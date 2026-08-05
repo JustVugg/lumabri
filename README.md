@@ -1,3 +1,14 @@
+```
+██╗     ██╗   ██╗███╗   ███╗ █████╗ ██████╗ ██████╗ ██╗
+██║     ██║   ██║████╗ ████║██╔══██╗██╔══██╗██╔══██╗██║
+██║     ██║   ██║██╔████╔██║███████║██████╔╝██████╔╝██║
+██║     ██║   ██║██║╚██╔╝██║██╔══██║██╔══██╗██╔══██╗██║
+███████╗╚██████╔╝██║ ╚═╝ ██║██║  ██║██████╔╝██║  ██║██║
+╚══════╝ ╚═════╝ ╚═╝     ╚═╝╚═╝  ╚═╝╚═════╝ ╚═╝  ╚═╝╚═╝
+
+                    ✻ tiny engine, immense swarm
+```
+
 # lumabri
 
 Run huge mixture-of-experts models from a swarm of peers, with the
@@ -233,10 +244,34 @@ bytes:
   two honest peers cannot disagree, so a disagreement is proof of a lie and
   the run stops rather than emit a token nobody can vouch for.
 
+**Signed swarm — not even the tracker is trusted.** Hashes alone make the
+tracker the authority: it decides which bytes are true, so compromising it
+rewrites the model. A signature moves that authority to a key the operator
+keeps offline.
+
+```sh
+lumabri key --out swarm                 # ed25519 keypair, secret is 0600
+lumabri serve --model /srv/model --key swarm.key
+LUMABRI_PUBKEY=<the 64 hex chars> lumabri chat --tracker HOST:7300
+```
+
+The origin signs each file's hash vector (bound to model, path, chunk size
+and file size, under a domain tag, so a signature cannot be replayed onto
+another file). The tracker stores and forwards the signature and — given
+`--pubkey`, which `serve --key` passes automatically — refuses any claim
+that is not signed. The chatter rebuilds the signed message itself and
+checks it against the key it obtained **out of band**: a compromised
+tracker can withhold the truth, but it cannot rewrite it and be believed.
+Carrying a public key implies strict mode: unsigned bytes are refused, not
+merely noted. The Ed25519 and SHA-512 here are self-contained C, checked
+against RFC 8032 and against OpenSSL in both directions by `sign_test.sh`.
+
 **Private swarm — invitation only.** Set `LUMABRI_TOKEN=S` on every
 machine: `serve` passes it to its tracker, and the tracker, every
 maintainer and every expert node refuse unauthenticated connections. The
-token guards the bytes and the compute, not just the index.
+token guards the bytes and the compute, not just the index. It composes
+with signing: the token says who may connect, the key says which bytes are
+real.
 
 `./phase5_test.sh` proves all three open-swarm defences with peers that lie
 exactly as an adversary would (honest manifest, corrupt bytes): 7 corrupt
@@ -279,7 +314,9 @@ On every other machine, pick a role — or several:
 | `phase3_test.sh` | proximity, readahead, failover — measured |
 | `phase4_test.sh` | SSD cache, tracker discovery, delegate & fall back |
 | `phase5_test.sh` | integrity: lying peers caught, poison stripped |
-| `lumabri_sha.h` | sha256, self-contained — the root of the trust chain |
+| `sign_test.sh` | sha512/ed25519 vs RFC 8032 and OpenSSL, signed swarm |
+| `lumabri_sha.h` | sha256, self-contained — per-block integrity |
+| `lumabri_sign.h` | sha512 + ed25519 — the operator's authority |
 | `make_tiny_olmoe.py` | synthetic OLMoE-shaped fixture for tests |
 
 ## Related work
@@ -311,13 +348,14 @@ engine binaries.
 ## Status
 
 Working prototype, deployable. Open swarms verify bytes (sha256 per MiB,
-truth from the tracker) and results (spot-check on a second replica);
-private swarms need an invite token everywhere. Not yet done, in order of
-importance: signing the tracker's ground truth so a compromised tracker
-cannot rewrite it (today the root of trust is the operator's server),
-speculative drafting with batch-union (the remaining multiplier against WAN
-latency), hedged requests against stragglers, tracker-side expert
-assignment, NAT hole punching.
+signed by the operator's ed25519 key, checked by the chatter against a key
+it holds itself) and results (spot-check on a second replica); private
+swarms need an invite token everywhere. Not yet done, in order of
+importance: speculative drafting with batch-union (the remaining multiplier
+against WAN latency), hedged requests against stragglers, tracker-side
+expert assignment, key rotation and revocation, NAT hole punching. Expert
+execution is not yet covered by the operator signature — a peer's results
+are checked by replica agreement, not by a key.
 
 ## License
 

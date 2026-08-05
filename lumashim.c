@@ -49,6 +49,7 @@
 
 #include "lumabri_proto.h"
 #include "lumabri_sha.h"
+#include "lumabri_sign.h"
 
 #define FD_LIMIT      65536
 #define MAX_RPEERS    32
@@ -120,6 +121,7 @@ typedef struct {
     uint8_t *hash;        /* ground truth: sha256 per LMB_HASH_CHUNK */
     uint32_t nh;
     int hstate;           /* 0 unknown · 1 have · 2 tracker has none */
+    int signed_;          /* the truth carried a valid operator signature */
     pthread_mutex_t lk;
     pthread_cond_t cv;
 } RFile;
@@ -131,6 +133,7 @@ static struct {
     uint32_t block;
     RFile *files; int nfiles;
     RPeer peers[MAX_RPEERS]; int npeers;
+    uint8_t pubkey[32]; int have_pubkey;   /* LUMABRI_PUBKEY, out of band */
     RFile *_Atomic fdmap[FD_LIMIT];
     _Atomic uint64_t net_bytes, net_blocks, warm_reads;
     pthread_once_t once;
@@ -453,6 +456,19 @@ static void shim_init_impl(void) {
     mkdir_p(g.data_dir);
     mkdir_p(g.maps_dir);
 
+    /* the operator's public key: 32 hex bytes, or a file holding them.
+     * This is the only thing a chatter must obtain out of band — with it,
+     * nothing else in the swarm needs to be trusted. */
+    const char *pkspec = getenv("LUMABRI_PUBKEY");
+    if (pkspec && pkspec[0]) {
+        char hex[80] = "";
+        FILE *pf = real_fopen(pkspec, "r");
+        if (pf) { if (fscanf(pf, "%78s", hex) != 1) hex[0] = 0; fclose(pf); }
+        else snprintf(hex, sizeof hex, "%s", pkspec);
+        if (strlen(hex) == 64 && !lmb_unhex(g.pubkey, hex, 32)) g.have_pubkey = 1;
+        else fprintf(stderr, "[lumabri] LUMABRI_PUBKEY is not 32 hex bytes — ignored\n");
+    }
+
     long mib = 8;
     const char *bs = getenv("LUMABRI_BLOCK_MIB");
     if (bs && atol(bs) >= 1 && atol(bs) <= 64) mib = atol(bs);
@@ -556,10 +572,11 @@ static void shim_init_impl(void) {
             pthread_detach(t);
     }
     fprintf(stderr, "[lumabri] %d files · %.1f GB · %.1f%% already local · "
-                    "%d peer(s) · block %u MiB · prefetch %d\n",
+                    "%d peer(s) · block %u MiB · prefetch %d%s\n",
             g.nfiles, (double)total / 1e9,
             total ? 100.0 * (double)have / (double)total : 0.0,
-            g.npeers, g.block >> 20, pf_depth);
+            g.npeers, g.block >> 20, pf_depth,
+            g.have_pubkey ? " · verifying against the operator key" : "");
     g.ok = 1;
 }
 
@@ -656,6 +673,7 @@ static void hashes_ensure(RFile *f) {
 
     uint8_t *hash = NULL;
     uint32_t nh = 0;
+    int signed_ok = 0;
     const char *tracker = getenv("LUMABRI_TRACKER");
     if (tracker && tracker[0]) {
         const char *model = getenv("LUMABRI_MODEL");
@@ -667,25 +685,53 @@ static void hashes_ensure(RFile *f) {
         free(b.p);
         if (rc == 0 && m.op == LMB_HASHES_R) {
             LmbCur c = { m.body, m.body_len, 0 };
-            uint32_t chunk = 0, n = 0;
-            if (!lmb_cur_u32(&c, &chunk) && !lmb_cur_u32(&c, &n) &&
-                chunk == LMB_HASH_CHUNK && m.pay_len == n * 32 &&
+            char tmodel[64] = "";
+            uint32_t chunk = 0, n = 0, has_sig = 0;
+            uint64_t tsize = 0;
+            uint8_t sig[64];
+            if (!lmb_cur_str(&c, tmodel, sizeof tmodel) &&
+                !lmb_cur_u32(&c, &chunk) && !lmb_cur_u32(&c, &n) &&
+                !lmb_cur_u64(&c, &tsize) && !lmb_cur_u32(&c, &has_sig) &&
+                (!has_sig || !lmb_cur_bytes(&c, sig, 64)) &&
+                chunk == LMB_HASH_CHUNK && m.pay_len == n * 32 && tsize == f->size &&
                 n == (uint32_t)((f->size + LMB_HASH_CHUNK - 1) / LMB_HASH_CHUNK)) {
-                hash = m.pay; nh = n; m.pay = NULL;
+                /* The signature is what makes the tracker a courier: we
+                 * rebuild the signed message ourselves and check it against
+                 * a key obtained out of band, so a compromised tracker can
+                 * withhold the truth but never rewrite it. */
+                if (g.have_pubkey) {
+                    size_t mlen = 0;
+                    uint8_t *sm = has_sig
+                        ? lmb_truth_msg(tmodel, f->rel, chunk, tsize, m.pay, n, &mlen)
+                        : NULL;
+                    if (sm && lmb_sign_verify(sig, sm, mlen, g.pubkey) == 0)
+                        signed_ok = 1;
+                    free(sm);
+                    if (!signed_ok)
+                        fprintf(stderr, "[lumabri] %s: integrity data %s — "
+                                "refusing it\n", f->rel,
+                                has_sig ? "carries a BAD SIGNATURE"
+                                        : "is not signed by the operator key");
+                }
+                if (!g.have_pubkey || signed_ok) {
+                    hash = m.pay; nh = n; m.pay = NULL;
+                }
             }
         }
         lmb_msg_free(&m);
     }
     pthread_mutex_lock(&f->lk);
-    f->hash = hash; f->nh = nh;
+    f->hash = hash; f->nh = nh; f->signed_ = signed_ok;
     f->hstate = hash ? 1 : 2;
     pthread_cond_broadcast(&f->cv);
     pthread_mutex_unlock(&f->lk);
     if (!hash)
-        fprintf(stderr, "[lumabri] no integrity data for %s — fetches are "
+        fprintf(stderr, "[lumabri] no usable integrity data for %s — fetches are "
                         "UNVERIFIED%s\n", f->rel,
                 getenv("LUMABRI_REQUIRE_HASH") ? " and LUMABRI_REQUIRE_HASH is set"
                                                : "");
+    else if (signed_ok)
+        fprintf(stderr, "[lumabri] %s: truth signed by the operator key ✓\n", f->rel);
 }
 
 /* 0 = the bytes match the truth (or there is none to check against) */
@@ -723,7 +769,9 @@ static int ensure_block(RFile *f, uint32_t blk) {
     uint32_t len = (uint32_t)(off + g.block <= f->size ? g.block : f->size - off);
     uint8_t *data = NULL;
     hashes_ensure(f);
-    int require = getenv("LUMABRI_REQUIRE_HASH") != NULL;
+    /* a configured public key implies strict mode: the whole point of
+     * carrying one is refusing to run on bytes nobody signed */
+    int require = getenv("LUMABRI_REQUIRE_HASH") != NULL || g.have_pubkey;
     if (require && f->hstate != 1) {
         fprintf(stderr, "[lumabri] block %u of %s: integrity required but "
                         "unavailable — refusing the fetch\n", blk, f->rel);

@@ -22,6 +22,7 @@
 #include <time.h>
 
 #include "lumabri_proto.h"
+#include "lumabri_sign.h"
 
 #define MAX_PEERS  64
 #define MAX_FILES  4096
@@ -65,24 +66,55 @@ static char g_token[128];        /* --token: private swarm, invite required */
 typedef struct {
     char model[64], path[LMB_PATH_MAX];
     uint32_t nh;
+    uint64_t size;
     uint8_t *hash;
+    uint8_t sig[64]; int has_sig;
 } GTruth;
 static GTruth g_truth[MAX_FILES];
 static int g_ntruth;
+static uint8_t g_pubkey[32];
+static int g_have_pubkey;    /* --pubkey: only signed truth is accepted */
 
-/* under g_lk; steals *hash on first sight. Returns 1 ok / 0 poison. */
-static int truth_check(const char *model, const char *path,
-                       uint32_t nh, uint8_t **hash) {
+/* under g_lk; steals *hash on first sight. Returns 1 ok / 0 rejected.
+ *
+ * With --pubkey the tracker stops being an authority and becomes a witness:
+ * a truth claim is accepted only if it carries the operator's signature,
+ * so even a fully compromised tracker cannot invent bytes — it can refuse
+ * to serve, but it cannot lie and be believed, because the chatter checks
+ * the same signature independently. Without --pubkey the old first-come
+ * rule applies (fine for a private swarm, not for strangers). */
+static int truth_check(const char *model, const char *path, uint64_t size,
+                       uint32_t nh, uint8_t **hash,
+                       const uint8_t *sig, int has_sig) {
+    if (g_have_pubkey) {
+        if (!has_sig) return 0;
+        size_t mlen = 0;
+        uint8_t *msg = lmb_truth_msg(model, path, LMB_HASH_CHUNK, size,
+                                     *hash, nh, &mlen);
+        if (!msg) return 0;
+        int ok = lmb_sign_verify(sig, msg, mlen, g_pubkey) == 0;
+        free(msg);
+        if (!ok) return 0;
+    }
     for (int i = 0; i < g_ntruth; i++)
-        if (!strcmp(g_truth[i].model, model) && !strcmp(g_truth[i].path, path))
-            return g_truth[i].nh == nh &&
-                   memcmp(g_truth[i].hash, *hash, (size_t)nh * 32) == 0;
+        if (!strcmp(g_truth[i].model, model) && !strcmp(g_truth[i].path, path)) {
+            if (g_truth[i].nh != nh ||
+                memcmp(g_truth[i].hash, *hash, (size_t)nh * 32)) return 0;
+            if (!g_truth[i].has_sig && has_sig) {    /* upgrade to signed */
+                memcpy(g_truth[i].sig, sig, 64);
+                g_truth[i].has_sig = 1;
+            }
+            return 1;
+        }
     if (g_ntruth == MAX_FILES) return 1;      /* table full: cannot judge */
     GTruth *t = &g_truth[g_ntruth++];
     snprintf(t->model, sizeof t->model, "%s", model);
     snprintf(t->path, sizeof t->path, "%s", path);
     t->nh = nh;
+    t->size = size;
     t->hash = *hash;
+    t->has_sig = has_sig;
+    if (has_sig) memcpy(t->sig, sig, 64);
     *hash = NULL;
     return 1;
 }
@@ -121,15 +153,25 @@ static Peer *handle_register(int fd, LmbMsg *m) {
     /* optional integrity section (older peers simply do not send it) */
     uint8_t **fh = (uint8_t **)calloc(n ? n : 1, sizeof *fh);
     uint32_t *fnh = (uint32_t *)calloc(n ? n : 1, 4);
+    uint8_t (*fsig)[64] = (uint8_t (*)[64])calloc(n ? n : 1, 64);
+    int *fhas = (int *)calloc(n ? n : 1, sizeof(int));
     size_t save = c.off;
     uint32_t hm = 0;
-    int have_h = fh && fnh && !lmb_cur_u32(&c, &hm) && hm == LMB_HASH_MAGIC;
+    int have_h = fh && fnh && fsig && fhas &&
+                 !lmb_cur_u32(&c, &hm) && hm == LMB_HASH_MAGIC;
     if (have_h) {
         for (uint32_t i = 0; i < n; i++) {
+            uint32_t hassig = 0;
             if (lmb_cur_u32(&c, &fnh[i]) || fnh[i] > LMB_MAX_BODY / 32) { have_h = 0; break; }
-            if (!fnh[i]) continue;
-            fh[i] = (uint8_t *)malloc((size_t)fnh[i] * 32);
-            if (!fh[i] || lmb_cur_bytes(&c, fh[i], (size_t)fnh[i] * 32)) { have_h = 0; break; }
+            if (fnh[i]) {
+                fh[i] = (uint8_t *)malloc((size_t)fnh[i] * 32);
+                if (!fh[i] || lmb_cur_bytes(&c, fh[i], (size_t)fnh[i] * 32)) { have_h = 0; break; }
+            }
+            if (lmb_cur_u32(&c, &hassig)) { have_h = 0; break; }
+            if (hassig) {
+                if (lmb_cur_bytes(&c, fsig[i], 64)) { have_h = 0; break; }
+                fhas[i] = 1;
+            }
         }
     } else c.off = save;
 
@@ -138,18 +180,27 @@ static Peer *handle_register(int fd, LmbMsg *m) {
     pthread_mutex_lock(&g_lk);
     if (have_h) {
         /* poison dies here: a file whose announced hashes contradict the
-         * swarm's ground truth is stripped from this peer's offer */
+         * swarm's ground truth — or, with --pubkey, is not signed by the
+         * operator — is stripped from this peer's offer */
         for (uint32_t i = 0; i < n; ) {
-            if (fnh[i] && !truth_check(model, files[i].path, fnh[i], &fh[i])) {
-                printf("[tracker] POISON: %s announces different bytes for "
-                       "%s/%s — file rejected\n", name, model, files[i].path);
+            if (fnh[i] && !truth_check(model, files[i].path, files[i].size,
+                                       fnh[i], &fh[i], fsig[i], fhas[i])) {
+                printf("[tracker] REJECTED: %s announces %s bytes for %s/%s\n",
+                       name, g_have_pubkey && !fhas[i] ? "unsigned" : "different",
+                       model, files[i].path);
                 fflush(stdout);
                 free(fh[i]);
                 fh[i] = fh[n - 1]; fnh[i] = fnh[n - 1];
+                memcpy(fsig[i], fsig[n - 1], 64); fhas[i] = fhas[n - 1];
                 files[i] = files[n - 1];
                 n--;
             } else i++;
         }
+    } else if (g_have_pubkey && n) {
+        printf("[tracker] REJECTED: %s offers %u files with no integrity data\n",
+               name, n);
+        fflush(stdout);
+        n = 0;
     }
     for (int i = 0; i < MAX_PEERS; i++)
         if (g_peers[i].used && !g_peers[i].is_expert &&
@@ -191,7 +242,7 @@ static Peer *handle_register(int fd, LmbMsg *m) {
     }
     pthread_mutex_unlock(&g_lk);
     for (uint32_t i = 0; i < n; i++) free(fh[i]);   /* stolen ones are NULL */
-    free(fh); free(fnh);
+    free(fh); free(fnh); free(fsig); free(fhas);
     if (!slot) { free(files); send_err(fd, "peer table full"); return NULL; }
     if (fresh || !g_known_logged[idx]) {
         printf("[tracker] + %s @ %s (%s, %u files)\n", name, addr, model, n);
@@ -297,21 +348,34 @@ static int handle_hashes(int fd, LmbMsg *m) {
     }
     pthread_mutex_lock(&g_lk);
     uint32_t nh = 0;
-    uint8_t *copy = NULL;
+    uint64_t size = 0;
+    uint8_t *copy = NULL, sig[64];
+    char found_model[64] = "";
+    int has_sig = 0;
     /* an empty model matches any, exactly as PLACEMENT treats it */
     for (int i = 0; i < g_ntruth; i++)
         if ((!model[0] || !strcmp(g_truth[i].model, model)) &&
             !strcmp(g_truth[i].path, path)) {
             nh = g_truth[i].nh;
+            size = g_truth[i].size;
+            has_sig = g_truth[i].has_sig;
+            if (has_sig) memcpy(sig, g_truth[i].sig, 64);
+            snprintf(found_model, sizeof found_model, "%s", g_truth[i].model);
             copy = (uint8_t *)malloc((size_t)nh * 32);
             if (copy) memcpy(copy, g_truth[i].hash, (size_t)nh * 32);
             break;
         }
     pthread_mutex_unlock(&g_lk);
     if (!copy) { send_err(fd, "no integrity data"); return 0; }
+    /* the reply carries everything the verifier needs to rebuild the signed
+     * message itself — the tracker is a courier, not a witness to trust */
     LmbBuf b = {0};
+    lmb_buf_str(&b, found_model);
     lmb_buf_u32(&b, LMB_HASH_CHUNK);
     lmb_buf_u32(&b, nh);
+    lmb_buf_u64(&b, size);
+    lmb_buf_u32(&b, has_sig ? 1u : 0u);
+    if (has_sig) lmb_buf_bytes(&b, sig, 64);
     int rc = lmb_send(fd, LMB_HASHES_R, b.p, (uint32_t)b.len, copy, nh * 32);
     free(b.p); free(copy);
     return rc;
@@ -636,11 +700,32 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "--port") && i + 1 < argc) port = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--token") && i + 1 < argc)
             snprintf(g_token, sizeof g_token, "%s", argv[++i]);
-        else { fprintf(stderr, "usage: %s [--port N] [--token S]\n", argv[0]); return 2; }
+        else if (!strcmp(argv[i], "--pubkey") && i + 1 < argc) {
+            char hex[80] = "";
+            FILE *pf = fopen(argv[++i], "r");
+            if (pf && fscanf(pf, "%78s", hex) == 1 && strlen(hex) == 64 &&
+                !lmb_unhex(g_pubkey, hex, 32)) g_have_pubkey = 1;
+            else if (strlen(argv[i]) == 64 && !lmb_unhex(g_pubkey, argv[i], 32))
+                g_have_pubkey = 1;
+            if (pf) fclose(pf);
+            if (!g_have_pubkey) {
+                fprintf(stderr, "[tracker] --pubkey wants 32 hex bytes "
+                                "(a file or the value itself)\n");
+                return 2;
+            }
+        }
+        else { fprintf(stderr, "usage: %s [--port N] [--token S] [--pubkey FILE]\n",
+                       argv[0]); return 2; }
     signal(SIGPIPE, SIG_IGN);   /* a vanished peer must not kill the tracker */
     int lfd = lmb_listen(port);
     if (lfd < 0) { perror("[tracker] listen"); return 1; }
-    printf("[tracker] listening on :%d\n", port); fflush(stdout);
+    printf("[tracker] listening on :%d\n", port);
+    if (g_have_pubkey) {
+        char pub[70];
+        lmb_hex(pub, g_pubkey, 32);
+        printf("[tracker] signed swarm: only truth signed by %s is accepted\n", pub);
+    }
+    fflush(stdout);
     for (;;) {
         int fd = accept(lfd, NULL, NULL);
         if (fd < 0) { if (errno == EINTR) continue; perror("[tracker] accept"); break; }

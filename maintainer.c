@@ -23,6 +23,7 @@
 
 #include "lumabri_proto.h"
 #include "lumabri_sha.h"
+#include "lumabri_sign.h"
 
 #define MAX_FILES     4096
 #define MAX_INCLUDES  64
@@ -32,11 +33,13 @@
 typedef struct {
     char rel[LMB_PATH_MAX]; uint64_t size; int fd;
     uint8_t *hash; uint32_t nh;   /* sha256 per LMB_HASH_CHUNK */
+    uint8_t sig[64]; int signed_;  /* operator signature over the truth */
 } MFile;
 
 static struct {
     char root[LMB_PATH_MAX];
     char name[64], advertise[64], tracker[64], model[64], token[128];
+    uint8_t sk[64]; int have_key;   /* --key: this peer is the origin */
     MFile files[MAX_FILES]; int nfiles;
     const char *includes[MAX_INCLUDES]; int nincl;
     pthread_mutex_t fd_lk;
@@ -210,14 +213,30 @@ static void manifest_body(LmbBuf *b) {
     }
 }
 
-/* the optional integrity section a REGISTER carries after the file list */
+/* the optional integrity section a REGISTER carries after the file list:
+ * per file the hash vector and, when this peer holds the operator key, the
+ * signature over it — the tracker forwards both and can forge neither */
 static void hash_section(LmbBuf *b) {
     lmb_buf_u32(b, LMB_HASH_MAGIC);
     for (int i = 0; i < g.nfiles; i++) {
         lmb_buf_u32(b, g.files[i].hash ? g.files[i].nh : 0);
         if (g.files[i].hash)
             lmb_buf_bytes(b, g.files[i].hash, (size_t)g.files[i].nh * 32);
+        lmb_buf_u32(b, g.files[i].signed_ ? 1u : 0u);
+        if (g.files[i].signed_) lmb_buf_bytes(b, g.files[i].sig, 64);
     }
+}
+
+/* sign one file's truth with the operator key (origin peers only) */
+static void sign_truth(MFile *f) {
+    if (!g.have_key || !f->hash) return;
+    size_t mlen = 0;
+    uint8_t *msg = lmb_truth_msg(g.model, f->rel, LMB_HASH_CHUNK, f->size,
+                                 f->hash, f->nh, &mlen);
+    if (!msg) return;
+    lmb_sign(f->sig, msg, mlen, g.sk);
+    free(msg);
+    f->signed_ = 1;
 }
 
 static int handle_read(int fd, LmbMsg *m) {
@@ -587,9 +606,23 @@ int main(int argc, char **argv) {
             g.includes[g.nincl++] = argv[++i];
         else if (!strcmp(argv[i], "--donate") && i + 1 < argc)
             donate_gb = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--key") && i + 1 < argc) {
+            char hex[200] = "";
+            FILE *kf = fopen(argv[++i], "r");
+            if (!kf || fscanf(kf, "%198s", hex) != 1 || strlen(hex) != 128 ||
+                lmb_unhex(g.sk, hex, 64)) {
+                fprintf(stderr, "[maintainer] cannot read a 64-byte secret key "
+                                "from %s (make one with: lumabri key)\n", argv[i]);
+                if (kf) fclose(kf);
+                return 2;
+            }
+            fclose(kf);
+            g.have_key = 1;
+        }
         else {
             fprintf(stderr, "usage: %s --root DIR [--port N] [--tracker H:P]"
-                            " [--name S] [--advertise H:P] [--include PAT]...\n", argv[0]);
+                            " [--name S] [--advertise H:P] [--include PAT]..."
+                            " [--key FILE] [--donate GB]\n", argv[0]);
             return 2;
         }
     }
@@ -632,6 +665,14 @@ int main(int argc, char **argv) {
         if (hash_file(&g.files[i]))
             fprintf(stderr, "[maintainer %s] cannot hash %s — served unverified\n",
                     g.name, g.files[i].rel);
+        else
+            sign_truth(&g.files[i]);
+    }
+    if (g.have_key) {
+        char pub[70];
+        lmb_hex(pub, g.sk + 32, 32);
+        printf("[maintainer %s] ORIGIN: signed the truth of %d files with %s\n",
+               g.name, g.nfiles, pub);
     }
     { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
       double dh = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9 - h0;

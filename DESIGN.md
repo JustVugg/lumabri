@@ -224,10 +224,42 @@ avversario (manifest onesto, byte corrotti — `LUMABRI_CORRUPT_PPM`): 7
 blocchi corrotti rifiutati con mirror byte-identico, poisoner spogliato
 alla registrazione, esecutore bugiardo beccato al primo spot-check.
 
-Limite noto e dichiarato: la radice di fiducia è il server dell'operatore
-(tracker + origine). Un tracker compromesso può riscrivere la verità. Il
-passo successivo è firmare la ground truth con una chiave dell'operatore,
-così il tracker diventa un corriere e non un'autorità.
+## Fase 6 — la firma: il tracker diventa corriere (2026-08-05)
+
+Il limite della fase 5 era che **il tracker era l'autorità**: decide lui
+quali byte sono veri, quindi comprometterlo significa riscrivere il
+modello. La firma sposta l'autorità su una chiave che l'operatore tiene
+offline (le firme si calcolano una volta sola).
+
+- `lumabri key` genera una coppia ed25519: `.key` (segreto, 0600) e `.pub`.
+- L'**origine** (`maintainer --key`, o `serve --key`) firma per ogni file il
+  messaggio canonico `"lumabri-truth-v1\0" model \0 path \0 chunk size
+  hashes` — il binding è il punto: senza model/path/size dentro la firma,
+  una firma valida si potrebbe rigiocare su un altro file dello stesso
+  sciame, che è l'errore classico. Il tag di dominio impedisce che una
+  firma lumabri valga come firma di altro.
+- Il **tracker** memorizza e inoltra la firma; con `--pubkey` (che
+  `serve --key` gli passa da sé, derivandolo dal segreto) rifiuta ogni
+  dichiarazione non firmata. Ma la sua verifica è difesa in profondità, non
+  la garanzia.
+- La garanzia è il **chatter**: ricostruisce da sé il messaggio firmato e lo
+  verifica con la chiave ottenuta fuori banda (`LUMABRI_PUBKEY`). Un tracker
+  compromesso può negare la verità, non riscriverla. Avere una chiave
+  implica modo severo: i byte non firmati si rifiutano, non si annotano.
+
+Cripto self-contained (`lumabri_sign.h`): SHA-512 e Ed25519 in stile
+TweetNaCl, aritmetica a limbi da 16 bit su 2^255-19, swap condizionali
+constant-time. Verificato da `sign_test.sh` contro il vettore RFC 8032,
+contro `sha512sum`, e contro OpenSSL **in entrambe le direzioni** (le
+nostre firme verificano lì, le sue verificano qui). Più lo sciame firmato
+end-to-end: un peer non firmato non entra nell'indice, e un tracker che
+inventa la verità viene beccato dalla chiave del chatter.
+
+Restano scoperti: rotazione e revoca delle chiavi, e soprattutto
+l'**esecuzione** degli esperti, che oggi è garantita dall'accordo tra
+repliche (fase 5) e non da una firma — un peer non può firmare un calcolo
+che dipende dall'input, servirebbe attestazione o prova, ed è un problema
+aperto in tutta la letteratura.
 
 ## Fase 2 (esperti remoti) — appunti
 

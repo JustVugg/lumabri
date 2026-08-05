@@ -26,6 +26,7 @@
 #include <time.h>
 
 #include "lumabri_proto.h"
+#include "lumabri_sign.h"
 
 /* ---- terminal ----------------------------------------------------------- */
 
@@ -140,6 +141,7 @@ static void local_model_type(const char *model_dir, char *out, size_t cap) {
 
 static int cmd_serve(int argc, char **argv) {
     const char *model = NULL, *join = NULL, *mname = NULL, *donate = NULL;
+    const char *key = NULL, *pubkey = NULL;
     int port = 7300, no_exec = 0, cache_slots = 128;
     for (int i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "--model") && i + 1 < argc) model = argv[++i];
@@ -147,11 +149,14 @@ static int cmd_serve(int argc, char **argv) {
         else if (!strcmp(argv[i], "--join") && i + 1 < argc) join = argv[++i];
         else if (!strcmp(argv[i], "--model-name") && i + 1 < argc) mname = argv[++i];
         else if (!strcmp(argv[i], "--donate") && i + 1 < argc) donate = argv[++i];
+        else if (!strcmp(argv[i], "--key") && i + 1 < argc) key = argv[++i];
+        else if (!strcmp(argv[i], "--pubkey") && i + 1 < argc) pubkey = argv[++i];
         else if (!strcmp(argv[i], "--no-exec")) no_exec = 1;
         else if (!strcmp(argv[i], "--exec-cache") && i + 1 < argc) cache_slots = atoi(argv[++i]);
         else { fprintf(stderr, "usage: lumabri serve --model DIR [--port N] "
                                "[--join TRACKER] [--model-name S] [--donate GB] "
-                               "[--no-exec] [--exec-cache N]\n"); return 2; }
+                               "[--key FILE] [--pubkey FILE] [--no-exec] "
+                               "[--exec-cache N]\n"); return 2; }
     }
     if (!model) { fprintf(stderr, "usage: lumabri serve --model DIR [--port N]\n"); return 2; }
     if (donate && (!join || !mname)) {
@@ -178,8 +183,27 @@ static int cmd_serve(int argc, char **argv) {
         /* LUMABRI_TOKEN makes the whole serve private: the spawned tracker
          * requires it, the maintainer inherits it from the environment */
         const char *tok = getenv("LUMABRI_TOKEN");
-        char *targv[] = { tracker_bin, "--port", portstr, NULL, NULL, NULL };
-        if (tok && tok[0]) { targv[3] = "--token"; targv[4] = (char *)tok; }
+        char *targv[10];
+        int t = 0;
+        targv[t++] = tracker_bin;
+        targv[t++] = "--port"; targv[t++] = portstr;
+        if (tok && tok[0]) { targv[t++] = "--token"; targv[t++] = (char *)tok; }
+        /* signing without also telling the tracker the public half would
+         * leave it accepting unsigned claims from anyone: derive it here */
+        if (pubkey) { targv[t++] = "--pubkey"; targv[t++] = (char *)pubkey; }
+        else if (key) {
+            static char pub[80];
+            char hex[200] = "";
+            FILE *kf = fopen(key, "r");
+            uint8_t sk[64];
+            if (kf && fscanf(kf, "%198s", hex) == 1 && strlen(hex) == 128 &&
+                !lmb_unhex(sk, hex, 64)) {
+                lmb_hex(pub, sk + 32, 32);
+                targv[t++] = "--pubkey"; targv[t++] = pub;
+            }
+            if (kf) fclose(kf);
+        }
+        targv[t] = NULL;
         g_children[g_nchildren++] = spawn_argv(targv);
         usleep(300 * 1000);
     }
@@ -191,6 +215,7 @@ static int cmd_serve(int argc, char **argv) {
     margv[a++] = "--tracker"; margv[a++] = taddr;
     if (mname) { margv[a++] = "--model-name"; margv[a++] = (char *)mname; }
     if (donate) { margv[a++] = "--donate"; margv[a++] = (char *)donate; }
+    if (key) { margv[a++] = "--key"; margv[a++] = (char *)key; }
     margv[a] = NULL;
     g_children[g_nchildren++] = spawn_argv(margv);
 
@@ -703,15 +728,64 @@ static int cmd_chat(int argc, char **argv) {
     return 0;
 }
 
+/* ---- key: the operator's identity ---------------------------------------
+ * Ed25519 keypair. The secret signs the swarm's ground truth and belongs
+ * only on the machine that owns the model — ideally offline, since the
+ * signatures are computed once. The public half is what everyone else
+ * needs, and it is the ONLY thing a chatter must get out of band: with it,
+ * neither the tracker nor any peer has to be trusted. */
+static int cmd_key(int argc, char **argv) {
+    const char *out = "lumabri";
+    for (int i = 0; i < argc; i++) {
+        if (!strcmp(argv[i], "--out") && i + 1 < argc) out = argv[++i];
+        else { fprintf(stderr, "usage: lumabri key [--out NAME]\n"); return 2; }
+    }
+    uint8_t seed[32], pk[32], sk[64];
+    FILE *ur = fopen("/dev/urandom", "rb");
+    if (!ur || fread(seed, 1, 32, ur) != 32) {
+        fprintf(stderr, "cannot read 32 random bytes from /dev/urandom\n");
+        if (ur) fclose(ur);
+        return 1;
+    }
+    fclose(ur);
+    lmb_sign_keypair(pk, sk, seed);
+
+    char skpath[1100], pkpath[1100], hex[200];
+    snprintf(skpath, sizeof skpath, "%s.key", out);
+    snprintf(pkpath, sizeof pkpath, "%s.pub", out);
+    int fd = open(skpath, O_WRONLY | O_CREAT | O_TRUNC, 0600);   /* secret: 0600 */
+    if (fd < 0) { perror(skpath); return 1; }
+    lmb_hex(hex, sk, 64);
+    if (write(fd, hex, strlen(hex)) < 0 || write(fd, "\n", 1) < 0) { perror(skpath); close(fd); return 1; }
+    close(fd);
+    FILE *pf = fopen(pkpath, "w");
+    if (!pf) { perror(pkpath); return 1; }
+    lmb_hex(hex, pk, 32);
+    fprintf(pf, "%s\n", hex);
+    fclose(pf);
+
+    printf("\n  %ssecret%s %s  %s(0600 — keep it off the swarm)%s\n",
+           C_BOLD, C_R, skpath, C_DIM, C_R);
+    printf("  %spublic%s %s  %s%s%s\n\n", C_BOLD, C_R, pkpath, C_DIM, hex, C_R);
+    printf("  serve the model as its origin:\n");
+    printf("    %slumabri serve --model DIR --key %s%s\n", C_DIM, skpath, C_R);
+    printf("  let everyone verify (give them the public value, not the file):\n");
+    printf("    %sLUMABRI_PUBKEY=%s lumabri chat --tracker HOST:7300%s\n\n",
+           C_DIM, hex, C_R);
+    return 0;
+}
+
 /* ---- main --------------------------------------------------------------- */
 
 int main(int argc, char **argv) {
     g_tty = isatty(1);
     if (argc >= 2 && !strcmp(argv[1], "serve")) return cmd_serve(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "chat"))  return cmd_chat(argc - 2, argv + 2);
+    if (argc >= 2 && !strcmp(argv[1], "key"))   return cmd_key(argc - 2, argv + 2);
     fprintf(stderr,
         "lumabri: run huge models from a swarm of peers\n\n"
         "  lumabri serve --model DIR [--port 7300] [--join TRACKER]   share a model\n"
-        "  lumabri chat  [--tracker HOST:7300] [--model NAME]         chat with it\n");
+        "  lumabri chat  [--tracker HOST:7300] [--model NAME]         chat with it\n"
+        "  lumabri key   [--out NAME]                                 operator keypair\n");
     return 2;
 }
