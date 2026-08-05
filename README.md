@@ -1,15 +1,4 @@
-```
-██╗     ██╗   ██╗███╗   ███╗ █████╗ ██████╗ ██████╗ ██╗
-██║     ██║   ██║████╗ ████║██╔══██╗██╔══██╗██╔══██╗██║
-██║     ██║   ██║██╔████╔██║███████║██████╔╝██████╔╝██║
-██║     ██║   ██║██║╚██╔╝██║██╔══██║██╔══██╗██╔══██╗██║
-███████╗╚██████╔╝██║ ╚═╝ ██║██║  ██║██████╔╝██║  ██║██║
-╚══════╝ ╚═════╝ ╚═╝     ╚═╝╚═╝  ╚═╝╚═════╝ ╚═╝  ╚═╝╚═╝
-
-                    ✻ tiny engine, immense swarm
-```
-
-# lumabri
+<img src="logo.svg" alt="lumabri — tiny engine, immense swarm" width="524">
 
 Run huge mixture-of-experts models from a swarm of peers, with the
 [colibri](https://github.com/JustVugg/colibri) engine. Pure C, no
@@ -280,6 +269,9 @@ at registration, and a lying executor caught on the first spot-check.
 
 ## Deploy
 
+A full walkthrough for a real server — Hetzner, systemd, firewall, operator
+key, clients — is in **[DEPLOY.md](DEPLOY.md)**. The short version:
+
 ```sh
 make && make phase2 ENGINE=/path/to/colibri/c    # phase2 optional
 sudo make install                                 # or PREFIX=$HOME/.local
@@ -315,6 +307,7 @@ On every other machine, pick a role — or several:
 | `phase4_test.sh` | SSD cache, tracker discovery, delegate & fall back |
 | `phase5_test.sh` | integrity: lying peers caught, poison stripped |
 | `sign_test.sh` | sha512/ed25519 vs RFC 8032 and OpenSSL, signed swarm |
+| `DEPLOY.md` | server walkthrough: Hetzner, systemd, keys, clients |
 | `lumabri_sha.h` | sha256, self-contained — per-block integrity |
 | `lumabri_sign.h` | sha512 + ed25519 — the operator's authority |
 | `make_tiny_olmoe.py` | synthetic OLMoE-shaped fixture for tests |
