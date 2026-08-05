@@ -443,8 +443,8 @@ static uint8_t *peer_fetch(RPeer *p, const char *rel, uint64_t off, uint32_t len
         pthread_mutex_lock(&p->lk);
         int fd = p->nidle ? p->idle[--p->nidle] : -1;
         pthread_mutex_unlock(&p->lk);
-        if (fd < 0) fd = lmb_connect(p->addr);
-        if (fd < 0) return NULL;                 /* peer unreachable */
+        if (fd < 0) fd = lmb_connect_ms(p->addr, 2500);
+        if (fd < 0) return NULL;                 /* unreachable: relay decides */
 
         LmbBuf b = {0};
         lmb_buf_str(&b, rel); lmb_buf_u64(&b, off); lmb_buf_u32(&b, len);
@@ -476,6 +476,33 @@ static uint8_t *peer_fetch(RPeer *p, const char *rel, uint64_t off, uint32_t len
     return NULL;
 }
 
+/* The relay: when no peer can be dialed directly (typical for a maintainer
+ * behind a home NAT), the block is fetched through the tracker, which
+ * forwards the request down the maintainer's own outbound control
+ * connection. Slower per request, but it means the swarm works with zero
+ * router configuration — and the direct path stays the first choice. */
+static uint8_t *relay_fetch(const char *rel, uint64_t off, uint32_t len) {
+    const char *tracker = getenv("LUMIBRI_TRACKER");
+    if (!tracker || !tracker[0]) return NULL;
+    const char *model = getenv("LUMIBRI_MODEL");
+    LmbBuf b = {0};
+    lmb_buf_str(&b, model ? model : "");
+    lmb_buf_str(&b, rel);
+    lmb_buf_u64(&b, off);
+    lmb_buf_u32(&b, len);
+    LmbMsg m = {0};
+    int rc = lmb_request(tracker, LMB_RREAD, b.p, (uint32_t)b.len, &m);
+    free(b.p);
+    if (rc || m.op != LMB_RREAD_R || m.pay_len != len) {
+        lmb_msg_free(&m);
+        return NULL;
+    }
+    uint8_t *data = m.pay;
+    m.pay = NULL;
+    lmb_msg_free(&m);
+    return data;
+}
+
 /* Make one block present in the mirror. 0 on success. */
 static int ensure_block(RFile *f, uint32_t blk) {
     pthread_mutex_lock(&f->lk);
@@ -502,6 +529,7 @@ static int ensure_block(RFile *f, uint32_t blk) {
             data = peer_fetch(&g.peers[f->peer_idx[(start + i) % (uint32_t)f->npeers]],
                               f->rel, off, len);
     }
+    if (!data) data = relay_fetch(f->rel, off, len);   /* NAT floor */
     int ok = 0;
     if (data && wfd >= 0) {
         uint32_t put = 0;

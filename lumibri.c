@@ -118,18 +118,25 @@ static void on_sigint(int sig) {
 }
 
 static int cmd_serve(int argc, char **argv) {
-    const char *model = NULL, *join = NULL, *mname = NULL;
+    const char *model = NULL, *join = NULL, *mname = NULL, *donate = NULL;
     int port = 7300;
     for (int i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "--model") && i + 1 < argc) model = argv[++i];
         else if (!strcmp(argv[i], "--port") && i + 1 < argc) port = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--join") && i + 1 < argc) join = argv[++i];
         else if (!strcmp(argv[i], "--model-name") && i + 1 < argc) mname = argv[++i];
+        else if (!strcmp(argv[i], "--donate") && i + 1 < argc) donate = argv[++i];
         else { fprintf(stderr, "usage: lumibri serve --model DIR [--port N] "
-                               "[--join TRACKER] [--model-name S]\n"); return 2; }
+                               "[--join TRACKER] [--model-name S] [--donate GB]\n"); return 2; }
     }
     if (!model) { fprintf(stderr, "usage: lumibri serve --model DIR [--port N]\n"); return 2; }
+    if (donate && (!join || !mname)) {
+        fprintf(stderr, "--donate needs --join TRACKER and --model-name NAME "
+                        "(whose model to help hold)\n");
+        return 2;
+    }
     struct stat st;
+    if (stat(model, &st)) mkdir_p(model);        /* a donor starts empty */
     if (stat(model, &st) || !S_ISDIR(st.st_mode)) {
         fprintf(stderr, "%s: not a directory\n", model); return 1;
     }
@@ -155,6 +162,7 @@ static int cmd_serve(int argc, char **argv) {
     margv[a++] = "--port"; margv[a++] = mport;
     margv[a++] = "--tracker"; margv[a++] = taddr;
     if (mname) { margv[a++] = "--model-name"; margv[a++] = (char *)mname; }
+    if (donate) { margv[a++] = "--donate"; margv[a++] = (char *)donate; }
     margv[a] = NULL;
     g_children[g_nchildren++] = spawn_argv(margv);
     signal(SIGINT, on_sigint);
@@ -215,16 +223,29 @@ static int swarm_inspect(const char *tracker, const char *model, Swarm *s) {
     lmb_msg_free(&m);
     if (!s->nfiles || !s->config_peer[0]) return -1;
 
-    int fd = lmb_connect(s->config_peer);
-    if (fd < 0) return -1;
-    LmbBuf b = {0};
-    lmb_buf_str(&b, "config.json"); lmb_buf_u64(&b, 0); lmb_buf_u32(&b, 1 << 20);
-    rc = lmb_send(fd, LMB_READ, b.p, (uint32_t)b.len, NULL, 0);
-    free(b.p);
+    /* config.json: direct from the peer, else relayed through the tracker
+     * (the peer may be behind a NAT and reachable only outbound) */
     LmbMsg r = {0};
-    if (rc == 0) rc = lmb_recv(fd, &r);
-    close(fd);
-    if (rc || r.op != LMB_READ_R || !r.pay_len) { lmb_msg_free(&r); return -1; }
+    int fd = lmb_connect_ms(s->config_peer, 3000);
+    if (fd >= 0) {
+        LmbBuf b = {0};
+        lmb_buf_str(&b, "config.json"); lmb_buf_u64(&b, 0); lmb_buf_u32(&b, 1 << 20);
+        rc = lmb_send(fd, LMB_READ, b.p, (uint32_t)b.len, NULL, 0);
+        free(b.p);
+        if (rc == 0) rc = lmb_recv(fd, &r);
+        close(fd);
+    } else rc = -1;
+    if (rc || r.op != LMB_READ_R || !r.pay_len) {
+        lmb_msg_free(&r);
+        memset(&r, 0, sizeof r);
+        LmbBuf b = {0};
+        lmb_buf_str(&b, model ? model : "");
+        lmb_buf_str(&b, "config.json");
+        lmb_buf_u64(&b, 0); lmb_buf_u32(&b, 1 << 20);
+        rc = lmb_request(tracker, LMB_RREAD, b.p, (uint32_t)b.len, &r);
+        free(b.p);
+        if (rc || r.op != LMB_RREAD_R || !r.pay_len) { lmb_msg_free(&r); return -1; }
+    }
     char *mt = memmem((char *)r.pay, r.pay_len, "\"model_type\"", 12);
     if (mt) {
         mt = strchr(mt + 12, '"');

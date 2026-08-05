@@ -14,3 +14,6 @@ membw
 tiny_olmoe/
 olmoe_bench/
 __pycache__/
+donor_dir/
+*.part
+pushv.log

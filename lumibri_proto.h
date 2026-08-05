@@ -21,7 +21,10 @@
 #define LUMIBRI_PROTO_H
 
 #include <errno.h>
+#include <fcntl.h>
 #include <netdb.h>
+#include <poll.h>
+#include <signal.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <stdint.h>
@@ -50,6 +53,28 @@ enum {
      * addresses in the reply — per peer only: model, bytes held, bytes
      * served, reads served, seconds since last heartbeat. */
     LMB_SWARM = 15, LMB_SWARM_R = 16,
+    /* Relay, the NAT-survival floor: a maintainer that cannot accept inbound
+     * connections still serves, through the tracker. RREAD goes chatter →
+     * tracker {model,path,off,len}; the tracker forwards RREAD_FWD {id,...}
+     * down the maintainer's persistent control connection (the same one that
+     * heartbeats), the maintainer answers RREAD_R {id} + pay, the tracker
+     * routes the payload back. Direct peer-to-peer stays the first choice;
+     * the relay is the fallback that makes zero router configuration work.
+     * QUIC + hole punching later removes the relay from the path; it cannot
+     * remove the need for this floor (symmetric NATs defeat punching too). */
+    LMB_RREAD = 17, LMB_RREAD_FWD = 18, LMB_RREAD_R = 19,
+    /* AUTH: private swarms. When the tracker runs with --token, the first
+     * frame on every connection must be AUTH {str token}; everything else on
+     * an unauthenticated connection is refused. Clients send it whenever
+     * LUMIBRI_TOKEN is set. */
+    LMB_AUTH = 20,
+    /* ASSIGN: "the server decides". A joining maintainer offers a byte
+     * budget and the files it already holds; the tracker answers with the
+     * slice it should pull and serve, rarest-first — the least-replicated
+     * files of the model come first, so every new donor heals the swarm
+     * where it is thinnest. body: {str model, u64 budget, u32 n, n×str path}
+     * reply: {u32 n, n×{str path, u64 size}} */
+    LMB_ASSIGN = 21, LMB_ASSIGN_R = 22,
 };
 
 /* REGISTER body: str name, str addr, str model, u64 held_bytes,
@@ -200,8 +225,10 @@ static int lmb_cur_str(LmbCur *c, char *dst, size_t cap) {
 
 /* ---- sockets ----------------------------------------------------------- */
 
-/* addr is "host:port". Returns a connected fd with TCP_NODELAY, or -1. */
-static int lmb_connect(const char *addr) {
+/* addr is "host:port". Bounded connect: an unreachable peer must cost
+ * `timeout_ms`, not the kernel's minutes — the caller has a relay to fall
+ * back to. Returns a blocking fd with TCP_NODELAY, or -1. */
+static int lmb_connect_ms(const char *addr, int timeout_ms) {
     char host[256];
     const char *colon = strrchr(addr, ':');
     if (!colon || (size_t)(colon - addr) >= sizeof host) return -1;
@@ -214,7 +241,18 @@ static int lmb_connect(const char *addr) {
     for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
         fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
         if (fd < 0) continue;
-        if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) break;
+        int fl = fcntl(fd, F_GETFL, 0);
+        fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+        int r = connect(fd, ai->ai_addr, ai->ai_addrlen);
+        if (r < 0 && errno == EINPROGRESS) {
+            struct pollfd pf = { fd, POLLOUT, 0 };
+            int err = -1;
+            socklen_t el = sizeof err;
+            if (poll(&pf, 1, timeout_ms) > 0 &&
+                getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &el) == 0 && err == 0)
+                r = 0;
+        }
+        if (r == 0) { fcntl(fd, F_SETFL, fl); break; }
         close(fd); fd = -1;
     }
     freeaddrinfo(res);
@@ -224,6 +262,8 @@ static int lmb_connect(const char *addr) {
     }
     return fd;
 }
+
+static int lmb_connect(const char *addr) { return lmb_connect_ms(addr, 5000); }
 
 static int lmb_listen(int port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -241,6 +281,23 @@ static int lmb_listen(int port) {
     return fd;
 }
 
+/* Sends AUTH if LUMIBRI_TOKEN is set. Call right after connecting to a
+ * tracker. Returns 0 (also when no token is configured). */
+static int lmb_auth(int fd) {
+    const char *tok = getenv("LUMIBRI_TOKEN");
+    if (!tok || !tok[0]) return 0;
+    LmbBuf b = {0};
+    lmb_buf_str(&b, tok);
+    int rc = lmb_send(fd, LMB_AUTH, b.p, (uint32_t)b.len, NULL, 0);
+    free(b.p);
+    if (rc) return rc;
+    LmbMsg m = {0};
+    rc = lmb_recv(fd, &m);
+    int ok = rc == 0 && m.op == LMB_OK;
+    lmb_msg_free(&m);
+    return ok ? 0 : -1;
+}
+
 /* One-shot request/response on a fresh connection (tracker traffic; bulk
  * reads use pooled persistent connections instead). Returns 0 and fills
  * `resp` (caller frees), or -1. */
@@ -248,7 +305,8 @@ static int lmb_request(const char *addr, uint32_t op,
                        const void *body, uint32_t body_len, LmbMsg *resp) {
     int fd = lmb_connect(addr);
     if (fd < 0) return -1;
-    int rc = lmb_send(fd, op, body, body_len, NULL, 0);
+    int rc = lmb_auth(fd);
+    if (rc == 0) rc = lmb_send(fd, op, body, body_len, NULL, 0);
     if (rc == 0) rc = lmb_recv(fd, resp);
     close(fd);
     return rc;

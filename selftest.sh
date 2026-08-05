@@ -51,4 +51,21 @@ PIDS=()
 sleep 0.2
 env "${ENV[@]}" ./test_shim "$T/vroot" "$T/src"
 
+echo "· pass 4: NAT (peers advertise a dead address; bytes must flow via relay)"
+./tracker --port 7390 & PIDS+=($!)
+sleep 0.3
+./maintainer --root "$T/src" --port 7391 --tracker 127.0.0.1:7390 \
+             --name nat-a --advertise 127.0.0.1:1 \
+             --include 'a.bin' --include '*.json' & PIDS+=($!)
+./maintainer --root "$T/src" --port 7392 --tracker 127.0.0.1:7390 \
+             --name nat-b --advertise 127.0.0.1:1 \
+             --include 'sub/*' --include 'empty.bin' & PIDS+=($!)
+sleep 0.7
+NATENV=(LD_PRELOAD="$PWD/liblumibri.so"
+        LUMIBRI_VROOT="$T/vroot2"
+        LUMIBRI_CACHE="$T/cache2"
+        LUMIBRI_TRACKER=127.0.0.1:7390
+        LUMIBRI_BLOCK_MIB=1)
+env "${NATENV[@]}" ./test_shim "$T/vroot2" "$T/src"
+
 echo "LUMIBRI SELFTEST: PASS"

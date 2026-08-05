@@ -94,6 +94,33 @@ static void send_err(int fd, const char *msg) {
     free(b.p);
 }
 
+/* One range read into a fresh buffer; NULL on any failure. Shared by the
+ * direct path and the relayed path so both serve identical bytes. */
+static uint8_t *read_range(const char *rel, uint64_t off, uint32_t *len_io) {
+    MFile *f = find_file(rel);
+    if (!f) return NULL;
+    uint32_t len = *len_io;
+    if (len > MAX_READ_LEN) return NULL;
+    if (off >= f->size) { *len_io = 0; return (uint8_t *)malloc(1); }
+    if (off + len > f->size) len = (uint32_t)(f->size - off);
+    int ffd = file_fd(f);
+    if (ffd < 0) return NULL;
+    uint8_t *buf = (uint8_t *)malloc(len ? len : 1);
+    if (!buf) return NULL;
+    uint32_t got = 0;
+    while (got < len) {
+        ssize_t r = pread(ffd, buf + got, len - got, (off_t)(off + got));
+        if (r < 0) { if (errno == EINTR) continue; free(buf); return NULL; }
+        if (r == 0) break;
+        got += (uint32_t)r;
+    }
+    if (got != len) { free(buf); return NULL; }
+    atomic_fetch_add(&g.served_bytes, len);
+    atomic_fetch_add(&g.served_reads, 1);
+    *len_io = len;
+    return buf;
+}
+
 static void manifest_body(LmbBuf *b) {
     lmb_buf_u32(b, (uint32_t)g.nfiles);
     for (int i = 0; i < g.nfiles; i++) {
@@ -107,32 +134,12 @@ static int handle_read(int fd, LmbMsg *m) {
     char rel[LMB_PATH_MAX];
     uint64_t off; uint32_t len;
     if (lmb_cur_str(&c, rel, sizeof rel) || lmb_cur_u64(&c, &off) ||
-        lmb_cur_u32(&c, &len) || len > MAX_READ_LEN) {
+        lmb_cur_u32(&c, &len)) {
         send_err(fd, "bad read request"); return -1;
     }
-    MFile *f = find_file(rel);
-    if (!f) { send_err(fd, "unknown file"); return 0; }
-    if (off >= f->size) return lmb_send(fd, LMB_READ_R, NULL, 0, NULL, 0);
-    if (off + len > f->size) len = (uint32_t)(f->size - off);
-    int ffd = file_fd(f);
-    if (ffd < 0) { send_err(fd, "cannot open file"); return 0; }
-    uint8_t *buf = (uint8_t *)malloc(len);
-    if (!buf) { send_err(fd, "oom"); return 0; }
-    uint32_t got = 0;
-    while (got < len) {
-        ssize_t r = pread(ffd, buf + got, len - got, (off_t)(off + got));
-        if (r < 0) { if (errno == EINTR) continue; break; }
-        if (r == 0) break;
-        got += (uint32_t)r;
-    }
-    int rc;
-    if (got != len) {
-        send_err(fd, "short read"); rc = 0;
-    } else {
-        rc = lmb_send(fd, LMB_READ_R, NULL, 0, buf, len);
-        atomic_fetch_add(&g.served_bytes, len);
-        atomic_fetch_add(&g.served_reads, 1);
-    }
+    uint8_t *buf = read_range(rel, off, &len);
+    if (!buf) { send_err(fd, "unreadable range"); return 0; }
+    int rc = lmb_send(fd, LMB_READ_R, NULL, 0, buf, len);
     free(buf);
     return rc;
 }
@@ -144,6 +151,7 @@ static void *conn_thread(void *arg) {
         int rc;
         switch (m.op) {
         case LMB_PING:     rc = lmb_send(fd, LMB_OK, NULL, 0, NULL, 0); break;
+        case LMB_AUTH:     rc = lmb_send(fd, LMB_OK, NULL, 0, NULL, 0); break;
         case LMB_MANIFEST: {
             LmbBuf b = {0};
             manifest_body(&b);
@@ -161,32 +169,215 @@ static void *conn_thread(void *arg) {
     return NULL;
 }
 
-static void *heartbeat_thread(void *arg) {
+/* ---- pull mode: "the server decides" -------------------------------------
+ * With --donate G the maintainer asks the tracker which slice of the model
+ * it should hold (ASSIGN, rarest-first) and pulls it from the swarm before
+ * serving: direct from a holding peer when reachable, through the tracker's
+ * relay when not. Every donated gigabyte lands where the swarm is thinnest. */
+
+static void mkdir_parents(const char *path) {
+    char tmp[LMB_PATH_MAX * 2];
+    snprintf(tmp, sizeof tmp, "%s", path);
+    for (char *p = strchr(tmp + 1, '/'); p; p = strchr(p + 1, '/')) {
+        *p = 0; mkdir(tmp, 0755); *p = '/';
+    }
+}
+
+#define PULL_CHUNK (8u << 20)
+
+static int pull_file(const char *rel, uint64_t size) {
+    /* who has it, right now */
+    LmbBuf b = {0};
+    lmb_buf_str(&b, g.model);
+    LmbMsg m = {0};
+    char addrs[8][64];
+    int naddr = 0;
+    if (lmb_request(g.tracker, LMB_PLACEMENT, b.p, (uint32_t)b.len, &m) == 0 &&
+        m.op == LMB_PLACEMENT_R) {
+        LmbCur c = { m.body, m.body_len, 0 };
+        uint32_t n = 0;
+        if (!lmb_cur_u32(&c, &n))
+            for (uint32_t i = 0; i < n; i++) {
+                char path[LMB_PATH_MAX], a[64];
+                uint64_t sz; uint16_t np;
+                if (lmb_cur_str(&c, path, sizeof path) || lmb_cur_u64(&c, &sz) ||
+                    lmb_cur_u16(&c, &np)) break;
+                for (uint16_t p = 0; p < np; p++) {
+                    if (lmb_cur_str(&c, a, sizeof a)) break;
+                    if (!strcmp(path, rel) && naddr < 8)
+                        snprintf(addrs[naddr++], 64, "%s", a);
+                }
+            }
+    }
+    free(b.p); lmb_msg_free(&m);
+
+    char final[LMB_PATH_MAX * 2], part[LMB_PATH_MAX * 2];
+    snprintf(final, sizeof final, "%s/%s", g.root, rel);
+    snprintf(part, sizeof part, "%s.part", final);
+    mkdir_parents(final);
+    int out = open(part, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (out < 0) return -1;
+
+    int src = -1, ai = 0;
+    for (uint64_t off = 0; off < size || (size == 0 && off == 0); ) {
+        uint32_t want = (uint32_t)(size - off < PULL_CHUNK ? size - off : PULL_CHUNK);
+        uint8_t *data = NULL;
+        uint32_t got = 0;
+        /* direct, resuming across peers on failure */
+        while (!data && ai < naddr) {
+            if (src < 0) src = lmb_connect_ms(addrs[ai], 2500);
+            if (src < 0) { ai++; continue; }
+            LmbBuf rb = {0};
+            lmb_buf_str(&rb, rel); lmb_buf_u64(&rb, off); lmb_buf_u32(&rb, want);
+            LmbMsg rm = {0};
+            int rc = lmb_send(src, LMB_READ, rb.p, (uint32_t)rb.len, NULL, 0);
+            if (rc == 0) rc = lmb_recv(src, &rm);
+            free(rb.p);
+            if (rc == 0 && rm.op == LMB_READ_R && rm.pay_len == want) {
+                data = rm.pay; got = rm.pay_len; rm.pay = NULL;
+            } else { close(src); src = -1; ai++; }
+            lmb_msg_free(&rm);
+        }
+        if (!data) {                                   /* relay floor */
+            LmbBuf rb = {0};
+            lmb_buf_str(&rb, g.model); lmb_buf_str(&rb, rel);
+            lmb_buf_u64(&rb, off); lmb_buf_u32(&rb, want);
+            LmbMsg rm = {0};
+            if (lmb_request(g.tracker, LMB_RREAD, rb.p, (uint32_t)rb.len, &rm) == 0 &&
+                rm.op == LMB_RREAD_R && rm.pay_len == want) {
+                data = rm.pay; got = rm.pay_len; rm.pay = NULL;
+            }
+            free(rb.p); lmb_msg_free(&rm);
+        }
+        if (!data && want) { close(out); if (src >= 0) close(src); return -1; }
+        uint32_t put = 0;
+        while (put < got) {
+            ssize_t w = pwrite(out, data + put, got - put, (off_t)(off + put));
+            if (w < 0) { if (errno == EINTR) continue; free(data); close(out); return -1; }
+            put += (uint32_t)w;
+        }
+        free(data);
+        off += want;
+        if (size == 0) break;
+    }
+    if (src >= 0) close(src);
+    close(out);
+    return rename(part, final);
+}
+
+static void pull_slice(uint64_t budget) {
+    LmbBuf b = {0};
+    lmb_buf_str(&b, g.model);
+    lmb_buf_u64(&b, budget);
+    lmb_buf_u32(&b, (uint32_t)g.nfiles);
+    for (int i = 0; i < g.nfiles; i++) lmb_buf_str(&b, g.files[i].rel);
+    LmbMsg m = {0};
+    int rc = lmb_request(g.tracker, LMB_ASSIGN, b.p, (uint32_t)b.len, &m);
+    free(b.p);
+    if (rc || m.op != LMB_ASSIGN_R) {
+        fprintf(stderr, "[maintainer %s] tracker did not assign (is it running?)\n", g.name);
+        lmb_msg_free(&m);
+        return;
+    }
+    LmbCur c = { m.body, m.body_len, 0 };
+    uint32_t n = 0;
+    if (lmb_cur_u32(&c, &n)) { lmb_msg_free(&m); return; }
+    uint64_t pulled = 0;
+    uint32_t done = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        char rel[LMB_PATH_MAX];
+        uint64_t size;
+        if (lmb_cur_str(&c, rel, sizeof rel) || lmb_cur_u64(&c, &size)) break;
+        printf("[maintainer %s] pull %u/%u: %s (%.1f MB)\n",
+               g.name, i + 1, n, rel, (double)size / 1e6);
+        fflush(stdout);
+        if (pull_file(rel, size) == 0 && g.nfiles < MAX_FILES) {
+            MFile *f = &g.files[g.nfiles++];
+            snprintf(f->rel, sizeof f->rel, "%s", rel);
+            f->size = size; f->fd = -1;
+            pulled += size; done++;
+        } else
+            fprintf(stderr, "[maintainer %s] pull failed for %s\n", g.name, rel);
+    }
+    lmb_msg_free(&m);
+    printf("[maintainer %s] assigned slice: %u/%u files, %.2f GB pulled\n",
+           g.name, done, n, (double)pulled / 1e9);
+    fflush(stdout);
+}
+
+/* The control channel: ONE persistent outbound connection to the tracker.
+ * It heartbeats REGISTER every 10 s, and — because it is outbound — it works
+ * from behind any NAT with zero router configuration. The tracker uses the
+ * same connection to push RREAD_FWD when a chatter could not reach us
+ * directly: we answer with the bytes and the tracker relays them back. */
+static int register_body_send(int fd, uint64_t held) {
+    LmbBuf b = {0};
+    lmb_buf_str(&b, g.name);
+    lmb_buf_str(&b, g.advertise);
+    lmb_buf_str(&b, g.model);
+    lmb_buf_u64(&b, held);
+    lmb_buf_u64(&b, atomic_load(&g.served_bytes));
+    lmb_buf_u64(&b, atomic_load(&g.served_reads));
+    manifest_body(&b);
+    int rc = lmb_send(fd, LMB_REGISTER, b.p, (uint32_t)b.len, NULL, 0);
+    free(b.p);
+    return rc;
+}
+
+static void *control_thread(void *arg) {
     (void)arg;
     uint64_t held = 0;
     for (int i = 0; i < g.nfiles; i++) held += g.files[i].size;
     int warned = 0;
     for (;;) {
-        LmbBuf b = {0};   /* rebuilt each beat: the served counters move */
-        lmb_buf_str(&b, g.name);
-        lmb_buf_str(&b, g.advertise);
-        lmb_buf_str(&b, g.model);
-        lmb_buf_u64(&b, held);
-        lmb_buf_u64(&b, atomic_load(&g.served_bytes));
-        lmb_buf_u64(&b, atomic_load(&g.served_reads));
-        manifest_body(&b);
-        LmbMsg resp = {0};
-        int ok = lmb_request(g.tracker, LMB_REGISTER, b.p, (uint32_t)b.len, &resp) == 0;
-        free(b.p);
-        if (ok) {
-            lmb_msg_free(&resp);
-            warned = 0;
-        } else if (!warned) {
-            fprintf(stderr, "[maintainer %s] tracker %s unreachable (will retry)\n",
-                    g.name, g.tracker);
+        int fd = lmb_connect(g.tracker);
+        if (fd >= 0 && lmb_auth(fd)) { close(fd); fd = -1; }
+        if (fd < 0) {
+            if (!warned)
+                fprintf(stderr, "[maintainer %s] tracker %s unreachable (will retry)\n",
+                        g.name, g.tracker);
             warned = 1;
+            sleep(HEARTBEAT_S);
+            continue;
         }
-        sleep(HEARTBEAT_S);
+        warned = 0;
+        struct timeval tv = { HEARTBEAT_S, 0 };   /* recv timeout = beat cadence */
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+        if (register_body_send(fd, held)) { close(fd); sleep(HEARTBEAT_S); continue; }
+        for (;;) {
+            LmbMsg m;
+            if (lmb_recv(fd, &m) != 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {   /* quiet: beat */
+                    if (register_body_send(fd, held)) break;
+                    continue;
+                }
+                break;                                            /* dead socket */
+            }
+            int rc = 0;
+            if (m.op == LMB_RREAD_FWD) {
+                LmbCur c = { m.body, m.body_len, 0 };
+                char rel[LMB_PATH_MAX];
+                uint32_t id = 0, len = 0;
+                uint64_t off = 0;
+                if (lmb_cur_u32(&c, &id) || lmb_cur_str(&c, rel, sizeof rel) ||
+                    lmb_cur_u64(&c, &off) || lmb_cur_u32(&c, &len)) rc = -1;
+                else {
+                    uint8_t *buf = read_range(rel, off, &len);
+                    LmbBuf rb = {0};
+                    lmb_buf_u32(&rb, id);
+                    lmb_buf_u32(&rb, buf ? 1u : 0u);
+                    rc = lmb_send(fd, LMB_RREAD_R, rb.p, (uint32_t)rb.len,
+                                  buf, buf ? len : 0);
+                    free(rb.p); free(buf);
+                }
+            }
+            /* LMB_OK = heartbeat ack; anything else is ignored, same
+             * forward-compat stance as the engine's serve protocol */
+            lmb_msg_free(&m);
+            if (rc) break;
+        }
+        close(fd);
+        sleep(1);
     }
     return NULL;
 }
@@ -209,6 +400,8 @@ static void *stats_thread(void *arg) {
 
 int main(int argc, char **argv) {
     int port = 7301;
+    double donate_gb = 0;
+    int model_explicit = 0;
     g.root[0] = g.name[0] = g.advertise[0] = g.tracker[0] = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--root") && i + 1 < argc)
@@ -219,11 +412,13 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--name") && i + 1 < argc)
             snprintf(g.name, sizeof g.name, "%s", argv[++i]);
         else if (!strcmp(argv[i], "--model-name") && i + 1 < argc)
-            snprintf(g.model, sizeof g.model, "%s", argv[++i]);
+            { snprintf(g.model, sizeof g.model, "%s", argv[++i]); model_explicit = 1; }
         else if (!strcmp(argv[i], "--advertise") && i + 1 < argc)
             snprintf(g.advertise, sizeof g.advertise, "%s", argv[++i]);
         else if (!strcmp(argv[i], "--include") && i + 1 < argc && g.nincl < MAX_INCLUDES)
             g.includes[g.nincl++] = argv[++i];
+        else if (!strcmp(argv[i], "--donate") && i + 1 < argc)
+            donate_gb = atof(argv[++i]);
         else {
             fprintf(stderr, "usage: %s --root DIR [--port N] [--tracker H:P]"
                             " [--name S] [--advertise H:P] [--include PAT]...\n", argv[0]);
@@ -231,6 +426,7 @@ int main(int argc, char **argv) {
         }
     }
     if (!g.root[0]) { fprintf(stderr, "[maintainer] --root is required\n"); return 2; }
+    signal(SIGPIPE, SIG_IGN);   /* a vanished chatter must not kill the peer */
     size_t rl = strlen(g.root);
     while (rl > 1 && g.root[rl - 1] == '/') g.root[--rl] = 0;
     if (!g.name[0]) snprintf(g.name, sizeof g.name, "peer-%d", port);
@@ -241,6 +437,15 @@ int main(int argc, char **argv) {
     if (!g.advertise[0]) snprintf(g.advertise, sizeof g.advertise, "127.0.0.1:%d", port);
 
     scan_dir(g.root);
+    if (donate_gb > 0) {
+        if (!g.tracker[0]) { fprintf(stderr, "[maintainer] --donate needs --tracker\n"); return 2; }
+        if (!model_explicit) {
+            fprintf(stderr, "[maintainer] --donate needs --model-name "
+                            "(which model to help hold)\n");
+            return 2;
+        }
+        pull_slice((uint64_t)(donate_gb * 1e9));
+    }
     if (!g.nfiles) { fprintf(stderr, "[maintainer %s] nothing to serve under %s\n", g.name, g.root); return 1; }
     uint64_t total = 0;
     for (int i = 0; i < g.nfiles; i++) total += g.files[i].size;
@@ -251,7 +456,7 @@ int main(int argc, char **argv) {
     int lfd = lmb_listen(port);
     if (lfd < 0) { perror("[maintainer] listen"); return 1; }
     pthread_t t;
-    if (g.tracker[0]) { pthread_create(&t, NULL, heartbeat_thread, NULL); pthread_detach(t); }
+    if (g.tracker[0]) { pthread_create(&t, NULL, control_thread, NULL); pthread_detach(t); }
     pthread_create(&t, NULL, stats_thread, NULL); pthread_detach(t);
     for (;;) {
         int fd = accept(lfd, NULL, NULL);

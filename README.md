@@ -9,6 +9,12 @@ downloaded up front, the bytes an inference actually touches arrive from the
 peer on first use and stay in a local mirror. The second question is served
 from local disk at full speed. The engine binary is unmodified.
 
+The founding principle: any machine may join, GPU or not. The engine was
+built for CPU and SSD first; a GPU only makes it faster, never different,
+and the output is byte-identical either way. A swarm with no GPU at all is
+a working swarm. Networks that pool GPUs recruit from the few; lumibri
+recruits from everyone.
+
 ## Quick start
 
 Build:
@@ -38,6 +44,25 @@ numbered, never named: model held, GB, bytes served, heartbeat), `/model`
 lists the models on the swarm and switches between them, restarting the
 engine on the fly. Several machines can serve different models to one
 tracker with `lumibri serve --model DIR --join TRACKER:PORT`.
+
+Donating space, the server decides: a machine with an empty directory can
+offer a byte budget and the tracker assigns it the slice to hold,
+rarest-first, so every donated gigabyte lands where the swarm is thinnest.
+The donor pulls its slice from the swarm, then serves it.
+
+```sh
+./lumibri serve --model ./slice --join TRACKER:7300 \
+                --model-name tiny_olmoe --donate 5
+```
+
+NAT floor: maintainers keep one outbound control connection to the tracker
+and, when a direct dial fails, bytes are relayed through it. A peer behind
+any home NAT serves with zero router configuration; direct peer-to-peer
+stays the first choice. The selftest proves byte identity on the relay path
+too. Private swarms: start the tracker with `--token S` and set
+`LUMIBRI_TOKEN=S` on every peer and chatter. A maintainer advertising
+localhost from another machine gets its address corrected by the tracker to
+what the connection shows.
 
 ## How it works
 
