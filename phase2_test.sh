@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lumibri phase 2 — the experiment.
+# lumabri phase 2 — the experiment.
 #
 # The same model, the same prompt, generated twice:
 #   A) LOCAL   — the engine reads expert weights and runs them itself
@@ -56,10 +56,10 @@ done
 
 echo
 echo "══ B) P2P — every routed expert runs on a peer"
-SNAP="$MODEL" OMP_NUM_THREADS=6 LUMIBRI_EXPERTS="$ADDRS" \
+SNAP="$MODEL" OMP_NUM_THREADS=6 LUMABRI_EXPERTS="$ADDRS" \
     ./olmoe_p2p "$CACHE" 8 "$MODEL/ref.json" > p2p.out 2>p2p.err || { cat p2p.err; exit 1; }
 grep -E "^C engine|^Speed" p2p.out
-grep -E "^\[lumibri\]" p2p.err || true
+grep -E "^\[lumabri\]" p2p.err || true
 
 echo
 A=$(grep "^C engine" local.out)

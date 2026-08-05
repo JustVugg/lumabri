@@ -1,4 +1,4 @@
-# lumibri — design
+# lumabri — design
 
 Data: 2026-08-04. Fase 1 (distribuzione P2P dei byte) funzionante in locale.
 
@@ -47,7 +47,7 @@ close. `read()` è coperto per robustezza (tool esterni); i motori usano
 
 Costo a caldo: un lookup `fdmap[fd]` + un test di bitmap per blocco toccato.
 
-## Protocollo (lumibri_proto.h)
+## Protocollo (lumabri_proto.h)
 
 Frame: `{u32 magic "LMB1", u32 op, u32 body_len, u32 pay_len}` + body + pay,
 little-endian, stringhe con prefisso u16. Cap: body 16 MiB, pay 64 MiB —
@@ -71,7 +71,7 @@ silenzioso da >30 s → escluso dai placement.
 - **Mirror**: `cache/data/<rel>` sparse + `cache/maps/<rel>.lmap` (1 byte
   per blocco, persistita con `pwrite` dopo il blocco: prima i dati, poi il
   bit — un crash rifetcha, mai zeri spacciati per dati).
-- **Blocchi**: default 8 MiB (`LUMIBRI_BLOCK_MIB`). Fetch con dedup
+- **Blocchi**: default 8 MiB (`LUMABRI_BLOCK_MIB`). Fetch con dedup
   in-flight (mutex+condvar per file): N thread del motore che toccano lo
   stesso blocco = un solo fetch.
 - **Peer**: pool di 4 connessioni persistenti per peer; scelta per blocco
@@ -101,6 +101,133 @@ silenzioso da >30 s → escluso dai placement.
   usano sugli shard; LD_PRELOAD sopravvive comunque all'exec).
 - fd ≥ 65536 su file del modello → EMFILE (limite tabella).
 - Un solo vroot per processo.
+
+## Fase 3 — la guerra all'RTT (2026-08-05)
+
+Il muro misurato in fase 2 (30 ms × layer sequenziali) non si abbatte con una
+leva sola: si abbatte con leve moltiplicative. Tre sono implementate e
+provate da `phase3_test.sh`; due restano sul tavolo.
+
+**Topologia: perché non (ancora) un grafo/DHT.** La mappa vicino/lontano non
+richiede una DHT: ogni nodo misura da sé i propri archi — due PING per peer
+alla partenza (il secondo viaggia sulla connessione calda; si tiene il min) —
+e il tracker resta un indice Napster che non sa dov'è nessuno. La prossimità
+vive nel nodo che ne beneficia, l'unico posto dove si può misurare
+onestamente. Una DHT diventa necessaria solo per la rete aperta a migliaia di
+peer (SPOF del tracker, relay decentralizzato): il protocollo lo permette
+senza stravolgimenti — PLACEMENT diventa una lookup — ma è lavoro di quella
+fase, non di questa.
+
+Le leve, con le misure (emulazione `LUMABRI_RTT_US` dentro il peer, stessa
+metodologia del banco di fase 2):
+
+1. **Replica più vicina, fase 1** (lumashim): i peer di un file ordinati per
+   RTT misurato; chi sta entro il 25% + 2 ms del migliore è "ugualmente
+   vicino" e i blocchi si spartiscono per hash tra loro; i lontani sono
+   failover, il relay ultimo. Provato: replica piena a 0 ms + replica piena a
+   60 ms → 25.2 MB dal vicino, **0 byte dal lontano**, byte-identico.
+2. **Prefetch, fase 1** (`LUMABRI_PREFETCH`, default 2 blocchi, 0 spegne):
+   la mossa di Spotify — il carico di un modello è quasi tutto sequenziale,
+   quindi mentre il motore mastica il blocco N lo sciame sta già spedendo
+   N+1..N+K su worker paralleli. Provato: mirror freddo su sciame a 40 ms,
+   **45% più veloce** (1246 → 679 ms). La stessa `ensure_block` del path di
+   lettura: la bitmap e l'in-flight dedup rendono impossibile il doppio
+   fetch, e un prefetch fallito è silenzioso perché il read path lo ritenta
+   rumorosamente se il blocco serve davvero.
+3. **Repliche + vicinanza + failover, fase 2** (lumabri_client): fino a 4
+   repliche per esperto, ogni chiamata alla più vicina viva; un peer che
+   fallisce è marcato morto e l'esperto ritenta sulla replica successiva —
+   mai fallback locale (l'invariante regge), fatale solo l'esperto senza
+   repliche vive. Provato due volte: (a) esperto replicato a 2 ms e a 30 ms
+   col lontano primo in lista → **10.48 tok/s contro 1.37** del solo-30ms
+   (4.0 ms per round invece di 34.6); (b) peer ucciso a metà generazione →
+   4 failover, **token identici** al riferimento locale.
+
+La lettura: il muro dell'RTT è il muro della *replica più vicina*, non della
+media dello sciame. Con sciami che clusterizzano geograficamente (città,
+campus), il conto 30 ms diventa un conto 2-8 ms — e il resto lo devono fare
+le due leve rimanenti:
+
+4. **Draft speculativo con batch-union** (appunti in fase 2): un round di
+   layer per l'intero draft → ×3-5. Richiede il drafting del motore: lavoro
+   lato colibri, il protocollo qui è pronto (EXEC porta già più righe in
+   linea di principio).
+5. **Predizione degli esperti + cache LRU dei caldi sul chatter**: spedire le
+   chiamate del layer N+1 in anticipo sulla predizione del router, e tenere
+   localmente (via il mirror di fase 1) gli esperti più chiamati. Ogni hit è
+   un round trip in meno.
+
+## Fase 4 — bootstrap-and-delegate (2026-08-05)
+
+Il problema del giorno zero: uno sciame appena nato non ha donatori, e senza
+esecutori la fase 2 non parte. La politica: **il server esegue per primo,
+delega man mano che i donatori arrivano, e resta l'ultima istanza.**
+
+- **Il server è anche esecutore**: `lumabri serve` lancia un `expert_node`
+  sull'intero modello. Gli esperti restano sull'SSD e passano da una LRU in
+  RAM (`--cache N` slot): il metodo colibri applicato al peer. Acquire/pin
+  con refcount (mai evizione sotto una matmul in corso), loader del motore
+  serializzato da un mutex, un miss = una lettura NVMe. Identità provata con
+  cache 8 su 128 esperti — 80% di cold load, zero byte cambiati.
+- **Scoperta dal tracker** (EREG/EPEERS): gli expert node fanno heartbeat
+  come i maintainer; il client chiede EPEERS{model} quando LUMABRI_EXPERTS
+  non è impostata. Zero configurazione lato chatter.
+- **La scala di degrado**, ogni gradino rumoroso, nessuno può cambiare un
+  byte: replica più vicina → altra replica → ri-query del tracker (un
+  donatore può essere arrivato *dopo* l'avvio) → e se all'avvio lo sciame
+  non copre tutti gli esperti, la fase 2 resta spenta e il motore li esegue
+  in locale dai byte del mirror di fase 1.
+
+Misure di `phase4_test.sh`: identità con cache affamata (19.6% hit), 
+bootstrap zero-config via tracker, donatore a metà modello ucciso in piena
+generazione → failover al server, token identici al riferimento locale.
+`make install` porta tutto in PREFIX/bin + PREFIX/lib/lumabri; i binari si
+trovano l'un l'altro via /proc/self/exe.
+
+Aperto, in ordine: hash per blocco (fase 1) e verifica a campione dei
+risultati (fase 2) prima dei peer sconosciuti; batch-union speculativo lato
+motore; assegnazione degli esperti dal tracker (oggi il donatore sceglie
+con --stride/--layers; dovrebbe decidere il server, rarest-first come per i
+byte); relay EXEC per esecutori dietro NAT.
+
+## Fase 5 — sciame aperto e sciame a inviti (2026-08-05)
+
+Due modelli di fiducia, entrambi completi.
+
+**Aperto (chiunque entra, nessuno è fidato).** Catena di custodia radicata
+nell'operatore dello sciame, mai nel peer che serve i byte:
+
+- sha256 per MiB (`LMB_HASH_CHUNK`) calcolato dal maintainer, in cache in
+  `.lumabri_hashes/<rel>.sha` (invalidata dal cambio di size): solo il primo
+  avvio paga. Spedito dentro REGISTER come sezione opzionale (magic "SHAH",
+  i peer vecchi semplicemente non la mandano).
+- Il tracker tiene la **prima** dichiarazione di ogni (model, path) come
+  verità — l'origine registra prima che esista un donatore — e **rimuove
+  dall'offerta** di ogni registrante successivo i file i cui hash
+  contraddicono: il veleno muore all'indice, non entra mai in un placement.
+- Chatter e donatori-in-pull chiedono la verità al **tracker** (op HASHES) e
+  verificano ogni blocco: il peer che mente si vede rifiutare i byte e il
+  blocco viene ripreso altrove, rumorosamente. `LUMABRI_REQUIRE_HASH=1`
+  rifiuta di scaricare dove la verità non c'è (modo severo per sconosciuti).
+- Fase 2, `LUMABRI_VERIFY=N`: l'N% delle chiamate viene rieseguito su
+  un'**altra replica** e deve tornare byte-identico. È qui che l'invariante
+  di identità diventa un'arma: due peer onesti non possono discordare,
+  quindi una discordanza *è* la prova di una menzogna — e la run si ferma
+  invece di emettere un token di cui nessuno può rispondere.
+
+**A inviti.** `LUMABRI_TOKEN` su ogni macchina: tracker, maintainer e
+expert node rifiutano le connessioni non autenticate. Il token protegge
+byte e calcolo, non solo l'indice.
+
+Provato da `phase5_test.sh` con peer che mentono come mentirebbe un
+avversario (manifest onesto, byte corrotti — `LUMABRI_CORRUPT_PPM`): 7
+blocchi corrotti rifiutati con mirror byte-identico, poisoner spogliato
+alla registrazione, esecutore bugiardo beccato al primo spot-check.
+
+Limite noto e dichiarato: la radice di fiducia è il server dell'operatore
+(tracker + origine). Un tracker compromesso può riscrivere la verità. Il
+passo successivo è firmare la ground truth con una chiave dell'operatore,
+così il tracker diventa un corriere e non un'autorità.
 
 ## Fase 2 (esperti remoti) — appunti
 

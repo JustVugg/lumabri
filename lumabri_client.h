@@ -1,0 +1,421 @@
+/* lumabri_client.h — the chatter side of phase 2.
+ *
+ * Included by an engine compiled with -DLUMABRI_P2P. When LUMABRI_EXPERTS is
+ * set (a comma list of host:port), the MoE layer stops loading expert weights
+ * and instead sends the activation row to a peer that holds each selected
+ * expert, then sums the returned rows with the router's weights.
+ *
+ * The K experts of one layer are issued BEFORE any reply is read, on K
+ * separate sockets, so the peers work concurrently and the chatter pays one
+ * round trip per LAYER, not per expert. That is the whole latency argument of
+ * the design: 16 layers × one RTT, not 64 × one RTT.
+ *
+ * Replicas and distance: an expert may be held by several peers. Each peer's
+ * round-trip time is measured at init (two PINGs, take the min), and every
+ * call goes to the nearest live replica — the chatter owns its distance map,
+ * nobody coordinates it. A peer that fails a call is marked dead and the
+ * expert is retried on the next replica: slower for that one round, but the
+ * generation survives churn instead of dying with it.
+ *
+ * Two invariants, both inherited from the engine's own rules:
+ *   - the accumulation runs k = 0..K-1 in the router's order, exactly as the
+ *     local path does, so the float rounding is identical, not merely close;
+ *   - an expert with NO live replica is a hard error, never a silent
+ *     fallback to local compute — a fallback would quietly turn a broken
+ *     network into a passing measurement.
+ */
+#ifndef LUMABRI_CLIENT_H
+#define LUMABRI_CLIENT_H
+
+#include <limits.h>
+
+#include "lumabri_proto.h"
+
+#define LUMI_MAX_PEERS 32
+#define LUMI_MAX_K     64
+#define LUMI_MAX_REP   4      /* replicas remembered per expert */
+
+typedef struct {
+    char addr[64];
+    int socks[LUMI_MAX_K];
+    int nsocks;
+    long rtt_us;
+    int dead;
+} LumiPeer;
+
+static struct {
+    int on;
+    LumiPeer peers[LUMI_MAX_PEERS];
+    int npeers;
+    int *own;                   /* [gid * LUMI_MAX_REP] → peer index, -1 = free */
+    int n_layers, n_experts, hidden;
+    int verify_pct;             /* LUMABRI_VERIFY: % of calls double-checked */
+    unsigned long long calls, layers_done, failovers, verified;
+    double wait_s;
+} L = {0};
+
+static double lumi_now(void) {
+    struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
+    return (double)t.tv_sec + (double)t.tv_nsec * 1e-9;
+}
+
+static void lumi_die(const char *msg) {
+    fprintf(stderr, "[lumabri] %s\n", msg);
+    exit(1);
+}
+
+/* One socket per in-flight request: a peer executing two experts of the same
+ * layer must see them as two concurrent requests, not a queue of one.
+ * Returns -1 (and marks the peer dead) when it cannot connect: the caller
+ * has replicas to fall back to, so a dead peer must not be fatal here. */
+static int lumi_take_sock(LumiPeer *p) {
+    if (p->nsocks) return p->socks[--p->nsocks];
+    int fd = lmb_connect(p->addr);
+    if (fd >= 0 && lmb_auth(fd)) { close(fd); fd = -1; }
+    if (fd < 0) {
+        fprintf(stderr, "[lumabri] peer %s unreachable — marked dead\n", p->addr);
+        p->dead = 1;
+    }
+    return fd;
+}
+
+static void lumi_put_sock(LumiPeer *p, int fd) {
+    if (p->nsocks < LUMI_MAX_K) p->socks[p->nsocks++] = fd;
+    else close(fd);
+}
+
+static void lumi_probe(LumiPeer *p) {
+    p->rtt_us = LONG_MAX;
+    int fd = lumi_take_sock(p);
+    if (fd < 0) return;
+    for (int i = 0; i < 2; i++) {       /* the second ping rides warm; take min */
+        double a = lumi_now();
+        LmbMsg m = {0};
+        if (lmb_send(fd, LMB_PING, NULL, 0, NULL, 0) || lmb_recv(fd, &m)) {
+            close(fd); p->dead = 1; return;
+        }
+        lmb_msg_free(&m);
+        long us = (long)((lumi_now() - a) * 1e6);
+        if (us < p->rtt_us) p->rtt_us = us;
+    }
+    lumi_put_sock(p, fd);
+}
+
+/* Learn one peer: manifest, replica claims, distance. Returns 0, or -1 on
+ * any failure (already-known addresses are a no-op success). */
+static int lumi_add_peer(const char *addr) {
+    for (int i = 0; i < L.npeers; i++)
+        if (!strcmp(L.peers[i].addr, addr)) return 0;
+    if (L.npeers == LUMI_MAX_PEERS) return -1;
+    LumiPeer *p = &L.peers[L.npeers];
+    snprintf(p->addr, sizeof p->addr, "%s", addr);
+    p->nsocks = 0; p->dead = 0;
+
+    LmbMsg m = {0};
+    if (lmb_request(p->addr, LMB_EMANIFEST, NULL, 0, &m) || m.op != LMB_EMANIFEST_R) {
+        fprintf(stderr, "[lumabri] no expert manifest from %s — skipped\n", p->addr);
+        lmb_msg_free(&m);
+        return -1;
+    }
+    LmbCur c = { m.body, m.body_len, 0 };
+    uint32_t n = 0, peer_hidden = 0;
+    int bad = lmb_cur_u32(&c, &n) != 0;
+    int claimed = 0;
+    for (uint32_t i = 0; !bad && i < n; i++) {
+        uint32_t l, e;
+        if (lmb_cur_u32(&c, &l) || lmb_cur_u32(&c, &e) ||
+            (int)l >= L.n_layers || (int)e >= L.n_experts) { bad = 1; break; }
+        int *own = &L.own[((size_t)l * L.n_experts + e) * LUMI_MAX_REP];
+        for (int r = 0; r < LUMI_MAX_REP; r++) {
+            if (own[r] == L.npeers) break;                /* duplicate entry */
+            if (own[r] < 0) { own[r] = L.npeers; claimed += r == 0; break; }
+        }
+    }
+    if (bad || lmb_cur_u32(&c, &peer_hidden) || (int)peer_hidden != L.hidden) {
+        /* roll the claims back: this peer must not own anything */
+        for (size_t i = 0; i < (size_t)L.n_layers * L.n_experts * LUMI_MAX_REP; i++)
+            if (L.own[i] == L.npeers) L.own[i] = -1;
+        lmb_msg_free(&m);
+        fprintf(stderr, "[lumabri] peer %s: bad or mismatched manifest — skipped\n",
+                p->addr);
+        return -1;
+    }
+    lmb_msg_free(&m);
+    lumi_probe(p);
+    if (p->rtt_us == LONG_MAX) {
+        for (size_t i = 0; i < (size_t)L.n_layers * L.n_experts * LUMI_MAX_REP; i++)
+            if (L.own[i] == L.npeers) L.own[i] = -1;
+        return -1;
+    }
+    fprintf(stderr, "[lumabri] peer %s: %u experts (%d first-holder) · rtt %.2f ms\n",
+            p->addr, n, claimed, (double)p->rtt_us / 1000.0);
+    L.npeers++;
+    return 0;
+}
+
+/* Ask the tracker who can execute for this model. Returns peers added. */
+static int lumi_discover(void) {
+    const char *tracker = getenv("LUMABRI_TRACKER");
+    if (!tracker || !tracker[0]) return 0;
+    const char *model = getenv("LUMABRI_MODEL");
+    LmbBuf b = {0};
+    if (model && model[0]) lmb_buf_str(&b, model);
+    LmbMsg m = {0};
+    int rc = lmb_request(tracker, LMB_EPEERS, b.p, (uint32_t)b.len, &m);
+    free(b.p);
+    if (rc || m.op != LMB_EPEERS_R) { lmb_msg_free(&m); return 0; }
+    LmbCur c = { m.body, m.body_len, 0 };
+    uint32_t n = 0;
+    int added = 0;
+    if (!lmb_cur_u32(&c, &n))
+        for (uint32_t i = 0; i < n; i++) {
+            char addr[64];
+            if (lmb_cur_str(&c, addr, sizeof addr)) break;
+            int before = L.npeers;
+            if (lumi_add_peer(addr) == 0 && L.npeers > before) added++;
+        }
+    lmb_msg_free(&m);
+    return added;
+}
+
+/* The bootstrap-and-delegate policy, chatter side. Peer list from
+ * LUMABRI_EXPERTS when set (explicit, any gap is fatal); otherwise
+ * discovered from the tracker — and if the swarm cannot cover every
+ * expert, phase 2 simply stays off and the engine runs the experts
+ * itself from the phase-1 mirror. Graceful in, graceful out. */
+static void lumi_init(int n_layers, int n_experts, int hidden) {
+    const char *spec = getenv("LUMABRI_EXPERTS");
+    if (getenv("LUMABRI_NO_EXEC")) return;
+    const char *tracker = getenv("LUMABRI_TRACKER");
+    int discovery = !spec || !*spec;
+    if (discovery && (!tracker || !tracker[0])) return;
+
+    L.n_layers = n_layers; L.n_experts = n_experts; L.hidden = hidden;
+    size_t cells = (size_t)n_layers * n_experts * LUMI_MAX_REP;
+    L.own = (int *)malloc(cells * sizeof(int));
+    for (size_t i = 0; i < cells; i++) L.own[i] = -1;
+
+    if (discovery) {
+        int found = lumi_discover();
+        if (!found) {
+            fprintf(stderr, "[lumabri] no expert peers on the swarm — "
+                            "running experts locally\n");
+            return;
+        }
+        fprintf(stderr, "[lumabri] discovered %d expert peer(s) from the tracker\n",
+                found);
+    } else {
+        char list[1024];
+        snprintf(list, sizeof list, "%s", spec);
+        for (char *save = NULL, *tok = strtok_r(list, ",", &save); tok;
+             tok = strtok_r(NULL, ",", &save))
+            if (lumi_add_peer(tok)) lumi_die("configured expert peer failed");
+    }
+
+    int missing = 0;
+    for (size_t i = 0; i < cells; i += LUMI_MAX_REP) if (L.own[i] < 0) missing++;
+    if (missing) {
+        fprintf(stderr, "[lumabri] %d of %d experts have no peer — ", missing,
+                n_layers * n_experts);
+        if (discovery) {
+            fprintf(stderr, "running experts locally\n");
+            return;                    /* partial swarm: phase 2 stays off */
+        }
+        fprintf(stderr, "refusing to run "
+                "(a partial explicit network would silently change the model)\n");
+        exit(1);
+    }
+    const char *v = getenv("LUMABRI_VERIFY");
+    if (v) {
+        L.verify_pct = atoi(v);
+        if (L.verify_pct < 0) L.verify_pct = 0;
+        if (L.verify_pct > 100) L.verify_pct = 100;
+    }
+    L.on = 1;
+    fprintf(stderr, "[lumabri] phase 2 active: every expert runs on a peer, "
+                    "%d peer(s), hidden=%d, nearest replica preferred%s\n",
+            L.npeers, hidden,
+            L.verify_pct ? " · spot-check verification on" : "");
+}
+
+/* nearest live replica of (layer,eid) not yet tried this call, or -1 */
+static int lumi_pick(int gid, uint32_t tried) {
+    const int *own = &L.own[(size_t)gid * LUMI_MAX_REP];
+    int best = -1;
+    long bestr = LONG_MAX;
+    for (int r = 0; r < LUMI_MAX_REP; r++) {
+        int pi = own[r];
+        if (pi < 0 || ((tried >> r) & 1) || L.peers[pi].dead) continue;
+        if (best < 0 || L.peers[pi].rtt_us < bestr)
+            { best = r; bestr = L.peers[pi].rtt_us; }
+    }
+    return best;
+}
+
+static int lumi_send_exec(int fd, int layer, int eid, const float *x, int D) {
+    LmbBuf b = {0};
+    lmb_buf_u32(&b, (uint32_t)layer);
+    lmb_buf_u32(&b, (uint32_t)eid);
+    lmb_buf_u32(&b, (uint32_t)D);
+    int rc = lmb_send(fd, LMB_EXEC, b.p, (uint32_t)b.len,
+                      x, (uint32_t)(D * sizeof(float)));
+    free(b.p);
+    return rc;
+}
+
+/* the failover path: run one expert synchronously on the next replicas.
+ * Costs a full extra round trip — it is the price of a peer dying, paid
+ * once, instead of the generation dying with it. */
+static float *lumi_exec_retry(int layer, int eid, const float *x, int D,
+                              uint32_t tried) {
+    int gid = layer * L.n_experts + eid;
+    int refreshed = 0;
+    for (;;) {
+        int r = lumi_pick(gid, tried);
+        if (r < 0 && !refreshed) {
+            /* every known replica is gone: ask the tracker who joined since —
+             * a donor may have arrived, or the server may have come back */
+            refreshed = 1;
+            if (lumi_discover() > 0) continue;
+        }
+        if (r < 0) {
+            fprintf(stderr, "[lumabri] layer %d expert %d: no live replica left\n",
+                    layer, eid);
+            exit(1);
+        }
+        tried |= 1u << r;
+        LumiPeer *p = &L.peers[L.own[(size_t)gid * LUMI_MAX_REP + r]];
+        int fd = lumi_take_sock(p);
+        if (fd < 0) continue;
+        LmbMsg m = {0};
+        if (lumi_send_exec(fd, layer, eid, x, D) || lmb_recv(fd, &m) ||
+            m.op != LMB_EXEC_R || m.pay_len != (uint32_t)(D * sizeof(float))) {
+            close(fd);
+            p->dead = 1;
+            lmb_msg_free(&m);
+            fprintf(stderr, "[lumabri] peer %s failed — trying next replica\n", p->addr);
+            continue;
+        }
+        float *res = (float *)m.pay;
+        m.pay = NULL;
+        lmb_msg_free(&m);
+        lumi_put_sock(p, fd);
+        L.failovers++;
+        return res;
+    }
+}
+
+/* Spot-check: rerun this expert on a DIFFERENT replica and demand the same
+ * bytes. Determinism makes lying detectable: two honest peers cannot
+ * disagree, so a disagreement IS an attack (or broken hardware) — either
+ * way the answer cannot be trusted, and the run stops loudly rather than
+ * emit a token nobody can vouch for. */
+static void lumi_spot_check(int layer, int eid, const float *x, int D,
+                            const float *got, LumiPeer *from, uint32_t tried) {
+    int gid = layer * L.n_experts + eid;
+    int r2 = lumi_pick(gid, tried);
+    if (r2 < 0) return;                       /* no second replica to ask */
+    LumiPeer *p = &L.peers[L.own[(size_t)gid * LUMI_MAX_REP + r2]];
+    int fd = lumi_take_sock(p);
+    if (fd < 0) return;
+    LmbMsg m = {0};
+    if (lumi_send_exec(fd, layer, eid, x, D) || lmb_recv(fd, &m) ||
+        m.op != LMB_EXEC_R || m.pay_len != (uint32_t)(D * sizeof(float))) {
+        close(fd);
+        lmb_msg_free(&m);
+        return;                               /* checker down ≠ answer wrong */
+    }
+    L.verified++;
+    int same = memcmp(got, m.pay, (size_t)D * sizeof(float)) == 0;
+    lmb_msg_free(&m);
+    lumi_put_sock(p, fd);
+    if (!same) {
+        fprintf(stderr, "[lumabri] INTEGRITY FAILURE on layer %d expert %d: "
+                "%s and %s returned different bytes for the same activation. "
+                "One of them is lying or broken; refusing to continue.\n",
+                layer, eid, from->addr, p->addr);
+        exit(1);
+    }
+}
+
+/* Run the K selected experts of one layer on their peers and accumulate into
+ * `out` with the router weights. A peer failure costs a retry on the next
+ * replica; only a replica-exhausted expert is fatal. */
+static void lumi_moe_apply(int layer, const int *idx, const float *val, int K,
+                           const float *x, int D, float *out) {
+    if (K > LUMI_MAX_K) lumi_die("top-k larger than the client supports");
+    int fds[LUMI_MAX_K];
+    uint32_t tried[LUMI_MAX_K];
+    LumiPeer *ps[LUMI_MAX_K];
+    float *res[LUMI_MAX_K];
+    double t0 = lumi_now();
+
+    /* issue all K first — this is what buys one RTT per layer */
+    for (int k = 0; k < K; k++) {
+        int gid = layer * L.n_experts + idx[k];
+        tried[k] = 0; fds[k] = -1; ps[k] = NULL; res[k] = NULL;
+        for (;;) {
+            int r = lumi_pick(gid, tried[k]);
+            if (r < 0) break;                  /* collect phase will retry/die */
+            tried[k] |= 1u << r;
+            LumiPeer *p = &L.peers[L.own[(size_t)gid * LUMI_MAX_REP + r]];
+            int fd = lumi_take_sock(p);
+            if (fd < 0) continue;
+            if (lumi_send_exec(fd, layer, idx[k], x, D)) {
+                close(fd);
+                p->dead = 1;
+                continue;
+            }
+            fds[k] = fd; ps[k] = p;
+            break;
+        }
+    }
+    /* then collect, in order; a failed reply falls over to the next replica */
+    static unsigned vseed = 0x9e3779b9u;
+    for (int k = 0; k < K; k++) {
+        if (fds[k] >= 0) {
+            LmbMsg m = {0};
+            if (lmb_recv(fds[k], &m) == 0 && m.op == LMB_EXEC_R &&
+                m.pay_len == (uint32_t)(D * sizeof(float))) {
+                res[k] = (float *)m.pay;
+                m.pay = NULL;
+                lmb_msg_free(&m);
+                lumi_put_sock(ps[k], fds[k]);
+                if (L.verify_pct) {
+                    vseed = vseed * 1664525u + 1013904223u;
+                    if ((int)(vseed % 100u) < L.verify_pct)
+                        lumi_spot_check(layer, idx[k], x, D, res[k], ps[k], tried[k]);
+                }
+                continue;
+            }
+            close(fds[k]);
+            ps[k]->dead = 1;
+            lmb_msg_free(&m);
+            fprintf(stderr, "[lumabri] peer %s failed on layer %d expert %d — "
+                            "trying next replica\n", ps[k]->addr, layer, idx[k]);
+        }
+        res[k] = lumi_exec_retry(layer, idx[k], x, D, tried[k]);
+    }
+    /* accumulate in the router's order, exactly as the local path does */
+    for (int k = 0; k < K; k++) {
+        float w = val[k];
+        const float *h = res[k];
+        for (int d = 0; d < D; d++) out[d] += w * h[d];
+        free(res[k]);
+    }
+    L.wait_s += lumi_now() - t0;
+    L.calls += (unsigned long long)K;
+    L.layers_done++;
+}
+
+static void lumi_report(void) {
+    if (!L.on) return;
+    fprintf(stderr, "[lumabri] %llu remote expert calls in %llu layer rounds · "
+                    "%.2fs waiting on peers (%.2f ms per layer round) · "
+                    "%llu failover(s) · %llu spot-check(s), all agreed\n",
+            L.calls, L.layers_done, L.wait_s,
+            L.layers_done ? 1000.0 * L.wait_s / (double)L.layers_done : 0.0,
+            L.failovers, L.verified);
+}
+
+#endif /* LUMABRI_CLIENT_H */

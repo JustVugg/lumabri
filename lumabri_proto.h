@@ -1,4 +1,4 @@
-/* lumibri_proto.h — the lumibri wire protocol. Header-only, no dependencies.
+/* lumabri_proto.h — the lumabri wire protocol. Header-only, no dependencies.
  *
  * One frame on the wire:
  *   preamble  16 bytes  { u32 magic "LMB1", u32 op, u32 body_len, u32 pay_len }
@@ -17,8 +17,8 @@
  *   REGISTER{name,addr,files} → OK             maintainer → tracker heartbeat
  *   PLACEMENT → PLACEMENT_R                    file → peers map, tracker → chatter
  */
-#ifndef LUMIBRI_PROTO_H
-#define LUMIBRI_PROTO_H
+#ifndef LUMABRI_PROTO_H
+#define LUMABRI_PROTO_H
 
 #include <errno.h>
 #include <fcntl.h>
@@ -32,12 +32,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 #define LMB_MAGIC     0x31424D4Cu           /* "LMB1" read as little-endian */
-#define LMB_MAX_BODY  (16u << 20)
+#define LMB_MAX_BODY  (64u << 20)   /* a REGISTER carrying block hashes for a
+                                       whole huge model must fit: 32 B/MiB */
 #define LMB_MAX_PAY   (64u << 20)
 #define LMB_PATH_MAX  512
+#define LMB_HASH_CHUNK (1u << 20)   /* integrity granularity: sha256 per MiB */
+#define LMB_HASH_MAGIC 0x48414853u  /* "SHAH": optional hash section marker */
 
 enum {
     LMB_PING = 1, LMB_OK = 2, LMB_ERR = 3,
@@ -66,7 +70,7 @@ enum {
     /* AUTH: private swarms. When the tracker runs with --token, the first
      * frame on every connection must be AUTH {str token}; everything else on
      * an unauthenticated connection is refused. Clients send it whenever
-     * LUMIBRI_TOKEN is set. */
+     * LUMABRI_TOKEN is set. */
     LMB_AUTH = 20,
     /* ASSIGN: "the server decides". A joining maintainer offers a byte
      * budget and the files it already holds; the tracker answers with the
@@ -75,6 +79,27 @@ enum {
      * where it is thinnest. body: {str model, u64 budget, u32 n, n×str path}
      * reply: {u32 n, n×{str path, u64 size}} */
     LMB_ASSIGN = 21, LMB_ASSIGN_R = 22,
+    /* Phase-2 discovery — the bootstrap-and-delegate policy. An expert node
+     * advertises itself with EREG {name, addr, model, u32 nexperts} on a
+     * heartbeat, exactly like a maintainer REGISTERs; a chatter asks
+     * EPEERS {model} and gets the live expert-capable addresses back. The
+     * machine that `lumabri serve`s a model always runs one expert node, so
+     * a brand-new swarm works from minute zero with the server executing
+     * every expert; donors that join later are discovered and win the calls
+     * they are nearest for; a donor that dies fails over — ultimately back
+     * to the server, which holds everything. */
+    LMB_EREG = 23, LMB_EPEERS = 24, LMB_EPEERS_R = 25,
+    /* Integrity for the open swarm. A registering maintainer appends a
+     * sha256 per LMB_HASH_CHUNK of every file it holds; the tracker keeps
+     * the FIRST announcement of each (model, path) as ground truth — the
+     * origin server registers before any donor exists — and rejects the
+     * files of any later registrant whose hashes disagree (poison dies at
+     * the index). HASHES {model, path} → HASHES_R {u32 chunk, u32 n} + pay
+     * (n × 32 raw bytes) hands the truth to chatters and pulling donors,
+     * which verify every fetched block against it: a lying peer's bytes
+     * are rejected and refetched elsewhere, loudly. The root of trust is
+     * the swarm operator (tracker + origin), never the peers. */
+    LMB_HASHES = 26, LMB_HASHES_R = 27,
 };
 
 /* REGISTER body: str name, str addr, str model, u64 held_bytes,
@@ -187,6 +212,11 @@ static int lmb_buf_u64(LmbBuf *b, uint64_t v) {
     if (lmb_buf_u32(b, (uint32_t)v)) return -1;
     return lmb_buf_u32(b, (uint32_t)(v >> 32));
 }
+static int lmb_buf_bytes(LmbBuf *b, const void *p, size_t n) {
+    if (lmb_buf_reserve(b, n)) return -1;
+    memcpy(b->p + b->len, p, n); b->len += n;
+    return 0;
+}
 static int lmb_buf_str(LmbBuf *b, const char *s) {  /* u16 len + bytes */
     size_t n = strlen(s);
     if (n > 0xFFFF) return -1;
@@ -213,6 +243,11 @@ static int lmb_cur_u64(LmbCur *c, uint64_t *v) {
     uint32_t lo, hi;
     if (lmb_cur_u32(c, &lo) || lmb_cur_u32(c, &hi)) return -1;
     *v = (uint64_t)lo | ((uint64_t)hi << 32);
+    return 0;
+}
+static int lmb_cur_bytes(LmbCur *c, void *dst, size_t n) {
+    if (c->off + n > c->len) return -1;
+    memcpy(dst, c->p + c->off, n); c->off += n;
     return 0;
 }
 static int lmb_cur_str(LmbCur *c, char *dst, size_t cap) {
@@ -265,6 +300,57 @@ static int lmb_connect_ms(const char *addr, int timeout_ms) {
 
 static int lmb_connect(const char *addr) { return lmb_connect_ms(addr, 5000); }
 
+/* ---- userspace network emulation ---------------------------------------
+ * Measuring what a LAN or a WAN would cost normally means a netem qdisc,
+ * which needs root and changes the host's networking for every process.
+ * This does the same job inside a serving peer: it holds the reply for the
+ * configured round-trip time before sending it. Because the K requests of a
+ * layer travel on K sockets served by K threads, the waits overlap exactly
+ * as real flight time would. Zero cost when the variables are unset.
+ *
+ *   LUMABRI_RTT_US=250 LUMABRI_JITTER_US=50                 ≈ gigabit LAN
+ *   LUMABRI_RTT_US=30000 LUMABRI_JITTER_US=5000 LUMABRI_LOSS_PPM=1000 ≈ WAN
+ *
+ * Loss is approximated the only honest way available in userspace: by
+ * paying a retransmission timeout (LUMABRI_RTO_US) on that fraction of
+ * replies. Applied to PING too, on purpose: probes must see the emulated
+ * distance, or proximity-aware peer selection could not be tested. */
+
+static long lmb_emu_rtt_us = -1, lmb_emu_jitter_us, lmb_emu_loss_ppm, lmb_emu_rto_us;
+static __thread unsigned lmb_emu_seed;
+
+static inline void lmb_emu_parse(void) {
+    if (lmb_emu_rtt_us >= 0) return;       /* benign race: the parse is idempotent */
+    const char *e;
+    lmb_emu_jitter_us = (e = getenv("LUMABRI_JITTER_US")) ? atol(e) : 0;
+    lmb_emu_loss_ppm  = (e = getenv("LUMABRI_LOSS_PPM"))  ? atol(e) : 0;
+    lmb_emu_rto_us    = (e = getenv("LUMABRI_RTO_US"))    ? atol(e) : 200000;
+    lmb_emu_rtt_us    = (e = getenv("LUMABRI_RTT_US"))    ? atol(e) : 0;
+}
+
+static inline void lmb_emu_delay(void) {
+    lmb_emu_parse();
+    if (!lmb_emu_rtt_us && !lmb_emu_jitter_us && !lmb_emu_loss_ppm) return;
+    if (!lmb_emu_seed) lmb_emu_seed = (unsigned)(uintptr_t)&lmb_emu_seed | 1u;
+    long us = lmb_emu_rtt_us;
+    if (lmb_emu_jitter_us > 0) {
+        lmb_emu_seed = lmb_emu_seed * 1664525u + 1013904223u;
+        us += (long)(lmb_emu_seed % (unsigned)(2 * lmb_emu_jitter_us + 1)) - lmb_emu_jitter_us;
+    }
+    if (lmb_emu_loss_ppm > 0) {
+        lmb_emu_seed = lmb_emu_seed * 1664525u + 1013904223u;
+        if (lmb_emu_seed % 1000000u < (unsigned)lmb_emu_loss_ppm) us += lmb_emu_rto_us;
+    }
+    if (us <= 0) return;
+    struct timespec ts = { us / 1000000, (us % 1000000) * 1000 };
+    while (nanosleep(&ts, &ts) && errno == EINTR) { }
+}
+
+static inline int lmb_emu_active(void) {
+    lmb_emu_parse();
+    return lmb_emu_rtt_us > 0 || lmb_emu_jitter_us > 0 || lmb_emu_loss_ppm > 0;
+}
+
 static int lmb_listen(int port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
@@ -281,10 +367,10 @@ static int lmb_listen(int port) {
     return fd;
 }
 
-/* Sends AUTH if LUMIBRI_TOKEN is set. Call right after connecting to a
+/* Sends AUTH if LUMABRI_TOKEN is set. Call right after connecting to a
  * tracker. Returns 0 (also when no token is configured). */
 static int lmb_auth(int fd) {
-    const char *tok = getenv("LUMIBRI_TOKEN");
+    const char *tok = getenv("LUMABRI_TOKEN");
     if (!tok || !tok[0]) return 0;
     LmbBuf b = {0};
     lmb_buf_str(&b, tok);
@@ -312,4 +398,4 @@ static int lmb_request(const char *addr, uint32_t op,
     return rc;
 }
 
-#endif /* LUMIBRI_PROTO_H */
+#endif /* LUMABRI_PROTO_H */

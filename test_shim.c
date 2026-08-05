@@ -1,14 +1,14 @@
-/* test_shim.c — correctness client for liblumibri.so.
+/* test_shim.c — correctness client for liblumabri.so.
  *
  * Exercises exactly the libc surface the engines use on a model directory
  * (opendir/readdir, open+fstat+pread, fopen+fread) against the virtual root,
  * and compares every byte with the source directory the maintainers serve.
  *
- *   LD_PRELOAD=./liblumibri.so LUMIBRI_VROOT=... LUMIBRI_CACHE=... \
+ *   LD_PRELOAD=./liblumabri.so LUMABRI_VROOT=... LUMABRI_CACHE=... \
  *     ./test_shim VROOT SRCDIR
  *
  * Exit 0 = every comparison passed. Any mismatch or unexpected errno is
- * fatal and named — the whole point of lumibri is that the network may only
+ * fatal and named — the whole point of lumabri is that the network may only
  * change where bytes come from, never which bytes.
  */
 #include <dirent.h>
@@ -102,7 +102,7 @@ static void walk(const char *rel) {
     struct dirent *e;
     while ((e = readdir(d))) {
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-        if (!strcmp(e->d_name, "manifest.txt")) continue;   /* lumibri's own */
+        if (!strcmp(e->d_name, "manifest.txt")) continue;   /* lumabri's own */
         char sub[1024], spath[1024];
         if (rel[0]) snprintf(sub, sizeof sub, "%s/%s", rel, e->d_name);
         else        snprintf(sub, sizeof sub, "%s", e->d_name);
@@ -151,7 +151,7 @@ int main(int argc, char **argv) {
     char note[1024];
     snprintf(note, sizeof note, "%s/.coli_usage_selftest", g_vroot);
     FILE *nf = fopen(note, "w");
-    if (!nf || fputs("lumibri\n", nf) == EOF) {
+    if (!nf || fputs("lumabri\n", nf) == EOF) {
         fprintf(stderr, "FAIL: chatter-local write beside the model failed\n");
         return 1;
     }

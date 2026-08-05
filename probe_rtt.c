@@ -5,7 +5,7 @@
  *
  *   ./probe_rtt HOST:PORT LAYER EID HIDDEN [N]
  */
-#include "lumibri_proto.h"
+#include "lumabri_proto.h"
 #include <time.h>
 
 static double nowd(void) {

@@ -1,7 +1,10 @@
 tracker
 maintainer
+lumabri
 lumibri
+liblumabri.so
 liblumibri.so
+.lumabri_hashes/
 test_shim
 expert_node
 olmoe_p2p

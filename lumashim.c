@@ -1,17 +1,17 @@
-/* lumishim.c — liblumibri.so, the chatter-side shim.
+/* lumishim.c — liblumabri.so, the chatter-side shim.
  *
  * The engine is not modified and not aware. It is launched with
  *
- *   LD_PRELOAD=liblumibri.so  LUMIBRI_VROOT=/virtual/model/dir  ...
+ *   LD_PRELOAD=liblumabri.so  LUMABRI_VROOT=/virtual/model/dir  ...
  *
- * and opens LUMIBRI_VROOT as if the model directory existed locally. The shim
+ * and opens LUMABRI_VROOT as if the model directory existed locally. The shim
  * interposes exactly the libc surface the engines use on the model dir —
  * open / fopen / opendir / pread / read / close (deepseek imports: open,
  * fopen, pread, fstat, close, opendir, readdir, posix_fadvise) — and routes
  * it to a local sparse mirror:
  *
- *   LUMIBRI_CACHE/data/<rel>       sparse file, ftruncated to the true size
- *   LUMIBRI_CACHE/maps/<rel>.lmap  one byte per block, 1 = block present
+ *   LUMABRI_CACHE/data/<rel>       sparse file, ftruncated to the true size
+ *   LUMABRI_CACHE/maps/<rel>.lmap  one byte per block, 1 = block present
  *
  * open() returns a REAL fd to the sparse mirror, so fstat, readdir,
  * posix_fadvise, lseek and the kernel page cache all work natively with no
@@ -21,7 +21,7 @@
  * forever; here a warm read costs what a local read costs.
  *
  * A missing block is fetched from a peer (placement from the tracker, or
- * LUMIBRI_PEERS directly), pwritten into the mirror, recorded in the map,
+ * LUMABRI_PEERS directly), pwritten into the mirror, recorded in the map,
  * and only then does the engine's own pread proceed. Blocks are immutable
  * once fetched — model weights never change — so there is no invalidation,
  * and a warm cache works with every peer offline.
@@ -30,22 +30,25 @@
  * from, never WHICH bytes. Any attempt to open a model file for writing gets
  * EROFS; a block that no peer can provide is a loud EIO, never zeros.
  *
- * Env: LUMIBRI_VROOT (the virtual dir), LUMIBRI_CACHE (local mirror root),
- *      LUMIBRI_TRACKER=host:port | LUMIBRI_PEERS=h:p[,h:p...],
- *      LUMIBRI_BLOCK_MIB (default 8), LUMIBRI_STATS=seconds (default off).
+ * Env: LUMABRI_VROOT (the virtual dir), LUMABRI_CACHE (local mirror root),
+ *      LUMABRI_TRACKER=host:port | LUMABRI_PEERS=h:p[,h:p...],
+ *      LUMABRI_BLOCK_MIB (default 8), LUMABRI_STATS=seconds (default off).
  */
 #define _GNU_SOURCE
 #include <dirent.h>
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <time.h>
 
-#include "lumibri_proto.h"
+#include "lumabri_proto.h"
+#include "lumabri_sha.h"
 
 #define FD_LIMIT      65536
 #define MAX_RPEERS    32
@@ -65,6 +68,8 @@ static ssize_t(*real_pread)(int, void *, size_t, off_t);
 static ssize_t(*real_pread64)(int, void *, size_t, off_t);
 static ssize_t(*real_read)(int, void *, size_t);
 static int    (*real_close)(int);
+static void  *(*real_mmap)(void *, size_t, int, int, int, off_t);
+static void  *(*real_mmap64)(void *, size_t, int, int, int, off_t);
 
 static void shim_resolve(void) {
     if (real_open) return;
@@ -77,6 +82,8 @@ static void shim_resolve(void) {
     real_pread64  = (ssize_t (*)(int, void *, size_t, off_t))dlsym(RTLD_NEXT, "pread64");
     real_read     = (ssize_t (*)(int, void *, size_t))dlsym(RTLD_NEXT, "read");
     real_close    = (int (*)(int))dlsym(RTLD_NEXT, "close");
+    real_mmap     = (void *(*)(void *, size_t, int, int, int, off_t))dlsym(RTLD_NEXT, "mmap");
+    real_mmap64   = (void *(*)(void *, size_t, int, int, int, off_t))dlsym(RTLD_NEXT, "mmap64");
     real_pread    = (ssize_t (*)(int, void *, size_t, off_t))dlsym(RTLD_NEXT, "pread");
     /* last, and last assigned: real_open doubles as the "resolved" flag */
     real_open     = (int (*)(const char *, int, ...))dlsym(RTLD_NEXT, "open");
@@ -97,6 +104,7 @@ __attribute__((constructor)) static void shim_ctor(void) {
 typedef struct {
     char addr[64];
     int idle[POOL_SOCKS]; int nidle;
+    long rtt_us;          /* measured at init; LONG_MAX = unreachable then */
     pthread_mutex_t lk;
 } RPeer;
 
@@ -109,6 +117,9 @@ typedef struct {
     int peer_idx[MAX_FPEERS]; int npeers;
     int wfd;              /* mirror write fd, opened on first fetch */
     int map_fd;           /* persisted bitmap */
+    uint8_t *hash;        /* ground truth: sha256 per LMB_HASH_CHUNK */
+    uint32_t nh;
+    int hstate;           /* 0 unknown · 1 have · 2 tracker has none */
     pthread_mutex_t lk;
     pthread_cond_t cv;
 } RFile;
@@ -120,14 +131,13 @@ static struct {
     uint32_t block;
     RFile *files; int nfiles;
     RPeer peers[MAX_RPEERS]; int npeers;
-    RFile *fdmap[FD_LIMIT];
-    pthread_mutex_t fd_lk;
+    RFile *_Atomic fdmap[FD_LIMIT];
     _Atomic uint64_t net_bytes, net_blocks, warm_reads;
     pthread_once_t once;
-} g = { .fd_lk = PTHREAD_MUTEX_INITIALIZER, .once = PTHREAD_ONCE_INIT };
+} g = { .once = PTHREAD_ONCE_INIT };
 
 static void shim_learn_vroot(void) {
-    const char *v = getenv("LUMIBRI_VROOT");
+    const char *v = getenv("LUMABRI_VROOT");
     if (!v || v[0] != '/') return;              /* unset or relative: disabled */
     snprintf(g.vroot, sizeof g.vroot, "%s", v);
     size_t l = strlen(g.vroot);
@@ -196,6 +206,7 @@ static int peer_add(const char *addr) {
     RPeer *p = &g.peers[g.npeers];
     snprintf(p->addr, sizeof p->addr, "%s", addr);
     p->nidle = 0;
+    p->rtt_us = 0;        /* all-equal until probed: FNV spreading as before */
     pthread_mutex_init(&p->lk, NULL);
     return g.npeers++;
 }
@@ -204,7 +215,7 @@ static RFile *file_add(const char *rel, uint64_t size) {
     for (int i = 0; i < g.nfiles; i++)
         if (!strcmp(g.files[i].rel, rel)) {
             if (g.files[i].size != size) {
-                fprintf(stderr, "[lumibri] size conflict on %s (%llu vs %llu) — "
+                fprintf(stderr, "[lumabri] size conflict on %s (%llu vs %llu) — "
                         "keeping the first announcement\n", rel,
                         (unsigned long long)g.files[i].size, (unsigned long long)size);
                 return NULL;
@@ -231,7 +242,7 @@ static void file_link_peer(RFile *f, int pi) {
 static int placement_from_tracker(const char *tracker) {
     LmbMsg m = {0};
     LmbBuf b = {0};
-    const char *model = getenv("LUMIBRI_MODEL");   /* optional filter */
+    const char *model = getenv("LUMABRI_MODEL");   /* optional filter */
     if (model && model[0]) lmb_buf_str(&b, model);
     int rc = lmb_request(tracker, LMB_PLACEMENT, b.p, (uint32_t)b.len, &m);
     free(b.p);
@@ -313,6 +324,102 @@ static int manifest_load(void) {
     return g.nfiles ? 0 : -1;
 }
 
+/* ---- the distance map ---------------------------------------------------
+ * Every chatter measures its own edges: two PINGs per peer (the second one
+ * rides the warm connection; the min is the distance), all peers probed in
+ * parallel at init. The tracker stays a Napster index and never needs to
+ * know where anyone is — proximity lives with the node that benefits from
+ * it, which is the only place it can be measured honestly anyway. */
+
+static void *probe_thread(void *arg) {
+    RPeer *p = (RPeer *)arg;
+    p->rtt_us = LONG_MAX;
+    int fd = lmb_connect_ms(p->addr, 2000);
+    if (fd < 0) return NULL;
+    if (lmb_auth(fd)) { real_close(fd); return NULL; }
+    for (int i = 0; i < 2; i++) {
+        struct timespec a, b;
+        clock_gettime(CLOCK_MONOTONIC, &a);
+        LmbMsg m = {0};
+        if (lmb_send(fd, LMB_PING, NULL, 0, NULL, 0) || lmb_recv(fd, &m)) {
+            real_close(fd);
+            return NULL;
+        }
+        lmb_msg_free(&m);
+        clock_gettime(CLOCK_MONOTONIC, &b);
+        long us = (b.tv_sec - a.tv_sec) * 1000000L + (b.tv_nsec - a.tv_nsec) / 1000;
+        if (us < p->rtt_us) p->rtt_us = us;
+    }
+    pthread_mutex_lock(&p->lk);
+    if (p->nidle < POOL_SOCKS) { p->idle[p->nidle++] = fd; fd = -1; }
+    pthread_mutex_unlock(&p->lk);
+    if (fd >= 0) real_close(fd);
+    return NULL;
+}
+
+static void probe_peers(void) {
+    pthread_t t[MAX_RPEERS];
+    int started[MAX_RPEERS];
+    for (int i = 0; i < g.npeers; i++)
+        started[i] = pthread_create(&t[i], NULL, probe_thread, &g.peers[i]) == 0;
+    for (int i = 0; i < g.npeers; i++)
+        if (started[i]) pthread_join(t[i], NULL);
+}
+
+/* ---- prefetch ------------------------------------------------------------
+ * The Spotify move: bytes of a model load are overwhelmingly sequential, so
+ * while the engine chews on block N the swarm is already sending N+1..N+K.
+ * A small queue feeds worker threads that call the same ensure_block the
+ * read path uses — the in-flight map dedups, the bitmap makes a wasted
+ * prefetch impossible to double-fetch, and a prefetch failure is silent
+ * because the read path will retry it loudly if the block is ever needed.
+ * LUMABRI_PREFETCH sets the readahead depth in blocks (default 2, 0 = off). */
+
+#define PF_QLEN 64
+static struct {
+    RFile *f; uint32_t blk;
+} pf_q[PF_QLEN];
+static int pf_head, pf_tail, pf_depth;
+static pthread_mutex_t pf_lk = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t pf_cv = PTHREAD_COND_INITIALIZER;
+
+static int ensure_block(RFile *f, uint32_t blk);      /* fwd */
+
+static void *prefetch_thread(void *arg) {
+    (void)arg;
+    for (;;) {
+        pthread_mutex_lock(&pf_lk);
+        while (pf_head == pf_tail) pthread_cond_wait(&pf_cv, &pf_lk);
+        RFile *f = pf_q[pf_tail].f;
+        uint32_t blk = pf_q[pf_tail].blk;
+        pf_tail = (pf_tail + 1) % PF_QLEN;
+        pthread_mutex_unlock(&pf_lk);
+        ensure_block(f, blk);
+    }
+    return NULL;
+}
+
+/* queue the blocks after the range just read; full queue = drop, no harm */
+static void prefetch_after(RFile *f, uint64_t off, uint64_t len) {
+    if (!pf_depth || !f->nblocks) return;
+    uint64_t end = off + len;
+    if (end > f->size) end = f->size;
+    uint32_t last = (uint32_t)((end ? end - 1 : 0) / g.block);
+    int queued = 0;
+    pthread_mutex_lock(&pf_lk);
+    for (uint32_t b = last + 1; b < f->nblocks && queued < pf_depth; b++) {
+        if (f->map[b] || f->inflight[b]) continue;    /* benign unlocked peek */
+        int nh = (pf_head + 1) % PF_QLEN;
+        if (nh == pf_tail) break;
+        pf_q[pf_head].f = f;
+        pf_q[pf_head].blk = b;
+        pf_head = nh;
+        queued++;
+    }
+    if (queued) pthread_cond_broadcast(&pf_cv);
+    pthread_mutex_unlock(&pf_lk);
+}
+
 /* ---- stats -------------------------------------------------------------- */
 
 static void *stats_thread(void *arg) {
@@ -324,7 +431,7 @@ static void *stats_thread(void *arg) {
         uint64_t blk = atomic_load(&g.net_blocks);
         uint64_t warm = atomic_load(&g.warm_reads);
         if (nb == last_bytes && !warm) continue;
-        fprintf(stderr, "[lumibri] net %.1f MB in %llu blocks (%.1f MB/s) · warm preads %llu\n",
+        fprintf(stderr, "[lumabri] net %.1f MB in %llu blocks (%.1f MB/s) · warm preads %llu\n",
                 (double)nb / 1e6, (unsigned long long)blk,
                 (double)(nb - last_bytes) / 1e6 / period, (unsigned long long)warm);
         last_bytes = nb;
@@ -336,9 +443,9 @@ static void *stats_thread(void *arg) {
 
 static void shim_init_impl(void) {
     shim_resolve();
-    const char *cache = getenv("LUMIBRI_CACHE");
+    const char *cache = getenv("LUMABRI_CACHE");
     if (!cache || !cache[0]) {
-        fprintf(stderr, "[lumibri] LUMIBRI_VROOT is set but LUMIBRI_CACHE is not — disabled\n");
+        fprintf(stderr, "[lumabri] LUMABRI_VROOT is set but LUMABRI_CACHE is not — disabled\n");
         return;
     }
     snprintf(g.data_dir, sizeof g.data_dir, "%s/data", cache);
@@ -347,13 +454,13 @@ static void shim_init_impl(void) {
     mkdir_p(g.maps_dir);
 
     long mib = 8;
-    const char *bs = getenv("LUMIBRI_BLOCK_MIB");
+    const char *bs = getenv("LUMABRI_BLOCK_MIB");
     if (bs && atol(bs) >= 1 && atol(bs) <= 64) mib = atol(bs);
     g.block = (uint32_t)(mib << 20);
 
     /* placement: tracker, or peers directly, or the persisted manifest */
-    const char *tracker = getenv("LUMIBRI_TRACKER");
-    const char *peers = getenv("LUMIBRI_PEERS");
+    const char *tracker = getenv("LUMABRI_TRACKER");
+    const char *peers = getenv("LUMABRI_PEERS");
     int placed = -1;
     if (tracker && tracker[0]) placed = placement_from_tracker(tracker);
     if (placed && peers && peers[0]) {
@@ -369,11 +476,11 @@ static void shim_init_impl(void) {
         manifest_save();
     } else {
         if (manifest_load()) {
-            fprintf(stderr, "[lumibri] no tracker, no peers, no saved manifest — disabled\n");
+            fprintf(stderr, "[lumabri] no tracker, no peers, no saved manifest — disabled\n");
             return;
         }
         qsort(g.files, (size_t)g.nfiles, sizeof(RFile), rfile_cmp);
-        fprintf(stderr, "[lumibri] offline: serving from the local mirror only "
+        fprintf(stderr, "[lumabri] offline: serving from the local mirror only "
                         "(a cold block will be EIO)\n");
     }
 
@@ -390,12 +497,12 @@ static void shim_init_impl(void) {
         data_path(path, sizeof path, f->rel);
         mkdir_parent(path);
         int fd = real_open(path, O_RDWR | O_CREAT, 0644);
-        if (fd < 0) { fprintf(stderr, "[lumibri] cannot create mirror %s\n", path); return; }
+        if (fd < 0) { fprintf(stderr, "[lumabri] cannot create mirror %s\n", path); return; }
         struct stat st;
         int stale = fstat(fd, &st) == 0 && st.st_size != 0 &&
                     (uint64_t)st.st_size != f->size;
         if (ftruncate(fd, (off_t)f->size))
-            { fprintf(stderr, "[lumibri] ftruncate %s failed\n", path); real_close(fd); return; }
+            { fprintf(stderr, "[lumabri] ftruncate %s failed\n", path); real_close(fd); return; }
         real_close(fd);
 
         snprintf(path, sizeof path, "%s/%s.lmap", g.maps_dir, f->rel);
@@ -404,10 +511,10 @@ static void shim_init_impl(void) {
         f->inflight = (uint8_t *)calloc(f->nblocks ? f->nblocks : 1, 1);
         f->map_fd = real_open(path, O_RDWR | O_CREAT, 0644);
         if (!f->map || !f->inflight || f->map_fd < 0)
-            { fprintf(stderr, "[lumibri] map alloc failed for %s\n", f->rel); return; }
+            { fprintf(stderr, "[lumabri] map alloc failed for %s\n", f->rel); return; }
         if (stale) {
             /* the upstream file changed size: every cached block is suspect */
-            fprintf(stderr, "[lumibri] %s changed size upstream — mirror reset\n", f->rel);
+            fprintf(stderr, "[lumabri] %s changed size upstream — mirror reset\n", f->rel);
             if (ftruncate(f->map_fd, 0)) { /* map cleared, blocks refetch */ }
         }
         if (ftruncate(f->map_fd, (off_t)(f->nblocks ? f->nblocks : 1))) { /* keep going */ }
@@ -418,17 +525,41 @@ static void shim_init_impl(void) {
             if (f->map[b]) have += b + 1 == f->nblocks ? f->size - (uint64_t)b * g.block : g.block;
     }
 
-    const char *stats = getenv("LUMIBRI_STATS");
+    /* measure the distance map, then start the readahead workers */
+    probe_peers();
+    for (int i = 0; i < g.npeers; i++) {
+        if (g.peers[i].rtt_us == LONG_MAX)
+            fprintf(stderr, "[lumabri] peer %s: unreachable directly (relay or failover)\n",
+                    g.peers[i].addr);
+        else
+            fprintf(stderr, "[lumabri] peer %s: rtt %.2f ms\n",
+                    g.peers[i].addr, (double)g.peers[i].rtt_us / 1000.0);
+    }
+    pf_depth = 2;
+    const char *pf = getenv("LUMABRI_PREFETCH");
+    if (pf) pf_depth = atoi(pf);
+    if (pf_depth < 0) pf_depth = 0;
+    if (pf_depth > 16) pf_depth = 16;
+    if (pf_depth && g.npeers) {
+        int nw = pf_depth < 4 ? pf_depth : 4;
+        for (int i = 0; i < nw; i++) {
+            pthread_t t;
+            if (pthread_create(&t, NULL, prefetch_thread, NULL) == 0)
+                pthread_detach(t);
+        }
+    }
+
+    const char *stats = getenv("LUMABRI_STATS");
     if (stats && atoi(stats) > 0) {
         pthread_t t;
         if (pthread_create(&t, NULL, stats_thread, (void *)(intptr_t)atoi(stats)) == 0)
             pthread_detach(t);
     }
-    fprintf(stderr, "[lumibri] %d files · %.1f GB · %.1f%% already local · "
-                    "%d peer(s) · block %u MiB\n",
+    fprintf(stderr, "[lumabri] %d files · %.1f GB · %.1f%% already local · "
+                    "%d peer(s) · block %u MiB · prefetch %d\n",
             g.nfiles, (double)total / 1e9,
             total ? 100.0 * (double)have / (double)total : 0.0,
-            g.npeers, g.block >> 20);
+            g.npeers, g.block >> 20, pf_depth);
     g.ok = 1;
 }
 
@@ -443,8 +574,11 @@ static uint8_t *peer_fetch(RPeer *p, const char *rel, uint64_t off, uint32_t len
         pthread_mutex_lock(&p->lk);
         int fd = p->nidle ? p->idle[--p->nidle] : -1;
         pthread_mutex_unlock(&p->lk);
-        if (fd < 0) fd = lmb_connect_ms(p->addr, 2500);
-        if (fd < 0) return NULL;                 /* unreachable: relay decides */
+        if (fd < 0) {
+            fd = lmb_connect_ms(p->addr, 2500);
+            if (fd < 0) return NULL;             /* unreachable: relay decides */
+            if (lmb_auth(fd)) { real_close(fd); return NULL; }
+        }
 
         LmbBuf b = {0};
         lmb_buf_str(&b, rel); lmb_buf_u64(&b, off); lmb_buf_u32(&b, len);
@@ -482,9 +616,9 @@ static uint8_t *peer_fetch(RPeer *p, const char *rel, uint64_t off, uint32_t len
  * connection. Slower per request, but it means the swarm works with zero
  * router configuration — and the direct path stays the first choice. */
 static uint8_t *relay_fetch(const char *rel, uint64_t off, uint32_t len) {
-    const char *tracker = getenv("LUMIBRI_TRACKER");
+    const char *tracker = getenv("LUMABRI_TRACKER");
     if (!tracker || !tracker[0]) return NULL;
-    const char *model = getenv("LUMIBRI_MODEL");
+    const char *model = getenv("LUMABRI_MODEL");
     LmbBuf b = {0};
     lmb_buf_str(&b, model ? model : "");
     lmb_buf_str(&b, rel);
@@ -501,6 +635,71 @@ static uint8_t *relay_fetch(const char *rel, uint64_t off, uint32_t len) {
     m.pay = NULL;
     lmb_msg_free(&m);
     return data;
+}
+
+/* ---- integrity ----------------------------------------------------------
+ * The ground truth for a file comes from the TRACKER (which took it from
+ * the origin's first registration), never from the peer that serves the
+ * bytes — so a lying peer cannot vouch for itself. Every fetched block is
+ * hashed per LMB_HASH_CHUNK and compared; a mismatch is treated as a failed
+ * fetch and the block is refetched from the next peer, loudly. A swarm
+ * without integrity data still works (warned once per file);
+ * LUMABRI_REQUIRE_HASH=1 turns that into a hard EIO for untrusted swarms. */
+
+static void hashes_ensure(RFile *f) {
+    pthread_mutex_lock(&f->lk);
+    while (f->hstate < 0) pthread_cond_wait(&f->cv, &f->lk);
+    int state = f->hstate;
+    if (!state) f->hstate = -1;              /* claim the fetch */
+    pthread_mutex_unlock(&f->lk);
+    if (state > 0) return;
+
+    uint8_t *hash = NULL;
+    uint32_t nh = 0;
+    const char *tracker = getenv("LUMABRI_TRACKER");
+    if (tracker && tracker[0]) {
+        const char *model = getenv("LUMABRI_MODEL");
+        LmbBuf b = {0};
+        lmb_buf_str(&b, model ? model : "");
+        lmb_buf_str(&b, f->rel);
+        LmbMsg m = {0};
+        int rc = lmb_request(tracker, LMB_HASHES, b.p, (uint32_t)b.len, &m);
+        free(b.p);
+        if (rc == 0 && m.op == LMB_HASHES_R) {
+            LmbCur c = { m.body, m.body_len, 0 };
+            uint32_t chunk = 0, n = 0;
+            if (!lmb_cur_u32(&c, &chunk) && !lmb_cur_u32(&c, &n) &&
+                chunk == LMB_HASH_CHUNK && m.pay_len == n * 32 &&
+                n == (uint32_t)((f->size + LMB_HASH_CHUNK - 1) / LMB_HASH_CHUNK)) {
+                hash = m.pay; nh = n; m.pay = NULL;
+            }
+        }
+        lmb_msg_free(&m);
+    }
+    pthread_mutex_lock(&f->lk);
+    f->hash = hash; f->nh = nh;
+    f->hstate = hash ? 1 : 2;
+    pthread_cond_broadcast(&f->cv);
+    pthread_mutex_unlock(&f->lk);
+    if (!hash)
+        fprintf(stderr, "[lumabri] no integrity data for %s — fetches are "
+                        "UNVERIFIED%s\n", f->rel,
+                getenv("LUMABRI_REQUIRE_HASH") ? " and LUMABRI_REQUIRE_HASH is set"
+                                               : "");
+}
+
+/* 0 = the bytes match the truth (or there is none to check against) */
+static int block_verify(RFile *f, uint64_t off, const uint8_t *data, uint32_t len) {
+    if (f->hstate != 1) return 0;
+    for (uint32_t o = 0; o < len; o += LMB_HASH_CHUNK) {
+        uint32_t ci = (uint32_t)((off + o) / LMB_HASH_CHUNK);
+        uint32_t pl = len - o < LMB_HASH_CHUNK ? len - o : LMB_HASH_CHUNK;
+        uint8_t h[32];
+        if (ci >= f->nh) return -1;
+        lmb_sha256(data + o, pl, h);
+        if (memcmp(h, f->hash + (size_t)ci * 32, 32)) return -1;
+    }
+    return 0;
 }
 
 /* Make one block present in the mirror. 0 on success. */
@@ -523,13 +722,52 @@ static int ensure_block(RFile *f, uint32_t blk) {
     uint64_t off = (uint64_t)blk * g.block;
     uint32_t len = (uint32_t)(off + g.block <= f->size ? g.block : f->size - off);
     uint8_t *data = NULL;
-    if (f->npeers > 0) {
-        uint32_t start = fnv1a(f->rel, blk) % (uint32_t)f->npeers;
-        for (int i = 0; i < f->npeers && !data; i++)
-            data = peer_fetch(&g.peers[f->peer_idx[(start + i) % (uint32_t)f->npeers]],
-                              f->rel, off, len);
+    hashes_ensure(f);
+    int require = getenv("LUMABRI_REQUIRE_HASH") != NULL;
+    if (require && f->hstate != 1) {
+        fprintf(stderr, "[lumabri] block %u of %s: integrity required but "
+                        "unavailable — refusing the fetch\n", blk, f->rel);
+    } else if (f->npeers > 0) {
+        /* nearest first: the file's peers sorted by measured distance; peers
+         * within 25% + 2 ms of the best are "equally near" and the block
+         * spreads over them by hash (load balance among true replicas);
+         * everyone farther is failover, in distance order, relay last. */
+        int ord[MAX_FPEERS];
+        int n = f->npeers;
+        for (int i = 0; i < n; i++) ord[i] = f->peer_idx[i];
+        for (int i = 1; i < n; i++) {
+            int v = ord[i], j = i;
+            while (j > 0 && g.peers[ord[j - 1]].rtt_us > g.peers[v].rtt_us)
+                { ord[j] = ord[j - 1]; j--; }
+            ord[j] = v;
+        }
+        long best = g.peers[ord[0]].rtt_us;
+        int nnear = 1;
+        while (nnear < n && best != LONG_MAX &&
+               g.peers[ord[nnear]].rtt_us <= best + best / 4 + 2000)
+            nnear++;
+        uint32_t start = fnv1a(f->rel, blk) % (uint32_t)nnear;
+        for (int i = 0; i < n && !data; i++) {
+            int pick = i < nnear ? (int)((start + (uint32_t)i) % (uint32_t)nnear) : i;
+            data = peer_fetch(&g.peers[ord[pick]], f->rel, off, len);
+            if (data && block_verify(f, off, data, len)) {
+                fprintf(stderr, "[lumabri] peer %s served CORRUPT bytes for "
+                        "block %u of %s — rejected, trying elsewhere\n",
+                        g.peers[ord[pick]].addr, blk, f->rel);
+                free(data);
+                data = NULL;
+            }
+        }
     }
-    if (!data) data = relay_fetch(f->rel, off, len);   /* NAT floor */
+    if (!data && !(require && f->hstate != 1)) {
+        data = relay_fetch(f->rel, off, len);          /* NAT floor */
+        if (data && block_verify(f, off, data, len)) {
+            fprintf(stderr, "[lumabri] relay served CORRUPT bytes for "
+                    "block %u of %s — rejected\n", blk, f->rel);
+            free(data);
+            data = NULL;
+        }
+    }
     int ok = 0;
     if (data && wfd >= 0) {
         uint32_t put = 0;
@@ -547,7 +785,7 @@ static int ensure_block(RFile *f, uint32_t blk) {
     }
     free(data);
     if (!ok)
-        fprintf(stderr, "[lumibri] block %u of %s: no peer could serve it\n", blk, f->rel);
+        fprintf(stderr, "[lumabri] block %u of %s: no peer could serve it\n", blk, f->rel);
 
     pthread_mutex_lock(&f->lk);
     f->inflight[blk] = 0;
@@ -572,9 +810,7 @@ static int ensure_full(RFile *f) { return ensure_range(f, 0, f->size); }
 
 static void fdmap_set(int fd, RFile *f) {
     if (fd < 0 || fd >= FD_LIMIT) return;
-    pthread_mutex_lock(&g.fd_lk);
     g.fdmap[fd] = f;
-    pthread_mutex_unlock(&g.fd_lk);
 }
 
 static RFile *fdmap_get(int fd) {
@@ -695,6 +931,7 @@ ssize_t pread(int fd, void *buf, size_t n, off_t off) {
     if (f) {
         if (ensure_range(f, (uint64_t)off, n)) { errno = EIO; return -1; }
         atomic_fetch_add(&g.warm_reads, 1);
+        prefetch_after(f, (uint64_t)off, n);
     }
     return real_pread(fd, buf, n, off);
 }
@@ -705,6 +942,7 @@ ssize_t pread64(int fd, void *buf, size_t n, off_t off) {
     if (f) {
         if (ensure_range(f, (uint64_t)off, n)) { errno = EIO; return -1; }
         atomic_fetch_add(&g.warm_reads, 1);
+        prefetch_after(f, (uint64_t)off, n);
     }
     return real_pread64 ? real_pread64(fd, buf, n, off) : real_pread(fd, buf, n, off);
 }
@@ -715,8 +953,31 @@ ssize_t read(int fd, void *buf, size_t n) {
     if (f) {
         off_t cur = lseek(fd, 0, SEEK_CUR);
         if (cur >= 0 && ensure_range(f, (uint64_t)cur, n)) { errno = EIO; return -1; }
+        if (cur >= 0) prefetch_after(f, (uint64_t)cur, n);
     }
     return real_read(fd, buf, n);
+}
+
+/* mmap on a mirror fd would hand the engine raw sparse-file pages: a block
+ * never fetched reads as zeros with no fault we could catch — the exact
+ * silent corruption the EIO rule exists to prevent. So the mapped range is
+ * materialized first; if it cannot be, the map fails loudly. */
+static void *mmap_common(void *addr, size_t len, int prot, int flags, int fd,
+                         off_t off, void *(*fn)(void *, size_t, int, int, int, off_t)) {
+    RFile *f = fdmap_get(fd);
+    if (f && ensure_range(f, (uint64_t)off, len)) { errno = EIO; return MAP_FAILED; }
+    return fn(addr, len, prot, flags, fd, off);
+}
+
+void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
+    shim_resolve();
+    return mmap_common(addr, len, prot, flags, fd, off, real_mmap);
+}
+
+void *mmap64(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
+    shim_resolve();
+    return mmap_common(addr, len, prot, flags, fd, off,
+                       real_mmap64 ? real_mmap64 : real_mmap);
 }
 
 int close(int fd) {

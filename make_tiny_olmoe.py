@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate a small OLMoE-shaped model for the lumibri phase-2 prototype.
+"""Generate a small OLMoE-shaped model for the lumabri phase-2 prototype.
 
 Random weights: the point is not text quality, it is that local execution and
 remote (peer) execution of the very same experts produce the very same tokens.

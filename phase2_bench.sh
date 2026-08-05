@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lumibri phase 2 — an HONEST benchmark on a single machine.
+# lumabri phase 2 — an HONEST benchmark on a single machine.
 #
 # Yesterday's run proved correctness but its tok/s meant little: peers and
 # chatter fought over the same cores, and localhost has no network at all.
@@ -13,12 +13,12 @@
 #
 #  2. THE RIGHT BASELINE. Comparing P2P against experts already resident in
 #     RAM answers a question nobody has: if the model fit in RAM you would not
-#     need lumibri. So three runs, not two:
+#     need lumabri. So three runs, not two:
 #       A  RAM-resident  — the unattainable best case (small models only)
 #       B  disk-streamed — CACHE=1 + EXPERT_DROP=1 (fadvise DONTNEED after
 #                          every read), which is what a 167 GB model does
 #       C  P2P           — experts live and run on peers
-#     B is the baseline lumibri actually has to beat.
+#     B is the baseline lumabri actually has to beat.
 #
 #  3. NETWORK REALISM. If a netem qdisc is present on `lo`, its delay is
 #     reported. Adding it needs root, so the script never does it silently:
@@ -55,7 +55,7 @@ run_engine() {   # run_engine <label> <cache> <drop> <experts-env>
     # env, not a bare prefix: an assignment produced by an expansion is not
     # recognised as one by the shell and would be run as a command.
     env SNAP="$MODEL" OMP_NUM_THREADS=6 EXPERT_DROP="$drop" \
-        ${experts:+LUMIBRI_EXPERTS="$experts"} \
+        ${experts:+LUMABRI_EXPERTS="$experts"} \
         taskset -c "$CHATTER_CPUS" ./olmoe_p2p "$cache" 8 "$MODEL/ref.json" \
         > "$label.out" 2> "$label.err" || { cat "$label.err"; exit 1; }
 }
@@ -75,7 +75,7 @@ start_peers() {   # start_peers <rtt_us> <jitter_us> <loss_ppm>
     for i in $(seq 0 $((NODES-1))); do
         p=$((PORT0+i))
         env OMP_NUM_THREADS=2 COLI_NO_OMP_TUNE=1 \
-            LUMIBRI_RTT_US="$1" LUMIBRI_JITTER_US="$2" LUMIBRI_LOSS_PPM="$3" \
+            LUMABRI_RTT_US="$1" LUMABRI_JITTER_US="$2" LUMABRI_LOSS_PPM="$3" \
             taskset -c "${PEER_CPUS[$i]}" ./expert_node --model "$MODEL" --port "$p" \
                     --name "node-$i" --stride "$NODES:$i" >/dev/null 2>&1 & PIDS+=($!)
         ADDRS="${ADDRS:+$ADDRS,}127.0.0.1:$p"
@@ -105,7 +105,7 @@ for sc in "${SCENARIOS[@]}"; do
     start_peers "$rtt" "$jit" "$loss"
     run_engine "bench_$lab" 1 0 "$ADDRS"
     grep -E "^Speed" "bench_$lab.out"
-    grep -E "^\[lumibri\] [0-9]" "bench_$lab.err" || true
+    grep -E "^\[lumabri\] [0-9]" "bench_$lab.err" || true
     stop_peers
 done
 

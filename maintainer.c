@@ -1,4 +1,4 @@
-/* maintainer.c — a lumibri peer that holds (part of) a model and serves
+/* maintainer.c — a lumabri peer that holds (part of) a model and serves
  * byte ranges of it.
  *
  * Scans --root once at startup, keeps the files matching --include (all of
@@ -21,18 +21,22 @@
 #include <stdatomic.h>
 #include <sys/stat.h>
 
-#include "lumibri_proto.h"
+#include "lumabri_proto.h"
+#include "lumabri_sha.h"
 
 #define MAX_FILES     4096
 #define MAX_INCLUDES  64
 #define MAX_READ_LEN  LMB_MAX_PAY
 #define HEARTBEAT_S   10
 
-typedef struct { char rel[LMB_PATH_MAX]; uint64_t size; int fd; } MFile;
+typedef struct {
+    char rel[LMB_PATH_MAX]; uint64_t size; int fd;
+    uint8_t *hash; uint32_t nh;   /* sha256 per LMB_HASH_CHUNK */
+} MFile;
 
 static struct {
     char root[LMB_PATH_MAX];
-    char name[64], advertise[64], tracker[64], model[64];
+    char name[64], advertise[64], tracker[64], model[64], token[128];
     MFile files[MAX_FILES]; int nfiles;
     const char *includes[MAX_INCLUDES]; int nincl;
     pthread_mutex_t fd_lk;
@@ -53,6 +57,7 @@ static void scan_dir(const char *dir) {
     struct dirent *e;
     while ((e = readdir(d))) {
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        if (!strcmp(e->d_name, ".lumabri_hashes")) continue;   /* our sidecars */
         snprintf(full, sizeof full, "%s/%s", dir, e->d_name);
         struct stat st;
         if (stat(full, &st)) continue;
@@ -94,6 +99,81 @@ static void send_err(int fd, const char *msg) {
     free(b.p);
 }
 
+/* ---- integrity ----------------------------------------------------------
+ * sha256 per LMB_HASH_CHUNK of every held file, computed once and cached in
+ * <root>/.lumabri_hashes/<rel>.sha (invalidated by size change). These go
+ * to the tracker inside REGISTER: the first announcement of a file becomes
+ * the swarm's ground truth, later mismatching announcements are rejected. */
+
+static int hash_file(MFile *f) {
+    f->nh = (uint32_t)((f->size + LMB_HASH_CHUNK - 1) / LMB_HASH_CHUNK);
+    f->hash = malloc((size_t)f->nh * 32 + 1);
+    if (!f->hash) return -1;
+    char sc[LMB_PATH_MAX * 2];
+    snprintf(sc, sizeof sc, "%s/.lumabri_hashes/%s.sha", g.root, f->rel);
+    FILE *fp = fopen(sc, "rb");
+    if (fp) {
+        uint64_t sz = 0;
+        if (fread(&sz, 8, 1, fp) == 1 && sz == f->size &&
+            fread(f->hash, 32, f->nh, fp) == f->nh) { fclose(fp); return 0; }
+        fclose(fp);
+    }
+    char full[LMB_PATH_MAX * 2];
+    snprintf(full, sizeof full, "%s/%s", g.root, f->rel);
+    int fd = open(full, O_RDONLY);
+    if (fd < 0) return -1;
+    uint8_t *buf = malloc(LMB_HASH_CHUNK);
+    if (!buf) { close(fd); return -1; }
+    for (uint32_t c = 0; c < f->nh; c++) {
+        uint64_t off = (uint64_t)c * LMB_HASH_CHUNK;
+        uint32_t len = (uint32_t)(f->size - off < LMB_HASH_CHUNK ? f->size - off
+                                                                 : LMB_HASH_CHUNK);
+        uint32_t got = 0;
+        while (got < len) {
+            ssize_t r = pread(fd, buf + got, len - got, (off_t)(off + got));
+            if (r <= 0) { if (r < 0 && errno == EINTR) continue; break; }
+            got += (uint32_t)r;
+        }
+        if (got != len) { free(buf); close(fd); return -1; }
+        lmb_sha256(buf, len, f->hash + (size_t)c * 32);
+    }
+    free(buf);
+    close(fd);
+    char tmp[LMB_PATH_MAX * 2 + 4];
+    snprintf(tmp, sizeof tmp, "%s.tmp", sc);
+    char dir[LMB_PATH_MAX * 2];
+    snprintf(dir, sizeof dir, "%s", sc);
+    char *slash = strrchr(dir, '/');
+    if (slash) { *slash = 0;
+        for (char *p = strchr(dir + 1, '/'); p; p = strchr(p + 1, '/'))
+            { *p = 0; mkdir(dir, 0755); *p = '/'; }
+        mkdir(dir, 0755);
+    }
+    fp = fopen(tmp, "wb");
+    if (fp) {
+        int ok = fwrite(&f->size, 8, 1, fp) == 1 &&
+                 fwrite(f->hash, 32, f->nh, fp) == f->nh;
+        fclose(fp);
+        if (ok) rename(tmp, sc);
+    }
+    return 0;
+}
+
+/* TEST ONLY — LUMABRI_CORRUPT_PPM makes this maintainer serve corrupted
+ * bytes for that fraction of reads, so the integrity tests can prove that a
+ * lying peer is caught. Announced loudly at startup; never set it outside a
+ * test. The hashes are computed from the true file, so the lie is exactly
+ * the one an adversarial peer would tell: correct manifest, wrong bytes. */
+static long g_corrupt_ppm;
+static __thread unsigned t_cseed;
+
+static void maybe_corrupt(uint8_t *buf, uint32_t len) {
+    if (!g_corrupt_ppm || !len) return;
+    if (!t_cseed) t_cseed = (unsigned)(uintptr_t)&t_cseed | 1u;
+    t_cseed = t_cseed * 1664525u + 1013904223u;
+    if (t_cseed % 1000000u < (unsigned)g_corrupt_ppm) buf[0] ^= 0xFF;
+}
+
 /* One range read into a fresh buffer; NULL on any failure. Shared by the
  * direct path and the relayed path so both serve identical bytes. */
 static uint8_t *read_range(const char *rel, uint64_t off, uint32_t *len_io) {
@@ -115,6 +195,7 @@ static uint8_t *read_range(const char *rel, uint64_t off, uint32_t *len_io) {
         got += (uint32_t)r;
     }
     if (got != len) { free(buf); return NULL; }
+    maybe_corrupt(buf, len);
     atomic_fetch_add(&g.served_bytes, len);
     atomic_fetch_add(&g.served_reads, 1);
     *len_io = len;
@@ -126,6 +207,16 @@ static void manifest_body(LmbBuf *b) {
     for (int i = 0; i < g.nfiles; i++) {
         lmb_buf_str(b, g.files[i].rel);
         lmb_buf_u64(b, g.files[i].size);
+    }
+}
+
+/* the optional integrity section a REGISTER carries after the file list */
+static void hash_section(LmbBuf *b) {
+    lmb_buf_u32(b, LMB_HASH_MAGIC);
+    for (int i = 0; i < g.nfiles; i++) {
+        lmb_buf_u32(b, g.files[i].hash ? g.files[i].nh : 0);
+        if (g.files[i].hash)
+            lmb_buf_bytes(b, g.files[i].hash, (size_t)g.files[i].nh * 32);
     }
 }
 
@@ -144,14 +235,34 @@ static int handle_read(int fd, LmbMsg *m) {
     return rc;
 }
 
+/* The same invite rule as the tracker: on a private swarm (LUMABRI_TOKEN
+ * set) the first frame must be a matching AUTH — otherwise anyone who can
+ * reach this port could pull the whole model, and the token would guard
+ * only the index while the bytes stayed public. */
 static void *conn_thread(void *arg) {
     int fd = (int)(intptr_t)arg;
+    int authed = g.token[0] ? 0 : 1;
     LmbMsg m;
     while (lmb_recv(fd, &m) == 0) {
         int rc;
+        lmb_emu_delay();           /* emulated flight time, when configured */
+        if (!authed && m.op != LMB_AUTH && m.op != LMB_PING) {
+            send_err(fd, "this swarm needs an invite token");
+            lmb_msg_free(&m);
+            break;
+        }
         switch (m.op) {
         case LMB_PING:     rc = lmb_send(fd, LMB_OK, NULL, 0, NULL, 0); break;
-        case LMB_AUTH:     rc = lmb_send(fd, LMB_OK, NULL, 0, NULL, 0); break;
+        case LMB_AUTH: {
+            char tok[128] = "";
+            LmbCur c = { m.body, m.body_len, 0 };
+            lmb_cur_str(&c, tok, sizeof tok);
+            if (!g.token[0] || !strcmp(tok, g.token)) {
+                authed = 1;
+                rc = lmb_send(fd, LMB_OK, NULL, 0, NULL, 0);
+            } else { send_err(fd, "bad token"); rc = -1; }
+            break;
+        }
         case LMB_MANIFEST: {
             LmbBuf b = {0};
             manifest_body(&b);
@@ -184,6 +295,44 @@ static void mkdir_parents(const char *path) {
 }
 
 #define PULL_CHUNK (8u << 20)
+
+/* the swarm's ground truth for one file, from the tracker; NULL when the
+ * tracker has none (a swarm without integrity — the pull proceeds, warned) */
+static uint8_t *fetch_truth(const char *rel, uint32_t *nh_out) {
+    LmbBuf b = {0};
+    lmb_buf_str(&b, g.model);
+    lmb_buf_str(&b, rel);
+    LmbMsg m = {0};
+    int rc = lmb_request(g.tracker, LMB_HASHES, b.p, (uint32_t)b.len, &m);
+    free(b.p);
+    uint8_t *hashes = NULL;
+    if (rc == 0 && m.op == LMB_HASHES_R) {
+        LmbCur c = { m.body, m.body_len, 0 };
+        uint32_t chunk = 0, n = 0;
+        if (!lmb_cur_u32(&c, &chunk) && !lmb_cur_u32(&c, &n) &&
+            chunk == LMB_HASH_CHUNK && m.pay_len == n * 32) {
+            hashes = m.pay; m.pay = NULL;
+            *nh_out = n;
+        }
+    }
+    lmb_msg_free(&m);
+    return hashes;
+}
+
+/* verify `len` bytes at `off` (chunk-aligned) against the truth */
+static int chunks_ok(const uint8_t *truth, uint32_t nh,
+                     const uint8_t *data, uint64_t off, uint32_t len) {
+    if (!truth) return 1;
+    for (uint32_t o = 0; o < len; o += LMB_HASH_CHUNK) {
+        uint32_t ci = (uint32_t)((off + o) / LMB_HASH_CHUNK);
+        uint32_t pl = len - o < LMB_HASH_CHUNK ? len - o : LMB_HASH_CHUNK;
+        uint8_t h[32];
+        if (ci >= nh) return 0;
+        lmb_sha256(data + o, pl, h);
+        if (memcmp(h, truth + (size_t)ci * 32, 32)) return 0;
+    }
+    return 1;
+}
 
 static int pull_file(const char *rel, uint64_t size) {
     /* who has it, right now */
@@ -218,6 +367,12 @@ static int pull_file(const char *rel, uint64_t size) {
     int out = open(part, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (out < 0) return -1;
 
+    uint32_t truth_n = 0;
+    uint8_t *truth = fetch_truth(rel, &truth_n);
+    if (!truth)
+        fprintf(stderr, "[maintainer %s] no integrity data for %s — "
+                        "pulling unverified\n", g.name, rel);
+
     int src = -1, ai = 0;
     for (uint64_t off = 0; off < size || (size == 0 && off == 0); ) {
         uint32_t want = (uint32_t)(size - off < PULL_CHUNK ? size - off : PULL_CHUNK);
@@ -225,7 +380,10 @@ static int pull_file(const char *rel, uint64_t size) {
         uint32_t got = 0;
         /* direct, resuming across peers on failure */
         while (!data && ai < naddr) {
-            if (src < 0) src = lmb_connect_ms(addrs[ai], 2500);
+            if (src < 0) {
+                src = lmb_connect_ms(addrs[ai], 2500);
+                if (src >= 0 && lmb_auth(src)) { close(src); src = -1; }
+            }
             if (src < 0) { ai++; continue; }
             LmbBuf rb = {0};
             lmb_buf_str(&rb, rel); lmb_buf_u64(&rb, off); lmb_buf_u32(&rb, want);
@@ -234,7 +392,13 @@ static int pull_file(const char *rel, uint64_t size) {
             if (rc == 0) rc = lmb_recv(src, &rm);
             free(rb.p);
             if (rc == 0 && rm.op == LMB_READ_R && rm.pay_len == want) {
-                data = rm.pay; got = rm.pay_len; rm.pay = NULL;
+                if (chunks_ok(truth, truth_n, rm.pay, off, want)) {
+                    data = rm.pay; got = rm.pay_len; rm.pay = NULL;
+                } else {
+                    fprintf(stderr, "[maintainer %s] %s served corrupt bytes of "
+                            "%s — rejected\n", g.name, addrs[ai], rel);
+                    close(src); src = -1; ai++;
+                }
             } else { close(src); src = -1; ai++; }
             lmb_msg_free(&rm);
         }
@@ -244,12 +408,13 @@ static int pull_file(const char *rel, uint64_t size) {
             lmb_buf_u64(&rb, off); lmb_buf_u32(&rb, want);
             LmbMsg rm = {0};
             if (lmb_request(g.tracker, LMB_RREAD, rb.p, (uint32_t)rb.len, &rm) == 0 &&
-                rm.op == LMB_RREAD_R && rm.pay_len == want) {
+                rm.op == LMB_RREAD_R && rm.pay_len == want &&
+                chunks_ok(truth, truth_n, rm.pay, off, want)) {
                 data = rm.pay; got = rm.pay_len; rm.pay = NULL;
             }
             free(rb.p); lmb_msg_free(&rm);
         }
-        if (!data && want) { close(out); if (src >= 0) close(src); return -1; }
+        if (!data && want) { free(truth); close(out); if (src >= 0) close(src); return -1; }
         uint32_t put = 0;
         while (put < got) {
             ssize_t w = pwrite(out, data + put, got - put, (off_t)(off + put));
@@ -260,6 +425,7 @@ static int pull_file(const char *rel, uint64_t size) {
         off += want;
         if (size == 0) break;
     }
+    free(truth);
     if (src >= 0) close(src);
     close(out);
     return rename(part, final);
@@ -319,6 +485,7 @@ static int register_body_send(int fd, uint64_t held) {
     lmb_buf_u64(&b, atomic_load(&g.served_bytes));
     lmb_buf_u64(&b, atomic_load(&g.served_reads));
     manifest_body(&b);
+    hash_section(&b);
     int rc = lmb_send(fd, LMB_REGISTER, b.p, (uint32_t)b.len, NULL, 0);
     free(b.p);
     return rc;
@@ -363,6 +530,7 @@ static void *control_thread(void *arg) {
                     lmb_cur_u64(&c, &off) || lmb_cur_u32(&c, &len)) rc = -1;
                 else {
                     uint8_t *buf = read_range(rel, off, &len);
+                    lmb_emu_delay();       /* the relayed path pays flight time too */
                     LmbBuf rb = {0};
                     lmb_buf_u32(&rb, id);
                     lmb_buf_u32(&rb, buf ? 1u : 0u);
@@ -426,6 +594,8 @@ int main(int argc, char **argv) {
         }
     }
     if (!g.root[0]) { fprintf(stderr, "[maintainer] --root is required\n"); return 2; }
+    const char *tok = getenv("LUMABRI_TOKEN");
+    if (tok) snprintf(g.token, sizeof g.token, "%s", tok);
     signal(SIGPIPE, SIG_IGN);   /* a vanished chatter must not kill the peer */
     size_t rl = strlen(g.root);
     while (rl > 1 && g.root[rl - 1] == '/') g.root[--rl] = 0;
@@ -447,10 +617,32 @@ int main(int argc, char **argv) {
         pull_slice((uint64_t)(donate_gb * 1e9));
     }
     if (!g.nfiles) { fprintf(stderr, "[maintainer %s] nothing to serve under %s\n", g.name, g.root); return 1; }
+    { const char *cp = getenv("LUMABRI_CORRUPT_PPM");
+      if (cp && atol(cp) > 0) {
+          g_corrupt_ppm = atol(cp);
+          printf("[maintainer %s] *** TEST MODE: serving corrupt bytes at "
+                 "%ld ppm ***\n", g.name, g_corrupt_ppm);
+      } }
     uint64_t total = 0;
-    for (int i = 0; i < g.nfiles; i++) total += g.files[i].size;
+    double h0 = 0;
+    { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+      h0 = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9; }
+    for (int i = 0; i < g.nfiles; i++) {
+        total += g.files[i].size;
+        if (hash_file(&g.files[i]))
+            fprintf(stderr, "[maintainer %s] cannot hash %s — served unverified\n",
+                    g.name, g.files[i].rel);
+    }
+    { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+      double dh = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9 - h0;
+      if (dh > 1.0)
+          printf("[maintainer %s] integrity: hashed %.1f GB in %.1fs "
+                 "(cached for next start)\n", g.name, (double)total / 1e9, dh); }
     printf("[maintainer %s] holding %d files, %.1f GB, from %s\n",
            g.name, g.nfiles, (double)total / 1e9, g.root);
+    if (lmb_emu_active())
+        printf("[maintainer %s] emulated network: rtt %ld us ± %ld, loss %ld ppm\n",
+               g.name, lmb_emu_rtt_us, lmb_emu_jitter_us, lmb_emu_loss_ppm);
     fflush(stdout);
 
     int lfd = lmb_listen(port);

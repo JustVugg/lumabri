@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lumibri × deepseek — the first real demo.
+# lumabri × deepseek — the first real demo.
 #
 # The DeepSeek-V4 checkpoint lives ONLY on two "peers" (maintainers serving
 # disjoint halves of the shards); the engine runs against a virtual directory
@@ -15,8 +15,8 @@ cd "$(dirname "$0")"
 
 MODEL="${MODEL:-$HOME/deepseek_v4}"
 ENGINE="${ENGINE:-/mnt/c/Users/User/Desktop/moe-stream/c/deepseek}"
-VROOT="${VROOT:-$HOME/lumibri_vroot/deepseek_v4}"     # never exists on disk
-CACHE="${CACHE:-$HOME/lumibri_cache/deepseek_v4}"
+VROOT="${VROOT:-$HOME/lumabri_vroot/deepseek_v4}"     # never exists on disk
+CACHE="${CACHE:-$HOME/lumabri_cache/deepseek_v4}"
 PROMPT="${1:-Ciao! Presentati in una frase.}"
 NGEN="${NGEN:-48}"
 
@@ -44,12 +44,12 @@ echo "· the model directory the engine will open is $VROOT (it does not exist)"
 echo "· bytes live on peer-even (:7301) and peer-odd (:7302); mirror in $CACHE"
 echo
 
-LD_PRELOAD="$PWD/liblumibri.so" \
-LUMIBRI_VROOT="$VROOT" \
-LUMIBRI_CACHE="$CACHE" \
-LUMIBRI_TRACKER=127.0.0.1:7300 \
-LUMIBRI_BLOCK_MIB="${BLOCK_MIB:-8}" \
-LUMIBRI_STATS=5 \
+LD_PRELOAD="$PWD/liblumabri.so" \
+LUMABRI_VROOT="$VROOT" \
+LUMABRI_CACHE="$CACHE" \
+LUMABRI_TRACKER=127.0.0.1:7300 \
+LUMABRI_BLOCK_MIB="${BLOCK_MIB:-8}" \
+LUMABRI_STATS=5 \
 "$ENGINE" "$VROOT" "$PROMPT" --max-tokens "$NGEN"
 
 echo

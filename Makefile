@@ -2,25 +2,27 @@ CC      ?= cc
 CFLAGS  ?= -O2 -Wall -Wextra
 ENGINE  ?= ../moe-stream/c
 
-all: tracker maintainer liblumibri.so test_shim lumibri
+all: tracker maintainer liblumabri.so test_shim lumabri
 
-lumibri: lumibri.c lumibri_proto.h
-	$(CC) $(CFLAGS) -pthread lumibri.c -o $@
+lumabri: lumabri.c lumabri_proto.h
+	$(CC) $(CFLAGS) -pthread lumabri.c -o $@
 
 # ---- phase 2: peers execute experts ------------------------------------
 # Both sides are built from the engine's own source so the expert math cannot
 # drift between local and remote: expert_node.c includes olmoe.c, and the
-# chatter is olmoe.c itself with -DLUMIBRI_P2P.
+# chatter is olmoe.c itself with -DLUMABRI_P2P.
 P2P_CFLAGS = -O2 -fopenmp -Wall -I. -I$(ENGINE) \
              -Wno-unused-function -Wno-unused-parameter
 
 phase2: expert_node olmoe_p2p
 
-expert_node: expert_node.c lumibri_proto.h $(ENGINE)/olmoe.c
+expert_node: expert_node.c lumabri_proto.h $(ENGINE)/olmoe.c
 	$(CC) $(P2P_CFLAGS) expert_node.c -o $@ -lm -lpthread
 
-olmoe_p2p: $(ENGINE)/olmoe.c lumibri_client.h lumibri_proto.h
-	$(CC) $(P2P_CFLAGS) -DLUMIBRI_P2P $(ENGINE)/olmoe.c -o $@ -lm -lpthread
+# -DLUMIBRI_P2P: the engine patch predates the rename and tests that macro;
+# the engine is never modified, so both spellings are defined here.
+olmoe_p2p: $(ENGINE)/olmoe.c lumabri_client.h lumibri_client.h lumabri_proto.h
+	$(CC) $(P2P_CFLAGS) -DLUMABRI_P2P -DLUMIBRI_P2P $(ENGINE)/olmoe.c -o $@ -lm -lpthread
 
 tiny_olmoe/config.json: make_tiny_olmoe.py
 	python3 make_tiny_olmoe.py tiny_olmoe
@@ -30,16 +32,16 @@ fixture: tiny_olmoe/config.json
 test-phase2: phase2 fixture
 	./phase2_test.sh
 
-tracker: tracker.c lumibri_proto.h
+tracker: tracker.c lumabri_proto.h
 	$(CC) $(CFLAGS) -pthread tracker.c -o $@
 
-maintainer: maintainer.c lumibri_proto.h
+maintainer: maintainer.c lumabri_proto.h
 	$(CC) $(CFLAGS) -pthread maintainer.c -o $@
 
 # The shim interposes libc symbols, so it must not itself be interposable
 # state: -fPIC shared object, resolved via RTLD_NEXT at load time.
-liblumibri.so: lumishim.c lumibri_proto.h
-	$(CC) $(CFLAGS) -shared -fPIC -pthread lumishim.c -o $@ -ldl
+liblumabri.so: lumashim.c lumabri_proto.h
+	$(CC) $(CFLAGS) -shared -fPIC -pthread lumashim.c -o $@ -ldl
 
 test_shim: test_shim.c
 	$(CC) $(CFLAGS) test_shim.c -o $@
@@ -47,7 +49,23 @@ test_shim: test_shim.c
 test: all
 	./selftest.sh
 
-clean:
-	rm -f tracker maintainer liblumibri.so test_shim
+# ---- deploy -------------------------------------------------------------
+# make install                    → /usr/local (needs sudo)
+# make install PREFIX=$$HOME/.local  → per-user, no root
+# Every binary lands in PREFIX/bin (they find each other via /proc/self/exe)
+# and the shim in PREFIX/lib/lumabri. Phase-2 binaries are installed when
+# they have been built (make phase2 ENGINE=...).
+PREFIX ?= /usr/local
 
-.PHONY: all test clean
+install: all
+	install -d $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(PREFIX)/lib/lumabri
+	install -m 755 lumabri tracker maintainer $(DESTDIR)$(PREFIX)/bin/
+	install -m 644 liblumabri.so $(DESTDIR)$(PREFIX)/lib/lumabri/
+	@if [ -f expert_node ]; then install -m 755 expert_node $(DESTDIR)$(PREFIX)/bin/; fi
+	@if [ -f olmoe_p2p ]; then install -m 755 olmoe_p2p $(DESTDIR)$(PREFIX)/bin/; fi
+	@echo "installed under $(DESTDIR)$(PREFIX)"
+
+clean:
+	rm -f tracker maintainer liblumabri.so test_shim lumabri expert_node olmoe_p2p
+
+.PHONY: all test clean install phase2 fixture test-phase2

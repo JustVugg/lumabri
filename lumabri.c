@@ -1,7 +1,7 @@
-/* lumibri.c — the lumibri front end: one binary, two roles.
+/* lumabri.c — the lumabri front end: one binary, two roles.
  *
- *   lumibri serve --model DIR      share a model with the swarm
- *   lumibri chat                   chat with a model that lives on the swarm
+ *   lumabri serve --model DIR      share a model with the swarm
+ *   lumabri chat                   chat with a model that lives on the swarm
  *
  * `serve` runs the tracker and a maintainer for the given directory.
  * `chat` asks the tracker what is available, mounts the chosen model through
@@ -25,7 +25,7 @@
 #include <sys/wait.h>
 #include <time.h>
 
-#include "lumibri_proto.h"
+#include "lumabri_proto.h"
 
 /* ---- terminal ----------------------------------------------------------- */
 
@@ -69,12 +69,12 @@ static void mkdir_p(const char *path) {
  * ANSI-Shadow block wordmark, warm gradient from coral to sand, one tint
  * per row. The same lettering every serious CLI splash uses. */
 static const char *WORDMARK[6] = {
-    "██╗     ██╗   ██╗███╗   ███╗██╗██████╗ ██████╗ ██╗",
-    "██║     ██║   ██║████╗ ████║██║██╔══██╗██╔══██╗██║",
-    "██║     ██║   ██║██╔████╔██║██║██████╔╝██████╔╝██║",
-    "██║     ██║   ██║██║╚██╔╝██║██║██╔══██╗██╔══██╗██║",
-    "███████╗╚██████╔╝██║ ╚═╝ ██║██║██████╔╝██║  ██║██║",
-    "╚══════╝ ╚═════╝ ╚═╝     ╚═╝╚═╝╚═════╝ ╚═╝  ╚═╝╚═╝",
+    "██╗     ██╗   ██╗███╗   ███╗ █████╗ ██████╗ ██████╗ ██╗",
+    "██║     ██║   ██║████╗ ████║██╔══██╗██╔══██╗██╔══██╗██║",
+    "██║     ██║   ██║██╔████╔██║███████║██████╔╝██████╔╝██║",
+    "██║     ██║   ██║██║╚██╔╝██║██╔══██║██╔══██╗██╔══██╗██║",
+    "███████╗╚██████╔╝██║ ╚═╝ ██║██║  ██║██████╔╝██║  ██║██║",
+    "╚══════╝ ╚═════╝ ╚═╝     ╚═╝╚═╝  ╚═╝╚═════╝ ╚═╝  ╚═╝╚═╝",
 };
 static const int WORD_TINT[6] = { 203, 209, 209, 215, 216, 223 };
 
@@ -117,19 +117,43 @@ static void on_sigint(int sig) {
     for (int i = 0; i < g_nchildren; i++) kill(g_children[i], SIGTERM);
 }
 
+/* model_type from a local config.json; "" when absent or unparseable */
+static void local_model_type(const char *model_dir, char *out, size_t cap) {
+    out[0] = 0;
+    char p[1200], buf[4096];
+    snprintf(p, sizeof p, "%s/config.json", model_dir);
+    FILE *f = fopen(p, "r");
+    if (!f) return;
+    size_t n = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    buf[n] = 0;
+    char *mt = strstr(buf, "\"model_type\"");
+    if (!mt) return;
+    mt = strchr(mt + 12, '"');
+    if (!mt) return;
+    char *end = strchr(mt + 1, '"');
+    if (end && (size_t)(end - mt - 1) < cap) {
+        memcpy(out, mt + 1, (size_t)(end - mt - 1));
+        out[end - mt - 1] = 0;
+    }
+}
+
 static int cmd_serve(int argc, char **argv) {
     const char *model = NULL, *join = NULL, *mname = NULL, *donate = NULL;
-    int port = 7300;
+    int port = 7300, no_exec = 0, cache_slots = 128;
     for (int i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "--model") && i + 1 < argc) model = argv[++i];
         else if (!strcmp(argv[i], "--port") && i + 1 < argc) port = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--join") && i + 1 < argc) join = argv[++i];
         else if (!strcmp(argv[i], "--model-name") && i + 1 < argc) mname = argv[++i];
         else if (!strcmp(argv[i], "--donate") && i + 1 < argc) donate = argv[++i];
-        else { fprintf(stderr, "usage: lumibri serve --model DIR [--port N] "
-                               "[--join TRACKER] [--model-name S] [--donate GB]\n"); return 2; }
+        else if (!strcmp(argv[i], "--no-exec")) no_exec = 1;
+        else if (!strcmp(argv[i], "--exec-cache") && i + 1 < argc) cache_slots = atoi(argv[++i]);
+        else { fprintf(stderr, "usage: lumabri serve --model DIR [--port N] "
+                               "[--join TRACKER] [--model-name S] [--donate GB] "
+                               "[--no-exec] [--exec-cache N]\n"); return 2; }
     }
-    if (!model) { fprintf(stderr, "usage: lumibri serve --model DIR [--port N]\n"); return 2; }
+    if (!model) { fprintf(stderr, "usage: lumabri serve --model DIR [--port N]\n"); return 2; }
     if (donate && (!join || !mname)) {
         fprintf(stderr, "--donate needs --join TRACKER and --model-name NAME "
                         "(whose model to help hold)\n");
@@ -151,7 +175,11 @@ static int cmd_serve(int argc, char **argv) {
     else      snprintf(taddr, sizeof taddr, "127.0.0.1:%d", port);
 
     if (!join) {
-        char *targv[] = { tracker_bin, "--port", portstr, NULL };
+        /* LUMABRI_TOKEN makes the whole serve private: the spawned tracker
+         * requires it, the maintainer inherits it from the environment */
+        const char *tok = getenv("LUMABRI_TOKEN");
+        char *targv[] = { tracker_bin, "--port", portstr, NULL, NULL, NULL };
+        if (tok && tok[0]) { targv[3] = "--token"; targv[4] = (char *)tok; }
         g_children[g_nchildren++] = spawn_argv(targv);
         usleep(300 * 1000);
     }
@@ -165,12 +193,42 @@ static int cmd_serve(int argc, char **argv) {
     if (donate) { margv[a++] = "--donate"; margv[a++] = (char *)donate; }
     margv[a] = NULL;
     g_children[g_nchildren++] = spawn_argv(margv);
+
+    /* The bootstrap executor: when the model family has an expert node
+     * build, serve also runs one on the whole model with an SSD-streaming
+     * cache — so a brand-new swarm can chat phase-2 from minute zero with
+     * this server executing every expert. Donors that join later are
+     * discovered by the chatters and win the calls they are nearest for;
+     * this node stays the replica of last resort. */
+    char exec_bin[1200], mtype[64];
+    snprintf(exec_bin, sizeof exec_bin, "%s/expert_node", dir);
+    local_model_type(model, mtype, sizeof mtype);
+    int with_exec = 0;
+    if (!no_exec && strstr(mtype, "olmoe") && access(exec_bin, X_OK) == 0) {
+        char eport[16], cachestr[16], ename[32];
+        snprintf(eport, sizeof eport, "%d", port + 2);
+        snprintf(cachestr, sizeof cachestr, "%d", cache_slots);
+        snprintf(ename, sizeof ename, "exec-%d", port);
+        char *eargv[16];
+        a = 0;
+        eargv[a++] = exec_bin;
+        eargv[a++] = "--model"; eargv[a++] = (char *)model;
+        eargv[a++] = "--port"; eargv[a++] = eport;
+        eargv[a++] = "--tracker"; eargv[a++] = taddr;
+        eargv[a++] = "--cache"; eargv[a++] = cachestr;
+        eargv[a++] = "--name"; eargv[a++] = ename;
+        if (mname) { eargv[a++] = "--model-name"; eargv[a++] = (char *)mname; }
+        eargv[a] = NULL;
+        g_children[g_nchildren++] = spawn_argv(eargv);
+        with_exec = 1;
+    }
     signal(SIGINT, on_sigint);
     signal(SIGTERM, on_sigint);
 
-    printf("\n%sserving%s %s %s(tracker %s)%s\n", C_GRN, C_R, model, C_DIM, taddr, C_R);
-    printf("%schat from this machine:   lumibri chat%s\n", C_DIM, C_R);
-    printf("%schat from another one:    lumibri chat --tracker <this-ip>:%d%s\n\n",
+    printf("\n%sserving%s %s %s(tracker %s%s)%s\n", C_GRN, C_R, model, C_DIM, taddr,
+           with_exec ? " · executing experts for the swarm" : "", C_R);
+    printf("%schat from this machine:   lumabri chat%s\n", C_DIM, C_R);
+    printf("%schat from another one:    lumabri chat --tracker <this-ip>:%d%s\n\n",
            C_DIM, port, C_R);
     while (g_nchildren) {
         int status;
@@ -227,6 +285,7 @@ static int swarm_inspect(const char *tracker, const char *model, Swarm *s) {
      * (the peer may be behind a NAT and reachable only outbound) */
     LmbMsg r = {0};
     int fd = lmb_connect_ms(s->config_peer, 3000);
+    if (fd >= 0 && lmb_auth(fd)) { close(fd); fd = -1; }
     if (fd >= 0) {
         LmbBuf b = {0};
         lmb_buf_str(&b, "config.json"); lmb_buf_u64(&b, 0); lmb_buf_u32(&b, 1 << 20);
@@ -246,15 +305,23 @@ static int swarm_inspect(const char *tracker, const char *model, Swarm *s) {
         free(b.p);
         if (rc || r.op != LMB_RREAD_R || !r.pay_len) { lmb_msg_free(&r); return -1; }
     }
-    char *mt = memmem((char *)r.pay, r.pay_len, "\"model_type\"", 12);
-    if (mt) {
-        mt = strchr(mt + 12, '"');
+    /* the payload is not NUL-terminated: parse a terminated copy, so a
+     * truncated config can never send strchr past the allocation */
+    char *cfg = malloc((size_t)r.pay_len + 1);
+    if (cfg) {
+        memcpy(cfg, r.pay, r.pay_len);
+        cfg[r.pay_len] = 0;
+        char *mt = strstr(cfg, "\"model_type\"");
         if (mt) {
-            char *end = strchr(mt + 1, '"');
-            if (end && end - mt - 1 < (long)sizeof s->model_type)
-                { memcpy(s->model_type, mt + 1, (size_t)(end - mt - 1));
-                  s->model_type[end - mt - 1] = 0; }
+            mt = strchr(mt + 12, '"');
+            if (mt) {
+                char *end = strchr(mt + 1, '"');
+                if (end && end - mt - 1 < (long)sizeof s->model_type)
+                    { memcpy(s->model_type, mt + 1, (size_t)(end - mt - 1));
+                      s->model_type[end - mt - 1] = 0; }
+            }
         }
+        free(cfg);
     }
     lmb_msg_free(&r);
     return 0;
@@ -339,8 +406,8 @@ static void *stderr_thread(void *arg) {
     char line[512];
     while (fgets(line, sizeof line, f)) {
         double mb;
-        if (sscanf(line, "[lumibri] net %lf MB", &mb) == 1) { g_eng.net_mb = mb; continue; }
-        if (strstr(line, "[lumibri]") || strstr(line, "resident weights") ||
+        if (sscanf(line, "[lumabri] net %lf MB", &mb) == 1) { g_eng.net_mb = mb; continue; }
+        if (strstr(line, "[lumabri]") || strstr(line, "resident weights") ||
             strstr(line, "[chat]") || strstr(line, "[USAGE]"))
             fprintf(stderr, "%s  %s%s", C_DIM, line, C_R);
     }
@@ -396,8 +463,8 @@ static int engine_spawn(const char *engine, const char *shim, const char *tracke
                         const char *model, int ctx, int max_new, Engine *e) {
     const char *home = getenv("HOME") ? getenv("HOME") : ".";
     char vroot[1024], cache[1024];
-    snprintf(vroot, sizeof vroot, "%s/.lumibri/%s/vroot", home, model);
-    snprintf(cache, sizeof cache, "%s/.lumibri/%s/cache", home, model);
+    snprintf(vroot, sizeof vroot, "%s/.lumabri/%s/vroot", home, model);
+    snprintf(cache, sizeof cache, "%s/.lumabri/%s/cache", home, model);
     mkdir_p(cache);   /* vroot stays virtual on purpose */
 
     int in_pipe[2], out_pipe[2], err_pipe[2];
@@ -410,11 +477,11 @@ static int engine_spawn(const char *engine, const char *shim, const char *tracke
         snprintf(env_ctx, sizeof env_ctx, "%d", ctx);
         snprintf(env_new, sizeof env_new, "%d", max_new);
         setenv("LD_PRELOAD", shim, 1);
-        setenv("LUMIBRI_VROOT", vroot, 1);
-        setenv("LUMIBRI_CACHE", cache, 1);
-        setenv("LUMIBRI_TRACKER", tracker, 1);
-        setenv("LUMIBRI_MODEL", model, 1);
-        setenv("LUMIBRI_STATS", "5", 1);
+        setenv("LUMABRI_VROOT", vroot, 1);
+        setenv("LUMABRI_CACHE", cache, 1);
+        setenv("LUMABRI_TRACKER", tracker, 1);
+        setenv("LUMABRI_MODEL", model, 1);
+        setenv("LUMABRI_STATS", "5", 1);
         setenv("SNAP", vroot, 1);
         setenv("CHAT", "1", 1);
         setenv("CTX", env_ctx, 1);
@@ -444,9 +511,19 @@ static void engine_stop(Engine *e) {
 
 static int resolve_engine(const char *engines_dir, const char *engine_path,
                           const char *model_type, char *out, size_t cap) {
-    if (engine_path) snprintf(out, cap, "%s", engine_path);
-    else snprintf(out, cap, "%s/%s",
-                  engines_dir ? engines_dir : "../moe-stream/c", engine_for(model_type));
+    if (engine_path) { snprintf(out, cap, "%s", engine_path); return access(out, X_OK); }
+    const char *eng = engine_for(model_type);
+    const char *dir = engines_dir ? engines_dir : "../moe-stream/c";
+    /* prefer the P2P build when one exists: it is the same engine (identical
+     * without expert peers) plus the ability to run the routed experts on
+     * the swarm when the tracker offers executors */
+    char me[1200];
+    exe_dir(me, sizeof me);
+    snprintf(out, cap, "%s/%s_p2p", dir, eng);
+    if (access(out, X_OK) == 0) return 0;
+    snprintf(out, cap, "%s/%s_p2p", me, eng);
+    if (access(out, X_OK) == 0) return 0;
+    snprintf(out, cap, "%s/%s", dir, eng);
     return access(out, X_OK);
 }
 
@@ -488,7 +565,7 @@ static int model_boot(const char *tracker, const char *model, const char *shim,
 
 static int cmd_chat(int argc, char **argv) {
     const char *tracker = "127.0.0.1:7300";
-    const char *engine_path = NULL, *engines_dir = getenv("LUMIBRI_ENGINES");
+    const char *engine_path = NULL, *engines_dir = getenv("LUMABRI_ENGINES");
     const char *want_model = NULL;
     int max_new = 256, ctx = 2048;
     for (int i = 0; i < argc; i++) {
@@ -499,7 +576,7 @@ static int cmd_chat(int argc, char **argv) {
         else if (!strcmp(argv[i], "--max-new") && i + 1 < argc) max_new = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--ctx") && i + 1 < argc) ctx = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--plain")) g_tty = 0;
-        else { fprintf(stderr, "usage: lumibri chat [--tracker H:P] [--model NAME] "
+        else { fprintf(stderr, "usage: lumabri chat [--tracker H:P] [--model NAME] "
                                "[--engine BIN] [--engines-dir DIR] [--max-new N] [--ctx N]\n");
                return 2; }
     }
@@ -508,7 +585,7 @@ static int cmd_chat(int argc, char **argv) {
     int nmodels = swarm_models(tracker, models, 16);
     if (nmodels <= 0) {
         fprintf(stderr, "%sno swarm at %s%s\n"
-                        "start one with:  lumibri serve --model <dir>\n", C_RED, tracker, C_R);
+                        "start one with:  lumabri serve --model <dir>\n", C_RED, tracker, C_R);
         return 1;
     }
     char model[64];
@@ -516,15 +593,17 @@ static int cmd_chat(int argc, char **argv) {
 
     char dir[1024], shim[1200];
     exe_dir(dir, sizeof dir);
-    snprintf(shim, sizeof shim, "%s/liblumibri.so", dir);
-    if (access(shim, R_OK)) { fprintf(stderr, "%s missing; run make\n", shim); return 1; }
+    snprintf(shim, sizeof shim, "%s/liblumabri.so", dir);
+    if (access(shim, R_OK))       /* installed layout: bin/../lib/lumabri/ */
+        snprintf(shim, sizeof shim, "%s/../lib/lumabri/liblumabri.so", dir);
+    if (access(shim, R_OK)) { fprintf(stderr, "liblumabri.so missing; run make (or make install)\n"); return 1; }
 
     Swarm sw;
     Engine eng = {0};
 
     /* welcome panel: the wordmark, then the spark line */
     int W = term_w() - 2;
-    if (W > 58) W = 58;
+    if (W > 66) W = 66;
     printf("\n");
     hline("\xe2\x95\xad", "\xe2\x95\xae", W);
     panel_row(W, "", "");
@@ -631,8 +710,8 @@ int main(int argc, char **argv) {
     if (argc >= 2 && !strcmp(argv[1], "serve")) return cmd_serve(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "chat"))  return cmd_chat(argc - 2, argv + 2);
     fprintf(stderr,
-        "lumibri: run huge models from a swarm of peers\n\n"
-        "  lumibri serve --model DIR [--port 7300] [--join TRACKER]   share a model\n"
-        "  lumibri chat  [--tracker HOST:7300] [--model NAME]         chat with it\n");
+        "lumabri: run huge models from a swarm of peers\n\n"
+        "  lumabri serve --model DIR [--port 7300] [--join TRACKER]   share a model\n"
+        "  lumabri chat  [--tracker HOST:7300] [--model NAME]         chat with it\n");
     return 2;
 }

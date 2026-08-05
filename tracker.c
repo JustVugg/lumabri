@@ -1,4 +1,4 @@
-/* tracker.c — the Napster part of lumibri: an index of who holds what,
+/* tracker.c — the Napster part of lumabri: an index of who holds what,
  * and — only when a direct connection fails — a relay for the bytes.
  *
  * Maintainers keep ONE persistent outbound control connection here: it
@@ -21,7 +21,7 @@
 #include <sys/eventfd.h>
 #include <time.h>
 
-#include "lumibri_proto.h"
+#include "lumabri_proto.h"
 
 #define MAX_PEERS  64
 #define MAX_FILES  4096
@@ -36,6 +36,8 @@ typedef struct {
     PFile *files; uint32_t nfiles;
     double ts;
     int used;
+    int is_expert;              /* EREG peer: executes experts, holds no files */
+    uint32_t nexperts;
 
     /* relay mailbox: one in-flight request per peer, serialized. The
      * chatter thread queues it and waits; the peer's control thread
@@ -55,6 +57,35 @@ static Peer g_peers[MAX_PEERS];
 static pthread_mutex_t g_lk = PTHREAD_MUTEX_INITIALIZER;
 static int g_known_logged[MAX_PEERS];
 static char g_token[128];        /* --token: private swarm, invite required */
+
+/* Ground truth: sha256 per LMB_HASH_CHUNK of every (model, path), taken
+ * from the FIRST registrant — the origin server registers before any donor
+ * exists. A later registrant whose hashes disagree is announcing poison:
+ * that file is stripped from its offer and the lie is logged. */
+typedef struct {
+    char model[64], path[LMB_PATH_MAX];
+    uint32_t nh;
+    uint8_t *hash;
+} GTruth;
+static GTruth g_truth[MAX_FILES];
+static int g_ntruth;
+
+/* under g_lk; steals *hash on first sight. Returns 1 ok / 0 poison. */
+static int truth_check(const char *model, const char *path,
+                       uint32_t nh, uint8_t **hash) {
+    for (int i = 0; i < g_ntruth; i++)
+        if (!strcmp(g_truth[i].model, model) && !strcmp(g_truth[i].path, path))
+            return g_truth[i].nh == nh &&
+                   memcmp(g_truth[i].hash, *hash, (size_t)nh * 32) == 0;
+    if (g_ntruth == MAX_FILES) return 1;      /* table full: cannot judge */
+    GTruth *t = &g_truth[g_ntruth++];
+    snprintf(t->model, sizeof t->model, "%s", model);
+    snprintf(t->path, sizeof t->path, "%s", path);
+    t->nh = nh;
+    t->hash = *hash;
+    *hash = NULL;
+    return 1;
+}
 
 static double now_s(void) {
     struct timespec ts;
@@ -87,11 +118,42 @@ static Peer *handle_register(int fd, LmbMsg *m) {
             lmb_cur_u64(&c, &files[i].size)) {
             free(files); send_err(fd, "bad register entry"); return NULL;
         }
+    /* optional integrity section (older peers simply do not send it) */
+    uint8_t **fh = (uint8_t **)calloc(n ? n : 1, sizeof *fh);
+    uint32_t *fnh = (uint32_t *)calloc(n ? n : 1, 4);
+    size_t save = c.off;
+    uint32_t hm = 0;
+    int have_h = fh && fnh && !lmb_cur_u32(&c, &hm) && hm == LMB_HASH_MAGIC;
+    if (have_h) {
+        for (uint32_t i = 0; i < n; i++) {
+            if (lmb_cur_u32(&c, &fnh[i]) || fnh[i] > LMB_MAX_BODY / 32) { have_h = 0; break; }
+            if (!fnh[i]) continue;
+            fh[i] = (uint8_t *)malloc((size_t)fnh[i] * 32);
+            if (!fh[i] || lmb_cur_bytes(&c, fh[i], (size_t)fnh[i] * 32)) { have_h = 0; break; }
+        }
+    } else c.off = save;
+
     Peer *slot = NULL;
     int idx = -1, fresh = 0;
     pthread_mutex_lock(&g_lk);
+    if (have_h) {
+        /* poison dies here: a file whose announced hashes contradict the
+         * swarm's ground truth is stripped from this peer's offer */
+        for (uint32_t i = 0; i < n; ) {
+            if (fnh[i] && !truth_check(model, files[i].path, fnh[i], &fh[i])) {
+                printf("[tracker] POISON: %s announces different bytes for "
+                       "%s/%s — file rejected\n", name, model, files[i].path);
+                fflush(stdout);
+                free(fh[i]);
+                fh[i] = fh[n - 1]; fnh[i] = fnh[n - 1];
+                files[i] = files[n - 1];
+                n--;
+            } else i++;
+        }
+    }
     for (int i = 0; i < MAX_PEERS; i++)
-        if (g_peers[i].used && !strcmp(g_peers[i].name, name)) { slot = &g_peers[i]; idx = i; break; }
+        if (g_peers[i].used && !g_peers[i].is_expert &&
+            !strcmp(g_peers[i].name, name)) { slot = &g_peers[i]; idx = i; break; }
     if (!slot)
         for (int i = 0; i < MAX_PEERS; i++)
             if (!g_peers[i].used) {
@@ -128,6 +190,8 @@ static Peer *handle_register(int fd, LmbMsg *m) {
         snprintf(slot->model, sizeof slot->model, "%s", model);
     }
     pthread_mutex_unlock(&g_lk);
+    for (uint32_t i = 0; i < n; i++) free(fh[i]);   /* stolen ones are NULL */
+    free(fh); free(fnh);
     if (!slot) { free(files); send_err(fd, "peer table full"); return NULL; }
     if (fresh || !g_known_logged[idx]) {
         printf("[tracker] + %s @ %s (%s, %u files)\n", name, addr, model, n);
@@ -136,6 +200,121 @@ static Peer *handle_register(int fd, LmbMsg *m) {
     }
     lmb_send(fd, LMB_OK, NULL, 0, NULL, 0);
     return slot;
+}
+
+/* ---- EREG / EPEERS: expert nodes -----------------------------------------
+ * Same shape as REGISTER: a heartbeat that names a model and an address.
+ * Expert peers never enter placements (they hold no files); EPEERS is how a
+ * chatter learns who can EXECUTE for a model, server included. */
+
+static int handle_ereg(int fd, LmbMsg *m) {
+    LmbCur c = { m->body, m->body_len, 0 };
+    char name[64], addr[64], model[64];
+    uint32_t nexperts;
+    if (lmb_cur_str(&c, name, sizeof name) || lmb_cur_str(&c, addr, sizeof addr) ||
+        lmb_cur_str(&c, model, sizeof model) || lmb_cur_u32(&c, &nexperts)) {
+        send_err(fd, "bad ereg"); return -1;
+    }
+    Peer *slot = NULL;
+    int fresh = 0;
+    pthread_mutex_lock(&g_lk);
+    for (int i = 0; i < MAX_PEERS; i++)
+        if (g_peers[i].used && g_peers[i].is_expert &&
+            !strcmp(g_peers[i].name, name)) { slot = &g_peers[i]; break; }
+    if (!slot)
+        for (int i = 0; i < MAX_PEERS; i++)
+            if (!g_peers[i].used) {
+                slot = &g_peers[i]; fresh = 1;
+                memset(slot, 0, sizeof *slot);
+                slot->ctrl_fd = -1;
+                slot->evfd = -1;
+                pthread_mutex_init(&slot->rq_lk, NULL);
+                pthread_cond_init(&slot->rq_cv, NULL);
+                break;
+            }
+    const char *use_addr = addr;
+    char fixed[64];
+    struct sockaddr_in sin;
+    socklen_t sl = sizeof sin;
+    if (!strncmp(addr, "127.0.0.1:", 10) &&
+        getpeername(fd, (struct sockaddr *)&sin, &sl) == 0 &&
+        sin.sin_family == AF_INET &&
+        ntohl(sin.sin_addr.s_addr) != INADDR_LOOPBACK) {
+        snprintf(fixed, sizeof fixed, "%s:%s", inet_ntoa(sin.sin_addr),
+                 strchr(addr, ':') + 1);
+        use_addr = fixed;
+    }
+    if (slot) {
+        slot->used = 1; slot->is_expert = 1;
+        slot->nexperts = nexperts; slot->ts = now_s();
+        snprintf(slot->name, sizeof slot->name, "%s", name);
+        snprintf(slot->addr, sizeof slot->addr, "%s", use_addr);
+        snprintf(slot->model, sizeof slot->model, "%s", model);
+    }
+    pthread_mutex_unlock(&g_lk);
+    if (!slot) { send_err(fd, "peer table full"); return -1; }
+    if (fresh) {
+        printf("[tracker] + expert %s @ %s (%s, %u experts)\n",
+               name, use_addr, model, nexperts);
+        fflush(stdout);
+    }
+    return lmb_send(fd, LMB_OK, NULL, 0, NULL, 0);
+}
+
+static int handle_epeers(int fd, LmbMsg *m) {
+    char want[64] = "";
+    if (m->body_len) {
+        LmbCur c = { m->body, m->body_len, 0 };
+        if (lmb_cur_str(&c, want, sizeof want)) want[0] = 0;
+    }
+    LmbBuf b = {0};
+    double now = now_s();
+    pthread_mutex_lock(&g_lk);
+    uint32_t n = 0;
+    for (int i = 0; i < MAX_PEERS; i++)
+        if (g_peers[i].used && g_peers[i].is_expert &&
+            now - g_peers[i].ts <= STALE_S &&
+            (!want[0] || !strcmp(g_peers[i].model, want))) n++;
+    lmb_buf_u32(&b, n);
+    for (int i = 0; i < MAX_PEERS; i++)
+        if (g_peers[i].used && g_peers[i].is_expert &&
+            now - g_peers[i].ts <= STALE_S &&
+            (!want[0] || !strcmp(g_peers[i].model, want)))
+            lmb_buf_str(&b, g_peers[i].addr);
+    pthread_mutex_unlock(&g_lk);
+    int rc = lmb_send(fd, LMB_EPEERS_R, b.p, (uint32_t)b.len, NULL, 0);
+    free(b.p);
+    return rc;
+}
+
+/* ---- HASHES: hand the ground truth to whoever verifies ------------------ */
+
+static int handle_hashes(int fd, LmbMsg *m) {
+    LmbCur c = { m->body, m->body_len, 0 };
+    char model[64], path[LMB_PATH_MAX];
+    if (lmb_cur_str(&c, model, sizeof model) || lmb_cur_str(&c, path, sizeof path)) {
+        send_err(fd, "bad hashes request"); return -1;
+    }
+    pthread_mutex_lock(&g_lk);
+    uint32_t nh = 0;
+    uint8_t *copy = NULL;
+    /* an empty model matches any, exactly as PLACEMENT treats it */
+    for (int i = 0; i < g_ntruth; i++)
+        if ((!model[0] || !strcmp(g_truth[i].model, model)) &&
+            !strcmp(g_truth[i].path, path)) {
+            nh = g_truth[i].nh;
+            copy = (uint8_t *)malloc((size_t)nh * 32);
+            if (copy) memcpy(copy, g_truth[i].hash, (size_t)nh * 32);
+            break;
+        }
+    pthread_mutex_unlock(&g_lk);
+    if (!copy) { send_err(fd, "no integrity data"); return 0; }
+    LmbBuf b = {0};
+    lmb_buf_u32(&b, LMB_HASH_CHUNK);
+    lmb_buf_u32(&b, nh);
+    int rc = lmb_send(fd, LMB_HASHES_R, b.p, (uint32_t)b.len, copy, nh * 32);
+    free(b.p); free(copy);
+    return rc;
 }
 
 /* ---- PLACEMENT ---------------------------------------------------------- */
@@ -190,11 +369,12 @@ static int handle_swarm(int fd) {
     pthread_mutex_lock(&g_lk);
     uint32_t live = 0;
     for (int i = 0; i < MAX_PEERS; i++)
-        if (g_peers[i].used && now - g_peers[i].ts <= STALE_S) live++;
+        if (g_peers[i].used && !g_peers[i].is_expert &&
+            now - g_peers[i].ts <= STALE_S) live++;
     lmb_buf_u32(&b, live);
     for (int i = 0; i < MAX_PEERS; i++) {
         Peer *p = &g_peers[i];
-        if (!p->used || now - p->ts > STALE_S) continue;
+        if (!p->used || p->is_expert || now - p->ts > STALE_S) continue;
         lmb_buf_str(&b, p->model);
         lmb_buf_u64(&b, p->held_bytes);
         lmb_buf_u64(&b, p->served_bytes);
@@ -433,6 +613,9 @@ static void *conn_thread(void *arg) {
             break;
         }
         case LMB_RREAD_R:   if (ctrl) rread_complete(ctrl, &m); break;
+        case LMB_EREG:      rc = handle_ereg(fd, &m); break;
+        case LMB_EPEERS:    rc = handle_epeers(fd, &m); break;
+        case LMB_HASHES:    rc = handle_hashes(fd, &m); break;
         case LMB_PLACEMENT: rc = handle_placement(fd, &m); break;
         case LMB_SWARM:     rc = handle_swarm(fd); break;
         case LMB_RREAD:     rc = handle_rread(fd, &m); break;

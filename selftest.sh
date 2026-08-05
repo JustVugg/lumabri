@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lumibri end-to-end selftest — no model needed, runs in seconds.
+# lumabri end-to-end selftest — no model needed, runs in seconds.
 #
 # Builds a small random tree, serves it from TWO maintainers holding disjoint
 # halves, and verifies through the LD_PRELOAD shim that every byte read via
@@ -13,7 +13,7 @@ cd "$(dirname "$0")"
 
 make -s all
 
-T=$(mktemp -d /tmp/lumibri-selftest.XXXXXX)
+T=$(mktemp -d /tmp/lumabri-selftest.XXXXXX)
 PIDS=()
 cleanup() { kill "${PIDS[@]}" 2>/dev/null || true; rm -rf "$T"; }
 trap cleanup EXIT
@@ -32,11 +32,11 @@ sleep 0.3
              --name half-b --include 'sub/*' --include 'empty.bin' & PIDS+=($!)
 sleep 0.5
 
-ENV=(LD_PRELOAD="$PWD/liblumibri.so"
-     LUMIBRI_VROOT="$T/vroot"
-     LUMIBRI_CACHE="$T/cache"
-     LUMIBRI_TRACKER=127.0.0.1:7390
-     LUMIBRI_BLOCK_MIB=1)
+ENV=(LD_PRELOAD="$PWD/liblumabri.so"
+     LUMABRI_VROOT="$T/vroot"
+     LUMABRI_CACHE="$T/cache"
+     LUMABRI_TRACKER=127.0.0.1:7390
+     LUMABRI_BLOCK_MIB=1)
 
 echo "· pass 1: cold (all blocks over the network)"
 env "${ENV[@]}" ./test_shim "$T/vroot" "$T/src"
@@ -61,11 +61,11 @@ sleep 0.3
              --name nat-b --advertise 127.0.0.1:1 \
              --include 'sub/*' --include 'empty.bin' & PIDS+=($!)
 sleep 0.7
-NATENV=(LD_PRELOAD="$PWD/liblumibri.so"
-        LUMIBRI_VROOT="$T/vroot2"
-        LUMIBRI_CACHE="$T/cache2"
-        LUMIBRI_TRACKER=127.0.0.1:7390
-        LUMIBRI_BLOCK_MIB=1)
+NATENV=(LD_PRELOAD="$PWD/liblumabri.so"
+        LUMABRI_VROOT="$T/vroot2"
+        LUMABRI_CACHE="$T/cache2"
+        LUMABRI_TRACKER=127.0.0.1:7390
+        LUMABRI_BLOCK_MIB=1)
 env "${NATENV[@]}" ./test_shim "$T/vroot2" "$T/src"
 
-echo "LUMIBRI SELFTEST: PASS"
+echo "LUMABRI SELFTEST: PASS"

@@ -62,7 +62,7 @@ I peer vanno avviati con `OMP_NUM_THREADS` esplicito.
 
 Il test qui sopra provava la correttezza, ma il suo tok/s valeva poco: peer e
 chatter si contendevano gli stessi core, e il baseline era "esperti già in
-RAM", cioè lo scenario in cui lumibri non servirebbe. Due correzioni:
+RAM", cioè lo scenario in cui lumabri non servirebbe. Due correzioni:
 
 - **Core partizionati** con `taskset`: chatter sui core fisici 0-2, ogni peer
   su un core fisico suo (3, 4, 5). Nessun peer ruba cicli al chatter — che
@@ -75,7 +75,7 @@ Modello `olmoe_bench`: hidden 2048, inter 1024, 16 layer, 16 esperti, **top-8**
 — esperto da **6.3 MB** e **128 chiamate remote per token**, gli stessi numeri
 di OLMoE-1B-7B reale. Solo il bacino di esperti è più piccolo (16 invece di 64).
 
-La rete è emulata **dentro il peer** (`LUMIBRI_RTT_US` / `JITTER_US` /
+La rete è emulata **dentro il peer** (`LUMABRI_RTT_US` / `JITTER_US` /
 `LOSS_PPM`): trattiene la risposta per il tempo di volo prima di spedirla.
 Fedele per quel che si misura, perché le K richieste di un layer viaggiano già
 su K socket con K thread, quindi le attese si sovrappongono e un round costa
@@ -123,7 +123,7 @@ Non è magia e va detto chiaramente: **i peer non portano solo memoria, portano
 CPU**. Il run A usa 3 core fisici; il run C ne usa 3 (chatter) + 3 (peer), e
 gli 8 esperti di un layer vengono calcolati davvero in parallelo mentre il
 chatter aspetta. Non è un confronto a parità di hardware — è esattamente il
-patto di lumibri: i maintainer donano macchine, e la rete guadagna il loro
+patto di lumabri: i maintainer donano macchine, e la rete guadagna il loro
 calcolo oltre al loro disco.
 
 Il numero che conta per la tesi del progetto resta l'altro: **33× più veloce
