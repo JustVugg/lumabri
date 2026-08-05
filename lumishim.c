@@ -230,13 +230,18 @@ static void file_link_peer(RFile *f, int pi) {
 
 static int placement_from_tracker(const char *tracker) {
     LmbMsg m = {0};
-    if (lmb_request(tracker, LMB_PLACEMENT, NULL, 0, &m) || m.op != LMB_PLACEMENT_R) {
+    LmbBuf b = {0};
+    const char *model = getenv("LUMIBRI_MODEL");   /* optional filter */
+    if (model && model[0]) lmb_buf_str(&b, model);
+    int rc = lmb_request(tracker, LMB_PLACEMENT, b.p, (uint32_t)b.len, &m);
+    free(b.p);
+    if (rc || m.op != LMB_PLACEMENT_R) {
         if (m.body || m.pay) lmb_msg_free(&m);
         return -1;
     }
     LmbCur c = { m.body, m.body_len, 0 };
     uint32_t n = 0;
-    int rc = lmb_cur_u32(&c, &n) ? -1 : 0;
+    rc = lmb_cur_u32(&c, &n) ? -1 : 0;
     for (uint32_t i = 0; rc == 0 && i < n; i++) {
         char rel[LMB_PATH_MAX], addr[64];
         uint64_t size; uint16_t np;

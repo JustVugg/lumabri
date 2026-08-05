@@ -22,7 +22,8 @@
 typedef struct { char path[LMB_PATH_MAX]; uint64_t size; } PFile;
 
 typedef struct {
-    char name[64], addr[64];
+    char name[64], addr[64], model[64];
+    uint64_t held_bytes, served_bytes, served_reads;
     PFile *files; uint32_t nfiles;
     double ts;
     int used;
@@ -46,9 +47,12 @@ static void send_err(int fd, const char *msg) {
 
 static int handle_register(int fd, LmbMsg *m) {
     LmbCur c = { m->body, m->body_len, 0 };
-    char name[64], addr[64];
+    char name[64], addr[64], model[64];
+    uint64_t held, sbytes, sreads;
     uint32_t n;
     if (lmb_cur_str(&c, name, sizeof name) || lmb_cur_str(&c, addr, sizeof addr) ||
+        lmb_cur_str(&c, model, sizeof model) || lmb_cur_u64(&c, &held) ||
+        lmb_cur_u64(&c, &sbytes) || lmb_cur_u64(&c, &sreads) ||
         lmb_cur_u32(&c, &n) || n > MAX_FILES) { send_err(fd, "bad register"); return -1; }
     PFile *files = (PFile *)calloc(n ? n : 1, sizeof *files);
     if (!files) { send_err(fd, "oom"); return -1; }
@@ -68,8 +72,10 @@ static int handle_register(int fd, LmbMsg *m) {
     if (slot) {
         free(slot->files);
         slot->used = 1; slot->files = files; slot->nfiles = n; slot->ts = now_s();
+        slot->held_bytes = held; slot->served_bytes = sbytes; slot->served_reads = sreads;
         snprintf(slot->name, sizeof slot->name, "%s", name);
         snprintf(slot->addr, sizeof slot->addr, "%s", addr);
+        snprintf(slot->model, sizeof slot->model, "%s", model);
     }
     pthread_mutex_unlock(&g_lk);
     if (!slot) { free(files); send_err(fd, "peer table full"); return -1; }
@@ -78,7 +84,38 @@ static int handle_register(int fd, LmbMsg *m) {
     return lmb_send(fd, LMB_OK, NULL, 0, NULL, 0);
 }
 
-static int handle_placement(int fd) {
+/* Anonymous by construction: neither names nor addresses leave the tracker.
+ * Per live peer: model, bytes held, bytes served, reads, heartbeat age. */
+static int handle_swarm(int fd) {
+    LmbBuf b = {0};
+    double now = now_s();
+    pthread_mutex_lock(&g_lk);
+    uint32_t live = 0;
+    for (int i = 0; i < MAX_PEERS; i++)
+        if (g_peers[i].used && now - g_peers[i].ts <= STALE_S) live++;
+    lmb_buf_u32(&b, live);
+    for (int i = 0; i < MAX_PEERS; i++) {
+        Peer *p = &g_peers[i];
+        if (!p->used || now - p->ts > STALE_S) continue;
+        lmb_buf_str(&b, p->model);
+        lmb_buf_u64(&b, p->held_bytes);
+        lmb_buf_u64(&b, p->served_bytes);
+        lmb_buf_u64(&b, p->served_reads);
+        lmb_buf_u32(&b, (uint32_t)(now - p->ts));
+        lmb_buf_u32(&b, p->nfiles);
+    }
+    pthread_mutex_unlock(&g_lk);
+    int rc = lmb_send(fd, LMB_SWARM_R, b.p, (uint32_t)b.len, NULL, 0);
+    free(b.p);
+    return rc;
+}
+
+static int handle_placement(int fd, LmbMsg *m) {
+    char want[64] = "";
+    if (m->body_len) {   /* optional model filter */
+        LmbCur c = { m->body, m->body_len, 0 };
+        if (lmb_cur_str(&c, want, sizeof want)) want[0] = 0;
+    }
     /* merge live peers' manifests: path → {size, [addr...]} */
     typedef struct { const PFile *f; char addrs[8][64]; int naddr; } Entry;
     Entry *ent = (Entry *)calloc(MAX_FILES, sizeof *ent);
@@ -88,6 +125,7 @@ static int handle_placement(int fd) {
     pthread_mutex_lock(&g_lk);
     for (int p = 0; p < MAX_PEERS; p++) {
         if (!g_peers[p].used || now - g_peers[p].ts > STALE_S) continue;
+        if (want[0] && strcmp(g_peers[p].model, want)) continue;
         for (uint32_t i = 0; i < g_peers[p].nfiles; i++) {
             const PFile *f = &g_peers[p].files[i];
             Entry *e = NULL;
@@ -123,7 +161,8 @@ static void *conn_thread(void *arg) {
         switch (m.op) {
         case LMB_PING:      rc = lmb_send(fd, LMB_OK, NULL, 0, NULL, 0); break;
         case LMB_REGISTER:  rc = handle_register(fd, &m); break;
-        case LMB_PLACEMENT: rc = handle_placement(fd); break;
+        case LMB_PLACEMENT: rc = handle_placement(fd, &m); break;
+        case LMB_SWARM:     rc = handle_swarm(fd); break;
         default:            send_err(fd, "unknown op"); rc = -1; break;
         }
         lmb_msg_free(&m);

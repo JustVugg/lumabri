@@ -46,7 +46,15 @@ enum {
      * EMANIFEST asks which (layer,expert) pairs a node actually holds. */
     LMB_EXEC = 11, LMB_EXEC_R = 12,
     LMB_EMANIFEST = 13, LMB_EMANIFEST_R = 14,
+    /* SWARM: anonymous network status from the tracker. No names, no
+     * addresses in the reply — per peer only: model, bytes held, bytes
+     * served, reads served, seconds since last heartbeat. */
+    LMB_SWARM = 15, LMB_SWARM_R = 16,
 };
+
+/* REGISTER body: str name, str addr, str model, u64 held_bytes,
+ *                u64 served_bytes, u64 served_reads, u32 n { str path, u64 size }
+ * PLACEMENT body: empty = every model; str model = that model's files only. */
 
 typedef struct {
     uint32_t op;

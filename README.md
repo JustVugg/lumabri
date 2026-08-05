@@ -33,6 +33,12 @@ That is all. The first answer is slower while the working set crosses the
 network; afterwards the mirror in `~/.lumibri` keeps serving even if the
 server goes offline.
 
+In the chat: `/swarm` shows the network live and anonymous (peers are
+numbered, never named: model held, GB, bytes served, heartbeat), `/model`
+lists the models on the swarm and switches between them, restarting the
+engine on the fly. Several machines can serve different models to one
+tracker with `lumibri serve --model DIR --join TRACKER:PORT`.
+
 ## How it works
 
 `serve` runs two small programs: a tracker, which is only an index of who

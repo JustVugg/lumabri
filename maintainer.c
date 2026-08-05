@@ -32,7 +32,7 @@ typedef struct { char rel[LMB_PATH_MAX]; uint64_t size; int fd; } MFile;
 
 static struct {
     char root[LMB_PATH_MAX];
-    char name[64], advertise[64], tracker[64];
+    char name[64], advertise[64], tracker[64], model[64];
     MFile files[MAX_FILES]; int nfiles;
     const char *includes[MAX_INCLUDES]; int nincl;
     pthread_mutex_t fd_lk;
@@ -163,14 +163,22 @@ static void *conn_thread(void *arg) {
 
 static void *heartbeat_thread(void *arg) {
     (void)arg;
-    LmbBuf b = {0};
-    lmb_buf_str(&b, g.name);
-    lmb_buf_str(&b, g.advertise);
-    manifest_body(&b);
+    uint64_t held = 0;
+    for (int i = 0; i < g.nfiles; i++) held += g.files[i].size;
     int warned = 0;
     for (;;) {
+        LmbBuf b = {0};   /* rebuilt each beat: the served counters move */
+        lmb_buf_str(&b, g.name);
+        lmb_buf_str(&b, g.advertise);
+        lmb_buf_str(&b, g.model);
+        lmb_buf_u64(&b, held);
+        lmb_buf_u64(&b, atomic_load(&g.served_bytes));
+        lmb_buf_u64(&b, atomic_load(&g.served_reads));
+        manifest_body(&b);
         LmbMsg resp = {0};
-        if (lmb_request(g.tracker, LMB_REGISTER, b.p, (uint32_t)b.len, &resp) == 0) {
+        int ok = lmb_request(g.tracker, LMB_REGISTER, b.p, (uint32_t)b.len, &resp) == 0;
+        free(b.p);
+        if (ok) {
             lmb_msg_free(&resp);
             warned = 0;
         } else if (!warned) {
@@ -210,6 +218,8 @@ int main(int argc, char **argv) {
             snprintf(g.tracker, sizeof g.tracker, "%s", argv[++i]);
         else if (!strcmp(argv[i], "--name") && i + 1 < argc)
             snprintf(g.name, sizeof g.name, "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--model-name") && i + 1 < argc)
+            snprintf(g.model, sizeof g.model, "%s", argv[++i]);
         else if (!strcmp(argv[i], "--advertise") && i + 1 < argc)
             snprintf(g.advertise, sizeof g.advertise, "%s", argv[++i]);
         else if (!strcmp(argv[i], "--include") && i + 1 < argc && g.nincl < MAX_INCLUDES)
@@ -224,6 +234,10 @@ int main(int argc, char **argv) {
     size_t rl = strlen(g.root);
     while (rl > 1 && g.root[rl - 1] == '/') g.root[--rl] = 0;
     if (!g.name[0]) snprintf(g.name, sizeof g.name, "peer-%d", port);
+    if (!g.model[0]) {   /* default model name: the directory's basename */
+        const char *base = strrchr(g.root, '/');
+        snprintf(g.model, sizeof g.model, "%s", base ? base + 1 : g.root);
+    }
     if (!g.advertise[0]) snprintf(g.advertise, sizeof g.advertise, "127.0.0.1:%d", port);
 
     scan_dir(g.root);
