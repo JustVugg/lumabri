@@ -89,11 +89,25 @@ downloading expert weights.
 ```sh
 su - lumabri
 git clone https://github.com/JustVugg/colibri.git
-cd colibri && git apply ~/lumabri/engine_patches/colibri-p2p.diff   # GLM
-cd ~/lumabri && make phase2-glm ENGINE=$HOME/colibri/c
+cd ~/lumabri && make phase2-all ENGINE=$HOME/colibri/c
 exit
 cd /home/lumabri/lumabri && make install
 ```
+
+`make phase2-all` builds both halves for every engine and **does not touch
+the colibri checkout**: each patch is applied to a copy under `build/`.
+
+Both halves matter and they are easy to confuse:
+
+| you want to | you need | binary |
+|---|---|---|
+| chat with experts on peers | the patched engine | `colibri_p2p`, `olmoe_p2p`, … |
+| donate compute | the expert node | `expert_node_glm`, `expert_node`, … |
+
+`make chatters` builds the first set, `make engines` the second. Without the
+patched engine a chatter still works — but phase 2 never engages and it
+quietly downloads expert weights instead of asking peers to run them. The
+tell is the missing `phase 2 active` line at boot.
 
 All five paths are proven byte-identical: `make test-engines` runs the four
 that have synthetic fixtures, and `make test-phase2-deepseek MODEL=<dir>`

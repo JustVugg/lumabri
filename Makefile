@@ -21,6 +21,9 @@ phase2-glm: expert_node_glm
 engines: expert_node expert_node_glm expert_node_inkling expert_node_kimi \
          expert_node_deepseek
 
+# everything phase 2 needs, both sides
+phase2-all: engines chatters
+
 # One expert-node binary per engine. The body is the same file; everything
 # engine-shaped lives in expert_engines/<name>.h, which pulls in the engine's
 # own source so remote and local run the same kernels on the same weights.
@@ -75,10 +78,43 @@ patches:
 patches-check:
 	python3 engine_patches/make_patches.py --engine-dir $(ENGINE) --check
 
-# -DLUMIBRI_P2P: the engine patch predates the rename and tests that macro;
-# the engine is never modified, so both spellings are defined here.
-olmoe_p2p: $(ENGINE)/olmoe.c lumabri_client.h lumibri_client.h lumabri_proto.h
-	$(CC) $(P2P_CFLAGS) -DLUMABRI_P2P -DLUMIBRI_P2P $(ENGINE)/olmoe.c -o $@ -lm -lpthread
+# ---- the chatter side: one patched engine binary per engine -------------
+#
+# `lumabri chat` prefers <engine>_p2p over <engine> in --engines-dir, and
+# without one it runs the stock engine — which works, but phase 2 never
+# engages and the chatter quietly downloads expert weights instead of asking
+# peers to run them. So every engine needs its build here, not just olmoe.
+#
+# The engine is never modified: the patch is applied to a COPY under build/.
+# A working copy that already has the patch applied is taken as-is, so an
+# engine tree someone patched by hand still builds.
+#
+# -DLUMIBRI_P2P: the patches predate the rename and test that macro; both
+# spellings are defined so either vintage compiles.
+build/%_p2p.c: $(ENGINE)/%.c engine_patches/%-p2p.diff
+	@mkdir -p build
+	@if grep -q LUMIBRI_P2P $<; then cp $< $@; \
+	 else patch -s -p2 -o $@ $< engine_patches/$*-p2p.diff; fi
+
+ENGINE_P2P_DEPS = lumabri_client.h lumibri_client.h lumabri_proto.h
+
+olmoe_p2p: build/olmoe_p2p.c $(ENGINE_P2P_DEPS)
+	$(CC) $(P2P_CFLAGS) -DLUMABRI_P2P -DLUMIBRI_P2P $< -o $@ -lm -lpthread
+
+colibri_p2p: build/colibri_p2p.c $(ENGINE_P2P_DEPS)
+	$(CC) $(P2P_CFLAGS) -DLUMABRI_P2P -DLUMIBRI_P2P $< -o $@ -lm -lpthread
+
+inkling_p2p: build/inkling_p2p.c $(ENGINE_P2P_DEPS)
+	$(CC) $(P2P_CFLAGS) -DLUMABRI_P2P -DLUMIBRI_P2P $< -o $@ -lm -lpthread
+
+kimi_k3_p2p: build/kimi_k3_p2p.c $(ENGINE_P2P_DEPS)
+	$(CC) $(P2P_CFLAGS) -DLUMABRI_P2P -DLUMIBRI_P2P $< -o $@ -lm -lpthread
+
+deepseek_p2p: build/deepseek_p2p.c $(ENGINE_P2P_DEPS)
+	$(CC) $(P2P_CFLAGS) $(DS_CFLAGS) -DLUMABRI_P2P -DLUMIBRI_P2P $< -o $@ -lm -lpthread
+
+# what a CHATTER needs; `engines` is what a compute DONOR needs
+chatters: olmoe_p2p colibri_p2p inkling_p2p kimi_k3_p2p deepseek_p2p
 
 tiny_olmoe/config.json: make_tiny_olmoe.py
 	python3 make_tiny_olmoe.py tiny_olmoe
@@ -144,17 +180,20 @@ install: all
 	install -m 755 lumabri tracker maintainer $(DESTDIR)$(PREFIX)/bin/
 	install -m 644 liblumabri.so $(DESTDIR)$(PREFIX)/lib/lumabri/
 	@for b in expert_node expert_node_glm expert_node_inkling expert_node_kimi \
-	         expert_node_deepseek olmoe_p2p; do \
+	         expert_node_deepseek \
+	         olmoe_p2p colibri_p2p inkling_p2p kimi_k3_p2p deepseek_p2p; do \
 	    [ -f $$b ] && install -m 755 $$b $(DESTDIR)$(PREFIX)/bin/ || true; done
 	@echo "installed under $(DESTDIR)$(PREFIX)"
 
 clean:
-	rm -f tracker maintainer liblumabri.so test_shim lumabri olmoe_p2p \
+	rm -f tracker maintainer liblumabri.so test_shim lumabri \
+	      olmoe_p2p colibri_p2p inkling_p2p kimi_k3_p2p deepseek_p2p \
 	      expert_node expert_node_glm expert_node_inkling expert_node_kimi \
 	      expert_node_deepseek
 	rm -rf build
 
-.PHONY: all test clean install phase2 phase2-glm engines fixture test-phase2 \
+.PHONY: all test clean install phase2 phase2-glm engines chatters phase2-all \
+        fixture test-phase2 \
         test-phase2-glm test-phase2-inkling test-phase2-kimi \
         test-phase2-deepseek test-engines \
         patches patches-check
