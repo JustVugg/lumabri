@@ -1,0 +1,30 @@
+diff --git a/c/inkling.c b/c/inkling.c
+--- a/c/inkling.c
++++ b/c/inkling.c
+@@ -153,6 +153,13 @@
+ static double rss_gb(void) { struct rusage r; getrusage(RUSAGE_SELF, &r); return r.ru_maxrss / (1024.0*1024.0); }
+ #endif
+ static float *falloc(int64_t n) { float *p = malloc(n*sizeof(float)); if(!p){fprintf(stderr,"OOM %ld\n",(long)n);exit(1);} return p; }
++
++#ifdef LUMIBRI_P2P
++/* lumabri: with a tracker (or LUMABRI_EXPERTS) the routed experts run on
++ * peers instead of being read from disk. Inert without the define, and inert
++ * at runtime unless the swarm can cover every expert. */
++#include "lumibri_client.h"
++#endif
+ static float sigmoidf(float x) { return 1.f / (1.f + expf(-x)); }
+ static float siluf(float x) { return x / (1.f + expf(-x)); }
+ /* TOPP=p (0..1): top-p adattivo sui routed — tieni gli esperti fino al peso
+@@ -1294,6 +1301,12 @@
+             const float *xs = x + (int64_t)s*D;
+             float *os = out + (int64_t)s*D;
+             float *w = wgt + (int64_t)s*(K+ns);
++#ifdef LUMIBRI_P2P
++            if (lumi_layer_on(layer)) {
++                lumi_moe_apply(layer, idx + (int64_t)s*K + kk, w + kk, 1, xs, D, os);
++                continue;
++            }
++#endif
+             if (m->xq) {
+                 if (q4) {
+                     matmul_q4(g, xs, e->p13, e->s13, D, 2*I);   /* gate rows then up rows */

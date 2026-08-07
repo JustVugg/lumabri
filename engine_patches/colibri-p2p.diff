@@ -1,0 +1,55 @@
+diff --git a/c/colibri.c b/c/colibri.c
+--- a/c/colibri.c
++++ b/c/colibri.c
+@@ -63,6 +63,13 @@
+ #include "schema_gbnf.h"                          /* SCHEMA=: JSON-Schema -> GBNF for method F */
+ #include "decode_batch.h"
+ #include "route_trace.h"                           /* ROUTE_TRACE + .coli_usage, engine-agnostic (#700) */
++
++#ifdef LUMIBRI_P2P
++/* lumabri: with a tracker (or LUMABRI_EXPERTS) the routed experts run on
++ * peers instead of being read from disk. Inert without the define, and inert
++ * at runtime unless the swarm can cover every expert. */
++#include "lumibri_client.h"
++#endif
+ #ifdef _OPENMP
+ #include <omp.h>                                  /* scratch per-thread nell'attention */
+ #else
+@@ -1918,6 +1925,19 @@
+     for(int i=0;i<c->n_layers;i++) if(!m->L[i].sparse) rt_drop_row(i);
+     if(!m->has_mtp) rt_drop_row(c->n_layers);
+     m->resident_bytes=rb;
++#ifdef LUMIBRI_P2P
++    {   /* which slots route: dense layers hold no experts, and the MTP row
++         * at index n_layers only exists when the model has one. Same rule as
++         * the tier fill below. */
++        int nl=c->n_layers, slots=nl+1;
++        unsigned char *routed=calloc((size_t)slots,1);
++        for(int li=0;li<slots;li++)
++            routed[li]=(li<nl&&m->L[li].sparse)||(li==nl&&m->has_mtp);
++        lumi_init_ex(slots, c->n_experts, c->hidden, routed);
++        free(routed);
++        atexit(lumi_report);
++    }
++#endif
+ }
+ 
+ /* embed: dequantizza la riga del token (scala per-riga) in x[hidden] */
+@@ -4015,6 +4035,17 @@
+         int e=idxs[(int64_t)s*K+kk];
+         if(!seen[e]){ seen[e]=1; uniq[nu++]=e; }
+     }
++#ifdef LUMIBRI_P2P
++    if(lumi_layer_on(layer)){
++        /* The routed experts run on peers, batched by expert exactly as the
++         * loop below would batch them — anything else is different floats.
++         * Routing (above), the weighted sum and FASE E's shared expert stay
++         * here; emptying the union is what makes FASE C/D find nothing left
++         * to resolve or compute. */
++        lumi_moe_apply_batch(layer, idxs, ws, keff, K, x, S, D, out);
++        nu=0;
++    }
++#endif
+     /* EXPERT_BUDGET: cap distinct experts per layer to reduce disk I/O on cold/low-RAM
+      * hosts. MISS-AWARE: always keep cache hits (pin/LRU — they're free, no disk I/O),
+      * only drop from misses. From the misses, keep the highest-aggregate-gate-weight

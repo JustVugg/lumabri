@@ -1,5 +1,4 @@
 diff --git a/c/olmoe.c b/c/olmoe.c
-index 325a8b5..9ccc94a 100644
 --- a/c/olmoe.c
 +++ b/c/olmoe.c
 @@ -38,6 +38,13 @@
@@ -7,31 +6,32 @@ index 325a8b5..9ccc94a 100644
  #include "route_trace.h"                    /* shared routing telemetry (#700) */
  
 +#ifdef LUMIBRI_P2P
-+/* Local research build only (never in the default target): with
-+ * LUMIBRI_EXPERTS set, the routed experts run on peers instead of being read
-+ * from disk. Inert unless that variable is present. */
++/* lumabri: with a tracker (or LUMABRI_EXPERTS) the routed experts run on
++ * peers instead of being read from disk. Inert without the define, and inert
++ * at runtime unless the swarm can cover every expert. */
 +#include "lumibri_client.h"
 +#endif
 +
  #ifdef _WIN32
  #include <windows.h>
  #define sleep_ms(ms) Sleep(ms)
-@@ -347,6 +354,9 @@ static void model_init(Model *m, const char *snap, int cap, int bits) {
+@@ -347,6 +354,10 @@
      if (cl < 0.1f) cl = 0.1f; if (cl > 1.0f) cl = 1.0f;
      m->pilot_conf_limit = cl;
      m->dense_load_s = now_s() - t0;
 +#ifdef LUMIBRI_P2P
 +    lumi_init(c->n_layers, c->n_experts, c->hidden);
++    atexit(lumi_report);
 +#endif
  
      // Persistent Hot Pinning: try to load hot_pinned.bin
      char pinpath[512];
-@@ -666,6 +676,12 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
+@@ -666,6 +677,12 @@
              if (freq_l) for (int kk = 0; kk < K; kk++) if (idx[kk] >= 0) freq_l[idx[kk]]++;
          }
          const float *xs = x + (int64_t)s*D;
 +#ifdef LUMIBRI_P2P
-+        if (L.on) {   /* the K experts run on peers; routing and the sum stay here */
++        if (lumi_layer_on(layer)) {   /* the K experts run on peers; routing and the sum stay here */
 +            lumi_moe_apply(layer, idx, val, K, xs, D, out + (int64_t)s*D);
 +            continue;
 +        }
@@ -39,13 +39,3 @@ index 325a8b5..9ccc94a 100644
          for (int kk = 0; kk < K; kk++) {
              Slot *e; expert_get(m, layer, idx[kk], &e);
              matmul_q(g, xs, e->g, e->gs, D, I);     /* gate_proj [I,D] */
-@@ -1202,6 +1218,9 @@ int main(int argc, char **argv) {
-     { const char *up = getenv("COLI_USAGE");
-       if (up && *up) rt_save(up, 0); }              /* same bytes as every other engine */
-     printf("Speed: %.2f tok/s (%.1fs for %d tokens)\n", n_new/dt, dt, n_new);
-+#ifdef LUMIBRI_P2P
-+    lumi_report();
-+#endif
-     free(buf); free(arena);
-     return 0;
- }

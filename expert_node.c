@@ -5,10 +5,28 @@
  * Per call: 4 KB in, 4 KB out, whatever the expert's size on disk.
  *
  * Bit-identity is the whole point, so this file does not re-implement the
- * expert math: it #includes olmoe.c (main neutralised — the same pattern the
- * project's own tests use to reach engine statics) and calls the very same
- * matmul_q / SwiGLU the local path uses, on weights read by the very same
- * loader. Remote and local cannot drift, because they are one source.
+ * expert math: it #includes the engine's own source (main neutralised — the
+ * same pattern the project's own tests use to reach engine statics) and
+ * calls the very same kernels the local path uses, on weights read by the
+ * very same loader. Remote and local cannot drift, because they are one
+ * source.
+ *
+ * The engines do not share a shape, so everything engine-specific lives
+ * behind one small contract, one header per engine in expert_engines/:
+ *
+ *   LmbeSlot                one expert's weights, engine-shaped
+ *   lmbe_open(dir,cap,bits) load whatever the loader needs; `bits` is the
+ *                           engine's expert quantization and must match the
+ *                           chatter's or the two hold different weights
+ *   lmbe_n_slots()          layer slots that can hold experts — n_layers for
+ *                           olmoe, n_layers+1 for colibri (the MTP slot)
+ *   lmbe_n_experts/hidden/inter()
+ *   lmbe_routed(slot)       0 for a dense layer: it has no experts to hold
+ *   lmbe_slot_init/load()   allocate once, then load any expert into it
+ *   lmbe_scratch_new/free() per-call buffers
+ *   lmbe_apply()            one expert, one row — the engine's own kernels
+ *
+ * Build one binary per engine: -DLMBE_ENGINE=colibri gives expert_node_glm.
  *
  * Two residency modes, the colibri way:
  *   default        every held expert loaded into RAM at startup
@@ -29,9 +47,10 @@
  *   ./expert_node --model DIR --port 7401 [--layers 0,2,4 | --stride N:OFF]
  *                 [--cache N] [--tracker H:P] [--model-name S] [--name S]
  */
-#define main olmoe_main_unused
-#include "../moe-stream/c/olmoe.c"
-#undef main
+#ifndef LMBE_ENGINE_HEADER
+#define LMBE_ENGINE_HEADER "expert_engines/olmoe.h"
+#endif
+#include LMBE_ENGINE_HEADER
 
 #include "lumabri_proto.h"
 
@@ -57,7 +76,7 @@ static void maybe_corrupt_out(float *out) {
     if (t_cseed % 1000000u < (unsigned)g_corrupt_ppm) out[0] += 1.0f;
 }
 
-typedef struct { int layer, eid; Slot slot; } Held;
+typedef struct { int layer, eid; LmbeSlot slot; } Held;
 
 /* one LRU slot of the --cache pool */
 typedef struct {
@@ -65,12 +84,12 @@ typedef struct {
     int refs, loading;
     uint64_t stamp;
     int allocated;
-    Slot slot;
+    LmbeSlot slot;
 } CSlot;
 
 static struct {
-    Model M;
-    uint8_t *holds;             /* [n_layers * n_experts] 1 = this node's expert */
+    int n_slots, n_experts, hidden, inter;
+    uint8_t *holds;             /* [n_slots * n_experts] 1 = this node's expert */
     int nholds;
     /* resident mode */
     Held *held; int nheld;
@@ -107,7 +126,7 @@ static void send_err(int fd, const char *msg) {
  * Hot expert: one table walk. Cold expert: one disk read, ~ms on NVMe. */
 
 static CSlot *cache_acquire(int layer, int eid) {
-    int gid = layer * g.M.c.n_experts + eid;
+    int gid = layer * g.n_experts + eid;
     pthread_mutex_lock(&g.c_lk);
     for (;;) {
         CSlot *hit = NULL, *victim = NULL;
@@ -131,9 +150,8 @@ static CSlot *cache_acquire(int layer, int eid) {
         pthread_mutex_unlock(&g.c_lk);
 
         pthread_mutex_lock(&g.load_lk);
-        if (!victim->allocated) { slot_ensure_allocated(&g.M, &victim->slot); victim->allocated = 1; }
-        load_expert_merged(&g.M, layer, eid, &victim->slot);
-        victim->slot.eid = eid;
+        if (!victim->allocated) { lmbe_slot_init(&victim->slot); victim->allocated = 1; }
+        lmbe_slot_load(layer, eid, &victim->slot);
         pthread_mutex_unlock(&g.load_lk);
         atomic_fetch_add(&g.cold, 1);
 
@@ -152,48 +170,51 @@ static void cache_release(CSlot *s) {
     pthread_mutex_unlock(&g.c_lk);
 }
 
-/* The expert, exactly as olmoe.c's moe() computes it — same kernels, same
- * order. The routing weight and the accumulation stay with the chatter: they
- * are the model's semantics, not the peer's business. */
-static void expert_apply(const Slot *e, const float *x, float *out,
-                         float *g_buf, float *u_buf) {
-    Cfg *c = &g.M.c;
-    int D = c->hidden, I = c->inter;
-    matmul_q(g_buf, x, e->g, e->gs, D, I);
-    matmul_q(u_buf, x, e->u, e->us, D, I);
-    for (int i = 0; i < I; i++) { float gv = g_buf[i]; g_buf[i] = (gv / (1.f + expf(-gv))) * u_buf[i]; }
-    matmul_q(out, g_buf, e->d, e->ds, I, D);
-}
-
+/* One request = every row the chatter's layer routed to this expert. It has
+ * to be all of them at once: an engine that computes nr rows in one call
+ * does not produce the same floats as nr calls of one row, and byte identity
+ * with the local path is the entire claim of this project. */
 static int handle_exec(int fd, LmbMsg *m) {
-    Cfg *c = &g.M.c;
     LmbCur cur = { m->body, m->body_len, 0 };
-    uint32_t layer, eid, dim;
+    uint32_t layer, eid, dim, nrows = 1;
     if (lmb_cur_u32(&cur, &layer) || lmb_cur_u32(&cur, &eid) || lmb_cur_u32(&cur, &dim)) {
         send_err(fd, "bad exec header"); return -1;
     }
-    if ((int)layer >= c->n_layers || (int)eid >= c->n_experts ||
-        (int)dim != c->hidden || m->pay_len != dim * sizeof(float)) {
+    lmb_cur_u32(&cur, &nrows);            /* absent in the single-row dialect */
+    if (nrows < 1 || nrows > (1u << 16)) { send_err(fd, "bad row count"); return -1; }
+    if ((int)layer >= g.n_slots || (int)eid >= g.n_experts ||
+        (int)dim != g.hidden ||
+        m->pay_len != (uint32_t)((size_t)nrows * dim * sizeof(float))) {
         send_err(fd, "exec shape mismatch"); return -1;
     }
-    int gid = (int)layer * c->n_experts + (int)eid;
+    int gid = (int)layer * g.n_experts + (int)eid;
     if (!g.holds[gid]) { send_err(fd, "expert not held by this node"); return 0; }
 
-    float *out = falloc(c->hidden);
-    float *gb = falloc(c->inter), *ub = falloc(c->inter);
+    /* one scratch per connection thread: the kernels are called concurrently */
+    static __thread void *scratch;
+    static __thread int scratch_rows;
+    if (!scratch || scratch_rows < (int)nrows) {
+        if (scratch) lmbe_scratch_free(scratch);
+        scratch = lmbe_scratch_new((int)nrows);
+        scratch_rows = (int)nrows;
+    }
+
+    size_t obytes = (size_t)nrows * g.hidden * sizeof(float);
+    float *out = falloc((int64_t)nrows * g.hidden);
     double t0 = nowd();
     if (g.ncs) {
         CSlot *s = cache_acquire((int)layer, (int)eid);
-        expert_apply(&s->slot, (const float *)m->pay, out, gb, ub);
+        lmbe_apply(&s->slot, (int)layer, (const float *)m->pay, out, (int)nrows, scratch);
         cache_release(s);
     } else {
-        expert_apply(&g.held[g.index[gid]].slot, (const float *)m->pay, out, gb, ub);
+        lmbe_apply(&g.held[g.index[gid]].slot, (int)layer,
+                   (const float *)m->pay, out, (int)nrows, scratch);
     }
     double dt = nowd() - t0;
     maybe_corrupt_out(out);
     lmb_emu_delay();   /* the reply's flight time, when one is being emulated */
-    int rc = lmb_send(fd, LMB_EXEC_R, NULL, 0, out, (uint32_t)(c->hidden * sizeof(float)));
-    free(out); free(gb); free(ub);
+    int rc = lmb_send(fd, LMB_EXEC_R, NULL, 0, out, (uint32_t)obytes);
+    free(out);
 
     atomic_fetch_add(&g.calls, 1);
     pthread_mutex_lock(&g.stat_lk); g.busy_s += dt; pthread_mutex_unlock(&g.stat_lk);
@@ -201,16 +222,15 @@ static int handle_exec(int fd, LmbMsg *m) {
 }
 
 static int handle_emanifest(int fd) {
-    Cfg *c = &g.M.c;
     LmbBuf b = {0};
     lmb_buf_u32(&b, (uint32_t)g.nholds);
-    for (int l = 0; l < c->n_layers; l++)
-        for (int e = 0; e < c->n_experts; e++)
-            if (g.holds[l * c->n_experts + e]) {
+    for (int l = 0; l < g.n_slots; l++)
+        for (int e = 0; e < g.n_experts; e++)
+            if (g.holds[l * g.n_experts + e]) {
                 lmb_buf_u32(&b, (uint32_t)l);
                 lmb_buf_u32(&b, (uint32_t)e);
             }
-    lmb_buf_u32(&b, (uint32_t)c->hidden);
+    lmb_buf_u32(&b, (uint32_t)g.hidden);
     int rc = lmb_send(fd, LMB_EMANIFEST_R, b.p, (uint32_t)b.len, NULL, 0);
     free(b.p);
     return rc;
@@ -319,7 +339,7 @@ static int in_list(const int *list, int n, int v) {
 
 int main(int argc, char **argv) {
     const char *dir = NULL;
-    int port = 7401, stride = 1, offset = 0, cache = 0;
+    int port = 7401, stride = 1, offset = 0, cache = 0, bits = 8;
     int layers[512], nlayers = 0;
     snprintf(g.name, sizeof g.name, "node");
 
@@ -335,6 +355,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--advertise") && i + 1 < argc)
             snprintf(g.advertise, sizeof g.advertise, "%s", argv[++i]);
         else if (!strcmp(argv[i], "--cache") && i + 1 < argc) cache = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--bits") && i + 1 < argc) bits = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--stride") && i + 1 < argc)
             sscanf(argv[++i], "%d:%d", &stride, &offset);
         else if (!strcmp(argv[i], "--layers") && i + 1 < argc) {
@@ -344,7 +365,8 @@ int main(int argc, char **argv) {
         } else {
             fprintf(stderr, "usage: %s --model DIR [--port N] [--name S] "
                             "[--model-name S] [--tracker H:P] [--advertise H:P] "
-                            "[--cache N] [--stride N:OFF] [--layers a,b,c]\n", argv[0]);
+                            "[--cache N] [--bits N] [--stride N:OFF] "
+                            "[--layers a,b,c]\n", argv[0]);
             return 2;
         }
     }
@@ -375,21 +397,27 @@ int main(int argc, char **argv) {
                  g.name, g_corrupt_ppm);
       } }
 
-    load_cfg(&g.M.c, dir);
-    st_init(&g.M.S, dir);
-    Cfg *c = &g.M.c;
-    int cells = c->n_layers * c->n_experts;
+    lmbe_open(dir, cache, bits);
+    g.n_slots   = lmbe_n_slots();
+    g.n_experts = lmbe_n_experts();
+    g.hidden    = lmbe_hidden();
+    g.inter     = lmbe_inter();
+    int cells = g.n_slots * g.n_experts, dense = 0;
     g.holds = calloc((size_t)cells, 1);
-    for (int l = 0; l < c->n_layers; l++) {
+    for (int l = 0; l < g.n_slots; l++) {
+        if (!lmbe_routed(l)) { dense++; continue; }   /* a dense layer holds nothing */
         if (nlayers && !in_list(layers, nlayers, l)) continue;
-        for (int e = 0; e < c->n_experts; e++) {
-            int gid = l * c->n_experts + e;
+        for (int e = 0; e < g.n_experts; e++) {
+            int gid = l * g.n_experts + e;
             if (gid % stride != offset) continue;
             g.holds[gid] = 1;
             g.nholds++;
         }
     }
     if (!g.nholds) { fprintf(stderr, "[%s] no experts selected\n", g.name); return 1; }
+    if (dense)
+        printf("[%s] %s: %d of %d layer slots are dense and route nothing\n",
+               g.name, lmbe_engine_name(), dense, g.n_slots);
 
     double t0 = nowd();
     if (cache > 0) {
@@ -401,29 +429,28 @@ int main(int argc, char **argv) {
         g.cs = calloc((size_t)cache, sizeof(CSlot));
         for (int i = 0; i < cache; i++) g.cs[i].gid = -1;
         pthread_cond_init(&g.c_cv, NULL);
-        double mb = (double)cache * (3.0 * c->inter * c->hidden) / 1e6;
+        double mb = (double)cache * (3.0 * g.inter * g.hidden) / 1e6;
         printf("[%s] holding %d experts on disk · %d-slot RAM cache (%.0f MB) · "
                "hidden=%d inter=%d\n",
-               g.name, g.nholds, cache, mb, c->hidden, c->inter);
+               g.name, g.nholds, cache, mb, g.hidden, g.inter);
     } else {
         g.index = malloc((size_t)cells * sizeof(int));
         for (int i = 0; i < cells; i++) g.index[i] = -1;
         g.held = calloc((size_t)g.nholds, sizeof(Held));
-        for (int l = 0; l < c->n_layers; l++)
-            for (int e = 0; e < c->n_experts; e++) {
-                int gid = l * c->n_experts + e;
+        for (int l = 0; l < g.n_slots; l++)
+            for (int e = 0; e < g.n_experts; e++) {
+                int gid = l * g.n_experts + e;
                 if (!g.holds[gid]) continue;
                 Held *h = &g.held[g.nheld];
                 h->layer = l; h->eid = e;
-                slot_ensure_allocated(&g.M, &h->slot);
-                load_expert_merged(&g.M, l, e, &h->slot);
-                h->slot.eid = e;
+                lmbe_slot_init(&h->slot);
+                lmbe_slot_load(l, e, &h->slot);
                 g.index[gid] = g.nheld++;
             }
-        double mb = (double)g.nheld * (3.0 * c->inter * c->hidden) / 1e6;
+        double mb = (double)g.nheld * (3.0 * g.inter * g.hidden) / 1e6;
         printf("[%s] holding %d experts (%.0f MB resident) loaded in %.1fs · "
                "hidden=%d inter=%d\n",
-               g.name, g.nheld, mb, nowd() - t0, c->hidden, c->inter);
+               g.name, g.nheld, mb, nowd() - t0, g.hidden, g.inter);
     }
     fflush(stdout);
 
