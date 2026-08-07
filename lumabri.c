@@ -12,9 +12,16 @@
  * In-chat commands: /swarm (anonymous network status), /model (list and
  * switch model, restarting the engine), /reset, /quit.
  *
- * The engine protocol is the one run_chat() already speaks: a "\n> " prompt
- * on stdout marks readiness, one line in, the whole reply out. No engine
- * changes, no extra daemon: the TUI is just a careful parent process.
+ * The engines are taken exactly as they are, which means speaking both of
+ * the protocols colibri ships: olmoe's line dialect (CHAT=1, a "> " prompt)
+ * and everyone else's framed SERVE dialect (\x01\x01READY\x01\x01, streamed
+ * tokens, \x01\x01END\x01\x01 + STAT). Which one is in front of us is
+ * decided by whichever sentinel arrives first. No engine changes, no extra
+ * daemon: the TUI is just a careful parent process.
+ *
+ * `chat --local DIR` skips the swarm entirely and reads a model that is
+ * already on this disk — the right mode on the machine that serves it,
+ * where mirroring would mean a second copy of the same bytes.
  */
 #define _GNU_SOURCE
 #include <fcntl.h>
@@ -22,6 +29,7 @@
 #include <signal.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/wait.h>
 #include <time.h>
 
@@ -418,38 +426,124 @@ static int swarm_models(const char *tracker, char names[][64], int cap) {
     return out;
 }
 
-/* ---- the engine child --------------------------------------------------- */
+/* ---- the engine child ----------------------------------------------------
+ * Loading a model out of a swarm can take minutes, and for most of them the
+ * only honest thing to show is what the engine and the shim are actually
+ * doing. So: every line the child writes is kept (the last ETAIL of them),
+ * the interesting numbers are parsed out of it, and if the child dies we
+ * print that tail instead of a shrug. A silent failure here used to read as
+ * "engine did not start", which is true and useless. */
+
+#define ETAIL 120
 
 static struct {
-    volatile double net_mb;
-    volatile int spinning;
-} g_eng = {0};
+    volatile double net_mb;          /* fetched from the swarm this session */
+    volatile double rate_mbs;
+    volatile double total_gb;        /* the whole model, from the shim */
+    volatile double local_gb;        /* already in the mirror when we started */
+    volatile int    spinning;
+    volatile int    booting;
+    volatile double last_out;        /* when the child last said anything */
+    char            phase[160];      /* its own words for what it is doing */
+    char            tail[ETAIL][256];
+    int             ntail;
+    pthread_mutex_t lk;
+} g_eng = { .lk = PTHREAD_MUTEX_INITIALIZER };
+
+static void tail_push(const char *line) {
+    pthread_mutex_lock(&g_eng.lk);
+    snprintf(g_eng.tail[g_eng.ntail % ETAIL], sizeof g_eng.tail[0], "%s", line);
+    g_eng.ntail++;
+    pthread_mutex_unlock(&g_eng.lk);
+}
+
+/* what the child said before it died — the only thing worth printing then */
+static void tail_dump(int max) {
+    pthread_mutex_lock(&g_eng.lk);
+    int n = g_eng.ntail < ETAIL ? g_eng.ntail : ETAIL;
+    if (n > max) n = max;
+    int first = g_eng.ntail - n;
+    for (int i = first; i < g_eng.ntail; i++)
+        fprintf(stderr, "  %s│%s %s\n", C_GRAY, C_R, g_eng.tail[i % ETAIL]);
+    pthread_mutex_unlock(&g_eng.lk);
+}
 
 static void *stderr_thread(void *arg) {
     FILE *f = fdopen((int)(intptr_t)arg, "r");
     if (!f) return NULL;
     char line[512];
     while (fgets(line, sizeof line, f)) {
-        double mb;
-        if (sscanf(line, "[lumabri] net %lf MB", &mb) == 1) { g_eng.net_mb = mb; continue; }
+        size_t n = strlen(line);
+        while (n && (line[n-1] == '\n' || line[n-1] == '\r')) line[--n] = 0;
+        if (!n) continue;
+        tail_push(line);
+        g_eng.last_out = nowd();
+
+        double mb, rate, gb, pct;
+        if (sscanf(line, "[lumabri] net %lf MB", &mb) == 1) {
+            g_eng.net_mb = mb;
+            if (sscanf(strstr(line, "(") ? strstr(line, "(") : "", "(%lf MB/s", &rate) == 1)
+                g_eng.rate_mbs = rate;
+            continue;                       /* the spinner already shows this */
+        }
+        if (sscanf(line, "[lumabri] %*d files \xc2\xb7 %lf GB \xc2\xb7 %lf%%", &gb, &pct) == 2) {
+            g_eng.total_gb = gb;
+            g_eng.local_gb = gb * pct / 100.0;
+        }
+        /* while booting, everything: this is exactly when you need to see it */
+        if (g_eng.booting) {
+            snprintf(g_eng.phase, sizeof g_eng.phase, "%s", line);
+            if (!g_tty) fprintf(stderr, "  %s%s%s\n", C_DIM, line, C_R);
+            continue;
+        }
         if (strstr(line, "[lumabri]") || strstr(line, "resident weights") ||
             strstr(line, "[chat]") || strstr(line, "[USAGE]"))
-            fprintf(stderr, "%s  %s%s", C_DIM, line, C_R);
+            fprintf(stderr, "%s  %s%s\n", C_DIM, line, C_R);
     }
     fclose(f);
     return NULL;
 }
 
+/* one line, rewritten in place: the star, what it is doing, how far along */
 static void *spinner_thread(void *arg) {
     const char *verb = arg ? (const char *)arg : "thinking";
     const char *star[] = { "\xe2\x9c\xbb", "\xe2\x9c\xb2", "\xe2\x9c\xb3", "\xe2\x9c\xb2" };
     const char *tint[] = { "\x1b[38;5;209m", "\x1b[38;5;216m",
                            "\x1b[38;5;223m", "\x1b[38;5;216m" };
-    int i = 0;
+    double t0 = nowd();
+    int i = 0, stalled = 0;
     while (g_eng.spinning) {
-        fprintf(stderr, "\r%s%s%s %s%s\xe2\x80\xa6%s ",
-                tint[i & 3], star[i & 3], C_R, C_DIM, verb, C_R);
+        char what[200] = "";
+        if (g_eng.booting && g_eng.phase[0]) {
+            const char *p = g_eng.phase;
+            if (!strncmp(p, "[lumabri] ", 10)) p += 10;
+            snprintf(what, sizeof what, "%.*s", 68, p);
+        } else
+            snprintf(what, sizeof what, "%s", verb);
+
+        char prog[160] = "";
+        double got = g_eng.local_gb + g_eng.net_mb / 1000.0;
+        if (g_eng.booting && g_eng.total_gb > 0)
+            snprintf(prog, sizeof prog, " %s\xc2\xb7 %.1f/%.0f GB \xc2\xb7 %.0f MB/s%s",
+                     C_DIM, got, g_eng.total_gb, g_eng.rate_mbs, C_R);
+        else if (g_eng.booting && g_eng.net_mb > 0)
+            snprintf(prog, sizeof prog, " %s\xc2\xb7 %.0f MB%s", C_DIM, g_eng.net_mb, C_R);
+
+        fprintf(stderr, "\r\x1b[2K%s%s%s %s%s\xe2\x80\xa6%s%s %s%.0fs%s",
+                tint[i & 3], star[i & 3], C_R, C_DIM, what, C_R, prog,
+                C_GRAY, nowd() - t0, C_R);
         fflush(stderr);
+
+        /* nothing from the child and nothing off the wire: say so once, with
+         * the two things that actually explain it */
+        if (!stalled && g_eng.booting && g_eng.last_out > 0 &&
+            nowd() - g_eng.last_out > 90 && g_eng.rate_mbs < 0.05) {
+            fprintf(stderr, "\r\x1b[2K  %s90s senza un byte n\xc3\xa9 una riga dal motore. "
+                            "Se \xc3\xa8 la prima volta pu\xc3\xb2 essere l'hashing del modello "
+                            "lato server; altrimenti guarda `df -h` e `dmesg | tail`.%s\n",
+                    C_DIM, C_R);
+            stalled = 1;
+        }
         i++;
         usleep(160 * 1000);
     }
@@ -457,11 +551,39 @@ static void *spinner_thread(void *arg) {
     return NULL;
 }
 
+/* ---- the two engine dialects ---------------------------------------------
+ * colibri ships several engines and they do NOT speak the same protocol:
+ *
+ *   olmoe            CHAT=1. Readiness and end of turn are both a "> "
+ *                    prompt; one line in, the whole reply out.
+ *   colibri (glm),   SERVE=1. Framed and streaming: \x01\x01READY\x01\x01
+ *   deepseek,        once after the load, then every turn streams its tokens
+ *   kimi_k3,         and closes with \x01\x01END\x01\x01 plus a STAT line.
+ *   inkling          Reset is the control byte line \x02RESET.
+ *
+ * We set both variables — each engine ignores the one that is not its own —
+ * and learn which dialect we are hearing from whichever sentinel arrives
+ * first. This used to assume olmoe unconditionally, so with any other engine
+ * we waited for a "> " that would never come, until the child exited: the
+ * "engine did not start" that had nothing to do with starting.
+ */
+#define FRAME_READY "\x01\x01" "READY" "\x01\x01"
+#define FRAME_END   "\x01\x01" "END" "\x01\x01"
+
+typedef enum { PROTO_UNKNOWN = 0, PROTO_LINE, PROTO_FRAMED } Proto;
+typedef struct { pid_t pid; int to, from; Proto proto; } Engine;
+
 static char *read_until_prompt(int fd) {
     size_t cap = 8192, len = 0;
     char *buf = malloc(cap);
+    if (!buf) return NULL;
     for (;;) {
-        if (len + 512 > cap) { cap *= 2; buf = realloc(buf, cap); }
+        if (len + 512 + 1 > cap) {
+            cap *= 2;
+            char *nb = realloc(buf, cap);
+            if (!nb) { free(buf); return NULL; }
+            buf = nb;
+        }
         ssize_t r = read(fd, buf + len, 512);
         if (r <= 0) { free(buf); return NULL; }
         len += (size_t)r;
@@ -474,6 +596,81 @@ static char *read_until_prompt(int fd) {
     }
 }
 
+/* Wait for readiness in either dialect, and remember which one it was.
+ * Returns 0, or -1 if the child died first. */
+static int engine_wait_ready(Engine *e) {
+    size_t cap = 8192, len = 0;
+    char *buf = malloc(cap);
+    if (!buf) return -1;
+    for (;;) {
+        if (len + 512 + 1 > cap) {
+            cap *= 2;
+            char *nb = realloc(buf, cap);
+            if (!nb) { free(buf); return -1; }
+            buf = nb;
+        }
+        ssize_t r = read(e->from, buf + len, 512);
+        if (r <= 0) { free(buf); return -1; }
+        len += (size_t)r;
+        buf[len] = 0;
+        if (memmem(buf, len, FRAME_READY, strlen(FRAME_READY)))
+            { e->proto = PROTO_FRAMED; free(buf); return 0; }
+        if ((len >= 3 && !memcmp(buf + len - 3, "\n> ", 3)) ||
+            (len == 2 && !memcmp(buf, "> ", 2)))
+            { e->proto = PROTO_LINE; free(buf); return 0; }
+    }
+}
+
+/* Framed turn: print the tokens as they arrive, stop at the END sentinel,
+ * then pick up the STAT line that follows it. */
+static int stream_until_end(Engine *e, char *statline, size_t scap) {
+    const char *S = FRAME_END;
+    size_t SL = strlen(S), cap = 8192, len = 0, shown = 0;
+    char *buf = malloc(cap), *hit = NULL;
+    if (statline && scap) statline[0] = 0;
+    if (!buf) return -1;
+    for (;;) {
+        if (len + 1024 + 1 > cap) {
+            cap *= 2;
+            char *nb = realloc(buf, cap);
+            if (!nb) { free(buf); return -1; }
+            buf = nb;
+        }
+        ssize_t r = read(e->from, buf + len, 1024);
+        if (r <= 0) { free(buf); return -1; }
+        len += (size_t)r;
+        buf[len] = 0;
+        hit = memmem(buf, len, S, SL);
+        /* hold back SL-1 bytes: a sentinel may straddle two reads */
+        size_t safe = hit ? (size_t)(hit - buf) : (len > SL ? len - SL : 0);
+        if (safe > shown) {
+            fwrite(buf + shown, 1, safe - shown, stdout);
+            fflush(stdout);
+            shown = safe;
+        }
+        if (hit) break;
+    }
+    size_t after = (size_t)(hit - buf) + SL;
+    char rest[256];
+    size_t rl = len > after ? len - after : 0;
+    if (rl > sizeof rest - 1) rl = sizeof rest - 1;
+    if (rl) memcpy(rest, buf + after, rl);
+    rest[rl] = 0;
+    free(buf);
+    for (;;) {
+        char *st = strstr(rest, "STAT "), *nl = st ? strchr(st, '\n') : NULL;
+        if (nl) {
+            if (statline && scap) snprintf(statline, scap, "%.*s", (int)(nl - st), st);
+            return 0;
+        }
+        if (rl + 1 >= sizeof rest) return 0;             /* no STAT: harmless */
+        ssize_t r = read(e->from, rest + rl, sizeof rest - 1 - rl);
+        if (r <= 0) return 0;
+        rl += (size_t)r;
+        rest[rl] = 0;
+    }
+}
+
 static const char *engine_for(const char *model_type) {
     if (strstr(model_type, "olmoe")) return "olmoe";
     if (strstr(model_type, "deepseek")) return "deepseek";
@@ -482,15 +679,24 @@ static const char *engine_for(const char *model_type) {
     return "colibri";
 }
 
-typedef struct { pid_t pid; int to, from; } Engine;
-
+/* `local_dir` non-NULL: the model is already on this disk, so no shim, no
+ * mirror, no second copy. That is the right mode on the machine that serves
+ * the model — otherwise chatting there downloads it from itself. */
 static int engine_spawn(const char *engine, const char *shim, const char *tracker,
-                        const char *model, int ctx, int max_new, Engine *e) {
+                        const char *model, const char *local_dir,
+                        int ctx, int max_new, int cap_experts, Engine *e) {
     const char *home = getenv("HOME") ? getenv("HOME") : ".";
     char vroot[1024], cache[1024];
     snprintf(vroot, sizeof vroot, "%s/.lumabri/%s/vroot", home, model);
     snprintf(cache, sizeof cache, "%s/.lumabri/%s/cache", home, model);
-    mkdir_p(cache);   /* vroot stays virtual on purpose */
+    if (!local_dir) mkdir_p(cache);   /* vroot stays virtual on purpose */
+
+    /* olmoe takes <cap> <bits>; the SERVE-mode engines take <cap> alone and
+     * read the quantization out of the file — passing bits there would
+     * override what the model actually is */
+    int line_proto = strstr(engine, "olmoe") != NULL;
+    char cap_s[32];
+    snprintf(cap_s, sizeof cap_s, "%d", cap_experts);
 
     int in_pipe[2], out_pipe[2], err_pipe[2];
     if (pipe(in_pipe) || pipe(out_pipe) || pipe(err_pipe)) return -1;
@@ -501,27 +707,62 @@ static int engine_spawn(const char *engine, const char *shim, const char *tracke
         char env_ctx[32], env_new[32];
         snprintf(env_ctx, sizeof env_ctx, "%d", ctx);
         snprintf(env_new, sizeof env_new, "%d", max_new);
-        setenv("LD_PRELOAD", shim, 1);
-        setenv("LUMABRI_VROOT", vroot, 1);
-        setenv("LUMABRI_CACHE", cache, 1);
-        setenv("LUMABRI_TRACKER", tracker, 1);
-        setenv("LUMABRI_MODEL", model, 1);
-        setenv("LUMABRI_STATS", "5", 1);
-        setenv("SNAP", vroot, 1);
-        setenv("CHAT", "1", 1);
+        if (local_dir) {
+            setenv("SNAP", local_dir, 1);
+        } else {
+            setenv("LD_PRELOAD", shim, 1);
+            setenv("LUMABRI_VROOT", vroot, 1);
+            setenv("LUMABRI_CACHE", cache, 1);
+            setenv("LUMABRI_TRACKER", tracker, 1);
+            setenv("LUMABRI_MODEL", model, 1);
+            setenv("LUMABRI_STATS", "2", 1);       /* boot progress, not a log */
+            setenv("SNAP", vroot, 1);
+        }
+        setenv("CHAT", "1", 1);                    /* olmoe's dialect */
+        setenv("SERVE", "1", 1);                   /* everyone else's */
+        setenv("KV_SLOTS", "1", 1);
         setenv("CTX", env_ctx, 1);
         setenv("MAX_NEW", env_new, 1);
-        char *eargv[] = { (char *)engine, "64", "8", NULL };
+        setenv("NGEN", env_new, 1);                /* SERVE mode calls it NGEN */
+        char *eargv[] = { (char *)engine, cap_s, line_proto ? "8" : NULL, NULL };
         execv(engine, eargv);
         perror(engine);
         _exit(127);
     }
     close(in_pipe[0]); close(out_pipe[1]); close(err_pipe[1]);
     e->pid = pid; e->to = in_pipe[1]; e->from = out_pipe[0];
+    e->proto = PROTO_UNKNOWN;
     pthread_t t;
     pthread_create(&t, NULL, stderr_thread, (void *)(intptr_t)err_pipe[0]);
     pthread_detach(t);
     return 0;
+}
+
+/* Why the child is gone, in the words of the kernel and of the child. */
+static void engine_diag(Engine *e) {
+    int st = 0;
+    if (e->pid > 0 && waitpid(e->pid, &st, WNOHANG) == e->pid) {
+        e->pid = 0;
+        if (WIFSIGNALED(st)) {
+            int s = WTERMSIG(st);
+            printf("  %sil motore è stato ucciso dal kernel (segnale %d: %s)%s\n",
+                   C_RED, s, strsignal(s), C_R);
+            if (s == SIGKILL)
+                printf("  %squasi sempre è la RAM: `dmesg | grep -i oom` lo conferma. "
+                       "Riduci --ctx e --cap, o prendi una macchina con più memoria.%s\n",
+                       C_DIM, C_R);
+        } else if (WIFEXITED(st)) {
+            int c = WEXITSTATUS(st);
+            printf("  %sil motore è uscito con codice %d%s\n", C_RED, c, C_R);
+            if (c == 127)
+                printf("  %sil binario non è partito affatto: libreria mancante? "
+                       "provalo a mano con `ldd`.%s\n", C_DIM, C_R);
+        }
+    } else
+        printf("  %sil motore ha chiuso il suo stdout senza dire di essere pronto%s\n",
+               C_RED, C_R);
+    printf("  %sultime righe del motore:%s\n", C_DIM, C_R);
+    tail_dump(25);
 }
 
 static void engine_stop(Engine *e) {
@@ -552,36 +793,90 @@ static int resolve_engine(const char *engines_dir, const char *engine_path,
     return access(out, X_OK);
 }
 
-/* boot one model: inspect, resolve, spawn, wait for the prompt */
+/* Is there room for the mirror? The chatter keeps its own copy of every
+ * block it touches, so a 300 GB model needs 300 GB here — the single most
+ * common way this goes wrong, and it goes wrong hours in, silently. */
+static void disk_preflight(const char *model, uint64_t model_bytes) {
+    const char *home = getenv("HOME") ? getenv("HOME") : ".";
+    char cache[1024];
+    snprintf(cache, sizeof cache, "%s/.lumabri", home);
+    mkdir_p(cache);
+    struct statvfs vfs;
+    if (statvfs(cache, &vfs)) return;
+    double free_gb = (double)vfs.f_bavail * (double)vfs.f_frsize / 1e9;
+    double need_gb = (double)model_bytes / 1e9;
+    printf("  %smirror in %s: %.0f GB liberi. Tiene solo i blocchi che tocchi "
+           "— la parte densa sempre, gli esperti solo se nessun peer li esegue "
+           "(al limite %.0f GB)%s\n",
+           C_DIM, cache, free_gb, need_gb, C_R);
+    /* the dense part is the floor; a tenth of the model is a generous guess
+     * at it, and below that even a warm phase-2 chatter cannot boot */
+    if (free_gb < need_gb * 0.1)
+        printf("  %s⚠ %.0f GB liberi non bastano nemmeno per la parte densa. "
+               "Se il modello è già su questo disco usa `--local DIR`: la chat "
+               "lo legge dov'è, senza copiarne un byte.%s\n",
+               C_RED, free_gb, C_R);
+    else if (free_gb < need_gb)
+        printf("  %snon c'è spazio per il modello intero: va bene finché gli "
+               "esperti girano sui peer, ma se lo sciame si svuota la chat si "
+               "ferma per disco pieno.%s\n", C_DIM, C_R);
+}
+
+/* boot one model: inspect, resolve, spawn, wait for readiness */
 static int model_boot(const char *tracker, const char *model, const char *shim,
                       const char *engines_dir, const char *engine_path,
-                      int ctx, int max_new, Engine *e, Swarm *sw) {
-    if (swarm_inspect(tracker, model, sw)) {
-        printf("  %smodel %s: nobody on the swarm has it%s\n", C_RED, model, C_R);
-        return -1;
+                      const char *local_dir, int ctx, int max_new, int cap_experts,
+                      Engine *e, Swarm *sw) {
+    char mtype[64] = "";
+    memset(sw, 0, sizeof *sw);
+    if (local_dir) {
+        local_model_type(local_dir, mtype, sizeof mtype);
+        printf("  %smodello locale %s%s%s%s · niente rete, niente mirror%s\n",
+               C_DIM, C_R, C_BOLD, local_dir, C_DIM, C_R);
+    } else {
+        printf("  %schiedo allo sciame chi ha %s…%s\n", C_DIM, model, C_R);
+        if (swarm_inspect(tracker, model, sw)) {
+            printf("  %smodel %s: nobody on the swarm has it%s\n", C_RED, model, C_R);
+            return -1;
+        }
+        snprintf(mtype, sizeof mtype, "%s", sw->model_type);
+        printf("  %s%d file · %.0f GB · %d peer · tipo %s%s\n", C_DIM,
+               sw->nfiles, (double)sw->total_bytes / 1e9, sw->npeers,
+               mtype[0] ? mtype : "?", C_R);
+        disk_preflight(model, sw->total_bytes);
     }
+
     char engine[1200];
-    if (resolve_engine(engines_dir, engine_path, sw->model_type, engine, sizeof engine)) {
+    if (resolve_engine(engines_dir, engine_path, mtype, engine, sizeof engine)) {
         printf("  %sengine not found: %s%s\n"
                "  point me at a colibri build with --engine or --engines-dir\n",
                C_RED, engine, C_R);
         return -1;
     }
-    if (engine_spawn(engine, shim, tracker, model, ctx, max_new, e)) return -1;
+    printf("  %smotore %s%s\n", C_DIM, engine, C_R);
+    if (!local_dir)
+        printf("  %sora scarico la parte densa una volta sola — gli esperti "
+               "restano sullo sciame%s\n", C_DIM, C_R);
 
+    if (engine_spawn(engine, shim, tracker, model, local_dir,
+                     ctx, max_new, cap_experts, e)) return -1;
+
+    g_eng.booting = 1;
+    g_eng.last_out = nowd();
     g_eng.spinning = 1;
     pthread_t tspin;
     if (g_tty) pthread_create(&tspin, NULL, spinner_thread, (void *)"lo sciame si scalda");
     double t0 = nowd();
-    char *banner = read_until_prompt(e->from);
+    int ready = engine_wait_ready(e);
     g_eng.spinning = 0;
     if (g_tty) pthread_join(tspin, NULL);
-    if (!banner) {
-        printf("  %sengine did not start%s\n", C_RED, C_R);
+    g_eng.booting = 0;
+    if (ready) {
+        printf("  %s✗ il motore non è arrivato a essere pronto%s\n", C_RED, C_R);
+        engine_diag(e);
         engine_stop(e);
         return -1;
     }
-    free(banner);
     printf("  %s\xe2\x9c\x93 %s pronto in %.1fs%s%s · net %.0f MB · "
            "/swarm /model /reset /quit%s\n",
            C_GRN, model, nowd() - t0, C_R, C_DIM, g_eng.net_mb, C_R);
@@ -591,37 +886,51 @@ static int model_boot(const char *tracker, const char *model, const char *shim,
 static int cmd_chat(int argc, char **argv) {
     const char *tracker = "127.0.0.1:7300";
     const char *engine_path = NULL, *engines_dir = getenv("LUMABRI_ENGINES");
-    const char *want_model = NULL;
-    int max_new = 256, ctx = 2048;
+    const char *want_model = NULL, *local_dir = NULL;
+    int max_new = 256, ctx = 2048, cap_experts = 64;
     for (int i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "--tracker") && i + 1 < argc) tracker = argv[++i];
         else if (!strcmp(argv[i], "--engine") && i + 1 < argc) engine_path = argv[++i];
         else if (!strcmp(argv[i], "--engines-dir") && i + 1 < argc) engines_dir = argv[++i];
         else if (!strcmp(argv[i], "--model") && i + 1 < argc) want_model = argv[++i];
+        else if (!strcmp(argv[i], "--local") && i + 1 < argc) local_dir = argv[++i];
         else if (!strcmp(argv[i], "--max-new") && i + 1 < argc) max_new = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--ctx") && i + 1 < argc) ctx = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--cap") && i + 1 < argc) cap_experts = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--plain")) g_tty = 0;
         else { fprintf(stderr, "usage: lumabri chat [--tracker H:P] [--model NAME] "
-                               "[--engine BIN] [--engines-dir DIR] [--max-new N] [--ctx N]\n");
+                               "[--local DIR] [--engine BIN] [--engines-dir DIR]\n"
+                               "                    [--max-new N] [--ctx N] [--cap N]\n");
                return 2; }
     }
 
     char models[16][64];
-    int nmodels = swarm_models(tracker, models, 16);
-    if (nmodels <= 0) {
-        fprintf(stderr, "%sno swarm at %s%s\n"
-                        "start one with:  lumabri serve --model <dir>\n", C_RED, tracker, C_R);
-        return 1;
-    }
+    int nmodels = 0;
     char model[64];
-    snprintf(model, sizeof model, "%s", want_model ? want_model : models[0]);
+    if (local_dir) {
+        const char *base = strrchr(local_dir, '/');
+        snprintf(model, sizeof model, "%s", base && base[1] ? base + 1 : local_dir);
+    } else {
+        nmodels = swarm_models(tracker, models, 16);
+        if (nmodels <= 0) {
+            fprintf(stderr, "%sno swarm at %s%s\n"
+                            "start one with:  lumabri serve --model <dir>\n"
+                            "or chat with a model already on this disk:  "
+                            "lumabri chat --local <dir>\n", C_RED, tracker, C_R);
+            return 1;
+        }
+        snprintf(model, sizeof model, "%s", want_model ? want_model : models[0]);
+    }
 
     char dir[1024], shim[1200];
     exe_dir(dir, sizeof dir);
     snprintf(shim, sizeof shim, "%s/liblumabri.so", dir);
     if (access(shim, R_OK))       /* installed layout: bin/../lib/lumabri/ */
         snprintf(shim, sizeof shim, "%s/../lib/lumabri/liblumabri.so", dir);
-    if (access(shim, R_OK)) { fprintf(stderr, "liblumabri.so missing; run make (or make install)\n"); return 1; }
+    if (!local_dir && access(shim, R_OK)) {
+        fprintf(stderr, "liblumabri.so missing; run make (or make install)\n");
+        return 1;
+    }
 
     Swarm sw;
     Engine eng = {0};
@@ -651,7 +960,8 @@ static int cmd_chat(int argc, char **argv) {
         printf("  %s(/model per cambiare)%s\n", C_DIM, C_R);
     }
 
-    if (model_boot(tracker, model, shim, engines_dir, engine_path, ctx, max_new, &eng, &sw))
+    if (model_boot(tracker, model, shim, engines_dir, engine_path, local_dir,
+                   ctx, max_new, cap_experts, &eng, &sw))
         return 1;
 
     char line[4096];
@@ -675,6 +985,7 @@ static int cmd_chat(int argc, char **argv) {
         if (!strncmp(line, "/model", 6)) {
             const char *arg = line + 6;
             while (*arg == ' ') arg++;
+            if (local_dir) { printf("  %s--local: un modello solo%s\n", C_DIM, C_R); continue; }
             nmodels = swarm_models(tracker, models, 16);
             if (!*arg) {
                 printf("  %smodelli:%s", C_DIM, C_R);
@@ -687,40 +998,72 @@ static int cmd_chat(int argc, char **argv) {
             if (!strcmp(arg, model)) { printf("  %sgià su %s%s\n", C_DIM, model, C_R); continue; }
             engine_stop(&eng);
             snprintf(model, sizeof model, "%s", arg);
-            if (model_boot(tracker, model, shim, engines_dir, engine_path,
-                           ctx, max_new, &eng, &sw))
+            if (model_boot(tracker, model, shim, engines_dir, engine_path, local_dir,
+                           ctx, max_new, cap_experts, &eng, &sw))
                 return 1;
             continue;
         }
 
-        line[L] = '\n';
-        if (write(eng.to, line, L + 1) < 0) break;
-        line[L] = 0;
-        if (!strcmp(line, "/reset")) {
-            printf("  %s\xe2\x9c\xa6 nuova conversazione%s\n", C_DIM, C_R);
-            continue;
+        int is_reset = !strcmp(line, "/reset");
+        if (eng.proto == PROTO_FRAMED) {
+            /* framed dialect: reset is a control byte, everything else is the
+             * prompt line as-is */
+            const char *send = is_reset ? "\x02RESET" : line;
+            if (write(eng.to, send, strlen(send)) < 0) break;
+            if (write(eng.to, "\n", 1) < 0) break;
+        } else {
+            line[L] = '\n';
+            if (write(eng.to, line, L + 1) < 0) break;
+            line[L] = 0;
+            if (is_reset) {
+                printf("  %s\xe2\x9c\xa6 nuova conversazione%s\n", C_DIM, C_R);
+                continue;
+            }
         }
 
         double m0 = g_eng.net_mb, r0 = nowd();
-        g_eng.spinning = 1;
-        pthread_t tspin;
-        if (g_tty) pthread_create(&tspin, NULL, spinner_thread, NULL);
-        char *reply = read_until_prompt(eng.from);
-        g_eng.spinning = 0;
-        if (g_tty) pthread_join(tspin, NULL);
-        if (!reply) { fprintf(stderr, "%sengine exited%s\n", C_RED, C_R); break; }
+        char stat[128] = "";
 
-        char *text = reply;
-        while (*text == '\n') text++;
-        printf("%s%s\xe2\x97\x86 %s%s\n", C_BOLD, C_CORAL, model, C_R);
-        printf("  %s\n", text);
+        if (eng.proto == PROTO_FRAMED) {
+            if (!is_reset) printf("%s%s\xe2\x97\x86 %s%s\n  ", C_BOLD, C_CORAL, model, C_R);
+            if (stream_until_end(&eng, stat, sizeof stat)) {
+                fprintf(stderr, "\n%sengine exited%s\n", C_RED, C_R);
+                engine_diag(&eng);
+                break;
+            }
+            printf("\n");
+            if (is_reset) { printf("  %s\xe2\x9c\xa6 nuova conversazione%s\n", C_DIM, C_R); continue; }
+        } else {
+            g_eng.spinning = 1;
+            pthread_t tspin;
+            if (g_tty) pthread_create(&tspin, NULL, spinner_thread, NULL);
+            char *reply = read_until_prompt(eng.from);
+            g_eng.spinning = 0;
+            if (g_tty) pthread_join(tspin, NULL);
+            if (!reply) {
+                fprintf(stderr, "%sengine exited%s\n", C_RED, C_R);
+                engine_diag(&eng);
+                break;
+            }
+            char *text = reply;
+            while (*text == '\n') text++;
+            printf("%s%s\xe2\x97\x86 %s%s\n", C_BOLD, C_CORAL, model, C_R);
+            printf("  %s\n", text);
+            free(reply);
+        }
+
+        /* STAT <tokens> <tok/s> <cache hit%> <rss GB> */
+        double tps = 0, hit = 0, rss = 0;
+        int ntok = 0;
+        int nstat = sscanf(stat, "STAT %d %lf %lf %lf", &ntok, &tps, &hit, &rss);
         double dmb = g_eng.net_mb - m0;
-        if (dmb > 0.5)
-            printf("%s  %.1fs · %.0f MB dallo sciame · mirror %.0f MB%s\n",
-                   C_DIM, nowd() - r0, dmb, g_eng.net_mb, C_R);
-        else
-            printf("%s  %.1fs · mirror caldo, zero rete%s\n", C_DIM, nowd() - r0, C_R);
-        free(reply);
+        printf("%s  %.1fs", C_DIM, nowd() - r0);
+        if (nstat >= 2 && tps > 0) printf(" · %.1f tok/s", tps);
+        if (nstat >= 4 && rss > 0) printf(" · %.1f GB residenti", rss);
+        if (local_dir)    printf(" · disco locale");
+        else if (dmb > 0.5) printf(" · %.0f MB dallo sciame · mirror %.0f MB", dmb, g_eng.net_mb);
+        else                printf(" · mirror caldo, zero rete");
+        printf("%s\n", C_R);
     }
 
     engine_stop(&eng);

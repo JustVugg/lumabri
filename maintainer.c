@@ -108,6 +108,32 @@ static void send_err(int fd, const char *msg) {
  * to the tracker inside REGISTER: the first announcement of a file becomes
  * the swarm's ground truth, later mismatching announcements are rejected. */
 
+/* Hashing a big model is minutes of a completely silent process, and on a
+ * first start it happens before anything is served — so from the outside it
+ * looks like a hang. Report it: total, progress, rate, and what it is for. */
+static uint64_t g_hash_total, g_hash_done;
+static double g_hash_t0, g_hash_last;
+
+static double hash_now(void) {
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
+static void hash_tick(uint64_t bytes, const char *rel) {
+    g_hash_done += bytes;
+    double t = hash_now();
+    if (t - g_hash_last < 2.0 || !g_hash_total) return;
+    g_hash_last = t;
+    double dt = t - g_hash_t0, rate = dt > 0 ? (double)g_hash_done / dt : 0;
+    double left = rate > 0 ? (double)(g_hash_total - g_hash_done) / rate : 0;
+    printf("[maintainer %s] hashing %.1f/%.1f GB (%.0f%%) · %.0f MB/s · "
+           "~%.0f min left · %s\n",
+           g.name, (double)g_hash_done / 1e9, (double)g_hash_total / 1e9,
+           100.0 * (double)g_hash_done / (double)g_hash_total,
+           rate / 1e6, left / 60.0, rel);
+    fflush(stdout);
+}
+
 static int hash_file(MFile *f) {
     f->nh = (uint32_t)((f->size + LMB_HASH_CHUNK - 1) / LMB_HASH_CHUNK);
     f->hash = malloc((size_t)f->nh * 32 + 1);
@@ -118,7 +144,8 @@ static int hash_file(MFile *f) {
     if (fp) {
         uint64_t sz = 0;
         if (fread(&sz, 8, 1, fp) == 1 && sz == f->size &&
-            fread(f->hash, 32, f->nh, fp) == f->nh) { fclose(fp); return 0; }
+            fread(f->hash, 32, f->nh, fp) == f->nh)
+            { fclose(fp); g_hash_done += f->size; return 0; }   /* cached: free */
         fclose(fp);
     }
     char full[LMB_PATH_MAX * 2];
@@ -139,6 +166,7 @@ static int hash_file(MFile *f) {
         }
         if (got != len) { free(buf); close(fd); return -1; }
         lmb_sha256(buf, len, f->hash + (size_t)c * 32);
+        hash_tick(len, f->rel);
     }
     free(buf);
     close(fd);
@@ -657,11 +685,18 @@ int main(int argc, char **argv) {
                  "%ld ppm ***\n", g.name, g_corrupt_ppm);
       } }
     uint64_t total = 0;
-    double h0 = 0;
-    { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
-      h0 = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9; }
+    for (int i = 0; i < g.nfiles; i++) total += g.files[i].size;
+    g_hash_total = total;
+    g_hash_done = 0;
+    g_hash_t0 = g_hash_last = hash_now();
+    double h0 = g_hash_t0;
+    if (total > 4e9)
+        printf("[maintainer %s] integrity: hashing %d files, %.1f GB. "
+               "Only the first start pays this — the result is cached in "
+               "%s/.lumabri_hashes.\n",
+               g.name, g.nfiles, (double)total / 1e9, g.root);
+    fflush(stdout);
     for (int i = 0; i < g.nfiles; i++) {
-        total += g.files[i].size;
         if (hash_file(&g.files[i]))
             fprintf(stderr, "[maintainer %s] cannot hash %s — served unverified\n",
                     g.name, g.files[i].rel);

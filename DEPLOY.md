@@ -131,7 +131,15 @@ rsync -avP --info=progress2 /path/to/model/ \
 ```
 
 First start hashes the whole model (sha256 per MiB, ~1-2 GB/s per core) and
-caches the result in `.lumabri_hashes/`, so only that first start pays.
+caches the result in `.lumabri_hashes/`, so only that first start pays. It
+tells you how it is going — for a 300 GB model expect several minutes with
+nothing served until it finishes:
+
+```
+[maintainer peer-7301] integrity: hashing 148 files, 299.0 GB. Only the first
+                       start pays this — cached in .../models/glm/.lumabri_hashes.
+[maintainer peer-7301] hashing 42.1/299.0 GB (14%) · 780 MB/s · ~5 min left · model-00012-of-00148.safetensors
+```
 
 ---
 
@@ -200,6 +208,28 @@ The first answer is slow while the dense weights cross the network; after
 that `~/.lumabri` serves them locally and the swarm is only touched for
 experts. `/swarm` shows the network, `/model` switches model.
 
+The boot narrates itself, so you can see where the time goes:
+
+```
+  chiedo allo sciame chi ha glm…
+  148 file · 299 GB · 1 peer · tipo glm4_moe
+  mirror in /home/you/.lumabri: 512 GB liberi. Tiene solo i blocchi che tocchi…
+  motore /home/you/colibri/c/colibri
+  ora scarico la parte densa una volta sola — gli esperti restano sullo sciame
+  ✻ net 6.2 MB in 12 blocks… · 4.1/299 GB · 92 MB/s · 47s
+```
+
+**On the machine that already holds the model** — the server itself — do not
+chat through the swarm: the mirror would be a second full copy of the model
+on the same disk. Read it where it is:
+
+```sh
+lumabri chat --local /home/lumabri/models/mymodel --engines-dir ~/colibri/c
+```
+
+Useful knobs when RAM is tight: `--ctx` (context tokens, the KV pool scales
+with it) and `--cap` (resident experts, default 64).
+
 **Donate disk** — hold part of the model so the swarm survives your server:
 
 ```sh
@@ -266,6 +296,10 @@ Two things worth knowing:
 | symptom | cause |
 |---|---|
 | `no swarm at HOST:7300` | cloud firewall: open 7300-7302 in the Hetzner console too |
+| the server logs nothing for minutes on first start | it is hashing the model; the progress lines say how far along |
+| `il motore non è arrivato a essere pronto` | the engine's own last 25 lines are printed underneath — read those |
+| engine killed by signal 9 | out of memory: lower `--ctx` and `--cap`, or take a bigger box |
+| the chatter fills the disk | it mirrors what it reads; on the server use `--local DIR` instead |
 | client says `not signed by the operator key` | server not started with `--key`, or a different key than the client's `LUMABRI_PUBKEY` |
 | `engine not found` on the client | pass `--engines-dir /path/to/colibri/c` |
 | tracker logs `REJECTED: ... unsigned` | a peer joined a signed swarm without signed truth — that is the defence working |

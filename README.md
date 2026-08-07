@@ -287,6 +287,7 @@ On every other machine, pick a role — or several:
 | you want to | run |
 |---|---|
 | chat | `lumabri chat --tracker SERVER:7300` |
+| chat on the machine that holds the model | `lumabri chat --local DIR` (no mirror, no second copy) |
 | donate disk (hold bytes) | `lumabri serve --model ./slice --join SERVER:7300 --model-name NAME --donate GB` |
 | donate compute (execute experts) | `expert_node --model DIR --tracker SERVER:7300 --cache N` |
 
@@ -307,6 +308,7 @@ On every other machine, pick a role — or several:
 | `phase4_test.sh` | SSD cache, tracker discovery, delegate & fall back |
 | `phase5_test.sh` | integrity: lying peers caught, poison stripped |
 | `sign_test.sh` | sha512/ed25519 vs RFC 8032 and OpenSSL, signed swarm |
+| `chat_proto_test.sh` | both engine dialects, and a dying engine that explains itself |
 | `DEPLOY.md` | server walkthrough: Hetzner, systemd, keys, clients |
 | `lumabri_sha.h` | sha256, self-contained — per-block integrity |
 | `lumabri_sign.h` | sha512 + ed25519 — the operator's authority |
