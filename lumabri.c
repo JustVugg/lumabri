@@ -126,6 +126,17 @@ static void on_sigint(int sig) {
     for (int i = 0; i < g_nchildren; i++) kill(g_children[i], SIGTERM);
 }
 
+/* Which expert-node binary can execute this model's experts, or NULL when
+ * that engine has no phase-2 build yet. One per engine family: the engines
+ * do not share an expert shape, so neither can the peers. */
+static const char *expert_node_for(const char *model_type) {
+    if (strstr(model_type, "olmoe"))    return "expert_node";
+    if (strstr(model_type, "glm"))      return "expert_node_glm";
+    if (strstr(model_type, "inkling"))  return "expert_node_inkling";
+    if (strstr(model_type, "kimi"))     return "expert_node_kimi";
+    return NULL;                        /* deepseek and anything unknown */
+}
+
 /* model_type from a local config.json; "" when absent or unparseable */
 static void local_model_type(const char *model_dir, char *out, size_t cap) {
     out[0] = 0;
@@ -234,10 +245,16 @@ static int cmd_serve(int argc, char **argv) {
      * discovered by the chatters and win the calls they are nearest for;
      * this node stays the replica of last resort. */
     char exec_bin[1200], mtype[64];
-    snprintf(exec_bin, sizeof exec_bin, "%s/expert_node", dir);
     local_model_type(model, mtype, sizeof mtype);
+    /* one node binary per engine family — they do not share an expert shape */
+    const char *node = expert_node_for(mtype);
+    snprintf(exec_bin, sizeof exec_bin, "%s/%s", dir, node);
     int with_exec = 0;
-    if (!no_exec && strstr(mtype, "olmoe") && access(exec_bin, X_OK) == 0) {
+    if (!no_exec && node && access(exec_bin, X_OK)) {
+        printf("  %s%s non è compilato: nessun esperto eseguito qui "
+               "(make %s ENGINE=/path/to/colibri/c)%s\n", C_DIM, node, node, C_R);
+    }
+    if (!no_exec && node && access(exec_bin, X_OK) == 0) {
         char eport[16], cachestr[16], ename[32];
         snprintf(eport, sizeof eport, "%d", port + 2);
         snprintf(cachestr, sizeof cachestr, "%d", cache_slots);
