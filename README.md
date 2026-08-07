@@ -44,6 +44,38 @@ numbered, never named: model held, GB, bytes served, heartbeat), `/model`
 lists the models on the swarm and switches between them, restarting the
 engine on the fly.
 
+### Joining: chat, or bring something
+
+`lumabri chat` asks once, on the way in, and Enter means "just chat" so the
+impatient path is one key:
+
+```
+  come entri nello sciame?
+
+    1  solo chattare        non condividi niente
+    2  chatti e doni disco  tieni un pezzo di glm per lo sciame
+    3  chatti e doni calcolo  esegui esperti per gli altri
+    4  tutti e due
+
+  invio = solo chattare
+```
+
+Pick 2 and it asks how many GB (Enter takes a quarter of the free space,
+capped), then starts a maintainer with that budget: the tracker assigns it
+the least-replicated files first, it pulls them verifying every byte against
+the operator's signature, and serves them. Pick 3 and it starts the expert
+node for that model's engine. Both run as children of the chat and stop when
+you close it — which is the honest lifetime for something offered from a
+terminal you have open. A donor that should outlive the session is
+`lumabri serve --join`.
+
+Donating compute needs the model on your disk (an expert node reads the
+weights from there), so option 3 is offered only with `--model-dir DIR`.
+Donating disk needs nothing: you start empty and the swarm fills you.
+
+Scripts skip the question: `--role chat|disk|compute|all`, with `--donate GB`
+and `--model-dir DIR`.
+
 ### Several models on one swarm
 
 One tracker is an index, not a model server, so it holds as many models as
@@ -129,6 +161,56 @@ turning your machine off:
 The tracker assigns the donor the least-replicated files first; the donor
 pulls them from the swarm, then serves them. `/swarm` in your chat now
 shows two peers.
+
+## Trying it, for real
+
+Two stages: everything on one machine first, then more machines. Nothing
+below is a simulation — the single-machine version runs the same binaries
+over the same sockets.
+
+**On the machine with the model.** Build both halves of phase 2 (`chatters`
+is the patched engines, `engines` is the expert nodes) and check the model
+runs at all before any network is involved:
+
+```sh
+make phase2-all ENGINE=/path/to/colibri/c && sudo make install
+lumabri chat --local /path/to/model --engines-dir /path/to/colibri/c
+```
+
+Then the swarm, still on one machine:
+
+```sh
+lumabri key --out swarm                       # once, keep swarm.key safe
+lumabri serve --model /path/to/model --key swarm.key --exec-cache 256
+```
+
+Expect, in order: the hashing progress (first start only — minutes on a big
+model), `ORIGIN: signed the truth of N files`, and `serving EXEC on :7302 …
+registered with tracker`. In a second terminal:
+
+```sh
+LUMABRI_PUBKEY=$(cat swarm.pub) lumabri chat --tracker 127.0.0.1:7300     --engines-dir /path/to/colibri/c
+```
+
+**The line to look for is `[lumabri] phase 2 active`.** Without it the
+chatter is running the stock engine and will download expert weights instead
+of asking peers to run them — `du -sh ~/.lumabri` is the other tell: with
+phase 2 on it grows by the dense part and stops.
+
+**Adding machines.** Open 7300-7302 (and +10 per extra model) in the
+firewall — on a cloud host, in the provider's console *as well as* in `ufw`.
+Every other machine needs lumabri and a colibri checkout, then
+`make phase2-all ENGINE=…`. From there the three roles:
+
+| they want to | command |
+|---|---|
+| chat | `LUMABRI_PUBKEY=<pub> lumabri chat --tracker IP:7300 --engines-dir …` |
+| chat + donate disk | the same, then pick 2 (or `--role disk --donate 50`) |
+| donate compute | needs the model locally: `--role compute --model-dir DIR`, or `expert_node_<engine>` as a service |
+
+`/swarm` in any chat shows who arrived. The proof that the swarm is really
+carrying the work: while a reply is generating, kill a donor — you get one
+failover line and the tokens continue, identical.
 
 ## How it works
 

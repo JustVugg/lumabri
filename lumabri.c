@@ -843,6 +843,174 @@ static void disk_preflight(const char *model, uint64_t model_bytes) {
                "ferma per disco pieno.%s\n", C_DIM, C_R);
 }
 
+/* ---- joining: what do you bring? ----------------------------------------
+ *
+ * A chatter is a taker. Most people would give something back if it took one
+ * keypress, and almost nobody will read a manual to find the flag for it —
+ * so the choice is made here, on the way in, with Enter meaning "just chat"
+ * so the impatient path stays one key.
+ *
+ * Whatever is chosen starts as a child of the chat process and dies with it,
+ * which is the honest shape for a donation made from a terminal someone has
+ * open: it lasts as long as they are around. A donor that should outlive the
+ * session is `lumabri serve --join`, and the picker says so.
+ *
+ * The server side needs no changes at all. A disk donor is a maintainer with
+ * a byte budget, and the tracker already assigns it the rarest files first;
+ * a compute donor is an expert node, and chatters already discover it by
+ * heartbeat. The role is entirely a client-side decision.
+ */
+typedef struct { int disk, compute; double gb; char model_dir[1024]; } Role;
+
+/* free space where the donated slice would live, in GB */
+static double free_gb_at(const char *path) {
+    struct statvfs v;
+    if (statvfs(path, &v)) return 0;
+    return (double)v.f_bavail * (double)v.f_frsize / 1e9;
+}
+
+static int prompt_line(char *buf, size_t cap) {
+    if (!fgets(buf, (int)cap, stdin)) return -1;
+    size_t n = strlen(buf);
+    while (n && (buf[n-1] == '\n' || buf[n-1] == '\r')) buf[--n] = 0;
+    return 0;
+}
+
+/* Returns 0 when the user chose, -1 when they quit. `have_model_dir` is
+ * whether a full local copy of the model exists — without one, executing
+ * experts is not on offer, because an expert node reads the weights from
+ * disk and there would be none to read. */
+static int role_pick(Role *r, const char *model, int have_model_dir) {
+    printf("  %scome entri nello sciame?%s\n\n", C_BOLD, C_R);
+    printf("    %s1%s  solo chattare        %snon condividi niente%s\n",
+           C_CORAL, C_R, C_DIM, C_R);
+    printf("    %s2%s  chatti e doni disco  %stieni un pezzo di %s per lo sciame%s\n",
+           C_CORAL, C_R, C_DIM, model, C_R);
+    if (have_model_dir) {
+        printf("    %s3%s  chatti e doni calcolo %sesegui esperti per gli altri%s\n",
+               C_CORAL, C_R, C_DIM, C_R);
+        printf("    %s4%s  tutti e due%s\n", C_CORAL, C_R, C_R);
+    } else {
+        printf("    %s3%s  %sdonare calcolo: serve il modello sul tuo disco "
+               "(--model-dir DIR)%s\n", C_GRAY, C_R, C_DIM, C_R);
+    }
+    printf("\n  %sinvio = solo chattare%s\n", C_DIM, C_R);
+    printf("\n%s\xe2\x94\x82%s %s%s\xe2\x80\xba%s ", C_GRAY, C_R, C_CORAL, C_BOLD, C_R);
+    fflush(stdout);
+
+    char line[256];
+    if (prompt_line(line, sizeof line)) return -1;
+    int c = line[0] ? line[0] : '1';
+    if (c == 'q') return -1;
+    if (c == '2' || c == '4') r->disk = 1;
+    if ((c == '3' || c == '4') && have_model_dir) r->compute = 1;
+    if (!r->disk && !r->compute) return 0;
+
+    if (r->disk) {
+        const char *home = getenv("HOME") ? getenv("HOME") : ".";
+        snprintf(r->model_dir, sizeof r->model_dir, "%s/.lumabri/%s/donated",
+                 home, model);
+        mkdir_p(r->model_dir);
+        double freeg = free_gb_at(r->model_dir);
+        double suggest = freeg * 0.25;
+        if (suggest > 100) suggest = 100;
+        if (suggest < 1) suggest = 1;
+        printf("\n  %squanti GB doni? %.0f liberi in %s%s\n",
+               C_DIM, freeg, r->model_dir, C_R);
+        printf("  %sinvio = %.0f GB%s\n", C_DIM, suggest, C_R);
+        printf("\n%s\xe2\x94\x82%s %s%s\xe2\x80\xba%s ", C_GRAY, C_R, C_CORAL, C_BOLD, C_R);
+        fflush(stdout);
+        if (prompt_line(line, sizeof line)) return -1;
+        r->gb = line[0] ? atof(line) : suggest;
+        if (r->gb <= 0) r->gb = suggest;
+        if (r->gb > freeg) {
+            printf("  %s%.0f GB non ci stanno: dono %.0f%s\n",
+                   C_DIM, r->gb, freeg > 1 ? freeg - 1 : 0.0, C_R);
+            r->gb = freeg > 1 ? freeg - 1 : 0;
+            if (r->gb <= 0) r->disk = 0;
+        }
+    }
+    return 0;
+}
+
+/* A port nobody is on, starting from `from` — a donor picked from a TUI
+ * cannot ask the user for one, and two chatters on the same box must not
+ * collide. */
+static int free_port(int from) {
+    for (int p = from; p < from + 200; p++) {
+        int fd = lmb_listen(p);
+        if (fd >= 0) { close(fd); return p; }
+    }
+    return 0;
+}
+
+/* Start whatever was chosen. Never fatal: a donation that cannot start is a
+ * missed contribution, not a reason to refuse someone a conversation. */
+static void role_start(const Role *r, const char *tracker, const char *model,
+                       const char *model_type) {
+    char dir[1024];
+    exe_dir(dir, sizeof dir);
+
+    if (r->disk) {
+        char bin[1200], portstr[16], gbstr[32], name[64];
+        snprintf(bin, sizeof bin, "%s/maintainer", dir);
+        int port = free_port(7601);   /* clear of the test ranges */
+        if (!port || access(bin, X_OK)) {
+            printf("  %snon riesco ad avviare il maintainer: dono disco saltato%s\n",
+                   C_DIM, C_R);
+        } else {
+            snprintf(portstr, sizeof portstr, "%d", port);
+            snprintf(gbstr, sizeof gbstr, "%.2f", r->gb);
+            snprintf(name, sizeof name, "donor-%d", port);
+            char *argv[16];
+            int a = 0;
+            argv[a++] = bin;
+            argv[a++] = "--root";       argv[a++] = (char *)r->model_dir;
+            argv[a++] = "--port";       argv[a++] = portstr;
+            argv[a++] = "--tracker";    argv[a++] = (char *)tracker;
+            argv[a++] = "--name";       argv[a++] = name;
+            argv[a++] = "--model-name"; argv[a++] = (char *)model;
+            argv[a++] = "--donate";     argv[a++] = gbstr;
+            argv[a] = NULL;
+            g_children[g_nchildren++] = spawn_argv(argv);
+            printf("  %s\xe2\x9c\xa6 dono %.0f GB di %s%s%s%s: il tracker mi assegna "
+                   "i file piu\xcc\x80 rari%s\n",
+                   C_GRN, r->gb, C_R, C_BOLD, model, C_DIM, C_R);
+        }
+    }
+
+    if (r->compute) {
+        const char *node = expert_node_for(model_type ? model_type : "");
+        char bin[1200];
+        snprintf(bin, sizeof bin, "%s/%s", dir, node ? node : "expert_node");
+        int port = free_port(7701);
+        if (!node || !port || access(bin, X_OK)) {
+            printf("  %snessun expert node per %s (make engines): dono calcolo "
+                   "saltato%s\n", C_DIM, model_type ? model_type : "?", C_R);
+        } else {
+            char portstr[16], name[64];
+            snprintf(portstr, sizeof portstr, "%d", port);
+            snprintf(name, sizeof name, "donor-exec-%d", port);
+            char *argv[16];
+            int a = 0;
+            argv[a++] = bin;
+            argv[a++] = "--model";      argv[a++] = (char *)r->model_dir;
+            argv[a++] = "--port";       argv[a++] = portstr;
+            argv[a++] = "--tracker";    argv[a++] = (char *)tracker;
+            argv[a++] = "--name";       argv[a++] = name;
+            argv[a++] = "--model-name"; argv[a++] = (char *)model;
+            argv[a++] = "--cache";      argv[a++] = "64";
+            argv[a] = NULL;
+            g_children[g_nchildren++] = spawn_argv(argv);
+            printf("  %s\xe2\x9c\xa6 eseguo esperti per lo sciame%s %s(%s)%s\n",
+                   C_GRN, C_R, C_DIM, node, C_R);
+        }
+    }
+    if (r->disk || r->compute)
+        printf("  %sfinche\xcc\x81 questa chat resta aperta. Per un donatore che "
+               "sopravvive alla sessione: lumabri serve --join%s\n", C_DIM, C_R);
+}
+
 /* boot one model: inspect, resolve, spawn, wait for readiness */
 static int model_boot(const char *tracker, const char *model, const char *shim,
                       const char *engines_dir, const char *engine_path,
@@ -908,6 +1076,8 @@ static int cmd_chat(int argc, char **argv) {
     const char *tracker = "127.0.0.1:7300";
     const char *engine_path = NULL, *engines_dir = getenv("LUMABRI_ENGINES");
     const char *want_model = NULL, *local_dir = NULL;
+    const char *role_arg = NULL, *model_dir_arg = NULL;
+    double donate_gb = 0;
     int max_new = 256, ctx = 2048, cap_experts = 64;
     for (int i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "--tracker") && i + 1 < argc) tracker = argv[++i];
@@ -918,10 +1088,15 @@ static int cmd_chat(int argc, char **argv) {
         else if (!strcmp(argv[i], "--max-new") && i + 1 < argc) max_new = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--ctx") && i + 1 < argc) ctx = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--cap") && i + 1 < argc) cap_experts = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--role") && i + 1 < argc) role_arg = argv[++i];
+        else if (!strcmp(argv[i], "--model-dir") && i + 1 < argc) model_dir_arg = argv[++i];
+        else if (!strcmp(argv[i], "--donate") && i + 1 < argc) donate_gb = atof(argv[++i]);
         else if (!strcmp(argv[i], "--plain")) g_tty = 0;
         else { fprintf(stderr, "usage: lumabri chat [--tracker H:P] [--model NAME] "
                                "[--local DIR] [--engine BIN] [--engines-dir DIR]\n"
-                               "                    [--max-new N] [--ctx N] [--cap N]\n");
+                               "                    [--max-new N] [--ctx N] [--cap N]\n"
+                               "                    [--role chat|disk|compute|all] "
+                               "[--donate GB] [--model-dir DIR]\n");
                return 2; }
     }
 
@@ -980,10 +1155,43 @@ static int cmd_chat(int argc, char **argv) {
         for (int i = 0; i < nmodels; i++) printf(" %s%s%s", C_BOLD, models[i], C_R);
         printf("  %s(/model per cambiare)%s\n", C_DIM, C_R);
     }
+    printf("\n");
+
+    /* the role, before the engine boots: a donor started now warms up while
+     * the dense weights cross the wire, instead of after */
+    Role role = {0};
+    if (!local_dir && role_arg) {
+        if (strchr(role_arg, 'd') || !strcmp(role_arg, "all")) role.disk = 1;
+        if (strchr(role_arg, 'c') || !strcmp(role_arg, "all")) role.compute = 1;
+        if (role.disk || role.compute) {
+            const char *home = getenv("HOME") ? getenv("HOME") : ".";
+            if (model_dir_arg) snprintf(role.model_dir, sizeof role.model_dir, "%s", model_dir_arg);
+            else snprintf(role.model_dir, sizeof role.model_dir,
+                          "%s/.lumabri/%s/donated", home, model);
+            mkdir_p(role.model_dir);
+            role.gb = donate_gb > 0 ? donate_gb : 10;
+        }
+    } else if (!local_dir && g_tty) {
+        char probe[1100];
+        int have_dir = 0;
+        if (model_dir_arg) {
+            snprintf(role.model_dir, sizeof role.model_dir, "%s", model_dir_arg);
+            snprintf(probe, sizeof probe, "%s/config.json", role.model_dir);
+            have_dir = access(probe, R_OK) == 0;
+        }
+        if (role_pick(&role, model, have_dir)) return 0;
+        if (have_dir && role.compute)
+            snprintf(role.model_dir, sizeof role.model_dir, "%s", model_dir_arg);
+    }
 
     if (model_boot(tracker, model, shim, engines_dir, engine_path, local_dir,
                    ctx, max_new, cap_experts, &eng, &sw))
         return 1;
+    if (role.disk || role.compute) {
+        signal(SIGINT, on_sigint);            /* the donors die with the chat */
+        signal(SIGTERM, on_sigint);
+        role_start(&role, tracker, model, sw.model_type);
+    }
 
     char line[4096];
     for (;;) {

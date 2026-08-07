@@ -251,6 +251,11 @@ Every client needs the binaries (`make && sudo make install`, or just
 `make` and run from the directory) and, for chatting, a colibri build for
 the engine.
 
+On first launch the chat asks what you are bringing — Enter for chat only,
+2 to also donate disk, 3 (with `--model-dir`) to also execute experts. The
+donors live as long as the chat does. `--role chat|disk|compute|all` skips
+the question for scripts and services.
+
 **Chat** — this is the whole point:
 
 ```sh
