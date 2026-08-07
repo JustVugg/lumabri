@@ -192,18 +192,26 @@ static int handle_exec(int fd, LmbMsg *m) {
         send_err(fd, "bad exec header"); return -1;
     }
     lmb_cur_u32(&cur, &nrows);            /* absent in the single-row dialect */
-    if (nrows < 1 || nrows > (1u << 16)) { send_err(fd, "bad row count"); return -1; }
+    /* The cap is not decoration. The size check below used to be computed in
+     * 32 bits, so on a model with a large hidden size a caller could pick a
+     * row count whose byte length wrapped to something small, match it with a
+     * tiny payload, and get us to allocate gigabytes and then read from a
+     * NULL payload. Everything here is 64-bit now, and a real batch is a
+     * prompt's worth of rows — thousands, never tens of thousands. */
+    if (nrows < 1 || nrows > LMB_MAX_EXEC_ROWS) {
+        send_err(fd, "bad row count"); return -1;
+    }
     /* Router weights follow the header only when the engine needs them
      * applied HERE — DeepSeek V4 folds the weight in before the down
      * projection, so it is not something the chatter can multiply back. The
      * body length says which dialect this is. */
     const float *rw = NULL;
-    if (m->body_len == 16 + (size_t)nrows * sizeof(float))
+    if (m->body_len == 16 + (uint64_t)nrows * sizeof(float))
         rw = (const float *)(m->body + 16);
     else if (m->body_len != 16) { send_err(fd, "bad exec body"); return -1; }
+    uint64_t want = (uint64_t)nrows * dim * sizeof(float);
     if ((int)layer >= g.n_slots || (int)eid >= g.n_experts ||
-        (int)dim != g.hidden ||
-        m->pay_len != (uint32_t)((size_t)nrows * dim * sizeof(float))) {
+        (int)dim != g.hidden || want > LMB_MAX_PAY || m->pay_len != want) {
         send_err(fd, "exec shape mismatch"); return -1;
     }
     int gid = (int)layer * g.n_experts + (int)eid;
@@ -218,7 +226,7 @@ static int handle_exec(int fd, LmbMsg *m) {
         scratch_rows = (int)nrows;
     }
 
-    size_t obytes = (size_t)nrows * g.hidden * sizeof(float);
+    size_t obytes = (size_t)want;
     float *out = node_falloc((size_t)nrows * g.hidden);
     double t0 = nowd();
     if (g.ncs) {

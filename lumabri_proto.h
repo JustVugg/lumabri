@@ -39,6 +39,10 @@
 #define LMB_MAX_BODY  (64u << 20)   /* a REGISTER carrying block hashes for a
                                        whole huge model must fit: 32 B/MiB */
 #define LMB_MAX_PAY   (64u << 20)
+/* Rows an EXEC may carry. A real batch is a prompt's worth of positions, so
+ * this is generous; it exists so a length can never be chosen to overflow
+ * the size arithmetic on a model with a large hidden dimension. */
+#define LMB_MAX_EXEC_ROWS 4096u
 #define LMB_PATH_MAX  512
 #define LMB_HASH_CHUNK (1u << 20)   /* integrity granularity: sha256 per MiB */
 #define LMB_HASH_MAGIC 0x48414853u  /* "SHAH": optional hash section marker */
