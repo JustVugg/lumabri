@@ -178,11 +178,70 @@ KIMI = [
 """, where="before"),
 ]
 
+
+# --------------------------------------------------------------------------
+# deepseek_v4: every layer routes, but the router weight is applied INSIDE the
+# expert (before the down projection, rounded to bf16), so it has to travel
+# with the activation — lumi_moe_apply_v4 sends it and adds what comes back
+# unweighted-by-us. Three sites apply experts against the target model, and
+# each is disarmed by emptying the count the loop below it walks; the dspark
+# draft path is deliberately left local, since those are the DRAFT model's
+# experts and the target verifies every token it proposes anyway.
+# --------------------------------------------------------------------------
+DEEPSEEK = [
+    hook('#include "route_trace.h"   /* .coli_usage, shared format */\n', INCLUDE),
+    hook("""    engine->summary.expert_cache_bytes =
+        engine->runtime.target_expert_cache_bytes;
+    *output = engine;
+    return 0;
+
+fail:
+""", """#ifdef LUMIBRI_P2P
+    lumi_init_ex(engine->config.num_hidden_layers,
+                 engine->config.n_routed_experts,
+                 engine->config.hidden_size, NULL);   /* every V4 layer routes */
+    atexit(lumi_report);
+#endif
+""", where="before"),
+    hook("""    if (!result) memset(output, 0, (size_t)d * sizeof(*output));
+    for (int expert_id = 0; !result && expert_id < n; expert_id++) {
+""", """#ifdef LUMIBRI_P2P
+    if (!result && lumi_layer_on(weights->plan.layer)) {
+        lumi_moe_apply_v4(weights->plan.layer, indices, route_weights, topk,
+                          input, 1, d, output);
+        n = 0;                        /* the loop below finds no expert left */
+    }
+#endif
+"""),
+    hook("""    if (!result) memset(output, 0, (size_t)d * sizeof(*output));
+
+#ifdef COLI_V4_EXPERIMENTAL_DUAL_EXPERT_LOADER
+""", """#ifdef LUMIBRI_P2P
+    if (!result && lumi_layer_on(weights->plan.layer)) {
+        lumi_moe_apply_v4(weights->plan.layer, indices, route_weights, topk,
+                          input, 1, d, output);
+        selected = 0;                 /* both loader variants walk `selected` */
+    }
+#endif
+"""),
+    hook("""    if (!result)
+        memset(outputs, 0, (size_t)batch * d * sizeof(*outputs));
+""", """#ifdef LUMIBRI_P2P
+    if (!result && lumi_layer_on(weights->plan.layer)) {
+        lumi_moe_apply_v4(weights->plan.layer, indices, route_weights, topk,
+                          inputs, batch, d, outputs);
+        n = 0;                        /* key_count becomes 0: nothing to lease */
+    }
+#endif
+"""),
+]
+
 ENGINES = {
     "olmoe.c": OLMOE,
     "colibri.c": COLIBRI,
     "inkling.c": INKLING,
     "kimi_k3.c": KIMI,
+    "deepseek.c": DEEPSEEK,
 }
 
 

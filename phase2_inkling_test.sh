@@ -15,7 +15,7 @@ cd "$(dirname "$0")"
 
 ENGINE="${ENGINE:-../moe-stream/c}"
 NODES="${NODES:-2}"
-PORT0="${PORT0:-7451}"
+PORT0="${PORT0:-7481}"   # clear of phase5 (745x) and sign_test (746x)
 CAP="${CAP:-4}"
 BITS=0
 

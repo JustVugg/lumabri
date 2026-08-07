@@ -24,7 +24,9 @@
  *   lmbe_routed(slot)       0 for a dense layer: it has no experts to hold
  *   lmbe_slot_init/load()   allocate once, then load any expert into it
  *   lmbe_scratch_new/free() per-call buffers
- *   lmbe_apply()            one expert, one row — the engine's own kernels
+ *   lmbe_apply()            one expert, N rows — the engine's own kernels;
+ *                           `w` carries the router weights when the engine
+ *                           applies them inside the expert (V4 only)
  *
  * Build one binary per engine: -DLMBE_ENGINE=colibri gives expert_node_glm.
  *
@@ -107,6 +109,15 @@ static struct {
 } g = { .c_lk = PTHREAD_MUTEX_INITIALIZER, .load_lk = PTHREAD_MUTEX_INITIALIZER,
         .stat_lk = PTHREAD_MUTEX_INITIALIZER };
 
+/* Plain malloc, not the engine's falloc: not every engine has one (the V4
+ * glue links its store, not a colibri model loader) and this buffer is only
+ * ever read and written here. */
+static float *node_falloc(size_t n) {
+    float *p = (float *)malloc(n * sizeof(float));
+    if (!p) { fprintf(stderr, "OOM %zu floats\n", n); exit(1); }
+    return p;
+}
+
 static double nowd(void) {
     struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
     return (double)t.tv_sec + (double)t.tv_nsec * 1e-9;
@@ -182,6 +193,14 @@ static int handle_exec(int fd, LmbMsg *m) {
     }
     lmb_cur_u32(&cur, &nrows);            /* absent in the single-row dialect */
     if (nrows < 1 || nrows > (1u << 16)) { send_err(fd, "bad row count"); return -1; }
+    /* Router weights follow the header only when the engine needs them
+     * applied HERE — DeepSeek V4 folds the weight in before the down
+     * projection, so it is not something the chatter can multiply back. The
+     * body length says which dialect this is. */
+    const float *rw = NULL;
+    if (m->body_len == 16 + (size_t)nrows * sizeof(float))
+        rw = (const float *)(m->body + 16);
+    else if (m->body_len != 16) { send_err(fd, "bad exec body"); return -1; }
     if ((int)layer >= g.n_slots || (int)eid >= g.n_experts ||
         (int)dim != g.hidden ||
         m->pay_len != (uint32_t)((size_t)nrows * dim * sizeof(float))) {
@@ -200,15 +219,15 @@ static int handle_exec(int fd, LmbMsg *m) {
     }
 
     size_t obytes = (size_t)nrows * g.hidden * sizeof(float);
-    float *out = falloc((int64_t)nrows * g.hidden);
+    float *out = node_falloc((size_t)nrows * g.hidden);
     double t0 = nowd();
     if (g.ncs) {
         CSlot *s = cache_acquire((int)layer, (int)eid);
-        lmbe_apply(&s->slot, (int)layer, (const float *)m->pay, out, (int)nrows, scratch);
+        lmbe_apply(&s->slot, (int)layer, (const float *)m->pay, out, (int)nrows, rw, scratch);
         cache_release(s);
     } else {
         lmbe_apply(&g.held[g.index[gid]].slot, (int)layer,
-                   (const float *)m->pay, out, (int)nrows, scratch);
+                   (const float *)m->pay, out, (int)nrows, rw, scratch);
     }
     double dt = nowd() - t0;
     maybe_corrupt_out(out);

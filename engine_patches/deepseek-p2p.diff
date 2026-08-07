@@ -1,0 +1,72 @@
+diff --git a/c/deepseek.c b/c/deepseek.c
+--- a/c/deepseek.c
++++ b/c/deepseek.c
+@@ -60,6 +60,13 @@
+ #include "st.h"
+ #include "quant.h"
+ #include "route_trace.h"   /* .coli_usage, shared format */
++
++#ifdef LUMIBRI_P2P
++/* lumabri: with a tracker (or LUMABRI_EXPERTS) the routed experts run on
++ * peers instead of being read from disk. Inert without the define, and inert
++ * at runtime unless the swarm can cover every expert. */
++#include "lumibri_client.h"
++#endif
+ #include "tok.h"
+ #include "json.h"
+ #include "compat.h"
+@@ -5427,6 +5434,13 @@
+         shared_output, &w1, &w2, &w3, input, config->swiglu_limit);
+     if (!result) memset(output, 0, (size_t)d * sizeof(*output));
+     for (int expert_id = 0; !result && expert_id < n; expert_id++) {
++#ifdef LUMIBRI_P2P
++    if (!result && lumi_layer_on(weights->plan.layer)) {
++        lumi_moe_apply_v4(weights->plan.layer, indices, route_weights, topk,
++                          input, 1, d, output);
++        n = 0;                        /* the loop below finds no expert left */
++    }
++#endif
+         int rank = -1;
+         for (int candidate = 0; candidate < topk; candidate++)
+             if (indices[candidate] == expert_id) rank = candidate;
+@@ -5980,6 +5994,13 @@
+     if (!result) memset(output, 0, (size_t)d * sizeof(*output));
+ 
+ #ifdef COLI_V4_EXPERIMENTAL_DUAL_EXPERT_LOADER
++#ifdef LUMIBRI_P2P
++    if (!result && lumi_layer_on(weights->plan.layer)) {
++        lumi_moe_apply_v4(weights->plan.layer, indices, route_weights, topk,
++                          input, 1, d, output);
++        selected = 0;                 /* both loader variants walk `selected` */
++    }
++#endif
+     for (int current = 0; !result && current < selected; current++) {
+         int slot = current % DUAL_EXPERT_LOADER_COUNT;
+         if (!loader_active[slot] ||
+@@ -6232,6 +6253,13 @@
+             inputs + (size_t)item * d, config->swiglu_limit);
+     if (!result)
+         memset(outputs, 0, (size_t)batch * d * sizeof(*outputs));
++#ifdef LUMIBRI_P2P
++    if (!result && lumi_layer_on(weights->plan.layer)) {
++        lumi_moe_apply_v4(weights->plan.layer, indices, route_weights, topk,
++                          inputs, batch, d, outputs);
++        n = 0;                        /* key_count becomes 0: nothing to lease */
++    }
++#endif
+ 
+     int key_count = 0;
+     for (int expert = 0; expert < n; expert++)
+@@ -8784,6 +8812,12 @@
+     engine->owns_experts = 1;
+     engine->summary.dense_resident = engine->runtime.dense_resident;
+     engine->summary.head_resident = engine->head_cache.data != NULL;
++#ifdef LUMIBRI_P2P
++    lumi_init_ex(engine->config.num_hidden_layers,
++                 engine->config.n_routed_experts,
++                 engine->config.hidden_size, NULL);   /* every V4 layer routes */
++    atexit(lumi_report);
++#endif
+     engine->summary.expert_cache_bytes =
+         engine->runtime.target_expert_cache_bytes;
+     *output = engine;

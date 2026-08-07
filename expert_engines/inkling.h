@@ -89,7 +89,8 @@ static void lmbe_scratch_free(void *p) {
 
 /* inkling.c's moe() compute branch, verbatim, once per row. */
 static void lmbe_apply(const LmbeSlot *ec, int slot, const float *x, float *out,
-                       int nrows, void *p) {
+                       int nrows, const float *w, void *p) {
+    (void)w;                          /* this engine weights on the chatter */
     (void)slot;
     LmbeScratch *sc = (LmbeScratch *)p;
     Slot *e = (Slot *)ec;

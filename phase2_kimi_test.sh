@@ -14,7 +14,7 @@ cd "$(dirname "$0")"
 
 ENGINE="${ENGINE:-../moe-stream/c}"
 NODES="${NODES:-2}"
-PORT0="${PORT0:-7461}"
+PORT0="${PORT0:-7485}"   # clear of phase5 (745x) and sign_test (746x)
 NGEN="${NGEN:-8}"
 IDS="${IDS:-3 7 11 19}"
 export K3_BITS=32          # f32 dense side: the question is the experts

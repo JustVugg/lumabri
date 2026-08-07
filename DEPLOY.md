@@ -79,7 +79,7 @@ because the engines do not share a shape:
 | GLM | `colibri-p2p.diff` | `make phase2-glm` | `expert_node_glm` |
 | Inkling | `inkling-p2p.diff` | `make expert_node_inkling` | `expert_node_inkling` |
 | Kimi K3 | `kimi_k3-p2p.diff` | `make expert_node_kimi` | `expert_node_kimi` |
-| DeepSeek V4 | — | — | none yet (chat works, experts stay on the chatter) |
+| DeepSeek V4 | `deepseek-p2p.diff` | `make expert_node_deepseek` | `expert_node_deepseek` |
 
 Skip this whole section if you only want phase 1: a server that serves the
 model's bytes works for every engine, DeepSeek included, and `lumabri chat`
@@ -95,10 +95,13 @@ exit
 cd /home/lumabri/lumabri && make install
 ```
 
-Only the OLMoE and GLM paths have been proven byte-identical against a
-fixture (`phase2_test.sh`, `phase2_glm_test.sh`). The Inkling and Kimi paths
-build on both sides but have not been run against a real model — see the
-README table before relying on them.
+All five paths are proven byte-identical: `make test-engines` runs the four
+that have synthetic fixtures, and `make test-phase2-deepseek MODEL=<dir>`
+runs V4 against a real model.
+
+The DeepSeek peer is worth knowing about even if you serve something else:
+it holds experts and no dense weights at all, so a donor for a 156 GB V4
+model needs a few hundred MB of RAM and the disk.
 
 Sanity check before going further — it runs in seconds and proves the whole
 byte path is byte-identical:

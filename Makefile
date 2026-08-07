@@ -37,6 +37,33 @@ expert_node_kimi: $(EXPERT_DEPS) expert_engines/kimi_k3.h $(ENGINE)/kimi_k3.c
 	$(CC) $(P2P_CFLAGS) -DLMBE_ENGINE_HEADER='"expert_engines/kimi_k3.h"' \
 	      expert_node.c -o $@ -lm -lpthread
 
+# DeepSeek V4 needs two extra things at build time.
+#
+# Its own -D set (upstream's expert-store sizing) has to match, or the store
+# is laid out differently than the engine expects.
+#
+# And deepseek.c does `#undef main` halfway through — it renames a legacy
+# entry point of its own — which kills the usual `#define main` trick every
+# other glue relies on. So the CLI entry point is renamed textually into a
+# build copy instead. One deterministic substitution, and if upstream ever
+# changes that signature the copy still has a second main() and the compile
+# says so rather than silently building the wrong program.
+DS_CFLAGS = -DCOLI_V4_MAX_PIN_SLOTS_PER_LAYER=16 -DCOLI_V4_PIN_RAMP_REQUESTS=24 \
+            -DCOLI_V4_EXPERIMENTAL_BLOCK_OTHER_PROFILE \
+            -DCOLI_V4_EXPERIMENTAL_DUAL_EXPERT_LOADER
+
+build/deepseek_noentry.c: $(ENGINE)/deepseek.c
+	@mkdir -p build
+	@sed 's/^int main(int argc, char \*\*argv) {/int deepseek_cli_main_unused(int argc, char **argv) {/' \
+	     $< > $@
+	@grep -q deepseek_cli_main_unused $@ || \
+	  { echo "deepseek.c: main() signature changed — update the rule"; exit 1; }
+
+expert_node_deepseek: $(EXPERT_DEPS) expert_engines/deepseek.h build/deepseek_noentry.c
+	$(CC) $(P2P_CFLAGS) $(DS_CFLAGS) -Ibuild \
+	      -DLMBE_ENGINE_HEADER='"expert_engines/deepseek.h"' \
+	      expert_node.c -o $@ -lm -lpthread
+
 # Regenerate the engine patches from a colibri checkout (never modifies it)
 patches:
 	python3 engine_patches/make_patches.py --engine-dir $(ENGINE)
@@ -65,6 +92,11 @@ test-phase2-inkling: expert_node_inkling
 
 test-phase2-kimi: expert_node_kimi
 	./phase2_kimi_test.sh
+
+# needs a real DeepSeek V4 model: MODEL=<dir> (no synthetic fixture, see the
+# script's header for why)
+test-phase2-deepseek: expert_node_deepseek
+	./phase2_deepseek_test.sh
 
 # every engine's byte-identity proof, one after the other
 test-engines: test-phase2 test-phase2-glm test-phase2-inkling test-phase2-kimi
@@ -98,14 +130,18 @@ install: all
 	install -d $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(PREFIX)/lib/lumabri
 	install -m 755 lumabri tracker maintainer $(DESTDIR)$(PREFIX)/bin/
 	install -m 644 liblumabri.so $(DESTDIR)$(PREFIX)/lib/lumabri/
-	@for b in expert_node expert_node_glm expert_node_inkling expert_node_kimi olmoe_p2p; do \
+	@for b in expert_node expert_node_glm expert_node_inkling expert_node_kimi \
+	         expert_node_deepseek olmoe_p2p; do \
 	    [ -f $$b ] && install -m 755 $$b $(DESTDIR)$(PREFIX)/bin/ || true; done
 	@echo "installed under $(DESTDIR)$(PREFIX)"
 
 clean:
 	rm -f tracker maintainer liblumabri.so test_shim lumabri olmoe_p2p \
-	      expert_node expert_node_glm expert_node_inkling expert_node_kimi
+	      expert_node expert_node_glm expert_node_inkling expert_node_kimi \
+	      expert_node_deepseek
+	rm -rf build
 
 .PHONY: all test clean install phase2 phase2-glm fixture test-phase2 \
-        test-phase2-glm test-phase2-inkling test-phase2-kimi test-engines \
+        test-phase2-glm test-phase2-inkling test-phase2-kimi \
+        test-phase2-deepseek test-engines \
         patches patches-check

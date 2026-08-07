@@ -56,7 +56,8 @@ static void lmbe_scratch_free(void *p) {
  * IS the local arithmetic. The routing weight and the accumulation stay with
  * the chatter: those are the model's semantics, not the peer's business. */
 static void lmbe_apply(const LmbeSlot *e, int slot, const float *x, float *out,
-                       int nrows, void *p) {
+                       int nrows, const float *w, void *p) {
+    (void)w;                          /* this engine weights on the chatter */
     (void)slot;
     LmbeScratch *sc = (LmbeScratch *)p;
     int D = lmbe_M.c.hidden, I = lmbe_M.c.inter;

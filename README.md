@@ -178,10 +178,11 @@ experts — is the part that is per engine.
 | `colibri` | GLM | yes | `expert_node_glm` — **proven**, `phase2_glm_test.sh` |
 | `inkling` | Inkling | yes | `expert_node_inkling` — **proven**, `phase2_inkling_test.sh` |
 | `kimi_k3` | Kimi K3 | yes | `expert_node_kimi` — **proven**, `phase2_kimi_test.sh` |
-| `deepseek` | DeepSeek V4 | yes | no — see below |
+| `deepseek` | DeepSeek V4 | yes | `expert_node_deepseek` — **proven**, `phase2_deepseek_test.sh` |
 
-`make test-engines` runs all four. "Proven" means the experiment, not the
-opinion: the same engine, the same prompt, generated twice — once with the
+`make test-engines` runs the four with fixtures; DeepSeek needs a real model
+(`make test-phase2-deepseek MODEL=<dir>`). "Proven" means the experiment, not
+the opinion: the same engine, the same prompt, generated twice — once with the
 experts local and once with every one of them on a peer — and the tokens
 compared. Each needs a fixture, so this repo carries a generator per engine
 (`make_tiny_olmoe.py`, `make_tiny_inkling.py`, `make_tiny_kimi.py`; GLM uses
@@ -195,29 +196,35 @@ because GLM computes an expert over all its routed rows at once and the
 peers were being fed one row at a time. Nothing but running it would have
 caught that.
 
-**DeepSeek V4** is left out deliberately, and it is worth writing down why,
-because from the outside it looks like the easiest of the five: it has a
+**DeepSeek V4** was the one that looked easiest from the outside — it has a
 clean public API (`coli_v4_engine_open`, `coli_expert_lookup`,
-`coli_v4_expert_forward_ref`) where the others need their internals. Three
-things say no:
+`coli_v4_expert_forward_ref`) where the others need their internals — and
+turned out to have the sharpest edge:
 
-- **the router weight is not a scale.** `coli_v4_expert_forward_ref` folds
-  it in *before* the down projection and rounds the result to bf16, so
-  `w · expert(x)` is not what the engine computes. It would have to travel
-  with the activation, and a chatter-side multiply — which is what every
-  other engine allows — would quietly produce different numbers.
-- **there are four places that apply an expert**, two per-token and two in
-  the batch union, each guarded by `COLI_V4_EXPERIMENTAL_DUAL_EXPERT_LOADER`.
-  Missing one is not a crash; it is a layer that quietly ran locally.
-- **`deepseek.c` is generated** by `tools/amalgamate_deepseek.py` — upstream
-  says to edit the generator, not the file — so a patch against it is stale
-  the next time anyone regenerates.
+- **the router weight is not a scale.** `coli_v4_expert_forward_ref` folds it
+  in *before* the down projection and rounds the product to bf16, so
+  `w · expert(x)` is not what the engine computes. It has to travel with the
+  activation and be applied by the peer; the chatter-side multiply that every
+  other engine allows would have looked right and been wrong. `EXEC` carries
+  the weights when the body is long enough to hold them.
+- **three places apply a target expert** — one per token, one in the block
+  pipeline, one in the batch union — and each had to be hooked. Missing one
+  is not a crash; it is a layer that quietly runs locally. The dspark draft
+  path is deliberately left alone: those are the *draft* model's experts, and
+  the target verifies every token they propose.
+- **`deepseek.c` is generated** by `tools/amalgamate_deepseek.py`, so the
+  patch is regenerated from anchors like the rest, and the build renames its
+  CLI entry point in a copy because the file `#undef`s `main` halfway through.
 
-None of that is unsolvable. What makes it wrong to ship *now* is that there
-is no DeepSeek fixture, so none of it could be checked, and the one thing
-this project promises is that the network does not change the model. A
-synthetic fixture is the unlock; until then, DeepSeek V4 runs through
-lumabri as a phase-1 model, which works.
+Its peer is also the only one that holds no dense weights at all: V4's expert
+store opens straight off the model directory, which is what a peer should
+have wanted all along.
+
+There is no synthetic fixture for it — V4 validates a strict config and an
+FP8/FP4 tensor plan, so a random-weight stand-in is more work than it is
+worth. `phase2_deepseek_test.sh` runs against a real model instead, and the
+engine scores itself: the local run writes an oracle, the P2P run is checked
+against it by `--oracle`.
 
 Three shapes had to be taught to the client, and they are worth naming
 because they are what "support another engine" actually costs:
@@ -383,7 +390,7 @@ On every other machine, pick a role — or several:
 | `lumabri_client.h` | phase 2 chatter side |
 | `selftest.sh` | byte identity: cold, warm, offline |
 | `phase2_test.sh`, `phase2_bench.sh` | phase 2 correctness and benchmark (olmoe) |
-| `phase2_glm_test.sh`, `phase2_inkling_test.sh`, `phase2_kimi_test.sh` | phase 2 byte identity, one per engine |
+| `phase2_glm_test.sh`, `phase2_inkling_test.sh`, `phase2_kimi_test.sh`, `phase2_deepseek_test.sh` | phase 2 byte identity, one per engine |
 | `phase3_test.sh` | proximity, readahead, failover — measured |
 | `phase4_test.sh` | SSD cache, tracker discovery, delegate & fall back |
 | `phase5_test.sh` | integrity: lying peers caught, poison stripped |
@@ -394,6 +401,7 @@ On every other machine, pick a role — or several:
 | `lumabri_sign.h` | sha512 + ed25519 — the operator's authority |
 | `make_tiny_olmoe.py` | synthetic OLMoE-shaped fixture for tests |
 | `make_tiny_inkling.py`, `make_tiny_kimi.py` | the same for Inkling and Kimi K3, numpy only |
+| `expert_engines/deepseek.h` | the V4 peer: expert store only, no dense weights |
 
 ## Related work
 

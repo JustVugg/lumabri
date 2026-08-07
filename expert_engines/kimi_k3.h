@@ -72,7 +72,8 @@ static void lmbe_scratch_free(void *p) {
  * impossible by construction rather than by inspection. The router weight is
  * applied by the caller on the chatter, exactly as this engine applies it. */
 static void lmbe_apply(const LmbeSlot *ec, int slot, const float *z, float *out,
-                       int nrows, void *p) {
+                       int nrows, const float *w, void *p) {
+    (void)w;                          /* this engine weights on the chatter */
     LmbeScratch *sc = (LmbeScratch *)p;
     Slot *s = (Slot *)ec;
     int LT = lmbe_M.c.latent;

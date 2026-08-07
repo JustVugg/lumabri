@@ -134,8 +134,7 @@ static const char *expert_node_for(const char *model_type) {
     if (strstr(model_type, "glm"))      return "expert_node_glm";
     if (strstr(model_type, "inkling"))  return "expert_node_inkling";
     if (strstr(model_type, "kimi"))     return "expert_node_kimi";
-    /* deepseek_v4 chats fine — phase 1 serves its bytes and it speaks the
-     * framed dialect — but it has no expert node: see the README. */
+    if (strstr(model_type, "deepseek")) return "expert_node_deepseek";
     return NULL;
 }
 

@@ -292,12 +292,20 @@ static int lumi_pick(int gid, uint32_t tried) {
  * generation has visibly diverged. Batching keeps remote and local doing
  * literally the same arithmetic, and as a bonus a 12-token prefill costs one
  * round trip per expert instead of twelve. */
-static int lumi_send_exec(int fd, int layer, int eid, const float *x, int D, int nr) {
+/* `w` non-NULL: the router weights travel WITH the activations and the peer
+ * applies them. Every engine but DeepSeek V4 leaves them here, because there
+ * `w · expert(x)` is the same number either way. V4 folds the weight in
+ * before the down projection and rounds the result to bf16, so it is not a
+ * scale at all and a chatter-side multiply would quietly differ. The body
+ * says which: 16 bytes = no weights, 16 + nr*4 = weights follow. */
+static int lumi_send_exec(int fd, int layer, int eid, const float *x, int D, int nr,
+                          const float *w) {
     LmbBuf b = {0};
     lmb_buf_u32(&b, (uint32_t)layer);
     lmb_buf_u32(&b, (uint32_t)eid);
     lmb_buf_u32(&b, (uint32_t)D);
     lmb_buf_u32(&b, (uint32_t)nr);
+    if (w) lmb_buf_bytes(&b, w, (size_t)nr * sizeof(float));
     int rc = lmb_send(fd, LMB_EXEC, b.p, (uint32_t)b.len,
                       x, (uint32_t)((size_t)nr * D * sizeof(float)));
     free(b.p);
@@ -308,7 +316,7 @@ static int lumi_send_exec(int fd, int layer, int eid, const float *x, int D, int
  * Costs a full extra round trip — it is the price of a peer dying, paid
  * once, instead of the generation dying with it. */
 static float *lumi_exec_retry(int layer, int eid, const float *x, int D, int nr,
-                              uint32_t tried) {
+                              const float *w, uint32_t tried) {
     int gid = layer * L.n_experts + eid;
     uint32_t want = (uint32_t)((size_t)nr * D * sizeof(float));
     int refreshed = 0;
@@ -330,7 +338,7 @@ static float *lumi_exec_retry(int layer, int eid, const float *x, int D, int nr,
         int fd = lumi_take_sock(p);
         if (fd < 0) continue;
         LmbMsg m = {0};
-        if (lumi_send_exec(fd, layer, eid, x, D, nr) || lmb_recv(fd, &m) ||
+        if (lumi_send_exec(fd, layer, eid, x, D, nr, w) || lmb_recv(fd, &m) ||
             m.op != LMB_EXEC_R || m.pay_len != want) {
             close(fd);
             p->dead = 1;
@@ -353,7 +361,8 @@ static float *lumi_exec_retry(int layer, int eid, const float *x, int D, int nr,
  * way the answer cannot be trusted, and the run stops loudly rather than
  * emit a token nobody can vouch for. */
 static void lumi_spot_check(int layer, int eid, const float *x, int D, int nr,
-                            const float *got, LumiPeer *from, uint32_t tried) {
+                            const float *w, const float *got, LumiPeer *from,
+                            uint32_t tried) {
     int gid = layer * L.n_experts + eid;
     int r2 = lumi_pick(gid, tried);
     if (r2 < 0) return;                       /* no second replica to ask */
@@ -362,7 +371,7 @@ static void lumi_spot_check(int layer, int eid, const float *x, int D, int nr,
     if (fd < 0) return;
     uint32_t want = (uint32_t)((size_t)nr * D * sizeof(float));
     LmbMsg m = {0};
-    if (lumi_send_exec(fd, layer, eid, x, D, nr) || lmb_recv(fd, &m) ||
+    if (lumi_send_exec(fd, layer, eid, x, D, nr, w) || lmb_recv(fd, &m) ||
         m.op != LMB_EXEC_R || m.pay_len != want) {
         close(fd);
         lmb_msg_free(&m);
@@ -404,7 +413,7 @@ static void lumi_moe_apply(int layer, const int *idx, const float *val, int K,
             LumiPeer *p = &L.peers[L.own[(size_t)gid * LUMI_MAX_REP + r]];
             int fd = lumi_take_sock(p);
             if (fd < 0) continue;
-            if (lumi_send_exec(fd, layer, idx[k], x, D, 1)) {
+            if (lumi_send_exec(fd, layer, idx[k], x, D, 1, NULL)) {
                 close(fd);
                 p->dead = 1;
                 continue;
@@ -427,7 +436,7 @@ static void lumi_moe_apply(int layer, const int *idx, const float *val, int K,
                 if (L.verify_pct) {
                     vseed = vseed * 1664525u + 1013904223u;
                     if ((int)(vseed % 100u) < L.verify_pct)
-                        lumi_spot_check(layer, idx[k], x, D, 1, res[k], ps[k], tried[k]);
+                        lumi_spot_check(layer, idx[k], x, D, 1, NULL, res[k], ps[k], tried[k]);
                 }
                 continue;
             }
@@ -437,7 +446,7 @@ static void lumi_moe_apply(int layer, const int *idx, const float *val, int K,
             fprintf(stderr, "[lumabri] peer %s failed on layer %d expert %d — "
                             "trying next replica\n", ps[k]->addr, layer, idx[k]);
         }
-        res[k] = lumi_exec_retry(layer, idx[k], x, D, 1, tried[k]);
+        res[k] = lumi_exec_retry(layer, idx[k], x, D, 1, NULL, tried[k]);
     }
     /* accumulate in the router's order, exactly as the local path does */
     for (int k = 0; k < K; k++) {
@@ -521,7 +530,7 @@ static void lumi_moe_apply_batch(int layer, const int *idxs, const float *ws,
                 LumiPeer *p = &L.peers[L.own[(size_t)gid * LUMI_MAX_REP + r]];
                 int fd = lumi_take_sock(p);
                 if (fd < 0) continue;
-                if (lumi_send_exec(fd, layer, eid, xj, D, nr)) {
+                if (lumi_send_exec(fd, layer, eid, xj, D, nr, NULL)) {
                     close(fd); p->dead = 1; continue;
                 }
                 fds[j] = fd; ps[j] = p;
@@ -542,7 +551,7 @@ static void lumi_moe_apply_batch(int layer, const int *idxs, const float *ws,
                     if (L.verify_pct) {
                         vseed = vseed * 1664525u + 1013904223u;
                         if ((int)(vseed % 100u) < L.verify_pct)
-                            lumi_spot_check(layer, eid, xj, D, nr, res, ps[j], tried[j]);
+                            lumi_spot_check(layer, eid, xj, D, nr, NULL, res, ps[j], tried[j]);
                     }
                 } else {
                     close(fds[j]);
@@ -552,7 +561,7 @@ static void lumi_moe_apply_batch(int layer, const int *idxs, const float *ws,
                                     "trying next replica\n", ps[j]->addr, layer, eid);
                 }
             }
-            if (!res) res = lumi_exec_retry(layer, eid, xj, D, nr, tried[j]);
+            if (!res) res = lumi_exec_retry(layer, eid, xj, D, nr, NULL, tried[j]);
             int *rj = rows + (size_t)j * S;
             float *wj = rw + (size_t)j * S;
             for (int r = 0; r < nr; r++) {
@@ -608,7 +617,7 @@ static void lumi_moe_apply_union(int layer, int nu, const int *uid,
                 LumiPeer *p = &L.peers[L.own[(size_t)gid * LUMI_MAX_REP + r]];
                 int fd = lumi_take_sock(p);
                 if (fd < 0) continue;
-                if (lumi_send_exec(fd, layer, eid, xj, D, nr)) {
+                if (lumi_send_exec(fd, layer, eid, xj, D, nr, NULL)) {
                     close(fd); p->dead = 1; continue;
                 }
                 fds[j] = fd; ps[j] = p;
@@ -629,7 +638,7 @@ static void lumi_moe_apply_union(int layer, int nu, const int *uid,
                     if (L.verify_pct) {
                         vseed = vseed * 1664525u + 1013904223u;
                         if ((int)(vseed % 100u) < L.verify_pct)
-                            lumi_spot_check(layer, eid, xj, D, nr, res, ps[j], tried[j]);
+                            lumi_spot_check(layer, eid, xj, D, nr, NULL, res, ps[j], tried[j]);
                     }
                 } else {
                     close(fds[j]);
@@ -639,7 +648,7 @@ static void lumi_moe_apply_union(int layer, int nu, const int *uid,
                                     "trying next replica\n", ps[j]->addr, layer, eid);
                 }
             }
-            if (!res) res = lumi_exec_retry(layer, eid, xj, D, nr, tried[j]);
+            if (!res) res = lumi_exec_retry(layer, eid, xj, D, nr, NULL, tried[j]);
             for (int r = 0; r < nr; r++) {
                 float *us = U + (int64_t)poslist[f + r] * D, w = wlist[f + r];
                 const float *hr = res + (size_t)r * D;
@@ -652,6 +661,121 @@ static void lumi_moe_apply_union(int layer, int nu, const int *uid,
     L.wait_s += lumi_now() - t0;
     L.layers_done++;
     free(xg);
+}
+
+/* ---- DeepSeek V4 -------------------------------------------------------
+ *
+ * V4 differs from the other four in two ways that both reach the wire.
+ *
+ * The router weight is not a scale. coli_v4_expert_forward_ref folds it in
+ * BEFORE the down projection and rounds the product to bf16, so the peer has
+ * to receive it and apply it — see lumi_send_exec. What comes back is
+ * already weighted, and the chatter only adds.
+ *
+ * And the union is in ASCENDING EXPERT ID, not first-seen order: the engine
+ * builds it with `for expert 0..n if used[expert]`, and within an expert it
+ * walks the batch in order. Both are copied here, because the order of a
+ * float sum is part of the answer.
+ */
+static void lumi_moe_apply_v4(int layer, const int *indices, const float *weights,
+                              int topk, const float *x, int batch, int D,
+                              float *out) {
+    unsigned char *used = (unsigned char *)calloc((size_t)L.n_experts, 1);
+    int *uid = (int *)malloc((size_t)L.n_experts * sizeof(int));
+    int *rows = (int *)malloc((size_t)batch * LUMI_BLOCK * sizeof(int));
+    float *rw = (float *)malloc((size_t)batch * LUMI_BLOCK * sizeof(float));
+    float *xg = (float *)malloc((size_t)batch * LUMI_BLOCK * (size_t)D * sizeof(float));
+    if (!used || !uid || !rows || !rw || !xg) lumi_die("out of memory batching a layer");
+    for (int item = 0; item < batch; item++)
+        for (int k = 0; k < topk; k++) {
+            int e = indices[(size_t)item * topk + k];
+            if (e >= 0 && e < L.n_experts) used[e] = 1;
+        }
+    int nu = 0;
+    for (int e = 0; e < L.n_experts; e++) if (used[e]) uid[nu++] = e;
+
+    double t0 = lumi_now();
+    int fds[LUMI_BLOCK];
+    uint32_t tried[LUMI_BLOCK];
+    LumiPeer *ps[LUMI_BLOCK];
+    int nrs[LUMI_BLOCK];
+    static unsigned vseed = 0xc2b2ae35u;
+
+    for (int base = 0; base < nu; base += LUMI_BLOCK) {
+        int nb = nu - base < LUMI_BLOCK ? nu - base : LUMI_BLOCK;
+        for (int j = 0; j < nb; j++) {
+            int eid = uid[base + j], nr = 0;
+            int *rj = rows + (size_t)j * batch;
+            float *wj = rw + (size_t)j * batch;
+            for (int item = 0; item < batch; item++) {
+                int rank = -1;
+                for (int k = 0; k < topk; k++)
+                    if (indices[(size_t)item * topk + k] == eid) rank = k;
+                if (rank < 0) continue;                    /* engine takes the LAST match */
+                rj[nr] = item;
+                wj[nr] = weights[(size_t)item * topk + rank];
+                nr++;
+            }
+            nrs[j] = nr;
+            float *xj = xg + (size_t)j * batch * D;
+            for (int r = 0; r < nr; r++)
+                memcpy(xj + (size_t)r * D, x + (size_t)rj[r] * D, (size_t)D * sizeof(float));
+
+            int gid = layer * L.n_experts + eid;
+            tried[j] = 0; fds[j] = -1; ps[j] = NULL;
+            for (;;) {
+                int r = lumi_pick(gid, tried[j]);
+                if (r < 0) break;
+                tried[j] |= 1u << r;
+                LumiPeer *p = &L.peers[L.own[(size_t)gid * LUMI_MAX_REP + r]];
+                int fd = lumi_take_sock(p);
+                if (fd < 0) continue;
+                if (lumi_send_exec(fd, layer, eid, xj, D, nr, wj)) {
+                    close(fd); p->dead = 1; continue;
+                }
+                fds[j] = fd; ps[j] = p;
+                break;
+            }
+        }
+        for (int j = 0; j < nb; j++) {
+            int eid = uid[base + j], nr = nrs[j];
+            uint32_t want = (uint32_t)((size_t)nr * D * sizeof(float));
+            float *res = NULL, *xj = xg + (size_t)j * batch * D;
+            float *wj = rw + (size_t)j * batch;
+            int *rj = rows + (size_t)j * batch;
+            if (fds[j] >= 0) {
+                LmbMsg m = {0};
+                if (lmb_recv(fds[j], &m) == 0 && m.op == LMB_EXEC_R && m.pay_len == want) {
+                    res = (float *)m.pay;
+                    m.pay = NULL;
+                    lmb_msg_free(&m);
+                    lumi_put_sock(ps[j], fds[j]);
+                    if (L.verify_pct) {
+                        vseed = vseed * 1664525u + 1013904223u;
+                        if ((int)(vseed % 100u) < L.verify_pct)
+                            lumi_spot_check(layer, eid, xj, D, nr, wj, res, ps[j], tried[j]);
+                    }
+                } else {
+                    close(fds[j]);
+                    ps[j]->dead = 1;
+                    lmb_msg_free(&m);
+                    fprintf(stderr, "[lumabri] peer %s failed on layer %d expert %d — "
+                                    "trying next replica\n", ps[j]->addr, layer, eid);
+                }
+            }
+            if (!res) res = lumi_exec_retry(layer, eid, xj, D, nr, wj, tried[j]);
+            for (int r = 0; r < nr; r++) {       /* already weighted by the peer */
+                float *os = out + (size_t)rj[r] * D;
+                const float *hr = res + (size_t)r * D;
+                for (int d = 0; d < D; d++) os[d] += hr[d];
+            }
+            free(res);
+            L.calls++;
+        }
+    }
+    L.wait_s += lumi_now() - t0;
+    L.layers_done++;
+    free(used); free(uid); free(rows); free(rw); free(xg);
 }
 
 static void lumi_report(void) {

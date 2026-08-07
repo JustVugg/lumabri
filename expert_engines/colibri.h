@@ -87,7 +87,8 @@ static void lmbe_scratch_free(void *p) {
  * the row count has to come across the wire — see the protocol note in
  * lumabri_client.h. */
 static void lmbe_apply(const LmbeSlot *ec, int slot, const float *x, float *out,
-                       int nrows, void *p) {
+                       int nrows, const float *w, void *p) {
+    (void)w;                          /* this engine weights on the chatter */
     (void)slot;
     LmbeScratch *sc = (LmbeScratch *)p;
     ESlot *e = (ESlot *)ec;                 /* the engine's kernels take non-const */
