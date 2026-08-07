@@ -79,6 +79,12 @@ because the engines do not share a shape:
 | GLM | `colibri-p2p.diff` | `make phase2-glm` | `expert_node_glm` |
 | Inkling | `inkling-p2p.diff` | `make expert_node_inkling` | `expert_node_inkling` |
 | Kimi K3 | `kimi_k3-p2p.diff` | `make expert_node_kimi` | `expert_node_kimi` |
+| DeepSeek V4 | — | — | none yet (chat works, experts stay on the chatter) |
+
+Skip this whole section if you only want phase 1: a server that serves the
+model's bytes works for every engine, DeepSeek included, and `lumabri chat`
+speaks every engine's protocol. Phase 2 is what stops the chatter from
+downloading expert weights.
 
 ```sh
 su - lumabri

@@ -134,7 +134,9 @@ static const char *expert_node_for(const char *model_type) {
     if (strstr(model_type, "glm"))      return "expert_node_glm";
     if (strstr(model_type, "inkling"))  return "expert_node_inkling";
     if (strstr(model_type, "kimi"))     return "expert_node_kimi";
-    return NULL;                        /* deepseek and anything unknown */
+    /* deepseek_v4 chats fine — phase 1 serves its bytes and it speaks the
+     * framed dialect — but it has no expert node: see the README. */
+    return NULL;
 }
 
 /* model_type from a local config.json; "" when absent or unparseable */
@@ -250,10 +252,13 @@ static int cmd_serve(int argc, char **argv) {
     const char *node = expert_node_for(mtype);
     snprintf(exec_bin, sizeof exec_bin, "%s/%s", dir, node);
     int with_exec = 0;
-    if (!no_exec && node && access(exec_bin, X_OK)) {
+    if (!no_exec && !node && mtype[0])
+        printf("  %sfase 2 non disponibile per il motore %s: questo server "
+               "serve i byte, gli esperti li esegue il chatter%s\n",
+               C_DIM, mtype, C_R);
+    if (!no_exec && node && access(exec_bin, X_OK))
         printf("  %s%s non è compilato: nessun esperto eseguito qui "
                "(make %s ENGINE=/path/to/colibri/c)%s\n", C_DIM, node, node, C_R);
-    }
     if (!no_exec && node && access(exec_bin, X_OK) == 0) {
         char eport[16], cachestr[16], ename[32];
         snprintf(eport, sizeof eport, "%d", port + 2);

@@ -168,13 +168,17 @@ engine-agnostic. The patches are generated from source anchors by
 colibri version and fail loudly instead of applying to the wrong place. The
 engine is never modified — the test patches a copy.
 
-| engine | model | node | expert identity |
+All five engines **chat** through lumabri: phase 1 serves any model's bytes,
+and the front end speaks both engine dialects. Phase 2 — peers executing the
+experts — is the part that is per engine.
+
+| engine | model | chat (phase 1) | experts on peers (phase 2) |
 |---|---|---|---|
-| `olmoe` | OLMoE | `expert_node` | **proven** — `phase2_test.sh` |
-| `colibri` | GLM | `expert_node_glm` | **proven** — `phase2_glm_test.sh` |
-| `inkling` | Inkling | `expert_node_inkling` | builds both sides, unproven |
-| `kimi_k3` | Kimi K3 | `expert_node_kimi` | builds both sides, unproven |
-| `deepseek` | DeepSeek V4 | — | not done, see below |
+| `olmoe` | OLMoE | yes | `expert_node` — **proven**, `phase2_test.sh` |
+| `colibri` | GLM | yes | `expert_node_glm` — **proven**, `phase2_glm_test.sh` |
+| `inkling` | Inkling | yes | `expert_node_inkling` — builds, unproven |
+| `kimi_k3` | Kimi K3 | yes | `expert_node_kimi` — builds, unproven |
+| `deepseek` | DeepSeek V4 | yes | no — see below |
 
 "Unproven" means exactly that: the code is there and compiles on both sides,
 but nobody has yet run the two-runs-must-match experiment on it, because
@@ -185,10 +189,29 @@ that matched for four positions and then drifted, because GLM computes an
 expert over all its routed rows at once and the peers were being fed one row
 at a time. Only the fixture caught it.
 
-DeepSeek V4 is the one genuinely different case: its experts go through a
-`ColiExpertStore` / `ColiExpertView` API with the router weight applied
-inside the expert forward, so it needs its own store on the peer rather than
-the loader-and-kernels pattern the other four share. Left out on purpose.
+**DeepSeek V4** is left out deliberately, and it is worth writing down why,
+because from the outside it looks like the easiest of the five: it has a
+clean public API (`coli_v4_engine_open`, `coli_expert_lookup`,
+`coli_v4_expert_forward_ref`) where the others need their internals. Three
+things say no:
+
+- **the router weight is not a scale.** `coli_v4_expert_forward_ref` folds
+  it in *before* the down projection and rounds the result to bf16, so
+  `w · expert(x)` is not what the engine computes. It would have to travel
+  with the activation, and a chatter-side multiply — which is what every
+  other engine allows — would quietly produce different numbers.
+- **there are four places that apply an expert**, two per-token and two in
+  the batch union, each guarded by `COLI_V4_EXPERIMENTAL_DUAL_EXPERT_LOADER`.
+  Missing one is not a crash; it is a layer that quietly ran locally.
+- **`deepseek.c` is generated** by `tools/amalgamate_deepseek.py` — upstream
+  says to edit the generator, not the file — so a patch against it is stale
+  the next time anyone regenerates.
+
+None of that is unsolvable. What makes it wrong to ship *now* is that there
+is no DeepSeek fixture, so none of it could be checked, and the one thing
+this project promises is that the network does not change the model. A
+synthetic fixture is the unlock; until then, DeepSeek V4 runs through
+lumabri as a phase-1 model, which works.
 
 Three shapes had to be taught to the client, and they are worth naming
 because they are what "support another engine" actually costs:
