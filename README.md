@@ -42,8 +42,29 @@ server goes offline.
 In the chat: `/swarm` shows the network live and anonymous (peers are
 numbered, never named: model held, GB, bytes served, heartbeat), `/model`
 lists the models on the swarm and switches between them, restarting the
-engine on the fly. Several machines can serve different models to one
-tracker with `lumabri serve --model DIR --join TRACKER:PORT`.
+engine on the fly.
+
+### Several models on one swarm
+
+One tracker is an index, not a model server, so it holds as many models as
+you point at it — from one machine or many:
+
+```sh
+lumabri serve --model /models/glm      --port 7300
+lumabri serve --model /models/olmoe    --join 127.0.0.1:7300 --port 7310
+lumabri serve --model /models/deepseek --join 127.0.0.1:7300 --port 7320
+```
+
+Each `serve` brings its own maintainer (the bytes) and its own expert node
+(the compute), and each registers under its model's name. A chatter sees
+`3 modelli sullo sciame` and switches with `/model <name>`: the engine is
+restarted against the new model, and since the engine binary is chosen from
+that model's `model_type`, switching between different *architectures* works
+too — GLM to OLMoE to DeepSeek, one client, one tracker.
+
+Donors are per model as well: a machine can hold a slice of one model and
+execute experts for another. The tracker keeps them apart, and a chatter
+only ever discovers the peers for the model it is talking to.
 
 Donating space, the server decides: a machine with an empty directory can
 offer a byte budget and the tracker assigns it the slice to hold,
@@ -372,8 +393,21 @@ On every other machine, pick a role — or several:
 | chat | `lumabri chat --tracker SERVER:7300` |
 | chat on the machine that holds the model | `lumabri chat --local DIR` (no mirror, no second copy) |
 | donate disk (hold bytes) | `lumabri serve --model ./slice --join SERVER:7300 --model-name NAME --donate GB` |
-| donate compute (execute experts) | `expert_node --model DIR --tracker SERVER:7300 --cache N` |
-| donate compute for GLM | `expert_node_glm --model DIR --tracker SERVER:7300 --cache N --bits 8` |
+| donate compute (execute experts) | `expert_node<engine> --model DIR --tracker SERVER:7300 --cache N` |
+
+The compute peer is per engine, because the engines do not share an expert
+shape. `lumabri serve` picks the right one from the model's `model_type`;
+donating by hand means naming it:
+
+| model | binary | notes |
+|---|---|---|
+| OLMoE | `expert_node` | |
+| GLM | `expert_node_glm` | `--bits` must match the chatter's (default 8) |
+| Inkling | `expert_node_inkling` | `--bits` likewise |
+| Kimi K3 | `expert_node_kimi` | activations are latent-width, not hidden |
+| DeepSeek V4 | `expert_node_deepseek` | holds no dense weights: `--cache` is expert slots per layer |
+
+`make engines` builds all five.
 
 ## Layout
 

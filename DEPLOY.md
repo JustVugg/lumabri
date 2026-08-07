@@ -209,6 +209,28 @@ log prints the hit rate), lower it if it swaps.
 
 ---
 
+## 5b. More than one model on the same server
+
+The tracker is an index, not a model server: one of them holds as many models
+as you give it. Add a unit per model, all joining the first one's tracker:
+
+```ini
+ExecStart=/usr/local/bin/lumabri serve \
+    --model /home/lumabri/models/second \
+    --join 127.0.0.1:7300 \
+    --port 7310 \
+    --key /home/lumabri/swarm.key \
+    --exec-cache 256
+```
+
+Ports go up in tens: each `serve` uses P (its own tracker, unused when it
+joins), P+1 (maintainer) and P+2 (expert executor), so open those in the
+firewall for every model you add. Clients see them all with `/model`, and
+switching works across architectures because the engine binary is chosen
+from each model's `model_type`.
+
+---
+
 ## 6. Clients
 
 Every client needs the binaries (`make && sudo make install`, or just
@@ -263,12 +285,20 @@ The tracker assigns the 20 GB where the swarm is thinnest (rarest first),
 the donor pulls it — verifying every byte against the signed truth — and
 then serves it.
 
-**Donate compute** — execute experts, the part that actually makes it fast:
+**Donate compute** — execute experts, the part that actually makes it fast.
+The binary is per engine (§2 has the table); `expert_node` is OLMoE's,
+`expert_node_glm` is GLM's, and so on:
 
 ```sh
-expert_node --model /path/to/model --tracker YOUR_SERVER_IP:7300 \
-            --cache 128 --name my-node
+expert_node_glm --model /path/to/model --tracker YOUR_SERVER_IP:7300 \
+                --cache 128 --bits 8 --name my-node
 ```
+
+`--bits` must match what the chatter's engine uses (its argv[2], default 8):
+for a model without pre-quantized tensors the loader quantizes on the way in,
+and a peer at different bits holds different weights. DeepSeek V4 has no such
+knob — and its peer is the cheap one to run, since the V4 expert store needs
+no dense weights at all.
 
 Chatters discover it automatically and route to it when it is nearer than
 the server. Kill it and they fail over — ultimately back to the server,

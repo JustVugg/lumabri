@@ -17,6 +17,10 @@ P2P_CFLAGS = -O2 -fopenmp -Wall -I. -I$(ENGINE) \
 phase2: expert_node olmoe_p2p
 phase2-glm: expert_node_glm
 
+# every engine's peer in one go
+engines: expert_node expert_node_glm expert_node_inkling expert_node_kimi \
+         expert_node_deepseek
+
 # One expert-node binary per engine. The body is the same file; everything
 # engine-shaped lives in expert_engines/<name>.h, which pulls in the engine's
 # own source so remote and local run the same kernels on the same weights.
@@ -98,8 +102,17 @@ test-phase2-kimi: expert_node_kimi
 test-phase2-deepseek: expert_node_deepseek
 	./phase2_deepseek_test.sh
 
-# every engine's byte-identity proof, one after the other
+# Every engine's byte-identity proof, one after the other. DeepSeek V4 has no
+# synthetic fixture (see phase2_deepseek_test.sh), so it runs only when a real
+# model is there — and says so when it is not, rather than quietly passing on
+# four engines while claiming five.
 test-engines: test-phase2 test-phase2-glm test-phase2-inkling test-phase2-kimi
+	@if [ -f "$${MODEL:-$$HOME/deepseek_v4}/config.json" ]; then \
+	    $(MAKE) --no-print-directory test-phase2-deepseek; \
+	else \
+	    echo; echo "── DeepSeek V4 SKIPPED: no model at $${MODEL:-$$HOME/deepseek_v4}"; \
+	    echo "   it has no synthetic fixture — MODEL=<dir> make test-engines"; \
+	fi
 
 tracker: tracker.c lumabri_proto.h
 	$(CC) $(CFLAGS) -pthread tracker.c -o $@
@@ -141,7 +154,7 @@ clean:
 	      expert_node_deepseek
 	rm -rf build
 
-.PHONY: all test clean install phase2 phase2-glm fixture test-phase2 \
+.PHONY: all test clean install phase2 phase2-glm engines fixture test-phase2 \
         test-phase2-glm test-phase2-inkling test-phase2-kimi \
         test-phase2-deepseek test-engines \
         patches patches-check
