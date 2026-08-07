@@ -569,6 +569,91 @@ static void lumi_moe_apply_batch(int layer, const int *idxs, const float *ws,
     free(seen); free(uniq); free(rows); free(rw); free(xg);
 }
 
+/* The same batching, for an engine that has already built the union itself.
+ *
+ * kimi_k3 arrives here with the work already grouped: nu distinct experts,
+ * and for each one the list of positions that routed to it with their
+ * weights. It also runs its experts in the LATENT space, so `D` here is
+ * c->latent, not hidden — the peer must agree, which is what the manifest's
+ * dimension check enforces. */
+static void lumi_moe_apply_union(int layer, int nu, const int *uid,
+                                 const int *pfirst, const int *pcnt,
+                                 const int *poslist, const float *wlist,
+                                 const float *Z, int D, float *U) {
+    if (nu <= 0) return;
+    int maxrows = 0;
+    for (int j = 0; j < nu; j++) if (pcnt[j] > maxrows) maxrows = pcnt[j];
+    float *xg = (float *)malloc((size_t)maxrows * LUMI_BLOCK * (size_t)D * sizeof(float));
+    if (!xg) lumi_die("out of memory batching a layer");
+    double t0 = lumi_now();
+    int fds[LUMI_BLOCK];
+    uint32_t tried[LUMI_BLOCK];
+    LumiPeer *ps[LUMI_BLOCK];
+    static unsigned vseed = 0x85ebca6bu;
+
+    for (int base = 0; base < nu; base += LUMI_BLOCK) {
+        int nb = nu - base < LUMI_BLOCK ? nu - base : LUMI_BLOCK;
+        for (int j = 0; j < nb; j++) {
+            int eid = uid[base + j], nr = pcnt[base + j], f = pfirst[base + j];
+            float *xj = xg + (size_t)j * maxrows * D;
+            for (int r = 0; r < nr; r++)
+                memcpy(xj + (size_t)r * D, Z + (int64_t)poslist[f + r] * D,
+                       (size_t)D * sizeof(float));
+            int gid = layer * L.n_experts + eid;
+            tried[j] = 0; fds[j] = -1; ps[j] = NULL;
+            for (;;) {
+                int r = lumi_pick(gid, tried[j]);
+                if (r < 0) break;
+                tried[j] |= 1u << r;
+                LumiPeer *p = &L.peers[L.own[(size_t)gid * LUMI_MAX_REP + r]];
+                int fd = lumi_take_sock(p);
+                if (fd < 0) continue;
+                if (lumi_send_exec(fd, layer, eid, xj, D, nr)) {
+                    close(fd); p->dead = 1; continue;
+                }
+                fds[j] = fd; ps[j] = p;
+                break;
+            }
+        }
+        for (int j = 0; j < nb; j++) {
+            int eid = uid[base + j], nr = pcnt[base + j], f = pfirst[base + j];
+            uint32_t want = (uint32_t)((size_t)nr * D * sizeof(float));
+            float *res = NULL, *xj = xg + (size_t)j * maxrows * D;
+            if (fds[j] >= 0) {
+                LmbMsg m = {0};
+                if (lmb_recv(fds[j], &m) == 0 && m.op == LMB_EXEC_R && m.pay_len == want) {
+                    res = (float *)m.pay;
+                    m.pay = NULL;
+                    lmb_msg_free(&m);
+                    lumi_put_sock(ps[j], fds[j]);
+                    if (L.verify_pct) {
+                        vseed = vseed * 1664525u + 1013904223u;
+                        if ((int)(vseed % 100u) < L.verify_pct)
+                            lumi_spot_check(layer, eid, xj, D, nr, res, ps[j], tried[j]);
+                    }
+                } else {
+                    close(fds[j]);
+                    ps[j]->dead = 1;
+                    lmb_msg_free(&m);
+                    fprintf(stderr, "[lumabri] peer %s failed on layer %d expert %d — "
+                                    "trying next replica\n", ps[j]->addr, layer, eid);
+                }
+            }
+            if (!res) res = lumi_exec_retry(layer, eid, xj, D, nr, tried[j]);
+            for (int r = 0; r < nr; r++) {
+                float *us = U + (int64_t)poslist[f + r] * D, w = wlist[f + r];
+                const float *hr = res + (size_t)r * D;
+                for (int d = 0; d < D; d++) us[d] += w * hr[d];
+            }
+            free(res);
+            L.calls++;
+        }
+    }
+    L.wait_s += lumi_now() - t0;
+    L.layers_done++;
+    free(xg);
+}
+
 static void lumi_report(void) {
     if (!L.on) return;
     fprintf(stderr, "[lumabri] %llu remote expert calls in %llu layer rounds · "

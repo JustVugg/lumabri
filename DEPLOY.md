@@ -70,16 +70,29 @@ cd /home/lumabri/lumabri && make install     # → /usr/local
 ```
 
 To also execute experts (phase 2) the server needs the colibri engine
-source and the small patch:
+source and the patch for the engine your model uses — they are per engine,
+because the engines do not share a shape:
+
+| model | patch | build | node |
+|---|---|---|---|
+| OLMoE | `olmoe-p2p.diff` | `make phase2` | `expert_node` |
+| GLM | `colibri-p2p.diff` | `make phase2-glm` | `expert_node_glm` |
+| Inkling | `inkling-p2p.diff` | `make expert_node_inkling` | `expert_node_inkling` |
+| Kimi K3 | `kimi_k3-p2p.diff` | `make expert_node_kimi` | `expert_node_kimi` |
 
 ```sh
 su - lumabri
 git clone https://github.com/JustVugg/colibri.git
-cd colibri && git apply ~/lumabri/engine_patches/olmoe-p2p.diff
-cd ~/lumabri && make phase2 ENGINE=$HOME/colibri/c
+cd colibri && git apply ~/lumabri/engine_patches/colibri-p2p.diff   # GLM
+cd ~/lumabri && make phase2-glm ENGINE=$HOME/colibri/c
 exit
 cd /home/lumabri/lumabri && make install
 ```
+
+Only the OLMoE and GLM paths have been proven byte-identical against a
+fixture (`phase2_test.sh`, `phase2_glm_test.sh`). The Inkling and Kimi paths
+build on both sides but have not been run against a real model — see the
+README table before relying on them.
 
 Sanity check before going further — it runs in seconds and proves the whole
 byte path is byte-identical:

@@ -113,28 +113,76 @@ COLIBRI = [
 INKLING = [
     hook("static float sigmoidf(float x) { return 1.f / (1.f + expf(-x)); }\n",
          INCLUDE, where="before"),
-    hook("""            Slot *e = use[t - base];
-            if (!e) continue;                              /* scartato da TOPP */
-            const float *xs = x + (int64_t)s*D;
-            float *os = out + (int64_t)s*D;
-            float *w = wgt + (int64_t)s*(K+ns);
-""", """#ifdef LUMIBRI_P2P
-            if (lumi_layer_on(layer)) {
-                lumi_moe_apply(layer, idx + (int64_t)s*K + kk, w + kk, 1, xs, D, os);
-                continue;
-            }
+    hook("        m->euse += keff[s];\n    }\n", """#ifdef LUMIBRI_P2P
+    /* The routed experts run on peers — all K of a position issued together,
+     * so the cost is one round trip per layer and not per expert. The shared
+     * experts below, the routing above and the weighted sum stay here. */
+    int lumi_remote = lumi_layer_on(layer);
+    if (lumi_remote)
+        for (int s = 0; s < S; s++)
+            lumi_moe_apply(layer, idx + (int64_t)s*K, wgt + (int64_t)s*(K+ns),
+                           keff[s], x + (int64_t)s*D, D, out + (int64_t)s*D);
+#endif
+"""),
+    hook("    m->eusage = rt_counts_all();                  /* alias: the bump sites stay as they are */\n",
+         """#ifdef LUMIBRI_P2P
+    {   /* dense layers hold no experts: without the mask their non-existent
+         * ones count as missing and phase 2 never turns on */
+        unsigned char *routed = calloc((size_t)c->n_layers, 1);
+        for (int i = 0; i < c->n_layers; i++) routed[i] = c->sparse[i];
+        lumi_init_ex(c->n_layers, E, c->hidden, routed);
+        free(routed);
+        atexit(lumi_report);
+    }
+#endif
+"""),
+    hook("    int64_t npair = (int64_t)S*K;\n", """#ifdef LUMIBRI_P2P
+    if (lumi_remote) npair = 0;       /* nothing left to acquire, fill or compute */
 #endif
 """),
 ]
 
 # --------------------------------------------------------------------------
-# kimi_k3 and deepseek: same shape as colibri — the hook goes where the
-# per-position expert loop begins.
+# kimi_k3: the experts live in the LATENT space (c->latent, not hidden) and
+# the engine has already built the union by the time it calls
+# experts_apply_union — so the hook hands that union straight over and leaves
+# nothing behind. The latent projections above and below, and the shared
+# experts, stay local.
 # --------------------------------------------------------------------------
+KIMI = [
+    hook("static inline float sigmoidf_(float x){ return 1.f/(1.f+expf(-x)); }\n",
+         INCLUDE, where="before"),
+    hook("""    fprintf(stderr,"[K3] init done in %.1fs | %d layers | expert cache %d/layer (%.1f MB/slot) | RSS %.1f GB\\n",
+            now_s()-t0,c->n_layers,cap,m->e_slot/1e6,rss_gb());
+""", """#ifdef LUMIBRI_P2P
+    {   /* the experts live in the LATENT space, so that — not hidden — is the
+         * width the peers must agree on. Dense layers route nothing. */
+        unsigned char *routed=calloc((size_t)c->n_layers,1);
+        for(int i=0;i<c->n_layers;i++) routed[i]=m->L[i].sparse;
+        lumi_init_ex(c->n_layers, c->n_experts, c->latent, routed);
+        free(routed);
+        atexit(lumi_report);
+    }
+#endif
+"""),
+    hook("""        experts_apply_union(m,li,nu,uid,pfirst,pcnt,poslist,wlist,z,LT,u,gate,up,hz);
+""", """#ifdef LUMIBRI_P2P
+        if(lumi_layer_on(li)){
+            /* the union the engine just built, executed on peers; the router
+             * weights are applied at accumulation there exactly as
+             * expert_apply does here */
+            lumi_moe_apply_union(li,nu,uid,pfirst,pcnt,poslist,wlist,z,LT,u);
+            nu=0;
+        }
+#endif
+""", where="before"),
+]
+
 ENGINES = {
     "olmoe.c": OLMOE,
     "colibri.c": COLIBRI,
     "inkling.c": INKLING,
+    "kimi_k3.c": KIMI,
 }
 
 

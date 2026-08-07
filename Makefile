@@ -33,6 +33,10 @@ expert_node_inkling: $(EXPERT_DEPS) expert_engines/inkling.h $(ENGINE)/inkling.c
 	$(CC) $(P2P_CFLAGS) -DLMBE_ENGINE_HEADER='"expert_engines/inkling.h"' \
 	      expert_node.c -o $@ -lm -lpthread
 
+expert_node_kimi: $(EXPERT_DEPS) expert_engines/kimi_k3.h $(ENGINE)/kimi_k3.c
+	$(CC) $(P2P_CFLAGS) -DLMBE_ENGINE_HEADER='"expert_engines/kimi_k3.h"' \
+	      expert_node.c -o $@ -lm -lpthread
+
 # Regenerate the engine patches from a colibri checkout (never modifies it)
 patches:
 	python3 engine_patches/make_patches.py --engine-dir $(ENGINE)
@@ -85,13 +89,13 @@ install: all
 	install -d $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(PREFIX)/lib/lumabri
 	install -m 755 lumabri tracker maintainer $(DESTDIR)$(PREFIX)/bin/
 	install -m 644 liblumabri.so $(DESTDIR)$(PREFIX)/lib/lumabri/
-	@for b in expert_node expert_node_glm expert_node_inkling olmoe_p2p; do \
+	@for b in expert_node expert_node_glm expert_node_inkling expert_node_kimi olmoe_p2p; do \
 	    [ -f $$b ] && install -m 755 $$b $(DESTDIR)$(PREFIX)/bin/ || true; done
 	@echo "installed under $(DESTDIR)$(PREFIX)"
 
 clean:
 	rm -f tracker maintainer liblumabri.so test_shim lumabri olmoe_p2p \
-	      expert_node expert_node_glm expert_node_inkling
+	      expert_node expert_node_glm expert_node_inkling expert_node_kimi
 
 .PHONY: all test clean install phase2 phase2-glm fixture test-phase2 \
         test-phase2-glm patches patches-check

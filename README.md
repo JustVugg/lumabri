@@ -157,6 +157,53 @@ make phase2 ENGINE=/path/to/colibri/c
 ./phase2_bench.sh
 ```
 
+### More than one engine
+
+colibri ships several engines and they do not share a shape, so phase 2 is
+per engine: a patch that hooks the MoE function, and an expert-node binary
+built from that engine's own source. Everything engine-specific lives in one
+header per engine under `expert_engines/`; `expert_node.c` itself is
+engine-agnostic. The patches are generated from source anchors by
+`engine_patches/make_patches.py`, so they can be regenerated against any
+colibri version and fail loudly instead of applying to the wrong place. The
+engine is never modified — the test patches a copy.
+
+| engine | model | node | expert identity |
+|---|---|---|---|
+| `olmoe` | OLMoE | `expert_node` | **proven** — `phase2_test.sh` |
+| `colibri` | GLM | `expert_node_glm` | **proven** — `phase2_glm_test.sh` |
+| `inkling` | Inkling | `expert_node_inkling` | builds both sides, unproven |
+| `kimi_k3` | Kimi K3 | `expert_node_kimi` | builds both sides, unproven |
+| `deepseek` | DeepSeek V4 | — | not done, see below |
+
+"Unproven" means exactly that: the code is there and compiles on both sides,
+but nobody has yet run the two-runs-must-match experiment on it, because
+there is no small fixture for those models in the repo. Do not trust an
+unproven row — run the experiment first. The GLM work is the reason for the
+caution: the first version looked right, compiled, ran, and produced tokens
+that matched for four positions and then drifted, because GLM computes an
+expert over all its routed rows at once and the peers were being fed one row
+at a time. Only the fixture caught it.
+
+DeepSeek V4 is the one genuinely different case: its experts go through a
+`ColiExpertStore` / `ColiExpertView` API with the router weight applied
+inside the expert forward, so it needs its own store on the peer rather than
+the loader-and-kernels pattern the other four share. Left out on purpose.
+
+Three shapes had to be taught to the client, and they are worth naming
+because they are what "support another engine" actually costs:
+
+- **not every layer routes.** Dense first layers, and for GLM an MTP row at
+  index `n_layers` that does. `lumi_init_ex` takes the mask; without it the
+  non-existent experts of dense layers count as missing and phase 2 silently
+  stays off on every model that has one.
+- **batching is part of the arithmetic.** GLM gathers every row a layer
+  routed to an expert and computes them together; nr rows in one call is not
+  nr calls of one row. EXEC carries a row count, and `lumi_moe_apply_batch`
+  reproduces the engine's own union, row order and accumulation order.
+- **the experts do not always live in hidden space.** Kimi K3 routes in a
+  latent of `c->latent`, so that is the width on the wire.
+
 ## Phase 3: the war on RTT
 
 The swarm is as fast as your *nearest replica*, not your average peer —
@@ -290,6 +337,7 @@ On every other machine, pick a role — or several:
 | chat on the machine that holds the model | `lumabri chat --local DIR` (no mirror, no second copy) |
 | donate disk (hold bytes) | `lumabri serve --model ./slice --join SERVER:7300 --model-name NAME --donate GB` |
 | donate compute (execute experts) | `expert_node --model DIR --tracker SERVER:7300 --cache N` |
+| donate compute for GLM | `expert_node_glm --model DIR --tracker SERVER:7300 --cache N --bits 8` |
 
 ## Layout
 
@@ -301,9 +349,12 @@ On every other machine, pick a role — or several:
 | `lumashim.c` | the chatter-side LD_PRELOAD shim |
 | `lumabri_proto.h` | binary wire protocol, header only |
 | `expert_node.c` | phase 2 peer: holds experts and executes them |
+| `expert_engines/*.h` | one per engine: the only engine-shaped code |
+| `engine_patches/make_patches.py` | generates the engine patches from source anchors |
 | `lumabri_client.h` | phase 2 chatter side |
 | `selftest.sh` | byte identity: cold, warm, offline |
-| `phase2_test.sh`, `phase2_bench.sh` | phase 2 correctness and benchmark |
+| `phase2_test.sh`, `phase2_bench.sh` | phase 2 correctness and benchmark (olmoe) |
+| `phase2_glm_test.sh` | phase 2 byte identity on the GLM engine |
 | `phase3_test.sh` | proximity, readahead, failover — measured |
 | `phase4_test.sh` | SSD cache, tracker discovery, delegate & fall back |
 | `phase5_test.sh` | integrity: lying peers caught, poison stripped |

@@ -15,16 +15,47 @@ diff --git a/c/inkling.c b/c/inkling.c
  static float sigmoidf(float x) { return 1.f / (1.f + expf(-x)); }
  static float siluf(float x) { return x / (1.f + expf(-x)); }
  /* TOPP=p (0..1): top-p adattivo sui routed — tieni gli esperti fino al peso
-@@ -1294,6 +1301,12 @@
-             const float *xs = x + (int64_t)s*D;
-             float *os = out + (int64_t)s*D;
-             float *w = wgt + (int64_t)s*(K+ns);
+@@ -867,6 +874,16 @@
+     for (int i = 0; i < c->n_layers; i++) if (!c->sparse[i]) rt_drop_row(i);
+     rt_drop_row(c->n_layers);                     /* inkling has no MTP row */
+     m->eusage = rt_counts_all();                  /* alias: the bump sites stay as they are */
 +#ifdef LUMIBRI_P2P
-+            if (lumi_layer_on(layer)) {
-+                lumi_moe_apply(layer, idx + (int64_t)s*K + kk, w + kk, 1, xs, D, os);
-+                continue;
-+            }
++    {   /* dense layers hold no experts: without the mask their non-existent
++         * ones count as missing and phase 2 never turns on */
++        unsigned char *routed = calloc((size_t)c->n_layers, 1);
++        for (int i = 0; i < c->n_layers; i++) routed[i] = c->sparse[i];
++        lumi_init_ex(c->n_layers, E, c->hidden, routed);
++        free(routed);
++        atexit(lumi_report);
++    }
 +#endif
-             if (m->xq) {
-                 if (q4) {
-                     matmul_q4(g, xs, e->p13, e->s13, D, 2*I);   /* gate rows then up rows */
+     m->dense_load_s = now_s() - t0;
+ }
+ 
+@@ -1185,6 +1202,16 @@
+         }
+         m->euse += keff[s];
+     }
++#ifdef LUMIBRI_P2P
++    /* The routed experts run on peers — all K of a position issued together,
++     * so the cost is one round trip per layer and not per expert. The shared
++     * experts below, the routing above and the weighted sum stay here. */
++    int lumi_remote = lumi_layer_on(layer);
++    if (lumi_remote)
++        for (int s = 0; s < S; s++)
++            lumi_moe_apply(layer, idx + (int64_t)s*K, wgt + (int64_t)s*(K+ns),
++                           keff[s], x + (int64_t)s*D, D, out + (int64_t)s*D);
++#endif
+     /* Il ciclo sotto ACQUISISCE uno slot per ogni coppia (token, esperto) e ne tiene
+      * il puntatore fino al calcolo. slot_acquire evince l'LRU quando la cache e'
+      * piena — anche uno slot gia' consegnato in QUESTA chiamata: il puntatore resta
+@@ -1202,6 +1229,9 @@
+     float *g = falloc(2*I), *u = g + I, *hh = falloc(D);
+     int q4 = m->xq && m->rb13*2 == D;   /* packed int4 vs int8 container */
+     int64_t npair = (int64_t)S*K;
++#ifdef LUMIBRI_P2P
++    if (lumi_remote) npair = 0;       /* nothing left to acquire, fill or compute */
++#endif
+ #ifdef COLI_METAL
+     /* per-round scratch for the batched GPU submit: pairs grouped by expert,
+      * activations packed in group order. Allocated once per moe() call. */
