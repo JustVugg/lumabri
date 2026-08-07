@@ -47,42 +47,40 @@ static void lmbe_slot_load(int slot, int eid, LmbeSlot *s) {
     s->eid = eid;
 }
 
-typedef struct { float *gate, *up; } LmbeScratch;
+typedef struct { float *gate, *up, *hz; } LmbeScratch;
 
 static void *lmbe_scratch_new(int nrows) {
     (void)nrows;                      /* K3's kernels are one row at a time */
     LmbeScratch *sc = (LmbeScratch *)calloc(1, sizeof *sc);
     sc->gate = falloc(lmbe_M.c.moe_inter);
     sc->up   = falloc(lmbe_M.c.moe_inter);
+    sc->hz   = falloc(lmbe_M.c.latent);
     return sc;
 }
 
 static void lmbe_scratch_free(void *p) {
     LmbeScratch *sc = (LmbeScratch *)p;
-    free(sc->gate); free(sc->up); free(sc);
+    free(sc->gate); free(sc->up); free(sc->hz); free(sc);
 }
 
-/* kimi_k3.c's expert_apply(), minus the two things that belong to the
- * chatter: the router weight and the accumulation. */
+/* The engine's OWN expert_apply, not a transcription of it.
+ *
+ * Its last line is `u[i] += wk*hz[i]`, so calling it with a zeroed output row
+ * and wk = 1.0f leaves exactly hz[i] there: `0.0f + 1.0f*x` is x in IEEE 754,
+ * for every x including denormals and signed zero. That gives the unweighted
+ * expert output the chatter wants, and makes drift between local and remote
+ * impossible by construction rather than by inspection. The router weight is
+ * applied by the caller on the chatter, exactly as this engine applies it. */
 static void lmbe_apply(const LmbeSlot *ec, int slot, const float *z, float *out,
                        int nrows, void *p) {
-    (void)slot;
     LmbeScratch *sc = (LmbeScratch *)p;
     Slot *s = (Slot *)ec;
-    Cfg *c = &lmbe_M.c;
-    uint8_t *w1p = s->buf, *w1s = w1p + lmbe_M.e_w1p, *w2p = w1s + lmbe_M.e_w1s,
-            *w2s = w2p + lmbe_M.e_w2p, *w3p = w2s + lmbe_M.e_w2s,
-            *w3s = w3p + lmbe_M.e_w1p;
-    void (*mm)(float *, const float *, const uint8_t *, const uint8_t *, int, int, int)
-        = g_k3_idot ? matmul_mxfp4_i8 : matmul_mxfp4;
-    for (int r = 0; r < nrows; r++) {
-        const float *zr = z + (int64_t)r * c->latent;
-        mm(sc->gate, zr, w1p, w1s, 1, c->latent, c->moe_inter);
-        mm(sc->up,   zr, w3p, w3s, 1, c->latent, c->moe_inter);
-        for (int i = 0; i < c->moe_inter; i++)
-            sc->gate[i] = situf_(sc->gate[i], sc->up[i], c->situ_b1, c->situ_b2);
-        mm(out + (int64_t)r * c->latent, sc->gate, w2p, w2s, 1, c->moe_inter, c->latent);
-    }
+    int LT = lmbe_M.c.latent;
+    (void)slot;
+    memset(out, 0, (size_t)nrows * LT * sizeof(float));
+    for (int r = 0; r < nrows; r++)
+        expert_apply(&lmbe_M, s, z + (int64_t)r * LT, 1.0f,
+                     out + (int64_t)r * LT, sc->gate, sc->up, sc->hz);
 }
 
 #endif

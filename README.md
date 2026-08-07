@@ -176,18 +176,24 @@ experts — is the part that is per engine.
 |---|---|---|---|
 | `olmoe` | OLMoE | yes | `expert_node` — **proven**, `phase2_test.sh` |
 | `colibri` | GLM | yes | `expert_node_glm` — **proven**, `phase2_glm_test.sh` |
-| `inkling` | Inkling | yes | `expert_node_inkling` — builds, unproven |
-| `kimi_k3` | Kimi K3 | yes | `expert_node_kimi` — builds, unproven |
+| `inkling` | Inkling | yes | `expert_node_inkling` — **proven**, `phase2_inkling_test.sh` |
+| `kimi_k3` | Kimi K3 | yes | `expert_node_kimi` — **proven**, `phase2_kimi_test.sh` |
 | `deepseek` | DeepSeek V4 | yes | no — see below |
 
-"Unproven" means exactly that: the code is there and compiles on both sides,
-but nobody has yet run the two-runs-must-match experiment on it, because
-there is no small fixture for those models in the repo. Do not trust an
-unproven row — run the experiment first. The GLM work is the reason for the
-caution: the first version looked right, compiled, ran, and produced tokens
-that matched for four positions and then drifted, because GLM computes an
-expert over all its routed rows at once and the peers were being fed one row
-at a time. Only the fixture caught it.
+`make test-engines` runs all four. "Proven" means the experiment, not the
+opinion: the same engine, the same prompt, generated twice — once with the
+experts local and once with every one of them on a peer — and the tokens
+compared. Each needs a fixture, so this repo carries a generator per engine
+(`make_tiny_olmoe.py`, `make_tiny_inkling.py`, `make_tiny_kimi.py`; GLM uses
+colibri's own `glm_tiny_i4`). They are numpy-only and build random-weight
+models: the output is gibberish, which is the point — what is being measured
+is that two runs agree bit for bit, not that the model is any good.
+
+The fixtures are not ceremony. GLM's first version looked right, compiled,
+ran, and produced tokens that matched for four positions and then drifted,
+because GLM computes an expert over all its routed rows at once and the
+peers were being fed one row at a time. Nothing but running it would have
+caught that.
 
 **DeepSeek V4** is left out deliberately, and it is worth writing down why,
 because from the outside it looks like the easiest of the five: it has a
@@ -377,7 +383,7 @@ On every other machine, pick a role — or several:
 | `lumabri_client.h` | phase 2 chatter side |
 | `selftest.sh` | byte identity: cold, warm, offline |
 | `phase2_test.sh`, `phase2_bench.sh` | phase 2 correctness and benchmark (olmoe) |
-| `phase2_glm_test.sh` | phase 2 byte identity on the GLM engine |
+| `phase2_glm_test.sh`, `phase2_inkling_test.sh`, `phase2_kimi_test.sh` | phase 2 byte identity, one per engine |
 | `phase3_test.sh` | proximity, readahead, failover — measured |
 | `phase4_test.sh` | SSD cache, tracker discovery, delegate & fall back |
 | `phase5_test.sh` | integrity: lying peers caught, poison stripped |
@@ -387,6 +393,7 @@ On every other machine, pick a role — or several:
 | `lumabri_sha.h` | sha256, self-contained — per-block integrity |
 | `lumabri_sign.h` | sha512 + ed25519 — the operator's authority |
 | `make_tiny_olmoe.py` | synthetic OLMoE-shaped fixture for tests |
+| `make_tiny_inkling.py`, `make_tiny_kimi.py` | the same for Inkling and Kimi K3, numpy only |
 
 ## Related work
 

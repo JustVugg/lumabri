@@ -60,6 +60,15 @@ test-phase2: phase2 fixture
 test-phase2-glm: phase2-glm
 	./phase2_glm_test.sh
 
+test-phase2-inkling: expert_node_inkling
+	./phase2_inkling_test.sh
+
+test-phase2-kimi: expert_node_kimi
+	./phase2_kimi_test.sh
+
+# every engine's byte-identity proof, one after the other
+test-engines: test-phase2 test-phase2-glm test-phase2-inkling test-phase2-kimi
+
 tracker: tracker.c lumabri_proto.h
 	$(CC) $(CFLAGS) -pthread tracker.c -o $@
 
@@ -98,4 +107,5 @@ clean:
 	      expert_node expert_node_glm expert_node_inkling expert_node_kimi
 
 .PHONY: all test clean install phase2 phase2-glm fixture test-phase2 \
-        test-phase2-glm patches patches-check
+        test-phase2-glm test-phase2-inkling test-phase2-kimi test-engines \
+        patches patches-check
