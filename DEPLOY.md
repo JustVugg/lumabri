@@ -81,6 +81,12 @@ because the engines do not share a shape:
 | Kimi K3 | `kimi_k3-p2p.diff` | `make expert_node_kimi` | `expert_node_kimi` |
 | DeepSeek V4 | `deepseek-p2p.diff` | `make expert_node_deepseek` | `expert_node_deepseek` |
 
+DeepSeek is the one that needs a step first: colibri's `deepseek.c` is
+**generated** by `tools/amalgamate_deepseek.py` and is not in a fresh clone.
+`make phase2-all` notices it is missing, builds the other four and says so;
+`deepseek_v4.c` is not a substitute — it is one unit of a multi-file build,
+not the amalgamated one this expects.
+
 Skip this whole section if you only want phase 1: a server that serves the
 model's bytes works for every engine, DeepSeek included, and `lumabri chat`
 speaks every engine's protocol. Phase 2 is what stops the chatter from
