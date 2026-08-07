@@ -53,6 +53,10 @@ printf 'ciao\n/quit\n' | ./lumabri chat --tracker "127.0.0.1:$PORT" \
 echo
 printf "%8s  %10s  %10s  %10s  %10s\n" clients fastest slowest spread total
 for n in $CLIENTS; do
+    # wait on THESE clients only: a bare `wait` also waits for the server
+    # started above, which never exits — the first version of this script
+    # hung there and printed nothing but the header
+    CPIDS=()
     for i in $(seq 1 "$n"); do
         ( start=$(date +%s.%N)
           printf 'ciao\n/quit\n' | ./lumabri chat --tracker "127.0.0.1:$PORT" \
@@ -60,13 +64,15 @@ for n in $CLIENTS; do
               > "$T/c$i.log" 2>&1
           end=$(date +%s.%N)
           echo "$end - $start" | bc > "$T/t$i" ) &
+        CPIDS+=($!)
     done
-    wait
-    read -r fast slow tot < <(cat "$T"/t* | sort -n | awk '
+    for pid in "${CPIDS[@]}"; do wait "$pid" || true; done
+    STATS=$(cat "$T"/t* 2>/dev/null | sort -n | awk '
         {v[NR]=$1; s+=$1}
-        END {printf "%.1f %.1f %.1f", v[1], v[NR], s/NR}')
-    spread=$(echo "$slow - $fast" | bc)
-    printf "%8s  %9ss  %9ss  %9ss  %9ss\n" "$n" "$fast" "$slow" "$spread" "$tot"
+        END {if (NR) printf "%.1f %.1f %.1f %.1f", v[1], v[NR], v[NR]-v[1], s/NR;
+             else printf "0 0 0 0"}')
+    set -- $STATS
+    printf "%8s  %9ss  %9ss  %9ss  %9ss\n" "$n" "$1" "$2" "$3" "$4"
     rm -f "$T"/t*
 done
 

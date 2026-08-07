@@ -212,6 +212,38 @@ Every other machine needs lumabri and a colibri checkout, then
 carrying the work: while a reply is generating, kill a donor — you get one
 failover line and the tokens continue, identical.
 
+### Several people at once
+
+`concurrency_test.sh` runs the same generation from N chatters simultaneously
+and reports the spread between the fastest and the slowest, because "does it
+answer" is the easy question and "does anyone get starved" is the real one.
+On one 6-core box, tiny_olmoe, everything (server, peers, clients) sharing
+those cores:
+
+| chatters | fastest | slowest | spread |
+|---|---|---|---|
+| 1 | 1.0 s | 1.0 s | 0.0 s |
+| 2 | 1.7 s | 1.8 s | 0.0 s |
+| 4 | 10.4 s | 10.7 s | 0.3 s |
+
+Nobody is starved — the spread stays flat while the absolute time grows,
+which is what CPU contention looks like and not what a lock convoy looks
+like. Four clients on six cores that are already running the server and its
+expert node is oversubscription, and on separate machines the clients bring
+their own cores.
+
+Where contention actually lives, so those numbers can be read honestly:
+
+- **bytes scale.** The maintainer answers reads with positional `pread` on
+  shared fds — no lock on the read path — and the page cache serves every
+  client the same hot bytes.
+- **hot experts scale, cold ones queue.** The expert node runs a thread per
+  connection, but a cache *miss* holds a single loader lock, because the
+  engine loaders are engine-internal state and not re-entrant. Size
+  `--cache` so the working set fits and misses are rare; that is the knob.
+- **the tracker is not on the hot path at all.** It is consulted at boot and
+  on a 10 s heartbeat, never per token.
+
 ## How it works
 
 `serve` runs two small programs: a tracker, which is only an index of who
@@ -512,6 +544,7 @@ donating by hand means naming it:
 | `phase5_test.sh` | integrity: lying peers caught, poison stripped |
 | `sign_test.sh` | sha512/ed25519 vs RFC 8032 and OpenSSL, signed swarm |
 | `security_test.sh` | path escape from a hostile peer, tracker, or slice assignment |
+| `concurrency_test.sh` | N chatters at once: does anyone get starved |
 | `chat_proto_test.sh` | both engine dialects, and a dying engine that explains itself |
 | `DEPLOY.md` | server walkthrough: Hetzner, systemd, keys, clients |
 | `lumabri_sha.h` | sha256, self-contained — per-block integrity |
