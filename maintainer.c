@@ -501,6 +501,11 @@ static void pull_slice(uint64_t budget) {
         char rel[LMB_PATH_MAX];
         uint64_t size;
         if (lmb_cur_str(&c, rel, sizeof rel) || lmb_cur_u64(&c, &size)) break;
+        if (!lmb_rel_ok(rel)) {      /* the tracker does not get to name our disk */
+            fprintf(stderr, "[maintainer %s] refusing unsafe file name from the "
+                            "tracker\n", g.name);
+            break;
+        }
         printf("[maintainer %s] pull %u/%u: %s (%.1f MB)\n",
                g.name, i + 1, n, rel, (double)size / 1e6);
         fflush(stdout);

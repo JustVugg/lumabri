@@ -511,6 +511,7 @@ donating by hand means naming it:
 | `phase4_test.sh` | SSD cache, tracker discovery, delegate & fall back |
 | `phase5_test.sh` | integrity: lying peers caught, poison stripped |
 | `sign_test.sh` | sha512/ed25519 vs RFC 8032 and OpenSSL, signed swarm |
+| `security_test.sh` | path escape from a hostile peer, tracker, or slice assignment |
 | `chat_proto_test.sh` | both engine dialects, and a dying engine that explains itself |
 | `DEPLOY.md` | server walkthrough: Hetzner, systemd, keys, clients |
 | `lumabri_sha.h` | sha256, self-contained — per-block integrity |

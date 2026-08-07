@@ -145,11 +145,22 @@ static Peer *handle_register(int fd, LmbMsg *m) {
         lmb_cur_u32(&c, &n) || n > MAX_FILES) { send_err(fd, "bad register"); return NULL; }
     PFile *files = (PFile *)calloc(n ? n : 1, sizeof *files);
     if (!files) { send_err(fd, "oom"); return NULL; }
-    for (uint32_t i = 0; i < n; i++)
+    /* The index is what every chatter builds its local mirror from, so a
+     * name that escapes a directory must be stopped HERE as well as at each
+     * client: one poisoned announcement would otherwise be handed to
+     * everyone who asks, and the oldest clients are the ones least likely to
+     * check. */
+    for (uint32_t i = 0; i < n; i++) {
         if (lmb_cur_str(&c, files[i].path, sizeof files[i].path) ||
             lmb_cur_u64(&c, &files[i].size)) {
             free(files); send_err(fd, "bad register entry"); return NULL;
         }
+        if (!lmb_rel_ok(files[i].path)) {
+            printf("[tracker] REJECTED: %s announced an unsafe file name\n", name);
+            fflush(stdout);
+            free(files); send_err(fd, "unsafe file name"); return NULL;
+        }
+    }
     /* optional integrity section (older peers simply do not send it) */
     uint8_t **fh = (uint8_t **)calloc(n ? n : 1, sizeof *fh);
     uint32_t *fnh = (uint32_t *)calloc(n ? n : 1, 4);

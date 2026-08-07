@@ -234,6 +234,39 @@ static int lmb_cur_u16(LmbCur *c, uint16_t *v) {
     c->off += 2;
     return 0;
 }
+/* Is this a model-relative path we are willing to create on our own disk?
+ *
+ * File names arrive from the network — a tracker's placement, a peer's
+ * manifest, a slice assignment — and are then joined onto a local directory
+ * and opened with O_CREAT. Without this check a hostile peer (or a hostile
+ * tracker on an unsigned swarm) names a file `../../.bashrc`, and the victim
+ * dutifully creates and ftruncates it before a single byte of model has been
+ * verified. Signatures do not help: the mirror file is made before any hash
+ * is fetched, and the attacker picks the name.
+ *
+ * So: relative, no `..` component anywhere, no empty or `.` components, no
+ * backslashes (a Windows port would treat them as separators), nothing below
+ * space or above ASCII. Deliberately narrow — model directories are boring,
+ * and anything interesting here is an attack. */
+static int lmb_rel_ok(const char *rel) {
+    if (!rel || !rel[0] || rel[0] == '/' || strlen(rel) >= LMB_PATH_MAX) return 0;
+    const char *p = rel;
+    while (*p) {
+        const char *seg = p;
+        while (*p && *p != '/') {
+            if ((unsigned char)*p < 0x20 || (unsigned char)*p > 0x7e || *p == '\\')
+                return 0;
+            p++;
+        }
+        size_t n = (size_t)(p - seg);
+        if (n == 0) return 0;                                  /* "" or "//" */
+        if (n == 1 && seg[0] == '.') return 0;                 /* "." */
+        if (n == 2 && seg[0] == '.' && seg[1] == '.') return 0; /* ".." */
+        if (*p == '/') p++;
+    }
+    return 1;
+}
+
 static int lmb_cur_u32(LmbCur *c, uint32_t *v) {
     if (c->off + 4 > c->len) return -1;
     *v = lmb_get32(c->p + c->off); c->off += 4;

@@ -261,6 +261,11 @@ static int placement_from_tracker(const char *tracker) {
         uint64_t size; uint16_t np;
         if (lmb_cur_str(&c, rel, sizeof rel) || lmb_cur_u64(&c, &size) ||
             lmb_cur_u16(&c, &np)) { rc = -1; break; }
+        if (!lmb_rel_ok(rel)) {      /* a name we would have to escape to honour */
+            fprintf(stderr, "[lumabri] tracker offered an unsafe file name — "
+                            "refusing the whole placement\n");
+            rc = -1; break;
+        }
         RFile *f = file_add(rel, size);
         for (uint16_t p = 0; p < np; p++) {
             if (lmb_cur_str(&c, addr, sizeof addr)) { rc = -1; break; }
@@ -284,6 +289,11 @@ static int placement_from_peer(const char *addr) {
     for (uint32_t i = 0; rc == 0 && i < n; i++) {
         char rel[LMB_PATH_MAX]; uint64_t size;
         if (lmb_cur_str(&c, rel, sizeof rel) || lmb_cur_u64(&c, &size)) { rc = -1; break; }
+        if (!lmb_rel_ok(rel)) {
+            fprintf(stderr, "[lumabri] peer %s offered an unsafe file name — "
+                            "refusing its manifest\n", addr);
+            rc = -1; break;
+        }
         file_link_peer(file_add(rel, size), pi);
     }
     lmb_msg_free(&m);
@@ -877,6 +887,23 @@ static int open_common(const char *path, int flags, mode_t mode) {
     RFile *f = rfind(rel);
     if (f && (flags & (O_WRONLY | O_RDWR | O_TRUNC))) { errno = EROFS; return -1; }
     if (!f && (flags & O_CREAT)) mkdir_parent(cpath);
+    /* O_DIRECT on a mirror file is not what the caller thinks it is. The
+     * engine asks for it to skip the page cache on a whole model that it
+     * reads once; here the file is filled by our own buffered writes as
+     * blocks arrive, and a direct read may not see them — the kernel makes
+     * no coherency promise when the two are mixed on one file. Dropping the
+     * flag returns the same bytes through the cache, which is also where the
+     * block we just fetched already is. Silent by design: it changes how the
+     * bytes are read, never which. */
+#ifdef O_DIRECT
+    if (f && (flags & O_DIRECT)) {
+        flags &= ~O_DIRECT;
+        static _Atomic int said;
+        if (!atomic_exchange(&said, 1))
+            fprintf(stderr, "[lumabri] O_DIRECT dropped on mirrored files "
+                            "(the mirror is filled through the page cache)\n");
+    }
+#endif
     int fd = real_open(cpath, flags, mode);
     if (fd >= FD_LIMIT && f) { real_close(fd); errno = EMFILE; return -1; }
     if (fd >= 0 && f) fdmap_set(fd, f);
