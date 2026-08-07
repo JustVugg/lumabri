@@ -184,6 +184,13 @@ lumabri key --out swarm                       # once, keep swarm.key safe
 lumabri serve --model /path/to/model --key swarm.key --exec-cache 256
 ```
 
+For a swarm anyone else can reach, add `--advertise <the machine's public
+IP>`: peers publish the address they are given, and without it they publish
+`127.0.0.1` — right for this machine, useless for everyone else. `serve`
+says so loudly if you forget, because the failure mode is a remote chatter
+that falls back to the relay and never turns phase 2 on, which reads as
+"slow" rather than "misconfigured".
+
 Expect, in order: the hashing progress (first start only — minutes on a big
 model), `ORIGIN: signed the truth of N files`, and `serving EXEC on :7302 …
 registered with tracker`. In a second terminal:

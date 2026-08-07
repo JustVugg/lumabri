@@ -161,7 +161,7 @@ static void local_model_type(const char *model_dir, char *out, size_t cap) {
 
 static int cmd_serve(int argc, char **argv) {
     const char *model = NULL, *join = NULL, *mname = NULL, *donate = NULL;
-    const char *key = NULL, *pubkey = NULL;
+    const char *key = NULL, *pubkey = NULL, *advertise = NULL;
     int port = 7300, no_exec = 0, cache_slots = 128;
     for (int i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "--model") && i + 1 < argc) model = argv[++i];
@@ -171,12 +171,13 @@ static int cmd_serve(int argc, char **argv) {
         else if (!strcmp(argv[i], "--donate") && i + 1 < argc) donate = argv[++i];
         else if (!strcmp(argv[i], "--key") && i + 1 < argc) key = argv[++i];
         else if (!strcmp(argv[i], "--pubkey") && i + 1 < argc) pubkey = argv[++i];
+        else if (!strcmp(argv[i], "--advertise") && i + 1 < argc) advertise = argv[++i];
         else if (!strcmp(argv[i], "--no-exec")) no_exec = 1;
         else if (!strcmp(argv[i], "--exec-cache") && i + 1 < argc) cache_slots = atoi(argv[++i]);
         else { fprintf(stderr, "usage: lumabri serve --model DIR [--port N] "
                                "[--join TRACKER] [--model-name S] [--donate GB] "
-                               "[--key FILE] [--pubkey FILE] [--no-exec] "
-                               "[--exec-cache N]\n"); return 2; }
+                               "[--key FILE] [--pubkey FILE] [--advertise HOST] "
+                               "[--no-exec] [--exec-cache N]\n"); return 2; }
     }
     if (!model) { fprintf(stderr, "usage: lumabri serve --model DIR [--port N]\n"); return 2; }
     if (donate && (!join || !mname)) {
@@ -236,6 +237,11 @@ static int cmd_serve(int argc, char **argv) {
     if (mname) { margv[a++] = "--model-name"; margv[a++] = (char *)mname; }
     if (donate) { margv[a++] = "--donate"; margv[a++] = (char *)donate; }
     if (key) { margv[a++] = "--key"; margv[a++] = (char *)key; }
+    static char madv[80];
+    if (advertise) {
+        snprintf(madv, sizeof madv, "%s:%d", advertise, port + 1);
+        margv[a++] = "--advertise"; margv[a++] = madv;
+    }
     margv[a] = NULL;
     g_children[g_nchildren++] = spawn_argv(margv);
 
@@ -272,6 +278,11 @@ static int cmd_serve(int argc, char **argv) {
         eargv[a++] = "--cache"; eargv[a++] = cachestr;
         eargv[a++] = "--name"; eargv[a++] = ename;
         if (mname) { eargv[a++] = "--model-name"; eargv[a++] = (char *)mname; }
+        static char eadv[80];
+        if (advertise) {
+            snprintf(eadv, sizeof eadv, "%s:%d", advertise, port + 2);
+            eargv[a++] = "--advertise"; eargv[a++] = eadv;
+        }
         eargv[a] = NULL;
         g_children[g_nchildren++] = spawn_argv(eargv);
         with_exec = 1;
@@ -281,6 +292,20 @@ static int cmd_serve(int argc, char **argv) {
 
     printf("\n%sserving%s %s %s(tracker %s%s)%s\n", C_GRN, C_R, model, C_DIM, taddr,
            with_exec ? " · executing experts for the swarm" : "", C_R);
+    /* Without --advertise every peer here registers as 127.0.0.1, and the
+     * tracker's correction cannot help: it only rewrites the host when the
+     * registration arrives from OFF this machine, and these arrive over
+     * loopback. A remote chatter then gets 127.0.0.1, fails to connect, falls
+     * back to the relay for bytes — and phase 2 never starts at all, because
+     * expert execution has no relay. It looks like a slow swarm instead of a
+     * misconfigured one, so say it plainly. */
+    if (!advertise && !join)
+        printf("%s⚠ nessun --advertise: questo sciame è raggiungibile SOLO da "
+               "questa macchina.%s\n"
+               "%s  I peer si annunciano come 127.0.0.1 e un chatter remoto non "
+               "può collegarsi.%s\n"
+               "%s  Per aprirlo:  lumabri serve --model %s --advertise <ip-pubblico>%s\n",
+               C_RED, C_R, C_DIM, C_R, C_DIM, model, C_R);
     printf("%schat from this machine:   lumabri chat%s\n", C_DIM, C_R);
     printf("%schat from another one:    lumabri chat --tracker <this-ip>:%d%s\n\n",
            C_DIM, port, C_R);

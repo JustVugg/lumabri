@@ -202,6 +202,7 @@ WorkingDirectory=/home/lumabri
 ExecStart=/usr/local/bin/lumabri serve \
     --model /home/lumabri/models/mymodel \
     --port 7300 \
+    --advertise YOUR_SERVER_IP \
     --key /home/lumabri/swarm.key \
     --exec-cache 256
 Restart=always
@@ -219,9 +220,20 @@ systemctl enable --now lumabri
 journalctl -u lumabri -f
 ```
 
+**`--advertise` is what makes the swarm reachable from anywhere else.** The
+peers register with the tracker under the address they are told to publish,
+and without it they publish `127.0.0.1` — which is correct for this machine
+and useless for everyone. The tracker cannot fix it either: it rewrites a
+localhost registration only when it arrives from off-machine, and these
+arrive over loopback. A remote chatter then gets `127.0.0.1`, cannot connect,
+falls back to the relay for bytes, and phase 2 never starts at all because
+expert execution has no relay. It looks like a slow swarm rather than a
+misconfigured one. `serve` warns loudly when the flag is missing.
+
 You should see, in order: the maintainer announcing how much it holds, the
-line `ORIGIN: signed the truth of N files with <pubkey>`, and the executor
-`serving EXEC on :7302 ... registered with tracker`.
+line `ORIGIN: signed the truth of N files with <pubkey>`, the executor
+`serving EXEC on :7302 ... registered with tracker`, and the tracker
+accepting both under `YOUR_SERVER_IP`, not `127.0.0.1`.
 
 `--exec-cache 256` is the RAM/SSD trade: 256 expert slots resident, the
 rest streamed from disk on demand. Raise it if the box has spare RAM (the
