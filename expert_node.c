@@ -323,6 +323,19 @@ static void *control_thread(void *arg) {
             lmb_buf_str(&b, g.advertise);
             lmb_buf_str(&b, g.model);
             lmb_buf_u32(&b, (uint32_t)g.nholds);
+            /* WHICH ones, not just how many: the tracker needs it to tell a
+             * newcomer what nobody covers. One bit per cell, 2.4 KB for a
+             * 19456-expert model — cheap enough to resend every heartbeat. */
+            { size_t cells = (size_t)g.n_slots * g.n_experts;
+              size_t nb = (cells + 7) / 8;
+              uint8_t *bits = (uint8_t *)calloc(nb, 1);
+              if (bits) {
+                  for (size_t k = 0; k < cells; k++)
+                      if (g.holds[k]) bits[k >> 3] |= (uint8_t)(1u << (k & 7));
+                  lmb_buf_u32(&b, (uint32_t)nb);
+                  lmb_buf_bytes(&b, bits, nb);
+                  free(bits);
+              } }
             int rc = lmb_send(fd, LMB_EREG, b.p, (uint32_t)b.len, NULL, 0);
             free(b.p);
             if (rc) break;
@@ -366,7 +379,7 @@ static int in_list(const int *list, int n, int v) {
 
 int main(int argc, char **argv) {
     const char *dir = NULL;
-    int port = 7401, stride = 1, offset = 0, cache = 0, bits = 8;
+    int port = 7401, stride = 1, offset = 0, cache = 0, bits = 8, hold = 0;
     int layers[512], nlayers = 0;
     snprintf(g.name, sizeof g.name, "node");
 
@@ -383,6 +396,7 @@ int main(int argc, char **argv) {
             snprintf(g.advertise, sizeof g.advertise, "%s", argv[++i]);
         else if (!strcmp(argv[i], "--cache") && i + 1 < argc) cache = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--bits") && i + 1 < argc) bits = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--hold") && i + 1 < argc) hold = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--stride") && i + 1 < argc)
             sscanf(argv[++i], "%d:%d", &stride, &offset);
         else if (!strcmp(argv[i], "--layers") && i + 1 < argc) {
@@ -392,8 +406,8 @@ int main(int argc, char **argv) {
         } else {
             fprintf(stderr, "usage: %s --model DIR [--port N] [--name S] "
                             "[--model-name S] [--tracker H:P] [--advertise H:P] "
-                            "[--cache N] [--bits N] [--stride N:OFF] "
-                            "[--layers a,b,c]\n", argv[0]);
+                            "[--cache N] [--bits N] [--hold N] "
+                            "[--stride N:OFF] [--layers a,b,c]\n", argv[0]);
             return 2;
         }
     }
@@ -439,6 +453,52 @@ int main(int argc, char **argv) {
             if (gid % stride != offset) continue;
             g.holds[gid] = 1;
             g.nholds++;
+        }
+    }
+    /* "the server decides", for compute. With --hold N the node states only
+     * what it knows about itself — how many experts it can carry — and the
+     * tracker answers with the set nobody else covers. --layers/--stride
+     * still work and simply opt out of the coordination. */
+    if (hold > 0 && g.tracker[0] && !nlayers && stride == 1) {
+        size_t cells = (size_t)g.n_slots * g.n_experts;
+        LmbBuf b = {0};
+        lmb_buf_str(&b, g.model);
+        lmb_buf_str(&b, g.name);          /* so the tracker can recognise us */
+        lmb_buf_u32(&b, (uint32_t)g.n_slots);
+        lmb_buf_u32(&b, (uint32_t)g.n_experts);
+        lmb_buf_u32(&b, (uint32_t)hold);
+        uint8_t *routed = (uint8_t *)calloc((size_t)g.n_slots, 1);
+        for (int l = 0; l < g.n_slots; l++) routed[l] = lmbe_routed(l) ? 1 : 0;
+        lmb_buf_u32(&b, (uint32_t)g.n_slots);
+        lmb_buf_bytes(&b, routed, (size_t)g.n_slots);
+        free(routed);
+        (void)cells;
+        LmbMsg r = {0};
+        int rc = lmb_request(g.tracker, LMB_EASSIGN, b.p, (uint32_t)b.len, &r);
+        free(b.p);
+        if (rc || r.op != LMB_EASSIGN_R) {
+            fprintf(stderr, "[%s] the tracker did not assign experts "
+                            "(older tracker?) — keeping what --layers/--stride "
+                            "chose\n", g.name);
+            lmb_msg_free(&r);
+        } else {
+            LmbCur c = { r.body, r.body_len, 0 };
+            uint32_t n = 0;
+            if (!lmb_cur_u32(&c, &n)) {
+                memset(g.holds, 0, cells);
+                g.nholds = 0;
+                for (uint32_t i = 0; i < n; i++) {
+                    uint32_t l, e;
+                    if (lmb_cur_u32(&c, &l) || lmb_cur_u32(&c, &e)) break;
+                    if ((int)l >= g.n_slots || (int)e >= g.n_experts) continue;
+                    size_t gid = (size_t)l * g.n_experts + e;
+                    if (!g.holds[gid]) { g.holds[gid] = 1; g.nholds++; }
+                }
+                printf("[%s] the tracker assigned %d experts (asked for %d): "
+                       "the least replicated of %s\n",
+                       g.name, g.nholds, hold, g.model);
+            }
+            lmb_msg_free(&r);
         }
     }
     if (!g.nholds) { fprintf(stderr, "[%s] no experts selected\n", g.name); return 1; }

@@ -826,23 +826,35 @@ static int ensure_block(RFile *f, uint32_t blk) {
             data = NULL;
         }
     }
-    int ok = 0;
+    int ok = 0, werr = 0;
     if (data && wfd >= 0) {
         uint32_t put = 0;
         while (put < len) {
             ssize_t w = pwrite(wfd, data + put, len - put, (off_t)(off + put));
-            if (w < 0) { if (errno == EINTR) continue; break; }
+            if (w < 0) { if (errno == EINTR) continue; werr = errno; break; }
             put += (uint32_t)w;
         }
         if (put == len) {
             uint8_t one = 1;
-            ok = pwrite(f->map_fd, &one, 1, (off_t)blk) == 1;
+            if (pwrite(f->map_fd, &one, 1, (off_t)blk) == 1) ok = 1;
+            else werr = errno;
         }
         atomic_fetch_add(&g.net_bytes, len);
         atomic_fetch_add(&g.net_blocks, 1);
     }
     free(data);
-    if (!ok)
+    /* A peer that had the bytes and a disk that could not keep them are two
+     * completely different problems, and reporting the second as the first
+     * sends people to look at their network for hours. The bytes arrived; it
+     * is the mirror that failed. */
+    if (!ok && werr == ENOSPC)
+        fprintf(stderr, "[lumabri] DISCO PIENO scrivendo il mirror in %s — "
+                        "il peer aveva i byte, non c'e' spazio per tenerli "
+                        "(blocco %u di %s)\n", g.data_dir, blk, f->rel);
+    else if (!ok && werr)
+        fprintf(stderr, "[lumabri] mirror write failed (%s): block %u of %s\n",
+                strerror(werr), blk, f->rel);
+    else if (!ok)
         fprintf(stderr, "[lumabri] block %u of %s: no peer could serve it\n", blk, f->rel);
 
     pthread_mutex_lock(&f->lk);

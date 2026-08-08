@@ -180,6 +180,23 @@ static int cmd_serve(int argc, char **argv) {
                                "[--no-exec] [--exec-cache N]\n"); return 2; }
     }
     if (!model) { fprintf(stderr, "usage: lumabri serve --model DIR [--port N]\n"); return 2; }
+    /* A directory without config.json is not a model, and letting it through
+     * produces three disconnected symptoms for one cause: the maintainer
+     * serves bytes happily, no expert node starts (the engine family is
+     * unknown), and every chatter is told "nobody on the swarm has it"
+     * because the config it needs is not at the root. Refuse here instead. */
+    {
+        char probe[1200];
+        snprintf(probe, sizeof probe, "%s/config.json", model);
+        if (access(probe, R_OK)) {
+            fprintf(stderr, "%s%s non contiene config.json — non e' una "
+                            "directory di modello%s\n"
+                            "  (se il modello e' in una sottocartella, punta "
+                            "li: --model %s/<sottocartella>)\n",
+                    C_RED, model, C_R, model);
+            return 2;
+        }
+    }
     if (donate && (!join || !mname)) {
         fprintf(stderr, "--donate needs --join TRACKER and --model-name NAME "
                         "(whose model to help hold)\n");
@@ -287,6 +304,15 @@ static int cmd_serve(int argc, char **argv) {
         g_children[g_nchildren++] = spawn_argv(eargv);
         with_exec = 1;
     }
+    /* The node opens its port only after loading the dense side, which on a
+     * big model is minutes. Until then a chatter that connects sees no
+     * executor and concludes phase 2 is impossible — so say it, rather than
+     * let someone race their own server and blame the swarm. */
+    if (with_exec)
+        printf("  %sl'esecutore sta caricando il modello: la porta %d si apre "
+               "quando ha finito. Un chatter che si collega prima non lo "
+               "trovera' e scarichera' gli esperti.%s\n",
+               C_DIM, port + 2, C_R);
     signal(SIGINT, on_sigint);
     signal(SIGTERM, on_sigint);
 
@@ -536,10 +562,20 @@ static void *stderr_thread(void *arg) {
             g_eng.total_gb = gb;
             g_eng.local_gb = gb * pct / 100.0;
         }
-        /* while booting, everything: this is exactly when you need to see it */
+        /* While booting the spinner shows the latest line and overwrites it,
+         * which is fine for progress and wrong for conclusions: "phase 2
+         * active", the peers found and the signature verdict are exactly what
+         * someone wants to re-read afterwards, and they used to scroll past
+         * inside a spinner that erases itself. Those stay; the rest keeps
+         * flowing through the spinner. */
         if (g_eng.booting) {
             snprintf(g_eng.phase, sizeof g_eng.phase, "%s", line);
+            int keep = strstr(line, "phase 2 active") || strstr(line, "expert peers") ||
+                       strstr(line, "running experts locally") ||
+                       strstr(line, "no peer") || strstr(line, "unreachable") ||
+                       (strstr(line, "peer ") && strstr(line, "rtt"));
             if (!g_tty) fprintf(stderr, "  %s%s%s\n", C_DIM, line, C_R);
+            else if (keep) fprintf(stderr, "\r\x1b[2K  %s%s%s\n", C_DIM, line, C_R);
             continue;
         }
         if (strstr(line, "[lumabri]") || strstr(line, "resident weights") ||
@@ -764,6 +800,12 @@ static int engine_spawn(const char *engine, const char *shim, const char *tracke
             setenv("LUMABRI_STATS", "2", 1);       /* boot progress, not a log */
             setenv("SNAP", vroot, 1);
         }
+        /* Pinning is for an engine that owns its experts. A chatter never
+         * does: either they run on peers (pinning is pointless) or they come
+         * over the network (pinning is catastrophic — colibri's AUTOPIN reads
+         * a shipped .coli_usage and preloads GBs of them before the first
+         * token). overwrite=0, so an explicit PIN still wins. */
+        setenv("PIN", "0", 0);
         setenv("CHAT", "1", 1);                    /* olmoe's dialect */
         setenv("SERVE", "1", 1);                   /* everyone else's */
         setenv("KV_SLOTS", "1", 1);
@@ -1321,6 +1363,15 @@ static int cmd_chat(int argc, char **argv) {
     }
 
     engine_stop(&eng);
+    /* The picker promises the donation lasts as long as the chat. That was
+     * only true for Ctrl-C: a normal /quit returned and left the maintainer
+     * running as an orphan, still serving, with nobody left who knew it
+     * existed. */
+    for (int i = 0; i < g_nchildren; i++) {
+        kill(g_children[i], SIGTERM);
+        waitpid(g_children[i], NULL, 0);
+    }
+    if (g_nchildren) printf("  %sdonazione chiusa%s\n", C_DIM, C_R);
     printf("\n");
     return 0;
 }

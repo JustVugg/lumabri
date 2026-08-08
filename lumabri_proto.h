@@ -104,6 +104,17 @@ enum {
      * are rejected and refetched elsewhere, loudly. The root of trust is
      * the swarm operator (tracker + origin), never the peers. */
     LMB_HASHES = 26, LMB_HASHES_R = 27,
+    /* "the server decides", for compute. A donor of disk already gets its
+     * slice assigned rarest-first; a donor of COMPUTE had to be told which
+     * experts to hold by hand (--stride 9:3), which means knowing how many
+     * other donors exist and which index is free — coordination the swarm
+     * was supposed to remove. EASSIGN {model, slots, n_experts, capacity,
+     * u32 mask_len, routed mask, u32 have_len, held bitmap} asks the tracker
+     * instead; the reply {u32 n, n×{u32 layer, u32 eid}} is the set to hold,
+     * least-replicated first, keeping whatever the node already has so a
+     * restart does not re-download. A node that passes --layers/--stride
+     * opts out and is simply counted like any other replica. */
+    LMB_EASSIGN = 28, LMB_EASSIGN_R = 29,
 };
 
 /* REGISTER body: str name, str addr, str model, u64 held_bytes,

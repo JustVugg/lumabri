@@ -39,6 +39,11 @@ typedef struct {
     int used;
     int is_expert;              /* EREG peer: executes experts, holds no files */
     uint32_t nexperts;
+    /* WHICH experts, not just how many: one bit per (slot, expert). Without
+     * it the tracker can count executors but cannot tell whether they
+     * overlap, and so cannot assign a newcomer the part nobody covers. Sent
+     * on the EREG heartbeat; 2.4 KB for a 19456-expert model. */
+    uint8_t *ebits; uint32_t enbits;
 
     /* relay mailbox: one in-flight request per peer, serialized. The
      * chatter thread queues it and waits; the peer's control thread
@@ -277,6 +282,11 @@ static int handle_ereg(int fd, LmbMsg *m) {
         lmb_cur_str(&c, model, sizeof model) || lmb_cur_u32(&c, &nexperts)) {
         send_err(fd, "bad ereg"); return -1;
     }
+    /* optional, appended by newer nodes: the bitmap of what it holds */
+    uint32_t bl = 0; const uint8_t *bits = NULL;
+    if (!lmb_cur_u32(&c, &bl) && bl && bl <= (1u << 20) && c.off + bl <= c.len) {
+        bits = c.p + c.off; c.off += bl;
+    } else bl = 0;
     Peer *slot = NULL;
     int fresh = 0;
     pthread_mutex_lock(&g_lk);
@@ -312,6 +322,11 @@ static int handle_ereg(int fd, LmbMsg *m) {
         snprintf(slot->name, sizeof slot->name, "%s", name);
         snprintf(slot->addr, sizeof slot->addr, "%s", use_addr);
         snprintf(slot->model, sizeof slot->model, "%s", model);
+        if (bl) {
+            uint8_t *nb = (uint8_t *)realloc(slot->ebits, bl);
+            if (nb) { slot->ebits = nb; memcpy(slot->ebits, bits, bl);
+                      slot->enbits = bl * 8; }
+        }
     }
     pthread_mutex_unlock(&g_lk);
     if (!slot) { send_err(fd, "peer table full"); return -1; }
@@ -460,6 +475,97 @@ static int handle_swarm(int fd) {
     pthread_mutex_unlock(&g_lk);
     int rc = lmb_send(fd, LMB_SWARM_R, b.p, (uint32_t)b.len, NULL, 0);
     free(b.p);
+    return rc;
+}
+
+/* ---- EASSIGN: which experts should this node hold? ----------------------
+ *
+ * The disk side has had this since day one: a donor offers bytes, the tracker
+ * answers with the least-replicated files. The compute side had nothing, so a
+ * donor had to be told `--stride 9:3` — which means knowing how many other
+ * donors exist and which index is free. That is coordination, and coordination
+ * is what a swarm is supposed to remove.
+ *
+ * Now a node says only what it knows about ITSELF: how many experts it can
+ * hold, the shape of the model, which slots route, and what it already has.
+ * The tracker answers with a set, rarest first.
+ *
+ * Two rules keep it stable. What the node already holds is kept (a restart
+ * must not re-download), and the count for each expert excludes the asker, so
+ * "rare" means rare among the OTHERS — otherwise a node would drop exactly
+ * what it is the only holder of. */
+static int handle_eassign(int fd, LmbMsg *m) {
+    LmbCur c = { m->body, m->body_len, 0 };
+    char model[64], name[64];
+    uint32_t slots, nexp, capacity, rlen;
+    if (lmb_cur_str(&c, model, sizeof model) || lmb_cur_str(&c, name, sizeof name) ||
+        lmb_cur_u32(&c, &slots) || lmb_cur_u32(&c, &nexp) ||
+        lmb_cur_u32(&c, &capacity) || lmb_cur_u32(&c, &rlen) || !slots || !nexp ||
+        (uint64_t)slots * nexp > (1u << 24) || rlen != slots ||
+        c.off + rlen > c.len) {
+        send_err(fd, "bad eassign"); return -1;
+    }
+    const uint8_t *routed = c.p + c.off; c.off += rlen;
+
+    size_t cells = (size_t)slots * nexp;
+    uint16_t *cnt = (uint16_t *)calloc(cells, sizeof *cnt);
+    uint32_t *pick = (uint32_t *)malloc(cells * sizeof *pick);
+    uint8_t *mine = (uint8_t *)calloc((cells + 7) / 8, 1);
+    if (!cnt || !pick || !mine) {
+        free(cnt); free(pick); free(mine); send_err(fd, "oom"); return -1; }
+
+    /* Replica counts over every OTHER live executor, and separately what THIS
+     * one held before. Both matter and for opposite reasons: counting itself
+     * would make a node drop precisely what it is the only holder of, and
+     * forgetting what it held would make every restart re-download a
+     * different slice. The tracker is the memory here — the node sends
+     * nothing about its past, because on a fresh start it has no past and
+     * would have to claim it holds everything. */
+    pthread_mutex_lock(&g_lk);
+    double now = now_s();
+    for (int i = 0; i < MAX_PEERS; i++) {
+        Peer *p = &g_peers[i];
+        if (!p->used || !p->is_expert || strcmp(p->model, model) || !p->ebits) continue;
+        if (!strcmp(p->name, name)) {                 /* this node, as it was */
+            memcpy(mine, p->ebits, ((cells + 7) / 8 < (p->enbits + 7) / 8
+                                    ? (cells + 7) / 8 : (p->enbits + 7) / 8));
+            continue;
+        }
+        if (now - p->ts > STALE_S) continue;
+        for (size_t k = 0; k < cells && k < p->enbits; k++)
+            if (p->ebits[k >> 3] & (1u << (k & 7))) cnt[k]++;
+    }
+    pthread_mutex_unlock(&g_lk);
+
+    /* pass 1: keep what it already had — no churn, no re-download */
+    uint32_t n = 0;
+    for (size_t k = 0; k < cells && n < capacity; k++) {
+        if (!routed[k / nexp]) continue;
+        if (mine[k >> 3] & (1u << (k & 7))) {
+            pick[n++] = (uint32_t)k;
+            cnt[k] = 0xffff;                     /* taken: never picked twice */
+        }
+    }
+    /* pass 2: fill the rest with the least-replicated, rarest first */
+    for (uint16_t want = 0; want < 64 && n < capacity; want++)
+        for (size_t k = 0; k < cells && n < capacity; k++) {
+            if (!routed[k / nexp] || cnt[k] != want) continue;
+            pick[n++] = (uint32_t)k;
+            cnt[k] = 0xffff;
+        }
+
+    LmbBuf b = {0};
+    lmb_buf_u32(&b, n);
+    for (uint32_t i = 0; i < n; i++) {
+        lmb_buf_u32(&b, pick[i] / nexp);
+        lmb_buf_u32(&b, pick[i] % nexp);
+    }
+    free(cnt); free(pick); free(mine);
+    int rc = lmb_send(fd, LMB_EASSIGN_R, b.p, (uint32_t)b.len, NULL, 0);
+    free(b.p);
+    printf("[tracker] assign: %u experts of %s to an executor "
+           "(capacity %u)\n", n, model, capacity);
+    fflush(stdout);
     return rc;
 }
 
@@ -689,6 +795,7 @@ static void *conn_thread(void *arg) {
         }
         case LMB_RREAD_R:   if (ctrl) rread_complete(ctrl, &m); break;
         case LMB_EREG:      rc = handle_ereg(fd, &m); break;
+        case LMB_EASSIGN:   rc = handle_eassign(fd, &m); break;
         case LMB_EPEERS:    rc = handle_epeers(fd, &m); break;
         case LMB_HASHES:    rc = handle_hashes(fd, &m); break;
         case LMB_PLACEMENT: rc = handle_placement(fd, &m); break;
