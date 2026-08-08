@@ -44,6 +44,22 @@ numbered, never named: model held, GB, bytes served, heartbeat), `/model`
 lists the models on the swarm and switches between them, restarting the
 engine on the fly.
 
+### For someone who only ever opens the TUI
+
+```sh
+lumabri
+```
+
+No arguments. It asks for the swarm's address and, once, for the operator's
+public key; it finds the engines itself; and it remembers all of it in
+`~/.lumabri/config`, so the second time it is Enter, Enter, and you are in.
+
+That matters more than convenience. Everything it asks for used to be a flag,
+and getting one wrong does not produce "invalid argument" — a missing
+`--engines-dir` produces a 299 GB download, and a missing key produces a
+model nobody verified. Flags still win when given, so a script never
+inherits somebody's saved answers.
+
 ### Joining: chat, or bring something
 
 `lumabri chat` asks once, on the way in, and Enter means "just chat" so the

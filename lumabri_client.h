@@ -34,6 +34,7 @@
 #define LUMI_MAX_PEERS 32
 #define LUMI_MAX_K     64
 #define LUMI_MAX_REP   4      /* replicas remembered per expert */
+#define LUMI_WAIT_S    30     /* how long a vanished peer is given to come back */
 
 typedef struct {
     char addr[64];
@@ -319,18 +320,33 @@ static float *lumi_exec_retry(int layer, int eid, const float *x, int D, int nr,
                               const float *w, uint32_t tried) {
     int gid = layer * L.n_experts + eid;
     uint32_t want = (uint32_t)((size_t)nr * D * sizeof(float));
-    int refreshed = 0;
+    int waited = 0;
     for (;;) {
         int r = lumi_pick(gid, tried);
-        if (r < 0 && !refreshed) {
-            /* every known replica is gone: ask the tracker who joined since —
-             * a donor may have arrived, or the server may have come back */
-            refreshed = 1;
-            if (lumi_discover() > 0) continue;
-        }
         if (r < 0) {
-            fprintf(stderr, "[lumabri] layer %d expert %d: no live replica left\n",
-                    layer, eid);
+            /* Every known replica is gone. Giving up here is correct in the
+             * sense that inventing a result is never allowed — but it threw
+             * away a whole generation for a peer that was rebooting, or a
+             * network blip, or an ssh session that took the server with it.
+             * A swarm with one holder per expert has no redundancy to fall
+             * back on, so the only honest thing left is patience: ask the
+             * tracker again, and wait, saying so. */
+            if (waited < LUMI_WAIT_S) {
+                if (!waited)
+                    fprintf(stderr, "[lumabri] layer %d expert %d: nessuna replica "
+                            "viva — aspetto che torni (fino a %d s)\n",
+                            layer, eid, LUMI_WAIT_S);
+                tried = 0;                    /* a returning peer deserves a retry */
+                for (int i = 0; i < L.npeers; i++) L.peers[i].dead = 0;
+                sleep(2);
+                waited += 2;
+                lumi_discover();
+                continue;
+            }
+            fprintf(stderr, "[lumabri] layer %d expert %d: nessuna replica viva "
+                    "dopo %d s. Con un solo detentore per esperto qualunque "
+                    "interruzione e' definitiva: serve un secondo peer.\n",
+                    layer, eid, waited);
             exit(1);
         }
         tried |= 1u << r;

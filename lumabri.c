@@ -120,9 +120,27 @@ static pid_t spawn_argv(char *const argv[]) {
 
 static pid_t g_children[8];
 static int g_nchildren = 0;
+/* what each child was, and how to start it again: a supervisor that cannot
+ * name or restart what died is just a process that happens to be the parent */
+static char **g_cargv[8];
+static const char *g_cwhat[8];
+
+static void spawn_tracked(char *const argv[], const char *what) {
+    int n = 0;
+    while (argv[n]) n++;
+    char **copy = (char **)calloc((size_t)n + 1, sizeof *copy);
+    for (int i = 0; i < n; i++) copy[i] = strdup(argv[i]);
+    int idx = g_nchildren;
+    g_cargv[idx] = copy;
+    g_cwhat[idx] = what;
+    g_children[g_nchildren++] = spawn_argv(argv);
+}
+
+static volatile int g_stopping = 0;
 
 static void on_sigint(int sig) {
     (void)sig;
+    g_stopping = 1;
     for (int i = 0; i < g_nchildren; i++) kill(g_children[i], SIGTERM);
 }
 
@@ -242,7 +260,7 @@ static int cmd_serve(int argc, char **argv) {
             if (kf) fclose(kf);
         }
         targv[t] = NULL;
-        g_children[g_nchildren++] = spawn_argv(targv);
+        spawn_tracked(targv, "il tracker");
         usleep(300 * 1000);
     }
     char *margv[16];
@@ -260,7 +278,7 @@ static int cmd_serve(int argc, char **argv) {
         margv[a++] = "--advertise"; margv[a++] = madv;
     }
     margv[a] = NULL;
-    g_children[g_nchildren++] = spawn_argv(margv);
+    spawn_tracked(margv, "il maintainer");
 
     /* The bootstrap executor: when the model family has an expert node
      * build, serve also runs one on the whole model with an SSD-streaming
@@ -301,7 +319,7 @@ static int cmd_serve(int argc, char **argv) {
             eargv[a++] = "--advertise"; eargv[a++] = eadv;
         }
         eargv[a] = NULL;
-        g_children[g_nchildren++] = spawn_argv(eargv);
+        spawn_tracked(eargv, "l'esecutore di esperti");
         with_exec = 1;
     }
     /* The node opens its port only after loading the dense side, which on a
@@ -340,8 +358,28 @@ static int cmd_serve(int argc, char **argv) {
         pid_t p = wait(&status);
         if (p < 0 && errno == EINTR) continue;
         if (p < 0) break;
-        for (int i = 0; i < g_nchildren; i++)
-            if (g_children[i] == p) g_children[i] = g_children[--g_nchildren];
+        int idx = -1;
+        for (int i = 0; i < g_nchildren; i++) if (g_children[i] == p) idx = i;
+        if (idx >= 0 && g_cargv[idx] && !g_stopping) {
+            /* Losing a child silently is the expensive failure: with the
+             * executor gone every chatter falls back to downloading experts
+             * and nothing anywhere says why. Name it, and bring it back. */
+            if (WIFSIGNALED(status))
+                printf("\n%s⚠ %s e' stato ucciso (segnale %d)%s\n",
+                       C_RED, g_cwhat[idx], WTERMSIG(status), C_R);
+            else
+                printf("\n%s⚠ %s e' uscito (codice %d)%s\n",
+                       C_RED, g_cwhat[idx], WEXITSTATUS(status), C_R);
+            printf("  %slo riavvio fra 5 s — finche' manca, i chatter si "
+                   "scaricano gli esperti invece di farli eseguire%s\n", C_DIM, C_R);
+            fflush(stdout);
+            sleep(5);
+            g_children[idx] = spawn_argv(g_cargv[idx]);
+            printf("  %s%s riavviato%s\n", C_DIM, g_cwhat[idx], C_R);
+            fflush(stdout);
+            continue;
+        }
+        if (idx >= 0) g_children[idx] = g_children[--g_nchildren];
     }
     return 0;
 }
@@ -827,7 +865,7 @@ static int engine_spawn(const char *engine, const char *shim, const char *tracke
 }
 
 /* Why the child is gone, in the words of the kernel and of the child. */
-static void engine_diag(Engine *e) {
+static void engine_diag(Engine *e, int booting) {
     int st = 0;
     if (e->pid > 0 && waitpid(e->pid, &st, WNOHANG) == e->pid) {
         e->pid = 0;
@@ -846,9 +884,14 @@ static void engine_diag(Engine *e) {
                 printf("  %sil binario non è partito affatto: libreria mancante? "
                        "provalo a mano con `ldd`.%s\n", C_DIM, C_R);
         }
-    } else
+    } else if (booting)
         printf("  %sil motore ha chiuso il suo stdout senza dire di essere pronto%s\n",
                C_RED, C_R);
+    else
+        printf("  %sil motore si e' fermato durante la risposta%s\n"
+               "  %sla causa piu' probabile e' un peer sparito: con un solo "
+               "detentore per esperto non c'e' dove ripiegare%s\n",
+               C_RED, C_R, C_DIM, C_R);
     printf("  %sultime righe del motore:%s\n", C_DIM, C_R);
     tail_dump(25);
 }
@@ -910,6 +953,82 @@ static void disk_preflight(const char *model, uint64_t model_bytes) {
                "ferma per disco pieno.%s\n", C_DIM, C_R);
 }
 
+/* ---- the settings a TUI user must never be asked twice -------------------
+ *
+ * Everything the chat needs used to live on the command line: the tracker,
+ * the engines directory, the operator key. Someone who only ever opens the
+ * TUI would have to be told all three by whoever runs the swarm, and would
+ * have to retype them every time — and the failure when they get one wrong
+ * is not "invalid argument", it is a 299 GB download or a silently
+ * unverified model. So they are asked once, in the panel, and remembered.
+ *
+ * ~/.lumabri/config, one key=value per line. Flags still win when given:
+ * a script is not a person and should not inherit somebody's saved answers. */
+typedef struct { char tracker[80], pubkey[80], engines[1024]; } Cfg;
+
+static void cfg_path(char *dst, size_t cap) {
+    const char *home = getenv("HOME") ? getenv("HOME") : ".";
+    snprintf(dst, cap, "%s/.lumabri/config", home);
+}
+
+static void cfg_load(Cfg *c) {
+    memset(c, 0, sizeof *c);
+    char p[1100];
+    cfg_path(p, sizeof p);
+    FILE *f = fopen(p, "r");
+    if (!f) return;
+    char line[1200];
+    while (fgets(line, sizeof line, f)) {
+        char *eq = strchr(line, '=');
+        if (!eq) continue;
+        *eq = 0;
+        char *v = eq + 1, *nl = strchr(v, '\n');
+        if (nl) *nl = 0;
+        if (!strcmp(line, "tracker")) snprintf(c->tracker, sizeof c->tracker, "%s", v);
+        else if (!strcmp(line, "pubkey")) snprintf(c->pubkey, sizeof c->pubkey, "%s", v);
+        else if (!strcmp(line, "engines")) snprintf(c->engines, sizeof c->engines, "%s", v);
+    }
+    fclose(f);
+}
+
+static void cfg_save(const Cfg *c) {
+    const char *home = getenv("HOME") ? getenv("HOME") : ".";
+    char d[1100], p[1200];
+    snprintf(d, sizeof d, "%s/.lumabri", home);
+    mkdir_p(d);
+    cfg_path(p, sizeof p);
+    FILE *f = fopen(p, "w");
+    if (!f) return;
+    if (c->tracker[0]) fprintf(f, "tracker=%s\n", c->tracker);
+    if (c->pubkey[0])  fprintf(f, "pubkey=%s\n", c->pubkey);
+    if (c->engines[0]) fprintf(f, "engines=%s\n", c->engines);
+    fclose(f);
+}
+
+/* Where the engines live. Nobody should have to know: look where `make` and
+ * `make install` put them, and where a colibri checkout usually sits. */
+static int find_engines(char *dst, size_t cap) {
+    const char *home = getenv("HOME") ? getenv("HOME") : ".";
+    char me[1100];
+    exe_dir(me, sizeof me);
+    const char *names[] = { "colibri_p2p", "olmoe_p2p", "colibri", "olmoe" };
+    char cand[8][1100];
+    int n = 0;
+    snprintf(cand[n++], 1100, "%s", me);
+    snprintf(cand[n++], 1100, ".");
+    snprintf(cand[n++], 1100, "%s/colibri/c", home);
+    snprintf(cand[n++], 1100, "../moe-stream/c");
+    snprintf(cand[n++], 1100, "../colibri/c");
+    snprintf(cand[n++], 1100, "/usr/local/bin");
+    for (int i = 0; i < n; i++)
+        for (size_t k = 0; k < sizeof names / sizeof *names; k++) {
+            char probe[1300];
+            snprintf(probe, sizeof probe, "%s/%s", cand[i], names[k]);
+            if (access(probe, X_OK) == 0) { snprintf(dst, cap, "%s", cand[i]); return 0; }
+        }
+    return -1;
+}
+
 /* ---- joining: what do you bring? ----------------------------------------
  *
  * A chatter is a taker. Most people would give something back if it took one
@@ -941,6 +1060,42 @@ static int prompt_line(char *buf, size_t cap) {
     size_t n = strlen(buf);
     while (n && (buf[n-1] == '\n' || buf[n-1] == '\r')) buf[--n] = 0;
     return 0;
+}
+
+/* Ask for what is missing, once, and remember it. Enter keeps the saved
+ * value, so the second time this is three keypresses of nothing. */
+static void setup_panel(Cfg *c) {
+    char line[1200];
+    printf("  %sa quale sciame ti colleghi?%s\n", C_BOLD, C_R);
+    if (c->tracker[0])
+        printf("  %sinvio = %s%s\n", C_DIM, c->tracker, C_R);
+    else
+        printf("  %sindirizzo del server, es. 148.251.4.122 (invio = questo "
+               "computer)%s\n", C_DIM, C_R);
+    printf("\n%s\xe2\x94\x82%s %s%s\xe2\x80\xba%s ", C_GRAY, C_R, C_CORAL, C_BOLD, C_R);
+    fflush(stdout);
+    if (!prompt_line(line, sizeof line) && line[0]) {
+        /* a bare host means the default port: nobody should have to know it */
+        if (strchr(line, ':')) snprintf(c->tracker, sizeof c->tracker, "%s", line);
+        else snprintf(c->tracker, sizeof c->tracker, "%s:7300", line);
+    } else if (!c->tracker[0])
+        snprintf(c->tracker, sizeof c->tracker, "127.0.0.1:7300");
+
+    if (!c->pubkey[0]) {
+        printf("\n  %schiave pubblica dello sciame%s %s(64 caratteri, te la da "
+               "chi lo gestisce)%s\n", C_BOLD, C_R, C_DIM, C_R);
+        printf("  %scon la chiave ogni byte del modello viene verificato; "
+               "invio per saltare e fidarti del server%s\n", C_DIM, C_R);
+        printf("\n%s\xe2\x94\x82%s %s%s\xe2\x80\xba%s ", C_GRAY, C_R, C_CORAL, C_BOLD, C_R);
+        fflush(stdout);
+        if (!prompt_line(line, sizeof line) && strlen(line) == 64)
+            snprintf(c->pubkey, sizeof c->pubkey, "%s", line);
+        else if (line[0])
+            printf("  %snon sono 64 caratteri esadecimali — proseguo senza "
+                   "verifica%s\n", C_DIM, C_R);
+    }
+    cfg_save(c);
+    printf("\n  %sricordato in ~/.lumabri/config%s\n\n", C_DIM, C_R);
 }
 
 /* Returns 0 when the user chose, -1 when they quit. `have_model_dir` is
@@ -1110,6 +1265,30 @@ static int model_boot(const char *tracker, const char *model, const char *shim,
         return -1;
     }
     printf("  %smotore %s%s\n", C_DIM, engine, C_R);
+    /* The stock engine works and downloads every expert it routes to. On a
+     * 299 GB model that is the difference between 12 GB and all of it, and
+     * the only sign used to be the absence of a line. If the swarm has
+     * executors, say it here, before anything is fetched. */
+    if (!local_dir && !strstr(engine, "_p2p")) {
+        LmbMsg em = {0};
+        LmbBuf eb = {0};
+        lmb_buf_str(&eb, model);
+        int nexec = 0;
+        if (!lmb_request(tracker, LMB_EPEERS, eb.p, (uint32_t)eb.len, &em) &&
+            em.op == LMB_EPEERS_R) {
+            LmbCur ec = { em.body, em.body_len, 0 };
+            uint32_t n = 0;
+            if (!lmb_cur_u32(&ec, &n)) nexec = (int)n;
+        }
+        free(eb.p);
+        lmb_msg_free(&em);
+        if (nexec > 0)
+            printf("\n  %s⚠ questo motore non e' la build P2P: gli esperti li "
+                   "scarichera' invece di farli eseguire%s\n"
+                   "  %sci sono %d peer pronti a eseguirli. Serve %s_p2p, che "
+                   "si costruisce con:  make chatters ENGINE=/path/to/colibri/c%s\n\n",
+                   C_RED, C_R, C_DIM, nexec, engine_for(mtype), C_R);
+    }
     if (!local_dir)
         printf("  %sora scarico la parte densa una volta sola — gli esperti "
                "restano sullo sciame%s\n", C_DIM, C_R);
@@ -1129,7 +1308,7 @@ static int model_boot(const char *tracker, const char *model, const char *shim,
     g_eng.booting = 0;
     if (ready) {
         printf("  %s✗ il motore non è arrivato a essere pronto%s\n", C_RED, C_R);
-        engine_diag(e);
+        engine_diag(e, 1);
         engine_stop(e);
         return -1;
     }
@@ -1140,7 +1319,7 @@ static int model_boot(const char *tracker, const char *model, const char *shim,
 }
 
 static int cmd_chat(int argc, char **argv) {
-    const char *tracker = "127.0.0.1:7300";
+    const char *tracker = NULL;
     const char *engine_path = NULL, *engines_dir = getenv("LUMABRI_ENGINES");
     const char *want_model = NULL, *local_dir = NULL;
     const char *role_arg = NULL, *model_dir_arg = NULL;
@@ -1165,6 +1344,59 @@ static int cmd_chat(int argc, char **argv) {
                                "                    [--role chat|disk|compute|all] "
                                "[--donate GB] [--model-dir DIR]\n");
                return 2; }
+    }
+
+    /* The panel comes BEFORE anything is contacted: the wordmark, then what
+     * is missing, then the role. A TUI user never sees a flag. */
+    Cfg cfg;
+    cfg_load(&cfg);
+    int interactive = !local_dir && g_tty;
+    if (interactive) {
+        int W0 = term_w() - 2; if (W0 > 66) W0 = 66;
+        printf("\n");
+        hline("\xe2\x95\xad", "\xe2\x95\xae", W0);
+        panel_row(W0, "", "");
+        for (int r = 0; r < 6; r++) {
+            char row[512];
+            snprintf(row, sizeof row, "\x1b[38;5;%dm%s\x1b[0m", WORD_TINT[r], WORDMARK[r]);
+            panel_row(W0, row, "");
+        }
+        char tag0[256];
+        snprintf(tag0, sizeof tag0, "%s\xe2\x9c\xbb%s %stiny engine, immense swarm%s",
+                 C_CORAL, C_R, C_DIM, C_R);
+        panel_row(W0, "", ""); panel_row(W0, tag0, "");
+        hline("\xe2\x95\xb0", "\xe2\x95\xaf", W0);
+        printf("\n");
+        if (!tracker && !cfg.tracker[0]) setup_panel(&cfg);
+        else if (!tracker) {
+            printf("  %ssciame%s %s%s%s%s   invio per confermare, o un altro "
+                   "indirizzo%s\n", C_DIM, C_R, C_BOLD, cfg.tracker, C_R, C_DIM, C_R);
+            printf("\n%s\xe2\x94\x82%s %s%s\xe2\x80\xba%s ", C_GRAY, C_R, C_CORAL, C_BOLD, C_R);
+            fflush(stdout);
+            char l[1200];
+            if (!prompt_line(l, sizeof l) && l[0]) {
+                if (strchr(l, ':')) snprintf(cfg.tracker, sizeof cfg.tracker, "%s", l);
+                else snprintf(cfg.tracker, sizeof cfg.tracker, "%s:7300", l);
+                cfg_save(&cfg);
+            }
+            printf("\n");
+        }
+    }
+    if (!tracker && cfg.tracker[0]) tracker = cfg.tracker;
+    if (!tracker) tracker = "127.0.0.1:7300";
+    /* the key is remembered, never retyped, and never overrides an explicit
+     * environment: a script that sets LUMABRI_PUBKEY means it */
+    if (cfg.pubkey[0] && !getenv("LUMABRI_PUBKEY")) setenv("LUMABRI_PUBKEY", cfg.pubkey, 1);
+    if (!engines_dir && !engine_path) {
+        if (cfg.engines[0] && access(cfg.engines, X_OK) == 0) engines_dir = cfg.engines;
+        else {
+            static char found[1024];
+            if (find_engines(found, sizeof found) == 0) {
+                engines_dir = found;
+                snprintf(cfg.engines, sizeof cfg.engines, "%s", found);
+                cfg_save(&cfg);
+            }
+        }
     }
 
     char models[16][64];
@@ -1198,25 +1430,21 @@ static int cmd_chat(int argc, char **argv) {
     Swarm sw;
     Engine eng = {0};
 
-    /* welcome panel: the wordmark, then the spark line */
-    int W = term_w() - 2;
-    if (W > 66) W = 66;
-    printf("\n");
-    hline("\xe2\x95\xad", "\xe2\x95\xae", W);
-    panel_row(W, "", "");
-    for (int r = 0; r < 6; r++) {
-        char row[512];
-        if (g_tty) snprintf(row, sizeof row, "\x1b[38;5;%dm%s\x1b[0m",
-                            WORD_TINT[r], WORDMARK[r]);
-        else       snprintf(row, sizeof row, "%s", WORDMARK[r]);
-        panel_row(W, row, "");
+    if (!interactive) {                 /* the panel was already drawn above */
+        int W = term_w() - 2;
+        if (W > 66) W = 66;
+        printf("\n");
+        hline("\xe2\x95\xad", "\xe2\x95\xae", W);
+        panel_row(W, "", "");
+        for (int r = 0; r < 6; r++) {
+            char row[512];
+            snprintf(row, sizeof row, "%s", WORDMARK[r]);
+            panel_row(W, row, "");
+        }
+        panel_row(W, "", "");
+        panel_row(W, "* tiny engine, immense swarm", "");
+        hline("\xe2\x95\xb0", "\xe2\x95\xaf", W);
     }
-    char tag[256];
-    snprintf(tag, sizeof tag, "%s\xe2\x9c\xbb%s %stiny engine, immense swarm%s",
-             C_CORAL, C_R, C_DIM, C_R);
-    panel_row(W, "", "");
-    panel_row(W, tag, "");
-    hline("\xe2\x95\xb0", "\xe2\x95\xaf", W);
     if (nmodels > 1) {
         printf("  %s%d modelli sullo sciame:%s", C_DIM, nmodels, C_R);
         for (int i = 0; i < nmodels; i++) printf(" %s%s%s", C_BOLD, models[i], C_R);
@@ -1324,7 +1552,7 @@ static int cmd_chat(int argc, char **argv) {
             if (!is_reset) printf("%s%s\xe2\x97\x86 %s%s\n  ", C_BOLD, C_CORAL, model, C_R);
             if (stream_until_end(&eng, stat, sizeof stat)) {
                 fprintf(stderr, "\n%sengine exited%s\n", C_RED, C_R);
-                engine_diag(&eng);
+                engine_diag(&eng, 0);
                 break;
             }
             printf("\n");
@@ -1338,7 +1566,7 @@ static int cmd_chat(int argc, char **argv) {
             if (g_tty) pthread_join(tspin, NULL);
             if (!reply) {
                 fprintf(stderr, "%sengine exited%s\n", C_RED, C_R);
-                engine_diag(&eng);
+                engine_diag(&eng, 0);
                 break;
             }
             char *text = reply;
@@ -1430,8 +1658,13 @@ int main(int argc, char **argv) {
     if (argc >= 2 && !strcmp(argv[1], "serve")) return cmd_serve(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "chat"))  return cmd_chat(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "key"))   return cmd_key(argc - 2, argv + 2);
+    /* No arguments and a terminal: this is a person, not a script. Chat is
+     * the only thing a person wants by default, and everything it needs is
+     * either remembered or asked for in the panel. */
+    if (argc == 1 && g_tty) return cmd_chat(0, NULL);
     fprintf(stderr,
         "lumabri: run huge models from a swarm of peers\n\n"
+        "  lumabri                                                    chat (asks what it needs)\n"
         "  lumabri serve --model DIR [--port 7300] [--join TRACKER]   share a model\n"
         "  lumabri chat  [--tracker HOST:7300] [--model NAME]         chat with it\n"
         "  lumabri key   [--out NAME]                                 operator keypair\n");
