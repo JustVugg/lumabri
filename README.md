@@ -573,6 +573,7 @@ rather than failing the build for everyone who only wants GLM.
 | `engine_patches/make_patches.py` | generates the engine patches from source anchors |
 | `lumabri_client.h` | phase 2 chatter side |
 | `selftest.sh` | byte identity: cold, warm, offline |
+| `donate_test.sh` | an empty disk donor pulls a slice and outlives the origin |
 | `phase2_test.sh`, `phase2_bench.sh` | phase 2 correctness and benchmark (olmoe) |
 | `phase2_glm_test.sh`, `phase2_inkling_test.sh`, `phase2_kimi_test.sh`, `phase2_deepseek_test.sh` | phase 2 byte identity, one per engine |
 | `phase3_test.sh` | proximity, readahead, failover — measured |
