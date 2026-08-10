@@ -123,6 +123,42 @@ static double nowd(void) {
     return (double)t.tv_sec + (double)t.tv_nsec * 1e-9;
 }
 
+/* ---- the compute gate ---------------------------------------------------
+ * The default is not a constant but a division: cores / threads-per-expert.
+ * With OMP_NUM_THREADS=1 the teams are single-threaded and the gate opens
+ * wide; with a full team per call it narrows to one. Either way the machine
+ * is asked for about the number of threads it actually has. */
+static pthread_mutex_t g_gate_lk = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  g_gate_cv = PTHREAD_COND_INITIALIZER;
+static int g_gate_free = 1;
+static _Atomic uint64_t g_gate_waits;
+
+static void gate_init(int forced) {
+    if (forced > 0) { g_gate_free = forced; return; }
+    long cores = sysconf(_SC_NPROCESSORS_ONLN);
+    if (cores < 1) cores = 1;
+    const char *ot = getenv("OMP_NUM_THREADS");
+    long per = ot ? atol(ot) : cores;
+    if (per < 1) per = 1;
+    g_gate_free = (int)(cores / per);
+    if (g_gate_free < 1) g_gate_free = 1;
+}
+
+static void gate_enter(void) {
+    pthread_mutex_lock(&g_gate_lk);
+    if (g_gate_free <= 0) atomic_fetch_add(&g_gate_waits, 1);
+    while (g_gate_free <= 0) pthread_cond_wait(&g_gate_cv, &g_gate_lk);
+    g_gate_free--;
+    pthread_mutex_unlock(&g_gate_lk);
+}
+
+static void gate_leave(void) {
+    pthread_mutex_lock(&g_gate_lk);
+    g_gate_free++;
+    pthread_cond_signal(&g_gate_cv);
+    pthread_mutex_unlock(&g_gate_lk);
+}
+
 static void send_err(int fd, const char *msg) {
     LmbBuf b = {0};
     lmb_buf_str(&b, msg);
@@ -217,6 +253,14 @@ static int handle_exec(int fd, LmbMsg *m) {
     int gid = (int)layer * g.n_experts + (int)eid;
     if (!g.holds[gid]) { send_err(fd, "expert not held by this node"); return 0; }
 
+    /* How many experts may be multiplied at once. Every connection gets its
+     * own thread and every expert call opens a full OpenMP team, so without a
+     * limit four chatters ask for four times the cores the machine has: the
+     * box stops multiplying and starts context-switching. The measured cost
+     * of that was a tenfold collapse at four clients. Queueing is the cheaper
+     * failure — everyone waits a little instead of everyone thrashing. */
+    gate_enter();
+
     /* one scratch per connection thread: the kernels are called concurrently */
     static __thread void *scratch;
     static __thread int scratch_rows;
@@ -238,6 +282,7 @@ static int handle_exec(int fd, LmbMsg *m) {
                    (const float *)m->pay, out, (int)nrows, rw, scratch);
     }
     double dt = nowd() - t0;
+    gate_leave();
     maybe_corrupt_out(out);
     lmb_emu_delay();   /* the reply's flight time, when one is being emulated */
     int rc = lmb_send(fd, LMB_EXEC_R, NULL, 0, out, (uint32_t)obytes);
@@ -380,7 +425,7 @@ static int in_list(const int *list, int n, int v) {
 int main(int argc, char **argv) {
     const char *dir = NULL;
     int port = 7401, stride = 1, offset = 0, cache = 0, bits = 8, hold = 0;
-    int layers[512], nlayers = 0;
+    int layers[512], nlayers = 0, parallel = 0;
     snprintf(g.name, sizeof g.name, "node");
 
     for (int i = 1; i < argc; i++) {
@@ -397,6 +442,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--cache") && i + 1 < argc) cache = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--bits") && i + 1 < argc) bits = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--hold") && i + 1 < argc) hold = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--parallel") && i + 1 < argc) parallel = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--stride") && i + 1 < argc)
             sscanf(argv[++i], "%d:%d", &stride, &offset);
         else if (!strcmp(argv[i], "--layers") && i + 1 < argc) {
@@ -406,12 +452,13 @@ int main(int argc, char **argv) {
         } else {
             fprintf(stderr, "usage: %s --model DIR [--port N] [--name S] "
                             "[--model-name S] [--tracker H:P] [--advertise H:P] "
-                            "[--cache N] [--bits N] [--hold N] "
+                            "[--cache N] [--bits N] [--hold N] [--parallel N] "
                             "[--stride N:OFF] [--layers a,b,c]\n", argv[0]);
             return 2;
         }
     }
     if (!dir) { fprintf(stderr, "--model is required\n"); return 2; }
+    gate_init(parallel);
     if (stride < 1) stride = 1;
     if (cache < 0) cache = 0;
     signal(SIGPIPE, SIG_IGN);
@@ -546,8 +593,13 @@ int main(int argc, char **argv) {
     if (lmb_emu_active())
         printf("[%s] emulated network: rtt %ld us ± %ld, loss %ld ppm (rto %ld us)\n",
                g.name, lmb_emu_rtt_us, lmb_emu_jitter_us, lmb_emu_loss_ppm, lmb_emu_rto_us);
-    printf("[%s] serving EXEC on :%d (model %s)%s\n", g.name, port, g.model,
-           g.tracker[0] ? " · registered with tracker" : "");
+    printf("[%s] serving EXEC on :%d (model %s)%s · %d expert%s at a time, "
+           "%s thread%s each\n", g.name, port, g.model,
+           g.tracker[0] ? " · registered with tracker" : "",
+           g_gate_free, g_gate_free == 1 ? "" : "s",
+           getenv("OMP_NUM_THREADS") ? getenv("OMP_NUM_THREADS") : "all",
+           getenv("OMP_NUM_THREADS") && !strcmp(getenv("OMP_NUM_THREADS"), "1")
+               ? "" : "s");
     fflush(stdout);
 
     pthread_t t;

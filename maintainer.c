@@ -40,6 +40,7 @@ static struct {
     char root[LMB_PATH_MAX];
     char name[64], advertise[64], tracker[64], model[64], token[128];
     uint8_t sk[64]; int have_key;   /* --key: this peer is the origin */
+    uint8_t pk[32]; int have_pub;   /* --pubkey: a donor that checks the origin */
     MFile files[MAX_FILES]; int nfiles;
     const char *includes[MAX_INCLUDES]; int nincl;
     pthread_mutex_t fd_lk;
@@ -134,6 +135,54 @@ static void hash_tick(uint64_t bytes, const char *rel) {
     fflush(stdout);
 }
 
+/* Where a file's truth lives on disk: the hash vector beside the bytes and,
+ * for a donor — which did not compute that truth but was given it — the
+ * origin's signature over it. A donor that forgot the signature on restart
+ * would announce unsigned bytes, a --pubkey tracker would refuse them, and
+ * the donation would quietly amount to nothing. */
+static void sidecar_path(const MFile *f, const char *ext, char *out, size_t cap) {
+    snprintf(out, cap, "%s/.lumabri_hashes/%s.%s", g.root, f->rel, ext);
+}
+
+static int sidecar_write(const char *path, const void *a, size_t na,
+                         const void *b, size_t nb) {
+    char tmp[LMB_PATH_MAX * 2 + 8], dir[LMB_PATH_MAX * 2];
+    snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    snprintf(dir, sizeof dir, "%s", path);
+    char *slash = strrchr(dir, '/');
+    if (slash) { *slash = 0;
+        for (char *p = strchr(dir + 1, '/'); p; p = strchr(p + 1, '/'))
+            { *p = 0; mkdir(dir, 0755); *p = '/'; }
+        mkdir(dir, 0755);
+    }
+    FILE *fp = fopen(tmp, "wb");
+    if (!fp) return -1;
+    int ok = (!na || fwrite(a, 1, na, fp) == na) &&
+             (!nb || fwrite(b, 1, nb, fp) == nb);
+    fclose(fp);
+    if (!ok) { unlink(tmp); return -1; }
+    return rename(tmp, path);
+}
+
+static void save_truth(const MFile *f) {
+    char p[LMB_PATH_MAX * 2];
+    sidecar_path(f, "sha", p, sizeof p);
+    if (f->hash) sidecar_write(p, &f->size, 8, f->hash, (size_t)f->nh * 32);
+    if (f->signed_) {
+        sidecar_path(f, "sig", p, sizeof p);
+        sidecar_write(p, f->sig, 64, NULL, 0);
+    }
+}
+
+static void load_sig(MFile *f) {
+    char p[LMB_PATH_MAX * 2];
+    sidecar_path(f, "sig", p, sizeof p);
+    FILE *fp = fopen(p, "rb");
+    if (!fp) return;
+    if (fread(f->sig, 1, 64, fp) == 64) f->signed_ = 1;
+    fclose(fp);
+}
+
 static int hash_file(MFile *f) {
     f->nh = (uint32_t)((f->size + LMB_HASH_CHUNK - 1) / LMB_HASH_CHUNK);
     f->hash = malloc((size_t)f->nh * 32 + 1);
@@ -170,23 +219,7 @@ static int hash_file(MFile *f) {
     }
     free(buf);
     close(fd);
-    char tmp[LMB_PATH_MAX * 2 + 4];
-    snprintf(tmp, sizeof tmp, "%s.tmp", sc);
-    char dir[LMB_PATH_MAX * 2];
-    snprintf(dir, sizeof dir, "%s", sc);
-    char *slash = strrchr(dir, '/');
-    if (slash) { *slash = 0;
-        for (char *p = strchr(dir + 1, '/'); p; p = strchr(p + 1, '/'))
-            { *p = 0; mkdir(dir, 0755); *p = '/'; }
-        mkdir(dir, 0755);
-    }
-    fp = fopen(tmp, "wb");
-    if (fp) {
-        int ok = fwrite(&f->size, 8, 1, fp) == 1 &&
-                 fwrite(f->hash, 32, f->nh, fp) == f->nh;
-        fclose(fp);
-        if (ok) rename(tmp, sc);
-    }
+    save_truth(f);
     return 0;
 }
 
@@ -343,27 +376,78 @@ static void mkdir_parents(const char *path) {
 
 #define PULL_CHUNK (8u << 20)
 
-/* the swarm's ground truth for one file, from the tracker; NULL when the
- * tracker has none (a swarm without integrity — the pull proceeds, warned) */
-static uint8_t *fetch_truth(const char *rel, uint32_t *nh_out) {
+/* The swarm's ground truth for one file: which model it belongs to, the hash
+ * vector, the size those hashes cover, and — on a signed swarm — the
+ * operator's signature over all of it. */
+typedef struct {
+    uint8_t *hash; uint32_t nh;
+    uint64_t size;
+    uint8_t sig[64]; int has_sig;
+    char model[64];
+} Truth;
+
+static void truth_free(Truth *t) { free(t->hash); memset(t, 0, sizeof *t); }
+
+/* HASHES_R grew a model name and a signature when the tracker stopped being
+ * an authority and became a courier. This parser did not grow with it: it
+ * read the first bytes of the model string as a chunk size, concluded the
+ * reply was malformed, and reported "no truth" — which chunks_ok() reads as
+ * "nothing to check against, so everything is fine". A parse failure
+ * degraded silently into an unverified pull, and the donor then announced
+ * unsigned bytes that a --pubkey tracker refused, so it held nothing.
+ *
+ * Returns 0 with the truth filled, or -1 having said exactly what is wrong. */
+static int fetch_truth(const char *rel, Truth *t) {
+    memset(t, 0, sizeof *t);
     LmbBuf b = {0};
     lmb_buf_str(&b, g.model);
     lmb_buf_str(&b, rel);
     LmbMsg m = {0};
     int rc = lmb_request(g.tracker, LMB_HASHES, b.p, (uint32_t)b.len, &m);
     free(b.p);
-    uint8_t *hashes = NULL;
-    if (rc == 0 && m.op == LMB_HASHES_R) {
-        LmbCur c = { m.body, m.body_len, 0 };
-        uint32_t chunk = 0, n = 0;
-        if (!lmb_cur_u32(&c, &chunk) && !lmb_cur_u32(&c, &n) &&
-            chunk == LMB_HASH_CHUNK && m.pay_len == n * 32) {
-            hashes = m.pay; m.pay = NULL;
-            *nh_out = n;
+    if (rc || m.op != LMB_HASHES_R) { lmb_msg_free(&m); return -1; }
+
+    LmbCur c = { m.body, m.body_len, 0 };
+    uint32_t chunk = 0, has_sig = 0;
+    int bad = lmb_cur_str(&c, t->model, sizeof t->model) ||
+              lmb_cur_u32(&c, &chunk) || lmb_cur_u32(&c, &t->nh) ||
+              lmb_cur_u64(&c, &t->size) || lmb_cur_u32(&c, &has_sig) ||
+              (has_sig && lmb_cur_bytes(&c, t->sig, 64));
+    if (bad || chunk != LMB_HASH_CHUNK || m.pay_len != (uint64_t)t->nh * 32) {
+        fprintf(stderr, "[maintainer %s] the tracker's integrity record for %s "
+                        "is not one I can read — refusing to guess\n", g.name, rel);
+        lmb_msg_free(&m);
+        memset(t, 0, sizeof *t);
+        return -1;
+    }
+    t->has_sig = has_sig != 0;
+    t->hash = m.pay; m.pay = NULL;
+    lmb_msg_free(&m);
+
+    /* With the operator's public key we check the signature ourselves, so a
+     * tracker that invents hashes to match corrupt bytes is caught here and
+     * not three hops later. Without the key we can still carry a signature
+     * we cannot read: the chatter checks it against its own copy. */
+    if (g.have_pub) {
+        if (!t->has_sig) {
+            fprintf(stderr, "[maintainer %s] %s is not signed by the operator — "
+                            "refusing to hold it\n", g.name, rel);
+            truth_free(t);
+            return -1;
+        }
+        size_t ml = 0;
+        uint8_t *msg = lmb_truth_msg(t->model, rel, LMB_HASH_CHUNK, t->size,
+                                     t->hash, t->nh, &ml);
+        int ok = msg && lmb_sign_verify(t->sig, msg, ml, g.pk) == 0;
+        free(msg);
+        if (!ok) {
+            fprintf(stderr, "[maintainer %s] the signature on %s does not match "
+                            "the operator key — refusing to hold it\n", g.name, rel);
+            truth_free(t);
+            return -1;
         }
     }
-    lmb_msg_free(&m);
-    return hashes;
+    return 0;
 }
 
 /* verify `len` bytes at `off` (chunk-aligned) against the truth */
@@ -381,7 +465,7 @@ static int chunks_ok(const uint8_t *truth, uint32_t nh,
     return 1;
 }
 
-static int pull_file(const char *rel, uint64_t size) {
+static int pull_file(const char *rel, uint64_t size, Truth *tr) {
     /* who has it, right now */
     LmbBuf b = {0};
     lmb_buf_str(&b, g.model);
@@ -407,18 +491,30 @@ static int pull_file(const char *rel, uint64_t size) {
     }
     free(b.p); lmb_msg_free(&m);
 
+    /* the truth first: there is no point spending bandwidth on bytes we have
+     * already decided we would not be allowed to serve */
+    memset(tr, 0, sizeof *tr);
+    int have_truth = fetch_truth(rel, tr) == 0;
+    if (!have_truth && g.have_pub) return -1;      /* said why, in fetch_truth */
+    if (!have_truth)
+        fprintf(stderr, "[maintainer %s] no integrity data for %s — "
+                        "pulling unverified\n", g.name, rel);
+    if (have_truth && tr->size != size) {
+        fprintf(stderr, "[maintainer %s] %s: the tracker offers %llu bytes but "
+                        "the signed truth covers %llu — refusing\n", g.name, rel,
+                (unsigned long long)size, (unsigned long long)tr->size);
+        truth_free(tr);
+        return -1;
+    }
+    const uint8_t *truth = tr->hash;
+    uint32_t truth_n = tr->nh;
+
     char final[LMB_PATH_MAX * 2], part[LMB_PATH_MAX * 2];
     snprintf(final, sizeof final, "%s/%s", g.root, rel);
     snprintf(part, sizeof part, "%s.part", final);
     mkdir_parents(final);
     int out = open(part, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (out < 0) return -1;
-
-    uint32_t truth_n = 0;
-    uint8_t *truth = fetch_truth(rel, &truth_n);
-    if (!truth)
-        fprintf(stderr, "[maintainer %s] no integrity data for %s — "
-                        "pulling unverified\n", g.name, rel);
+    if (out < 0) { truth_free(tr); return -1; }
 
     int src = -1, ai = 0;
     for (uint64_t off = 0; off < size || (size == 0 && off == 0); ) {
@@ -461,7 +557,7 @@ static int pull_file(const char *rel, uint64_t size) {
             }
             free(rb.p); lmb_msg_free(&rm);
         }
-        if (!data && want) { free(truth); close(out); if (src >= 0) close(src); return -1; }
+        if (!data && want) { truth_free(tr); close(out); if (src >= 0) close(src); return -1; }
         uint32_t put = 0;
         while (put < got) {
             ssize_t w = pwrite(out, data + put, got - put, (off_t)(off + put));
@@ -472,10 +568,10 @@ static int pull_file(const char *rel, uint64_t size) {
         off += want;
         if (size == 0) break;
     }
-    free(truth);
     if (src >= 0) close(src);
     close(out);
-    return rename(part, final);
+    if (rename(part, final)) { truth_free(tr); return -1; }
+    return 0;                        /* the caller now owns tr */
 }
 
 static void pull_slice(uint64_t budget) {
@@ -509,13 +605,24 @@ static void pull_slice(uint64_t budget) {
         printf("[maintainer %s] pull %u/%u: %s (%.1f MB)\n",
                g.name, i + 1, n, rel, (double)size / 1e6);
         fflush(stdout);
-        if (pull_file(rel, size) == 0 && g.nfiles < MAX_FILES) {
+        Truth t;
+        if (pull_file(rel, size, &t) == 0 && g.nfiles < MAX_FILES) {
             MFile *f = &g.files[g.nfiles++];
             snprintf(f->rel, sizeof f->rel, "%s", rel);
             f->size = size; f->fd = -1;
+            /* keep the truth we were given, signature and all: a donor that
+             * re-hashed the bytes itself could prove they are consistent but
+             * not that they are the operator's, and an unsigned announcement
+             * is refused by a signed swarm */
+            f->hash = t.hash; f->nh = t.nh;
+            f->signed_ = t.has_sig;
+            if (t.has_sig) memcpy(f->sig, t.sig, 64);
+            save_truth(f);
             pulled += size; done++;
-        } else
+        } else {
+            truth_free(&t);
             fprintf(stderr, "[maintainer %s] pull failed for %s\n", g.name, rel);
+        }
     }
     lmb_msg_free(&m);
     printf("[maintainer %s] assigned slice: %u/%u files, %.2f GB pulled\n",
@@ -652,6 +759,20 @@ int main(int argc, char **argv) {
             fclose(kf);
             g.have_key = 1;
         }
+        /* the public half: a donor holds no key but can still refuse bytes
+         * whose truth the operator did not sign — accepts a file or the hex */
+        else if (!strcmp(argv[i], "--pubkey") && i + 1 < argc) {
+            char hex[200] = "";
+            FILE *pf = fopen(argv[++i], "r");
+            if (pf) { if (fscanf(pf, "%198s", hex) != 1) hex[0] = 0; fclose(pf); }
+            else snprintf(hex, sizeof hex, "%s", argv[i]);
+            if (strlen(hex) != 64 || lmb_unhex(g.pk, hex, 32)) {
+                fprintf(stderr, "[maintainer] cannot read a 32-byte public key "
+                                "from %s\n", argv[i]);
+                return 2;
+            }
+            g.have_pub = 1;
+        }
         else {
             fprintf(stderr, "usage: %s --root DIR [--port N] [--tracker H:P]"
                             " [--name S] [--advertise H:P] [--include PAT]..."
@@ -705,8 +826,10 @@ int main(int argc, char **argv) {
         if (hash_file(&g.files[i]))
             fprintf(stderr, "[maintainer %s] cannot hash %s — served unverified\n",
                     g.name, g.files[i].rel);
-        else
+        else {
+            load_sig(&g.files[i]);   /* a donor's proof, kept across restarts */
             sign_truth(&g.files[i]);
+        }
     }
     if (g.have_key) {
         char pub[70];

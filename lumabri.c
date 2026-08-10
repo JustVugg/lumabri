@@ -76,6 +76,20 @@ static void mkdir_p(const char *path) {
     mkdir(tmp, 0755);
 }
 
+/* An expert executor inherits its parallelism from whatever OpenMP decides,
+ * and OpenMP decides "the whole machine" for every team it opens. The tests
+ * always set this by hand and the real deployments never did, which is how a
+ * server ended up asking for four teams of twelve threads on twelve cores.
+ * Fix the number here, where the child is born, and let it be overridden. */
+static void exec_threads_default(void) {
+    if (getenv("OMP_NUM_THREADS")) return;
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    if (n < 1) n = 1;
+    char buf[16];
+    snprintf(buf, sizeof buf, "%ld", n);
+    setenv("OMP_NUM_THREADS", buf, 1);
+}
+
 /* ---- the logo ------------------------------------------------------------
  * ANSI-Shadow block wordmark, warm gradient from coral to sand, one tint
  * per row. The same lettering every serious CLI splash uses. */
@@ -276,7 +290,7 @@ static int cmd_serve(int argc, char **argv) {
         spawn_tracked(targv, "il tracker");
         usleep(300 * 1000);
     }
-    char *margv[16];
+    char *margv[24];
     int a = 0;
     margv[a++] = maint_bin;
     margv[a++] = "--root"; margv[a++] = (char *)model;
@@ -285,6 +299,9 @@ static int cmd_serve(int argc, char **argv) {
     if (mname) { margv[a++] = "--model-name"; margv[a++] = (char *)mname; }
     if (donate) { margv[a++] = "--donate"; margv[a++] = (char *)donate; }
     if (key) { margv[a++] = "--key"; margv[a++] = (char *)key; }
+    /* a donor pulls other people's bytes: give it the operator key so it can
+     * refuse anything the operator did not sign, instead of holding it */
+    if (pubkey) { margv[a++] = "--pubkey"; margv[a++] = (char *)pubkey; }
     static char madv[80];
     if (advertise) {
         snprintf(madv, sizeof madv, "%s:%d", advertise, port + 1);
@@ -332,6 +349,7 @@ static int cmd_serve(int argc, char **argv) {
             eargv[a++] = "--advertise"; eargv[a++] = eadv;
         }
         eargv[a] = NULL;
+        exec_threads_default();
         spawn_tracked(eargv, "l'esecutore di esperti");
         with_exec = 1;
     }
@@ -1115,6 +1133,20 @@ static void setup_panel(Cfg *c) {
  * whether a full local copy of the model exists — without one, executing
  * experts is not on offer, because an expert node reads the weights from
  * disk and there would be none to read. */
+/* --role takes whole words: chat, disk, compute, all, or a combination like
+ * "disk,compute". Matching by letter was shorter and wrong — strchr("chat",
+ * 'c') is true, so the one role that donates nothing was the one that
+ * switched compute donation on. */
+static int role_has(const char *arg, const char *want) {
+    size_t wl = strlen(want);
+    for (const char *p = arg; *p; ) {
+        size_t n = strcspn(p, ",+ ");
+        if (n == wl && !strncasecmp(p, want, wl)) return 1;
+        p += n; if (*p) p++;
+    }
+    return 0;
+}
+
 static int role_pick(Role *r, const char *model, int have_model_dir) {
     printf("  %scome entri nello sciame?%s\n\n", C_BOLD, C_R);
     printf("    %s1%s  solo chattare        %snon condividi niente%s\n",
@@ -1197,7 +1229,7 @@ static void role_start(const Role *r, const char *tracker, const char *model,
             snprintf(portstr, sizeof portstr, "%d", port);
             snprintf(gbstr, sizeof gbstr, "%.2f", r->gb);
             snprintf(name, sizeof name, "donor-%d", port);
-            char *argv[16];
+            char *argv[20];
             int a = 0;
             argv[a++] = bin;
             argv[a++] = "--root";       argv[a++] = (char *)r->model_dir;
@@ -1206,6 +1238,11 @@ static void role_start(const Role *r, const char *tracker, const char *model,
             argv[a++] = "--name";       argv[a++] = name;
             argv[a++] = "--model-name"; argv[a++] = (char *)model;
             argv[a++] = "--donate";     argv[a++] = gbstr;
+            /* the TUI asked for this key once and remembered it: the donor
+             * should refuse unsigned bytes for exactly the same reason the
+             * chatter does */
+            const char *pub = getenv("LUMABRI_PUBKEY");
+            if (pub && pub[0]) { argv[a++] = "--pubkey"; argv[a++] = (char *)pub; }
             argv[a] = NULL;
             g_children[g_nchildren++] = spawn_argv(argv);
             printf("  %s\xe2\x9c\xa6 dono %.0f GB di %s%s%s%s: il tracker mi assegna "
@@ -1226,7 +1263,7 @@ static void role_start(const Role *r, const char *tracker, const char *model,
             char portstr[16], name[64];
             snprintf(portstr, sizeof portstr, "%d", port);
             snprintf(name, sizeof name, "donor-exec-%d", port);
-            char *argv[16];
+            char *argv[20];
             int a = 0;
             argv[a++] = bin;
             argv[a++] = "--model";      argv[a++] = (char *)r->model_dir;
@@ -1236,6 +1273,7 @@ static void role_start(const Role *r, const char *tracker, const char *model,
             argv[a++] = "--model-name"; argv[a++] = (char *)model;
             argv[a++] = "--cache";      argv[a++] = "64";
             argv[a] = NULL;
+            exec_threads_default();
             g_children[g_nchildren++] = spawn_argv(argv);
             printf("  %s\xe2\x9c\xa6 eseguo esperti per lo sciame%s %s(%s)%s\n",
                    C_GRN, C_R, C_DIM, node, C_R);
@@ -1469,8 +1507,15 @@ static int cmd_chat(int argc, char **argv) {
      * the dense weights cross the wire, instead of after */
     Role role = {0};
     if (!local_dir && role_arg) {
-        if (strchr(role_arg, 'd') || !strcmp(role_arg, "all")) role.disk = 1;
-        if (strchr(role_arg, 'c') || !strcmp(role_arg, "all")) role.compute = 1;
+        int all = role_has(role_arg, "all");
+        if (!all && !role_has(role_arg, "chat") &&
+            !role_has(role_arg, "disk") && !role_has(role_arg, "compute")) {
+            fprintf(stderr, "--role vuole chat, disk, compute o all "
+                            "(anche combinati: --role disk,compute)\n");
+            return 2;
+        }
+        if (all || role_has(role_arg, "disk"))    role.disk = 1;
+        if (all || role_has(role_arg, "compute")) role.compute = 1;
         if (role.disk || role.compute) {
             const char *home = getenv("HOME") ? getenv("HOME") : ".";
             if (model_dir_arg) snprintf(role.model_dir, sizeof role.model_dir, "%s", model_dir_arg);

@@ -574,6 +574,8 @@ rather than failing the build for everyone who only wants GLM.
 | `lumabri_client.h` | phase 2 chatter side |
 | `selftest.sh` | byte identity: cold, warm, offline |
 | `donate_test.sh` | an empty disk donor pulls a slice and outlives the origin |
+| `signed_donor_test.sh` | a donor on a signed swarm verifies, republishes the signature, and refuses the wrong key |
+| `role_test.sh` | `--role` takes whole words: chat is not compute |
 | `phase2_test.sh`, `phase2_bench.sh` | phase 2 correctness and benchmark (olmoe) |
 | `phase2_glm_test.sh`, `phase2_inkling_test.sh`, `phase2_kimi_test.sh`, `phase2_deepseek_test.sh` | phase 2 byte identity, one per engine |
 | `phase3_test.sh` | proximity, readahead, failover — measured |

@@ -185,6 +185,8 @@ test_shim: test_shim.c
 test: all
 	./selftest.sh
 	./donate_test.sh
+	./signed_donor_test.sh
+	./role_test.sh
 
 # ---- deploy -------------------------------------------------------------
 # make install                    → /usr/local (needs sudo)
