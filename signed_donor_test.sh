@@ -135,4 +135,28 @@ grep -q "assigned slice: 0/" "$T/wrong.log" || {
     echo "   it wrote files it could not verify"; ls -A "$T/wrong"; exit 1; }
 echo "   ✓ refused every file, kept none: the check is real"
 
+echo "· 6) a correct manifest is not a promise about the bytes"
+# The adversary worth testing is not the one who lies in the index — the
+# tracker already refuses that. It is the peer whose announcement is
+# perfectly valid, signature and all, and who then serves something else.
+# Its own hashes convict it.
+./tracker --port 7587 --pubkey "$T/swarm.pub" > "$T/tracker2.log" 2>&1 & PIDS+=($!)
+wait_port 7587
+LUMABRI_CORRUPT_PPM=1000000 \
+    ./maintainer --root "$T/src" --port 7588 --tracker 127.0.0.1:7587 \
+                 --name liar --model-name fy --key "$T/swarm.key" \
+                 > "$T/liar.log" 2>&1 & PIDS+=($!)
+wait_port 7588
+wait_for "$T/tracker2.log" "+ liar" 15 || { cat "$T/tracker2.log"; exit 1; }
+./maintainer --root "$T/victim" --port 7589 --tracker 127.0.0.1:7587 \
+             --name victim --model-name fy --donate 1 --pubkey "$T/swarm.pub" \
+             > "$T/victim.log" 2>&1 || true
+grep -q "served corrupt bytes" "$T/victim.log" || {
+    echo "   the donor accepted bytes that did not match their own hashes"
+    cat "$T/victim.log"; exit 1; }
+grep -q "assigned slice: 0/" "$T/victim.log" || {
+    echo "   it kept something from a peer it had caught lying"
+    grep "assigned slice" "$T/victim.log"; exit 1; }
+echo "   ✓ caught the lie, pulled nothing, and said which peer told it"
+
 echo "LUMABRI SIGNED DONOR TEST: PASS"

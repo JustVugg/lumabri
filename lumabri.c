@@ -76,20 +76,6 @@ static void mkdir_p(const char *path) {
     mkdir(tmp, 0755);
 }
 
-/* An expert executor inherits its parallelism from whatever OpenMP decides,
- * and OpenMP decides "the whole machine" for every team it opens. The tests
- * always set this by hand and the real deployments never did, which is how a
- * server ended up asking for four teams of twelve threads on twelve cores.
- * Fix the number here, where the child is born, and let it be overridden. */
-static void exec_threads_default(void) {
-    if (getenv("OMP_NUM_THREADS")) return;
-    long n = sysconf(_SC_NPROCESSORS_ONLN);
-    if (n < 1) n = 1;
-    char buf[16];
-    snprintf(buf, sizeof buf, "%ld", n);
-    setenv("OMP_NUM_THREADS", buf, 1);
-}
-
 /* ---- the logo ------------------------------------------------------------
  * ANSI-Shadow block wordmark, warm gradient from coral to sand, one tint
  * per row. The same lettering every serious CLI splash uses. */
@@ -349,7 +335,6 @@ static int cmd_serve(int argc, char **argv) {
             eargv[a++] = "--advertise"; eargv[a++] = eadv;
         }
         eargv[a] = NULL;
-        exec_threads_default();
         spawn_tracked(eargv, "l'esecutore di esperti");
         with_exec = 1;
     }
@@ -1147,6 +1132,27 @@ static int role_has(const char *arg, const char *want) {
     return 0;
 }
 
+/* Every token has to be a role, not just one of them: accepting
+ * "chat,bogus" because "chat" is in there drops the half the user probably
+ * cared about and says nothing. Returns the first word it does not know. */
+static int role_unknown(const char *arg, char *out, size_t cap) {
+    static const char *ok[] = { "chat", "disk", "compute", "all" };
+    int any = 0;
+    for (const char *p = arg; *p; ) {
+        size_t n = strcspn(p, ",+ ");
+        if (n) {
+            any = 1;
+            int good = 0;
+            for (size_t i = 0; i < sizeof ok / sizeof *ok; i++)
+                if (n == strlen(ok[i]) && !strncasecmp(p, ok[i], n)) good = 1;
+            if (!good) { snprintf(out, cap, "%.*s", (int)n, p); return 1; }
+        }
+        p += n; if (*p) p++;
+    }
+    if (!any) { snprintf(out, cap, "%s", "(vuoto)"); return 1; }
+    return 0;
+}
+
 static int role_pick(Role *r, const char *model, int have_model_dir) {
     printf("  %scome entri nello sciame?%s\n\n", C_BOLD, C_R);
     printf("    %s1%s  solo chattare        %snon condividi niente%s\n",
@@ -1273,7 +1279,6 @@ static void role_start(const Role *r, const char *tracker, const char *model,
             argv[a++] = "--model-name"; argv[a++] = (char *)model;
             argv[a++] = "--cache";      argv[a++] = "64";
             argv[a] = NULL;
-            exec_threads_default();
             g_children[g_nchildren++] = spawn_argv(argv);
             printf("  %s\xe2\x9c\xa6 eseguo esperti per lo sciame%s %s(%s)%s\n",
                    C_GRN, C_R, C_DIM, node, C_R);
@@ -1507,13 +1512,14 @@ static int cmd_chat(int argc, char **argv) {
      * the dense weights cross the wire, instead of after */
     Role role = {0};
     if (!local_dir && role_arg) {
-        int all = role_has(role_arg, "all");
-        if (!all && !role_has(role_arg, "chat") &&
-            !role_has(role_arg, "disk") && !role_has(role_arg, "compute")) {
-            fprintf(stderr, "--role vuole chat, disk, compute o all "
-                            "(anche combinati: --role disk,compute)\n");
+        char bad[40];
+        if (role_unknown(role_arg, bad, sizeof bad)) {
+            fprintf(stderr, "--role: non conosco \"%s\". Vuole chat, disk, "
+                            "compute o all (anche combinati: "
+                            "--role disk,compute)\n", bad);
             return 2;
         }
+        int all = role_has(role_arg, "all");
         if (all || role_has(role_arg, "disk"))    role.disk = 1;
         if (all || role_has(role_arg, "compute")) role.compute = 1;
         if (role.disk || role.compute) {

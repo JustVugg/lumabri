@@ -54,8 +54,22 @@
 #endif
 #include LMBE_ENGINE_HEADER
 
+/* The engine sets its OpenMP team on the FIRST LINE of its own main(), and
+ * this file neutralises main to reach the engine's statics — so the team was
+ * never sized and every expert node has been running on OpenMP's default,
+ * which is one thread per hyperthread. The engine measured that choice and
+ * rejected it: physical cores only, +2.3x on a 16C/32T Zen3 from the thread
+ * count alone (omp_tune.h). Call exactly what main() would have called;
+ * engines without the header keep whatever they set for themselves. */
+#ifdef COLI_OMP_TUNE_H
+#define LMBE_TUNE_THREADS() coli_omp_tune_threads("lumabri")
+#else
+#define LMBE_TUNE_THREADS() ((void)0)
+#endif
+
 #include "lumabri_proto.h"
 
+#include <omp.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <sys/prctl.h>
@@ -133,14 +147,9 @@ static pthread_cond_t  g_gate_cv = PTHREAD_COND_INITIALIZER;
 static int g_gate_free = 1;
 static _Atomic uint64_t g_gate_waits;
 
-static void gate_init(int forced) {
+static void gate_init(int forced, int per_expert, int phys) {
     if (forced > 0) { g_gate_free = forced; return; }
-    long cores = sysconf(_SC_NPROCESSORS_ONLN);
-    if (cores < 1) cores = 1;
-    const char *ot = getenv("OMP_NUM_THREADS");
-    long per = ot ? atol(ot) : cores;
-    if (per < 1) per = 1;
-    g_gate_free = (int)(cores / per);
+    g_gate_free = (phys > 0 && per_expert > 0) ? phys / per_expert : 1;
     if (g_gate_free < 1) g_gate_free = 1;
 }
 
@@ -422,6 +431,39 @@ static int in_list(const int *list, int n, int v) {
     return 0;
 }
 
+/* ---- how wide the machine is --------------------------------------------
+ * lumabri does NOT choose the OpenMP team size. The engine already does, in
+ * its own main() — which this file calls for it, see LMBE_TUNE_THREADS —
+ * sized to the physical cores and argued from measurements on
+ * real models (omp_tune.h: +2.3x on a 16C/32T Zen3 from the thread count
+ * alone). A micro-benchmark here would be measuring one expert of one model
+ * at one row, and would happily overrule that with a fixture's answer.
+ *
+ * What lumabri owns is the gate: given that each expert call takes the whole
+ * machine, how many may run at once. That is a ratio, so it needs the core
+ * count — and the engine's own rule applies to it too. If the physical count
+ * cannot be determined we do not guess it: we admit one expert at a time,
+ * which is never oversubscribed, rather than invent a number. */
+static int phys_cores(void) {
+    struct { int p, c; } seen[1024];
+    int n = 0, pid = -1, cid = -1;
+    FILE *f = fopen("/proc/cpuinfo", "r");
+    if (!f) return 0;
+    char line[256];
+    while (fgets(line, sizeof line, f)) {
+        if (!strncmp(line, "physical id", 11)) sscanf(line, "%*[^:]: %d", &pid);
+        else if (!strncmp(line, "core id", 7)) sscanf(line, "%*[^:]: %d", &cid);
+        if (pid >= 0 && cid >= 0) {
+            int dup = 0;
+            for (int i = 0; i < n; i++) if (seen[i].p == pid && seen[i].c == cid) dup = 1;
+            if (!dup && n < 1024) { seen[n].p = pid; seen[n].c = cid; n++; }
+            pid = cid = -1;
+        }
+    }
+    fclose(f);
+    return n;
+}
+
 int main(int argc, char **argv) {
     const char *dir = NULL;
     int port = 7401, stride = 1, offset = 0, cache = 0, bits = 8, hold = 0;
@@ -458,7 +500,6 @@ int main(int argc, char **argv) {
         }
     }
     if (!dir) { fprintf(stderr, "--model is required\n"); return 2; }
-    gate_init(parallel);
     if (stride < 1) stride = 1;
     if (cache < 0) cache = 0;
     signal(SIGPIPE, SIG_IGN);
@@ -485,6 +526,7 @@ int main(int argc, char **argv) {
                  g.name, g_corrupt_ppm);
       } }
 
+    LMBE_TUNE_THREADS();
     lmbe_open(dir, cache, bits);
     g.n_slots   = lmbe_n_slots();
     g.n_experts = lmbe_n_experts();
@@ -588,18 +630,25 @@ int main(int argc, char **argv) {
     }
     fflush(stdout);
 
+    /* whatever the engine settled on during lmbe_open */
+    int phys = phys_cores(), per_expert = omp_get_max_threads();
+    if (per_expert < 1) per_expert = 1;
+    gate_init(parallel, per_expert, phys);
+
     int lfd = lmb_listen(port);
     if (lfd < 0) { perror("listen"); return 1; }
     if (lmb_emu_active())
         printf("[%s] emulated network: rtt %ld us ± %ld, loss %ld ppm (rto %ld us)\n",
                g.name, lmb_emu_rtt_us, lmb_emu_jitter_us, lmb_emu_loss_ppm, lmb_emu_rto_us);
     printf("[%s] serving EXEC on :%d (model %s)%s · %d expert%s at a time, "
-           "%s thread%s each\n", g.name, port, g.model,
+           "%d thread%s each, %d physical core%s\n", g.name, port, g.model,
            g.tracker[0] ? " · registered with tracker" : "",
            g_gate_free, g_gate_free == 1 ? "" : "s",
-           getenv("OMP_NUM_THREADS") ? getenv("OMP_NUM_THREADS") : "all",
-           getenv("OMP_NUM_THREADS") && !strcmp(getenv("OMP_NUM_THREADS"), "1")
-               ? "" : "s");
+           per_expert, per_expert == 1 ? "" : "s",
+           phys, phys == 1 ? "" : "s");
+    if (!phys)
+        printf("[%s] physical core count unknown: one expert at a time "
+               "(--parallel N to say otherwise)\n", g.name);
     fflush(stdout);
 
     pthread_t t;

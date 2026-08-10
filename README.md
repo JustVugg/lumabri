@@ -626,8 +626,9 @@ signed by the operator's ed25519 key, checked by the chatter against a key
 it holds itself) and results (spot-check on a second replica); private
 swarms need an invite token everywhere. Not yet done, in order of
 importance: speculative drafting with batch-union (the remaining multiplier
-against WAN latency), hedged requests against stragglers, tracker-side
-expert assignment, key rotation and revocation, NAT hole punching. Expert
+against WAN latency), hedged requests against stragglers, continuous peer
+discovery mid-generation, a durable content-addressed mirror, key rotation
+and revocation, NAT hole punching. Expert
 execution is not yet covered by the operator signature — a peer's results
 are checked by replica agreement, not by a key.
 

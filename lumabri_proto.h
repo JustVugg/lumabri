@@ -98,11 +98,18 @@ enum {
      * the FIRST announcement of each (model, path) as ground truth — the
      * origin server registers before any donor exists — and rejects the
      * files of any later registrant whose hashes disagree (poison dies at
-     * the index). HASHES {model, path} → HASHES_R {u32 chunk, u32 n} + pay
-     * (n × 32 raw bytes) hands the truth to chatters and pulling donors,
+     * the index). HASHES {model, path} → HASHES_R {str model, u32 chunk,
+     * u32 n, u64 size, u32 has_sig, [64 sig]} + pay (n × 32 raw bytes) hands
+     * the truth to chatters and pulling donors,
      * which verify every fetched block against it: a lying peer's bytes
      * are rejected and refetched elsewhere, loudly. The root of trust is
-     * the swarm operator (tracker + origin), never the peers. */
+     * the swarm operator (tracker + origin), never the peers. The reply
+     * carries model and size because the signature is over all of it: a
+     * verifier must be able to rebuild the signed message itself, and a
+     * courier that could not supply the fields could rewrite them. Keep this
+     * comment in step with the encoder — it went stale once and the donor's
+     * decoder went stale with it, reading the model string as a chunk size
+     * and calling the whole record malformed. */
     LMB_HASHES = 26, LMB_HASHES_R = 27,
     /* "the server decides", for compute. A donor of disk already gets its
      * slice assigned rarest-first; a donor of COMPUTE had to be told which

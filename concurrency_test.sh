@@ -30,6 +30,9 @@ ENGINES="${ENGINES:-../moe-stream/c}"
 
 [ -f "$MODEL/config.json" ] || make -s fixture
 make -s all
+# the executor is not part of `all` (it needs an engine checkout), and a stale
+# one silently benchmarks yesterday's code
+make -s expert_node ENGINE="$ENGINES"
 
 T=$(mktemp -d /tmp/lumabri-conc.XXXXXX)
 PIDS=()
@@ -51,7 +54,7 @@ printf 'ciao\n/quit\n' | ./lumabri chat --tracker "127.0.0.1:$PORT" \
     > "$T/warm.log" 2>&1 || true
 
 echo
-printf "%8s  %10s  %10s  %10s  %10s\n" clients fastest slowest spread total
+printf "%8s  %10s  %10s  %10s  %10s\n" clients fastest slowest spread mean
 for n in $CLIENTS; do
     # wait on THESE clients only: a bare `wait` also waits for the server
     # started above, which never exits — the first version of this script
