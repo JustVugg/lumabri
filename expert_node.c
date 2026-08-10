@@ -175,6 +175,11 @@ static void send_err(int fd, const char *msg) {
     free(b.p);
 }
 
+static int expert_index_ok(uint32_t layer, uint32_t eid) {
+    return g.n_slots > 0 && g.n_experts > 0 &&
+           layer < (uint32_t)g.n_slots && eid < (uint32_t)g.n_experts;
+}
+
 /* ---- the SSD-streaming LRU ----------------------------------------------
  * acquire pins a slot (refs) so eviction can never pull weights out from
  * under a running matmul; a miss loads with the engine's own loader under
@@ -255,11 +260,11 @@ static int handle_exec(int fd, LmbMsg *m) {
         rw = (const float *)(m->body + 16);
     else if (m->body_len != 16) { send_err(fd, "bad exec body"); return -1; }
     uint64_t want = (uint64_t)nrows * dim * sizeof(float);
-    if ((int)layer >= g.n_slots || (int)eid >= g.n_experts ||
-        (int)dim != g.hidden || want > LMB_MAX_PAY || m->pay_len != want) {
+    if (!expert_index_ok(layer, eid) || dim != (uint32_t)g.hidden ||
+        want > LMB_MAX_PAY || m->pay_len != want) {
         send_err(fd, "exec shape mismatch"); return -1;
     }
-    int gid = (int)layer * g.n_experts + (int)eid;
+    size_t gid = (size_t)layer * (size_t)g.n_experts + eid;
     if (!g.holds[gid]) { send_err(fd, "expert not held by this node"); return 0; }
 
     /* How many experts may be multiplied at once. Every connection gets its
@@ -573,20 +578,31 @@ int main(int argc, char **argv) {
         } else {
             LmbCur c = { r.body, r.body_len, 0 };
             uint32_t n = 0;
-            if (!lmb_cur_u32(&c, &n)) {
-                memset(g.holds, 0, cells);
-                g.nholds = 0;
-                for (uint32_t i = 0; i < n; i++) {
-                    uint32_t l, e;
-                    if (lmb_cur_u32(&c, &l) || lmb_cur_u32(&c, &e)) break;
-                    if ((int)l >= g.n_slots || (int)e >= g.n_experts) continue;
-                    size_t gid = (size_t)l * g.n_experts + e;
-                    if (!g.holds[gid]) { g.holds[gid] = 1; g.nholds++; }
+            uint8_t *assigned = (uint8_t *)calloc(cells ? cells : 1, 1);
+            int assigned_n = 0, bad = !assigned || lmb_cur_u32(&c, &n) ||
+                                         n > (uint32_t)hold ||
+                                         (size_t)n > cells || r.pay_len != 0;
+            for (uint32_t i = 0; !bad && i < n; i++) {
+                uint32_t l, e;
+                if (lmb_cur_u32(&c, &l) || lmb_cur_u32(&c, &e) ||
+                    !expert_index_ok(l, e) || !lmbe_routed((int)l)) {
+                    bad = 1; break;
                 }
+                size_t gid = (size_t)l * (size_t)g.n_experts + e;
+                if (!assigned[gid]) { assigned[gid] = 1; assigned_n++; }
+            }
+            if (!bad && c.off != c.len) bad = 1;
+            if (bad) {
+                fprintf(stderr, "[%s] tracker returned an invalid expert assignment — "
+                                "keeping the local selection\n", g.name);
+            } else {
+                memcpy(g.holds, assigned, cells);
+                g.nholds = assigned_n;
                 printf("[%s] the tracker assigned %d experts (asked for %d): "
                        "the least replicated of %s\n",
                        g.name, g.nholds, hold, g.model);
             }
+            free(assigned);
             lmb_msg_free(&r);
         }
     }

@@ -103,6 +103,11 @@ static void lumi_probe(LumiPeer *p) {
     lumi_put_sock(p, fd);
 }
 
+static int lumi_index_ok(uint32_t layer, uint32_t eid) {
+    return L.n_layers > 0 && L.n_experts > 0 &&
+           layer < (uint32_t)L.n_layers && eid < (uint32_t)L.n_experts;
+}
+
 /* Learn one peer: manifest, replica claims, distance. Returns 0, or -1 on
  * any failure (already-known addresses are a no-op success). */
 static int lumi_add_peer(const char *addr) {
@@ -122,18 +127,21 @@ static int lumi_add_peer(const char *addr) {
     LmbCur c = { m.body, m.body_len, 0 };
     uint32_t n = 0, peer_hidden = 0;
     int bad = lmb_cur_u32(&c, &n) != 0;
+    size_t cells = (size_t)L.n_layers * (size_t)L.n_experts;
+    if (!bad && (size_t)n > cells) bad = 1;
     int claimed = 0;
     for (uint32_t i = 0; !bad && i < n; i++) {
         uint32_t l, e;
         if (lmb_cur_u32(&c, &l) || lmb_cur_u32(&c, &e) ||
-            (int)l >= L.n_layers || (int)e >= L.n_experts) { bad = 1; break; }
-        int *own = &L.own[((size_t)l * L.n_experts + e) * LUMI_MAX_REP];
+            !lumi_index_ok(l, e)) { bad = 1; break; }
+        int *own = &L.own[((size_t)l * (size_t)L.n_experts + e) * LUMI_MAX_REP];
         for (int r = 0; r < LUMI_MAX_REP; r++) {
             if (own[r] == L.npeers) break;                /* duplicate entry */
             if (own[r] < 0) { own[r] = L.npeers; claimed += r == 0; break; }
         }
     }
-    if (bad || lmb_cur_u32(&c, &peer_hidden) || (int)peer_hidden != L.hidden) {
+    if (bad || lmb_cur_u32(&c, &peer_hidden) ||
+        peer_hidden != (uint32_t)L.hidden || c.off != c.len || m.pay_len != 0) {
         /* roll the claims back: this peer must not own anything */
         for (size_t i = 0; i < (size_t)L.n_layers * L.n_experts * LUMI_MAX_REP; i++)
             if (L.own[i] == L.npeers) L.own[i] = -1;
