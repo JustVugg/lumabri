@@ -25,8 +25,10 @@
  */
 #define _GNU_SOURCE
 #include <fcntl.h>
+#include <math.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdint.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
@@ -198,15 +200,36 @@ static int cmd_serve(int argc, char **argv) {
                                "[--no-exec] [--exec-cache N]\n"); return 2; }
     }
     if (!model) { fprintf(stderr, "usage: lumabri serve --model DIR [--port N]\n"); return 2; }
+    if (donate && (!join || !join[0] || !mname || !mname[0])) {
+        fprintf(stderr, "--donate needs --join TRACKER and --model-name NAME "
+                        "(whose model to help hold)\n");
+        return 2;
+    }
+    if (donate) {
+        char *end = NULL;
+        double gb = strtod(donate, &end);
+        if (end == donate || *end || !(gb > 0) || !isfinite(gb) ||
+            gb * 1e9 < 1 || gb > (double)UINT64_MAX / 1e9) {
+            fprintf(stderr, "--donate needs a positive number of GB\n");
+            return 2;
+        }
+    }
+    int disk_donor = donate != NULL;
+    struct stat st;
+    if (stat(model, &st) && disk_donor) mkdir_p(model);  /* a donor starts empty */
+    if (stat(model, &st) || !S_ISDIR(st.st_mode)) {
+        fprintf(stderr, "%s: not a directory\n", model); return 1;
+    }
     /* A directory without config.json is not a model, and letting it through
      * produces three disconnected symptoms for one cause: the maintainer
      * serves bytes happily, no expert node starts (the engine family is
      * unknown), and every chatter is told "nobody on the swarm has it"
-     * because the config it needs is not at the root. Refuse here instead. */
+     * because the config it needs is not at the root. A disk donor is the
+     * exception: its directory starts empty and the tracker fills the slice. */
     {
         char probe[1200];
         snprintf(probe, sizeof probe, "%s/config.json", model);
-        if (access(probe, R_OK)) {
+        if (!disk_donor && access(probe, R_OK)) {
             fprintf(stderr, "%s%s non contiene config.json — non e' una "
                             "directory di modello%s\n"
                             "  (se il modello e' in una sottocartella, punta "
@@ -214,16 +237,6 @@ static int cmd_serve(int argc, char **argv) {
                     C_RED, model, C_R, model);
             return 2;
         }
-    }
-    if (donate && (!join || !mname)) {
-        fprintf(stderr, "--donate needs --join TRACKER and --model-name NAME "
-                        "(whose model to help hold)\n");
-        return 2;
-    }
-    struct stat st;
-    if (stat(model, &st)) mkdir_p(model);        /* a donor starts empty */
-    if (stat(model, &st) || !S_ISDIR(st.st_mode)) {
-        fprintf(stderr, "%s: not a directory\n", model); return 1;
     }
 
     char dir[1024], tracker_bin[1200], maint_bin[1200], portstr[16], mport[16], taddr[64];
@@ -290,16 +303,16 @@ static int cmd_serve(int argc, char **argv) {
     local_model_type(model, mtype, sizeof mtype);
     /* one node binary per engine family — they do not share an expert shape */
     const char *node = expert_node_for(mtype);
-    snprintf(exec_bin, sizeof exec_bin, "%s/%s", dir, node);
+    if (node) snprintf(exec_bin, sizeof exec_bin, "%s/%s", dir, node);
     int with_exec = 0;
-    if (!no_exec && !node && mtype[0])
+    if (!no_exec && !disk_donor && !node && mtype[0])
         printf("  %sfase 2 non disponibile per il motore %s: questo server "
                "serve i byte, gli esperti li esegue il chatter%s\n",
                C_DIM, mtype, C_R);
-    if (!no_exec && node && access(exec_bin, X_OK))
+    if (!no_exec && !disk_donor && node && access(exec_bin, X_OK))
         printf("  %s%s non è compilato: nessun esperto eseguito qui "
                "(make %s ENGINE=/path/to/colibri/c)%s\n", C_DIM, node, node, C_R);
-    if (!no_exec && node && access(exec_bin, X_OK) == 0) {
+    if (!no_exec && !disk_donor && node && access(exec_bin, X_OK) == 0) {
         char eport[16], cachestr[16], ename[32];
         snprintf(eport, sizeof eport, "%d", port + 2);
         snprintf(cachestr, sizeof cachestr, "%d", cache_slots);
