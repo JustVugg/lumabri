@@ -516,11 +516,18 @@ static void *stats_thread(void *arg) {
         sleep(5);
         uint64_t calls = atomic_load(&g.calls), cold = atomic_load(&g.cold);
         if (calls == last) continue;
-        if (g.ncs)
+        if (g.ncs) {
+            /* cold is bumped in cache_acquire, calls when the exec completes,
+             * and the two are read without a lock: a call in flight has
+             * counted its cold load but not itself, so cold can momentarily
+             * exceed calls. Cumulatively it never does (one cold per exec at
+             * most), so clamp the difference instead of letting the unsigned
+             * subtraction wrap to a monstrous percentage. */
+            uint64_t hits = calls > cold ? calls - cold : 0;
             printf("[%s] %llu exec calls · %llu cold loads · %.1f%% RAM hit\n",
                    g.name, (unsigned long long)calls, (unsigned long long)cold,
-                   calls ? 100.0 * (double)(calls - cold) / (double)calls : 0.0);
-        else
+                   calls ? 100.0 * (double)hits / (double)calls : 0.0);
+        } else
             printf("[%s] %llu exec calls\n", g.name, (unsigned long long)calls);
         fflush(stdout);
         last = calls;
