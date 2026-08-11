@@ -18,6 +18,7 @@
 #include <fcntl.h>
 #include <fnmatch.h>
 #include <pthread.h>
+#include <stdarg.h>
 #include <stdatomic.h>
 #include <sys/stat.h>
 
@@ -25,10 +26,11 @@
 #include "lumabri_sha.h"
 #include "lumabri_sign.h"
 
-#define MAX_FILES     4096
-#define MAX_INCLUDES  64
-#define MAX_READ_LEN  LMB_MAX_PAY
-#define HEARTBEAT_S   10
+#define MAX_FILES          4096
+#define MAX_INCLUDES       64
+#define MAX_READ_LEN       LMB_MAX_PAY
+#define HEARTBEAT_S        10
+#define LMB_LOCAL_PATH_MAX (LMB_PATH_MAX * 2 + 64)
 
 typedef struct {
     char rel[LMB_PATH_MAX]; uint64_t size; int fd;
@@ -147,15 +149,28 @@ static void hash_tick(uint64_t bytes, const char *rel) {
  * origin's signature over it. A donor that forgot the signature on restart
  * would announce unsigned bytes, a --pubkey tracker would refuse them, and
  * the donation would quietly amount to nothing. */
-static void sidecar_path(const MFile *f, const char *ext, char *out, size_t cap) {
-    snprintf(out, cap, "%s/.lumabri_hashes/%s.%s", g.root, f->rel, ext);
+static int path_printf(char *out, size_t cap, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(out, cap, fmt, ap);
+    va_end(ap);
+    if (n < 0 || (size_t)n >= cap) {
+        if (cap) out[0] = 0;
+        return -1;
+    }
+    return 0;
+}
+
+static int sidecar_path(const MFile *f, const char *ext, char *out, size_t cap) {
+    return path_printf(out, cap, "%s/.lumabri_hashes/%s.%s",
+                       g.root, f->rel, ext);
 }
 
 static int sidecar_write(const char *path, const void *a, size_t na,
                          const void *b, size_t nb) {
-    char tmp[LMB_PATH_MAX * 2 + 8], dir[LMB_PATH_MAX * 2];
-    snprintf(tmp, sizeof tmp, "%s.tmp", path);
-    snprintf(dir, sizeof dir, "%s", path);
+    char tmp[LMB_LOCAL_PATH_MAX], dir[LMB_LOCAL_PATH_MAX];
+    if (path_printf(tmp, sizeof tmp, "%s.tmp", path) ||
+        path_printf(dir, sizeof dir, "%s", path)) return -1;
     char *slash = strrchr(dir, '/');
     if (slash) { *slash = 0;
         for (char *p = strchr(dir + 1, '/'); p; p = strchr(p + 1, '/'))
@@ -172,35 +187,42 @@ static int sidecar_write(const char *path, const void *a, size_t na,
     return rename(tmp, path);
 }
 
-static void save_truth(const MFile *f) {
+static int save_truth(const MFile *f) {
     struct {
         uint32_t magic, version;
         uint64_t size, mtime_ns, ctime_ns;
         uint32_t nh, reserved;
     } hdr = { 0x3148534Cu, 1, f->size, f->mtime_ns, f->ctime_ns,
               f->nh, 0 }; /* "LSH1" */
-    char p[LMB_PATH_MAX * 2];
-    sidecar_path(f, "sha", p, sizeof p);
-    if (f->hash) sidecar_write(p, &hdr, sizeof hdr,
-                               f->hash, (size_t)f->nh * 32);
-    if (f->signed_) {
-        sidecar_path(f, "sig", p, sizeof p);
-        sidecar_write(p, f->sig, 64, NULL, 0);
+    char p[LMB_LOCAL_PATH_MAX];
+    if (f->hash) {
+        if (sidecar_path(f, "sha", p, sizeof p) ||
+            sidecar_write(p, &hdr, sizeof hdr,
+                          f->hash, (size_t)f->nh * 32)) return -1;
     }
+    if (f->signed_) {
+        if (sidecar_path(f, "sig", p, sizeof p) ||
+            sidecar_write(p, f->sig, 64, NULL, 0)) return -1;
+    }
+    return 0;
 }
 
-static void load_sig(MFile *f) {
-    char p[LMB_PATH_MAX * 2];
-    sidecar_path(f, "sig", p, sizeof p);
+static int load_sig(MFile *f) {
+    char p[LMB_LOCAL_PATH_MAX];
+    if (sidecar_path(f, "sig", p, sizeof p)) return -1;
     FILE *fp = fopen(p, "rb");
-    if (!fp) return;
+    if (!fp) return 0;
     if (fread(f->sig, 1, 64, fp) == 64) f->signed_ = 1;
     fclose(fp);
+    return 0;
 }
 
 static int hash_file(MFile *f) {
-    char full[LMB_PATH_MAX * 2];
-    snprintf(full, sizeof full, "%s/%s", g.root, f->rel);
+    char full[LMB_LOCAL_PATH_MAX], sc[LMB_LOCAL_PATH_MAX];
+    char sigp[LMB_LOCAL_PATH_MAX];
+    if (path_printf(full, sizeof full, "%s/%s", g.root, f->rel) ||
+        sidecar_path(f, "sha", sc, sizeof sc) ||
+        sidecar_path(f, "sig", sigp, sizeof sigp)) return -1;
     int fd = open(full, O_RDONLY);
     if (fd < 0) return -1;
     struct stat st;
@@ -214,8 +236,6 @@ static int hash_file(MFile *f) {
     free(f->hash);
     f->hash = malloc((size_t)f->nh * 32 + 1);
     if (!f->hash) { close(fd); return -1; }
-    char sc[LMB_PATH_MAX * 2];
-    snprintf(sc, sizeof sc, "%s/.lumabri_hashes/%s.sha", g.root, f->rel);
     FILE *fp = fopen(sc, "rb");
     if (fp) {
         struct {
@@ -245,8 +265,6 @@ static int hash_file(MFile *f) {
     /* A rehash invalidates any signature stored beside the old vector.  An
      * origin with the secret key will create a new one after this returns; a
      * donor must obtain the new proof from the swarm, never reuse the old. */
-    char sigp[LMB_PATH_MAX * 2];
-    sidecar_path(f, "sig", sigp, sizeof sigp);
     unlink(sigp);
     f->signed_ = 0;
     uint8_t *buf = malloc(LMB_HASH_CHUNK);
@@ -282,7 +300,10 @@ static int hash_file(MFile *f) {
         free(f->hash); f->hash = NULL; close(fd); return -1;
     }
     close(fd);
-    save_truth(f);
+    if (save_truth(f)) {
+        free(f->hash); f->hash = NULL;
+        return -1;
+    }
     return 0;
 }
 
@@ -554,12 +575,13 @@ static void *conn_thread(void *arg) {
  * serving: direct from a holding peer when reachable, through the tracker's
  * relay when not. Every donated gigabyte lands where the swarm is thinnest. */
 
-static void mkdir_parents(const char *path) {
-    char tmp[LMB_PATH_MAX * 2];
-    snprintf(tmp, sizeof tmp, "%s", path);
+static int mkdir_parents(const char *path) {
+    char tmp[LMB_LOCAL_PATH_MAX];
+    if (path_printf(tmp, sizeof tmp, "%s", path)) return -1;
     for (char *p = strchr(tmp + 1, '/'); p; p = strchr(p + 1, '/')) {
         *p = 0; mkdir(tmp, 0755); *p = '/';
     }
+    return 0;
 }
 
 #define PULL_CHUNK (8u << 20)
@@ -697,10 +719,20 @@ static int pull_file(const char *rel, uint64_t size, Truth *tr) {
     const uint8_t *truth = tr->hash;
     uint32_t truth_n = tr->nh;
 
-    char final[LMB_PATH_MAX * 2], part[LMB_PATH_MAX * 2];
-    snprintf(final, sizeof final, "%s/%s", g.root, rel);
-    snprintf(part, sizeof part, "%s.part", final);
-    mkdir_parents(final);
+    char final[LMB_LOCAL_PATH_MAX], part[LMB_LOCAL_PATH_MAX];
+    if (path_printf(final, sizeof final, "%s/%s", g.root, rel) ||
+        path_printf(part, sizeof part, "%s.part", final)) {
+        fprintf(stderr, "[maintainer %s] local path is too long for %s\n",
+                g.name, rel);
+        truth_free(tr);
+        return -1;
+    }
+    if (mkdir_parents(final)) {
+        fprintf(stderr, "[maintainer %s] local path is too long for %s\n",
+                g.name, rel);
+        truth_free(tr);
+        return -1;
+    }
     int out = open(part, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (out < 0) { truth_free(tr); return -1; }
 
@@ -793,9 +825,17 @@ static void pull_slice(uint64_t budget) {
         printf("[maintainer %s] pull %u/%u: %s (%.1f MB)\n",
                g.name, i + 1, n, rel, (double)size / 1e6);
         fflush(stdout);
-        Truth t;
+        Truth t = {0};
         if (pull_file(rel, size, &t) == 0 && g.nfiles < MAX_FILES) {
-            MFile *f = &g.files[g.nfiles++];
+            char full[LMB_LOCAL_PATH_MAX];
+            if (path_printf(full, sizeof full, "%s/%s", g.root, rel)) {
+                fprintf(stderr, "[maintainer %s] local path is too long for %s\n",
+                        g.name, rel);
+                truth_free(&t);
+                continue;
+            }
+            MFile *f = &g.files[g.nfiles];
+            memset(f, 0, sizeof *f);
             snprintf(f->rel, sizeof f->rel, "%s", rel);
             f->size = size; f->fd = -1;
             /* keep the truth we were given, signature and all: a donor that
@@ -805,16 +845,21 @@ static void pull_slice(uint64_t budget) {
             f->hash = t.hash; f->nh = t.nh;
             f->signed_ = t.has_sig;
             if (t.has_sig) memcpy(f->sig, t.sig, 64);
-            char full[LMB_PATH_MAX * 2];
             struct stat st;
-            snprintf(full, sizeof full, "%s/%s", g.root, rel);
             if (!stat(full, &st)) {
                 f->mtime_ns = (uint64_t)st.st_mtim.tv_sec * 1000000000ull +
                               (uint64_t)st.st_mtim.tv_nsec;
                 f->ctime_ns = (uint64_t)st.st_ctim.tv_sec * 1000000000ull +
                               (uint64_t)st.st_ctim.tv_nsec;
             }
-            save_truth(f);
+            if (save_truth(f)) {
+                fprintf(stderr, "[maintainer %s] cannot persist integrity data "
+                                "for %s\n", g.name, rel);
+                free(f->hash);
+                memset(f, 0, sizeof *f);
+                continue;
+            }
+            g.nfiles++;
             pulled += size; done++;
         } else {
             truth_free(&t);
@@ -1021,9 +1066,17 @@ int main(int argc, char **argv) {
             fprintf(stderr, "[maintainer %s] cannot hash %s — served unverified\n",
                     g.name, g.files[i].rel);
         else {
-            load_sig(&g.files[i]);   /* a donor's proof, kept across restarts */
+            if (load_sig(&g.files[i])) {
+                fprintf(stderr, "[maintainer %s] sidecar path is too long for %s\n",
+                        g.name, g.files[i].rel);
+                return 1;
+            }
             sign_truth(&g.files[i]);
-            save_truth(&g.files[i]); /* persist a newly made signature too */
+            if (save_truth(&g.files[i])) {
+                fprintf(stderr, "[maintainer %s] cannot persist integrity data "
+                                "for %s\n", g.name, g.files[i].rel);
+                return 1;
+            }
         }
     }
     if (model_identity_prepare(donate_gb > 0)) {
