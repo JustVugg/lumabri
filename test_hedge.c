@@ -15,7 +15,12 @@ static void *echo_server(void *arg) {
     int bad = fd < 0 || lmb_recv(fd, &m) || m.op != LMB_EXEC || m.body_len < 16;
     if (!bad) {
         if (e->delay_ms) usleep((useconds_t)e->delay_ms * 1000u);
-        bad = lmb_send(fd, LMB_EXEC_R, NULL, 0, m.pay, m.pay_len);
+        /* The slow replica answers into a socket the hedge already closed.
+         * That send failing with EPIPE is the mechanism working — the loser's
+         * late frame must never be mistaken for a reply — so only the fast
+         * replica's send is required to succeed. */
+        int sent = lmb_send(fd, LMB_EXEC_R, NULL, 0, m.pay, m.pay_len);
+        bad = sent != 0 && !e->delay_ms;
     }
     lmb_msg_free(&m);
     if (fd >= 0) close(fd);

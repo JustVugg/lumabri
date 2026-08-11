@@ -37,6 +37,11 @@
 #include <time.h>
 #include <unistd.h>
 
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0     /* platforms without it deliver SIGPIPE; the
+                              daemons ignore the signal themselves */
+#endif
+
 #define LMB_MAGIC     0x31424D4Cu           /* "LMB1" read as little-endian */
 #define LMB_MAX_BODY  (64u << 20)   /* a REGISTER carrying block hashes for a
                                        whole huge model must fit: 32 B/MiB */
@@ -175,10 +180,15 @@ typedef struct {
 
 /* ---- full-buffer socket I/O ------------------------------------------- */
 
+/* MSG_NOSIGNAL, not write(): this library also runs inside somebody else's
+ * inference engine — via the LD_PRELOAD shim and the patched-engine client —
+ * where it has no business changing the process's SIGPIPE disposition. A
+ * peer that vanishes mid-frame must surface as EPIPE on this call, never as
+ * a signal that kills the engine before failover can run. */
 static int lmb_write_full(int fd, const void *buf, size_t n) {
     const uint8_t *p = (const uint8_t *)buf;
     while (n) {
-        ssize_t w = write(fd, p, n);
+        ssize_t w = send(fd, p, n, MSG_NOSIGNAL);
         if (w < 0) { if (errno == EINTR) continue; return -1; }
         p += w; n -= (size_t)w;
     }
