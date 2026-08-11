@@ -68,6 +68,7 @@
 #endif
 
 #include "lumabri_proto.h"
+#include "lumabri_sign.h"
 
 #include <omp.h>
 #include <pthread.h>
@@ -119,6 +120,7 @@ static struct {
     pthread_mutex_t load_lk;    /* the engine loader is used one call at a time */
     char name[64], model[64], advertise[64], tracker[64], token[128];
     char profile[LMB_BUILD_PROFILE_MAX];
+    uint8_t peer_sk[64], peer_pk[32];   /* identity to the tracker */
     int bits;
     LmbModelIdentity identity; int have_identity;
     pthread_mutex_t identity_lk;
@@ -438,7 +440,7 @@ static void *conn_thread(void *arg) {
 
 /* ---- tracker heartbeat: this is how chatters find us --------------------- */
 
-static int send_ereg(int fd) {
+static int send_ereg(int fd, const uint8_t nonce[32]) {
     LmbBuf b = {0};
     lmb_buf_str(&b, g.name);
     lmb_buf_str(&b, g.advertise);
@@ -462,6 +464,11 @@ static int send_ereg(int fd) {
     lmb_buf_u32(&b, (uint32_t)g.hidden);
     lmb_buf_u32(&b, (uint32_t)g.n_slots);
     lmb_buf_u32(&b, (uint32_t)g.n_experts);
+    /* identity: sign the connection nonce with this machine's peer key */
+    uint8_t msg[512], sig[64];
+    size_t ml = lmb_peer_auth_msg(nonce, g.name, g.model, g.advertise, msg, sizeof msg);
+    lmb_sign(sig, msg, ml, g.peer_sk);
+    lmb_buf_peer_auth(&b, g.peer_pk, sig);
     int rc = lmb_send(fd, LMB_EREG, b.p, (uint32_t)b.len, NULL, 0);
     free(b.p);
     return rc;
@@ -482,14 +489,16 @@ static void *control_thread(void *arg) {
             continue;
         }
         warned = 0;
+        uint8_t nonce[32];
+        if (lmb_request_challenge(fd, nonce)) { close(fd); sleep(1); continue; }
         struct timeval tv = { HEARTBEAT_S, 0 };
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-        if (send_ereg(fd)) { close(fd); sleep(1); continue; }
+        if (send_ereg(fd, nonce)) { close(fd); sleep(1); continue; }
         for (;;) {
             LmbMsg m;
             if (lmb_recv(fd, &m) != 0) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    if (send_ereg(fd)) break;
+                    if (send_ereg(fd, nonce)) break;
                     continue;
                 }
                 break;
@@ -832,6 +841,13 @@ int main(int argc, char **argv) {
                "(--parallel N to say otherwise)\n", g.name);
     fflush(stdout);
 
+    if (g.tracker[0]) {
+        char kp[512];
+        if (lmb_peer_identity(lmb_peer_key_path(kp, sizeof kp), g.peer_sk, g.peer_pk)) {
+            fprintf(stderr, "[%s] cannot load or create a peer key at %s\n", g.name, kp);
+            return 1;
+        }
+    }
     pthread_t t;
     lmb_conn_gate_init(&g_conn_gate);
     if (g.tracker[0]) { pthread_create(&t, NULL, control_thread, NULL); pthread_detach(t); }

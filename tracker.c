@@ -42,6 +42,8 @@ typedef struct {
     int used;
     unsigned refs;              /* control/relay users holding this slot */
     int is_expert;              /* EREG peer: executes experts, holds no files */
+    uint8_t pubkey[32];         /* this name's identity, bound on first claim */
+    int has_key;
     uint32_t nexperts;
     /* WHICH experts, not just how many: one bit per (slot, expert). Without
      * it the tracker can count executors but cannot tell whether they
@@ -243,8 +245,40 @@ static void send_err(int fd, const char *msg) {
 
 /* ---- REGISTER ----------------------------------------------------------- */
 
-static Peer *handle_register(int fd, LmbMsg *m) {
-    LmbCur c = { m->body, m->body_len, 0 };
+/* Peer identity travels as a fixed 100-byte block at the very end of REGISTER
+ * and EREG: {u32 magic, pubkey[32], sig[64]}. Strip it before the rest of the
+ * body is parsed, so every existing field parses against the shortened length
+ * exactly as before. Returns that shortened length; sets *present and fills
+ * pk/sig when the block is there. The signature itself is checked later,
+ * once name/model/addr are known, against the connection's nonce. */
+static size_t peer_auth_strip(const LmbMsg *m, uint8_t pk[32], uint8_t sig[64],
+                              int *present) {
+    *present = 0;
+    size_t blen = m->body_len;
+    if (blen < 100 || lmb_get32(m->body + blen - 100) != LMB_PEER_AUTH_MAGIC)
+        return blen;
+    const uint8_t *tail = m->body + blen - 100;
+    memcpy(pk, tail + 4, 32);
+    memcpy(sig, tail + 36, 64);
+    *present = 1;
+    return blen - 100;
+}
+
+/* 0 if this name may be held by this key: unclaimed, or already this key.
+ * -1 if the name is owned by a different key (the takeover this closes). */
+static int name_key_ok(const char *name, int is_expert, const uint8_t pk[32]) {
+    for (int i = 0; i < MAX_PEERS; i++)
+        if (g_peers[i].used && g_peers[i].is_expert == is_expert &&
+            g_peers[i].has_key && !strcmp(g_peers[i].name, name))
+            return memcmp(g_peers[i].pubkey, pk, 32) ? -1 : 0;
+    return 0;
+}
+
+static Peer *handle_register(int fd, LmbMsg *m, const uint8_t *nonce) {
+    uint8_t peer_pk[32], peer_sig[64];
+    int have_auth = 0;
+    size_t blen = peer_auth_strip(m, peer_pk, peer_sig, &have_auth);
+    LmbCur c = { m->body, blen, 0 };
     char name[64], addr[64], model[64];
     uint64_t held, sbytes, sreads;
     uint32_t n;
@@ -252,6 +286,22 @@ static Peer *handle_register(int fd, LmbMsg *m) {
         lmb_cur_str(&c, model, sizeof model) || lmb_cur_u64(&c, &held) ||
         lmb_cur_u64(&c, &sbytes) || lmb_cur_u64(&c, &sreads) ||
         lmb_cur_u32(&c, &n) || n > MAX_FILES) { send_err(fd, "bad register"); return NULL; }
+    /* Prove the name belongs to this key before anything is bound to it. The
+     * signature is over the connection's nonce, so it cannot be replayed onto
+     * another connection, and over name+model+addr, so it cannot be lifted
+     * onto a different claim. */
+    if (!have_auth || !nonce) {
+        printf("[tracker] REJECTED: %s did not authenticate its identity\n", name);
+        fflush(stdout); send_err(fd, "registration must be signed (CHALLENGE first)");
+        return NULL;
+    }
+    uint8_t authmsg[512];
+    size_t aml = lmb_peer_auth_msg(nonce, name, model, addr, authmsg, sizeof authmsg);
+    if (!aml || lmb_sign_verify(peer_sig, authmsg, aml, peer_pk)) {
+        printf("[tracker] REJECTED: %s has a bad identity signature\n", name);
+        fflush(stdout); send_err(fd, "bad identity signature");
+        return NULL;
+    }
     PFile *files = (PFile *)calloc(n ? n : 1, sizeof *files);
     if (!files) { send_err(fd, "oom"); return NULL; }
     /* The index is what every chatter builds its local mirror from, so a
@@ -347,6 +397,17 @@ static Peer *handle_register(int fd, LmbMsg *m) {
         fflush(stdout);
         n = 0;
     }
+    /* trust on first use: the name belongs to the key that first claimed it,
+     * and a different key under that name is the takeover this refuses */
+    if (name_key_ok(name, 0, peer_pk) < 0) {
+        pthread_mutex_unlock(&g_lk);
+        printf("[tracker] REJECTED: %s is already held by another key\n", name);
+        fflush(stdout);
+        for (uint32_t i = 0; i < n; i++) free(fh[i]);
+        free(fh); free(fnh); free(fsig); free(fhas); free(files);
+        send_err(fd, "name held by another key");
+        return NULL;
+    }
     for (int i = 0; i < MAX_PEERS; i++)
         if (g_peers[i].used && !g_peers[i].is_expert &&
             !strcmp(g_peers[i].name, name)) { slot = &g_peers[i]; idx = i; break; }
@@ -354,6 +415,7 @@ static Peer *handle_register(int fd, LmbMsg *m) {
         slot = peer_slot_new(0, &idx);
         fresh = slot != NULL;
     }
+    if (slot) { memcpy(slot->pubkey, peer_pk, 32); slot->has_key = 1; }
     /* observed address: a maintainer that advertises localhost from another
      * machine gets its host part corrected to what this connection shows —
      * the --advertise footgun dies here, ports stay as declared */
@@ -396,14 +458,29 @@ static Peer *handle_register(int fd, LmbMsg *m) {
  * Expert peers never enter placements (they hold no files); EPEERS is how a
  * chatter learns who can EXECUTE for a model, server included. */
 
-static Peer *handle_ereg(int fd, LmbMsg *m) {
-    LmbCur c = { m->body, m->body_len, 0 };
+static Peer *handle_ereg(int fd, LmbMsg *m, const uint8_t *nonce) {
+    uint8_t peer_pk[32], peer_sig[64];
+    int have_auth = 0;
+    size_t blen = peer_auth_strip(m, peer_pk, peer_sig, &have_auth);
+    LmbCur c = { m->body, blen, 0 };
     char name[64], addr[64], model[64];
     uint32_t nexperts;
     if (lmb_cur_str(&c, name, sizeof name) || lmb_cur_str(&c, addr, sizeof addr) ||
         lmb_cur_str(&c, model, sizeof model) || lmb_cur_u32(&c, &nexperts)) {
         send_err(fd, "bad ereg"); return NULL;
     }
+    if (!have_auth || !nonce) {
+        printf("[tracker] REJECTED: %s (expert) did not authenticate\n", name);
+        fflush(stdout); send_err(fd, "ereg must be signed (CHALLENGE first)");
+        return NULL;
+    }
+    { uint8_t authmsg[512];
+      size_t aml = lmb_peer_auth_msg(nonce, name, model, addr, authmsg, sizeof authmsg);
+      if (!aml || lmb_sign_verify(peer_sig, authmsg, aml, peer_pk)) {
+          printf("[tracker] REJECTED: %s (expert) bad identity signature\n", name);
+          fflush(stdout); send_err(fd, "bad identity signature");
+          return NULL;
+      } }
     /* optional, appended by newer nodes: the bitmap of what it holds */
     uint32_t bl = 0; const uint8_t *bits = NULL;
     if (!lmb_cur_u32(&c, &bl) && bl && bl <= (1u << 20) && c.off + bl <= c.len) {
@@ -424,6 +501,12 @@ static Peer *handle_ereg(int fd, LmbMsg *m) {
     Peer *slot = NULL;
     int fresh = 0;
     pthread_mutex_lock(&g_lk);
+    if (name_key_ok(name, 1, peer_pk) < 0) {
+        pthread_mutex_unlock(&g_lk);
+        printf("[tracker] REJECTED: expert %s is already held by another key\n", name);
+        fflush(stdout); send_err(fd, "name held by another key");
+        return NULL;
+    }
     for (int i = 0; i < MAX_PEERS; i++)
         if (g_peers[i].used && g_peers[i].is_expert &&
             !strcmp(g_peers[i].name, name)) { slot = &g_peers[i]; break; }
@@ -431,6 +514,7 @@ static Peer *handle_ereg(int fd, LmbMsg *m) {
         slot = peer_slot_new(1, NULL);
         fresh = slot != NULL;
     }
+    if (slot) { memcpy(slot->pubkey, peer_pk, 32); slot->has_key = 1; }
     const char *use_addr = addr;
     char fixed[64];
     struct sockaddr_in sin;
@@ -1052,6 +1136,7 @@ static void *conn_thread(void *arg) {
     int fd = (int)(intptr_t)arg;
     Peer *ctrl = NULL;    /* set once this connection REGISTERs */
     int authed = g_token[0] ? 0 : 1;
+    uint8_t nonce[32]; int have_nonce = 0;   /* per-connection identity challenge */
     for (;;) {
         if (ctrl) {
             struct pollfd pf[2] = { { fd, POLLIN, 0 }, { ctrl->evfd, POLLIN, 0 } };
@@ -1117,8 +1202,13 @@ static void *conn_thread(void *arg) {
             break;
         }
         case LMB_PING:      rc = lmb_send(fd, LMB_OK, NULL, 0, NULL, 0); break;
+        case LMB_CHALLENGE:
+            lmb_random(nonce, sizeof nonce);
+            have_nonce = 1;
+            rc = lmb_send(fd, LMB_CHALLENGE_R, nonce, sizeof nonce, NULL, 0);
+            break;
         case LMB_REGISTER: {
-            Peer *p = handle_register(fd, &m);
+            Peer *p = handle_register(fd, &m, have_nonce ? nonce : NULL);
             if (p) {
                 if (!ctrl) {
                     pthread_mutex_lock(&g_lk);
@@ -1138,7 +1228,7 @@ static void *conn_thread(void *arg) {
         case LMB_RREAD_R:
         case LMB_REXEC_R:   if (ctrl) relay_complete(ctrl, &m); break;
         case LMB_EREG: {
-            Peer *p = handle_ereg(fd, &m);
+            Peer *p = handle_ereg(fd, &m, have_nonce ? nonce : NULL);
             if (p) {
                 if (!ctrl) {
                     pthread_mutex_lock(&g_lk); p->refs++; pthread_mutex_unlock(&g_lk);

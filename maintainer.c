@@ -41,6 +41,7 @@ static struct {
     char root[LMB_PATH_MAX];
     char name[64], advertise[64], tracker[64], model[64], token[128];
     uint8_t sk[64]; int have_key;   /* --key: this peer is the origin */
+    uint8_t peer_sk[64], peer_pk[32];  /* this machine's identity to the tracker */
     LmbTrustKeys trust;             /* --pubkey: old+new during manual rotation */
     LmbModelIdentity identity; int have_identity;
     MFile files[MAX_FILES]; int nfiles;
@@ -832,7 +833,7 @@ static void pull_slice(uint64_t budget) {
  * from behind any NAT with zero router configuration. The tracker uses the
  * same connection to push RREAD_FWD when a chatter could not reach us
  * directly: we answer with the bytes and the tracker relays them back. */
-static int register_body_send(int fd, uint64_t held) {
+static int register_body_send(int fd, uint64_t held, const uint8_t nonce[32]) {
     LmbBuf b = {0};
     lmb_buf_str(&b, g.name);
     lmb_buf_str(&b, g.advertise);
@@ -842,6 +843,12 @@ static int register_body_send(int fd, uint64_t held) {
     lmb_buf_u64(&b, atomic_load(&g.served_reads));
     manifest_body(&b);
     hash_section(&b);
+    /* prove the name is ours: sign the tracker's nonce (bound to this
+     * connection) together with the identity this REGISTER claims */
+    uint8_t msg[512], sig[64];
+    size_t ml = lmb_peer_auth_msg(nonce, g.name, g.model, g.advertise, msg, sizeof msg);
+    lmb_sign(sig, msg, ml, g.peer_sk);
+    lmb_buf_peer_auth(&b, g.peer_pk, sig);
     int rc = lmb_send(fd, LMB_REGISTER, b.p, (uint32_t)b.len, NULL, 0);
     free(b.p);
     return rc;
@@ -864,14 +871,17 @@ static void *control_thread(void *arg) {
             continue;
         }
         warned = 0;
+        /* one identity nonce for this connection, reused by every heartbeat */
+        uint8_t nonce[32];
+        if (lmb_request_challenge(fd, nonce)) { close(fd); sleep(HEARTBEAT_S); continue; }
         struct timeval tv = { HEARTBEAT_S, 0 };   /* recv timeout = beat cadence */
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-        if (register_body_send(fd, held)) { close(fd); sleep(HEARTBEAT_S); continue; }
+        if (register_body_send(fd, held, nonce)) { close(fd); sleep(HEARTBEAT_S); continue; }
         for (;;) {
             LmbMsg m;
             if (lmb_recv(fd, &m) != 0) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK) {   /* quiet: beat */
-                    if (register_body_send(fd, held)) break;
+                    if (register_body_send(fd, held, nonce)) break;
                     continue;
                 }
                 break;                                            /* dead socket */
@@ -1050,6 +1060,14 @@ int main(int argc, char **argv) {
                g.name, lmb_emu_rtt_us, lmb_emu_jitter_us, lmb_emu_loss_ppm);
     fflush(stdout);
 
+    if (g.tracker[0]) {
+        char kp[512];
+        if (lmb_peer_identity(lmb_peer_key_path(kp, sizeof kp), g.peer_sk, g.peer_pk)) {
+            fprintf(stderr, "[maintainer %s] cannot load or create a peer key at %s\n",
+                    g.name, kp);
+            return 1;
+        }
+    }
     int lfd = lmb_listen(port);
     if (lfd < 0) { perror("[maintainer] listen"); return 1; }
     pthread_t t;

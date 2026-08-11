@@ -208,34 +208,46 @@ wait "$HOLDER_PID" 2>/dev/null || true
 echo "   ✓ configured connection cap rejects excess idle clients"
 
 echo "· 6) stale peer names do not exhaust the tracker's lifetime capacity"
+# Registrations are now signed, so each junk peer authenticates under its own
+# name and key. Mandatory auth alone means anonymous junk cannot take a slot
+# at all; this still exercises the reclaim path, with authenticated peers that
+# then go stale.
+cat > "$T/authreg.c" <<'EOF'
+#include "lumabri_proto.h"
+#include "lumabri_sign.h"
+int main(int argc, char **argv) {         /* addr name keyfile */
+    uint8_t sk[64], pk[32];
+    if (lmb_peer_identity(argv[3], sk, pk)) return 2;
+    int fd = lmb_connect(argv[1]);
+    if (fd < 0) return 2;
+    uint8_t nonce[32];
+    if (lmb_request_challenge(fd, nonce)) { close(fd); return 2; }
+    LmbBuf b = {0};
+    lmb_buf_str(&b, argv[2]); lmb_buf_str(&b, "127.0.0.1:9");
+    lmb_buf_str(&b, "model"); lmb_buf_u64(&b, 0);
+    lmb_buf_u64(&b, 0); lmb_buf_u64(&b, 0); lmb_buf_u32(&b, 0);
+    uint8_t msg[512], sig[64];
+    size_t ml = lmb_peer_auth_msg(nonce, argv[2], "model", "127.0.0.1:9", msg, sizeof msg);
+    lmb_sign(sig, msg, ml, sk);
+    lmb_buf_peer_auth(&b, pk, sig);
+    LmbMsg m = {0};
+    int rc = lmb_send(fd, LMB_REGISTER, b.p, (uint32_t)b.len, NULL, 0) || lmb_recv(fd, &m);
+    int accepted = !rc && m.op != LMB_ERR;
+    lmb_msg_free(&m); free(b.p); close(fd);
+    return accepted ? 0 : 1;
+}
+EOF
+cc -O2 -w -I. "$T/authreg.c" -o "$T/authreg" -lpthread
+
 env LUMABRI_STALE_MS=100 ./tracker --port 7555 > "$T/reuse.log" 2>&1 & PIDS+=($!)
 sleep 0.3
-python3 - 7555 <<'PY'
-import socket, struct, sys, time
-port = int(sys.argv[1])
-def string(s):
-    b = s.encode()
-    return struct.pack("<H", len(b)) + b
-def register(i):
-    body = string(f"gone-{i}") + string("127.0.0.1:9") + string("model")
-    body += struct.pack("<I", 0)
-    s = socket.create_connection(("127.0.0.1", port))
-    s.sendall(struct.pack("<IIII", 0x31424D4C, 23, len(body), 0) + body)
-    pre = b""
-    while len(pre) < 16:
-        part = s.recv(16 - len(pre))
-        if not part:
-            raise SystemExit(f"peer {i}: tracker closed without a reply")
-        pre += part
-    op = struct.unpack("<IIII", pre)[1]
-    s.close()
-    if op != 2:
-        raise SystemExit(f"peer {i}: tracker table was not reusable")
-for i in range(64):
-    register(i)
-time.sleep(0.2)
-register(64)
-PY
+for i in $(seq 0 63); do
+    "$T/authreg" 127.0.0.1:7555 "gone-$i" "$T/jk-$i" || {
+        echo "   authenticated peer $i was refused a slot in an empty table"; exit 1; }
+done
+sleep 0.2                                  # let the 64 go stale
+"$T/authreg" 127.0.0.1:7555 "gone-64" "$T/jk-64" || {
+    echo "   a fresh peer could not reclaim a stale slot"; exit 1; }
 echo "   ✓ stale slot recycled; the cap applies to live peers, not history"
 
 echo "LUMABRI SECURITY TEST: PASS"
