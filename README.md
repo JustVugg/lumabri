@@ -160,11 +160,13 @@ copy matters.
 make test
 ```
 
-runs the byte-identity, integrity, protocol, assignment, role, prefetch and
-concurrency suites. Per-engine expert identity runs with fixtures
-(`make test-engines`); DeepSeek V4 uses a real model
-(`make test-phase2-deepseek MODEL=<dir>`). Every claim in this README has a
-script behind it.
+runs the core suites: byte identity, donor integrity, role parsing, security
+(path escape, hostile frame lengths, idle connections), protocol input
+validation and prefetch policy. Per-engine expert identity runs with fixtures
+(`make test-engines`), and DeepSeek V4 against a real model
+(`make test-phase2-deepseek MODEL=<dir>`). Assignment, concurrency and signing
+have their own scripts (`assign_test.sh`, `concurrency_test.sh`,
+`sign_test.sh`). Every claim in this README has a script behind it.
 
 ## How it compares
 
