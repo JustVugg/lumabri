@@ -61,6 +61,7 @@
 #define LMB_PATH_MAX  512
 #define LMB_HASH_CHUNK (1u << 20)   /* integrity granularity: sha256 per MiB */
 #define LMB_HASH_MAGIC 0x48414853u  /* "SHAH": optional hash section marker */
+#define LMB_PEER_AUTH_MAGIC 0x52554150u /* "PAUR": trailing peer-identity block */
 
 enum {
     LMB_PING = 1, LMB_OK = 2, LMB_ERR = 3,
@@ -154,6 +155,11 @@ enum {
      * holders' bitmaps, allowing the chatter to enable remote execution only
      * when every routed expert has either a direct or relayed path. */
     LMB_ECOVER = 35, LMB_ECOVER_R = 36,
+    /* Peer identity. A control connection asks CHALLENGE and gets a 32-byte
+     * random nonce; its REGISTER/EREG then carries {pubkey, sig} over that
+     * nonce, so the tracker binds each name to the key that first claimed it
+     * and refuses a different key under the same name. */
+    LMB_CHALLENGE = 37, LMB_CHALLENGE_R = 38,
 };
 
 /* REGISTER body: str name, str addr, str model, u64 held_bytes,
@@ -341,6 +347,27 @@ static int lmb_buf_str(LmbBuf *b, const char *s) {  /* u16 len + bytes */
     if (lmb_buf_reserve(b, n)) return -1;
     memcpy(b->p + b->len, s, n); b->len += n;
     return 0;
+}
+
+/* Append the 100-byte peer-identity block a REGISTER/EREG ends with. The
+ * caller signs {nonce,name,model,addr} with lmb_peer_auth_msg + lmb_sign;
+ * this only lays the bytes down, so lumabri_proto.h stays crypto-free. */
+static int lmb_buf_peer_auth(LmbBuf *b, const uint8_t pk[32], const uint8_t sig[64]) {
+    if (lmb_buf_u32(b, LMB_PEER_AUTH_MAGIC)) return -1;
+    if (lmb_buf_bytes(b, pk, 32)) return -1;
+    return lmb_buf_bytes(b, sig, 64);
+}
+
+/* Ask the tracker for this connection's identity nonce. 0 and fills nonce, or
+ * -1. Sent once per control connection, right after connect (and AUTH). */
+static int lmb_request_challenge(int fd, uint8_t nonce[32]) {
+    if (lmb_send(fd, LMB_CHALLENGE, NULL, 0, NULL, 0)) return -1;
+    LmbMsg m;
+    if (lmb_recv(fd, &m)) return -1;
+    int ok = m.op == LMB_CHALLENGE_R && m.body_len == 32;
+    if (ok) memcpy(nonce, m.body, 32);
+    lmb_msg_free(&m);
+    return ok ? 0 : -1;
 }
 
 typedef struct { const uint8_t *p; size_t len, off; } LmbCur;
