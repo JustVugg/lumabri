@@ -67,25 +67,44 @@ grep -q "discovered" "$T/boot.err" || { echo "   BOOTSTRAP FAILED: no discovery"
 echo "   ✓ zero configuration: tracker → server executor → identical tokens"
 
 echo "· 3) delegate & fall back: nearer donor joins, then dies mid-run"
-# the server sits 3 ms away; the donor holds HALF the experts at 0 ms and
-# must win those calls while it lives
+# The server starts alone and sits 100 ms away.  Only after generation is
+# active does a nearby donor holding half the experts join.  The chatter must
+# discover it without restarting, use it, then survive its disappearance.
 kill "$SRV_PID" 2>/dev/null || true
-OMP_NUM_THREADS=2 COLI_NO_OMP_TUNE=1 LUMABRI_RTT_US=3000 \
+OMP_NUM_THREADS=2 COLI_NO_OMP_TUNE=1 LUMABRI_RTT_US=100000 \
     ./expert_node --model "$MODEL" --port 7433 --name srv-far --cache 32 \
                   --tracker 127.0.0.1:7430 > "$T/far.log" 2>&1 & PIDS+=($!)
-OMP_NUM_THREADS=2 COLI_NO_OMP_TUNE=1 \
-    ./expert_node --model "$MODEL" --port 7434 --name donor --stride 2:0 \
-                  --tracker 127.0.0.1:7430 > "$T/donor.log" 2>&1 & DONOR_PID=$!; PIDS+=($!)
-wait_port 7433; wait_port 7434
+wait_port 7433
 sleep 1
 SNAP="$MODEL" OMP_NUM_THREADS=6 \
     LUMABRI_TRACKER=127.0.0.1:7430 LUMABRI_MODEL=tiny_olmoe \
+    LUMABRI_DISCOVERY_MS=100 \
     ./olmoe_p2p 16 8 "$MODEL/ref.json" > "$T/del.out" 2>"$T/del.err" & CHAT=$!
-for _ in $(seq 1 100); do
+for _ in $(seq 1 300); do
     grep -q "phase 2 active" "$T/del.err" 2>/dev/null && break
     sleep 0.1
 done
-sleep 1.0
+grep -q "phase 2 active" "$T/del.err" || {
+    echo "   DELEGATE FAILED: generation never entered phase 2"
+    cat "$T/del.err"
+    exit 1
+}
+OMP_NUM_THREADS=2 COLI_NO_OMP_TUNE=1 \
+    ./expert_node --model "$MODEL" --port 7434 --name donor --stride 2:0 \
+                  --cache 8 --tracker 127.0.0.1:7430 \
+                  > "$T/donor.log" 2>&1 & DONOR_PID=$!; PIDS+=($!)
+wait_port 7434
+for _ in $(seq 1 300); do
+    grep -q "discovered .*mid-generation" "$T/del.err" 2>/dev/null && break
+    kill -0 "$CHAT" 2>/dev/null || break
+    sleep 0.1
+done
+grep -q "discovered .*mid-generation" "$T/del.err" || {
+    echo "   DELEGATE FAILED: late donor was not discovered during generation"
+    cat "$T/del.err"
+    exit 1
+}
+sleep 0.5
 kill "$DONOR_PID" 2>/dev/null || true
 wait "$CHAT" || { cat "$T/del.err"; exit 1; }
 B=$(grep "^C engine" "$T/del.out")
@@ -98,7 +117,7 @@ echo "   failovers away from the dead donor: $DONOR_USED · total failovers: $FO
 [ "$REF" = "$B" ] || { echo "   DELEGATE FAILED: tokens diverged"; exit 1; }
 [ "$FO" -gt 0 ] || { echo "   DELEGATE UNPROVEN: no failover happened"; exit 1; }
 [ "$DONOR_USED" -gt 0 ] || { echo "   DELEGATE UNPROVEN: donor never used"; exit 1; }
-echo "   ✓ the swarm delegated to the donor, lost it, fell back to the server —"
-echo "     and not one token changed"
+echo "   ✓ late donor discovered, used, lost, and failed over to the server"
+echo "     without changing one token"
 
 echo "LUMABRI PHASE 4: PASS"

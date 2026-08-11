@@ -24,12 +24,15 @@
 #include "colibri.c"
 #undef main
 
+#define LMBE_NEEDS_HOT_OMP_REEXEC 1
+
 typedef ESlot LmbeSlot;
 
 static Model lmbe_M;
 static int lmbe_slots;
 
 static const char *lmbe_engine_name(void) { return "colibri"; }
+static int lmbe_effective_bits(int bits) { return bits; }
 
 /* `bits` is the engine's expert quantization and it MUST match the chatter's,
  * because for a model without pre-quantized .qs tensors the loader quantizes

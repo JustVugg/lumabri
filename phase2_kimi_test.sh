@@ -19,7 +19,7 @@ NGEN="${NGEN:-8}"
 IDS="${IDS:-3 7 11 19}"
 export K3_BITS=32          # f32 dense side: the question is the experts
 
-make -s expert_node_kimi ENGINE="$ENGINE"
+make -s expert_node_kimi kimi_k3_p2p ENGINE="$ENGINE"
 
 T=$(mktemp -d /tmp/lumabri-k3.XXXXXX)
 PIDS=()
@@ -29,14 +29,8 @@ trap cleanup EXIT
 MODEL="${MODEL:-$T/tiny_kimi}"
 [ -f "$MODEL/config.json" ] || python3 make_tiny_kimi.py "$MODEL" > /dev/null
 
-# built from a COPY: kimi_k3.c itself is never modified
-cp "$ENGINE/kimi_k3.c" "$T/kimi_k3.c"
-( cd "$T" && patch -s -p2 < "$OLDPWD/engine_patches/kimi_k3-p2p.diff" )
-cc -O2 -fopenmp -w -I. -I"$ENGINE" -DLUMABRI_P2P -DLUMIBRI_P2P \
-   "$T/kimi_k3.c" -o "$T/kimi_p2p" -lm -lpthread
-
 run() { OMP_NUM_THREADS="${THREADS:-2}" "$@" \
-        "$T/kimi_p2p" "$MODEL" --ids "$IDS" --ngen "$NGEN"; }
+        ./kimi_k3_p2p "$MODEL" --ids "$IDS" --ngen "$NGEN"; }
 
 echo
 echo "══ A) LOCAL — experts read and run by the engine itself"

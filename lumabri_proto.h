@@ -25,6 +25,7 @@
 #include <netdb.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <stdint.h>
@@ -32,6 +33,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -39,6 +41,19 @@
 #define LMB_MAX_BODY  (64u << 20)   /* a REGISTER carrying block hashes for a
                                        whole huge model must fit: 32 B/MiB */
 #define LMB_MAX_PAY   (64u << 20)
+#define LMB_MAX_CONTROL_BODY (4u << 20)
+#define LMB_MAX_PLACEMENT_BODY (8u << 20) /* 4096 long paths, eight replicas */
+#define LMB_MAX_SMALL_BODY   (64u << 10)
+/* A DeepSeek prefill may queue dozens of cold experts behind one CPU gate;
+ * 30 s incorrectly declared a healthy disk-backed node dead.  Connections
+ * remain bounded separately, so five minutes is a safe default for bulk
+ * work while deployments may lower it with LUMABRI_IO_TIMEOUT_MS. */
+#define LMB_DEFAULT_IO_TIMEOUT_MS 300000
+#define LMB_DEFAULT_MAX_CONNECTIONS 256u
+#define LMB_EXPERT_MANIFEST_MAGIC 0x324D454Cu /* "LEM2": versioned EXEC manifest */
+#define LMB_MODEL_ID_MAGIC         0x3144494Du /* "MID1": signed model identity */
+#define LMB_MODEL_ROOT_LEN 32
+#define LMB_BUILD_PROFILE_MAX 384
 /* Rows an EXEC may carry. A real batch is a prompt's worth of positions, so
  * this is generous; it exists so a length can never be chosen to overflow
  * the size arithmetic on a model with a large hidden dimension. */
@@ -122,6 +137,11 @@ enum {
      * restart does not re-download. A node that passes --layers/--stride
      * opts out and is simply counted like any other replica. */
     LMB_EASSIGN = 28, LMB_EASSIGN_R = 29,
+    /* A single signed identity for the complete model. The origin hashes the
+     * canonical list of {path,size,block hashes}, signs that 32-byte root,
+     * and the tracker only carries it. Expert nodes include the same record
+     * in EMANIFEST, so a chatter cannot accidentally mix checkpoints. */
+    LMB_MODEL_ID = 30, LMB_MODEL_ID_R = 31,
 };
 
 /* REGISTER body: str name, str addr, str model, u64 held_bytes,
@@ -133,6 +153,13 @@ typedef struct {
     uint8_t *body; uint32_t body_len;
     uint8_t *pay;  uint32_t pay_len;
 } LmbMsg;
+
+typedef struct {
+    char model[64];
+    uint8_t root[LMB_MODEL_ROOT_LEN];
+    uint8_t sig[64];
+    int has_sig;
+} LmbModelIdentity;
 
 /* ---- full-buffer socket I/O ------------------------------------------- */
 
@@ -168,8 +195,53 @@ static uint32_t lmb_get32(const uint8_t *p) {
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
+/* A frame's legal shape is determined before allocating it. REGISTER is the
+ * only large-body request because it may carry every block hash of a huge
+ * model. Bulk byte and activation frames may have a large payload but only a
+ * small body. Thus no unknown or control op can reserve 64+64 MiB merely by
+ * writing a hostile preamble. */
+static void lmb_frame_caps(uint32_t op, uint32_t *body_cap, uint32_t *pay_cap) {
+    *body_cap = LMB_MAX_SMALL_BODY;
+    *pay_cap = 0;
+    switch (op) {
+    case LMB_REGISTER:
+        *body_cap = LMB_MAX_BODY;
+        break;
+    case LMB_MANIFEST_R:
+    case LMB_SWARM_R:
+    case LMB_EPEERS_R:
+    case LMB_EMANIFEST_R:
+    case LMB_EASSIGN_R:
+        *body_cap = LMB_MAX_CONTROL_BODY;
+        break;
+    case LMB_PLACEMENT_R:
+        *body_cap = LMB_MAX_PLACEMENT_BODY;
+        break;
+    case LMB_READ_R:
+    case LMB_RREAD_R:
+    case LMB_HASHES_R:
+    case LMB_EXEC_R:
+        *pay_cap = LMB_MAX_PAY;
+        break;
+    case LMB_RREAD_FWD:
+    case LMB_EXEC:
+        *body_cap = LMB_MAX_CONTROL_BODY;
+        *pay_cap = LMB_MAX_PAY;
+        break;
+    default:
+        break;
+    }
+}
+
+static int lmb_frame_shape_ok(uint32_t op, uint32_t body_len, uint32_t pay_len) {
+    uint32_t bc, pc;
+    lmb_frame_caps(op, &bc, &pc);
+    return body_len <= bc && pay_len <= pc;
+}
+
 static int lmb_send(int fd, uint32_t op, const void *body, uint32_t body_len,
                     const void *pay, uint32_t pay_len) {
+    if (!lmb_frame_shape_ok(op, body_len, pay_len)) { errno = EMSGSIZE; return -1; }
     uint8_t pre[16];
     lmb_put32(pre, LMB_MAGIC); lmb_put32(pre + 4, op);
     lmb_put32(pre + 8, body_len); lmb_put32(pre + 12, pay_len);
@@ -188,7 +260,10 @@ static int lmb_recv(int fd, LmbMsg *m) {
     m->op = lmb_get32(pre + 4);
     m->body_len = lmb_get32(pre + 8);
     m->pay_len = lmb_get32(pre + 12);
-    if (m->body_len > LMB_MAX_BODY || m->pay_len > LMB_MAX_PAY) return -1;
+    if (!lmb_frame_shape_ok(m->op, m->body_len, m->pay_len)) {
+        errno = EMSGSIZE;
+        return -1;
+    }
     if (m->body_len) {
         if (!(m->body = (uint8_t *)malloc(m->body_len))) return -1;
         if (lmb_read_full(fd, m->body, m->body_len)) { free(m->body); m->body = NULL; return -1; }
@@ -212,9 +287,14 @@ static void lmb_msg_free(LmbMsg *m) {
 typedef struct { uint8_t *p; size_t len, cap; } LmbBuf;
 
 static int lmb_buf_reserve(LmbBuf *b, size_t extra) {
-    if (b->len + extra <= b->cap) return 0;
+    if (extra > SIZE_MAX - b->len) return -1;
+    size_t need = b->len + extra;
+    if (need <= b->cap) return 0;
     size_t cap = b->cap ? b->cap : 256;
-    while (cap < b->len + extra) cap *= 2;
+    while (cap < need) {
+        if (cap > SIZE_MAX / 2) { cap = need; break; }
+        cap *= 2;
+    }
     uint8_t *p = (uint8_t *)realloc(b->p, cap);
     if (!p) return -1;
     b->p = p; b->cap = cap;
@@ -251,7 +331,7 @@ static int lmb_buf_str(LmbBuf *b, const char *s) {  /* u16 len + bytes */
 typedef struct { const uint8_t *p; size_t len, off; } LmbCur;
 
 static int lmb_cur_u16(LmbCur *c, uint16_t *v) {
-    if (c->off + 2 > c->len) return -1;
+    if (c->off > c->len || 2 > c->len - c->off) return -1;
     *v = (uint16_t)(c->p[c->off] | (c->p[c->off + 1] << 8));
     c->off += 2;
     return 0;
@@ -289,8 +369,64 @@ static int lmb_rel_ok(const char *rel) {
     return 1;
 }
 
+/* Numeric compatibility is stricter than an engine family name. Different
+ * source trees, compilers, ISA paths or fast-math settings may all produce a
+ * different last bit while still accepting the same tensors. Official builds
+ * inject a stable source hash; the rest is derived from compiler macros so an
+ * EMANIFEST comparison is cheap and deterministic. */
+#ifndef LMBE_ENGINE_ID
+#define LMBE_ENGINE_ID "unknown"
+#endif
+#ifndef LMBE_SOURCE_ID
+#define LMBE_SOURCE_ID "unversioned"
+#endif
+#define LMB_STR_INNER(x) #x
+#define LMB_STR(x) LMB_STR_INNER(x)
+#ifdef _OPENMP
+#define LMB_PROFILE_OMP LMB_STR(_OPENMP)
+#else
+#define LMB_PROFILE_OMP "none"
+#endif
+#ifdef __FAST_MATH__
+#define LMB_PROFILE_MATH "fast"
+#else
+#define LMB_PROFILE_MATH "strict"
+#endif
+#if defined(__AVX512BF16__)
+#define LMB_PROFILE_ISA "avx512bf16"
+#elif defined(__AVX512VNNI__)
+#define LMB_PROFILE_ISA "avx512vnni"
+#elif defined(__AVX512F__)
+#define LMB_PROFILE_ISA "avx512f"
+#elif defined(__AVXVNNI__)
+#define LMB_PROFILE_ISA "avxvnni"
+#elif defined(__AVX2__)
+#define LMB_PROFILE_ISA "avx2"
+#elif defined(__ARM_FEATURE_MATMUL_INT8)
+#define LMB_PROFILE_ISA "arm-i8mm"
+#elif defined(__ARM_FEATURE_DOTPROD)
+#define LMB_PROFILE_ISA "arm-dotprod"
+#elif defined(__aarch64__)
+#define LMB_PROFILE_ISA "aarch64"
+#elif defined(__x86_64__)
+#define LMB_PROFILE_ISA "x86_64"
+#else
+#define LMB_PROFILE_ISA "generic"
+#endif
+#ifdef __VERSION__
+#define LMB_PROFILE_CC __VERSION__
+#else
+#define LMB_PROFILE_CC "unknown-cc"
+#endif
+
+static void lmb_build_profile(char *out, size_t cap) {
+    snprintf(out, cap, "abi=2;engine=%s;src=%s;cc=%s;isa=%s;omp=%s;math=%s;f32=%zu",
+             LMBE_ENGINE_ID, LMBE_SOURCE_ID, LMB_PROFILE_CC, LMB_PROFILE_ISA,
+             LMB_PROFILE_OMP, LMB_PROFILE_MATH, sizeof(float));
+}
+
 static int lmb_cur_u32(LmbCur *c, uint32_t *v) {
-    if (c->off + 4 > c->len) return -1;
+    if (c->off > c->len || 4 > c->len - c->off) return -1;
     *v = lmb_get32(c->p + c->off); c->off += 4;
     return 0;
 }
@@ -301,19 +437,59 @@ static int lmb_cur_u64(LmbCur *c, uint64_t *v) {
     return 0;
 }
 static int lmb_cur_bytes(LmbCur *c, void *dst, size_t n) {
-    if (c->off + n > c->len) return -1;
+    if (c->off > c->len || n > c->len - c->off) return -1;
     memcpy(dst, c->p + c->off, n); c->off += n;
     return 0;
 }
 static int lmb_cur_str(LmbCur *c, char *dst, size_t cap) {
     uint16_t n;
     if (lmb_cur_u16(c, &n)) return -1;
-    if (c->off + n > c->len || (size_t)n + 1 > cap) return -1;
+    if (c->off > c->len || n > c->len - c->off || (size_t)n + 1 > cap) return -1;
     memcpy(dst, c->p + c->off, n); dst[n] = 0; c->off += n;
     return 0;
 }
 
 /* ---- sockets ----------------------------------------------------------- */
+
+static int lmb_env_int(const char *name, int fallback, int lo, int hi) {
+    const char *s = getenv(name);
+    if (!s || !*s) return fallback;
+    char *end = NULL;
+    long v = strtol(s, &end, 10);
+    if (end == s || *end || v < lo || v > hi) return fallback;
+    return (int)v;
+}
+
+static void lmb_set_io_timeout(int fd, int timeout_ms) {
+    if (timeout_ms <= 0) return;
+    struct timeval tv = { timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+}
+
+/* Thread-per-connection keeps persistent pooled sockets simple, but it must
+ * have an admission boundary. This small atomic gate is shared by tracker,
+ * byte peers and expert peers; excess connections are closed before a stack
+ * or request buffer is allocated. */
+typedef struct { _Atomic unsigned active; unsigned limit; } LmbConnGate;
+#define LMB_CONN_GATE_INIT { .active = 0, .limit = LMB_DEFAULT_MAX_CONNECTIONS }
+
+static void lmb_conn_gate_init(LmbConnGate *g) {
+    g->limit = (unsigned)lmb_env_int("LUMABRI_MAX_CONNECTIONS",
+                                     (int)LMB_DEFAULT_MAX_CONNECTIONS, 1, 65536);
+}
+
+static int lmb_conn_gate_enter(LmbConnGate *g) {
+    unsigned n = atomic_load(&g->active);
+    while (n < g->limit) {
+        if (atomic_compare_exchange_weak(&g->active, &n, n + 1)) return 1;
+    }
+    return 0;
+}
+
+static void lmb_conn_gate_leave(LmbConnGate *g) {
+    atomic_fetch_sub(&g->active, 1);
+}
 
 /* addr is "host:port". Bounded connect: an unreachable peer must cost
  * `timeout_ms`, not the kernel's minutes — the caller has a relay to fall
@@ -349,6 +525,8 @@ static int lmb_connect_ms(const char *addr, int timeout_ms) {
     if (fd >= 0) {
         int one = 1;
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+        lmb_set_io_timeout(fd, lmb_env_int("LUMABRI_IO_TIMEOUT_MS",
+                                           LMB_DEFAULT_IO_TIMEOUT_MS, 100, 3600000));
     }
     return fd;
 }
@@ -451,6 +629,32 @@ static int lmb_request(const char *addr, uint32_t op,
     if (rc == 0) rc = lmb_recv(fd, resp);
     close(fd);
     return rc;
+}
+
+/* Fetch the operator-bound identity of a complete model. Signature checking
+ * stays with the caller because only the caller owns the public key. */
+static int lmb_model_identity_get(const char *tracker, const char *model,
+                                  LmbModelIdentity *id) {
+    memset(id, 0, sizeof *id);
+    if (!tracker || !*tracker || !model || !*model) return -1;
+    LmbBuf b = {0};
+    if (lmb_buf_str(&b, model)) return -1;
+    LmbMsg m = {0};
+    int rc = lmb_request(tracker, LMB_MODEL_ID, b.p, (uint32_t)b.len, &m);
+    free(b.p);
+    if (rc || m.op != LMB_MODEL_ID_R) { lmb_msg_free(&m); return -1; }
+    LmbCur c = { m.body, m.body_len, 0 };
+    uint32_t magic = 0, has_sig = 0;
+    int bad = lmb_cur_u32(&c, &magic) || magic != LMB_MODEL_ID_MAGIC ||
+              lmb_cur_str(&c, id->model, sizeof id->model) ||
+              lmb_cur_bytes(&c, id->root, sizeof id->root) ||
+              lmb_cur_u32(&c, &has_sig) || has_sig > 1 ||
+              (has_sig && lmb_cur_bytes(&c, id->sig, sizeof id->sig)) ||
+              c.off != c.len;
+    id->has_sig = has_sig != 0;
+    lmb_msg_free(&m);
+    if (bad || strcmp(id->model, model)) { memset(id, 0, sizeof *id); return -1; }
+    return 0;
 }
 
 #endif /* LUMABRI_PROTO_H */

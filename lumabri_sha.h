@@ -5,6 +5,7 @@
 #define LUMABRI_SHA_H
 
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 typedef struct { uint32_t h[8]; uint64_t len; uint8_t buf[64]; size_t off; } LmbSha;
@@ -87,6 +88,71 @@ static void lmb_sha256(const void *data, size_t n, uint8_t out[32]) {
     lmb_sha_init(&s);
     lmb_sha_update(&s, data, n);
     lmb_sha_final(&s, out);
+}
+
+/* Canonical identity of a complete model. Paths are sorted here, rather than
+ * trusting readdir or registration order, and every field has an explicit
+ * little-endian encoding. The root commits to the inventory as well as all
+ * per-MiB hashes, so replacing, adding or removing a file changes it. */
+typedef struct {
+    const char *path;
+    uint64_t size;
+    uint32_t nh;
+    const uint8_t *hashes;
+} LmbModelItem;
+
+static int lmb_model_item_cmp(const void *a, const void *b) {
+    const LmbModelItem *const *aa = (const LmbModelItem *const *)a;
+    const LmbModelItem *const *bb = (const LmbModelItem *const *)b;
+    return strcmp((*aa)->path, (*bb)->path);
+}
+
+static void lmb_sha_le32(LmbSha *s, uint32_t v) {
+    uint8_t b[4];
+    for (int i = 0; i < 4; i++) b[i] = (uint8_t)(v >> (8 * i));
+    lmb_sha_update(s, b, sizeof b);
+}
+
+static void lmb_sha_le64(LmbSha *s, uint64_t v) {
+    uint8_t b[8];
+    for (int i = 0; i < 8; i++) b[i] = (uint8_t)(v >> (8 * i));
+    lmb_sha_update(s, b, sizeof b);
+}
+
+static int lmb_model_root(const char *model, const LmbModelItem *items, size_t n,
+                          uint8_t out[32]) {
+    static const char tag[] = "lumabri-model-root-v1";
+    if (!model || (!items && n) || n > UINT32_MAX) return -1;
+    const LmbModelItem **ord = (const LmbModelItem **)malloc((n ? n : 1) * sizeof *ord);
+    if (!ord) return -1;
+    for (size_t i = 0; i < n; i++) {
+        if (!items[i].path || (items[i].nh && !items[i].hashes)) { free(ord); return -1; }
+        ord[i] = &items[i];
+    }
+    qsort(ord, n, sizeof *ord, lmb_model_item_cmp);
+    LmbSha s;
+    lmb_sha_init(&s);
+    lmb_sha_update(&s, tag, sizeof tag);
+    size_t ml = strlen(model);
+    if (ml > UINT32_MAX) { free(ord); return -1; }
+    lmb_sha_le32(&s, (uint32_t)ml);
+    lmb_sha_update(&s, model, ml);
+    lmb_sha_le32(&s, (uint32_t)n);
+    for (size_t i = 0; i < n; i++) {
+        const LmbModelItem *it = ord[i];
+        size_t pl = strlen(it->path);
+        /* nh is a uint32_t, so nh * 32 cannot overflow size_t on the
+         * supported 64-bit targets.  Keep the path conversion explicit. */
+        if (pl > UINT32_MAX) { free(ord); return -1; }
+        lmb_sha_le32(&s, (uint32_t)pl);
+        lmb_sha_update(&s, it->path, pl);
+        lmb_sha_le64(&s, it->size);
+        lmb_sha_le32(&s, it->nh);
+        lmb_sha_update(&s, it->hashes, (size_t)it->nh * 32);
+    }
+    free(ord);
+    lmb_sha_final(&s, out);
+    return 0;
 }
 
 #endif /* LUMABRI_SHA_H */

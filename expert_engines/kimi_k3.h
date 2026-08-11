@@ -25,6 +25,7 @@ typedef Slot LmbeSlot;
 static Model lmbe_M;
 
 static const char *lmbe_engine_name(void) { return "kimi_k3"; }
+static int lmbe_effective_bits(int bits) { (void)bits; return 0; }
 
 static void lmbe_open(const char *dir, int cap, int bits) {
     (void)cap; (void)bits;            /* MXFP4 comes as it is on disk */

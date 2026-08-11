@@ -34,6 +34,29 @@ ENGINE_NODES    = $(foreach e,$(HAVE_ENGINES),$(NODE_$(e)))
 ENGINE_CHATTERS = $(foreach e,$(HAVE_ENGINES),$(e)_p2p)
 MISSING_ENGINES = $(filter-out $(HAVE_ENGINES),olmoe colibri inkling kimi_k3 deepseek)
 
+# A strict distributed run must not mix engine sources or numeric build
+# profiles. Hash contents only (not absolute paths), then inject the same ID
+# into the chatter and expert-node build for that family. Compiler/ISA/OpenMP
+# details are appended at runtime by lmb_build_profile().
+ENGINE_PROFILE_DEPS := $(sort $(wildcard $(ENGINE)/*.h)) \
+                       lumabri_client.h lumabri_proto.h
+define engine_source_id
+$(shell sha256sum $(ENGINE)/$(1).c $(ENGINE_PROFILE_DEPS) \
+        expert_engines/$(2).h engine_patches/$(1)-p2p.diff 2>/dev/null | \
+        awk '{print $$1}' | sha256sum | cut -c1-16)
+endef
+SRCID_olmoe   := $(call engine_source_id,olmoe,olmoe)
+SRCID_colibri := $(call engine_source_id,colibri,colibri)
+SRCID_inkling := $(call engine_source_id,inkling,inkling)
+SRCID_kimi_k3 := $(call engine_source_id,kimi_k3,kimi_k3)
+SRCID_deepseek:= $(call engine_source_id,deepseek,deepseek)
+
+PROFILE_olmoe   = -DLMBE_ENGINE_ID='"olmoe"'      -DLMBE_SOURCE_ID='"$(SRCID_olmoe)"'   -DLMBE_EXPECT_BITS=0
+PROFILE_colibri = -DLMBE_ENGINE_ID='"colibri"'    -DLMBE_SOURCE_ID='"$(SRCID_colibri)"' -DLMBE_EXPECT_BITS=8
+PROFILE_inkling = -DLMBE_ENGINE_ID='"inkling"'    -DLMBE_SOURCE_ID='"$(SRCID_inkling)"' -DLMBE_EXPECT_BITS=8
+PROFILE_kimi_k3 = -DLMBE_ENGINE_ID='"kimi_k3"'    -DLMBE_SOURCE_ID='"$(SRCID_kimi_k3)"' -DLMBE_EXPECT_BITS=0
+PROFILE_deepseek= -DLMBE_ENGINE_ID='"deepseek_v4"' -DLMBE_SOURCE_ID='"$(SRCID_deepseek)"' -DLMBE_EXPECT_BITS=0
+
 # every engine's peer in one go — the ones this checkout has
 engines: $(ENGINE_NODES)
 	@$(if $(MISSING_ENGINES),echo "  skipped (not in $(ENGINE)): $(MISSING_ENGINES)";\
@@ -47,19 +70,23 @@ phase2-all: engines chatters
 # own source so remote and local run the same kernels on the same weights.
 EXPERT_DEPS = expert_node.c lumabri_proto.h
 
-expert_node: $(EXPERT_DEPS) expert_engines/olmoe.h $(ENGINE)/olmoe.c
-	$(CC) $(P2P_CFLAGS) expert_node.c -o $@ -lm -lpthread
+expert_node: $(EXPERT_DEPS) expert_engines/olmoe.h $(ENGINE)/olmoe.c \
+             engine_patches/olmoe-p2p.diff $(ENGINE_PROFILE_DEPS)
+	$(CC) $(P2P_CFLAGS) $(PROFILE_olmoe) expert_node.c -o $@ -lm -lpthread
 
-expert_node_glm: $(EXPERT_DEPS) expert_engines/colibri.h $(ENGINE)/colibri.c
-	$(CC) $(P2P_CFLAGS) -DLMBE_ENGINE_HEADER='"expert_engines/colibri.h"' \
+expert_node_glm: $(EXPERT_DEPS) expert_engines/colibri.h $(ENGINE)/colibri.c \
+                 engine_patches/colibri-p2p.diff $(ENGINE_PROFILE_DEPS)
+	$(CC) $(P2P_CFLAGS) $(PROFILE_colibri) -DLMBE_ENGINE_HEADER='"expert_engines/colibri.h"' \
 	      expert_node.c -o $@ -lm -lpthread
 
-expert_node_inkling: $(EXPERT_DEPS) expert_engines/inkling.h $(ENGINE)/inkling.c
-	$(CC) $(P2P_CFLAGS) -DLMBE_ENGINE_HEADER='"expert_engines/inkling.h"' \
+expert_node_inkling: $(EXPERT_DEPS) expert_engines/inkling.h $(ENGINE)/inkling.c \
+                     engine_patches/inkling-p2p.diff $(ENGINE_PROFILE_DEPS)
+	$(CC) $(P2P_CFLAGS) $(PROFILE_inkling) -DLMBE_ENGINE_HEADER='"expert_engines/inkling.h"' \
 	      expert_node.c -o $@ -lm -lpthread
 
-expert_node_kimi: $(EXPERT_DEPS) expert_engines/kimi_k3.h $(ENGINE)/kimi_k3.c
-	$(CC) $(P2P_CFLAGS) -DLMBE_ENGINE_HEADER='"expert_engines/kimi_k3.h"' \
+expert_node_kimi: $(EXPERT_DEPS) expert_engines/kimi_k3.h $(ENGINE)/kimi_k3.c \
+                  engine_patches/kimi_k3-p2p.diff $(ENGINE_PROFILE_DEPS)
+	$(CC) $(P2P_CFLAGS) $(PROFILE_kimi_k3) -DLMBE_ENGINE_HEADER='"expert_engines/kimi_k3.h"' \
 	      expert_node.c -o $@ -lm -lpthread
 
 # DeepSeek V4 needs two extra things at build time.
@@ -84,8 +111,9 @@ build/deepseek_noentry.c: $(ENGINE)/deepseek.c
 	@grep -q deepseek_cli_main_unused $@ || \
 	  { echo "deepseek.c: main() signature changed — update the rule"; exit 1; }
 
-expert_node_deepseek: $(EXPERT_DEPS) expert_engines/deepseek.h build/deepseek_noentry.c
-	$(CC) $(P2P_CFLAGS) $(DS_CFLAGS) -Ibuild \
+expert_node_deepseek: $(EXPERT_DEPS) expert_engines/deepseek.h build/deepseek_noentry.c \
+                      engine_patches/deepseek-p2p.diff $(ENGINE_PROFILE_DEPS)
+	$(CC) $(P2P_CFLAGS) $(PROFILE_deepseek) $(DS_CFLAGS) -Ibuild \
 	      -DLMBE_ENGINE_HEADER='"expert_engines/deepseek.h"' \
 	      expert_node.c -o $@ -lm -lpthread
 
@@ -105,31 +133,34 @@ patches-check:
 #
 # The engine is never modified: the patch is applied to a COPY under build/.
 # A working copy that already has the patch applied is taken as-is, so an
-# engine tree someone patched by hand still builds.
+# engine tree someone patched by hand still builds. Early OLMoE patches used
+# `L.on` directly; normalize that old hook in the build copy so periodic
+# discovery still runs while phase 2 is active.
 #
 # -DLUMIBRI_P2P: the patches predate the rename and test that macro; both
 # spellings are defined so either vintage compiles.
-build/%_p2p.c: $(ENGINE)/%.c engine_patches/%-p2p.diff
+build/%_p2p.c: $(ENGINE)/%.c engine_patches/%-p2p.diff Makefile
 	@mkdir -p build
 	@if grep -q LUMIBRI_P2P $<; then cp $< $@; \
 	 else patch -s -p2 -o $@ $< engine_patches/$*-p2p.diff; fi
+	@sed -i 's/if (L\.on) {/if (lumi_layer_on(layer)) {/' $@
 
 ENGINE_P2P_DEPS = lumabri_client.h lumibri_client.h lumabri_proto.h
 
 olmoe_p2p: build/olmoe_p2p.c $(ENGINE_P2P_DEPS)
-	$(CC) $(P2P_CFLAGS) -DLUMABRI_P2P -DLUMIBRI_P2P $< -o $@ -lm -lpthread
+	$(CC) $(P2P_CFLAGS) $(PROFILE_olmoe) -DLUMABRI_P2P -DLUMIBRI_P2P $< -o $@ -lm -lpthread
 
 colibri_p2p: build/colibri_p2p.c $(ENGINE_P2P_DEPS)
-	$(CC) $(P2P_CFLAGS) -DLUMABRI_P2P -DLUMIBRI_P2P $< -o $@ -lm -lpthread
+	$(CC) $(P2P_CFLAGS) $(PROFILE_colibri) -DLUMABRI_P2P -DLUMIBRI_P2P $< -o $@ -lm -lpthread
 
 inkling_p2p: build/inkling_p2p.c $(ENGINE_P2P_DEPS)
-	$(CC) $(P2P_CFLAGS) -DLUMABRI_P2P -DLUMIBRI_P2P $< -o $@ -lm -lpthread
+	$(CC) $(P2P_CFLAGS) $(PROFILE_inkling) -DLUMABRI_P2P -DLUMIBRI_P2P $< -o $@ -lm -lpthread
 
 kimi_k3_p2p: build/kimi_k3_p2p.c $(ENGINE_P2P_DEPS)
-	$(CC) $(P2P_CFLAGS) -DLUMABRI_P2P -DLUMIBRI_P2P $< -o $@ -lm -lpthread
+	$(CC) $(P2P_CFLAGS) $(PROFILE_kimi_k3) -DLUMABRI_P2P -DLUMIBRI_P2P $< -o $@ -lm -lpthread
 
 deepseek_p2p: build/deepseek_p2p.c $(ENGINE_P2P_DEPS)
-	$(CC) $(P2P_CFLAGS) $(DS_CFLAGS) -DLUMABRI_P2P -DLUMIBRI_P2P $< -o $@ -lm -lpthread
+	$(CC) $(P2P_CFLAGS) $(PROFILE_deepseek) $(DS_CFLAGS) -DLUMABRI_P2P -DLUMIBRI_P2P $< -o $@ -lm -lpthread
 
 # what a CHATTER needs; `engines` is what a compute DONOR needs
 chatters: $(ENGINE_CHATTERS)
@@ -187,7 +218,9 @@ test: all
 	./donate_test.sh
 	./signed_donor_test.sh
 	./role_test.sh
+	./security_test.sh
 	./expert_input_test.sh
+	./prefetch_policy_test.sh
 
 # ---- deploy -------------------------------------------------------------
 # make install                    → /usr/local (needs sudo)

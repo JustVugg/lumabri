@@ -19,7 +19,7 @@ PORT0="${PORT0:-7481}"   # clear of phase5 (745x) and sign_test (746x)
 CAP="${CAP:-4}"
 BITS=0
 
-make -s expert_node_inkling ENGINE="$ENGINE"
+make -s expert_node_inkling inkling_p2p ENGINE="$ENGINE"
 
 T=$(mktemp -d /tmp/lumabri-ink.XXXXXX)
 PIDS=()
@@ -41,14 +41,29 @@ p = [3, 7, 11, 19, 23, 29, 31, 37]
 json.dump({"prompt_ids": p, "full_ids": p + [0] * 16}, open(sys.argv[1], "w"))
 EOF
 
-# built from a COPY: inkling.c itself is never modified
-cp "$ENGINE/inkling.c" "$T/inkling.c"
-( cd "$T" && patch -s -p2 < "$OLDPWD/engine_patches/inkling-p2p.diff" )
-cc -O2 -fopenmp -w -I. -I"$ENGINE" -DLUMABRI_P2P -DLUMIBRI_P2P \
-   "$T/inkling.c" -o "$T/inkling_p2p" -lm -lpthread
-
 run() { SNAP="$MODEL" OMP_NUM_THREADS="${THREADS:-2}" "$@" \
-        "$T/inkling_p2p" "$CAP" "$BITS" "$T/ref.json"; }
+        LUMABRI_EXPERT_BITS="$BITS" ./inkling_p2p "$CAP" "$BITS" "$T/ref.json"; }
+
+echo
+echo "══ THREAD POLICY — default Inkling node uses physical cores, not SMT threads"
+POLICY_PORT=$((PORT0+60))
+env -u OMP_NUM_THREADS -u OMP_PROC_BIND -u COLI_NO_OMP_TUNE -u COLI_OMP_TUNED \
+    ./expert_node_inkling --model "$MODEL" --port "$POLICY_PORT" --name ink-policy \
+                          --bits "$BITS" --cache 1 > "$T/policy.log" 2>&1 & POLICY_PID=$!; PIDS+=($!)
+for _ in $(seq 1 300); do
+    (exec 3<>/dev/tcp/127.0.0.1/$POLICY_PORT) 2>/dev/null && { exec 3<&-; break; }
+    sleep 0.1
+done
+grep -q "applying the engine hot-thread policy" "$T/policy.log" || {
+    echo "Inkling node did not apply its OpenMP hot-thread policy"; cat "$T/policy.log"; exit 1; }
+POLICY_LINE=$(grep "thread.* each, .* physical core" "$T/policy.log" | tail -1)
+PT=$(printf '%s\n' "$POLICY_LINE" | sed -nE 's/.* ([0-9]+) threads? each, ([0-9]+) physical cores?.*/\1/p')
+PC=$(printf '%s\n' "$POLICY_LINE" | sed -nE 's/.* ([0-9]+) threads? each, ([0-9]+) physical cores?.*/\2/p')
+[ -n "$PT" ] && [ -n "$PC" ] && [ "$PT" -le "$PC" ] || {
+    echo "Inkling node oversubscribed its physical cores: $POLICY_LINE"; exit 1; }
+kill "$POLICY_PID" 2>/dev/null || true
+wait "$POLICY_PID" 2>/dev/null || true
+echo "✓ Inkling default: $PT OpenMP threads on $PC available physical cores"
 
 echo
 echo "══ A) LOCAL — experts read and run by the engine itself"

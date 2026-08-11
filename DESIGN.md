@@ -50,9 +50,12 @@ Costo a caldo: un lookup `fdmap[fd]` + un test di bitmap per blocco toccato.
 ## Protocollo (lumabri_proto.h)
 
 Frame: `{u32 magic "LMB1", u32 op, u32 body_len, u32 pay_len}` + body + pay,
-little-endian, stringhe con prefisso u16. Cap: body 16 MiB, pay 64 MiB —
-ogni allocazione è limitata prima di leggere. Op sconosciuta → `ERR`
-esplicito (mai indovinare).
+little-endian, stringhe con prefisso u16. Il pay bulk ha cap 64 MiB;
+REGISTER può portare fino a 64 MiB di hash, i controlli normali 4 MiB e i
+messaggi piccoli 64 KiB. Forma e limiti sono verificati dai soli 16 byte di
+header, prima di allocare o attendere il body. Timeout I/O e numero massimo
+di connessioni sono configurabili e hanno limiti di default. Op sconosciuta
+→ `ERR` esplicito (mai indovinare).
 
 | op | flusso | uso |
 |---|---|---|
@@ -69,8 +72,18 @@ silenzioso da >30 s → escluso dai placement.
 ## Lato chatter (lumishim.c)
 
 - **Mirror**: `cache/data/<rel>` sparse + `cache/maps/<rel>.lmap` (1 byte
-  per blocco, persistita con `pwrite` dopo il blocco: prima i dati, poi il
-  bit — un crash rifetcha, mai zeri spacciati per dati).
+  per blocco). I nuovi bit sono visibili subito al processo ma persistiti in
+  batch: prima `fdatasync` dei dati, poi bitmap e relativo `fdatasync`. Si
+  evita una sync per MiB; un crash rifetcha, mai zeri spacciati per dati.
+- **Identità checkpoint**: la root canonica del modello completo lega
+  inventario, path, size e vettori sha256. Le bitmap sono legate a quella
+  root; un file sostituito con la stessa size invalida il mirror caldo.
+- **Concorrenza tra processi**: più chatter sullo stesso checkpoint tengono
+  un lock condiviso per tutta la vita; cambio identità o riparazione del
+  layout prendono il lock esclusivo. Un secondo lock elegge un solo resetter,
+  e i commit delle bitmap fanno OR con i bit già pubblicati dagli altri
+  processi. Dati e directory vengono sincronizzati prima dei bit e della
+  nuova identità, quindi anche il primo avvio simultaneo resta crash-safe.
 - **Blocchi**: default 8 MiB (`LUMABRI_BLOCK_MIB`). Fetch con dedup
   in-flight (mutex+condvar per file): N thread del motore che toccano lo
   stesso blocco = un solo fetch.
@@ -92,11 +105,13 @@ silenzioso da >30 s → escluso dai placement.
 3. A mirror caldo, il costo per lettura ≈ costo locale (page cache inclusa).
 4. Selftest: cold = warm = offline, byte-identici (test_shim).
 
-## Limiti noti (MVP)
+## Limiti noti
 
-- Nessuna verifica hash dei blocchi → solo peer fidati/localhost per ora.
-  Primo requisito per la rete aperta: manifest firmato con sha256 per blocco.
-- Niente NAT traversal (serve rendezvous UDP/QUIC per peer domestici).
+- Il relay rende raggiungibili i maintainer dietro NAT, ma l'esecuzione
+  esperti non ha ancora hole punching o relay EXEC.
+- Mancano rotazione e revoca delle chiavi dell'operatore.
+- Il mirror è crash-consistent e legato al checkpoint, ma non è ancora un
+  content-addressed store condiviso tra checkpoint.
 - `dup()`/`fork()+exec` sull'fd del modello non tracciati (i motori non li
   usano sugli shard; LD_PRELOAD sopravvive comunque all'exec).
 - fd ≥ 65536 su file del modello → EMFILE (limite tabella).
@@ -169,9 +184,10 @@ delega man mano che i donatori arrivano, e resta l'ultima istanza.**
   con refcount (mai evizione sotto una matmul in corso), loader del motore
   serializzato da un mutex, un miss = una lettura NVMe. Identità provata con
   cache 8 su 128 esperti — 80% di cold load, zero byte cambiati.
-- **Scoperta dal tracker** (EREG/EPEERS): gli expert node fanno heartbeat
-  come i maintainer; il client chiede EPEERS{model} quando LUMABRI_EXPERTS
-  non è impostata. Zero configurazione lato chatter.
+- **Scoperta continua dal tracker** (EREG/EPEERS): gli expert node fanno
+  heartbeat come i maintainer; il client chiede EPEERS{model} all'avvio e
+  periodicamente durante la generazione quando LUMABRI_EXPERTS non è
+  impostata. Un donatore tardivo entra senza riavviare il chatter.
 - **La scala di degrado**, ogni gradino rumoroso, nessuno può cambiare un
   byte: replica più vicina → altra replica → ri-query del tracker (un
   donatore può essere arrivato *dopo* l'avvio) → e se all'avvio lo sciame
@@ -184,11 +200,9 @@ generazione → failover al server, token identici al riferimento locale.
 `make install` porta tutto in PREFIX/bin + PREFIX/lib/lumabri; i binari si
 trovano l'un l'altro via /proc/self/exe.
 
-Aperto, in ordine: hash per blocco (fase 1) e verifica a campione dei
-risultati (fase 2) prima dei peer sconosciuti; batch-union speculativo lato
-motore; assegnazione degli esperti dal tracker (oggi il donatore sceglie
-con --stride/--layers; dovrebbe decidere il server, rarest-first come per i
-byte); relay EXEC per esecutori dietro NAT.
+Aperto, in ordine: batch-union speculativo lato motore, richieste hedged
+contro gli straggler, rotazione/revoca delle chiavi, store content-addressed
+condiviso e relay o hole punching EXEC per esecutori dietro NAT.
 
 ## Fase 5 — sciame aperto e sciame a inviti (2026-08-05)
 
@@ -198,9 +212,12 @@ Due modelli di fiducia, entrambi completi.
 nell'operatore dello sciame, mai nel peer che serve i byte:
 
 - sha256 per MiB (`LMB_HASH_CHUNK`) calcolato dal maintainer, in cache in
-  `.lumabri_hashes/<rel>.sha` (invalidata dal cambio di size): solo il primo
+  `.lumabri_hashes/<rel>.sha` (invalidata da size, mtime o ctime): solo il primo
   avvio paga. Spedito dentro REGISTER come sezione opzionale (magic "SHAH",
   i peer vecchi semplicemente non la mandano).
+- L'origine calcola una root canonica dell'intero modello e la firma con
+  Ed25519. Tracker, mirror ed expert manifest usano la stessa identità, così
+  checkpoint o profili di build diversi non possono essere mescolati.
 - Il tracker tiene la **prima** dichiarazione di ogni (model, path) come
   verità — l'origine registra prima che esista un donatore — e **rimuove
   dall'offerta** di ogni registrante successivo i file i cui hash

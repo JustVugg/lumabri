@@ -34,6 +34,7 @@ typedef struct { int unused; } LmbeSlot;
 static const char *lmbe_engine_name(void) { return "test"; }
 static void lmbe_open(const char *dir, int cap, int bits)
     { (void)dir; (void)cap; (void)bits; }
+static int lmbe_effective_bits(int bits) { (void)bits; return 8; }
 static int lmbe_n_slots(void) { return 2; }
 static int lmbe_n_experts(void) { return 2; }
 static int lmbe_hidden(void) { return 4; }
@@ -60,6 +61,23 @@ cc -O1 -g $SAN -fopenmp -pthread -I"$T" -I. \
 cat > "$T/wire_test.c" <<'EOF'
 #include "lumabri_proto.h"
 
+/* An EMANIFEST_R the chatter will accept as far as the ownership table: the
+ * v2 header must match the chatter's own engine, build profile and bits, or
+ * the frame is refused for incompatibility before any index is looked at —
+ * which would make this a test of the wrong rejection. wire_test and
+ * client_test are built the same way, so both derive the same profile and
+ * the default "unknown" engine / 8-bit experts. */
+static void put_v2_header(LmbBuf *b) {
+    char profile[LMB_BUILD_PROFILE_MAX];
+    lmb_build_profile(profile, sizeof profile);
+    lmb_buf_u32(b, LMB_EXPERT_MANIFEST_MAGIC);
+    lmb_buf_str(b, LMBE_ENGINE_ID);
+    lmb_buf_str(b, profile);
+    lmb_buf_str(b, "test");            /* model name */
+    lmb_buf_u32(b, 8);                 /* expert bits: LMBE_EXPECT_BITS default */
+    lmb_buf_u32(b, 0);                 /* have_id = 0 */
+}
+
 static int bad_manifest(int port, int bad_eid) {
     int lfd = lmb_listen(port), fd; LmbMsg m = {0}; LmbBuf b = {0};
     if (lfd < 0) return 1;
@@ -69,11 +87,12 @@ static int bad_manifest(int port, int bad_eid) {
         if (!lmb_recv(fd, &m) && m.op == LMB_EMANIFEST) break;
         lmb_msg_free(&m); close(fd);
     }
+    put_v2_header(&b);
     lmb_buf_u32(&b, 2);
     lmb_buf_u32(&b, 0); lmb_buf_u32(&b, 0);
     lmb_buf_u32(&b, bad_eid ? 0 : UINT32_MAX);
     lmb_buf_u32(&b, bad_eid ? UINT32_MAX : 0);
-    lmb_buf_u32(&b, 4);
+    lmb_buf_u32(&b, 4);                /* peer hidden */
     int rc = lmb_send(fd, LMB_EMANIFEST_R, b.p, (uint32_t)b.len, NULL, 0);
     free(b.p); lmb_msg_free(&m); close(fd); close(lfd); return rc != 0;
 }
@@ -108,12 +127,24 @@ static int dense_assignment(int port) {
     free(b.p); lmb_msg_free(&m); close(fd); close(lfd); return rc != 0;
 }
 
+/* Skip the v2 EMANIFEST_R header and read the expert count that follows. */
 static int manifest_count(const char *addr, uint32_t expected) {
     LmbMsg m = {0};
     if (lmb_request(addr, LMB_EMANIFEST, NULL, 0, &m) ||
         m.op != LMB_EMANIFEST_R) return 1;
-    LmbCur c = { m.body, m.body_len, 0 }; uint32_t n = 0;
-    int rc = lmb_cur_u32(&c, &n) || n != expected;
+    LmbCur c = { m.body, m.body_len, 0 };
+    uint32_t magic = 0, bits = 0, have_id = 0, has_sig = 0, n = 0;
+    char engine[64], profile[LMB_BUILD_PROFILE_MAX], model[64];
+    uint8_t root[LMB_MODEL_ROOT_LEN], sig[64];
+    int rc = lmb_cur_u32(&c, &magic) || magic != LMB_EXPERT_MANIFEST_MAGIC ||
+             lmb_cur_str(&c, engine, sizeof engine) ||
+             lmb_cur_str(&c, profile, sizeof profile) ||
+             lmb_cur_str(&c, model, sizeof model) ||
+             lmb_cur_u32(&c, &bits) || lmb_cur_u32(&c, &have_id);
+    if (!rc && have_id)
+        rc = lmb_cur_bytes(&c, root, sizeof root) || lmb_cur_u32(&c, &has_sig) ||
+             (has_sig && lmb_cur_bytes(&c, sig, sizeof sig));
+    if (!rc) rc = lmb_cur_u32(&c, &n) || n != expected;
     lmb_msg_free(&m); return rc;
 }
 
@@ -186,7 +217,7 @@ set +e
 "$T/client_test" 127.0.0.1:7582 > "$T/client.out" 2> "$T/client.err"
 RC=$?
 set -e
-[ "$RC" -ne 0 ] && grep -q "bad or mismatched manifest" "$T/client.err" && \
+[ "$RC" -ne 0 ] && grep -q "incompatible manifest" "$T/client.err" && \
     ! grep -q "Sanitizer" "$T/client.err" && \
     ! grep -q "runtime error:" "$T/client.err" || {
     cat "$T/client.err"; echo "   chatter did not reject the bad manifest cleanly"; exit 1; }
@@ -199,7 +230,7 @@ set +e
 "$T/client_test" 127.0.0.1:7587 > "$T/client-eid.out" 2> "$T/client-eid.err"
 RC=$?
 set -e
-[ "$RC" -ne 0 ] && grep -q "bad or mismatched manifest" "$T/client-eid.err" && \
+[ "$RC" -ne 0 ] && grep -q "incompatible manifest" "$T/client-eid.err" && \
     ! grep -q "Sanitizer" "$T/client-eid.err" && \
     ! grep -q "runtime error:" "$T/client-eid.err" || {
     cat "$T/client-eid.err"; echo "   chatter did not reject the bad expert ID"; exit 1; }

@@ -64,14 +64,26 @@ int main(int argc, char **argv) {
     if (lmb_request(argv[1], LMB_EMANIFEST, NULL, 0, &m) || m.op != LMB_EMANIFEST_R)
         return 1;
     LmbCur c = { m.body, m.body_len, 0 };
-    uint32_t n = 0;
-    if (lmb_cur_u32(&c, &n)) return 1;
+    uint32_t magic = 0, bits = 0, have_id = 0, has_sig = 0, n = 0, hidden = 0;
+    uint8_t root[32], sig[64];
+    char engine[64], profile[LMB_BUILD_PROFILE_MAX], model[64];
+    if (lmb_cur_u32(&c, &magic) || magic != LMB_EXPERT_MANIFEST_MAGIC ||
+        lmb_cur_str(&c, engine, sizeof engine) ||
+        lmb_cur_str(&c, profile, sizeof profile) ||
+        lmb_cur_str(&c, model, sizeof model) ||
+        lmb_cur_u32(&c, &bits) || lmb_cur_u32(&c, &have_id) || have_id > 1)
+        return 2;
+    if (have_id && (lmb_cur_bytes(&c, root, sizeof root) ||
+                    lmb_cur_u32(&c, &has_sig) || has_sig > 1 ||
+                    (has_sig && lmb_cur_bytes(&c, sig, sizeof sig))))
+        return 2;
+    if (lmb_cur_u32(&c, &n)) return 2;
     for (uint32_t i = 0; i < n; i++) {
         uint32_t l, e;
-        if (lmb_cur_u32(&c, &l) || lmb_cur_u32(&c, &e)) break;
+        if (lmb_cur_u32(&c, &l) || lmb_cur_u32(&c, &e)) return 2;
         printf("%u:%u\n", l, e);
     }
-    return 0;
+    return lmb_cur_u32(&c, &hidden) || c.off != c.len ? 2 : 0;
 }
 EOF
 cc -O2 -w -I. "$T/ask.c" -o "$T/ask" -lpthread

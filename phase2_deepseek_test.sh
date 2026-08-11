@@ -34,26 +34,16 @@ NODE_CACHE="${NODE_CACHE:-6}"  # expert slots per layer on the peer
     echo "set MODEL=<dir> (tools/download_deepseek_v4.py fetches one)"
     exit 1; }
 
-make -s expert_node_deepseek ENGINE="$ENGINE"
+make -s expert_node_deepseek deepseek_p2p ENGINE="$ENGINE"
 
 T=$(mktemp -d /tmp/lumabri-ds.XXXXXX)
 PIDS=()
 cleanup() { kill "${PIDS[@]}" 2>/dev/null || true; rm -rf "$T"; }
 trap cleanup EXIT
 
-# built from a COPY: deepseek.c itself is never modified
-cp "$ENGINE/deepseek.c" "$T/deepseek.c"
-( cd "$T" && patch -s -p2 < "$OLDPWD/engine_patches/deepseek-p2p.diff" )
-DS_CFLAGS="-DCOLI_V4_MAX_PIN_SLOTS_PER_LAYER=16 -DCOLI_V4_PIN_RAMP_REQUESTS=24
-           -DCOLI_V4_EXPERIMENTAL_BLOCK_OTHER_PROFILE
-           -DCOLI_V4_EXPERIMENTAL_DUAL_EXPERT_LOADER"
-# shellcheck disable=SC2086
-cc -O2 -fopenmp -w -I. -I"$ENGINE" $DS_CFLAGS -DLUMABRI_P2P -DLUMIBRI_P2P \
-   "$T/deepseek.c" -o "$T/deepseek_p2p" -lm -lpthread
-
 echo
 echo "══ A) LOCAL — experts read and run by the engine itself"
-OMP_NUM_THREADS="${THREADS:-6}" "$T/deepseek_p2p" "$MODEL" "$PROMPT" \
+OMP_NUM_THREADS="${THREADS:-6}" ./deepseek_p2p "$MODEL" "$PROMPT" \
     --max-tokens "$GEN" --memory-gb "$CHAT_GB" --no-dspark \
     --record-oracle "$T/oracle.json" > "$T/local.log" 2>&1 \
     || { tail -20 "$T/local.log"; exit 1; }
@@ -74,7 +64,7 @@ grep -h "holding" "$T/node.log" || { tail -10 "$T/node.log"; exit 1; }
 echo
 echo "══ B) P2P — every routed expert runs on the peer, scored against local"
 OMP_NUM_THREADS="${THREADS:-6}" LUMABRI_EXPERTS="127.0.0.1:$PORT" \
-    "$T/deepseek_p2p" "$MODEL" --oracle "$T/oracle.json" --greedy "$GEN" \
+    ./deepseek_p2p "$MODEL" --oracle "$T/oracle.json" --greedy "$GEN" \
     --memory-gb "$CHAT_GB" --no-dspark > "$T/p2p.log" 2>&1 \
     || { tail -20 "$T/p2p.log"; exit 1; }
 grep -E "^\[lumabri\]" "$T/p2p.log" || true

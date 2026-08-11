@@ -264,8 +264,10 @@ Where contention actually lives, so those numbers can be read honestly:
   connection, but a cache *miss* holds a single loader lock, because the
   engine loaders are engine-internal state and not re-entrant. Size
   `--cache` so the working set fits and misses are rare; that is the knob.
-- **the tracker is not on the hot path at all.** It is consulted at boot and
-  on a 10 s heartbeat, never per token.
+- **the tracker is not on the hot path at all.** Expert discovery is checked
+  at most once every 5 s by default, while activations still travel directly
+  between chatter and expert peers. `LUMABRI_DISCOVERY_MS` changes that
+  interval.
 
 ## How it works
 
@@ -285,7 +287,13 @@ plus a normal local read: there is no FUSE and no daemon on the read path.
 Correctness rule, inherited from colibri: the network may only change where
 bytes come from, never which bytes. Writing to model files returns `EROFS`.
 A block no peer can serve is a loud `EIO`, never silent zeros. The selftest
-verifies byte identity cold, warm, and with every peer dead.
+verifies byte identity cold, warm, and with every peer dead. The data file is
+synced before its bitmap bits are committed in a background batch, and every
+bitmap is bound to the complete model root. This avoids an `fdatasync` per MiB
+while ensuring a crash or same-size checkpoint replacement cannot bless stale
+bytes as cached. Concurrent chatters share the same mirror under a checkpoint
+lock: ordinary reads remain concurrent, reset is exclusive, and persisted
+bitmaps are merged so one process cannot erase another process's warm blocks.
 
 ## Phase 2: peers execute experts
 
@@ -295,6 +303,13 @@ only the dense weights, router and KV cache, and sends the activation row
 reach the chatter. Both sides are built from the engine's own source
 (`expert_node.c` includes `olmoe.c`), so local and remote runs are one code
 path and produce identical tokens.
+
+An expert manifest also commits to the engine family, content fingerprint of
+the engine source and generated patch, compiler and ISA profile, effective
+quantization, tensor shape, model name, and complete model root. A chatter
+refuses an incompatible peer before the first activation is sent. This keeps
+`-march=native`, a changed checkout, or another checkpoint from creating a
+mixed-arithmetic swarm that only drifts several tokens later.
 
 Measured on one machine with pinned cores and network emulated in the peer
 (`phase2_bench.sh`, details and limits in `RESULTS_PHASE2.md`):
@@ -441,6 +456,7 @@ the fallback of last resort.**
   server alone.
 - A donor joins with `expert_node --model DIR --tracker H:P [--cache N]
   [--stride N:OFF]`, is discovered, and wins the calls it is nearest for.
+  Discovery continues during generation, so no chatter restart is needed.
   If it dies mid-generation the call fails over — replica, then a fresh
   tracker query, ultimately the server. If the swarm cannot cover every
   expert at startup, phase 2 simply stays off and the engine runs experts
@@ -487,7 +503,10 @@ LUMABRI_PUBKEY=<the 64 hex chars> lumabri chat --tracker HOST:7300
 
 The origin signs each file's hash vector (bound to model, path, chunk size
 and file size, under a domain tag, so a signature cannot be replayed onto
-another file). The tracker stores and forwards the signature and — given
+another file). It separately signs one canonical root over the complete file
+inventory, paths, sizes, and every per-MiB hash. That root binds phase 1 and
+phase 2 to one checkpoint and invalidates a warm mirror even when a replaced
+file has the same size. The tracker stores and forwards the signatures and — given
 `--pubkey`, which `serve --key` passes automatically — refuses any claim
 that is not signed. The chatter rebuilds the signed message itself and
 checks it against the key it obtained **out of band**: a compromised
@@ -572,10 +591,11 @@ rather than failing the build for everyone who only wants GLM.
 | `expert_engines/*.h` | one per engine: the only engine-shaped code |
 | `engine_patches/make_patches.py` | generates the engine patches from source anchors |
 | `lumabri_client.h` | phase 2 chatter side |
-| `selftest.sh` | byte identity: cold, warm, offline |
+| `selftest.sh` | byte identity: cold, warm, offline, NAT relay, same-size checkpoint replacement |
 | `donate_test.sh` | an empty disk donor pulls a slice and outlives the origin |
 | `signed_donor_test.sh` | a donor on a signed swarm verifies, republishes the signature, and refuses the wrong key |
 | `role_test.sh` | `--role` takes whole words: chat is not compute |
+| `prefetch_policy_test.sh` | readahead stops when experts run on peers, so no expert weight is pulled |
 | `expert_input_test.sh` | phase-2 peers reject out-of-range network indices |
 | `phase2_test.sh`, `phase2_bench.sh` | phase 2 correctness and benchmark (olmoe) |
 | `phase2_glm_test.sh`, `phase2_inkling_test.sh`, `phase2_kimi_test.sh`, `phase2_deepseek_test.sh` | phase 2 byte identity, one per engine |
@@ -583,7 +603,7 @@ rather than failing the build for everyone who only wants GLM.
 | `phase4_test.sh` | SSD cache, tracker discovery, delegate & fall back |
 | `phase5_test.sh` | integrity: lying peers caught, poison stripped |
 | `sign_test.sh` | sha512/ed25519 vs RFC 8032 and OpenSSL, signed swarm |
-| `security_test.sh` | path escape from a hostile peer, tracker, or slice assignment |
+| `security_test.sh` | path escape, hostile frame lengths, and bounded idle connections |
 | `assign_test.sh` | three uncoordinated compute donors split the experts by themselves |
 | `concurrency_test.sh` | N chatters at once: does anyone get starved |
 | `chat_proto_test.sh` | both engine dialects, and a dying engine that explains itself |
@@ -622,14 +642,14 @@ engine binaries.
 
 ## Status
 
-Working prototype, deployable. Open swarms verify bytes (sha256 per MiB,
-signed by the operator's ed25519 key, checked by the chatter against a key
-it holds itself) and results (spot-check on a second replica); private
+Working prototype, deployable. Open swarms verify bytes (sha256 per MiB and
+a signed complete-model root, checked by the chatter against a key it holds
+itself) and results (spot-check on a second replica); private
 swarms need an invite token everywhere. Not yet done, in order of
 importance: speculative drafting with batch-union (the remaining multiplier
-against WAN latency), hedged requests against stragglers, continuous peer
-discovery mid-generation, a durable content-addressed mirror, key rotation
-and revocation, NAT hole punching. Expert
+against WAN latency), hedged requests against stragglers, a content-addressed
+mirror shared across checkpoints, key rotation and revocation, NAT hole
+punching. Expert
 execution is not yet covered by the operator signature — a peer's results
 are checked by replica agreement, not by a key.
 

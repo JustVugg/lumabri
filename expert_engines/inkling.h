@@ -22,11 +22,14 @@
 #include "inkling.c"
 #undef main
 
+#define LMBE_NEEDS_HOT_OMP_REEXEC 1
+
 typedef Slot LmbeSlot;
 
 static Model lmbe_M;
 
 static const char *lmbe_engine_name(void) { return "inkling"; }
+static int lmbe_effective_bits(int bits) { return bits; }
 
 static void lmbe_open(const char *dir, int cap, int bits) {
     (void)cap;
