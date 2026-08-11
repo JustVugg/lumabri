@@ -43,6 +43,7 @@ typedef struct {
     int nsocks;
     long rtt_us;
     int dead;
+    double retry_at;          /* do not redial a relay-only/NAT address per layer */
 } LumiPeer;
 
 static struct {
@@ -50,15 +51,18 @@ static struct {
     LumiPeer peers[LUMI_MAX_PEERS];
     int npeers;
     int *own;                   /* [gid * LUMI_MAX_REP] → peer index, -1 = free */
+    unsigned char *relay;       /* tracker tunnel covers this (slot,expert) */
     unsigned char *routed;      /* [n_layers] 1 = this slot routes to experts */
     int n_layers, n_experts, hidden;
     int expected, expected_bits;
     char expected_model[64], profile[LMB_BUILD_PROFILE_MAX];
     LmbModelIdentity identity; int have_identity;
-    uint8_t pubkey[32]; int have_pubkey;
+    LmbTrustKeys trust;
     double next_discover, discover_period_s;
     int verify_pct;             /* LUMABRI_VERIFY: % of calls double-checked */
-    unsigned long long calls, layers_done, failovers, verified;
+    int hedge_ms;               /* 0 disables; base policy, fixed delay */
+    unsigned long long calls, layers_done, failovers, verified, relays;
+    unsigned long long hedges, hedge_wins, batch_calls, batch_rows;
     double wait_s;
 } L = {0};
 
@@ -121,21 +125,18 @@ static int lumi_index_ok(uint32_t layer, uint32_t eid) {
 static void lumi_load_pubkey(void) {
     const char *spec = getenv("LUMABRI_PUBKEY");
     if (!spec || !*spec) return;
-    char hex[80] = "";
-    FILE *fp = fopen(spec, "r");
-    if (fp) { if (fscanf(fp, "%78s", hex) != 1) hex[0] = 0; fclose(fp); }
-    else snprintf(hex, sizeof hex, "%s", spec);
-    if (strlen(hex) == 64 && !lmb_unhex(L.pubkey, hex, 32)) L.have_pubkey = 1;
-    else fprintf(stderr, "[lumabri] invalid LUMABRI_PUBKEY: expert execution stays local\n");
+    if (lmb_trust_load_spec(&L.trust, spec))
+        fprintf(stderr, "[lumabri] invalid LUMABRI_PUBKEY/keyring: "
+                        "expert execution stays local\n");
 }
 
 static int lumi_identity_valid(const char *model, const LmbModelIdentity *id) {
     if (strcmp(model, id->model)) return 0;
-    if (!L.have_pubkey) return 1;
+    if (!L.trust.n) return 1;
     if (!id->has_sig) return 0;
     size_t n = 0;
     uint8_t *msg = lmb_model_id_msg(model, id->root, &n);
-    int ok = msg && lmb_sign_verify(id->sig, msg, n, L.pubkey) == 0;
+    int ok = msg && lmb_trust_verify(&L.trust, id->sig, msg, n) == 0;
     free(msg);
     return ok;
 }
@@ -163,6 +164,7 @@ static int lumi_add_peer(const char *addr) {
         if (!strcmp(L.peers[i].addr, addr)) {
             LumiPeer *known = &L.peers[i];
             if (!known->dead) return 0;
+            if (lumi_now() < known->retry_at) return -1;
             while (known->nsocks) close(known->socks[--known->nsocks]);
             reprobe = i;
             break;
@@ -177,6 +179,8 @@ static int lumi_add_peer(const char *addr) {
     if (lmb_request(p->addr, LMB_EMANIFEST, NULL, 0, &m) || m.op != LMB_EMANIFEST_R) {
         fprintf(stderr, "[lumabri] no expert manifest from %s — skipped\n", p->addr);
         lmb_msg_free(&m);
+        p->dead = 1; p->retry_at = lumi_now() + 30.0;
+        if (reprobe < 0) L.npeers++;       /* remember NAT-only addresses */
         return -1;
     }
     LmbCur c = { m.body, m.body_len, 0 };
@@ -201,7 +205,7 @@ static int lumi_add_peer(const char *addr) {
     if (!bad && (strcmp(engine, LMBE_ENGINE_ID) || strcmp(profile, L.profile) ||
                  bits != (uint32_t)L.expected_bits ||
                  (L.expected_model[0] && strcmp(peer_model, L.expected_model)) ||
-                 ((L.have_identity || L.have_pubkey) && !have_id) ||
+                 ((L.have_identity || L.trust.n) && !have_id) ||
                  (have_id && !lumi_identity_valid(peer_model, &peer_id)) ||
                  (L.have_identity && memcmp(L.identity.root, peer_id.root, 32)))) {
         bad = 1;
@@ -247,6 +251,7 @@ static int lumi_add_peer(const char *addr) {
     free(seen);
     lmb_msg_free(&m);
     p->dead = 0;
+    p->retry_at = 0;
     lumi_probe(p);
     if (p->rtt_us == LONG_MAX) {
         if (reprobe < 0)
@@ -285,13 +290,49 @@ static int lumi_discover(void) {
     return added;
 }
 
+/* Relay-only nodes cannot be queried at their advertised address, so the
+ * tracker returns the union of holder bitmaps whose engine/build/shape
+ * metadata exactly matches this chatter. */
+static int lumi_relay_coverage(void) {
+    const char *tracker = getenv("LUMABRI_TRACKER");
+    if (!tracker || !*tracker || !L.expected_model[0]) return 0;
+    LmbBuf b = {0};
+    lmb_buf_str(&b, L.expected_model);
+    lmb_buf_str(&b, LMBE_ENGINE_ID);
+    lmb_buf_str(&b, L.profile);
+    lmb_buf_u32(&b, (uint32_t)L.expected_bits);
+    lmb_buf_u32(&b, (uint32_t)L.hidden);
+    lmb_buf_u32(&b, (uint32_t)L.n_layers);
+    lmb_buf_u32(&b, (uint32_t)L.n_experts);
+    LmbMsg m = {0};
+    int rc = lmb_request(tracker, LMB_ECOVER, b.p, (uint32_t)b.len, &m);
+    free(b.p);
+    if (rc || m.op != LMB_ECOVER_R) { lmb_msg_free(&m); return 0; }
+    LmbCur c = { m.body, m.body_len, 0 };
+    uint32_t slots = 0, nexp = 0, nb = 0;
+    size_t cells = (size_t)L.n_layers * L.n_experts;
+    int bad = lmb_cur_u32(&c, &slots) || lmb_cur_u32(&c, &nexp) ||
+              lmb_cur_u32(&c, &nb) || slots != (uint32_t)L.n_layers ||
+              nexp != (uint32_t)L.n_experts || nb != (cells + 7) / 8 ||
+              c.off + nb != c.len;
+    if (!bad) {
+        if (!L.relay) L.relay = (unsigned char *)calloc(cells ? cells : 1, 1);
+        if (!L.relay) bad = 1;
+        else for (size_t gid = 0; gid < cells; gid++)
+            L.relay[gid] = (c.p[c.off + (gid >> 3)] >> (gid & 7)) & 1;
+    }
+    lmb_msg_free(&m);
+    return bad ? 0 : 1;
+}
+
 static int lumi_missing_experts(void) {
     int missing = 0, expected = 0;
     for (int l = 0; l < L.n_layers; l++) {
         if (L.routed && !L.routed[l]) continue;
         for (int e = 0; e < L.n_experts; e++) {
             expected++;
-            if (L.own[((size_t)l * L.n_experts + e) * LUMI_MAX_REP] < 0) missing++;
+            size_t gid = (size_t)l * L.n_experts + e;
+            if (L.own[gid * LUMI_MAX_REP] < 0 && (!L.relay || !L.relay[gid])) missing++;
         }
     }
     L.expected = expected;
@@ -307,10 +348,12 @@ static void lumi_enable_if_complete(void) {
      * here on the experts run on peers, and a readahead past a dense block
      * would pull adjacent expert weights the chatter will never execute. */
     setenv("LUMABRI_REMOTE_EXPERTS", "1", 1);
+    int direct = 0;
+    for (int i = 0; i < L.npeers; i++) if (!L.peers[i].dead) direct++;
     fprintf(stderr, "[lumabri] phase 2 active: every expert runs on a peer, "
-                    "%d peer(s), %d experts, hidden=%d, nearest replica "
+                    "%d direct peer(s), %d experts, hidden=%d, nearest replica "
                     "preferred%s\n",
-            L.npeers, L.expected, L.hidden,
+            direct, L.expected, L.hidden,
             L.verify_pct ? " · spot-check verification on" : "");
 }
 
@@ -321,6 +364,7 @@ static void lumi_maybe_discover(void) {
     L.next_discover = now + L.discover_period_s;
     if (!L.have_identity) lumi_refresh_identity();
     int added = lumi_discover();
+    lumi_relay_coverage();
     if (added)
         fprintf(stderr, "[lumabri] discovered %d new expert peer(s) mid-generation\n",
                 added);
@@ -359,7 +403,7 @@ static void lumi_init_ex(int n_layers, int n_experts, int hidden,
     const char *model = getenv("LUMABRI_MODEL");
     if (model) snprintf(L.expected_model, sizeof L.expected_model, "%s", model);
     lumi_load_pubkey();
-    if (getenv("LUMABRI_PUBKEY") && !L.have_pubkey) return;
+    if (getenv("LUMABRI_PUBKEY") && !L.trust.n) return;
     if (tracker && tracker[0] && L.expected_model[0]) lumi_refresh_identity();
     size_t cells = (size_t)n_layers * n_experts * LUMI_MAX_REP;
     L.own = (int *)malloc(cells * sizeof(int));
@@ -376,13 +420,17 @@ static void lumi_init_ex(int n_layers, int n_experts, int hidden,
         if (L.verify_pct < 0) L.verify_pct = 0;
         if (L.verify_pct > 100) L.verify_pct = 100;
     }
+    L.hedge_ms = lmb_env_int("LUMABRI_HEDGE_MS", 0, 0, 60000);
     L.initialized = 1;
 
     if (discovery) {
         int found = lumi_discover();
+        int relay = lumi_relay_coverage();
         if (!found) {
-            fprintf(stderr, "[lumabri] no expert peers on the swarm — "
-                            "running experts locally\n");
+            fprintf(stderr, relay ? "[lumabri] no directly reachable expert peers; "
+                                    "checking tracker relay coverage\n"
+                                  : "[lumabri] no expert peers on the swarm — "
+                                    "running experts locally\n");
         } else
             fprintf(stderr, "[lumabri] discovered %d expert peer(s) from the tracker\n",
                     found);
@@ -465,6 +513,103 @@ static int lumi_send_exec(int fd, int layer, int eid, const float *x, int D, int
     return rc;
 }
 
+/* Fixed-delay hedging, intentionally a mechanism rather than an SLA policy.
+ * If the nearest replica has not produced a readable reply after
+ * LUMABRI_HEDGE_MS, issue the identical deterministic call to the next one
+ * and accept the first valid result. The losing socket is closed so its late
+ * frame can never be mistaken for a future request. */
+static float *lumi_finish_exec(int layer, int eid, const float *x, int D, int nr,
+                               const float *w, int primary_fd, LumiPeer *primary,
+                               uint32_t *tried, LumiPeer **from) {
+    if (from) *from = NULL;
+    if (primary_fd < 0 || !primary) return NULL;
+    int fd[2] = { primary_fd, -1 };
+    LumiPeer *p[2] = { primary, NULL };
+    uint32_t want = (uint32_t)((size_t)nr * D * sizeof(float));
+    if (L.hedge_ms > 0) {
+        struct pollfd one = { fd[0], POLLIN, 0 };
+        int pr;
+        do pr = poll(&one, 1, L.hedge_ms); while (pr < 0 && errno == EINTR);
+        if (pr == 0) {
+            int gid = layer * L.n_experts + eid;
+            int r = lumi_pick(gid, *tried);
+            if (r >= 0) {
+                *tried |= 1u << r;
+                p[1] = &L.peers[L.own[(size_t)gid * LUMI_MAX_REP + r]];
+                fd[1] = lumi_take_sock(p[1]);
+                if (fd[1] >= 0 && lumi_send_exec(fd[1], layer, eid, x, D, nr, w)) {
+                    close(fd[1]); p[1]->dead = 1; fd[1] = -1;
+                }
+                if (fd[1] >= 0) L.hedges++;
+            }
+        }
+    }
+    int alive = 1 + (fd[1] >= 0);
+    while (alive) {
+        struct pollfd pf[2]; int map[2], np = 0;
+        for (int i = 0; i < 2; i++) if (fd[i] >= 0) {
+            pf[np].fd = fd[i]; pf[np].events = POLLIN; pf[np].revents = 0;
+            map[np++] = i;
+        }
+        int pr;
+        do pr = poll(pf, np, LMB_DEFAULT_IO_TIMEOUT_MS); while (pr < 0 && errno == EINTR);
+        if (pr <= 0) break;
+        for (int q = 0; q < np; q++) if (pf[q].revents) {
+            int i = map[q];
+            LmbMsg m = {0};
+            if (lmb_recv(fd[i], &m) == 0 && m.op == LMB_EXEC_R && m.pay_len == want) {
+                float *res = (float *)m.pay; m.pay = NULL; lmb_msg_free(&m);
+                lumi_put_sock(p[i], fd[i]); fd[i] = -1;
+                if (i == 1) L.hedge_wins++;
+                for (int j = 0; j < 2; j++) if (fd[j] >= 0) close(fd[j]);
+                if (from) *from = p[i];
+                return res;
+            }
+            lmb_msg_free(&m);
+            close(fd[i]); fd[i] = -1; p[i]->dead = 1; alive--;
+        }
+    }
+    for (int i = 0; i < 2; i++) if (fd[i] >= 0) {
+        close(fd[i]); p[i]->dead = 1;
+    }
+    return NULL;
+}
+
+static float *lumi_exec_relay(int layer, int eid, const float *x, int D, int nr,
+                              const float *w) {
+    const char *tracker = getenv("LUMABRI_TRACKER");
+    size_t gid = (size_t)layer * L.n_experts + eid;
+    if (!tracker || !*tracker || !L.discovery || !L.relay || !L.relay[gid]) return NULL;
+    LmbBuf b = {0};
+    lmb_buf_str(&b, L.expected_model);
+    lmb_buf_u32(&b, (uint32_t)L.n_experts);
+    lmb_buf_u32(&b, (uint32_t)layer);
+    lmb_buf_u32(&b, (uint32_t)eid);
+    lmb_buf_u32(&b, (uint32_t)D);
+    lmb_buf_u32(&b, (uint32_t)nr);
+    if (w) lmb_buf_bytes(&b, w, (size_t)nr * sizeof(float));
+    LmbMsg m = {0};
+    if (getenv("LUMABRI_RELAY_TRACE"))
+        fprintf(stderr, "[lumabri] relay request layer=%d expert=%d rows=%d\n",
+                layer, eid, nr);
+    int rc = lmb_request_pay(tracker, LMB_REXEC, b.p, (uint32_t)b.len,
+                             x, (uint32_t)((size_t)nr * D * sizeof(float)), &m);
+    free(b.p);
+    uint32_t want = (uint32_t)((size_t)nr * D * sizeof(float));
+    float *out = NULL;
+    if (!rc && m.op == LMB_REXEC_R && m.pay_len == want) {
+        out = (float *)m.pay; m.pay = NULL; L.relays++;
+    } else if (!rc && m.op == LMB_ERR) {
+        char why[160] = "relay refused the call";
+        LmbCur c = { m.body, m.body_len, 0 };
+        lmb_cur_str(&c, why, sizeof why);
+        fprintf(stderr, "[lumabri] tracker EXEC relay unavailable for layer %d "
+                        "expert %d: %s\n", layer, eid, why);
+    }
+    lmb_msg_free(&m);
+    return out;
+}
+
 /* the failover path: run one expert synchronously on the next replicas.
  * Costs a full extra round trip — it is the price of a peer dying, paid
  * once, instead of the generation dying with it. */
@@ -476,6 +621,8 @@ static float *lumi_exec_retry(int layer, int eid, const float *x, int D, int nr,
     for (;;) {
         int r = lumi_pick(gid, tried);
         if (r < 0) {
+            float *relayed = lumi_exec_relay(layer, eid, x, D, nr, w);
+            if (relayed) return relayed;
             /* Every known replica is gone. Giving up here is correct in the
              * sense that inventing a result is never allowed — but it threw
              * away a whole generation for a peer that was rebooting, or a
@@ -491,7 +638,7 @@ static float *lumi_exec_retry(int layer, int eid, const float *x, int D, int nr,
                 tried = 0;                    /* a returning peer deserves a retry */
                 sleep(2);
                 waited += 2;
-                if (L.discovery) lumi_discover();
+                if (L.discovery) { lumi_discover(); lumi_relay_coverage(); }
                 else for (int i = 0; i < L.npeers; i++)
                     if (L.peers[i].dead) {
                         char addr[64];
@@ -599,23 +746,17 @@ static void lumi_moe_apply(int layer, const int *idx, const float *val, int K,
     static unsigned vseed = 0x9e3779b9u;
     for (int k = 0; k < K; k++) {
         if (fds[k] >= 0) {
-            LmbMsg m = {0};
-            if (lmb_recv(fds[k], &m) == 0 && m.op == LMB_EXEC_R &&
-                m.pay_len == (uint32_t)(D * sizeof(float))) {
-                res[k] = (float *)m.pay;
-                m.pay = NULL;
-                lmb_msg_free(&m);
-                lumi_put_sock(ps[k], fds[k]);
+            LumiPeer *winner = NULL;
+            res[k] = lumi_finish_exec(layer, idx[k], x, D, 1, NULL,
+                                      fds[k], ps[k], &tried[k], &winner);
+            if (res[k]) {
                 if (L.verify_pct) {
                     vseed = vseed * 1664525u + 1013904223u;
                     if ((int)(vseed % 100u) < L.verify_pct)
-                        lumi_spot_check(layer, idx[k], x, D, 1, NULL, res[k], ps[k], tried[k]);
+                        lumi_spot_check(layer, idx[k], x, D, 1, NULL, res[k], winner, tried[k]);
                 }
                 continue;
             }
-            close(fds[k]);
-            ps[k]->dead = 1;
-            lmb_msg_free(&m);
             fprintf(stderr, "[lumabri] peer %s failed on layer %d expert %d — "
                             "trying next replica\n", ps[k]->addr, layer, idx[k]);
         }
@@ -712,29 +853,24 @@ static void lumi_moe_apply_batch(int layer, const int *idxs, const float *ws,
         }
         for (int j = 0; j < nb; j++) {
             int eid = uniq[base + j], nr = nrs[j];
-            uint32_t want = (uint32_t)((size_t)nr * D * sizeof(float));
             float *res = NULL, *xj = xg + (size_t)j * S * D;
             if (fds[j] >= 0) {
-                LmbMsg m = {0};
-                if (lmb_recv(fds[j], &m) == 0 && m.op == LMB_EXEC_R && m.pay_len == want) {
-                    res = (float *)m.pay;
-                    m.pay = NULL;
-                    lmb_msg_free(&m);
-                    lumi_put_sock(ps[j], fds[j]);
+                LumiPeer *winner = NULL;
+                res = lumi_finish_exec(layer, eid, xj, D, nr, NULL,
+                                       fds[j], ps[j], &tried[j], &winner);
+                if (res) {
                     if (L.verify_pct) {
                         vseed = vseed * 1664525u + 1013904223u;
                         if ((int)(vseed % 100u) < L.verify_pct)
-                            lumi_spot_check(layer, eid, xj, D, nr, NULL, res, ps[j], tried[j]);
+                            lumi_spot_check(layer, eid, xj, D, nr, NULL, res, winner, tried[j]);
                     }
                 } else {
-                    close(fds[j]);
-                    ps[j]->dead = 1;
-                    lmb_msg_free(&m);
                     fprintf(stderr, "[lumabri] peer %s failed on layer %d expert %d — "
                                     "trying next replica\n", ps[j]->addr, layer, eid);
                 }
             }
             if (!res) res = lumi_exec_retry(layer, eid, xj, D, nr, NULL, tried[j]);
+            if (nr > 1) { L.batch_calls++; L.batch_rows += (unsigned long long)nr; }
             int *rj = rows + (size_t)j * S;
             float *wj = rw + (size_t)j * S;
             for (int r = 0; r < nr; r++) {
@@ -799,29 +935,24 @@ static void lumi_moe_apply_union(int layer, int nu, const int *uid,
         }
         for (int j = 0; j < nb; j++) {
             int eid = uid[base + j], nr = pcnt[base + j], f = pfirst[base + j];
-            uint32_t want = (uint32_t)((size_t)nr * D * sizeof(float));
             float *res = NULL, *xj = xg + (size_t)j * maxrows * D;
             if (fds[j] >= 0) {
-                LmbMsg m = {0};
-                if (lmb_recv(fds[j], &m) == 0 && m.op == LMB_EXEC_R && m.pay_len == want) {
-                    res = (float *)m.pay;
-                    m.pay = NULL;
-                    lmb_msg_free(&m);
-                    lumi_put_sock(ps[j], fds[j]);
+                LumiPeer *winner = NULL;
+                res = lumi_finish_exec(layer, eid, xj, D, nr, NULL,
+                                       fds[j], ps[j], &tried[j], &winner);
+                if (res) {
                     if (L.verify_pct) {
                         vseed = vseed * 1664525u + 1013904223u;
                         if ((int)(vseed % 100u) < L.verify_pct)
-                            lumi_spot_check(layer, eid, xj, D, nr, NULL, res, ps[j], tried[j]);
+                            lumi_spot_check(layer, eid, xj, D, nr, NULL, res, winner, tried[j]);
                     }
                 } else {
-                    close(fds[j]);
-                    ps[j]->dead = 1;
-                    lmb_msg_free(&m);
                     fprintf(stderr, "[lumabri] peer %s failed on layer %d expert %d — "
                                     "trying next replica\n", ps[j]->addr, layer, eid);
                 }
             }
             if (!res) res = lumi_exec_retry(layer, eid, xj, D, nr, NULL, tried[j]);
+            if (nr > 1) { L.batch_calls++; L.batch_rows += (unsigned long long)nr; }
             for (int r = 0; r < nr; r++) {
                 float *us = U + (int64_t)poslist[f + r] * D, w = wlist[f + r];
                 const float *hr = res + (size_t)r * D;
@@ -912,31 +1043,26 @@ static void lumi_moe_apply_v4(int layer, const int *indices, const float *weight
         }
         for (int j = 0; j < nb; j++) {
             int eid = uid[base + j], nr = nrs[j];
-            uint32_t want = (uint32_t)((size_t)nr * D * sizeof(float));
             float *res = NULL, *xj = xg + (size_t)j * batch * D;
             float *wj = rw + (size_t)j * batch;
             int *rj = rows + (size_t)j * batch;
             if (fds[j] >= 0) {
-                LmbMsg m = {0};
-                if (lmb_recv(fds[j], &m) == 0 && m.op == LMB_EXEC_R && m.pay_len == want) {
-                    res = (float *)m.pay;
-                    m.pay = NULL;
-                    lmb_msg_free(&m);
-                    lumi_put_sock(ps[j], fds[j]);
+                LumiPeer *winner = NULL;
+                res = lumi_finish_exec(layer, eid, xj, D, nr, wj,
+                                       fds[j], ps[j], &tried[j], &winner);
+                if (res) {
                     if (L.verify_pct) {
                         vseed = vseed * 1664525u + 1013904223u;
                         if ((int)(vseed % 100u) < L.verify_pct)
-                            lumi_spot_check(layer, eid, xj, D, nr, wj, res, ps[j], tried[j]);
+                            lumi_spot_check(layer, eid, xj, D, nr, wj, res, winner, tried[j]);
                     }
                 } else {
-                    close(fds[j]);
-                    ps[j]->dead = 1;
-                    lmb_msg_free(&m);
                     fprintf(stderr, "[lumabri] peer %s failed on layer %d expert %d — "
                                     "trying next replica\n", ps[j]->addr, layer, eid);
                 }
             }
             if (!res) res = lumi_exec_retry(layer, eid, xj, D, nr, wj, tried[j]);
+            if (nr > 1) { L.batch_calls++; L.batch_rows += (unsigned long long)nr; }
             for (int r = 0; r < nr; r++) {       /* already weighted by the peer */
                 float *os = out + (size_t)rj[r] * D;
                 const float *hr = res + (size_t)r * D;
@@ -955,10 +1081,13 @@ static void lumi_report(void) {
     if (!L.on) return;
     fprintf(stderr, "[lumabri] %llu remote expert calls in %llu layer rounds · "
                     "%.2fs waiting on peers (%.2f ms per layer round) · "
-                    "%llu failover(s) · %llu spot-check(s), all agreed\n",
+                    "%llu batched call(s)/%llu rows · %llu hedge(s), %llu won · "
+                    "%llu failover(s) · %llu tracker relay call(s) · "
+                    "%llu spot-check(s), all agreed\n",
             L.calls, L.layers_done, L.wait_s,
             L.layers_done ? 1000.0 * L.wait_s / (double)L.layers_done : 0.0,
-            L.failovers, L.verified);
+            L.batch_calls, L.batch_rows, L.hedges, L.hedge_wins,
+            L.failovers, L.relays, L.verified);
 }
 
 #endif /* LUMABRI_CLIENT_H */

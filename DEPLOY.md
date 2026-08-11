@@ -159,6 +159,26 @@ it, put it in the README of your swarm, read it over the phone:
 cat swarm.pub
 ```
 
+### Manual key rotation
+
+Create the replacement key, then distribute a trust file containing the old
+and new public keys, one per line:
+
+```sh
+lumabri key --out swarm-next
+cat swarm.pub swarm-next.pub > swarm-trust.pub
+```
+
+Point tracker/maintainers at `--pubkey swarm-trust.pub` and clients at
+`LUMABRI_PUBKEY=/path/to/swarm-trust.pub` before signing anything with
+`swarm-next.key`. Once every verifier has the overlap trust file, switch the
+origin to the new secret and restart it. After the new signatures have been
+observed and old clients are gone, remove the old line. A comma-separated pair
+also works. Keep the newest key last: valid signatures from later keys replace
+earlier ones at the tracker, never the reverse. Restart long-running verifiers
+after changing the trust file. This is manual rotation and manual revocation; KMS/HSM policy and
+audit are outside the dependency-free core.
+
 ---
 
 ## 4. The model
@@ -220,15 +240,16 @@ systemctl enable --now lumabri
 journalctl -u lumabri -f
 ```
 
-**`--advertise` is what makes the swarm reachable from anywhere else.** The
+**`--advertise` is what gives the swarm its fastest direct path.** The
 peers register with the tracker under the address they are told to publish,
 and without it they publish `127.0.0.1` — which is correct for this machine
 and useless for everyone. The tracker cannot fix it either: it rewrites a
 localhost registration only when it arrives from off-machine, and these
 arrive over loopback. A remote chatter then gets `127.0.0.1`, cannot connect,
-falls back to the relay for bytes, and phase 2 never starts at all because
-expert execution has no relay. It looks like a slow swarm rather than a
-misconfigured one. `serve` warns loudly when the flag is missing.
+and falls back to the outbound heartbeat tunnel for both bytes and expert
+execution. That is correct behind symmetric NAT, but it adds a second network
+leg and tracker load. `serve` still warns because direct P2P should be used
+whenever an inbound address is available.
 
 You should see, in order: the maintainer announcing how much it holds, the
 line `ORIGIN: signed the truth of N files with <pubkey>`, the executor
@@ -288,6 +309,12 @@ unsigned. Without it the client still works, but it is trusting the server.
 The first answer is slow while the dense weights cross the network; after
 that `~/.lumabri` serves them locally and the swarm is only touched for
 experts. `/swarm` shows the network, `/model` switches model.
+
+Verified chunks are shared across models in `~/.lumabri/cas`; override it
+with `LUMABRI_CAS=/fast/local/path`. To enable the basic straggler hedge, set
+for example `LUMABRI_HEDGE_MS=40`. Keep it disabled (`0`, the default) until
+there are at least two replicas per expert, otherwise there is nowhere to
+hedge. Prefill and speculative target verification are batched automatically.
 
 The boot narrates itself, so you can see where the time goes:
 

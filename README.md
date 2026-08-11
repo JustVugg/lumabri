@@ -66,7 +66,10 @@ model directory (`open`, `fopen`, `opendir`, `pread`). Files appear as sparse
 local mirrors of the true size, so `fstat`, `readdir` and the page cache work
 natively. A missing block is fetched from a peer, written to the mirror, and
 then the engine's own `pread` proceeds. A warm read is a table lookup plus a
-normal local read: no FUSE, no daemon on the read path.
+normal local read: no FUSE, no daemon on the read path. Every verified MiB is
+also stored by sha256 in a local content-addressed store. The default CLI path,
+`~/.lumabri/cas`, is shared by every checkpoint, so equal chunks are downloaded
+once and can rebuild a different sparse mirror without a byte server.
 
 **One rule, inherited from colibri:** the network may change where bytes come
 from, never which bytes. Writing a model file returns `EROFS`. A block no peer
@@ -91,6 +94,14 @@ lying peer has its bytes rejected and refetched elsewhere. Remote compute is
 checked the only way it can be: `LUMABRI_VERIFY=N` reruns N percent of expert
 calls on a second replica and demands identical output. Two honest peers cannot
 disagree, so a disagreement is proof of a lie and the run stops.
+
+Prefill and target verification already arrive at the MoE as multiple rows.
+lumabri keeps that union intact and sends one multi-row EXEC per selected
+expert, including speculative-draft verification; it never serializes a batch
+into row-sized requests. `LUMABRI_HEDGE_MS=N` optionally sends a duplicate to
+the next replica when the nearest has not replied after N milliseconds and
+uses the first valid deterministic result. The fixed delay is deliberately the
+public mechanism, not an automatic SLA policy.
 
 ## Engines
 
@@ -130,8 +141,11 @@ sudo make install                                    # or PREFIX=$HOME/.local
 ```
 
 On the server, `lumabri serve --model /srv/model` opens TCP 7300 to 7302
-(tracker, maintainer, executor). Add `--advertise <public-ip>` so peers publish
-an address other machines can reach, and `--key swarm.key` to sign the model.
+(tracker, maintainer, executor). Add `--advertise <public-ip>` for the fastest
+direct path, and `--key swarm.key` to sign the model. If a byte or compute donor
+cannot accept inbound traffic, its outbound heartbeat doubles as a tracker
+relay. Direct P2P remains preferred; symmetric NAT no longer excludes it from
+the swarm.
 
 On every other machine, pick a role:
 
@@ -147,6 +161,17 @@ compute donor says only how many experts it can carry (`--hold N`) and the
 tracker gives it the set nobody else covers. Neither needs to know the others
 exist. While a reply is generating you can kill a donor: you get one failover
 line and the tokens continue, identical.
+
+For a manual signing-key rotation, distribute a keyring containing one public
+key per line. `--pubkey keyring` and `LUMABRI_PUBKEY=keyring` accept every key
+in it (up to 16). First deploy `old+new`, then restart the origin signing with
+the new secret, and only after clients and donors have moved remove the old
+line. Put the newest key last: the tracker keeps the valid signature made by
+the highest-priority (latest) key, so old donor heartbeats cannot roll it back.
+Comma-separated public keys are accepted too; the low-level tracker and
+maintainer commands also accept repeated `--pubkey`.
+There is still one signature per object; the overlap belongs to the verifier,
+so the wire format does not change during rotation.
 
 The server also runs an expert node on the whole model, so a fresh swarm works
 on day zero with the server executing everything, and donors that join later win
@@ -166,7 +191,9 @@ validation and prefetch policy. Per-engine expert identity runs with fixtures
 (`make test-engines`), and DeepSeek V4 against a real model
 (`make test-phase2-deepseek MODEL=<dir>`). Assignment, concurrency and signing
 have their own scripts (`assign_test.sh`, `concurrency_test.sh`,
-`sign_test.sh`). Every claim in this README has a script behind it.
+`sign_test.sh`). The newer mechanisms have focused targets:
+`make test-cas test-key-rotation test-hedge test-relay-exec`. Every claim in
+this README has a script behind it.
 
 ## How it compares
 
@@ -188,13 +215,14 @@ binaries.
 ## Status
 
 Working prototype, deployable. Open swarms verify bytes (sha256 per MiB and a
-signed complete-model root, checked by the chatter against its own key) and
-results (spot-check on a second replica). Private swarms add an invite token
-everywhere with `LUMABRI_TOKEN`. Still to come, in order of importance:
-speculative drafting to cut wide-area latency, hedged requests against slow
-peers, a content-addressed mirror shared across checkpoints, and key rotation.
-Expert execution is checked by replica agreement, not yet by the operator
-signature.
+signed complete-model root, checked by the chatter against its own trust set)
+and results (spot-check on a second replica). Private swarms add an invite token
+everywhere with `LUMABRI_TOKEN`. Multi-row speculative verification, fixed-delay
+hedging, a local cross-checkpoint CAS, manual old+new key rotation and NAT relay
+for both READ and EXEC are implemented. Automatic SLA tuning, distributed/S3
+CAS, KMS/HSM integration and automatic revocation are intentionally not part of
+this dependency-free base. Expert execution is checked by replica agreement,
+not by the operator signature.
 
 ## License
 

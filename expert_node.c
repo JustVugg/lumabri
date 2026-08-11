@@ -245,11 +245,11 @@ static void cache_release(CSlot *s) {
  * to be all of them at once: an engine that computes nr rows in one call
  * does not produce the same floats as nr calls of one row, and byte identity
  * with the local path is the entire claim of this project. */
-static int handle_exec(int fd, LmbMsg *m) {
+static int exec_compute(LmbMsg *m, float **outp, uint32_t *out_len) {
     LmbCur cur = { m->body, m->body_len, 0 };
     uint32_t layer, eid, dim, nrows = 1;
     if (lmb_cur_u32(&cur, &layer) || lmb_cur_u32(&cur, &eid) || lmb_cur_u32(&cur, &dim)) {
-        send_err(fd, "bad exec header"); return -1;
+        return -1;
     }
     lmb_cur_u32(&cur, &nrows);            /* absent in the single-row dialect */
     /* The cap is not decoration. The size check below used to be computed in
@@ -259,7 +259,7 @@ static int handle_exec(int fd, LmbMsg *m) {
      * NULL payload. Everything here is 64-bit now, and a real batch is a
      * prompt's worth of rows — thousands, never tens of thousands. */
     if (nrows < 1 || nrows > LMB_MAX_EXEC_ROWS) {
-        send_err(fd, "bad row count"); return -1;
+        return -1;
     }
     /* Router weights follow the header only when the engine needs them
      * applied HERE — DeepSeek V4 folds the weight in before the down
@@ -268,14 +268,14 @@ static int handle_exec(int fd, LmbMsg *m) {
     const float *rw = NULL;
     if (m->body_len == 16 + (uint64_t)nrows * sizeof(float))
         rw = (const float *)(m->body + 16);
-    else if (m->body_len != 16) { send_err(fd, "bad exec body"); return -1; }
+    else if (m->body_len != 16) return -1;
     uint64_t want = (uint64_t)nrows * dim * sizeof(float);
     if (!expert_index_ok(layer, eid) || dim != (uint32_t)g.hidden ||
         want > LMB_MAX_PAY || m->pay_len != want) {
-        send_err(fd, "exec shape mismatch"); return -1;
+        return -1;
     }
     size_t gid = (size_t)layer * (size_t)g.n_experts + eid;
-    if (!g.holds[gid]) { send_err(fd, "expert not held by this node"); return 0; }
+    if (!g.holds[gid]) return -1;
 
     /* How many experts may be multiplied at once. Every connection gets its
      * own thread and every expert call opens a full OpenMP team, so without a
@@ -306,12 +306,48 @@ static int handle_exec(int fd, LmbMsg *m) {
     double dt = nowd() - t0;
     gate_leave();
     maybe_corrupt_out(out);
+    { const char *slow = getenv("LUMABRI_EXEC_DELAY_MS");
+      if (slow && atoi(slow) > 0) usleep((useconds_t)atoi(slow) * 1000u); }
     lmb_emu_delay();   /* the reply's flight time, when one is being emulated */
-    int rc = lmb_send(fd, LMB_EXEC_R, NULL, 0, out, (uint32_t)obytes);
-    free(out);
-
     atomic_fetch_add(&g.calls, 1);
     pthread_mutex_lock(&g.stat_lk); g.busy_s += dt; pthread_mutex_unlock(&g.stat_lk);
+    *outp = out; *out_len = (uint32_t)obytes;
+    return 0;
+}
+
+static int handle_exec(int fd, LmbMsg *m) {
+    float *out = NULL; uint32_t out_len = 0;
+    if (exec_compute(m, &out, &out_len)) {
+        send_err(fd, "bad exec request or expert not held");
+        return -1;
+    }
+    int rc = lmb_send(fd, LMB_EXEC_R, NULL, 0, out, out_len);
+    free(out);
+    return rc;
+}
+
+/* The tracker prepends only its correlation id; the remaining body and pay
+ * are byte-for-byte the ordinary EXEC request, so direct and relayed compute
+ * necessarily enter the same validation and numeric path. */
+static int handle_rexec_fwd(int fd, LmbMsg *m) {
+    if (m->body_len < 4) return -1;
+    uint32_t id = lmb_get32(m->body);
+    if (getenv("LUMABRI_RELAY_TRACE"))
+        fprintf(stderr, "[%s] relay exec id=%u body=%u pay=%u\n",
+                g.name, id, m->body_len - 4, m->pay_len);
+    LmbMsg inner = { .op = LMB_EXEC, .body = m->body + 4,
+                     .body_len = m->body_len - 4,
+                     .pay = m->pay, .pay_len = m->pay_len };
+    float *out = NULL; uint32_t out_len = 0;
+    int ok = exec_compute(&inner, &out, &out_len) == 0;
+    if (getenv("LUMABRI_RELAY_TRACE"))
+        fprintf(stderr, "[%s] relay exec id=%u %s out=%u\n",
+                g.name, id, ok ? "ok" : "refused", out_len);
+    LmbBuf b = {0};
+    lmb_buf_u32(&b, id); lmb_buf_u32(&b, ok ? 1u : 0u);
+    int rc = lmb_send(fd, LMB_REXEC_R, b.p, (uint32_t)b.len,
+                      out, ok ? out_len : 0);
+    free(b.p); free(out);
     return rc;
 }
 
@@ -402,6 +438,35 @@ static void *conn_thread(void *arg) {
 
 /* ---- tracker heartbeat: this is how chatters find us --------------------- */
 
+static int send_ereg(int fd) {
+    LmbBuf b = {0};
+    lmb_buf_str(&b, g.name);
+    lmb_buf_str(&b, g.advertise);
+    lmb_buf_str(&b, g.model);
+    lmb_buf_u32(&b, (uint32_t)g.nholds);
+    size_t cells = (size_t)g.n_slots * g.n_experts;
+    size_t nb = (cells + 7) / 8;
+    uint8_t *bits = (uint8_t *)calloc(nb ? nb : 1, 1);
+    if (!bits) { free(b.p); return -1; }
+    for (size_t k = 0; k < cells; k++)
+        if (g.holds[k]) bits[k >> 3] |= (uint8_t)(1u << (k & 7));
+    lmb_buf_u32(&b, (uint32_t)nb);
+    lmb_buf_bytes(&b, bits, nb);
+    free(bits);
+    /* Metadata lets a chatter validate relay-only coverage without first
+     * reaching the node's advertised inbound address. */
+    lmb_buf_u32(&b, LMB_EXPERT_MANIFEST_MAGIC);
+    lmb_buf_str(&b, lmbe_engine_name());
+    lmb_buf_str(&b, g.profile);
+    lmb_buf_u32(&b, (uint32_t)g.bits);
+    lmb_buf_u32(&b, (uint32_t)g.hidden);
+    lmb_buf_u32(&b, (uint32_t)g.n_slots);
+    lmb_buf_u32(&b, (uint32_t)g.n_experts);
+    int rc = lmb_send(fd, LMB_EREG, b.p, (uint32_t)b.len, NULL, 0);
+    free(b.p);
+    return rc;
+}
+
 static void *control_thread(void *arg) {
     (void)arg;
     int warned = 0;
@@ -419,39 +484,24 @@ static void *control_thread(void *arg) {
         warned = 0;
         struct timeval tv = { HEARTBEAT_S, 0 };
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+        if (send_ereg(fd)) { close(fd); sleep(1); continue; }
         for (;;) {
-            LmbBuf b = {0};
-            lmb_buf_str(&b, g.name);
-            lmb_buf_str(&b, g.advertise);
-            lmb_buf_str(&b, g.model);
-            lmb_buf_u32(&b, (uint32_t)g.nholds);
-            /* WHICH ones, not just how many: the tracker needs it to tell a
-             * newcomer what nobody covers. One bit per cell, 2.4 KB for a
-             * 19456-expert model — cheap enough to resend every heartbeat. */
-            { size_t cells = (size_t)g.n_slots * g.n_experts;
-              size_t nb = (cells + 7) / 8;
-              uint8_t *bits = (uint8_t *)calloc(nb, 1);
-              if (bits) {
-                  for (size_t k = 0; k < cells; k++)
-                      if (g.holds[k]) bits[k >> 3] |= (uint8_t)(1u << (k & 7));
-                  lmb_buf_u32(&b, (uint32_t)nb);
-                  lmb_buf_bytes(&b, bits, nb);
-                  free(bits);
-              } }
-            int rc = lmb_send(fd, LMB_EREG, b.p, (uint32_t)b.len, NULL, 0);
-            free(b.p);
-            if (rc) break;
             LmbMsg m;
             if (lmb_recv(fd, &m) != 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    if (send_ereg(fd)) break;
+                    continue;
+                }
                 break;
             }
+            int rc = 0;
+            if (m.op == LMB_REXEC_FWD) rc = handle_rexec_fwd(fd, &m);
             lmb_msg_free(&m);
+            if (rc) break;
             pthread_mutex_lock(&g.identity_lk);
             int need_identity = !g.have_identity;
             pthread_mutex_unlock(&g.identity_lk);
             if (need_identity) node_refresh_identity();
-            sleep(HEARTBEAT_S);
         }
         close(fd);
         sleep(1);

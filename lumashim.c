@@ -132,15 +132,15 @@ typedef struct {
 static struct {
     int ok;                       /* full init succeeded */
     char vroot[LMB_PATH_MAX]; size_t vroot_len;
-    char data_dir[LMB_PATH_MAX], maps_dir[LMB_PATH_MAX];
+    char data_dir[LMB_PATH_MAX], maps_dir[LMB_PATH_MAX], cas_dir[LMB_PATH_MAX];
     int cache_lock_fd;              /* shared for process lifetime; exclusive on reset */
     int reset_lock_fd;              /* elects one resetter without queuing behind its chat */
     uint32_t block;
     RFile *files; int nfiles;
     RPeer peers[MAX_RPEERS]; int npeers;
-    uint8_t pubkey[32]; int have_pubkey;   /* LUMABRI_PUBKEY, out of band */
+    LmbTrustKeys trust;                    /* old+new keys during rotation */
     RFile *_Atomic fdmap[FD_LIMIT];
-    _Atomic uint64_t net_bytes, net_blocks, warm_reads;
+    _Atomic uint64_t net_bytes, net_blocks, warm_reads, cas_hits, cas_bytes;
     pthread_once_t once;
 } g = { .cache_lock_fd = -1, .reset_lock_fd = -1, .once = PTHREAD_ONCE_INIT };
 
@@ -504,11 +504,11 @@ static int cache_identity_save(const LmbModelIdentity *id) {
 }
 
 static int model_identity_signature_ok(const LmbModelIdentity *id) {
-    if (!g.have_pubkey) return 1;
+    if (!g.trust.n) return 1;
     if (!id->has_sig) return 0;
     size_t n = 0;
     uint8_t *msg = lmb_model_id_msg(id->model, id->root, &n);
-    int ok = msg && lmb_sign_verify(id->sig, msg, n, g.pubkey) == 0;
+    int ok = msg && lmb_trust_verify(&g.trust, id->sig, msg, n) == 0;
     free(msg);
     return ok;
 }
@@ -694,17 +694,20 @@ static void prefetch_after(RFile *f, uint64_t off, uint64_t len) {
 
 static void *stats_thread(void *arg) {
     int period = (int)(intptr_t)arg;
-    uint64_t last_bytes = 0;
+    uint64_t last_bytes = 0, last_cas = 0;
     for (;;) {
         sleep((unsigned)period);
         uint64_t nb = atomic_load(&g.net_bytes);
         uint64_t blk = atomic_load(&g.net_blocks);
         uint64_t warm = atomic_load(&g.warm_reads);
-        if (nb == last_bytes && !warm) continue;
-        fprintf(stderr, "[lumabri] net %.1f MB in %llu blocks (%.1f MB/s) · warm preads %llu\n",
+        uint64_t cb = atomic_load(&g.cas_bytes), ch = atomic_load(&g.cas_hits);
+        if (nb == last_bytes && cb == last_cas && !warm) continue;
+        fprintf(stderr, "[lumabri] net %.1f MB in %llu blocks (%.1f MB/s) · "
+                "CAS %.1f MB in %llu hits · warm preads %llu\n",
                 (double)nb / 1e6, (unsigned long long)blk,
-                (double)(nb - last_bytes) / 1e6 / period, (unsigned long long)warm);
-        last_bytes = nb;
+                (double)(nb - last_bytes) / 1e6 / period, (double)cb / 1e6,
+                (unsigned long long)ch, (unsigned long long)warm);
+        last_bytes = nb; last_cas = cb;
     }
     return NULL;
 }
@@ -720,20 +723,36 @@ static void shim_init_impl(void) {
     }
     snprintf(g.data_dir, sizeof g.data_dir, "%s/data", cache);
     snprintf(g.maps_dir, sizeof g.maps_dir, "%s/maps", cache);
+    const char *cas = getenv("LUMABRI_CAS");
+    snprintf(g.cas_dir, sizeof g.cas_dir, "%s", cas && cas[0] ? cas : "");
+    if (!g.cas_dir[0]) snprintf(g.cas_dir, sizeof g.cas_dir, "%s/cas", cache);
     mkdir_p(g.data_dir);
     mkdir_p(g.maps_dir);
+    mkdir_p(g.cas_dir);
 
-    /* the operator's public key: 32 hex bytes, or a file holding them.
+    /* The operator trust set: one key, a comma list, or a keyring file.
      * This is the only thing a chatter must obtain out of band — with it,
      * nothing else in the swarm needs to be trusted. */
     const char *pkspec = getenv("LUMABRI_PUBKEY");
     if (pkspec && pkspec[0]) {
-        char hex[80] = "";
         FILE *pf = real_fopen(pkspec, "r");
-        if (pf) { if (fscanf(pf, "%78s", hex) != 1) hex[0] = 0; fclose(pf); }
-        else snprintf(hex, sizeof hex, "%s", pkspec);
-        if (strlen(hex) == 64 && !lmb_unhex(g.pubkey, hex, 32)) g.have_pubkey = 1;
-        else fprintf(stderr, "[lumabri] LUMABRI_PUBKEY is not 32 hex bytes — ignored\n");
+        int bad = 0;
+        size_t trust_before = g.trust.n;
+        if (pf) { bad = lmb_trust_load_stream(&g.trust, pf); fclose(pf); }
+        else {
+            char copy[2048];
+            if (strlen(pkspec) >= sizeof copy) bad = -1;
+            else {
+                snprintf(copy, sizeof copy, "%s", pkspec);
+                char *save = NULL;
+                for (char *p = strtok_r(copy, ",", &save); p;
+                     p = strtok_r(NULL, ",", &save))
+                    if (lmb_trust_add_hex(&g.trust, p)) { bad = -1; break; }
+            }
+        }
+        if (bad) g.trust.n = trust_before;
+        if (bad || !g.trust.n)
+            fprintf(stderr, "[lumabri] LUMABRI_PUBKEY is not a valid key/keyring — ignored\n");
     }
 
     long mib = 8;
@@ -792,13 +811,13 @@ static void shim_init_impl(void) {
         cache_lock_release();
         return;
     }
-    if (online_placement && g.have_pubkey && !have_current_id) {
+    if (online_placement && g.trust.n && !have_current_id) {
         fprintf(stderr, "[lumabri] signed swarm has no complete model identity — disabled\n");
         cache_lock_release();
         return;
     }
     int have_saved_id = cache_identity_get(&saved_rec, &saved_id) == 0;
-    if (!online_placement && g.have_pubkey && !have_saved_id) {
+    if (!online_placement && g.trust.n && !have_saved_id) {
         fprintf(stderr, "[lumabri] offline mirror has no verified model identity — disabled\n");
         cache_lock_release();
         return;
@@ -1015,7 +1034,7 @@ static void shim_init_impl(void) {
             g.nfiles, (double)total / 1e9,
             total ? 100.0 * (double)have / (double)total : 0.0,
             g.npeers, g.block >> 20, pf_depth,
-            g.have_pubkey ? " · verifying against the operator key" : "");
+            g.trust.n ? " · verifying against the operator trust set" : "");
     g.ok = 1;
 }
 
@@ -1138,12 +1157,12 @@ static void hashes_ensure(RFile *f) {
                  * rebuild the signed message ourselves and check it against
                  * a key obtained out of band, so a compromised tracker can
                  * withhold the truth but never rewrite it. */
-                if (g.have_pubkey) {
+                if (g.trust.n) {
                     size_t mlen = 0;
                     uint8_t *sm = has_sig
                         ? lmb_truth_msg(tmodel, f->rel, chunk, tsize, m.pay, n, &mlen)
                         : NULL;
-                    if (sm && lmb_sign_verify(sig, sm, mlen, g.pubkey) == 0)
+                    if (sm && lmb_trust_verify(&g.trust, sig, sm, mlen) == 0)
                         signed_ok = 1;
                     free(sm);
                     if (!signed_ok)
@@ -1152,7 +1171,7 @@ static void hashes_ensure(RFile *f) {
                                 has_sig ? "carries a BAD SIGNATURE"
                                         : "is not signed by the operator key");
                 }
-                if (!g.have_pubkey || signed_ok) {
+                if (!g.trust.n || signed_ok) {
                     hash = m.pay; nh = n; m.pay = NULL;
                 }
             }
@@ -1185,6 +1204,83 @@ static int block_verify(RFile *f, uint64_t off, const uint8_t *data, uint32_t le
         if (memcmp(h, f->hash + (size_t)ci * 32, 32)) return -1;
     }
     return 0;
+}
+
+/* ---- local content-addressed store ------------------------------------
+ *
+ * Verified 1 MiB truth chunks are also published under sha256 names.  A
+ * second checkpoint/mirror using the same bytes can assemble its sparse file
+ * locally without downloading them again.  The hash is checked again on
+ * every CAS read: a filename is a hint, never authority.  `lumabri chat`
+ * points LUMABRI_CAS at ~/.lumabri/cas; direct shim users may choose another
+ * local directory, including a fast shared volume.
+ */
+static void cas_path(char *dst, size_t cap, const uint8_t hash[32]) {
+    char hex[65]; lmb_hex(hex, hash, 32);
+    snprintf(dst, cap, "%s/%.2s/%s", g.cas_dir, hex, hex);
+}
+
+static int cas_read_full(int fd, uint8_t *p, uint32_t n) {
+    uint32_t got = 0;
+    while (got < n) {
+        ssize_t r = real_pread(fd, p + got, n - got, (off_t)got);
+        if (r < 0) { if (errno == EINTR) continue; return -1; }
+        if (!r) return -1;
+        got += (uint32_t)r;
+    }
+    return 0;
+}
+
+static uint8_t *cas_load(RFile *f, uint64_t off, uint32_t len) {
+    if (!g.cas_dir[0] || f->hstate != 1 || off % LMB_HASH_CHUNK) return NULL;
+    uint8_t *data = (uint8_t *)malloc(len ? len : 1);
+    if (!data) return NULL;
+    for (uint32_t o = 0; o < len; o += LMB_HASH_CHUNK) {
+        uint32_t ci = (uint32_t)((off + o) / LMB_HASH_CHUNK);
+        uint32_t n = len - o < LMB_HASH_CHUNK ? len - o : LMB_HASH_CHUNK;
+        char path[LMB_PATH_MAX * 2];
+        if (ci >= f->nh) { free(data); return NULL; }
+        cas_path(path, sizeof path, f->hash + (size_t)ci * 32);
+        int fd = real_open(path, O_RDONLY | O_NOFOLLOW);
+        struct stat st;
+        uint8_t got[32];
+        int bad = fd < 0 || fstat(fd, &st) || !S_ISREG(st.st_mode) ||
+                  st.st_size != (off_t)n || cas_read_full(fd, data + o, n);
+        if (fd >= 0) close(fd);
+        if (!bad) { lmb_sha256(data + o, n, got); bad = memcmp(got, f->hash + (size_t)ci * 32, 32); }
+        if (bad) { free(data); return NULL; }
+    }
+    atomic_fetch_add(&g.cas_hits, 1);
+    atomic_fetch_add(&g.cas_bytes, len);
+    return data;
+}
+
+static void cas_publish(RFile *f, uint64_t off, const uint8_t *data, uint32_t len) {
+    if (!g.cas_dir[0] || f->hstate != 1 || off % LMB_HASH_CHUNK) return;
+    for (uint32_t o = 0; o < len; o += LMB_HASH_CHUNK) {
+        uint32_t ci = (uint32_t)((off + o) / LMB_HASH_CHUNK);
+        uint32_t n = len - o < LMB_HASH_CHUNK ? len - o : LMB_HASH_CHUNK;
+        if (ci >= f->nh) return;
+        char path[LMB_PATH_MAX * 2], tmp[LMB_PATH_MAX * 2 + 96];
+        cas_path(path, sizeof path, f->hash + (size_t)ci * 32);
+        if (!access(path, R_OK)) continue;
+        mkdir_parent(path);
+        snprintf(tmp, sizeof tmp, "%s.tmp.%ld.%lu", path, (long)getpid(),
+                 (unsigned long)pthread_self());
+        int fd = real_open(tmp, O_WRONLY | O_CREAT | O_EXCL, 0600);
+        if (fd < 0) continue;
+        uint32_t put = 0;
+        while (put < n) {
+            ssize_t w = write(fd, data + o + put, n - put);
+            if (w < 0) { if (errno == EINTR) continue; break; }
+            put += (uint32_t)w;
+        }
+        int ok = put == n && fsync(fd) == 0;
+        if (ok) fchmod(fd, 0444);
+        close(fd);
+        if (ok && !rename(tmp, path)) fsync_parent_dir(path);
+        else unlink(tmp);
+    }
 }
 
 /* Make one block present in the mirror. 0 on success. */
@@ -1220,11 +1316,14 @@ static int ensure_block(RFile *f, uint32_t blk) {
     uint64_t off = (uint64_t)blk * g.block;
     uint32_t len = (uint32_t)(off + g.block <= f->size ? g.block : f->size - off);
     uint8_t *data = NULL;
+    int from_cas = 0;
     hashes_ensure(f);
     /* a configured public key implies strict mode: the whole point of
      * carrying one is refusing to run on bytes nobody signed */
-    int require = getenv("LUMABRI_REQUIRE_HASH") != NULL || g.have_pubkey;
-    if (require && f->hstate != 1) {
+    int require = getenv("LUMABRI_REQUIRE_HASH") != NULL || g.trust.n;
+    if (f->hstate == 1 && (data = cas_load(f, off, len)) != NULL) {
+        from_cas = 1;
+    } else if (require && f->hstate != 1) {
         fprintf(stderr, "[lumabri] block %u of %s: integrity required but "
                         "unavailable — refusing the fetch\n", blk, f->rel);
     } else if (f->npeers > 0) {
@@ -1268,6 +1367,7 @@ static int ensure_block(RFile *f, uint32_t blk) {
             data = NULL;
         }
     }
+    if (data && !from_cas) cas_publish(f, off, data, len);
     int ok = 0, werr = 0;
     if (data && wfd >= 0) {
         uint32_t put = 0;
@@ -1280,8 +1380,10 @@ static int ensure_block(RFile *f, uint32_t blk) {
          * bit on disk.  Until then the bit exists only in memory, so a crash
          * causes a safe refetch rather than exposing sparse zeros. */
         if (put == len && !werr) ok = 1;
-        atomic_fetch_add(&g.net_bytes, len);
-        atomic_fetch_add(&g.net_blocks, 1);
+        if (!from_cas) {
+            atomic_fetch_add(&g.net_bytes, len);
+            atomic_fetch_add(&g.net_blocks, 1);
+        }
     }
     free(data);
     /* A peer that had the bytes and a disk that could not keep them are two
