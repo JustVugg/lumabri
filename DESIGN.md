@@ -87,6 +87,9 @@ silenzioso da >30 s → escluso dai placement.
 - **Blocchi**: default 8 MiB (`LUMABRI_BLOCK_MIB`). Fetch con dedup
   in-flight (mutex+condvar per file): N thread del motore che toccano lo
   stesso blocco = un solo fetch.
+- **CAS locale**: ogni chunk verificato da 1 MiB viene pubblicato come
+  `sha256` sotto `LUMABRI_CAS`. Il caricamento ricalcola sempre l'hash, poi
+  assembla il mirror sparso. La CLI usa `~/.lumabri/cas`, comune ai modelli.
 - **Peer**: pool di 4 connessioni persistenti per peer; scelta per blocco
   via FNV(rel,blk) % npeers (spreading deterministico); failover sugli
   altri peer del file; socket morto → 1 retry fresco.
@@ -107,11 +110,12 @@ silenzioso da >30 s → escluso dai placement.
 
 ## Limiti noti
 
-- Il relay rende raggiungibili i maintainer dietro NAT, ma l'esecuzione
-  esperti non ha ancora hole punching o relay EXEC.
-- Mancano rotazione e revoca delle chiavi dell'operatore.
-- Il mirror è crash-consistent e legato al checkpoint, ma non è ancora un
-  content-addressed store condiviso tra checkpoint.
+- READ ed EXEC hanno un relay tracker come floor NAT; non c'è ancora hole
+  punching, quindi il fallback paga il doppio tratto e carica il tracker.
+- La rotazione chiavi è manuale con trust set old+new; revoca automatica,
+  KMS/HSM e audit non fanno parte del core.
+- Il CAS è locale. Distribuzione tra server o object storage resta fuori dal
+  core; il nome sha256 non viene mai fidato senza ricalcolarlo.
 - `dup()`/`fork()+exec` sull'fd del modello non tracciati (i motori non li
   usano sugli shard; LD_PRELOAD sopravvive comunque all'exec).
 - fd ≥ 65536 su file del modello → EMFILE (limite tabella).
@@ -160,14 +164,17 @@ metodologia del banco di fase 2):
 
 La lettura: il muro dell'RTT è il muro della *replica più vicina*, non della
 media dello sciame. Con sciami che clusterizzano geograficamente (città,
-campus), il conto 30 ms diventa un conto 2-8 ms — e il resto lo devono fare
-le due leve rimanenti:
+campus), il conto 30 ms diventa un conto 2-8 ms. Le leve successive sono:
 
-4. **Draft speculativo con batch-union** (appunti in fase 2): un round di
-   layer per l'intero draft → ×3-5. Richiede il drafting del motore: lavoro
-   lato colibri, il protocollo qui è pronto (EXEC porta già più righe in
-   linea di principio).
-5. **Predizione degli esperti + cache LRU dei caldi sul chatter**: spedire le
+4. **Draft speculativo con batch-union**: prefill e verifica del target
+   conservano le righe raggruppate dal motore; EXEC porta `nrows` e il peer
+   esegue lo stesso kernel multi-riga. Un draft intero paga un round per
+   esperto/layer, non uno per token. Il drafter resta locale e il target
+   verifica sempre i token proposti.
+5. **Hedging base**: `LUMABRI_HEDGE_MS=N` duplica una chiamata deterministica
+   sulla replica successiva dopo N ms e prende il primo risultato valido. La
+   policy è fissa e opt-in; stima adattiva e SLA non sono nel core.
+6. **Predizione degli esperti + cache LRU dei caldi sul chatter**: spedire le
    chiamate del layer N+1 in anticipo sulla predizione del router, e tenere
    localmente (via il mirror di fase 1) gli esperti più chiamati. Ogni hit è
    un round trip in meno.
@@ -200,9 +207,10 @@ generazione → failover al server, token identici al riferimento locale.
 `make install` porta tutto in PREFIX/bin + PREFIX/lib/lumabri; i binari si
 trovano l'un l'altro via /proc/self/exe.
 
-Aperto, in ordine: batch-union speculativo lato motore, richieste hedged
-contro gli straggler, rotazione/revoca delle chiavi, store content-addressed
-condiviso e relay o hole punching EXEC per esecutori dietro NAT.
+Aperto: predizione degli esperti e cache calda sul chatter, hole punching per
+togliere il tracker dal fallback NAT, e misure su sciami reali multi-host. Il
+core ora include batch-union, hedging fisso, rotazione manuale, CAS locale e
+relay EXEC; policy SLA, CAS distribuito e gestione KMS restano livelli sopra.
 
 ## Fase 5 — sciame aperto e sciame a inviti (2026-08-05)
 
@@ -272,7 +280,8 @@ nostre firme verificano lì, le sue verificano qui). Più lo sciame firmato
 end-to-end: un peer non firmato non entra nell'indice, e un tracker che
 inventa la verità viene beccato dalla chiave del chatter.
 
-Restano scoperti: rotazione e revoca delle chiavi, e soprattutto
+Restano scoperti: revoca automatica delle chiavi (la rotazione manuale usa un
+trust set old+new), e soprattutto
 l'**esecuzione** degli esperti, che oggi è garantita dall'accordo tra
 repliche (fase 5) e non da una firma — un peer non può firmare un calcolo
 che dipende dall'input, servirebbe attestazione o prova, ed è un problema

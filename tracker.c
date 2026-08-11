@@ -34,6 +34,8 @@ typedef struct { char path[LMB_PATH_MAX]; uint64_t size; } PFile;
 
 typedef struct {
     char name[64], addr[64], model[64];
+    char engine[64], profile[LMB_BUILD_PROFILE_MAX];
+    uint32_t bits, hidden, slots, total_experts;
     uint64_t held_bytes, served_bytes, served_reads;
     PFile *files; uint32_t nfiles;
     double ts;
@@ -55,9 +57,11 @@ typedef struct {
     pthread_mutex_t rq_lk;
     pthread_cond_t rq_cv;
     int rq_busy, rq_sent, rq_done, rq_ok;
-    uint32_t rq_id, rq_next;
+    uint32_t rq_id, rq_next, rq_op;
     char rq_path[LMB_PATH_MAX];
     uint64_t rq_off; uint32_t rq_len;
+    uint8_t *rq_body; uint32_t rq_body_len;
+    uint8_t *rq_pay; uint32_t rq_pay_len;
     uint8_t *rq_resp; uint32_t rq_resp_len;
 } Peer;
 
@@ -77,15 +81,15 @@ typedef struct {
     uint32_t nh;
     uint64_t size;
     uint8_t *hash;
-    uint8_t sig[64]; int has_sig;
+    uint8_t sig[64]; int has_sig, sig_rank;
 } GTruth;
 static GTruth g_truth[MAX_FILES];
 static int g_ntruth;
-static uint8_t g_pubkey[32];
-static int g_have_pubkey;    /* --pubkey: only signed truth is accepted */
+static LmbTrustKeys g_trust; /* --pubkey: one key or an overlap keyring */
+#define g_have_pubkey (g_trust.n != 0)
 
 #define MAX_MODELS 128
-typedef struct { LmbModelIdentity id; int used; } GModel;
+typedef struct { LmbModelIdentity id; int used, sig_rank; } GModel;
 static GModel g_models[MAX_MODELS];
 
 /* under g_lk. A first identity must describe exactly the hash inventory in
@@ -95,11 +99,13 @@ static int model_identity_check(const char *model, const LmbModelIdentity *id,
                                 const PFile *files, uint32_t n,
                                 uint8_t *const *hashes, const uint32_t *nh) {
     if (strcmp(model, id->model)) return 0;
+    int sig_rank = -1;
     if (g_have_pubkey) {
         if (!id->has_sig) return 0;
         size_t ml = 0;
         uint8_t *msg = lmb_model_id_msg(model, id->root, &ml);
-        int ok = msg && lmb_sign_verify(id->sig, msg, ml, g_pubkey) == 0;
+        if (msg) sig_rank = lmb_trust_match(&g_trust, id->sig, msg, ml);
+        int ok = sig_rank >= 0;
         free(msg);
         if (!ok) return 0;
     }
@@ -107,7 +113,10 @@ static int model_identity_check(const char *model, const LmbModelIdentity *id,
         if (g_models[i].used && !strcmp(g_models[i].id.model, model)) {
             if (memcmp(g_models[i].id.root, id->root, 32)) return 0;
             if (g_models[i].id.has_sig && !id->has_sig) return 0;
-            if (!g_models[i].id.has_sig && id->has_sig) g_models[i].id = *id;
+            if ((!g_models[i].id.has_sig && id->has_sig) ||
+                (id->has_sig && sig_rank > g_models[i].sig_rank)) {
+                g_models[i].id = *id; g_models[i].sig_rank = sig_rank;
+            }
             return 1;
         }
     LmbModelItem *items = (LmbModelItem *)calloc(n ? n : 1, sizeof *items);
@@ -126,6 +135,7 @@ static int model_identity_check(const char *model, const LmbModelIdentity *id,
     for (int i = 0; i < MAX_MODELS; i++)
         if (!g_models[i].used) {
             g_models[i].used = 1; g_models[i].id = *id;
+            g_models[i].sig_rank = sig_rank;
             return 1;
         }
     return 0;
@@ -142,13 +152,15 @@ static int model_identity_check(const char *model, const LmbModelIdentity *id,
 static int truth_check(const char *model, const char *path, uint64_t size,
                        uint32_t nh, uint8_t **hash,
                        const uint8_t *sig, int has_sig) {
+    int sig_rank = -1;
     if (g_have_pubkey) {
         if (!has_sig) return 0;
         size_t mlen = 0;
         uint8_t *msg = lmb_truth_msg(model, path, LMB_HASH_CHUNK, size,
                                      *hash, nh, &mlen);
         if (!msg) return 0;
-        int ok = lmb_sign_verify(sig, msg, mlen, g_pubkey) == 0;
+        sig_rank = lmb_trust_match(&g_trust, sig, msg, mlen);
+        int ok = sig_rank >= 0;
         free(msg);
         if (!ok) return 0;
     }
@@ -156,9 +168,11 @@ static int truth_check(const char *model, const char *path, uint64_t size,
         if (!strcmp(g_truth[i].model, model) && !strcmp(g_truth[i].path, path)) {
             if (g_truth[i].nh != nh || g_truth[i].size != size ||
                 memcmp(g_truth[i].hash, *hash, (size_t)nh * 32)) return 0;
-            if (!g_truth[i].has_sig && has_sig) {    /* upgrade to signed */
+            if ((!g_truth[i].has_sig && has_sig) ||
+                (has_sig && sig_rank > g_truth[i].sig_rank)) {
                 memcpy(g_truth[i].sig, sig, 64);
                 g_truth[i].has_sig = 1;
+                g_truth[i].sig_rank = sig_rank;
             }
             return 1;
         }
@@ -170,6 +184,7 @@ static int truth_check(const char *model, const char *path, uint64_t size,
     t->size = size;
     t->hash = *hash;
     t->has_sig = has_sig;
+    t->sig_rank = sig_rank;
     if (has_sig) memcpy(t->sig, sig, 64);
     *hash = NULL;
     return 1;
@@ -187,6 +202,7 @@ static double now_s(void) {
  * connection from losing its mutex/storage underneath it.  Called with
  * g_lk held. */
 static Peer *peer_slot_new(int is_expert, int *idx) {
+    (void)is_expert; /* both maintainer and expert control links now relay */
     int pick = -1;
     for (int i = 0; i < MAX_PEERS; i++)
         if (!g_peers[i].used) { pick = i; break; }
@@ -202,14 +218,15 @@ static Peer *peer_slot_new(int is_expert, int *idx) {
     if (pick < 0) return NULL;
     Peer *p = &g_peers[pick];
     if (p->used) {
-        free(p->files); free(p->ebits); free(p->rq_resp);
+        free(p->files); free(p->ebits); free(p->rq_body); free(p->rq_pay);
+        free(p->rq_resp);
         if (p->evfd >= 0) close(p->evfd);
         pthread_mutex_destroy(&p->rq_lk);
         pthread_cond_destroy(&p->rq_cv);
     }
     memset(p, 0, sizeof *p);
     p->ctrl_fd = -1;
-    p->evfd = is_expert ? -1 : eventfd(0, EFD_NONBLOCK);
+    p->evfd = eventfd(0, EFD_NONBLOCK);
     pthread_mutex_init(&p->rq_lk, NULL);
     pthread_cond_init(&p->rq_cv, NULL);
     g_known_logged[pick] = 0;
@@ -379,19 +396,31 @@ static Peer *handle_register(int fd, LmbMsg *m) {
  * Expert peers never enter placements (they hold no files); EPEERS is how a
  * chatter learns who can EXECUTE for a model, server included. */
 
-static int handle_ereg(int fd, LmbMsg *m) {
+static Peer *handle_ereg(int fd, LmbMsg *m) {
     LmbCur c = { m->body, m->body_len, 0 };
     char name[64], addr[64], model[64];
     uint32_t nexperts;
     if (lmb_cur_str(&c, name, sizeof name) || lmb_cur_str(&c, addr, sizeof addr) ||
         lmb_cur_str(&c, model, sizeof model) || lmb_cur_u32(&c, &nexperts)) {
-        send_err(fd, "bad ereg"); return -1;
+        send_err(fd, "bad ereg"); return NULL;
     }
     /* optional, appended by newer nodes: the bitmap of what it holds */
     uint32_t bl = 0; const uint8_t *bits = NULL;
     if (!lmb_cur_u32(&c, &bl) && bl && bl <= (1u << 20) && c.off + bl <= c.len) {
         bits = c.p + c.off; c.off += bl;
     } else bl = 0;
+    uint32_t meta = 0, qbits = 0, hidden = 0, slots = 0, total_experts = 0;
+    char engine[64] = "", profile[LMB_BUILD_PROFILE_MAX] = "";
+    if (c.off < c.len) {
+        if (lmb_cur_u32(&c, &meta) || meta != LMB_EXPERT_MANIFEST_MAGIC ||
+            lmb_cur_str(&c, engine, sizeof engine) ||
+            lmb_cur_str(&c, profile, sizeof profile) ||
+            lmb_cur_u32(&c, &qbits) || lmb_cur_u32(&c, &hidden) ||
+            lmb_cur_u32(&c, &slots) || lmb_cur_u32(&c, &total_experts) ||
+            c.off != c.len) {
+            send_err(fd, "bad ereg metadata"); return NULL;
+        }
+    }
     Peer *slot = NULL;
     int fresh = 0;
     pthread_mutex_lock(&g_lk);
@@ -417,9 +446,14 @@ static int handle_ereg(int fd, LmbMsg *m) {
     if (slot) {
         slot->used = 1; slot->is_expert = 1;
         slot->nexperts = nexperts; slot->ts = now_s();
+        slot->ctrl_fd = fd;
         snprintf(slot->name, sizeof slot->name, "%s", name);
         snprintf(slot->addr, sizeof slot->addr, "%s", use_addr);
         snprintf(slot->model, sizeof slot->model, "%s", model);
+        snprintf(slot->engine, sizeof slot->engine, "%s", engine);
+        snprintf(slot->profile, sizeof slot->profile, "%s", profile);
+        slot->bits = qbits; slot->hidden = hidden;
+        slot->slots = slots; slot->total_experts = total_experts;
         if (bl) {
             uint8_t *nb = (uint8_t *)realloc(slot->ebits, bl);
             if (nb) { slot->ebits = nb; memcpy(slot->ebits, bits, bl);
@@ -427,13 +461,19 @@ static int handle_ereg(int fd, LmbMsg *m) {
         }
     }
     pthread_mutex_unlock(&g_lk);
-    if (!slot) { send_err(fd, "peer table full"); return -1; }
+    if (!slot) { send_err(fd, "peer table full"); return NULL; }
     if (fresh) {
         printf("[tracker] + expert %s @ %s (%s, %u experts)\n",
                name, use_addr, model, nexperts);
         fflush(stdout);
     }
-    return lmb_send(fd, LMB_OK, NULL, 0, NULL, 0);
+    if (lmb_send(fd, LMB_OK, NULL, 0, NULL, 0)) {
+        pthread_mutex_lock(&g_lk);
+        if (slot->ctrl_fd == fd) slot->ctrl_fd = -1;
+        pthread_mutex_unlock(&g_lk);
+        return NULL;
+    }
+    return slot;
 }
 
 static int handle_epeers(int fd, LmbMsg *m) {
@@ -458,6 +498,44 @@ static int handle_epeers(int fd, LmbMsg *m) {
             lmb_buf_str(&b, g_peers[i].addr);
     pthread_mutex_unlock(&g_lk);
     int rc = lmb_send(fd, LMB_EPEERS_R, b.p, (uint32_t)b.len, NULL, 0);
+    free(b.p);
+    return rc;
+}
+
+static int handle_ecover(int fd, LmbMsg *m) {
+    LmbCur c = { m->body, m->body_len, 0 };
+    char model[64], engine[64], profile[LMB_BUILD_PROFILE_MAX];
+    uint32_t bits, hidden, slots, nexp;
+    if (lmb_cur_str(&c, model, sizeof model) ||
+        lmb_cur_str(&c, engine, sizeof engine) ||
+        lmb_cur_str(&c, profile, sizeof profile) ||
+        lmb_cur_u32(&c, &bits) || lmb_cur_u32(&c, &hidden) ||
+        lmb_cur_u32(&c, &slots) || lmb_cur_u32(&c, &nexp) || c.off != c.len ||
+        !slots || !nexp || (uint64_t)slots * nexp > (1u << 23)) {
+        send_err(fd, "bad ecover"); return -1;
+    }
+    size_t cells = (size_t)slots * nexp, nb = (cells + 7) / 8;
+    uint8_t *cover = (uint8_t *)calloc(nb ? nb : 1, 1);
+    if (!cover) { send_err(fd, "oom"); return -1; }
+    double now = now_s();
+    pthread_mutex_lock(&g_lk);
+    for (int i = 0; i < MAX_PEERS; i++) {
+        Peer *q = &g_peers[i];
+        if (!q->used || !q->is_expert || q->ctrl_fd < 0 || q->evfd < 0 ||
+            now - q->ts > g_stale_s || strcmp(q->model, model) ||
+            strcmp(q->engine, engine) || strcmp(q->profile, profile) ||
+            q->bits != bits || q->hidden != hidden || q->slots != slots ||
+            q->total_experts != nexp) continue;
+        size_t take = (q->enbits + 7) / 8;
+        if (take > nb) take = nb;
+        for (size_t j = 0; j < take; j++) cover[j] |= q->ebits[j];
+    }
+    pthread_mutex_unlock(&g_lk);
+    LmbBuf b = {0};
+    lmb_buf_u32(&b, slots); lmb_buf_u32(&b, nexp);
+    lmb_buf_u32(&b, (uint32_t)nb); lmb_buf_bytes(&b, cover, nb);
+    free(cover);
+    int rc = lmb_send(fd, LMB_ECOVER_R, b.p, (uint32_t)b.len, NULL, 0);
     free(b.p);
     return rc;
 }
@@ -711,7 +789,7 @@ static int handle_rread(int fd, LmbMsg *m) {
     pthread_mutex_lock(&g_lk);
     for (int i = 0; i < MAX_PEERS && !p; i++) {
         Peer *q = &g_peers[i];
-        if (!q->used || now - q->ts > g_stale_s || q->ctrl_fd < 0) continue;
+        if (!q->used || now - q->ts > g_stale_s || q->ctrl_fd < 0 || q->evfd < 0) continue;
         if (model[0] && strcmp(q->model, model)) continue;
         for (uint32_t j = 0; j < q->nfiles; j++)
             if (!strcmp(q->files[j].path, path)) { p = q; p->refs++; break; }
@@ -722,9 +800,11 @@ static int handle_rread(int fd, LmbMsg *m) {
     pthread_mutex_lock(&p->rq_lk);
     while (p->rq_busy) pthread_cond_wait(&p->rq_cv, &p->rq_lk);
     p->rq_busy = 1; p->rq_sent = 0; p->rq_done = 0; p->rq_ok = 0;
-    p->rq_id = ++p->rq_next;
+    p->rq_id = ++p->rq_next; p->rq_op = LMB_RREAD_FWD;
     snprintf(p->rq_path, sizeof p->rq_path, "%s", path);
     p->rq_off = off; p->rq_len = len;
+    free(p->rq_body); p->rq_body = NULL; p->rq_body_len = 0;
+    free(p->rq_pay); p->rq_pay = NULL; p->rq_pay_len = 0;
     free(p->rq_resp); p->rq_resp = NULL; p->rq_resp_len = 0;
     pthread_mutex_unlock(&p->rq_lk);
 
@@ -756,6 +836,100 @@ static int handle_rread(int fd, LmbMsg *m) {
     pthread_mutex_lock(&g_lk);
     if (p->refs) p->refs--;
     pthread_mutex_unlock(&g_lk);
+    return rc;
+}
+
+/* EXEC relay: same one-request mailbox as byte relay, but the expert node's
+ * EREG connection is the outbound tunnel.  The tracker validates enough of
+ * the shape to select a real holder and bound memory; the expert validates
+ * the complete engine-specific request before executing it. */
+static int handle_rexec(int fd, LmbMsg *m) {
+    if (getenv("LUMABRI_RELAY_TRACE"))
+        fprintf(stderr, "[tracker] rexec request body=%u pay=%u\n",
+                m->body_len, m->pay_len);
+    LmbCur c = { m->body, m->body_len, 0 };
+    char model[64];
+    uint32_t nexp = 0, layer = 0, eid = 0, dim = 0, nrows = 0;
+    if (lmb_cur_str(&c, model, sizeof model) || lmb_cur_u32(&c, &nexp) ||
+        lmb_cur_u32(&c, &layer) || lmb_cur_u32(&c, &eid) ||
+        lmb_cur_u32(&c, &dim) || lmb_cur_u32(&c, &nrows)) {
+        send_err(fd, "malformed rexec header"); return -1;
+    }
+    if (nexp < 1 || eid >= nexp ||
+        !dim || nrows < 1 || nrows > LMB_MAX_EXEC_ROWS ||
+        (m->body_len - c.off != 0 && m->body_len - c.off != (uint64_t)nrows * 4) ||
+        (uint64_t)nrows * dim * 4 != m->pay_len) {
+        char why[160];
+        snprintf(why, sizeof why, "bad rexec shape (nexp=%u layer=%u eid=%u "
+                 "dim=%u rows=%u body_tail=%zu pay=%u)", nexp, layer, eid,
+                 dim, nrows, m->body_len - c.off, m->pay_len);
+        send_err(fd, why); return -1;
+    }
+    size_t exec_at = c.off - 16;             /* layer starts 16 bytes earlier */
+    uint64_t gid64 = (uint64_t)layer * nexp + eid;
+    if (gid64 > UINT32_MAX) { send_err(fd, "bad rexec expert id"); return -1; }
+
+    Peer *p = NULL;
+    double now = now_s();
+    pthread_mutex_lock(&g_lk);
+    for (int i = 0; i < MAX_PEERS && !p; i++) {
+        Peer *q = &g_peers[i];
+        uint32_t gid = (uint32_t)gid64;
+        if (!q->used || !q->is_expert || now - q->ts > g_stale_s ||
+            q->ctrl_fd < 0 || q->evfd < 0 || strcmp(q->model, model) || gid >= q->enbits ||
+            !(q->ebits[gid >> 3] & (uint8_t)(1u << (gid & 7)))) continue;
+        p = q; p->refs++;
+    }
+    pthread_mutex_unlock(&g_lk);
+    if (!p) { send_err(fd, "no relay-capable expert holds it"); return 0; }
+    if (getenv("LUMABRI_RELAY_TRACE"))
+        fprintf(stderr, "[tracker] rexec selected %s ctrl=%d gid=%llu\n",
+                p->name, p->ctrl_fd, (unsigned long long)gid64);
+
+    uint32_t body_len = m->body_len - (uint32_t)exec_at;
+    uint8_t *body = (uint8_t *)malloc(body_len ? body_len : 1);
+    uint8_t *pay = (uint8_t *)malloc(m->pay_len ? m->pay_len : 1);
+    if (!body || !pay) {
+        free(body); free(pay);
+        pthread_mutex_lock(&g_lk); if (p->refs) p->refs--; pthread_mutex_unlock(&g_lk);
+        send_err(fd, "oom"); return -1;
+    }
+    memcpy(body, m->body + exec_at, body_len);
+    memcpy(pay, m->pay, m->pay_len);
+
+    pthread_mutex_lock(&p->rq_lk);
+    while (p->rq_busy) pthread_cond_wait(&p->rq_cv, &p->rq_lk);
+    p->rq_busy = 1; p->rq_sent = 0; p->rq_done = 0; p->rq_ok = 0;
+    p->rq_id = ++p->rq_next; p->rq_op = LMB_REXEC_FWD;
+    free(p->rq_body); p->rq_body = body; p->rq_body_len = body_len;
+    free(p->rq_pay); p->rq_pay = pay; p->rq_pay_len = m->pay_len;
+    free(p->rq_resp); p->rq_resp = NULL; p->rq_resp_len = 0;
+    pthread_mutex_unlock(&p->rq_lk);
+    uint64_t one = 1; if (write(p->evfd, &one, 8) != 8) {}
+    if (getenv("LUMABRI_RELAY_TRACE"))
+        fprintf(stderr, "[tracker] rexec queued id=%u evfd=%d\n", p->rq_id, p->evfd);
+
+    struct timespec dl;
+    clock_gettime(CLOCK_REALTIME, &dl); dl.tv_sec += RELAY_WAIT_S;
+    pthread_mutex_lock(&p->rq_lk);
+    while (!p->rq_done)
+        if (pthread_cond_timedwait(&p->rq_cv, &p->rq_lk, &dl) != 0) break;
+    int ok = p->rq_done && p->rq_ok;
+    uint8_t *resp = p->rq_resp; uint32_t resp_len = p->rq_resp_len;
+    p->rq_resp = NULL; p->rq_resp_len = 0;
+    free(p->rq_body); p->rq_body = NULL; p->rq_body_len = 0;
+    free(p->rq_pay); p->rq_pay = NULL; p->rq_pay_len = 0;
+    p->rq_busy = 0; pthread_cond_broadcast(&p->rq_cv);
+    pthread_mutex_unlock(&p->rq_lk);
+
+    int rc;
+    if (!ok) { free(resp); send_err(fd, "exec relay timeout or peer failure"); rc = 0; }
+    else {
+        LmbBuf b = {0}; lmb_buf_u32(&b, 1);
+        rc = lmb_send(fd, LMB_REXEC_R, b.p, (uint32_t)b.len, resp, resp_len);
+        free(b.p); free(resp);
+    }
+    pthread_mutex_lock(&g_lk); if (p->refs) p->refs--; pthread_mutex_unlock(&g_lk);
     return rc;
 }
 
@@ -840,12 +1014,17 @@ static int handle_assign(int fd, LmbMsg *m) {
 }
 
 /* the peer's control thread completes the pending request */
-static void rread_complete(Peer *p, LmbMsg *m) {
+static void relay_complete(Peer *p, LmbMsg *m) {
     LmbCur c = { m->body, m->body_len, 0 };
     uint32_t id = 0, ok = 0;
     if (lmb_cur_u32(&c, &id) || lmb_cur_u32(&c, &ok)) return;
+    if (getenv("LUMABRI_RELAY_TRACE"))
+        fprintf(stderr, "[tracker] relay complete op=%u id=%u ok=%u pay=%u\n",
+                m->op, id, ok, m->pay_len);
     pthread_mutex_lock(&p->rq_lk);
-    if (p->rq_busy && p->rq_sent && id == p->rq_id && !p->rq_done) {
+    uint32_t expect = p->rq_op == LMB_RREAD_FWD ? LMB_RREAD_R : LMB_REXEC_R;
+    if (p->rq_busy && p->rq_sent && id == p->rq_id && m->op == expect &&
+        !p->rq_done) {
         p->rq_ok = ok && m->pay_len > 0;
         p->rq_resp = m->pay; p->rq_resp_len = m->pay_len;
         m->pay = NULL;                        /* stolen */
@@ -882,21 +1061,39 @@ static void *conn_thread(void *arg) {
                 uint64_t junk;
                 while (read(ctrl->evfd, &junk, 8) == 8) { }
                 LmbBuf b = {0};
+                uint8_t *pay = NULL; uint32_t pay_len = 0, op = 0;
                 int have = 0;
                 pthread_mutex_lock(&ctrl->rq_lk);
                 if (ctrl->rq_busy && !ctrl->rq_sent && !ctrl->rq_done) {
                     ctrl->rq_sent = 1; have = 1;
+                    op = ctrl->rq_op;
                     lmb_buf_u32(&b, ctrl->rq_id);
-                    lmb_buf_str(&b, ctrl->rq_path);
-                    lmb_buf_u64(&b, ctrl->rq_off);
-                    lmb_buf_u32(&b, ctrl->rq_len);
+                    if (op == LMB_RREAD_FWD) {
+                        lmb_buf_str(&b, ctrl->rq_path);
+                        lmb_buf_u64(&b, ctrl->rq_off);
+                        lmb_buf_u32(&b, ctrl->rq_len);
+                    } else if (op == LMB_REXEC_FWD) {
+                        lmb_buf_bytes(&b, ctrl->rq_body, ctrl->rq_body_len);
+                        pay_len = ctrl->rq_pay_len;
+                        if (pay_len) {
+                            pay = (uint8_t *)malloc(pay_len);
+                            if (pay) memcpy(pay, ctrl->rq_pay, pay_len);
+                            else {
+                                have = 0; ctrl->rq_done = 1; ctrl->rq_ok = 0;
+                                pthread_cond_broadcast(&ctrl->rq_cv);
+                            }
+                        }
+                    } else have = 0;
                 }
                 pthread_mutex_unlock(&ctrl->rq_lk);
                 if (have) {
-                    int rc = lmb_send(fd, LMB_RREAD_FWD, b.p, (uint32_t)b.len, NULL, 0);
-                    free(b.p);
+                    if (getenv("LUMABRI_RELAY_TRACE"))
+                        fprintf(stderr, "[tracker] relay forward op=%u id=%u "
+                                "body=%zu pay=%u\n", op, ctrl->rq_id, b.len, pay_len);
+                    int rc = lmb_send(fd, op, b.p, (uint32_t)b.len, pay, pay_len);
+                    free(b.p); free(pay);
                     if (rc) break;
-                } else free(b.p);
+                } else { free(b.p); free(pay); }
             }
             if (!(pf[0].revents & POLLIN)) continue;
         }
@@ -938,15 +1135,33 @@ static void *conn_thread(void *arg) {
             } else rc = -1;
             break;
         }
-        case LMB_RREAD_R:   if (ctrl) rread_complete(ctrl, &m); break;
-        case LMB_EREG:      rc = handle_ereg(fd, &m); break;
+        case LMB_RREAD_R:
+        case LMB_REXEC_R:   if (ctrl) relay_complete(ctrl, &m); break;
+        case LMB_EREG: {
+            Peer *p = handle_ereg(fd, &m);
+            if (p) {
+                if (!ctrl) {
+                    pthread_mutex_lock(&g_lk); p->refs++; pthread_mutex_unlock(&g_lk);
+                    ctrl = p;
+                } else if (ctrl != p) {
+                    pthread_mutex_lock(&g_lk);
+                    if (p->ctrl_fd == fd) p->ctrl_fd = -1;
+                    pthread_mutex_unlock(&g_lk);
+                    send_err(fd, "one expert identity per control connection");
+                    rc = -1;
+                }
+            } else rc = -1;
+            break;
+        }
         case LMB_EASSIGN:   rc = handle_eassign(fd, &m); break;
         case LMB_EPEERS:    rc = handle_epeers(fd, &m); break;
+        case LMB_ECOVER:    rc = handle_ecover(fd, &m); break;
         case LMB_HASHES:    rc = handle_hashes(fd, &m); break;
         case LMB_MODEL_ID:  rc = handle_model_id(fd, &m); break;
         case LMB_PLACEMENT: rc = handle_placement(fd, &m); break;
         case LMB_SWARM:     rc = handle_swarm(fd); break;
         case LMB_RREAD:     rc = handle_rread(fd, &m); break;
+        case LMB_REXEC:     rc = handle_rexec(fd, &m); break;
         case LMB_ASSIGN:    rc = handle_assign(fd, &m); break;
         default:            send_err(fd, "unknown op"); rc = -1; break;
         }
@@ -966,16 +1181,11 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--token") && i + 1 < argc)
             snprintf(g_token, sizeof g_token, "%s", argv[++i]);
         else if (!strcmp(argv[i], "--pubkey") && i + 1 < argc) {
-            char hex[80] = "";
-            FILE *pf = fopen(argv[++i], "r");
-            if (pf && fscanf(pf, "%78s", hex) == 1 && strlen(hex) == 64 &&
-                !lmb_unhex(g_pubkey, hex, 32)) g_have_pubkey = 1;
-            else if (strlen(argv[i]) == 64 && !lmb_unhex(g_pubkey, argv[i], 32))
-                g_have_pubkey = 1;
-            if (pf) fclose(pf);
-            if (!g_have_pubkey) {
-                fprintf(stderr, "[tracker] --pubkey wants 32 hex bytes "
-                                "(a file or the value itself)\n");
+            const char *spec = argv[++i];
+            if (lmb_trust_load_spec(&g_trust, spec)) {
+                fprintf(stderr, "[tracker] --pubkey wants a 32-byte hex key, "
+                                "a comma list, or a keyring file (max %d)\n",
+                        LMB_MAX_TRUST_KEYS);
                 return 2;
             }
         }
@@ -988,11 +1198,9 @@ int main(int argc, char **argv) {
     int lfd = lmb_listen(port);
     if (lfd < 0) { perror("[tracker] listen"); return 1; }
     printf("[tracker] listening on :%d\n", port);
-    if (g_have_pubkey) {
-        char pub[70];
-        lmb_hex(pub, g_pubkey, 32);
-        printf("[tracker] signed swarm: only truth signed by %s is accepted\n", pub);
-    }
+    if (g_have_pubkey)
+        printf("[tracker] signed swarm: truth accepted from %zu trusted "
+               "operator key%s\n", g_trust.n, g_trust.n == 1 ? "" : "s");
     fflush(stdout);
     for (;;) {
         int fd = accept(lfd, NULL, NULL);

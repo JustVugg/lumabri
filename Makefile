@@ -4,7 +4,7 @@ ENGINE  ?= ../moe-stream/c
 
 all: tracker maintainer liblumabri.so test_shim lumabri
 
-lumabri: lumabri.c lumabri_proto.h
+lumabri: lumabri.c lumabri_proto.h lumabri_sign.h
 	$(CC) $(CFLAGS) -pthread lumabri.c -o $@
 
 # ---- phase 2: peers execute experts ------------------------------------
@@ -39,7 +39,7 @@ MISSING_ENGINES = $(filter-out $(HAVE_ENGINES),olmoe colibri inkling kimi_k3 dee
 # into the chatter and expert-node build for that family. Compiler/ISA/OpenMP
 # details are appended at runtime by lmb_build_profile().
 ENGINE_PROFILE_DEPS := $(sort $(wildcard $(ENGINE)/*.h)) \
-                       lumabri_client.h lumabri_proto.h
+                       lumabri_client.h lumabri_proto.h lumabri_sign.h lumabri_sha.h
 define engine_source_id
 $(shell sha256sum $(ENGINE)/$(1).c $(ENGINE_PROFILE_DEPS) \
         expert_engines/$(2).h engine_patches/$(1)-p2p.diff 2>/dev/null | \
@@ -68,7 +68,7 @@ phase2-all: engines chatters
 # One expert-node binary per engine. The body is the same file; everything
 # engine-shaped lives in expert_engines/<name>.h, which pulls in the engine's
 # own source so remote and local run the same kernels on the same weights.
-EXPERT_DEPS = expert_node.c lumabri_proto.h
+EXPERT_DEPS = expert_node.c lumabri_proto.h lumabri_sign.h
 
 expert_node: $(EXPERT_DEPS) expert_engines/olmoe.h $(ENGINE)/olmoe.c \
              engine_patches/olmoe-p2p.diff $(ENGINE_PROFILE_DEPS)
@@ -145,7 +145,7 @@ build/%_p2p.c: $(ENGINE)/%.c engine_patches/%-p2p.diff Makefile
 	 else patch -s -p2 -o $@ $< engine_patches/$*-p2p.diff; fi
 	@sed -i 's/if (L\.on) {/if (lumi_layer_on(layer)) {/' $@
 
-ENGINE_P2P_DEPS = lumabri_client.h lumibri_client.h lumabri_proto.h
+ENGINE_P2P_DEPS = lumabri_client.h lumibri_client.h lumabri_proto.h lumabri_sign.h
 
 olmoe_p2p: build/olmoe_p2p.c $(ENGINE_P2P_DEPS)
 	$(CC) $(P2P_CFLAGS) $(PROFILE_olmoe) -DLUMABRI_P2P -DLUMIBRI_P2P $< -o $@ -lm -lpthread
@@ -199,21 +199,42 @@ test-engines: test-phase2 test-phase2-glm test-phase2-inkling test-phase2-kimi
 	    echo "   it has no synthetic fixture — MODEL=<dir> make test-engines"; \
 	fi
 
-tracker: tracker.c lumabri_proto.h
+tracker: tracker.c lumabri_proto.h lumabri_sha.h lumabri_sign.h
 	$(CC) $(CFLAGS) -pthread tracker.c -o $@
 
-maintainer: maintainer.c lumabri_proto.h
+maintainer: maintainer.c lumabri_proto.h lumabri_sha.h lumabri_sign.h
 	$(CC) $(CFLAGS) -pthread maintainer.c -o $@
 
 # The shim interposes libc symbols, so it must not itself be interposable
 # state: -fPIC shared object, resolved via RTLD_NEXT at load time.
-liblumabri.so: lumashim.c lumabri_proto.h
+liblumabri.so: lumashim.c lumabri_proto.h lumabri_sha.h lumabri_sign.h
 	$(CC) $(CFLAGS) -shared -fPIC -pthread lumashim.c -o $@ -ldl
 
 test_shim: test_shim.c
 	$(CC) $(CFLAGS) test_shim.c -o $@
 
-test: all
+test_relay_exec: test_relay_exec.c lumabri_proto.h
+	$(CC) $(CFLAGS) -pthread test_relay_exec.c -o $@
+
+test_key_rotation: test_key_rotation.c lumabri_sign.h
+	$(CC) $(CFLAGS) -pthread test_key_rotation.c -o $@
+
+test_hedge: test_hedge.c lumabri_client.h lumabri_proto.h lumabri_sign.h
+	$(CC) $(CFLAGS) -pthread test_hedge.c -o $@
+
+test-relay-exec: tracker expert_node test_relay_exec fixture
+	./relay_exec_test.sh
+
+test-cas: tracker maintainer liblumabri.so test_shim
+	./cas_test.sh
+
+test-key-rotation: test_key_rotation
+	./test_key_rotation
+
+test-hedge: test_hedge
+	./test_hedge
+
+test: all test_key_rotation test_hedge
 	./selftest.sh
 	./donate_test.sh
 	./signed_donor_test.sh
@@ -221,6 +242,10 @@ test: all
 	./security_test.sh
 	./expert_input_test.sh
 	./prefetch_policy_test.sh
+	./cas_test.sh
+	./relay_exec_test.sh
+	./test_key_rotation
+	./test_hedge
 
 # ---- deploy -------------------------------------------------------------
 # make install                    → /usr/local (needs sudo)
@@ -242,6 +267,7 @@ install: all
 
 clean:
 	rm -f tracker maintainer liblumabri.so test_shim lumabri \
+	      test_relay_exec test_key_rotation test_hedge \
 	      olmoe_p2p colibri_p2p inkling_p2p kimi_k3_p2p deepseek_p2p \
 	      expert_node expert_node_glm expert_node_inkling expert_node_kimi \
 	      expert_node_deepseek
@@ -251,4 +277,4 @@ clean:
         fixture test-phase2 \
         test-phase2-glm test-phase2-inkling test-phase2-kimi \
         test-phase2-deepseek test-engines \
-        patches patches-check
+        patches patches-check test-relay-exec test-cas test-key-rotation test-hedge

@@ -822,13 +822,14 @@ static int engine_spawn(const char *engine, const char *shim, const char *tracke
                         const char *model, const char *local_dir,
                         int ctx, int max_new, int cap_experts, Engine *e) {
     const char *home = getenv("HOME") ? getenv("HOME") : ".";
-    char vroot[1024], cache[1024];
+    char vroot[1024], cache[1024], cas[1024];
     const char *vroot_env = getenv("LUMABRI_VROOT");
     const char *cache_env = getenv("LUMABRI_CACHE");
     if (vroot_env && vroot_env[0]) snprintf(vroot, sizeof vroot, "%s", vroot_env);
     else snprintf(vroot, sizeof vroot, "%s/.lumabri/%s/vroot", home, model);
     if (cache_env && cache_env[0]) snprintf(cache, sizeof cache, "%s", cache_env);
     else snprintf(cache, sizeof cache, "%s/.lumabri/%s/cache", home, model);
+    snprintf(cas, sizeof cas, "%s/.lumabri/cas", home);
     if (!local_dir) mkdir_p(cache);   /* vroot stays virtual on purpose */
 
     /* olmoe takes <cap> <bits>; the SERVE-mode engines take <cap> alone and
@@ -853,6 +854,7 @@ static int engine_spawn(const char *engine, const char *shim, const char *tracke
             setenv("LD_PRELOAD", shim, 1);
             setenv("LUMABRI_VROOT", vroot, 1);
             setenv("LUMABRI_CACHE", cache, 1);
+            setenv("LUMABRI_CAS", cas, 0);       /* shared across model mirrors */
             setenv("LUMABRI_TRACKER", tracker, 1);
             setenv("LUMABRI_MODEL", model, 1);
             setenv("LUMABRI_STATS", "2", 1);       /* boot progress, not a log */
@@ -984,7 +986,7 @@ static void disk_preflight(const char *model, uint64_t model_bytes) {
  *
  * ~/.lumabri/config, one key=value per line. Flags still win when given:
  * a script is not a person and should not inherit somebody's saved answers. */
-typedef struct { char tracker[80], pubkey[80], engines[1024]; } Cfg;
+typedef struct { char tracker[80], pubkey[LMB_PATH_MAX], engines[1024]; } Cfg;
 
 static void cfg_path(char *dst, size_t cap) {
     const char *home = getenv("HOME") ? getenv("HOME") : ".";

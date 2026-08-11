@@ -17,6 +17,7 @@
 #define LUMABRI_SIGN_H
 
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -496,6 +497,91 @@ static int lmb_unhex(uint8_t *dst, const char *src, size_t n) {
         else if (b >= 'A' && b <= 'F') lo = b - 'A' + 10;
         if (hi < 0 || lo < 0) return -1;
         dst[i] = (uint8_t)((hi << 4) | lo);
+    }
+    return 0;
+}
+
+/* ---- trust sets / manual key rotation ---------------------------------
+ *
+ * A signed swarm may trust more than one operator key during a planned
+ * rotation.  The wire format deliberately stays unchanged: each object is
+ * signed by one key, while verifiers accept it if ANY key in this small,
+ * out-of-band trust set validates it.  Rollout is therefore:
+ *
+ *   publish old+new keys -> start signing with new -> remove old key
+ *
+ * KMS/HSM policy, automatic revocation and audit belong above this primitive;
+ * this is the dependency-free public floor needed to rotate safely by hand.
+ */
+#define LMB_MAX_TRUST_KEYS 16
+typedef struct {
+    uint8_t key[LMB_MAX_TRUST_KEYS][32];
+    size_t n;
+} LmbTrustKeys;
+
+static int lmb_trust_add_hex(LmbTrustKeys *t, const char *hex) {
+    if (!t || !hex || strlen(hex) != 64) return -1;
+    uint8_t key[32];
+    if (lmb_unhex(key, hex, sizeof key)) return -1;
+    for (size_t i = 0; i < t->n; i++)
+        if (!memcmp(t->key[i], key, sizeof key)) return 0;
+    if (t->n >= LMB_MAX_TRUST_KEYS) return -1;
+    memcpy(t->key[t->n++], key, sizeof key);
+    return 0;
+}
+
+static int lmb_trust_match(const LmbTrustKeys *t, const uint8_t sig[64],
+                           const uint8_t *msg, size_t n) {
+    if (!t) return -1;
+    for (size_t i = 0; i < t->n; i++)
+        if (lmb_sign_verify(sig, msg, n, t->key[i]) == 0) return (int)i;
+    return -1;
+}
+
+static int lmb_trust_verify(const LmbTrustKeys *t, const uint8_t sig[64],
+                            const uint8_t *msg, size_t n) {
+    return lmb_trust_match(t, sig, msg, n) >= 0 ? 0 : -1;
+}
+
+/* A keyring file contains one 64-hex public key per whitespace-separated
+ * field.  A literal spec may contain the same keys separated by commas.
+ * Calls append, so command-line programs may also repeat --pubkey. */
+static int lmb_trust_load_stream(LmbTrustKeys *t, FILE *fp) {
+    char word[256];
+    LmbTrustKeys add = {0};
+    while (t && fp && fscanf(fp, "%255s", word) == 1) {
+        if (word[0] == '#') { int ch; while ((ch = fgetc(fp)) != '\n' && ch != EOF) {} continue; }
+        if (lmb_trust_add_hex(&add, word)) return -1;
+    }
+    if (!t || !add.n) return -1;
+    size_t before = t->n;
+    for (size_t i = 0; i < add.n; i++) {
+        char hex[65]; lmb_hex(hex, add.key[i], 32);
+        if (lmb_trust_add_hex(t, hex)) { t->n = before; return -1; }
+    }
+    return 0;
+}
+
+static int lmb_trust_load_spec(LmbTrustKeys *t, const char *spec) {
+    if (!t || !spec || !*spec) return -1;
+    FILE *fp = fopen(spec, "r");
+    if (fp) {
+        int rc = lmb_trust_load_stream(t, fp);
+        fclose(fp);
+        return rc;
+    }
+    char *copy = strdup(spec);
+    if (!copy) return -1;
+    LmbTrustKeys add = {0};
+    size_t before = t->n;
+    char *save = NULL;
+    for (char *p = strtok_r(copy, ",", &save); p; p = strtok_r(NULL, ",", &save))
+        if (lmb_trust_add_hex(&add, p)) { free(copy); return -1; }
+    free(copy);
+    if (!add.n) return -1;
+    for (size_t i = 0; i < add.n; i++) {
+        char hex[65]; lmb_hex(hex, add.key[i], 32);
+        if (lmb_trust_add_hex(t, hex)) { t->n = before; return -1; }
     }
     return 0;
 }

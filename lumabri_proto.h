@@ -142,6 +142,18 @@ enum {
      * and the tracker only carries it. Expert nodes include the same record
      * in EMANIFEST, so a chatter cannot accidentally mix checkpoints. */
     LMB_MODEL_ID = 30, LMB_MODEL_ID_R = 31,
+    /* NAT relay for compute. REXEC is {str model,u32 n_experts,EXEC body}
+     * plus the activation payload. The tracker chooses a registered holder,
+     * forwards {u32 id,EXEC body}+pay over its outbound EREG connection, and
+     * returns the output. Direct EXEC remains preferred; this is the floor
+     * for symmetric NATs and networks where no inbound port can be opened. */
+    LMB_REXEC = 32, LMB_REXEC_FWD = 33, LMB_REXEC_R = 34,
+    /* Relay coverage is separate from EPEERS because an unreachable/NATed
+     * node has no direct EMANIFEST to query. Expert heartbeats append their
+     * engine/build/shape metadata; ECOVER returns the OR of compatible live
+     * holders' bitmaps, allowing the chatter to enable remote execution only
+     * when every routed expert has either a direct or relayed path. */
+    LMB_ECOVER = 35, LMB_ECOVER_R = 36,
 };
 
 /* REGISTER body: str name, str addr, str model, u64 held_bytes,
@@ -221,10 +233,13 @@ static void lmb_frame_caps(uint32_t op, uint32_t *body_cap, uint32_t *pay_cap) {
     case LMB_RREAD_R:
     case LMB_HASHES_R:
     case LMB_EXEC_R:
+    case LMB_REXEC_R:
         *pay_cap = LMB_MAX_PAY;
         break;
     case LMB_RREAD_FWD:
     case LMB_EXEC:
+    case LMB_REXEC:
+    case LMB_REXEC_FWD:
         *body_cap = LMB_MAX_CONTROL_BODY;
         *pay_cap = LMB_MAX_PAY;
         break;
@@ -620,15 +635,21 @@ static int lmb_auth(int fd) {
 /* One-shot request/response on a fresh connection (tracker traffic; bulk
  * reads use pooled persistent connections instead). Returns 0 and fills
  * `resp` (caller frees), or -1. */
-static int lmb_request(const char *addr, uint32_t op,
-                       const void *body, uint32_t body_len, LmbMsg *resp) {
+static int lmb_request_pay(const char *addr, uint32_t op,
+                           const void *body, uint32_t body_len,
+                           const void *pay, uint32_t pay_len, LmbMsg *resp) {
     int fd = lmb_connect(addr);
     if (fd < 0) return -1;
     int rc = lmb_auth(fd);
-    if (rc == 0) rc = lmb_send(fd, op, body, body_len, NULL, 0);
+    if (rc == 0) rc = lmb_send(fd, op, body, body_len, pay, pay_len);
     if (rc == 0) rc = lmb_recv(fd, resp);
     close(fd);
     return rc;
+}
+
+static int lmb_request(const char *addr, uint32_t op,
+                       const void *body, uint32_t body_len, LmbMsg *resp) {
+    return lmb_request_pay(addr, op, body, body_len, NULL, 0, resp);
 }
 
 /* Fetch the operator-bound identity of a complete model. Signature checking

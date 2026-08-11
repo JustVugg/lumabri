@@ -41,7 +41,7 @@ static struct {
     char root[LMB_PATH_MAX];
     char name[64], advertise[64], tracker[64], model[64], token[128];
     uint8_t sk[64]; int have_key;   /* --key: this peer is the origin */
-    uint8_t pk[32]; int have_pub;   /* --pubkey: a donor that checks the origin */
+    LmbTrustKeys trust;             /* --pubkey: old+new during manual rotation */
     LmbModelIdentity identity; int have_identity;
     MFile files[MAX_FILES]; int nfiles;
     const char *includes[MAX_INCLUDES]; int nincl;
@@ -372,11 +372,11 @@ static void sign_truth(MFile *f) {
 
 static int model_identity_valid(const LmbModelIdentity *id) {
     if (strcmp(id->model, g.model)) return 0;
-    if (!g.have_pub) return 1;
+    if (!g.trust.n) return 1;
     if (!id->has_sig) return 0;
     size_t n = 0;
     uint8_t *msg = lmb_model_id_msg(id->model, id->root, &n);
-    int ok = msg && lmb_sign_verify(id->sig, msg, n, g.pk) == 0;
+    int ok = msg && lmb_trust_verify(&g.trust, id->sig, msg, n) == 0;
     free(msg);
     return ok;
 }
@@ -478,7 +478,7 @@ static int model_identity_prepare(int disk_donor) {
         else if (have_saved && !memcmp(local.root, saved.root, 32)) local = saved;
         g.identity = local; g.have_identity = 1;
     }
-    if (g.have_pub && (!g.have_identity || !model_identity_valid(&g.identity))) {
+    if (g.trust.n && (!g.have_identity || !model_identity_valid(&g.identity))) {
         fprintf(stderr, "[maintainer %s] no operator-signed identity for model %s\n",
                 g.name, g.model);
         return -1;
@@ -616,7 +616,7 @@ static int fetch_truth(const char *rel, Truth *t) {
      * tracker that invents hashes to match corrupt bytes is caught here and
      * not three hops later. Without the key we can still carry a signature
      * we cannot read: the chatter checks it against its own copy. */
-    if (g.have_pub) {
+    if (g.trust.n) {
         if (!t->has_sig) {
             fprintf(stderr, "[maintainer %s] %s is not signed by the operator — "
                             "refusing to hold it\n", g.name, rel);
@@ -626,7 +626,7 @@ static int fetch_truth(const char *rel, Truth *t) {
         size_t ml = 0;
         uint8_t *msg = lmb_truth_msg(t->model, rel, LMB_HASH_CHUNK, t->size,
                                      t->hash, t->nh, &ml);
-        int ok = msg && lmb_sign_verify(t->sig, msg, ml, g.pk) == 0;
+        int ok = msg && lmb_trust_verify(&g.trust, t->sig, msg, ml) == 0;
         free(msg);
         if (!ok) {
             fprintf(stderr, "[maintainer %s] the signature on %s does not match "
@@ -683,7 +683,7 @@ static int pull_file(const char *rel, uint64_t size, Truth *tr) {
      * already decided we would not be allowed to serve */
     memset(tr, 0, sizeof *tr);
     int have_truth = fetch_truth(rel, tr) == 0;
-    if (!have_truth && g.have_pub) return -1;      /* said why, in fetch_truth */
+    if (!have_truth && g.trust.n) return -1;       /* said why, in fetch_truth */
     if (!have_truth)
         fprintf(stderr, "[maintainer %s] no integrity data for %s — "
                         "pulling unverified\n", g.name, rel);
@@ -956,19 +956,15 @@ int main(int argc, char **argv) {
             fclose(kf);
             g.have_key = 1;
         }
-        /* the public half: a donor holds no key but can still refuse bytes
-         * whose truth the operator did not sign — accepts a file or the hex */
+        /* The public half may be one key or an old+new keyring during a
+         * manual rotation. Repeating --pubkey appends to the trust set. */
         else if (!strcmp(argv[i], "--pubkey") && i + 1 < argc) {
-            char hex[200] = "";
-            FILE *pf = fopen(argv[++i], "r");
-            if (pf) { if (fscanf(pf, "%198s", hex) != 1) hex[0] = 0; fclose(pf); }
-            else snprintf(hex, sizeof hex, "%s", argv[i]);
-            if (strlen(hex) != 64 || lmb_unhex(g.pk, hex, 32)) {
-                fprintf(stderr, "[maintainer] cannot read a 32-byte public key "
-                                "from %s\n", argv[i]);
+            const char *spec = argv[++i];
+            if (lmb_trust_load_spec(&g.trust, spec)) {
+                fprintf(stderr, "[maintainer] cannot read public key/keyring "
+                                "from %s\n", spec);
                 return 2;
             }
-            g.have_pub = 1;
         }
         else {
             fprintf(stderr, "usage: %s --root DIR [--port N] [--tracker H:P]"

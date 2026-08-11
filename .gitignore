@@ -34,3 +34,8 @@ deepseek_p2p
 # engine sitting in our tree would be exactly that — plus a licence question
 # nobody needs.
 build/
+
+# compiled unit-test binaries
+test_hedge
+test_key_rotation
+test_relay_exec
