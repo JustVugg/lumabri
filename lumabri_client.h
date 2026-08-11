@@ -303,6 +303,10 @@ static void lumi_enable_if_complete(void) {
     int missing = lumi_missing_experts();
     if (missing) return;
     L.on = 1;
+    /* Tell the byte-mirror in this same process to stop reading ahead: from
+     * here on the experts run on peers, and a readahead past a dense block
+     * would pull adjacent expert weights the chatter will never execute. */
+    setenv("LUMABRI_REMOTE_EXPERTS", "1", 1);
     fprintf(stderr, "[lumabri] phase 2 active: every expert runs on a peer, "
                     "%d peer(s), %d experts, hidden=%d, nearest replica "
                     "preferred%s\n",

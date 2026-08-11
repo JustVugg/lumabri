@@ -220,6 +220,7 @@ test: all
 	./role_test.sh
 	./security_test.sh
 	./expert_input_test.sh
+	./prefetch_policy_test.sh
 
 # ---- deploy -------------------------------------------------------------
 # make install                    → /usr/local (needs sudo)

@@ -595,6 +595,7 @@ rather than failing the build for everyone who only wants GLM.
 | `donate_test.sh` | an empty disk donor pulls a slice and outlives the origin |
 | `signed_donor_test.sh` | a donor on a signed swarm verifies, republishes the signature, and refuses the wrong key |
 | `role_test.sh` | `--role` takes whole words: chat is not compute |
+| `prefetch_policy_test.sh` | readahead stops when experts run on peers, so no expert weight is pulled |
 | `expert_input_test.sh` | phase-2 peers reject out-of-range network indices |
 | `phase2_test.sh`, `phase2_bench.sh` | phase 2 correctness and benchmark (olmoe) |
 | `phase2_glm_test.sh`, `phase2_inkling_test.sh`, `phase2_kimi_test.sh`, `phase2_deepseek_test.sh` | phase 2 byte identity, one per engine |

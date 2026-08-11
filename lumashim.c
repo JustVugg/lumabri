@@ -618,13 +618,38 @@ static void probe_peers(void) {
  * read path uses — the in-flight map dedups, the bitmap makes a wasted
  * prefetch impossible to double-fetch, and a prefetch failure is silent
  * because the read path will retry it loudly if the block is ever needed.
- * LUMABRI_PREFETCH sets the readahead depth in blocks (default 2, 0 = off). */
+ * LUMABRI_PREFETCH sets the readahead depth in blocks (default 2, 0 = off).
+ *
+ * One exception the byte-mirror cannot see for itself: when the experts run
+ * on peers, the chatter is meant to touch only the dense part, and a
+ * readahead of 2 blocks past a dense read walks straight into the adjacent
+ * expert region at 1 MiB granularity — pulling expert weights it will never
+ * execute, a little more on every run. The engine's phase-2 client sets
+ * LUMABRI_REMOTE_EXPERTS the moment delegation goes live (same process), and
+ * from then on readahead is off, unless the operator asked for a specific
+ * depth explicitly. A skip-range-aware prefetcher could restore the latency
+ * hiding without entering declared expert ranges; this is the safe floor. */
 
 #define PF_QLEN 64
 static struct {
     RFile *f; uint32_t blk;
 } pf_q[PF_QLEN];
 static int pf_head, pf_tail, pf_depth;
+static int pf_user_set;          /* LUMABRI_PREFETCH given explicitly: it wins */
+static int pf_expert_off;        /* latches once remote experts are active */
+
+static int prefetch_suppressed(void) {
+    if (pf_user_set) return 0;
+    if (pf_expert_off) return 1;
+    const char *e = getenv("LUMABRI_REMOTE_EXPERTS");
+    if (e && e[0] == '1') {
+        pf_expert_off = 1;
+        fprintf(stderr, "[lumabri] remote experts active: readahead off so the "
+                        "chatter never pulls expert weights it will not run\n");
+        return 1;
+    }
+    return 0;
+}
 static pthread_mutex_t pf_lk = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t pf_cv = PTHREAD_COND_INITIALIZER;
 
@@ -646,7 +671,7 @@ static void *prefetch_thread(void *arg) {
 
 /* queue the blocks after the range just read; full queue = drop, no harm */
 static void prefetch_after(RFile *f, uint64_t off, uint64_t len) {
-    if (!pf_depth || !f->nblocks) return;
+    if (!pf_depth || !f->nblocks || prefetch_suppressed()) return;
     uint64_t end = off + len;
     if (end > f->size) end = f->size;
     uint32_t last = (uint32_t)((end ? end - 1 : 0) / g.block);
@@ -961,7 +986,7 @@ static void shim_init_impl(void) {
     }
     pf_depth = 2;
     const char *pf = getenv("LUMABRI_PREFETCH");
-    if (pf) pf_depth = atoi(pf);
+    if (pf) { pf_depth = atoi(pf); pf_user_set = 1; }
     if (pf_depth < 0) pf_depth = 0;
     if (pf_depth > 16) pf_depth = 16;
     if (pf_depth && g.npeers) {
