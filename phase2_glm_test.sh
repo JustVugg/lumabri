@@ -27,21 +27,36 @@ CAP="${CAP:-8}"
 [ -d "$MODEL" ] || { echo "no GLM fixture at $MODEL — set MODEL=<dir>"; exit 1; }
 [ -f "$REF" ]   || { echo "no oracle at $REF — set REF=<file>"; exit 1; }
 
-make -s phase2-glm ENGINE="$ENGINE"
+make -s phase2-glm colibri_p2p ENGINE="$ENGINE"
 
 T=$(mktemp -d /tmp/lumabri-glm.XXXXXX)
 PIDS=()
 cleanup() { kill "${PIDS[@]}" 2>/dev/null || true; rm -rf "$T"; }
 trap cleanup EXIT
 
-# The patched engine is built from a COPY: colibri itself is never modified.
-cp "$ENGINE/colibri.c" "$T/colibri.c"
-( cd "$T" && patch -s -p2 < "$OLDPWD/engine_patches/colibri-p2p.diff" )
-cc -O2 -fopenmp -Wall -I. -I"$ENGINE" -Wno-unused-function -Wno-unused-parameter \
-   -DLUMABRI_P2P -DLUMIBRI_P2P "$T/colibri.c" -o "$T/colibri_p2p" -lm -lpthread
-
 run() { SNAP="$MODEL" REF="$REF" COLI_NO_OMP_TUNE=1 OMP_NUM_THREADS="${THREADS:-4}" \
-        "$@" "$T/colibri_p2p" "$CAP"; }
+        "$@" ./colibri_p2p "$CAP"; }
+
+echo
+echo "══ THREAD POLICY — default GLM node uses physical cores, not SMT threads"
+POLICY_PORT=$((PORT0+60))
+env -u OMP_NUM_THREADS -u OMP_PROC_BIND -u COLI_NO_OMP_TUNE -u COLI_OMP_TUNED \
+    ./expert_node_glm --model "$MODEL" --port "$POLICY_PORT" --name glm-policy \
+                      --bits "$BITS" --cache 1 > "$T/policy.log" 2>&1 & POLICY_PID=$!; PIDS+=($!)
+for _ in $(seq 1 300); do
+    (exec 3<>/dev/tcp/127.0.0.1/$POLICY_PORT) 2>/dev/null && { exec 3<&-; break; }
+    sleep 0.1
+done
+grep -q "applying the engine hot-thread policy" "$T/policy.log" || {
+    echo "GLM node did not apply its OpenMP hot-thread policy"; cat "$T/policy.log"; exit 1; }
+POLICY_LINE=$(grep "thread.* each, .* physical core" "$T/policy.log" | tail -1)
+PT=$(printf '%s\n' "$POLICY_LINE" | sed -nE 's/.* ([0-9]+) threads? each, ([0-9]+) physical cores?.*/\1/p')
+PC=$(printf '%s\n' "$POLICY_LINE" | sed -nE 's/.* ([0-9]+) threads? each, ([0-9]+) physical cores?.*/\2/p')
+[ -n "$PT" ] && [ -n "$PC" ] && [ "$PT" -le "$PC" ] || {
+    echo "GLM node oversubscribed its physical cores: $POLICY_LINE"; exit 1; }
+kill "$POLICY_PID" 2>/dev/null || true
+wait "$POLICY_PID" 2>/dev/null || true
+echo "✓ GLM default: $PT OpenMP threads on $PC available physical cores"
 
 echo
 echo "══ A) LOCAL — experts read and run by the engine itself"

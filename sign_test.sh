@@ -113,7 +113,8 @@ sleep 0.3
              --key "$T/swarm.key" > "$T/origin.log" 2>&1 & PIDS+=($!)
 sleep 1.2
 env LD_PRELOAD="$PWD/liblumabri.so" LUMABRI_VROOT="$T/v" LUMABRI_CACHE="$T/c" \
-    LUMABRI_TRACKER=127.0.0.1:7460 LUMABRI_BLOCK_MIB=1 LUMABRI_PUBKEY="$PUB" \
+    LUMABRI_TRACKER=127.0.0.1:7460 LUMABRI_MODEL=src \
+    LUMABRI_BLOCK_MIB=1 LUMABRI_PUBKEY="$PUB" \
     ./test_shim "$T/v" "$T/src" 2> "$T/shim.err"
 grep -q "signed by the operator key" "$T/shim.err" || {
     echo "   SIGNED SWARM FAILED: the chatter never saw a valid signature"
@@ -124,7 +125,8 @@ echo "· 3b) an unsigned peer cannot get its files into a signed swarm"
 mkdir -p "$T/rogue"
 head -c $((3 * 1024 * 1024)) /dev/urandom > "$T/rogue/w.bin"
 ./maintainer --root "$T/rogue" --port 7462 --tracker 127.0.0.1:7460 \
-             --name rogue --model-name src > "$T/rogue.log" 2>&1 & PIDS+=($!)
+             --name rogue --model-name src --include '*' \
+             > "$T/rogue.log" 2>&1 & PIDS+=($!)
 sleep 1.5
 grep -q "REJECTED: rogue" "$T/tracker.log" || {
     echo "   REJECTION FAILED: the tracker accepted unsigned truth"
@@ -141,11 +143,12 @@ sleep 0.3
 sleep 1.2
 set +e
 env LD_PRELOAD="$PWD/liblumabri.so" LUMABRI_VROOT="$T/v2" LUMABRI_CACHE="$T/c2" \
-    LUMABRI_TRACKER=127.0.0.1:7463 LUMABRI_BLOCK_MIB=1 LUMABRI_PUBKEY="$PUB" \
+    LUMABRI_TRACKER=127.0.0.1:7463 LUMABRI_MODEL=src \
+    LUMABRI_BLOCK_MIB=1 LUMABRI_PUBKEY="$PUB" \
     ./test_shim "$T/v2" "$T/rogue" > /dev/null 2> "$T/evil_shim.err"
 RC=$?
 set -e
-grep -q "not signed by the operator key" "$T/evil_shim.err" || {
+grep -q "not signed by the operator" "$T/evil_shim.err" || {
     echo "   LYING TRACKER UNPROVEN: no signature complaint"
     cat "$T/evil_shim.err"; exit 1; }
 [ "$RC" -ne 0 ] || { echo "   LYING TRACKER FAILED: the chatter used its bytes"; exit 1; }

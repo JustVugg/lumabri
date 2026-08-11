@@ -71,6 +71,7 @@
 
 #include <omp.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdatomic.h>
 #include <sys/prctl.h>
 
@@ -117,11 +118,20 @@ static struct {
     pthread_cond_t c_cv;
     pthread_mutex_t load_lk;    /* the engine loader is used one call at a time */
     char name[64], model[64], advertise[64], tracker[64], token[128];
+    char profile[LMB_BUILD_PROFILE_MAX];
+    int bits;
+    LmbModelIdentity identity; int have_identity;
+    pthread_mutex_t identity_lk;
     _Atomic uint64_t calls, cold;
     double busy_s;
     pthread_mutex_t stat_lk;
 } g = { .c_lk = PTHREAD_MUTEX_INITIALIZER, .load_lk = PTHREAD_MUTEX_INITIALIZER,
-        .stat_lk = PTHREAD_MUTEX_INITIALIZER };
+        .stat_lk = PTHREAD_MUTEX_INITIALIZER,
+        .identity_lk = PTHREAD_MUTEX_INITIALIZER };
+
+static LmbConnGate g_conn_gate = LMB_CONN_GATE_INIT;
+static __thread void *t_scratch;
+static __thread int t_scratch_rows;
 
 /* Plain malloc, not the engine's falloc: not every engine has one (the V4
  * glue links its store, not a colibri model loader) and this buffer is only
@@ -276,12 +286,10 @@ static int handle_exec(int fd, LmbMsg *m) {
     gate_enter();
 
     /* one scratch per connection thread: the kernels are called concurrently */
-    static __thread void *scratch;
-    static __thread int scratch_rows;
-    if (!scratch || scratch_rows < (int)nrows) {
-        if (scratch) lmbe_scratch_free(scratch);
-        scratch = lmbe_scratch_new((int)nrows);
-        scratch_rows = (int)nrows;
+    if (!t_scratch || t_scratch_rows < (int)nrows) {
+        if (t_scratch) lmbe_scratch_free(t_scratch);
+        t_scratch = lmbe_scratch_new((int)nrows);
+        t_scratch_rows = (int)nrows;
     }
 
     size_t obytes = (size_t)want;
@@ -289,11 +297,11 @@ static int handle_exec(int fd, LmbMsg *m) {
     double t0 = nowd();
     if (g.ncs) {
         CSlot *s = cache_acquire((int)layer, (int)eid);
-        lmbe_apply(&s->slot, (int)layer, (const float *)m->pay, out, (int)nrows, rw, scratch);
+        lmbe_apply(&s->slot, (int)layer, (const float *)m->pay, out, (int)nrows, rw, t_scratch);
         cache_release(s);
     } else {
         lmbe_apply(&g.held[g.index[gid]].slot, (int)layer,
-                   (const float *)m->pay, out, (int)nrows, rw, scratch);
+                   (const float *)m->pay, out, (int)nrows, rw, t_scratch);
     }
     double dt = nowd() - t0;
     gate_leave();
@@ -307,8 +315,38 @@ static int handle_exec(int fd, LmbMsg *m) {
     return rc;
 }
 
+static void node_refresh_identity(void) {
+    if (!g.tracker[0] || !g.model[0]) return;
+    LmbModelIdentity id;
+    if (lmb_model_identity_get(g.tracker, g.model, &id)) return;
+    pthread_mutex_lock(&g.identity_lk);
+    g.identity = id;
+    g.have_identity = 1;
+    pthread_mutex_unlock(&g.identity_lk);
+}
+
 static int handle_emanifest(int fd) {
+    LmbModelIdentity id = {0};
+    pthread_mutex_lock(&g.identity_lk);
+    int have_id = g.have_identity;
+    pthread_mutex_unlock(&g.identity_lk);
+    if (!have_id) node_refresh_identity();
+    pthread_mutex_lock(&g.identity_lk);
+    have_id = g.have_identity;
+    if (have_id) id = g.identity;
+    pthread_mutex_unlock(&g.identity_lk);
     LmbBuf b = {0};
+    lmb_buf_u32(&b, LMB_EXPERT_MANIFEST_MAGIC);
+    lmb_buf_str(&b, lmbe_engine_name());
+    lmb_buf_str(&b, g.profile);
+    lmb_buf_str(&b, g.model);
+    lmb_buf_u32(&b, (uint32_t)g.bits);
+    lmb_buf_u32(&b, have_id ? 1u : 0u);
+    if (have_id) {
+        lmb_buf_bytes(&b, id.root, sizeof id.root);
+        lmb_buf_u32(&b, id.has_sig ? 1u : 0u);
+        if (id.has_sig) lmb_buf_bytes(&b, id.sig, sizeof id.sig);
+    }
     lmb_buf_u32(&b, (uint32_t)g.nholds);
     for (int l = 0; l < g.n_slots; l++)
         for (int e = 0; e < g.n_experts; e++)
@@ -353,7 +391,12 @@ static void *conn_thread(void *arg) {
         lmb_msg_free(&m);
         if (rc) break;
     }
+    if (t_scratch) {
+        lmbe_scratch_free(t_scratch);
+        t_scratch = NULL; t_scratch_rows = 0;
+    }
     close(fd);
+    lmb_conn_gate_leave(&g_conn_gate);
     return NULL;
 }
 
@@ -404,6 +447,10 @@ static void *control_thread(void *arg) {
                 break;
             }
             lmb_msg_free(&m);
+            pthread_mutex_lock(&g.identity_lk);
+            int need_identity = !g.have_identity;
+            pthread_mutex_unlock(&g.identity_lk);
+            if (need_identity) node_refresh_identity();
             sleep(HEARTBEAT_S);
         }
         close(fd);
@@ -437,39 +484,86 @@ static int in_list(const int *list, int n, int v) {
 }
 
 /* ---- how wide the machine is --------------------------------------------
- * lumabri does NOT choose the OpenMP team size. The engine already does, in
- * its own main() — which this file calls for it, see LMBE_TUNE_THREADS —
- * sized to the physical cores and argued from measurements on
- * real models (omp_tune.h: +2.3x on a 16C/32T Zen3 from the thread count
- * alone). A micro-benchmark here would be measuring one expert of one model
- * at one row, and would happily overrule that with a fixture's answer.
- *
- * What lumabri owns is the gate: given that each expert call takes the whole
- * machine, how many may run at once. That is a ratio, so it needs the core
- * count — and the engine's own rule applies to it too. If the physical count
- * cannot be determined we do not guess it: we admit one expert at a time,
- * which is never oversubscribed, rather than invent a number. */
+ * Count physical cores inside this process's allowed CPU set. Reading every
+ * host CPU from /proc made a taskset/container report cores it could not use,
+ * so the gate still oversubscribed constrained deployments. The pre-reexec
+ * value is carried in an internal env var because libgomp may bind the main
+ * thread to one place after OMP_PROC_BIND becomes active. */
 static int phys_cores(void) {
-    struct { int p, c; } seen[1024];
-    int n = 0, pid = -1, cid = -1;
-    FILE *f = fopen("/proc/cpuinfo", "r");
-    if (!f) return 0;
-    char line[256];
-    while (fgets(line, sizeof line, f)) {
-        if (!strncmp(line, "physical id", 11)) sscanf(line, "%*[^:]: %d", &pid);
-        else if (!strncmp(line, "core id", 7)) sscanf(line, "%*[^:]: %d", &cid);
-        if (pid >= 0 && cid >= 0) {
+    const char *saved = getenv("LUMABRI_PHYSICAL_CORES");
+    if (saved && atoi(saved) > 0) return atoi(saved);
+#if defined(__linux__) && defined(CPU_SETSIZE)
+    cpu_set_t allowed;
+    CPU_ZERO(&allowed);
+    if (sched_getaffinity(0, sizeof allowed, &allowed) == 0) {
+        struct { int package, core; } seen[CPU_SETSIZE];
+        int n = 0, logical = 0;
+        for (int cpu = 0; cpu < CPU_SETSIZE; cpu++) {
+            if (!CPU_ISSET(cpu, &allowed)) continue;
+            logical++;
+            char path[160];
+            int package = -1, core = -1;
+            snprintf(path, sizeof path,
+                     "/sys/devices/system/cpu/cpu%d/topology/physical_package_id", cpu);
+            FILE *fp = fopen(path, "r");
+            if (fp) {
+                if (fscanf(fp, "%d", &package) != 1) package = -1;
+                fclose(fp);
+            }
+            snprintf(path, sizeof path,
+                     "/sys/devices/system/cpu/cpu%d/topology/core_id", cpu);
+            fp = fopen(path, "r");
+            if (fp) {
+                if (fscanf(fp, "%d", &core) != 1) core = -1;
+                fclose(fp);
+            }
+            if (package < 0 || core < 0) continue;
             int dup = 0;
-            for (int i = 0; i < n; i++) if (seen[i].p == pid && seen[i].c == cid) dup = 1;
-            if (!dup && n < 1024) { seen[n].p = pid; seen[n].c = cid; n++; }
-            pid = cid = -1;
+            for (int i = 0; i < n; i++)
+                if (seen[i].package == package && seen[i].core == core) { dup = 1; break; }
+            if (!dup) { seen[n].package = package; seen[n].core = core; n++; }
         }
+        if (n > 0) return n;
+        if (logical > 0) return logical; /* topology unknown, still honor cpuset */
     }
-    fclose(f);
-    return n;
+#endif
+    int n = omp_get_num_procs();
+    return n > 0 ? n : 0;
+}
+
+/* GLM and Inkling set their hot-wait policy in the main() that the adapter
+ * deliberately renames away. libgomp reads those variables before main, so
+ * reproducing the policy requires the same one-time self re-exec. Engines
+ * using omp_tune.h need no re-exec and keep their native helper below. */
+static void runtime_prepare(int argc, char **argv) {
+    (void)argc;
+#ifdef LMBE_NEEDS_HOT_OMP_REEXEC
+    if (getenv("COLI_OMP_TUNED") || getenv("COLI_NO_OMP_TUNE")) return;
+    /* An explicit bind policy may already have narrowed this main thread in
+     * libgomp's constructor. Re-execing that one-core mask would be worse
+     * than leaving the user's existing runtime policy untouched. */
+    if (getenv("OMP_PROC_BIND")) return;
+    int phys = phys_cores();
+    if (phys > 0) {
+        char s[24]; snprintf(s, sizeof s, "%d", phys);
+        setenv("LUMABRI_PHYSICAL_CORES", s, 1);
+    }
+    setenv("OMP_WAIT_POLICY", "active", 0);
+    setenv("GOMP_SPINCOUNT", "200000", 0);
+    setenv("KMP_BLOCKTIME", "200", 0);
+    setenv("OMP_PROC_BIND", "close", 0);
+    setenv("OMP_DYNAMIC", "FALSE", 0);
+    setenv("COLI_OMP_TUNED", "1", 1);
+#ifdef __linux__
+    fprintf(stderr, "[OMP] lumabri: applying the engine hot-thread policy (one re-exec)\n");
+    execv("/proc/self/exe", argv);
+    perror("[OMP] execv self-reexec failed, running without hot-thread tuning");
+#endif
+#endif
 }
 
 int main(int argc, char **argv) {
+    runtime_prepare(argc, argv); /* must precede every other main-side action */
     const char *dir = NULL;
     int port = 7401, stride = 1, offset = 0, cache = 0, bits = 8, hold = 0;
     int layers[512], nlayers = 0, parallel = 0;
@@ -531,8 +625,21 @@ int main(int argc, char **argv) {
                  g.name, g_corrupt_ppm);
       } }
 
+    int runtime_phys = phys_cores();
     LMBE_TUNE_THREADS();
+    /* GLM/Inkling do not include omp_tune.h. Clamp their untouched OpenMP
+     * default, and any affinity-constrained engine, unless the user chose an
+     * explicit team or disabled tuning. */
+    if (!getenv("OMP_NUM_THREADS") && !getenv("COLI_NO_OMP_TUNE") &&
+        runtime_phys > 0 && omp_get_max_threads() > runtime_phys) {
+        int logical = omp_get_max_threads();
+        omp_set_num_threads(runtime_phys);
+        fprintf(stderr, "[OMP] lumabri: %d physical-core threads instead of %d logical\n",
+                runtime_phys, logical);
+    }
     lmbe_open(dir, cache, bits);
+    g.bits = lmbe_effective_bits(bits);
+    lmb_build_profile(g.profile, sizeof g.profile);
     g.n_slots   = lmbe_n_slots();
     g.n_experts = lmbe_n_experts();
     g.hidden    = lmbe_hidden();
@@ -647,7 +754,8 @@ int main(int argc, char **argv) {
     fflush(stdout);
 
     /* whatever the engine settled on during lmbe_open */
-    int phys = phys_cores(), per_expert = omp_get_max_threads();
+    node_refresh_identity();
+    int phys = runtime_phys, per_expert = omp_get_max_threads();
     if (per_expert < 1) per_expert = 1;
     gate_init(parallel, per_expert, phys);
 
@@ -668,6 +776,7 @@ int main(int argc, char **argv) {
     fflush(stdout);
 
     pthread_t t;
+    lmb_conn_gate_init(&g_conn_gate);
     if (g.tracker[0]) { pthread_create(&t, NULL, control_thread, NULL); pthread_detach(t); }
     pthread_create(&t, NULL, stats_thread, NULL); pthread_detach(t);
 
@@ -676,8 +785,11 @@ int main(int argc, char **argv) {
         if (fd < 0) { if (errno == EINTR) continue; break; }
         int one = 1;
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+        lmb_set_io_timeout(fd, lmb_env_int("LUMABRI_IO_TIMEOUT_MS",
+                                           LMB_DEFAULT_IO_TIMEOUT_MS, 100, 3600000));
+        if (!lmb_conn_gate_enter(&g_conn_gate)) { close(fd); continue; }
         if (pthread_create(&t, NULL, conn_thread, (void *)(intptr_t)fd) == 0) pthread_detach(t);
-        else close(fd);
+        else { lmb_conn_gate_leave(&g_conn_gate); close(fd); }
     }
     return 0;
 }

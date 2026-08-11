@@ -22,6 +22,7 @@
 #include <time.h>
 
 #include "lumabri_proto.h"
+#include "lumabri_sha.h"
 #include "lumabri_sign.h"
 
 #define MAX_PEERS  64
@@ -37,6 +38,7 @@ typedef struct {
     PFile *files; uint32_t nfiles;
     double ts;
     int used;
+    unsigned refs;              /* control/relay users holding this slot */
     int is_expert;              /* EREG peer: executes experts, holds no files */
     uint32_t nexperts;
     /* WHICH experts, not just how many: one bit per (slot, expert). Without
@@ -63,6 +65,8 @@ static Peer g_peers[MAX_PEERS];
 static pthread_mutex_t g_lk = PTHREAD_MUTEX_INITIALIZER;
 static int g_known_logged[MAX_PEERS];
 static char g_token[128];        /* --token: private swarm, invite required */
+static LmbConnGate g_conn_gate = LMB_CONN_GATE_INIT;
+static double g_stale_s = STALE_S;
 
 /* Ground truth: sha256 per LMB_HASH_CHUNK of every (model, path), taken
  * from the FIRST registrant — the origin server registers before any donor
@@ -79,6 +83,53 @@ static GTruth g_truth[MAX_FILES];
 static int g_ntruth;
 static uint8_t g_pubkey[32];
 static int g_have_pubkey;    /* --pubkey: only signed truth is accepted */
+
+#define MAX_MODELS 128
+typedef struct { LmbModelIdentity id; int used; } GModel;
+static GModel g_models[MAX_MODELS];
+
+/* under g_lk. A first identity must describe exactly the hash inventory in
+ * that registration; later partial donors may forward the already accepted
+ * full root. Signed swarms additionally require the operator's signature. */
+static int model_identity_check(const char *model, const LmbModelIdentity *id,
+                                const PFile *files, uint32_t n,
+                                uint8_t *const *hashes, const uint32_t *nh) {
+    if (strcmp(model, id->model)) return 0;
+    if (g_have_pubkey) {
+        if (!id->has_sig) return 0;
+        size_t ml = 0;
+        uint8_t *msg = lmb_model_id_msg(model, id->root, &ml);
+        int ok = msg && lmb_sign_verify(id->sig, msg, ml, g_pubkey) == 0;
+        free(msg);
+        if (!ok) return 0;
+    }
+    for (int i = 0; i < MAX_MODELS; i++)
+        if (g_models[i].used && !strcmp(g_models[i].id.model, model)) {
+            if (memcmp(g_models[i].id.root, id->root, 32)) return 0;
+            if (g_models[i].id.has_sig && !id->has_sig) return 0;
+            if (!g_models[i].id.has_sig && id->has_sig) g_models[i].id = *id;
+            return 1;
+        }
+    LmbModelItem *items = (LmbModelItem *)calloc(n ? n : 1, sizeof *items);
+    if (!items) return 0;
+    for (uint32_t i = 0; i < n; i++) {
+        /* Empty files legitimately have a zero-length hash vector. */
+        if (nh[i] && !hashes[i]) { free(items); return 0; }
+        items[i].path = files[i].path; items[i].size = files[i].size;
+        items[i].nh = nh[i]; items[i].hashes = hashes[i];
+    }
+    uint8_t root[32];
+    int ok = lmb_model_root(model, items, n, root) == 0 &&
+             memcmp(root, id->root, 32) == 0;
+    free(items);
+    if (!ok) return 0;
+    for (int i = 0; i < MAX_MODELS; i++)
+        if (!g_models[i].used) {
+            g_models[i].used = 1; g_models[i].id = *id;
+            return 1;
+        }
+    return 0;
+}
 
 /* under g_lk; steals *hash on first sight. Returns 1 ok / 0 rejected.
  *
@@ -103,7 +154,7 @@ static int truth_check(const char *model, const char *path, uint64_t size,
     }
     for (int i = 0; i < g_ntruth; i++)
         if (!strcmp(g_truth[i].model, model) && !strcmp(g_truth[i].path, path)) {
-            if (g_truth[i].nh != nh ||
+            if (g_truth[i].nh != nh || g_truth[i].size != size ||
                 memcmp(g_truth[i].hash, *hash, (size_t)nh * 32)) return 0;
             if (!g_truth[i].has_sig && has_sig) {    /* upgrade to signed */
                 memcpy(g_truth[i].sig, sig, 64);
@@ -111,7 +162,7 @@ static int truth_check(const char *model, const char *path, uint64_t size,
             }
             return 1;
         }
-    if (g_ntruth == MAX_FILES) return 1;      /* table full: cannot judge */
+    if (g_ntruth == MAX_FILES) return 0;      /* full means reject, never accept blind */
     GTruth *t = &g_truth[g_ntruth++];
     snprintf(t->model, sizeof t->model, "%s", model);
     snprintf(t->path, sizeof t->path, "%s", path);
@@ -128,6 +179,42 @@ static double now_s(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
+/* Reuse history slots after their peer has been stale long enough.  The
+ * table is a cap on simultaneous live peers, not on every temporary name a
+ * tracker has seen since boot.  refs keeps a relay waiter or an old control
+ * connection from losing its mutex/storage underneath it.  Called with
+ * g_lk held. */
+static Peer *peer_slot_new(int is_expert, int *idx) {
+    int pick = -1;
+    for (int i = 0; i < MAX_PEERS; i++)
+        if (!g_peers[i].used) { pick = i; break; }
+    if (pick < 0) {
+        double now = now_s();
+        for (int i = 0; i < MAX_PEERS; i++) {
+            Peer *p = &g_peers[i];
+            if (now - p->ts <= g_stale_s || p->ctrl_fd >= 0 || p->refs) continue;
+            pick = i;
+            break;
+        }
+    }
+    if (pick < 0) return NULL;
+    Peer *p = &g_peers[pick];
+    if (p->used) {
+        free(p->files); free(p->ebits); free(p->rq_resp);
+        if (p->evfd >= 0) close(p->evfd);
+        pthread_mutex_destroy(&p->rq_lk);
+        pthread_cond_destroy(&p->rq_cv);
+    }
+    memset(p, 0, sizeof *p);
+    p->ctrl_fd = -1;
+    p->evfd = is_expert ? -1 : eventfd(0, EFD_NONBLOCK);
+    pthread_mutex_init(&p->rq_lk, NULL);
+    pthread_cond_init(&p->rq_cv, NULL);
+    g_known_logged[pick] = 0;
+    if (idx) *idx = pick;
+    return p;
 }
 
 static void send_err(int fd, const char *msg) {
@@ -191,9 +278,34 @@ static Peer *handle_register(int fd, LmbMsg *m) {
         }
     } else c.off = save;
 
+    LmbModelIdentity mid = {0};
+    uint32_t mmagic = 0, mhas = 0;
+    int have_mid = 0, bad_mid = 0;
+    if (have_h && c.off < c.len) {
+        snprintf(mid.model, sizeof mid.model, "%s", model);
+        bad_mid = lmb_cur_u32(&c, &mmagic) || mmagic != LMB_MODEL_ID_MAGIC ||
+                  lmb_cur_bytes(&c, mid.root, sizeof mid.root) ||
+                  lmb_cur_u32(&c, &mhas) || mhas > 1 ||
+                  (mhas && lmb_cur_bytes(&c, mid.sig, sizeof mid.sig)) ||
+                  c.off != c.len;
+        mid.has_sig = mhas != 0;
+        have_mid = !bad_mid;
+    } else if (have_h && c.off != c.len) bad_mid = 1;
+
     Peer *slot = NULL;
     int idx = -1, fresh = 0;
     pthread_mutex_lock(&g_lk);
+    if (bad_mid || (g_have_pubkey && !have_mid) ||
+        (have_mid && !model_identity_check(model, &mid, files, n, fh, fnh))) {
+        pthread_mutex_unlock(&g_lk);
+        printf("[tracker] REJECTED: %s has a bad or mismatched model identity for %s\n",
+               name, model);
+        fflush(stdout);
+        for (uint32_t i = 0; i < n; i++) free(fh[i]);
+        free(fh); free(fnh); free(fsig); free(fhas); free(files);
+        send_err(fd, "bad model identity");
+        return NULL;
+    }
     if (have_h) {
         /* poison dies here: a file whose announced hashes contradict the
          * swarm's ground truth — or, with --pubkey, is not signed by the
@@ -221,17 +333,10 @@ static Peer *handle_register(int fd, LmbMsg *m) {
     for (int i = 0; i < MAX_PEERS; i++)
         if (g_peers[i].used && !g_peers[i].is_expert &&
             !strcmp(g_peers[i].name, name)) { slot = &g_peers[i]; idx = i; break; }
-    if (!slot)
-        for (int i = 0; i < MAX_PEERS; i++)
-            if (!g_peers[i].used) {
-                slot = &g_peers[i]; idx = i; fresh = 1;
-                memset(slot, 0, sizeof *slot);
-                slot->ctrl_fd = -1;
-                slot->evfd = eventfd(0, EFD_NONBLOCK);
-                pthread_mutex_init(&slot->rq_lk, NULL);
-                pthread_cond_init(&slot->rq_cv, NULL);
-                break;
-            }
+    if (!slot) {
+        slot = peer_slot_new(0, &idx);
+        fresh = slot != NULL;
+    }
     /* observed address: a maintainer that advertises localhost from another
      * machine gets its host part corrected to what this connection shows —
      * the --advertise footgun dies here, ports stay as declared */
@@ -293,17 +398,10 @@ static int handle_ereg(int fd, LmbMsg *m) {
     for (int i = 0; i < MAX_PEERS; i++)
         if (g_peers[i].used && g_peers[i].is_expert &&
             !strcmp(g_peers[i].name, name)) { slot = &g_peers[i]; break; }
-    if (!slot)
-        for (int i = 0; i < MAX_PEERS; i++)
-            if (!g_peers[i].used) {
-                slot = &g_peers[i]; fresh = 1;
-                memset(slot, 0, sizeof *slot);
-                slot->ctrl_fd = -1;
-                slot->evfd = -1;
-                pthread_mutex_init(&slot->rq_lk, NULL);
-                pthread_cond_init(&slot->rq_cv, NULL);
-                break;
-            }
+    if (!slot) {
+        slot = peer_slot_new(1, NULL);
+        fresh = slot != NULL;
+    }
     const char *use_addr = addr;
     char fixed[64];
     struct sockaddr_in sin;
@@ -350,12 +448,12 @@ static int handle_epeers(int fd, LmbMsg *m) {
     uint32_t n = 0;
     for (int i = 0; i < MAX_PEERS; i++)
         if (g_peers[i].used && g_peers[i].is_expert &&
-            now - g_peers[i].ts <= STALE_S &&
+            now - g_peers[i].ts <= g_stale_s &&
             (!want[0] || !strcmp(g_peers[i].model, want))) n++;
     lmb_buf_u32(&b, n);
     for (int i = 0; i < MAX_PEERS; i++)
         if (g_peers[i].used && g_peers[i].is_expert &&
-            now - g_peers[i].ts <= STALE_S &&
+            now - g_peers[i].ts <= g_stale_s &&
             (!want[0] || !strcmp(g_peers[i].model, want)))
             lmb_buf_str(&b, g_peers[i].addr);
     pthread_mutex_unlock(&g_lk);
@@ -407,6 +505,34 @@ static int handle_hashes(int fd, LmbMsg *m) {
     return rc;
 }
 
+/* ---- MODEL_ID: signed identity of the complete checkpoint --------------- */
+
+static int handle_model_id(int fd, LmbMsg *m) {
+    LmbCur c = { m->body, m->body_len, 0 };
+    char model[64];
+    if (lmb_cur_str(&c, model, sizeof model) || c.off != c.len) {
+        send_err(fd, "bad model identity request"); return -1;
+    }
+    LmbModelIdentity id = {0};
+    int found = 0;
+    pthread_mutex_lock(&g_lk);
+    for (int i = 0; i < MAX_MODELS; i++)
+        if (g_models[i].used && !strcmp(g_models[i].id.model, model)) {
+            id = g_models[i].id; found = 1; break;
+        }
+    pthread_mutex_unlock(&g_lk);
+    if (!found) { send_err(fd, "no complete model identity"); return 0; }
+    LmbBuf b = {0};
+    lmb_buf_u32(&b, LMB_MODEL_ID_MAGIC);
+    lmb_buf_str(&b, id.model);
+    lmb_buf_bytes(&b, id.root, sizeof id.root);
+    lmb_buf_u32(&b, id.has_sig ? 1u : 0u);
+    if (id.has_sig) lmb_buf_bytes(&b, id.sig, sizeof id.sig);
+    int rc = lmb_send(fd, LMB_MODEL_ID_R, b.p, (uint32_t)b.len, NULL, 0);
+    free(b.p);
+    return rc;
+}
+
 /* ---- PLACEMENT ---------------------------------------------------------- */
 
 static int handle_placement(int fd, LmbMsg *m) {
@@ -422,7 +548,7 @@ static int handle_placement(int fd, LmbMsg *m) {
     double now = now_s();
     pthread_mutex_lock(&g_lk);
     for (int p = 0; p < MAX_PEERS; p++) {
-        if (!g_peers[p].used || now - g_peers[p].ts > STALE_S) continue;
+        if (!g_peers[p].used || now - g_peers[p].ts > g_stale_s) continue;
         if (want[0] && strcmp(g_peers[p].model, want)) continue;
         for (uint32_t i = 0; i < g_peers[p].nfiles; i++) {
             const PFile *f = &g_peers[p].files[i];
@@ -460,11 +586,11 @@ static int handle_swarm(int fd) {
     uint32_t live = 0;
     for (int i = 0; i < MAX_PEERS; i++)
         if (g_peers[i].used && !g_peers[i].is_expert &&
-            now - g_peers[i].ts <= STALE_S) live++;
+            now - g_peers[i].ts <= g_stale_s) live++;
     lmb_buf_u32(&b, live);
     for (int i = 0; i < MAX_PEERS; i++) {
         Peer *p = &g_peers[i];
-        if (!p->used || p->is_expert || now - p->ts > STALE_S) continue;
+        if (!p->used || p->is_expert || now - p->ts > g_stale_s) continue;
         lmb_buf_str(&b, p->model);
         lmb_buf_u64(&b, p->held_bytes);
         lmb_buf_u64(&b, p->served_bytes);
@@ -531,7 +657,7 @@ static int handle_eassign(int fd, LmbMsg *m) {
                                     ? (cells + 7) / 8 : (p->enbits + 7) / 8));
             continue;
         }
-        if (now - p->ts > STALE_S) continue;
+        if (now - p->ts > g_stale_s) continue;
         for (size_t k = 0; k < cells && k < p->enbits; k++)
             if (p->ebits[k >> 3] & (1u << (k & 7))) cnt[k]++;
     }
@@ -585,10 +711,10 @@ static int handle_rread(int fd, LmbMsg *m) {
     pthread_mutex_lock(&g_lk);
     for (int i = 0; i < MAX_PEERS && !p; i++) {
         Peer *q = &g_peers[i];
-        if (!q->used || now - q->ts > STALE_S || q->ctrl_fd < 0) continue;
+        if (!q->used || now - q->ts > g_stale_s || q->ctrl_fd < 0) continue;
         if (model[0] && strcmp(q->model, model)) continue;
         for (uint32_t j = 0; j < q->nfiles; j++)
-            if (!strcmp(q->files[j].path, path)) { p = q; break; }
+            if (!strcmp(q->files[j].path, path)) { p = q; p->refs++; break; }
     }
     pthread_mutex_unlock(&g_lk);
     if (!p) { send_err(fd, "no relay-capable peer holds it"); return 0; }
@@ -627,6 +753,9 @@ static int handle_rread(int fd, LmbMsg *m) {
         free(b.p);
     }
     free(resp);
+    pthread_mutex_lock(&g_lk);
+    if (p->refs) p->refs--;
+    pthread_mutex_unlock(&g_lk);
     return rc;
 }
 
@@ -657,7 +786,7 @@ static int handle_assign(int fd, LmbMsg *m) {
     pthread_mutex_lock(&g_lk);
     for (int p = 0; p < MAX_PEERS; p++) {
         Peer *q = &g_peers[p];
-        if (!q->used || now - q->ts > STALE_S) continue;
+        if (!q->used || now - q->ts > g_stale_s) continue;
         if (model[0] && strcmp(q->model, model)) continue;
         for (uint32_t i = 0; i < q->nfiles; i++) {
             Cand *e = NULL;
@@ -733,6 +862,9 @@ static void ctrl_teardown(Peer *p, int fd) {
     pthread_mutex_lock(&p->rq_lk);
     if (p->rq_busy && !p->rq_done) { p->rq_done = 1; p->rq_ok = 0; pthread_cond_broadcast(&p->rq_cv); }
     pthread_mutex_unlock(&p->rq_lk);
+    pthread_mutex_lock(&g_lk);
+    if (p->refs) p->refs--;
+    pthread_mutex_unlock(&g_lk);
 }
 
 /* ---- connections -------------------------------------------------------- */
@@ -790,7 +922,20 @@ static void *conn_thread(void *arg) {
         case LMB_PING:      rc = lmb_send(fd, LMB_OK, NULL, 0, NULL, 0); break;
         case LMB_REGISTER: {
             Peer *p = handle_register(fd, &m);
-            if (p) ctrl = p; else rc = -1;
+            if (p) {
+                if (!ctrl) {
+                    pthread_mutex_lock(&g_lk);
+                    p->refs++;
+                    pthread_mutex_unlock(&g_lk);
+                    ctrl = p;
+                } else if (ctrl != p) {
+                    pthread_mutex_lock(&g_lk);
+                    if (p->ctrl_fd == fd) p->ctrl_fd = -1;
+                    pthread_mutex_unlock(&g_lk);
+                    send_err(fd, "one maintainer identity per control connection");
+                    rc = -1;
+                }
+            } else rc = -1;
             break;
         }
         case LMB_RREAD_R:   if (ctrl) rread_complete(ctrl, &m); break;
@@ -798,6 +943,7 @@ static void *conn_thread(void *arg) {
         case LMB_EASSIGN:   rc = handle_eassign(fd, &m); break;
         case LMB_EPEERS:    rc = handle_epeers(fd, &m); break;
         case LMB_HASHES:    rc = handle_hashes(fd, &m); break;
+        case LMB_MODEL_ID:  rc = handle_model_id(fd, &m); break;
         case LMB_PLACEMENT: rc = handle_placement(fd, &m); break;
         case LMB_SWARM:     rc = handle_swarm(fd); break;
         case LMB_RREAD:     rc = handle_rread(fd, &m); break;
@@ -809,6 +955,7 @@ static void *conn_thread(void *arg) {
     }
     if (ctrl) ctrl_teardown(ctrl, fd);
     close(fd);
+    lmb_conn_gate_leave(&g_conn_gate);
     return NULL;
 }
 
@@ -835,6 +982,9 @@ int main(int argc, char **argv) {
         else { fprintf(stderr, "usage: %s [--port N] [--token S] [--pubkey FILE]\n",
                        argv[0]); return 2; }
     signal(SIGPIPE, SIG_IGN);   /* a vanished peer must not kill the tracker */
+    g_stale_s = (double)lmb_env_int("LUMABRI_STALE_MS", (int)(STALE_S * 1000),
+                                    100, 3600000) / 1000.0;
+    lmb_conn_gate_init(&g_conn_gate);
     int lfd = lmb_listen(port);
     if (lfd < 0) { perror("[tracker] listen"); return 1; }
     printf("[tracker] listening on :%d\n", port);
@@ -847,11 +997,13 @@ int main(int argc, char **argv) {
     for (;;) {
         int fd = accept(lfd, NULL, NULL);
         if (fd < 0) { if (errno == EINTR) continue; perror("[tracker] accept"); break; }
+        lmb_set_io_timeout(fd, lmb_env_int("LUMABRI_IO_TIMEOUT_MS",
+                                           LMB_DEFAULT_IO_TIMEOUT_MS, 100, 3600000));
+        if (!lmb_conn_gate_enter(&g_conn_gate)) { close(fd); continue; }
         pthread_t t;
         if (pthread_create(&t, NULL, conn_thread, (void *)(intptr_t)fd) == 0)
             pthread_detach(t);
-        else
-            close(fd);
+        else { lmb_conn_gate_leave(&g_conn_gate); close(fd); }
     }
     return 0;
 }

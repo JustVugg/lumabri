@@ -452,6 +452,27 @@ static uint8_t *lmb_truth_msg(const char *model, const char *path,
     return m;
 }
 
+/* A separate domain binds the signature to a complete-model root. It cannot
+ * be replayed as a per-file truth signature, and the model name prevents a
+ * valid root from being relabelled by a tracker. */
+#define LMB_MODEL_ID_TAG "lumabri-model-id-v1"
+
+static uint8_t *lmb_model_id_msg(const char *model, const uint8_t root[32],
+                                 size_t *out_len) {
+    size_t ml = strlen(model);
+    if (ml > SIZE_MAX - sizeof(LMB_MODEL_ID_TAG) - 1 - 32) return NULL;
+    size_t n = sizeof(LMB_MODEL_ID_TAG) + ml + 1 + 32;
+    uint8_t *m = (uint8_t *)malloc(n);
+    if (!m) return NULL;
+    size_t o = 0;
+    memcpy(m + o, LMB_MODEL_ID_TAG, sizeof(LMB_MODEL_ID_TAG));
+    o += sizeof(LMB_MODEL_ID_TAG);
+    memcpy(m + o, model, ml); o += ml; m[o++] = 0;
+    memcpy(m + o, root, 32); o += 32;
+    *out_len = o;
+    return m;
+}
+
 /* ---- hex helpers (keys live in files as hex, easy to paste) ------------- */
 
 static void lmb_hex(char *dst, const uint8_t *src, size_t n) {

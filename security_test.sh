@@ -158,4 +158,84 @@ set -e
 grep -q "REJECTED" "$T/tracker.log" || { echo "   the tracker said nothing"; cat "$T/tracker.log"; exit 1; }
 echo "   ✓ refused at the index, so it never reaches a client"
 
+echo "· 4) oversized control frames are rejected before their body is read"
+env LUMABRI_MAX_CONNECTIONS=2 LUMABRI_IO_TIMEOUT_MS=5000 \
+    ./tracker --port 7554 > "$T/limits.log" 2>&1 & LIMIT_PID=$!; PIDS+=($LIMIT_PID)
+sleep 0.4
+python3 - 7554 <<'PY'
+import socket, struct, sys
+port = int(sys.argv[1])
+s = socket.create_connection(("127.0.0.1", port))
+s.settimeout(1.0)
+# PING has a 64 KiB control-body cap.  Announce 1 MiB but deliberately send
+# no body: a hardened receiver closes from the header alone instead of
+# allocating memory and waiting for attacker-controlled bytes.
+s.sendall(struct.pack("<IIII", 0x31424D4C, 1, 1 << 20, 0))
+try:
+    data = s.recv(1)
+except socket.timeout:
+    raise SystemExit("tracker waited for an oversized PING body")
+if data:
+    raise SystemExit("tracker accepted an oversized PING body")
+PY
+echo "   ✓ hostile length refused from the 16-byte header"
+
+echo "· 5) idle connections cannot grow the server thread count without bound"
+python3 - 7554 "$T/held.ready" <<'PY' &
+import pathlib, socket, sys, time
+port = int(sys.argv[1])
+socks = [socket.create_connection(("127.0.0.1", port)) for _ in range(2)]
+pathlib.Path(sys.argv[2]).write_text("ready")
+time.sleep(10)
+PY
+HOLDER_PID=$!; PIDS+=($HOLDER_PID)
+for _ in $(seq 1 100); do [ -f "$T/held.ready" ] && break; sleep 0.05; done
+[ -f "$T/held.ready" ] || { echo "   connection holders did not start"; exit 1; }
+sleep 0.2
+python3 - 7554 <<'PY'
+import socket, sys
+s = socket.create_connection(("127.0.0.1", int(sys.argv[1])))
+s.settimeout(1.0)
+try:
+    data = s.recv(1)
+except socket.timeout:
+    raise SystemExit("third idle connection was admitted past the configured cap")
+if data:
+    raise SystemExit("unexpected response on rejected connection")
+PY
+kill "$HOLDER_PID" 2>/dev/null || true
+wait "$HOLDER_PID" 2>/dev/null || true
+echo "   ✓ configured connection cap rejects excess idle clients"
+
+echo "· 6) stale peer names do not exhaust the tracker's lifetime capacity"
+env LUMABRI_STALE_MS=100 ./tracker --port 7555 > "$T/reuse.log" 2>&1 & PIDS+=($!)
+sleep 0.3
+python3 - 7555 <<'PY'
+import socket, struct, sys, time
+port = int(sys.argv[1])
+def string(s):
+    b = s.encode()
+    return struct.pack("<H", len(b)) + b
+def register(i):
+    body = string(f"gone-{i}") + string("127.0.0.1:9") + string("model")
+    body += struct.pack("<I", 0)
+    s = socket.create_connection(("127.0.0.1", port))
+    s.sendall(struct.pack("<IIII", 0x31424D4C, 23, len(body), 0) + body)
+    pre = b""
+    while len(pre) < 16:
+        part = s.recv(16 - len(pre))
+        if not part:
+            raise SystemExit(f"peer {i}: tracker closed without a reply")
+        pre += part
+    op = struct.unpack("<IIII", pre)[1]
+    s.close()
+    if op != 2:
+        raise SystemExit(f"peer {i}: tracker table was not reusable")
+for i in range(64):
+    register(i)
+time.sleep(0.2)
+register(64)
+PY
+echo "   ✓ stale slot recycled; the cap applies to live peers, not history"
+
 echo "LUMABRI SECURITY TEST: PASS"

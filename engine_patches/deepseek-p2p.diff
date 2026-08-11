@@ -43,7 +43,7 @@ diff --git a/c/deepseek.c b/c/deepseek.c
      for (int current = 0; !result && current < selected; current++) {
          int slot = current % DUAL_EXPERT_LOADER_COUNT;
          if (!loader_active[slot] ||
-@@ -6232,6 +6253,13 @@
+@@ -6324,6 +6345,13 @@
              inputs + (size_t)item * d, config->swiglu_limit);
      if (!result)
          memset(outputs, 0, (size_t)batch * d * sizeof(*outputs));
@@ -57,7 +57,7 @@ diff --git a/c/deepseek.c b/c/deepseek.c
  
      int key_count = 0;
      for (int expert = 0; expert < n; expert++)
-@@ -8784,6 +8812,12 @@
+@@ -8914,6 +8942,12 @@
      engine->owns_experts = 1;
      engine->summary.dense_resident = engine->runtime.dense_resident;
      engine->summary.head_resident = engine->head_cache.data != NULL;

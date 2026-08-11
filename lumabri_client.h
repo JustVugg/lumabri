@@ -30,8 +30,9 @@
 #include <limits.h>
 
 #include "lumabri_proto.h"
+#include "lumabri_sign.h"
 
-#define LUMI_MAX_PEERS 32
+#define LUMI_MAX_PEERS 64
 #define LUMI_MAX_K     64
 #define LUMI_MAX_REP   4      /* replicas remembered per expert */
 #define LUMI_WAIT_S    30     /* how long a vanished peer is given to come back */
@@ -45,16 +46,25 @@ typedef struct {
 } LumiPeer;
 
 static struct {
-    int on;
+    int on, initialized, discovery;
     LumiPeer peers[LUMI_MAX_PEERS];
     int npeers;
     int *own;                   /* [gid * LUMI_MAX_REP] → peer index, -1 = free */
     unsigned char *routed;      /* [n_layers] 1 = this slot routes to experts */
     int n_layers, n_experts, hidden;
+    int expected, expected_bits;
+    char expected_model[64], profile[LMB_BUILD_PROFILE_MAX];
+    LmbModelIdentity identity; int have_identity;
+    uint8_t pubkey[32]; int have_pubkey;
+    double next_discover, discover_period_s;
     int verify_pct;             /* LUMABRI_VERIFY: % of calls double-checked */
     unsigned long long calls, layers_done, failovers, verified;
     double wait_s;
 } L = {0};
+
+#ifndef LMBE_EXPECT_BITS
+#define LMBE_EXPECT_BITS 8
+#endif
 
 static double lumi_now(void) {
     struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
@@ -108,15 +118,60 @@ static int lumi_index_ok(uint32_t layer, uint32_t eid) {
            layer < (uint32_t)L.n_layers && eid < (uint32_t)L.n_experts;
 }
 
+static void lumi_load_pubkey(void) {
+    const char *spec = getenv("LUMABRI_PUBKEY");
+    if (!spec || !*spec) return;
+    char hex[80] = "";
+    FILE *fp = fopen(spec, "r");
+    if (fp) { if (fscanf(fp, "%78s", hex) != 1) hex[0] = 0; fclose(fp); }
+    else snprintf(hex, sizeof hex, "%s", spec);
+    if (strlen(hex) == 64 && !lmb_unhex(L.pubkey, hex, 32)) L.have_pubkey = 1;
+    else fprintf(stderr, "[lumabri] invalid LUMABRI_PUBKEY: expert execution stays local\n");
+}
+
+static int lumi_identity_valid(const char *model, const LmbModelIdentity *id) {
+    if (strcmp(model, id->model)) return 0;
+    if (!L.have_pubkey) return 1;
+    if (!id->has_sig) return 0;
+    size_t n = 0;
+    uint8_t *msg = lmb_model_id_msg(model, id->root, &n);
+    int ok = msg && lmb_sign_verify(id->sig, msg, n, L.pubkey) == 0;
+    free(msg);
+    return ok;
+}
+
+static int lumi_refresh_identity(void) {
+    const char *tracker = getenv("LUMABRI_TRACKER");
+    if (!tracker || !*tracker || !L.expected_model[0]) return 0;
+    LmbModelIdentity id;
+    if (lmb_model_identity_get(tracker, L.expected_model, &id) ||
+        !lumi_identity_valid(L.expected_model, &id)) return 0;
+    if (L.have_identity && memcmp(L.identity.root, id.root, 32)) {
+        fprintf(stderr, "[lumabri] model identity changed during this process — "
+                        "refusing to mix checkpoints\n");
+        exit(1);
+    }
+    L.identity = id; L.have_identity = 1;
+    return 1;
+}
+
 /* Learn one peer: manifest, replica claims, distance. Returns 0, or -1 on
  * any failure (already-known addresses are a no-op success). */
 static int lumi_add_peer(const char *addr) {
+    int reprobe = -1;
     for (int i = 0; i < L.npeers; i++)
-        if (!strcmp(L.peers[i].addr, addr)) return 0;
-    if (L.npeers == LUMI_MAX_PEERS) return -1;
-    LumiPeer *p = &L.peers[L.npeers];
-    snprintf(p->addr, sizeof p->addr, "%s", addr);
-    p->nsocks = 0; p->dead = 0;
+        if (!strcmp(L.peers[i].addr, addr)) {
+            LumiPeer *known = &L.peers[i];
+            if (!known->dead) return 0;
+            while (known->nsocks) close(known->socks[--known->nsocks]);
+            reprobe = i;
+            break;
+        }
+    if (reprobe < 0 && L.npeers == LUMI_MAX_PEERS) return -1;
+    int pi = reprobe >= 0 ? reprobe : L.npeers;
+    LumiPeer *p = &L.peers[pi];
+    if (reprobe < 0) snprintf(p->addr, sizeof p->addr, "%s", addr);
+    p->nsocks = 0;
 
     LmbMsg m = {0};
     if (lmb_request(p->addr, LMB_EMANIFEST, NULL, 0, &m) || m.op != LMB_EMANIFEST_R) {
@@ -125,41 +180,83 @@ static int lumi_add_peer(const char *addr) {
         return -1;
     }
     LmbCur c = { m.body, m.body_len, 0 };
+    uint32_t magic = 0, bits = 0, have_id = 0, has_sig = 0;
     uint32_t n = 0, peer_hidden = 0;
-    int bad = lmb_cur_u32(&c, &n) != 0;
-    size_t cells = (size_t)L.n_layers * (size_t)L.n_experts;
-    if (!bad && (size_t)n > cells) bad = 1;
+    char engine[64] = "", profile[LMB_BUILD_PROFILE_MAX] = "", peer_model[64] = "";
+    LmbModelIdentity peer_id = {0};
+    int bad = lmb_cur_u32(&c, &magic) || magic != LMB_EXPERT_MANIFEST_MAGIC ||
+              lmb_cur_str(&c, engine, sizeof engine) ||
+              lmb_cur_str(&c, profile, sizeof profile) ||
+              lmb_cur_str(&c, peer_model, sizeof peer_model) ||
+              lmb_cur_u32(&c, &bits) || lmb_cur_u32(&c, &have_id) || have_id > 1;
+    if (!bad && have_id) {
+        snprintf(peer_id.model, sizeof peer_id.model, "%s", peer_model);
+        bad = lmb_cur_bytes(&c, peer_id.root, sizeof peer_id.root) ||
+              lmb_cur_u32(&c, &has_sig) || has_sig > 1 ||
+              (has_sig && lmb_cur_bytes(&c, peer_id.sig, sizeof peer_id.sig));
+        peer_id.has_sig = has_sig != 0;
+    }
+    if (!bad) bad = lmb_cur_u32(&c, &n) ||
+                    n > (uint64_t)L.n_layers * (uint64_t)L.n_experts;
+    if (!bad && (strcmp(engine, LMBE_ENGINE_ID) || strcmp(profile, L.profile) ||
+                 bits != (uint32_t)L.expected_bits ||
+                 (L.expected_model[0] && strcmp(peer_model, L.expected_model)) ||
+                 ((L.have_identity || L.have_pubkey) && !have_id) ||
+                 (have_id && !lumi_identity_valid(peer_model, &peer_id)) ||
+                 (L.have_identity && memcmp(L.identity.root, peer_id.root, 32)))) {
+        bad = 1;
+    }
+    size_t gids = (size_t)L.n_layers * L.n_experts;
+    uint8_t *seen = reprobe >= 0 ? (uint8_t *)calloc(gids, 1) : NULL;
+    if (reprobe >= 0 && !seen) bad = 1;
     int claimed = 0;
     for (uint32_t i = 0; !bad && i < n; i++) {
         uint32_t l, e;
         if (lmb_cur_u32(&c, &l) || lmb_cur_u32(&c, &e) ||
             !lumi_index_ok(l, e)) { bad = 1; break; }
+        size_t gid = (size_t)l * (size_t)L.n_experts + e;
+        if (seen) { seen[gid] = 1; continue; }
         int *own = &L.own[((size_t)l * (size_t)L.n_experts + e) * LUMI_MAX_REP];
         for (int r = 0; r < LUMI_MAX_REP; r++) {
-            if (own[r] == L.npeers) break;                /* duplicate entry */
-            if (own[r] < 0) { own[r] = L.npeers; claimed += r == 0; break; }
+            if (own[r] == pi) break;                       /* duplicate entry */
+            if (own[r] < 0) { own[r] = pi; claimed += r == 0; break; }
         }
     }
+    if (!bad && seen)
+        for (size_t gid = 0; gid < gids && !bad; gid++)
+            for (int r = 0; r < LUMI_MAX_REP; r++)
+                if (L.own[gid * LUMI_MAX_REP + r] == pi && !seen[gid]) {
+                    bad = 1;
+                    break;
+                }
     if (bad || lmb_cur_u32(&c, &peer_hidden) ||
         peer_hidden != (uint32_t)L.hidden || c.off != c.len || m.pay_len != 0) {
         /* roll the claims back: this peer must not own anything */
-        for (size_t i = 0; i < (size_t)L.n_layers * L.n_experts * LUMI_MAX_REP; i++)
-            if (L.own[i] == L.npeers) L.own[i] = -1;
+        if (reprobe < 0)
+            for (size_t i = 0; i < gids * LUMI_MAX_REP; i++)
+                if (L.own[i] == pi) L.own[i] = -1;
+        free(seen);
         lmb_msg_free(&m);
-        fprintf(stderr, "[lumabri] peer %s: bad or mismatched manifest — skipped\n",
-                p->addr);
+        fprintf(stderr, "[lumabri] peer %s: incompatible manifest "
+                        "(model/build/engine/bits/shape) — skipped\n", p->addr);
         return -1;
     }
+    if (!L.expected_model[0]) snprintf(L.expected_model, sizeof L.expected_model,
+                                       "%s", peer_model);
+    if (!L.have_identity && have_id) { L.identity = peer_id; L.have_identity = 1; }
+    free(seen);
     lmb_msg_free(&m);
+    p->dead = 0;
     lumi_probe(p);
     if (p->rtt_us == LONG_MAX) {
-        for (size_t i = 0; i < (size_t)L.n_layers * L.n_experts * LUMI_MAX_REP; i++)
-            if (L.own[i] == L.npeers) L.own[i] = -1;
+        if (reprobe < 0)
+            for (size_t i = 0; i < gids * LUMI_MAX_REP; i++)
+                if (L.own[i] == pi) L.own[i] = -1;
         return -1;
     }
     fprintf(stderr, "[lumabri] peer %s: %u experts (%d first-holder) · rtt %.2f ms\n",
             p->addr, n, claimed, (double)p->rtt_us / 1000.0);
-    L.npeers++;
+    if (reprobe < 0) L.npeers++;
     return 0;
 }
 
@@ -188,6 +285,44 @@ static int lumi_discover(void) {
     return added;
 }
 
+static int lumi_missing_experts(void) {
+    int missing = 0, expected = 0;
+    for (int l = 0; l < L.n_layers; l++) {
+        if (L.routed && !L.routed[l]) continue;
+        for (int e = 0; e < L.n_experts; e++) {
+            expected++;
+            if (L.own[((size_t)l * L.n_experts + e) * LUMI_MAX_REP] < 0) missing++;
+        }
+    }
+    L.expected = expected;
+    return missing;
+}
+
+static void lumi_enable_if_complete(void) {
+    if (L.on) return;
+    int missing = lumi_missing_experts();
+    if (missing) return;
+    L.on = 1;
+    fprintf(stderr, "[lumabri] phase 2 active: every expert runs on a peer, "
+                    "%d peer(s), %d experts, hidden=%d, nearest replica "
+                    "preferred%s\n",
+            L.npeers, L.expected, L.hidden,
+            L.verify_pct ? " · spot-check verification on" : "");
+}
+
+static void lumi_maybe_discover(void) {
+    if (!L.initialized || !L.discovery) return;
+    double now = lumi_now();
+    if (now < L.next_discover) return;
+    L.next_discover = now + L.discover_period_s;
+    if (!L.have_identity) lumi_refresh_identity();
+    int added = lumi_discover();
+    if (added)
+        fprintf(stderr, "[lumabri] discovered %d new expert peer(s) mid-generation\n",
+                added);
+    lumi_enable_if_complete();
+}
+
 /* The bootstrap-and-delegate policy, chatter side. Peer list from
  * LUMABRI_EXPERTS when set (explicit, any gap is fatal); otherwise
  * discovered from the tracker — and if the swarm cannot cover every
@@ -205,26 +340,48 @@ static void lumi_init_ex(int n_layers, int n_experts, int hidden,
     const char *tracker = getenv("LUMABRI_TRACKER");
     int discovery = !spec || !*spec;
     if (discovery && (!tracker || !tracker[0])) return;
+    if (n_layers <= 0 || n_experts <= 0 || hidden <= 0 ||
+        (size_t)n_layers > SIZE_MAX / (size_t)n_experts / LUMI_MAX_REP)
+        lumi_die("invalid expert topology");
 
     L.n_layers = n_layers; L.n_experts = n_experts; L.hidden = hidden;
+    L.discovery = discovery;
+    L.discover_period_s = (double)lmb_env_int("LUMABRI_DISCOVERY_MS", 5000,
+                                              100, 600000) / 1000.0;
+    L.next_discover = lumi_now() + L.discover_period_s;
+    lmb_build_profile(L.profile, sizeof L.profile);
+    L.expected_bits = lmb_env_int("LUMABRI_EXPERT_BITS", LMBE_EXPECT_BITS,
+                                  0, 32);
+    const char *model = getenv("LUMABRI_MODEL");
+    if (model) snprintf(L.expected_model, sizeof L.expected_model, "%s", model);
+    lumi_load_pubkey();
+    if (getenv("LUMABRI_PUBKEY") && !L.have_pubkey) return;
+    if (tracker && tracker[0] && L.expected_model[0]) lumi_refresh_identity();
     size_t cells = (size_t)n_layers * n_experts * LUMI_MAX_REP;
     L.own = (int *)malloc(cells * sizeof(int));
+    if (!L.own) lumi_die("out of memory creating expert map");
     for (size_t i = 0; i < cells; i++) L.own[i] = -1;
     L.routed = NULL;
     if (routed) {
         L.routed = (unsigned char *)malloc((size_t)n_layers);
         if (L.routed) memcpy(L.routed, routed, (size_t)n_layers);
     }
+    const char *v = getenv("LUMABRI_VERIFY");
+    if (v) {
+        L.verify_pct = atoi(v);
+        if (L.verify_pct < 0) L.verify_pct = 0;
+        if (L.verify_pct > 100) L.verify_pct = 100;
+    }
+    L.initialized = 1;
 
     if (discovery) {
         int found = lumi_discover();
         if (!found) {
             fprintf(stderr, "[lumabri] no expert peers on the swarm — "
                             "running experts locally\n");
-            return;
-        }
-        fprintf(stderr, "[lumabri] discovered %d expert peer(s) from the tracker\n",
-                found);
+        } else
+            fprintf(stderr, "[lumabri] discovered %d expert peer(s) from the tracker\n",
+                    found);
     } else {
         char list[1024];
         snprintf(list, sizeof list, "%s", spec);
@@ -233,37 +390,19 @@ static void lumi_init_ex(int n_layers, int n_experts, int hidden,
             if (lumi_add_peer(tok)) lumi_die("configured expert peer failed");
     }
 
-    int missing = 0, expected = 0;
-    for (int l = 0; l < n_layers; l++) {
-        if (L.routed && !L.routed[l]) continue;      /* dense slot: no experts */
-        for (int e = 0; e < n_experts; e++) {
-            expected++;
-            if (L.own[((size_t)l * n_experts + e) * LUMI_MAX_REP] < 0) missing++;
-        }
-    }
+    int missing = lumi_missing_experts();
     if (missing) {
         fprintf(stderr, "[lumabri] %d of %d experts have no peer — ", missing,
-                expected);
+                L.expected);
         if (discovery) {
             fprintf(stderr, "running experts locally\n");
-            return;                    /* partial swarm: phase 2 stays off */
+            return; /* layer_on keeps discovering and enables once complete */
         }
         fprintf(stderr, "refusing to run "
                 "(a partial explicit network would silently change the model)\n");
         exit(1);
     }
-    const char *v = getenv("LUMABRI_VERIFY");
-    if (v) {
-        L.verify_pct = atoi(v);
-        if (L.verify_pct < 0) L.verify_pct = 0;
-        if (L.verify_pct > 100) L.verify_pct = 100;
-    }
-    L.on = 1;
-    fprintf(stderr, "[lumabri] phase 2 active: every expert runs on a peer, "
-                    "%d peer(s), %d experts, hidden=%d, nearest replica "
-                    "preferred%s\n",
-            L.npeers, expected, hidden,
-            L.verify_pct ? " · spot-check verification on" : "");
+    lumi_enable_if_complete();
 }
 
 /* olmoe's shape: every layer routes */
@@ -274,6 +413,7 @@ static void lumi_init(int n_layers, int n_experts, int hidden) {
 /* Does this (slot, expert) pair belong on the swarm? The engines call it
  * before handing a layer over, so an unrouted slot is never a wire error. */
 static int lumi_layer_on(int layer) {
+    lumi_maybe_discover();
     if (!L.on || layer < 0 || layer >= L.n_layers) return 0;
     return !L.routed || L.routed[layer];
 }
@@ -345,10 +485,15 @@ static float *lumi_exec_retry(int layer, int eid, const float *x, int D, int nr,
                             "viva — aspetto che torni (fino a %d s)\n",
                             layer, eid, LUMI_WAIT_S);
                 tried = 0;                    /* a returning peer deserves a retry */
-                for (int i = 0; i < L.npeers; i++) L.peers[i].dead = 0;
                 sleep(2);
                 waited += 2;
-                lumi_discover();
+                if (L.discovery) lumi_discover();
+                else for (int i = 0; i < L.npeers; i++)
+                    if (L.peers[i].dead) {
+                        char addr[64];
+                        snprintf(addr, sizeof addr, "%s", L.peers[i].addr);
+                        lumi_add_peer(addr);   /* revalidates manifest before reuse */
+                    }
                 continue;
             }
             fprintf(stderr, "[lumabri] layer %d expert %d: nessuna replica viva "

@@ -32,6 +32,7 @@
 
 typedef struct {
     char rel[LMB_PATH_MAX]; uint64_t size; int fd;
+    uint64_t mtime_ns, ctime_ns; /* invalidate same-size hash sidecars */
     uint8_t *hash; uint32_t nh;   /* sha256 per LMB_HASH_CHUNK */
     uint8_t sig[64]; int signed_;  /* operator signature over the truth */
 } MFile;
@@ -41,11 +42,13 @@ static struct {
     char name[64], advertise[64], tracker[64], model[64], token[128];
     uint8_t sk[64]; int have_key;   /* --key: this peer is the origin */
     uint8_t pk[32]; int have_pub;   /* --pubkey: a donor that checks the origin */
+    LmbModelIdentity identity; int have_identity;
     MFile files[MAX_FILES]; int nfiles;
     const char *includes[MAX_INCLUDES]; int nincl;
     pthread_mutex_t fd_lk;
     _Atomic uint64_t served_bytes, served_reads;
 } g = { .fd_lk = PTHREAD_MUTEX_INITIALIZER };
+static LmbConnGate g_conn_gate = LMB_CONN_GATE_INIT;
 
 static int want(const char *rel) {
     if (!g.nincl) return 1;
@@ -73,6 +76,10 @@ static void scan_dir(const char *dir) {
         MFile *f = &g.files[g.nfiles++];
         snprintf(f->rel, sizeof f->rel, "%s", rel);
         f->size = (uint64_t)st.st_size;
+        f->mtime_ns = (uint64_t)st.st_mtim.tv_sec * 1000000000ull +
+                      (uint64_t)st.st_mtim.tv_nsec;
+        f->ctime_ns = (uint64_t)st.st_ctim.tv_sec * 1000000000ull +
+                      (uint64_t)st.st_ctim.tv_nsec;
         f->fd = -1;
     }
     closedir(d);
@@ -158,16 +165,24 @@ static int sidecar_write(const char *path, const void *a, size_t na,
     FILE *fp = fopen(tmp, "wb");
     if (!fp) return -1;
     int ok = (!na || fwrite(a, 1, na, fp) == na) &&
-             (!nb || fwrite(b, 1, nb, fp) == nb);
-    fclose(fp);
+             (!nb || fwrite(b, 1, nb, fp) == nb) &&
+             fflush(fp) == 0 && fsync(fileno(fp)) == 0;
+    if (fclose(fp)) ok = 0;
     if (!ok) { unlink(tmp); return -1; }
     return rename(tmp, path);
 }
 
 static void save_truth(const MFile *f) {
+    struct {
+        uint32_t magic, version;
+        uint64_t size, mtime_ns, ctime_ns;
+        uint32_t nh, reserved;
+    } hdr = { 0x3148534Cu, 1, f->size, f->mtime_ns, f->ctime_ns,
+              f->nh, 0 }; /* "LSH1" */
     char p[LMB_PATH_MAX * 2];
     sidecar_path(f, "sha", p, sizeof p);
-    if (f->hash) sidecar_write(p, &f->size, 8, f->hash, (size_t)f->nh * 32);
+    if (f->hash) sidecar_write(p, &hdr, sizeof hdr,
+                               f->hash, (size_t)f->nh * 32);
     if (f->signed_) {
         sidecar_path(f, "sig", p, sizeof p);
         sidecar_write(p, f->sig, 64, NULL, 0);
@@ -184,25 +199,58 @@ static void load_sig(MFile *f) {
 }
 
 static int hash_file(MFile *f) {
-    f->nh = (uint32_t)((f->size + LMB_HASH_CHUNK - 1) / LMB_HASH_CHUNK);
-    f->hash = malloc((size_t)f->nh * 32 + 1);
-    if (!f->hash) return -1;
-    char sc[LMB_PATH_MAX * 2];
-    snprintf(sc, sizeof sc, "%s/.lumabri_hashes/%s.sha", g.root, f->rel);
-    FILE *fp = fopen(sc, "rb");
-    if (fp) {
-        uint64_t sz = 0;
-        if (fread(&sz, 8, 1, fp) == 1 && sz == f->size &&
-            fread(f->hash, 32, f->nh, fp) == f->nh)
-            { fclose(fp); g_hash_done += f->size; return 0; }   /* cached: free */
-        fclose(fp);
-    }
     char full[LMB_PATH_MAX * 2];
     snprintf(full, sizeof full, "%s/%s", g.root, f->rel);
     int fd = open(full, O_RDONLY);
     if (fd < 0) return -1;
+    struct stat st;
+    if (fstat(fd, &st)) { close(fd); return -1; }
+    f->size = (uint64_t)st.st_size;
+    f->mtime_ns = (uint64_t)st.st_mtim.tv_sec * 1000000000ull +
+                  (uint64_t)st.st_mtim.tv_nsec;
+    f->ctime_ns = (uint64_t)st.st_ctim.tv_sec * 1000000000ull +
+                  (uint64_t)st.st_ctim.tv_nsec;
+    f->nh = (uint32_t)((f->size + LMB_HASH_CHUNK - 1) / LMB_HASH_CHUNK);
+    free(f->hash);
+    f->hash = malloc((size_t)f->nh * 32 + 1);
+    if (!f->hash) { close(fd); return -1; }
+    char sc[LMB_PATH_MAX * 2];
+    snprintf(sc, sizeof sc, "%s/.lumabri_hashes/%s.sha", g.root, f->rel);
+    FILE *fp = fopen(sc, "rb");
+    if (fp) {
+        struct {
+            uint32_t magic, version;
+            uint64_t size, mtime_ns, ctime_ns;
+            uint32_t nh, reserved;
+        } hdr = {0};
+        if (fread(&hdr, sizeof hdr, 1, fp) == 1 &&
+            hdr.magic == 0x3148534Cu && hdr.version == 1 &&
+            hdr.size == f->size && hdr.mtime_ns == f->mtime_ns &&
+            hdr.ctime_ns == f->ctime_ns && hdr.nh == f->nh &&
+            fread(f->hash, 32, f->nh, fp) == f->nh) {
+            struct stat after;
+            int stable = fstat(fd, &after) == 0 &&
+                (uint64_t)after.st_size == f->size &&
+                (uint64_t)after.st_mtim.tv_sec * 1000000000ull +
+                    (uint64_t)after.st_mtim.tv_nsec == f->mtime_ns &&
+                (uint64_t)after.st_ctim.tv_sec * 1000000000ull +
+                    (uint64_t)after.st_ctim.tv_nsec == f->ctime_ns;
+            fclose(fp); close(fd);
+            if (stable) { g_hash_done += f->size; return 0; }
+            free(f->hash); f->hash = NULL;
+            return -1;
+        }
+        fclose(fp);
+    }
+    /* A rehash invalidates any signature stored beside the old vector.  An
+     * origin with the secret key will create a new one after this returns; a
+     * donor must obtain the new proof from the swarm, never reuse the old. */
+    char sigp[LMB_PATH_MAX * 2];
+    sidecar_path(f, "sig", sigp, sizeof sigp);
+    unlink(sigp);
+    f->signed_ = 0;
     uint8_t *buf = malloc(LMB_HASH_CHUNK);
-    if (!buf) { close(fd); return -1; }
+    if (!buf) { free(f->hash); f->hash = NULL; close(fd); return -1; }
     for (uint32_t c = 0; c < f->nh; c++) {
         uint64_t off = (uint64_t)c * LMB_HASH_CHUNK;
         uint32_t len = (uint32_t)(f->size - off < LMB_HASH_CHUNK ? f->size - off
@@ -213,11 +261,26 @@ static int hash_file(MFile *f) {
             if (r <= 0) { if (r < 0 && errno == EINTR) continue; break; }
             got += (uint32_t)r;
         }
-        if (got != len) { free(buf); close(fd); return -1; }
+        if (got != len) {
+            free(buf); free(f->hash); f->hash = NULL; close(fd); return -1;
+        }
         lmb_sha256(buf, len, f->hash + (size_t)c * 32);
         hash_tick(len, f->rel);
     }
     free(buf);
+    struct stat after;
+    uint64_t after_mtime = 0, after_ctime = 0;
+    int after_ok = fstat(fd, &after) == 0;
+    if (after_ok) {
+        after_mtime = (uint64_t)after.st_mtim.tv_sec * 1000000000ull +
+                      (uint64_t)after.st_mtim.tv_nsec;
+        after_ctime = (uint64_t)after.st_ctim.tv_sec * 1000000000ull +
+                      (uint64_t)after.st_ctim.tv_nsec;
+    }
+    if (!after_ok || after_mtime != f->mtime_ns || after_ctime != f->ctime_ns ||
+        (uint64_t)after.st_size != f->size) {
+        free(f->hash); f->hash = NULL; close(fd); return -1;
+    }
     close(fd);
     save_truth(f);
     return 0;
@@ -286,6 +349,13 @@ static void hash_section(LmbBuf *b) {
         lmb_buf_u32(b, g.files[i].signed_ ? 1u : 0u);
         if (g.files[i].signed_) lmb_buf_bytes(b, g.files[i].sig, 64);
     }
+    if (g.have_identity) {
+        lmb_buf_u32(b, LMB_MODEL_ID_MAGIC);
+        lmb_buf_bytes(b, g.identity.root, sizeof g.identity.root);
+        lmb_buf_u32(b, g.identity.has_sig ? 1u : 0u);
+        if (g.identity.has_sig)
+            lmb_buf_bytes(b, g.identity.sig, sizeof g.identity.sig);
+    }
 }
 
 /* sign one file's truth with the operator key (origin peers only) */
@@ -298,6 +368,123 @@ static void sign_truth(MFile *f) {
     lmb_sign(f->sig, msg, mlen, g.sk);
     free(msg);
     f->signed_ = 1;
+}
+
+static int model_identity_valid(const LmbModelIdentity *id) {
+    if (strcmp(id->model, g.model)) return 0;
+    if (!g.have_pub) return 1;
+    if (!id->has_sig) return 0;
+    size_t n = 0;
+    uint8_t *msg = lmb_model_id_msg(id->model, id->root, &n);
+    int ok = msg && lmb_sign_verify(id->sig, msg, n, g.pk) == 0;
+    free(msg);
+    return ok;
+}
+
+static int model_identity_local(LmbModelIdentity *id) {
+    LmbModelItem *items = (LmbModelItem *)calloc(g.nfiles ? (size_t)g.nfiles : 1,
+                                                 sizeof *items);
+    if (!items) return -1;
+    for (int i = 0; i < g.nfiles; i++) {
+        if (!g.files[i].hash) { free(items); return -1; }
+        items[i].path = g.files[i].rel;
+        items[i].size = g.files[i].size;
+        items[i].nh = g.files[i].nh;
+        items[i].hashes = g.files[i].hash;
+    }
+    memset(id, 0, sizeof *id);
+    snprintf(id->model, sizeof id->model, "%s", g.model);
+    int rc = lmb_model_root(g.model, items, (size_t)g.nfiles, id->root);
+    free(items);
+    return rc;
+}
+
+static void model_identity_path(char *out, size_t cap) {
+    snprintf(out, cap, "%s/.lumabri_hashes/model.mid", g.root);
+}
+
+static int model_identity_load(LmbModelIdentity *id) {
+    struct {
+        uint32_t magic, version;
+        char model[64];
+        uint8_t root[32];
+        uint32_t has_sig;
+        uint8_t sig[64];
+    } rec;
+    char path[LMB_PATH_MAX * 2];
+    model_identity_path(path, sizeof path);
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return -1;
+    int ok = fread(&rec, sizeof rec, 1, fp) == 1 &&
+             rec.magic == LMB_MODEL_ID_MAGIC && rec.version == 1 &&
+             rec.has_sig <= 1 && !strcmp(rec.model, g.model);
+    fclose(fp);
+    if (!ok) return -1;
+    memset(id, 0, sizeof *id);
+    snprintf(id->model, sizeof id->model, "%s", rec.model);
+    memcpy(id->root, rec.root, 32);
+    id->has_sig = rec.has_sig != 0;
+    if (id->has_sig) memcpy(id->sig, rec.sig, 64);
+    return model_identity_valid(id) ? 0 : -1;
+}
+
+static void model_identity_save(const LmbModelIdentity *id) {
+    struct {
+        uint32_t magic, version;
+        char model[64];
+        uint8_t root[32];
+        uint32_t has_sig;
+        uint8_t sig[64];
+    } rec;
+    memset(&rec, 0, sizeof rec);
+    rec.magic = LMB_MODEL_ID_MAGIC; rec.version = 1;
+    snprintf(rec.model, sizeof rec.model, "%s", id->model);
+    memcpy(rec.root, id->root, 32);
+    rec.has_sig = id->has_sig ? 1u : 0u;
+    if (id->has_sig) memcpy(rec.sig, id->sig, 64);
+    char path[LMB_PATH_MAX * 2];
+    model_identity_path(path, sizeof path);
+    sidecar_write(path, &rec, sizeof rec, NULL, 0);
+}
+
+static int model_identity_prepare(int disk_donor) {
+    LmbModelIdentity local = {0}, saved = {0}, remote = {0};
+    int complete_local = !disk_donor && g.nincl == 0;
+    int have_local = complete_local && model_identity_local(&local) == 0;
+    int have_saved = model_identity_load(&saved) == 0;
+    int have_remote = g.tracker[0] &&
+                      lmb_model_identity_get(g.tracker, g.model, &remote) == 0 &&
+                      model_identity_valid(&remote);
+
+    if (g.have_key && complete_local) {
+        if (!have_local) return -1;
+        size_t n = 0;
+        uint8_t *msg = lmb_model_id_msg(g.model, local.root, &n);
+        if (!msg) return -1;
+        lmb_sign(local.sig, msg, n, g.sk);
+        free(msg);
+        local.has_sig = 1;
+        g.identity = local; g.have_identity = 1;
+    } else if (disk_donor || !complete_local) {
+        if (have_remote) { g.identity = remote; g.have_identity = 1; }
+        else if (have_saved) { g.identity = saved; g.have_identity = 1; }
+    } else if (have_local) {
+        if (have_remote && memcmp(local.root, remote.root, 32)) {
+            fprintf(stderr, "[maintainer %s] local model root differs from the "
+                            "swarm identity — refusing to advertise it\n", g.name);
+            return -1;
+        }
+        if (have_remote) local = remote;
+        else if (have_saved && !memcmp(local.root, saved.root, 32)) local = saved;
+        g.identity = local; g.have_identity = 1;
+    }
+    if (g.have_pub && (!g.have_identity || !model_identity_valid(&g.identity))) {
+        fprintf(stderr, "[maintainer %s] no operator-signed identity for model %s\n",
+                g.name, g.model);
+        return -1;
+    }
+    if (g.have_identity) model_identity_save(&g.identity);
+    return 0; /* unsigned legacy/partial origins may have no complete root */
 }
 
 static int handle_read(int fd, LmbMsg *m) {
@@ -357,6 +544,7 @@ static void *conn_thread(void *arg) {
         if (rc) break;
     }
     close(fd);
+    lmb_conn_gate_leave(&g_conn_gate);
     return NULL;
 }
 
@@ -617,6 +805,15 @@ static void pull_slice(uint64_t budget) {
             f->hash = t.hash; f->nh = t.nh;
             f->signed_ = t.has_sig;
             if (t.has_sig) memcpy(f->sig, t.sig, 64);
+            char full[LMB_PATH_MAX * 2];
+            struct stat st;
+            snprintf(full, sizeof full, "%s/%s", g.root, rel);
+            if (!stat(full, &st)) {
+                f->mtime_ns = (uint64_t)st.st_mtim.tv_sec * 1000000000ull +
+                              (uint64_t)st.st_mtim.tv_nsec;
+                f->ctime_ns = (uint64_t)st.st_ctim.tv_sec * 1000000000ull +
+                              (uint64_t)st.st_ctim.tv_nsec;
+            }
             save_truth(f);
             pulled += size; done++;
         } else {
@@ -784,6 +981,7 @@ int main(int argc, char **argv) {
     const char *tok = getenv("LUMABRI_TOKEN");
     if (tok) snprintf(g.token, sizeof g.token, "%s", tok);
     signal(SIGPIPE, SIG_IGN);   /* a vanished chatter must not kill the peer */
+    lmb_conn_gate_init(&g_conn_gate);
     size_t rl = strlen(g.root);
     while (rl > 1 && g.root[rl - 1] == '/') g.root[--rl] = 0;
     if (!g.name[0]) snprintf(g.name, sizeof g.name, "peer-%d", port);
@@ -829,7 +1027,14 @@ int main(int argc, char **argv) {
         else {
             load_sig(&g.files[i]);   /* a donor's proof, kept across restarts */
             sign_truth(&g.files[i]);
+            save_truth(&g.files[i]); /* persist a newly made signature too */
         }
+    }
+    if (model_identity_prepare(donate_gb > 0)) {
+        fprintf(stderr, "[maintainer %s] cannot establish the complete model "
+                        "identity — refusing to serve an ambiguous checkpoint\n",
+                g.name);
+        return 1;
     }
     if (g.have_key) {
         char pub[70];
@@ -857,10 +1062,12 @@ int main(int argc, char **argv) {
     for (;;) {
         int fd = accept(lfd, NULL, NULL);
         if (fd < 0) { if (errno == EINTR) continue; perror("[maintainer] accept"); break; }
+        lmb_set_io_timeout(fd, lmb_env_int("LUMABRI_IO_TIMEOUT_MS",
+                                           LMB_DEFAULT_IO_TIMEOUT_MS, 100, 3600000));
+        if (!lmb_conn_gate_enter(&g_conn_gate)) { close(fd); continue; }
         if (pthread_create(&t, NULL, conn_thread, (void *)(intptr_t)fd) == 0)
             pthread_detach(t);
-        else
-            close(fd);
+        else { lmb_conn_gate_leave(&g_conn_gate); close(fd); }
     }
     return 0;
 }

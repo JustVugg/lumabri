@@ -35,6 +35,7 @@ static ColiDeepSeekV4Config lmbe_cfg;
 static ColiExpertStore *lmbe_store;
 
 static const char *lmbe_engine_name(void) { return "deepseek_v4"; }
+static int lmbe_effective_bits(int bits) { (void)bits; return 0; }
 
 /* `cap` is expert slots; the store wants bytes, so it is scaled by the
  * record size the store itself reports back through its stats. Before that

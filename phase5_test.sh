@@ -61,7 +61,7 @@ mkdir -p "$T/evil"
 head -c $((12 * 1024 * 1024)) /dev/urandom > "$T/evil/w.bin"   # different bytes!
 head -c 777 /dev/urandom > "$T/evil/config.json"
 ./maintainer --root "$T/evil" --port 7453 --tracker 127.0.0.1:7450 \
-    --name poisoner --model-name src > "$T/evil.log" 2>&1 & PIDS+=($!)
+    --name poisoner --model-name src --include '*' > "$T/evil.log" 2>&1 & PIDS+=($!)
 wait_port 7453
 sleep 1.5
 # assert on the tracker's own answer: the poisoner must hold zero placeable

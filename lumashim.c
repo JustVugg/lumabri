@@ -43,6 +43,7 @@
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -118,11 +119,13 @@ typedef struct {
     int peer_idx[MAX_FPEERS]; int npeers;
     int wfd;              /* mirror write fd, opened on first fetch */
     int map_fd;           /* persisted bitmap */
+    uint64_t dirty_gen, durable_gen; /* batched data-before-map commits */
     uint8_t *hash;        /* ground truth: sha256 per LMB_HASH_CHUNK */
     uint32_t nh;
     int hstate;           /* 0 unknown · 1 have · 2 tracker has none */
     int signed_;          /* the truth carried a valid operator signature */
     pthread_mutex_t lk;
+    pthread_mutex_t commit_lk;
     pthread_cond_t cv;
 } RFile;
 
@@ -130,6 +133,8 @@ static struct {
     int ok;                       /* full init succeeded */
     char vroot[LMB_PATH_MAX]; size_t vroot_len;
     char data_dir[LMB_PATH_MAX], maps_dir[LMB_PATH_MAX];
+    int cache_lock_fd;              /* shared for process lifetime; exclusive on reset */
+    int reset_lock_fd;              /* elects one resetter without queuing behind its chat */
     uint32_t block;
     RFile *files; int nfiles;
     RPeer peers[MAX_RPEERS]; int npeers;
@@ -137,7 +142,109 @@ static struct {
     RFile *_Atomic fdmap[FD_LIMIT];
     _Atomic uint64_t net_bytes, net_blocks, warm_reads;
     pthread_once_t once;
-} g = { .once = PTHREAD_ONCE_INIT };
+} g = { .cache_lock_fd = -1, .reset_lock_fd = -1, .once = PTHREAD_ONCE_INIT };
+
+/* Persist bitmap claims in batches.  A fetched block is immediately usable
+ * from the in-process map, but the on-disk map is updated only after the data
+ * fd has reached stable storage.  This preserves crash safety without paying
+ * two fdatasync calls on every MiB, which destroys cold-stream throughput. */
+static int mirror_commit_file(RFile *f) {
+    pthread_mutex_lock(&f->commit_lk);
+    pthread_mutex_lock(&f->lk);
+    if (f->dirty_gen == f->durable_gen || f->wfd < 0) {
+        pthread_mutex_unlock(&f->lk);
+        pthread_mutex_unlock(&f->commit_lk);
+        return 0;
+    }
+    uint64_t target = f->dirty_gen;
+    size_t n = f->nblocks ? f->nblocks : 1;
+    uint8_t *snapshot = (uint8_t *)calloc(n, 1);
+    if (snapshot) memcpy(snapshot, f->map, f->nblocks);
+    int wfd = f->wfd, mfd = f->map_fd;
+    pthread_mutex_unlock(&f->lk);
+    if (!snapshot) { pthread_mutex_unlock(&f->commit_lk); return -1; }
+
+    /* Several chatters may share this mirror.  Serialize the persisted-map
+     * merge across processes and OR in bits published by the others, or an
+     * older in-memory snapshot could erase their warm blocks. */
+    int rc = flock(mfd, LOCK_EX);
+    uint8_t *ondisk = NULL;
+    if (!rc) rc = fdatasync(wfd);       /* data is durable before any map bit */
+    if (!rc) {
+        ondisk = (uint8_t *)calloc(n, 1);
+        if (!ondisk) rc = -1;
+    }
+    if (!rc) {
+        size_t got = 0;
+        while (got < n) {
+            ssize_t r = real_pread(mfd, ondisk + got, n - got, (off_t)got);
+            if (r < 0) { if (errno == EINTR) continue; rc = -1; break; }
+            if (r == 0) break;
+            got += (size_t)r;
+        }
+        for (size_t i = 0; i < n; i++) snapshot[i] |= ondisk[i];
+    }
+    size_t put = 0;
+    while (!rc && put < n) {
+        ssize_t w = pwrite(mfd, snapshot + put, n - put, (off_t)put);
+        if (w < 0) { if (errno == EINTR) continue; rc = -1; break; }
+        put += (size_t)w;
+    }
+    if (!rc && fdatasync(mfd)) rc = -1;
+    free(ondisk);
+    if (flock(mfd, LOCK_UN) && !rc) rc = -1;
+    free(snapshot);
+    if (!rc) {
+        pthread_mutex_lock(&f->lk);
+        if (f->durable_gen < target) f->durable_gen = target;
+        pthread_mutex_unlock(&f->lk);
+    }
+    pthread_mutex_unlock(&f->commit_lk);
+    return rc;
+}
+
+static void mirror_commit_all(void) {
+    for (int i = 0; i < g.nfiles; i++)
+        if (mirror_commit_file(&g.files[i]))
+            fprintf(stderr, "[lumabri] cannot make the mirror map durable for %s\n",
+                    g.files[i].rel);
+}
+
+static void *mirror_commit_thread(void *arg) {
+    (void)arg;
+    for (;;) {
+        sleep(1);
+        mirror_commit_all();
+    }
+    return NULL;
+}
+
+static int cache_flock(int op) {
+    int rc;
+    do rc = flock(g.cache_lock_fd, op); while (rc && errno == EINTR);
+    return rc;
+}
+
+static void cache_reset_unlock(void) {
+    if (g.reset_lock_fd < 0) return;
+    flock(g.reset_lock_fd, LOCK_UN);
+    real_close(g.reset_lock_fd);
+    g.reset_lock_fd = -1;
+}
+
+static void cache_lock_release(void) {
+    if (g.cache_lock_fd >= 0) {
+        cache_flock(LOCK_UN);
+        real_close(g.cache_lock_fd);
+        g.cache_lock_fd = -1;
+    }
+    cache_reset_unlock();
+}
+
+__attribute__((destructor)) static void shim_dtor(void) {
+    if (g.ok) mirror_commit_all();
+    cache_lock_release();
+}
 
 static void shim_learn_vroot(void) {
     const char *v = getenv("LUMABRI_VROOT");
@@ -151,7 +258,7 @@ static void shim_learn_vroot(void) {
 /* ---- small helpers ----------------------------------------------------- */
 
 static void mkdir_p(const char *path) {
-    char tmp[LMB_PATH_MAX * 2];
+    char tmp[LMB_PATH_MAX * 2 + 64];
     snprintf(tmp, sizeof tmp, "%s", path);
     for (char *p = tmp + 1; *p; p++)
         if (*p == '/') { *p = 0; mkdir(tmp, 0755); *p = '/'; }
@@ -159,10 +266,24 @@ static void mkdir_p(const char *path) {
 }
 
 static void mkdir_parent(const char *path) {
-    char tmp[LMB_PATH_MAX * 2];
+    char tmp[LMB_PATH_MAX * 2 + 64];
     snprintf(tmp, sizeof tmp, "%s", path);
     char *slash = strrchr(tmp, '/');
     if (slash && slash != tmp) { *slash = 0; mkdir_p(tmp); }
+}
+
+static int fsync_parent_dir(const char *path) {
+    char dir[LMB_PATH_MAX * 2 + 64];
+    snprintf(dir, sizeof dir, "%s", path);
+    char *slash = strrchr(dir, '/');
+    if (!slash) return 0;
+    if (slash == dir) slash[1] = 0;
+    else *slash = 0;
+    int fd = real_open(dir, O_RDONLY | O_DIRECTORY);
+    if (fd < 0) return -1;
+    int rc = fsync(fd);
+    real_close(fd);
+    return rc;
 }
 
 static uint32_t fnv1a(const char *s, uint32_t extra) {
@@ -303,16 +424,18 @@ static int placement_from_peer(const char *addr) {
 /* The manifest survives on disk so a warm cache keeps working with every
  * peer AND the tracker offline: reads of present blocks never need the
  * network; only a miss does, and a miss with no peers is a loud EIO. */
-static void manifest_save(void) {
-    char path[LMB_PATH_MAX * 2], tmp[LMB_PATH_MAX * 2];
+static int manifest_save(void) {
+    char path[LMB_PATH_MAX * 2], tmp[LMB_PATH_MAX * 2 + 32];
     snprintf(path, sizeof path, "%s/manifest.txt", g.maps_dir);
-    snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    snprintf(tmp, sizeof tmp, "%s.tmp.%ld", path, (long)getpid());
     FILE *fp = real_fopen(tmp, "w");
-    if (!fp) return;
+    if (!fp) return -1;
     for (int i = 0; i < g.nfiles; i++)
         fprintf(fp, "%llu\t%s\n", (unsigned long long)g.files[i].size, g.files[i].rel);
-    fclose(fp);
-    rename(tmp, path);
+    int ok = fflush(fp) == 0 && fsync(fileno(fp)) == 0;
+    if (fclose(fp)) ok = 0;
+    if (!ok || rename(tmp, path)) { unlink(tmp); return -1; }
+    return fsync_parent_dir(path);
 }
 
 static int manifest_load(void) {
@@ -335,6 +458,115 @@ static int manifest_load(void) {
     }
     fclose(fp);
     return g.nfiles ? 0 : -1;
+}
+
+typedef struct {
+    uint32_t magic, version;
+    char model[64];
+    uint8_t root[32];
+    uint32_t has_sig;
+    uint8_t sig[64];
+    uint32_t block;
+} CacheIdentity;
+
+static int cache_identity_load(CacheIdentity *rec) {
+    char path[LMB_PATH_MAX * 2];
+    snprintf(path, sizeof path, "%s/identity.bin", g.maps_dir);
+    FILE *fp = real_fopen(path, "rb");
+    if (!fp) return -1;
+    int ok = fread(rec, sizeof *rec, 1, fp) == 1 &&
+             rec->magic == LMB_MODEL_ID_MAGIC && rec->version == 2 &&
+             rec->has_sig <= 1 && rec->block >= (1u << 20);
+    fclose(fp);
+    return ok ? 0 : -1;
+}
+
+static int cache_identity_save(const LmbModelIdentity *id) {
+    CacheIdentity rec;
+    memset(&rec, 0, sizeof rec);
+    rec.magic = LMB_MODEL_ID_MAGIC; rec.version = 2;
+    snprintf(rec.model, sizeof rec.model, "%s", id->model);
+    memcpy(rec.root, id->root, 32);
+    rec.has_sig = id->has_sig ? 1u : 0u;
+    if (id->has_sig) memcpy(rec.sig, id->sig, 64);
+    rec.block = g.block;
+    char path[LMB_PATH_MAX * 2], tmp[LMB_PATH_MAX * 2 + 32];
+    snprintf(path, sizeof path, "%s/identity.bin", g.maps_dir);
+    snprintf(tmp, sizeof tmp, "%s.tmp.%ld", path, (long)getpid());
+    FILE *fp = real_fopen(tmp, "wb");
+    if (!fp) return -1;
+    int ok = fwrite(&rec, sizeof rec, 1, fp) == 1 &&
+             fflush(fp) == 0 && fsync(fileno(fp)) == 0;
+    if (fclose(fp)) ok = 0;
+    if (!ok) { unlink(tmp); return -1; }
+    if (rename(tmp, path)) return -1;
+    return fsync_parent_dir(path);
+}
+
+static int model_identity_signature_ok(const LmbModelIdentity *id) {
+    if (!g.have_pubkey) return 1;
+    if (!id->has_sig) return 0;
+    size_t n = 0;
+    uint8_t *msg = lmb_model_id_msg(id->model, id->root, &n);
+    int ok = msg && lmb_sign_verify(id->sig, msg, n, g.pubkey) == 0;
+    free(msg);
+    return ok;
+}
+
+static int cache_identity_get(CacheIdentity *rec, LmbModelIdentity *id) {
+    memset(rec, 0, sizeof *rec);
+    memset(id, 0, sizeof *id);
+    if (cache_identity_load(rec) || rec->block != g.block) return -1;
+    snprintf(id->model, sizeof id->model, "%s", rec->model);
+    memcpy(id->root, rec->root, sizeof id->root);
+    id->has_sig = rec->has_sig != 0;
+    if (id->has_sig) memcpy(id->sig, rec->sig, sizeof id->sig);
+    return model_identity_signature_ok(id) ? 0 : -1;
+}
+
+static int cache_identity_differs(const LmbModelIdentity *current,
+                                  const LmbModelIdentity *saved, int have_saved) {
+    return !have_saved || strcmp(current->model, saved->model) ||
+           memcmp(current->root, saved->root, sizeof current->root);
+}
+
+static int cache_lock_shared_open(void) {
+    char path[LMB_PATH_MAX * 2];
+    snprintf(path, sizeof path, "%s/cache.lock", g.maps_dir);
+    g.cache_lock_fd = real_open(path, O_RDWR | O_CREAT, 0644);
+    return g.cache_lock_fd < 0 || cache_flock(LOCK_SH) ? -1 : 0;
+}
+
+static int cache_reset_lock(void) {
+    char path[LMB_PATH_MAX * 2];
+    snprintf(path, sizeof path, "%s/reset.lock", g.maps_dir);
+    g.reset_lock_fd = real_open(path, O_RDWR | O_CREAT, 0644);
+    if (g.reset_lock_fd < 0) return -1;
+    int rc;
+    do rc = flock(g.reset_lock_fd, LOCK_EX); while (rc && errno == EINTR);
+    return rc;
+}
+
+/* A nonzero file/map with a different expected length means somebody altered
+ * the mirror outside Lumabri or an old layout survived.  Repair needs the
+ * process-wide exclusive cache lock so a running chatter never observes the
+ * truncate between its bitmap check and pread. */
+static int cache_has_stale_layout(void) {
+    char path[LMB_PATH_MAX * 2 + 16];
+    struct stat st;
+    for (int i = 0; i < g.nfiles; i++) {
+        RFile *f = &g.files[i];
+        data_path(path, sizeof path, f->rel);
+        int have_data = stat(path, &st) == 0;
+        int bad_data = have_data && (uint64_t)st.st_size != f->size;
+        uint64_t nb = (f->size + g.block - 1) / g.block;
+        off_t want = (off_t)(nb ? nb : 1);
+        snprintf(path, sizeof path, "%s/%s.lmap", g.maps_dir, f->rel);
+        int have_map = stat(path, &st) == 0;
+        if (!have_data || !have_map || bad_data || st.st_size != want)
+            return 1;
+    }
+    return 0;
 }
 
 /* ---- the distance map ---------------------------------------------------
@@ -484,6 +716,15 @@ static void shim_init_impl(void) {
     if (bs && atol(bs) >= 1 && atol(bs) <= 64) mib = atol(bs);
     g.block = (uint32_t)(mib << 20);
 
+    /* Lock before reading either online placement or the offline manifest.
+     * Otherwise an offline starter could observe an old inventory, wait for
+     * an online reset, then pair that inventory with the newly saved root. */
+    if (cache_lock_shared_open()) {
+        fprintf(stderr, "[lumabri] cannot lock the shared mirror — disabled\n");
+        cache_lock_release();
+        return;
+    }
+
     /* placement: tracker, or peers directly, or the persisted manifest */
     const char *tracker = getenv("LUMABRI_TRACKER");
     const char *peers = getenv("LUMABRI_PEERS");
@@ -499,15 +740,104 @@ static void shim_init_impl(void) {
     }
     if (placed == 0) {
         qsort(g.files, (size_t)g.nfiles, sizeof(RFile), rfile_cmp);
-        manifest_save();
     } else {
         if (manifest_load()) {
             fprintf(stderr, "[lumabri] no tracker, no peers, no saved manifest — disabled\n");
+            cache_lock_release();
             return;
         }
         qsort(g.files, (size_t)g.nfiles, sizeof(RFile), rfile_cmp);
         fprintf(stderr, "[lumabri] offline: serving from the local mirror only "
                         "(a cold block will be EIO)\n");
+    }
+
+    /* Bind every persisted bitmap to the signed identity of the complete
+     * model. File size alone cannot detect a checkpoint replaced in place;
+     * the model root changes for any byte or inventory change. On the first
+     * run after this format was introduced, old unbound maps are reset once.
+     * Offline mode keeps using the last verified identity. */
+    LmbModelIdentity current_id = {0}, saved_id = {0};
+    CacheIdentity saved_rec = {0};
+    const char *model = getenv("LUMABRI_MODEL");
+    int online_placement = placed == 0;
+    int have_current_id = online_placement && tracker && tracker[0] && model && model[0] &&
+                          lmb_model_identity_get(tracker, model, &current_id) == 0;
+    if (have_current_id && !model_identity_signature_ok(&current_id)) {
+        fprintf(stderr, "[lumabri] model identity is not signed by the operator — disabled\n");
+        cache_lock_release();
+        return;
+    }
+    if (online_placement && g.have_pubkey && !have_current_id) {
+        fprintf(stderr, "[lumabri] signed swarm has no complete model identity — disabled\n");
+        cache_lock_release();
+        return;
+    }
+    int have_saved_id = cache_identity_get(&saved_rec, &saved_id) == 0;
+    if (!online_placement && g.have_pubkey && !have_saved_id) {
+        fprintf(stderr, "[lumabri] offline mirror has no verified model identity — disabled\n");
+        cache_lock_release();
+        return;
+    }
+    int identity_reset = have_current_id &&
+                         cache_identity_differs(&current_id, &saved_id, have_saved_id);
+    int stale_layout = cache_has_stale_layout();
+
+    /* Same identity: keep the shared lock for the whole process, allowing any
+     * number of chatters.  reset.lock elects one upgrader. Contenders wait
+     * there without holding cache.lock, then reacquire shared and recheck; if
+     * the elected process already repaired the mirror they never queue behind
+     * that process's full chat lifetime. */
+    int exclusive = 0;
+    if (identity_reset || stale_layout) {
+        cache_flock(LOCK_UN);
+        if (cache_reset_lock() || cache_flock(LOCK_SH)) {
+            fprintf(stderr, "[lumabri] cannot coordinate mirror reset — disabled\n");
+            cache_lock_release();
+            return;
+        }
+        have_saved_id = cache_identity_get(&saved_rec, &saved_id) == 0;
+        identity_reset = have_current_id &&
+                         cache_identity_differs(&current_id, &saved_id, have_saved_id);
+        stale_layout = cache_has_stale_layout();
+        if (identity_reset || stale_layout) {
+            cache_flock(LOCK_UN);
+            if (cache_flock(LOCK_EX)) {
+                fprintf(stderr, "[lumabri] cannot exclusively lock mirror reset — disabled\n");
+                cache_lock_release();
+                return;
+            }
+            /* The tracker may have restarted while an old-checkpoint chatter
+             * kept us waiting. Never reset a placement using a stale root. */
+            if (have_current_id) {
+                LmbModelIdentity fresh = {0};
+                if (lmb_model_identity_get(tracker, model, &fresh) ||
+                    !model_identity_signature_ok(&fresh) ||
+                    strcmp(fresh.model, current_id.model) ||
+                    memcmp(fresh.root, current_id.root, sizeof fresh.root)) {
+                    fprintf(stderr, "[lumabri] model identity changed during mirror init — disabled\n");
+                    cache_lock_release();
+                    return;
+                }
+            }
+            have_saved_id = cache_identity_get(&saved_rec, &saved_id) == 0;
+            identity_reset = have_current_id &&
+                             cache_identity_differs(&current_id, &saved_id, have_saved_id);
+            stale_layout = cache_has_stale_layout();
+            exclusive = identity_reset || stale_layout;
+            if (!exclusive && cache_flock(LOCK_SH)) {
+                fprintf(stderr, "[lumabri] cannot retain the shared mirror lock — disabled\n");
+                cache_lock_release();
+                return;
+            }
+        }
+        if (!exclusive) cache_reset_unlock();
+    }
+    if (identity_reset)
+        fprintf(stderr, "[lumabri] model identity changed — cached block maps reset\n");
+    if (placed == 0 && manifest_save()) {
+        fprintf(stderr, "[lumabri] cannot persist the mirror manifest — disabled\n");
+        cache_lock_release();
+        return;
     }
 
     /* materialize the sparse mirror + load the block maps */
@@ -516,40 +846,108 @@ static void shim_init_impl(void) {
         RFile *f = &g.files[i];
         f->nblocks = (uint32_t)((f->size + g.block - 1) / g.block);
         pthread_mutex_init(&f->lk, NULL);
+        pthread_mutex_init(&f->commit_lk, NULL);
         pthread_cond_init(&f->cv, NULL);
         f->wfd = -1;
 
-        char path[LMB_PATH_MAX * 2];
-        data_path(path, sizeof path, f->rel);
-        mkdir_parent(path);
-        int fd = real_open(path, O_RDWR | O_CREAT, 0644);
-        if (fd < 0) { fprintf(stderr, "[lumabri] cannot create mirror %s\n", path); return; }
+        char dpath[LMB_PATH_MAX * 2 + 16], mpath[LMB_PATH_MAX * 2 + 16];
+        struct stat before;
+        data_path(dpath, sizeof dpath, f->rel);
+        mkdir_parent(dpath);
+        int data_new = stat(dpath, &before) != 0;
+        int fd = real_open(dpath, O_RDWR | O_CREAT, 0644);
+        if (fd < 0) {
+            fprintf(stderr, "[lumabri] cannot create mirror %s\n", dpath);
+            cache_lock_release(); return;
+        }
         struct stat st;
-        int stale = fstat(fd, &st) == 0 && st.st_size != 0 &&
+        int stale = !data_new && fstat(fd, &st) == 0 &&
                     (uint64_t)st.st_size != f->size;
-        if (ftruncate(fd, (off_t)f->size))
-            { fprintf(stderr, "[lumabri] ftruncate %s failed\n", path); real_close(fd); return; }
-        real_close(fd);
 
-        snprintf(path, sizeof path, "%s/%s.lmap", g.maps_dir, f->rel);
-        mkdir_parent(path);
+        snprintf(mpath, sizeof mpath, "%s/%s.lmap", g.maps_dir, f->rel);
+        mkdir_parent(mpath);
+        int map_new = stat(mpath, &before) != 0;
         f->map = (uint8_t *)calloc(f->nblocks ? f->nblocks : 1, 1);
         f->inflight = (uint8_t *)calloc(f->nblocks ? f->nblocks : 1, 1);
-        f->map_fd = real_open(path, O_RDWR | O_CREAT, 0644);
-        if (!f->map || !f->inflight || f->map_fd < 0)
-            { fprintf(stderr, "[lumabri] map alloc failed for %s\n", f->rel); return; }
-        if (stale) {
-            /* the upstream file changed size: every cached block is suspect */
-            fprintf(stderr, "[lumabri] %s changed size upstream — mirror reset\n", f->rel);
-            if (ftruncate(f->map_fd, 0)) { /* map cleared, blocks refetch */ }
+        f->map_fd = real_open(mpath, O_RDWR | O_CREAT, 0644);
+        off_t map_size = (off_t)(f->nblocks ? f->nblocks : 1);
+        struct stat mst;
+        int map_stale = !map_new && f->map_fd >= 0 &&
+                        fstat(f->map_fd, &mst) == 0 && mst.st_size != map_size;
+        int pair_stale = data_new != map_new;
+        if (!f->map || !f->inflight || f->map_fd < 0) {
+            fprintf(stderr, "[lumabri] map alloc failed for %s\n", f->rel);
+            real_close(fd); cache_lock_release(); return;
         }
-        if (ftruncate(f->map_fd, (off_t)(f->nblocks ? f->nblocks : 1))) { /* keep going */ }
+        if ((stale || map_stale || pair_stale) && !exclusive) {
+            fprintf(stderr, "[lumabri] mirror layout changed while shared — disabled\n");
+            real_close(fd); cache_lock_release(); return;
+        }
+        if (stale || map_stale || pair_stale || identity_reset) {
+            /* size or signed content identity changed: cached blocks suspect */
+            if (stale)
+                fprintf(stderr, "[lumabri] %s changed size upstream — mirror reset\n", f->rel);
+            if (ftruncate(f->map_fd, 0)) {
+                fprintf(stderr, "[lumabri] cannot clear map for %s — disabled\n", f->rel);
+                real_close(fd); cache_lock_release(); return;
+            }
+        }
+        if ((map_new || stale || map_stale || pair_stale || identity_reset) &&
+            ftruncate(f->map_fd, map_size)) {
+            fprintf(stderr, "[lumabri] cannot size map for %s — disabled\n", f->rel);
+            real_close(fd); cache_lock_release(); return;
+        }
+        /* Publish the cleared bitmap before resizing data.  If the machine
+         * dies between these operations, no future process can mistake
+         * sparse/truncated bytes for a durable warm block. */
+        if ((map_new || stale || map_stale || pair_stale || identity_reset) &&
+            fdatasync(f->map_fd)) {
+            fprintf(stderr, "[lumabri] cannot durably reset map for %s — disabled\n",
+                    f->rel);
+            real_close(fd); cache_lock_release(); return;
+        }
+        if (map_new && fsync_parent_dir(mpath)) {
+            fprintf(stderr, "[lumabri] cannot persist map directory for %s — disabled\n",
+                    f->rel);
+            real_close(fd); cache_lock_release(); return;
+        }
+        if ((data_new || stale) && ftruncate(fd, (off_t)f->size)) {
+            fprintf(stderr, "[lumabri] ftruncate mirror data for %s failed\n", f->rel);
+            real_close(fd); cache_lock_release(); return;
+        }
+        if ((data_new || stale) && fdatasync(fd)) {
+            fprintf(stderr, "[lumabri] cannot persist mirror data for %s — disabled\n",
+                    f->rel);
+            real_close(fd); cache_lock_release(); return;
+        }
+        if (data_new && fsync_parent_dir(dpath)) {
+            fprintf(stderr, "[lumabri] cannot persist mirror directory for %s — disabled\n",
+                    f->rel);
+            real_close(fd); cache_lock_release(); return;
+        }
+        real_close(fd);
+        flock(f->map_fd, LOCK_SH);
         ssize_t r = real_pread ? real_pread(f->map_fd, f->map, f->nblocks, 0) : -1;
+        flock(f->map_fd, LOCK_UN);
         if (r < 0) memset(f->map, 0, f->nblocks);
         total += f->size;
         for (uint32_t b = 0; b < f->nblocks; b++)
             if (f->map[b]) have += b + 1 == f->nblocks ? f->size - (uint64_t)b * g.block : g.block;
     }
+    /* Written last: a crash halfway through clearing maps leaves the old
+     * identity in place, so the next start repeats the reset instead of
+     * blessing a half-reset cache. */
+    if (have_current_id && identity_reset && cache_identity_save(&current_id)) {
+        fprintf(stderr, "[lumabri] cannot persist model identity — disabled\n");
+        cache_lock_release();
+        return;
+    }
+    if (exclusive && cache_flock(LOCK_SH)) {
+        fprintf(stderr, "[lumabri] cannot retain mirror lock after reset — disabled\n");
+        cache_lock_release();
+        return;
+    }
+    if (exclusive) cache_reset_unlock();
 
     /* measure the distance map, then start the readahead workers */
     probe_peers();
@@ -573,6 +971,12 @@ static void shim_init_impl(void) {
             if (pthread_create(&t, NULL, prefetch_thread, NULL) == 0)
                 pthread_detach(t);
         }
+    }
+
+    {
+        pthread_t t;
+        if (pthread_create(&t, NULL, mirror_commit_thread, NULL) == 0)
+            pthread_detach(t);
     }
 
     const char *stats = getenv("LUMABRI_STATS");
@@ -766,6 +1170,19 @@ static int ensure_block(RFile *f, uint32_t blk) {
         if (!f->inflight[blk]) break;
         pthread_cond_wait(&f->cv, &f->lk);
     }
+    /* Another process sharing this checkpoint may have published the block
+     * since our startup snapshot. The persisted bit is safe to trust because
+     * every committer fdatasyncs mirror data before setting it. */
+    uint8_t shared = 0;
+    if (f->map_fd >= 0 && flock(f->map_fd, LOCK_SH) == 0) {
+        ssize_t r = real_pread(f->map_fd, &shared, 1, (off_t)blk);
+        flock(f->map_fd, LOCK_UN);
+        if (r == 1 && shared == 1) {
+            f->map[blk] = 1;
+            pthread_mutex_unlock(&f->lk);
+            return 0;
+        }
+    }
     f->inflight[blk] = 1;
     if (f->wfd < 0) {
         char path[LMB_PATH_MAX * 2];
@@ -834,11 +1251,10 @@ static int ensure_block(RFile *f, uint32_t blk) {
             if (w < 0) { if (errno == EINTR) continue; werr = errno; break; }
             put += (uint32_t)w;
         }
-        if (put == len) {
-            uint8_t one = 1;
-            if (pwrite(f->map_fd, &one, 1, (off_t)blk) == 1) ok = 1;
-            else werr = errno;
-        }
+        /* The background committer makes data durable before publishing this
+         * bit on disk.  Until then the bit exists only in memory, so a crash
+         * causes a safe refetch rather than exposing sparse zeros. */
+        if (put == len && !werr) ok = 1;
         atomic_fetch_add(&g.net_bytes, len);
         atomic_fetch_add(&g.net_blocks, 1);
     }
@@ -859,7 +1275,7 @@ static int ensure_block(RFile *f, uint32_t blk) {
 
     pthread_mutex_lock(&f->lk);
     f->inflight[blk] = 0;
-    if (ok) f->map[blk] = 1;
+    if (ok) { f->map[blk] = 1; f->dirty_gen++; }
     pthread_cond_broadcast(&f->cv);
     pthread_mutex_unlock(&f->lk);
     return ok ? 0 : -1;

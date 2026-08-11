@@ -823,8 +823,12 @@ static int engine_spawn(const char *engine, const char *shim, const char *tracke
                         int ctx, int max_new, int cap_experts, Engine *e) {
     const char *home = getenv("HOME") ? getenv("HOME") : ".";
     char vroot[1024], cache[1024];
-    snprintf(vroot, sizeof vroot, "%s/.lumabri/%s/vroot", home, model);
-    snprintf(cache, sizeof cache, "%s/.lumabri/%s/cache", home, model);
+    const char *vroot_env = getenv("LUMABRI_VROOT");
+    const char *cache_env = getenv("LUMABRI_CACHE");
+    if (vroot_env && vroot_env[0]) snprintf(vroot, sizeof vroot, "%s", vroot_env);
+    else snprintf(vroot, sizeof vroot, "%s/.lumabri/%s/vroot", home, model);
+    if (cache_env && cache_env[0]) snprintf(cache, sizeof cache, "%s", cache_env);
+    else snprintf(cache, sizeof cache, "%s/.lumabri/%s/cache", home, model);
     if (!local_dir) mkdir_p(cache);   /* vroot stays virtual on purpose */
 
     /* olmoe takes <cap> <bits>; the SERVE-mode engines take <cap> alone and
