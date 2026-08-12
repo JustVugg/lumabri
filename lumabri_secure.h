@@ -44,10 +44,22 @@ static void lmb_sec_nonce(uint8_t out[12], uint64_t ctr) {
 
 /* One handshake. `id_sk`/`id_pk` are this peer's Ed25519 identity (v0.7).
  * Returns 0 and fills `s`, or -1. */
+/* seconds a handshake may block, so a plaintext or hostile connection cannot
+ * pin a worker for the bulk io timeout; LUMABRI_HS_TIMEOUT_MS overrides */
+static void lmb_hs_deadline(int fd, int on) {
+    int ms = on ? lmb_env_int("LUMABRI_HS_TIMEOUT_MS", 8000, 100, 60000)
+                : lmb_env_int("LUMABRI_IO_TIMEOUT_MS",
+                              LMB_DEFAULT_IO_TIMEOUT_MS, 100, 3600000);
+    struct timeval tv = { ms / 1000, (ms % 1000) * 1000 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+}
+
 static int lmb_secure_handshake(int fd, int is_client,
                                 const uint8_t id_sk[64], const uint8_t id_pk[32],
                                 LmbSecure *s) {
     memset(s, 0, sizeof *s);
+    lmb_hs_deadline(fd, 1);
     uint8_t eph_sk[32], eph_pk[32], peer_eph[32];
     lmb_random(eph_sk, 32);
     lc_x25519_base(eph_pk, eph_sk);
@@ -98,6 +110,7 @@ static int lmb_secure_handshake(int fd, int is_client,
     else           { memcpy(s->tx_key, keys + 32, 32); memcpy(s->rx_key, keys, 32); }
     s->tx_ctr = s->rx_ctr = 0;
     s->active = 1;
+    lmb_hs_deadline(fd, 0);            /* back to the normal io timeout */
     return 0;
 }
 
@@ -152,6 +165,74 @@ static int lmb_secure_recv(LmbSecure *s, int fd, LmbMsg *m) {
     if (m->pay_len)  { m->pay  = (uint8_t *)malloc(m->pay_len);  memcpy(m->pay, pt + m->body_len, m->pay_len); }
     free(pt);
     return 0;
+}
+
+/* ---- opt-in transport integration -------------------------------------
+ * A component calls lmb_secure_init() once at startup. When LUMABRI_ENCRYPT
+ * is set it loads this machine's peer key and installs the proto.h hooks, so
+ * every lmb_connect handshakes outbound and every lmb_secure_server() wraps an
+ * accepted fd, and lmb_send/lmb_recv transparently use the AEAD channel for
+ * any handshaked fd. Off by default: nothing changes unless asked.
+ */
+#include <pthread.h>
+
+#define LMB_SEC_MAXFD 65536
+static LmbSecure *g_sec_reg[LMB_SEC_MAXFD];
+static pthread_mutex_t g_sec_lk = PTHREAD_MUTEX_INITIALIZER;
+static uint8_t g_sec_sk[64], g_sec_pk[32];
+
+static LmbSecure *lmb_sec_get(int fd) {
+    if (fd < 0 || fd >= LMB_SEC_MAXFD) return NULL;
+    pthread_mutex_lock(&g_sec_lk);
+    LmbSecure *s = g_sec_reg[fd];
+    pthread_mutex_unlock(&g_sec_lk);
+    return s;
+}
+
+static int lmb_sec_send_hook(int fd, uint32_t op, const void *b, uint32_t bl,
+                             const void *p, uint32_t pl) {
+    LmbSecure *s = lmb_sec_get(fd);
+    if (!s) return -2;                     /* not an encrypted fd: plaintext */
+    return lmb_secure_send(s, fd, op, b, bl, p, pl);
+}
+static int lmb_sec_recv_hook(int fd, LmbMsg *m) {
+    LmbSecure *s = lmb_sec_get(fd);
+    if (!s) return -2;
+    return lmb_secure_recv(s, fd, m);
+}
+static int lmb_sec_wrap_hook(int fd, int is_client) {
+    if (fd < 0 || fd >= LMB_SEC_MAXFD) return -1;
+    LmbSecure *s = (LmbSecure *)calloc(1, sizeof *s);
+    if (!s) return -1;
+    if (lmb_secure_handshake(fd, is_client, g_sec_sk, g_sec_pk, s)) { free(s); return -1; }
+    pthread_mutex_lock(&g_sec_lk);
+    free(g_sec_reg[fd]);                    /* a reused fd drops the old session */
+    g_sec_reg[fd] = s;
+    pthread_mutex_unlock(&g_sec_lk);
+    return 0;
+}
+
+/* handshake an accepted (inbound) fd; 0 when encryption is off or the wrap
+ * succeeds, -1 when an enabled handshake fails and the caller must drop it */
+static int lmb_secure_server(int fd) {
+    if (!lmb_enc_wrap) return 0;
+    return lmb_enc_wrap(fd, 0);
+}
+
+static void lmb_secure_init(void) {
+    const char *e = getenv("LUMABRI_ENCRYPT");
+    if (!e || !e[0] || e[0] == '0') return;
+    char kp[512];
+    if (lmb_peer_identity(lmb_peer_key_path(kp, sizeof kp), g_sec_sk, g_sec_pk)) {
+        fprintf(stderr, "[lumabri] LUMABRI_ENCRYPT set but no peer key at %s — "
+                        "staying plaintext\n", kp);
+        return;
+    }
+    lmb_enc_send = lmb_sec_send_hook;
+    lmb_enc_recv = lmb_sec_recv_hook;
+    lmb_enc_wrap = lmb_sec_wrap_hook;
+    fprintf(stderr, "[lumabri] transport encryption on "
+                    "(X25519 + ChaCha20-Poly1305, identity-authenticated)\n");
 }
 
 #endif /* LUMABRI_SECURE_H */

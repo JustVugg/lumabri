@@ -31,6 +31,7 @@
 
 #include "lumabri_proto.h"
 #include "lumabri_sign.h"
+#include "lumabri_secure.h"
 
 #define LUMI_MAX_PEERS 64
 #define LUMI_MAX_K     64
@@ -383,6 +384,7 @@ static void lumi_maybe_discover(void) {
  * every model that has one. */
 static void lumi_init_ex(int n_layers, int n_experts, int hidden,
                          const unsigned char *routed) {
+    lmb_secure_init();
     const char *spec = getenv("LUMABRI_EXPERTS");
     if (getenv("LUMABRI_NO_EXEC")) return;
     const char *tracker = getenv("LUMABRI_TRACKER");

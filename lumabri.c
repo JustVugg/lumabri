@@ -37,6 +37,7 @@
 
 #include "lumabri_proto.h"
 #include "lumabri_sign.h"
+#include "lumabri_secure.h"
 
 /* ---- terminal ----------------------------------------------------------- */
 
@@ -1750,6 +1751,8 @@ static int cmd_key(int argc, char **argv) {
 
 int main(int argc, char **argv) {
     g_tty = isatty(1);
+    lmb_secure_init();      /* honours LUMABRI_ENCRYPT for this process's own
+                               tracker queries; children inherit the env */
     if (argc >= 2 && !strcmp(argv[1], "serve")) return cmd_serve(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "chat"))  return cmd_chat(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "key"))   return cmd_key(argc - 2, argv + 2);

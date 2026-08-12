@@ -49,6 +49,7 @@
 #include <time.h>
 
 #include "lumabri_proto.h"
+#include "lumabri_secure.h"
 #include "lumabri_sha.h"
 #include "lumabri_sign.h"
 
@@ -849,6 +850,7 @@ static void *stats_thread(void *arg) {
 
 static void shim_init_impl(void) {
     shim_resolve();
+    lmb_secure_init();
     const char *cache = getenv("LUMABRI_CACHE");
     if (!cache || !cache[0]) {
         fprintf(stderr, "[lumabri] LUMABRI_VROOT is set but LUMABRI_CACHE is not — disabled\n");

@@ -24,6 +24,7 @@
 #include "lumabri_proto.h"
 #include "lumabri_sha.h"
 #include "lumabri_sign.h"
+#include "lumabri_secure.h"
 
 #define MAX_PEERS  64
 #define MAX_FILES  4096
@@ -1167,6 +1168,7 @@ static void ctrl_teardown(Peer *p, int fd) {
 
 static void *conn_thread(void *arg) {
     int fd = (int)(intptr_t)arg;
+    if (lmb_secure_server(fd)) { close(fd); lmb_conn_gate_leave(&g_conn_gate); return NULL; }
     Peer *ctrl = NULL;    /* set once this connection REGISTERs */
     int authed = g_token[0] ? 0 : 1;
     uint8_t nonce[32]; int have_nonce = 0;   /* per-connection identity challenge */
@@ -1318,6 +1320,7 @@ int main(int argc, char **argv) {
     g_stale_s = (double)lmb_env_int("LUMABRI_STALE_MS", (int)(STALE_S * 1000),
                                     100, 3600000) / 1000.0;
     lmb_conn_gate_init(&g_conn_gate);
+    lmb_secure_init();
     int lfd = lmb_listen(port);
     if (lfd < 0) { perror("[tracker] listen"); return 1; }
     printf("[tracker] listening on :%d\n", port);
