@@ -167,10 +167,18 @@ static int sidecar_path(const MFile *f, const char *ext, char *out, size_t cap) 
                        g.root, f->rel, ext);
 }
 
+/* Stage under a name unique to this process. Two maintainers may share one
+ * --root (phase5_test does, and so does any machine donating from the tree it
+ * already serves): with a single fixed .tmp they collide on the same staging
+ * file, one truncating the other mid-write, and the loser's rename then fails
+ * on a file that is no longer its own. The rename is what makes the sidecar
+ * appear atomically, so per-process staging removes the race entirely rather
+ * than tolerating it — every other staging site in the tree already
+ * uniquifies by pid this way. */
 static int sidecar_write(const char *path, const void *a, size_t na,
                          const void *b, size_t nb) {
-    char tmp[LMB_LOCAL_PATH_MAX], dir[LMB_LOCAL_PATH_MAX];
-    if (path_printf(tmp, sizeof tmp, "%s.tmp", path) ||
+    char tmp[LMB_LOCAL_PATH_MAX + 32], dir[LMB_LOCAL_PATH_MAX];
+    if (path_printf(tmp, sizeof tmp, "%s.tmp.%ld", path, (long)getpid()) ||
         path_printf(dir, sizeof dir, "%s", path)) return -1;
     char *slash = strrchr(dir, '/');
     if (slash) { *slash = 0;
