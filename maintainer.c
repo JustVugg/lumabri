@@ -301,10 +301,13 @@ static int hash_file(MFile *f) {
         free(f->hash); f->hash = NULL; close(fd); return -1;
     }
     close(fd);
-    if (save_truth(f)) {
-        free(f->hash); f->hash = NULL;
-        return -1;
-    }
+    /* The sidecar is only a cache that avoids re-hashing next start: the
+     * hashes are already in memory, which is what serves and registers. A
+     * failure to persist it (a too-long path, or two maintainers racing on
+     * one root) must not drop the file or kill the peer — warn and go on. */
+    if (save_truth(f))
+        fprintf(stderr, "[maintainer %s] could not cache integrity data for %s "
+                        "(will re-hash next start)\n", g.name, f->rel);
     return 0;
 }
 
@@ -853,13 +856,9 @@ static void pull_slice(uint64_t budget) {
                 f->ctime_ns = (uint64_t)st.st_ctim.tv_sec * 1000000000ull +
                               (uint64_t)st.st_ctim.tv_nsec;
             }
-            if (save_truth(f)) {
-                fprintf(stderr, "[maintainer %s] cannot persist integrity data "
-                                "for %s\n", g.name, rel);
-                free(f->hash);
-                memset(f, 0, sizeof *f);
-                continue;
-            }
+            if (save_truth(f))
+                fprintf(stderr, "[maintainer %s] could not cache integrity data "
+                                "for %s (will re-hash next start)\n", g.name, rel);
             g.nfiles++;
             pulled += size; done++;
         } else {
@@ -1082,11 +1081,10 @@ int main(int argc, char **argv) {
                 return 1;
             }
             sign_truth(&g.files[i]);
-            if (save_truth(&g.files[i])) {
-                fprintf(stderr, "[maintainer %s] cannot persist integrity data "
-                                "for %s\n", g.name, g.files[i].rel);
-                return 1;
-            }
+            if (save_truth(&g.files[i]))
+                fprintf(stderr, "[maintainer %s] could not cache integrity data "
+                                "for %s (will re-hash next start)\n",
+                        g.name, g.files[i].rel);
         }
     }
     if (model_identity_prepare(donate_gb > 0)) {
