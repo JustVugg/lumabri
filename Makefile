@@ -1,6 +1,6 @@
 CC      ?= cc
 CFLAGS  ?= -O2 -Wall -Wextra
-ENGINE  ?= ../moe-stream/c
+ENGINE  ?= ../colibri/c
 
 all: tracker maintainer liblumabri.so test_shim lumabri
 
