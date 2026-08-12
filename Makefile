@@ -224,7 +224,6 @@ test_hedge: test_hedge.c lumabri_client.h lumabri_proto.h lumabri_sign.h
 
 test-relay-exec: tracker expert_node test_relay_exec fixture
 	./relay_exec_test.sh
-	./peer_identity_test.sh
 
 test-cas: tracker maintainer liblumabri.so test_shim
 	./cas_test.sh
@@ -246,6 +245,7 @@ test: all test_key_rotation test_hedge
 	./prefetch_policy_test.sh
 	./cas_test.sh
 	./relay_exec_test.sh
+	./peer_identity_test.sh
 	./test_key_rotation
 	./test_hedge
 
