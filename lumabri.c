@@ -127,18 +127,34 @@ static int g_nchildren = 0;
 static char **g_cargv[8];
 static const char *g_cwhat[8];
 
+/* on_sigint reads g_children/g_nchildren; the main thread writes them. Block
+ * the two signals around every write so the handler never sees the array
+ * half-updated (a torn read would kill a stale pid or miss a live child). */
+static void children_lock(sigset_t *saved) {
+    sigset_t s; sigemptyset(&s);
+    sigaddset(&s, SIGINT); sigaddset(&s, SIGTERM);
+    sigprocmask(SIG_BLOCK, &s, saved);
+}
+static void children_unlock(const sigset_t *saved) {
+    sigprocmask(SIG_SETMASK, saved, NULL);
+}
+
 static void spawn_tracked(char *const argv[], const char *what) {
     int n = 0;
     while (argv[n]) n++;
     char **copy = (char **)calloc((size_t)n + 1, sizeof *copy);
     for (int i = 0; i < n; i++) copy[i] = strdup(argv[i]);
+    pid_t pid = spawn_argv(argv);          /* the slow part, outside the mask */
+    sigset_t saved; children_lock(&saved);
     int idx = g_nchildren;
     g_cargv[idx] = copy;
     g_cwhat[idx] = what;
-    g_children[g_nchildren++] = spawn_argv(argv);
+    g_children[idx] = pid;
+    g_nchildren++;
+    children_unlock(&saved);
 }
 
-static volatile int g_stopping = 0;
+static volatile sig_atomic_t g_stopping = 0;
 
 static void on_sigint(int sig) {
     (void)sig;
@@ -390,12 +406,19 @@ static int cmd_serve(int argc, char **argv) {
                    "scaricano gli esperti invece di farli eseguire%s\n", C_DIM, C_R);
             fflush(stdout);
             sleep(5);
-            g_children[idx] = spawn_argv(g_cargv[idx]);
+            pid_t np = spawn_argv(g_cargv[idx]);
+            sigset_t saved; children_lock(&saved);
+            g_children[idx] = np;
+            children_unlock(&saved);
             printf("  %s%s riavviato%s\n", C_DIM, g_cwhat[idx], C_R);
             fflush(stdout);
             continue;
         }
-        if (idx >= 0) g_children[idx] = g_children[--g_nchildren];
+        if (idx >= 0) {
+            sigset_t saved; children_lock(&saved);
+            g_children[idx] = g_children[--g_nchildren];
+            children_unlock(&saved);
+        }
     }
     return 0;
 }
@@ -1256,7 +1279,8 @@ static void role_start(const Role *r, const char *tracker, const char *model,
             const char *pub = getenv("LUMABRI_PUBKEY");
             if (pub && pub[0]) { argv[a++] = "--pubkey"; argv[a++] = (char *)pub; }
             argv[a] = NULL;
-            g_children[g_nchildren++] = spawn_argv(argv);
+            { pid_t np = spawn_argv(argv); sigset_t sv; children_lock(&sv);
+              g_children[g_nchildren++] = np; children_unlock(&sv); }
             printf("  %s\xe2\x9c\xa6 dono %.0f GB di %s%s%s%s: il tracker mi assegna "
                    "i file piu\xcc\x80 rari%s\n",
                    C_GRN, r->gb, C_R, C_BOLD, model, C_DIM, C_R);
@@ -1285,7 +1309,8 @@ static void role_start(const Role *r, const char *tracker, const char *model,
             argv[a++] = "--model-name"; argv[a++] = (char *)model;
             argv[a++] = "--cache";      argv[a++] = "64";
             argv[a] = NULL;
-            g_children[g_nchildren++] = spawn_argv(argv);
+            { pid_t np = spawn_argv(argv); sigset_t sv; children_lock(&sv);
+              g_children[g_nchildren++] = np; children_unlock(&sv); }
             printf("  %s\xe2\x9c\xa6 eseguo esperti per lo sciame%s %s(%s)%s\n",
                    C_GRN, C_R, C_DIM, node, C_R);
         }
