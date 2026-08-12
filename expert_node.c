@@ -118,7 +118,8 @@ static struct {
     pthread_mutex_t c_lk;       /* cache table */
     pthread_cond_t c_cv;
     pthread_mutex_t load_lk;    /* the engine loader is used one call at a time */
-    char name[64], model[64], advertise[64], tracker[64], token[128];
+    char name[64], model[64], advertise[64], tracker[64];
+    char token[LMB_TOKEN_MAX + 1];
     char profile[LMB_BUILD_PROFILE_MAX];
     uint8_t peer_sk[64], peer_pk[32];   /* identity to the tracker */
     int bits;
@@ -413,10 +414,10 @@ static void *conn_thread(void *arg) {
         case LMB_PING:      lmb_emu_delay();   /* probes must see the distance */
                             rc = lmb_send(fd, LMB_OK, NULL, 0, NULL, 0); break;
         case LMB_AUTH: {
-            char tok[128] = "";
+            char tok[LMB_TOKEN_MAX + 1] = "";
             LmbCur c = { m.body, m.body_len, 0 };
-            lmb_cur_str(&c, tok, sizeof tok);
-            if (!g.token[0] || !strcmp(tok, g.token)) {
+            int bad = lmb_cur_str(&c, tok, sizeof tok) || c.off != c.len;
+            if (!bad && (!g.token[0] || !strcmp(tok, g.token))) {
                 authed = 1;
                 rc = lmb_send(fd, LMB_OK, NULL, 0, NULL, 0);
             } else { send_err(fd, "bad token"); rc = -1; }
@@ -669,6 +670,11 @@ int main(int argc, char **argv) {
     if (cache < 0) cache = 0;
     signal(SIGPIPE, SIG_IGN);
     const char *tok = getenv("LUMABRI_TOKEN");
+    if (tok && strlen(tok) > LMB_TOKEN_MAX) {
+        fprintf(stderr, "LUMABRI_TOKEN must be at most %u bytes\n",
+                (unsigned)LMB_TOKEN_MAX);
+        return 2;
+    }
     if (tok) snprintf(g.token, sizeof g.token, "%s", tok);
     if (!g.model[0]) {                /* default model name: the dir basename */
         char tmp[LMB_PATH_MAX];
