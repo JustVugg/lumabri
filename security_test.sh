@@ -250,4 +250,16 @@ sleep 0.2                                  # let the 64 go stale
     echo "   a fresh peer could not reclaim a stale slot"; exit 1; }
 echo "   ✓ stale slot recycled; the cap applies to live peers, not history"
 
+echo "· 7) one key cannot monopolise the table with many names"
+env LUMABRI_STALE_MS=600000 ./tracker --port 7556 > "$T/cap.log" 2>&1 & PIDS+=($!)
+sleep 0.3
+ok=0
+for i in $(seq 1 8); do
+    "$T/authreg" 127.0.0.1:7556 "mine-$i" "$T/onekey" && ok=$((ok+1))
+done
+[ "$ok" -eq 8 ] || { echo "   the first 8 names for one key were not all accepted ($ok)"; exit 1; }
+if "$T/authreg" 127.0.0.1:7556 "mine-9" "$T/onekey"; then
+    echo "   a 9th name under the same key was accepted"; exit 1; fi
+echo "   ✓ 8 names held, the 9th refused; anonymous junk cannot exhaust the table"
+
 echo "LUMABRI SECURITY TEST: PASS"
