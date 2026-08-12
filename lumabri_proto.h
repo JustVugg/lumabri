@@ -270,8 +270,18 @@ static int lmb_frame_shape_ok(uint32_t op, uint32_t body_len, uint32_t pay_len) 
     return body_len <= bc && pay_len <= pc;
 }
 
+/* Optional encrypted transport. lumabri_secure.h, when a component enables
+ * it, points these at its AEAD channel: a fd that has been handshaked routes
+ * through them, an ordinary fd falls through to plaintext (the hook returns
+ * -2). Static per translation unit, so only a .c that opts in is affected. */
+static int (*lmb_enc_send)(int, uint32_t, const void *, uint32_t, const void *, uint32_t);
+static int (*lmb_enc_recv)(int, LmbMsg *);
+static int (*lmb_enc_wrap)(int fd, int is_client);   /* handshake+register; 0 ok */
+
 static int lmb_send(int fd, uint32_t op, const void *body, uint32_t body_len,
                     const void *pay, uint32_t pay_len) {
+    if (lmb_enc_send) { int r = lmb_enc_send(fd, op, body, body_len, pay, pay_len);
+                        if (r != -2) return r; }
     if (!lmb_frame_shape_ok(op, body_len, pay_len)) { errno = EMSGSIZE; return -1; }
     uint8_t pre[16];
     lmb_put32(pre, LMB_MAGIC); lmb_put32(pre + 4, op);
@@ -284,6 +294,7 @@ static int lmb_send(int fd, uint32_t op, const void *body, uint32_t body_len,
 
 /* Receives one frame; mallocs body/pay. Returns 0, or -1 on error/EOF. */
 static int lmb_recv(int fd, LmbMsg *m) {
+    if (lmb_enc_recv) { int r = lmb_enc_recv(fd, m); if (r != -2) return r; }
     uint8_t pre[16];
     memset(m, 0, sizeof *m);
     if (lmb_read_full(fd, pre, 16)) return -1;
@@ -579,6 +590,9 @@ static int lmb_connect_ms(const char *addr, int timeout_ms) {
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
         lmb_set_io_timeout(fd, lmb_env_int("LUMABRI_IO_TIMEOUT_MS",
                                            LMB_DEFAULT_IO_TIMEOUT_MS, 100, 3600000));
+        /* when this component has enabled encryption, every outbound
+         * connection handshakes here, before any frame is sent */
+        if (lmb_enc_wrap && lmb_enc_wrap(fd, 1)) { close(fd); fd = -1; }
     }
     return fd;
 }

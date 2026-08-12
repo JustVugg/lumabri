@@ -248,6 +248,7 @@ test: all test_key_rotation test_hedge
 	./peer_identity_test.sh
 	./crypto_test.sh
 	./secure_test.sh
+	./encrypted_transport_test.sh
 	./test_key_rotation
 	./test_hedge
 

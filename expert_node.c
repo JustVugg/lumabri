@@ -69,6 +69,7 @@
 
 #include "lumabri_proto.h"
 #include "lumabri_sign.h"
+#include "lumabri_secure.h"
 
 #include <omp.h>
 #include <pthread.h>
@@ -400,6 +401,7 @@ static int handle_emanifest(int fd) {
 
 static void *conn_thread(void *arg) {
     int fd = (int)(intptr_t)arg;
+    if (lmb_secure_server(fd)) { close(fd); lmb_conn_gate_leave(&g_conn_gate); return NULL; }
     int authed = g.token[0] ? 0 : 1;
     LmbMsg m;
     while (lmb_recv(fd, &m) == 0) {
@@ -850,6 +852,7 @@ int main(int argc, char **argv) {
     }
     pthread_t t;
     lmb_conn_gate_init(&g_conn_gate);
+    lmb_secure_init();
     if (g.tracker[0]) { pthread_create(&t, NULL, control_thread, NULL); pthread_detach(t); }
     pthread_create(&t, NULL, stats_thread, NULL); pthread_detach(t);
 

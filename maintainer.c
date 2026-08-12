@@ -25,6 +25,7 @@
 #include "lumabri_proto.h"
 #include "lumabri_sha.h"
 #include "lumabri_sign.h"
+#include "lumabri_secure.h"
 
 #define MAX_FILES          4096
 #define MAX_INCLUDES       64
@@ -533,6 +534,7 @@ static int handle_read(int fd, LmbMsg *m) {
  * only the index while the bytes stayed public. */
 static void *conn_thread(void *arg) {
     int fd = (int)(intptr_t)arg;
+    if (lmb_secure_server(fd)) { close(fd); lmb_conn_gate_leave(&g_conn_gate); return NULL; }
     int authed = g.token[0] ? 0 : 1;
     LmbMsg m;
     while (lmb_recv(fd, &m) == 0) {
@@ -1032,6 +1034,7 @@ int main(int argc, char **argv) {
     if (tok) snprintf(g.token, sizeof g.token, "%s", tok);
     signal(SIGPIPE, SIG_IGN);   /* a vanished chatter must not kill the peer */
     lmb_conn_gate_init(&g_conn_gate);
+    lmb_secure_init();
     size_t rl = strlen(g.root);
     while (rl > 1 && g.root[rl - 1] == '/') g.root[--rl] = 0;
     if (!g.name[0]) snprintf(g.name, sizeof g.name, "peer-%d", port);
