@@ -38,8 +38,17 @@ export HOME="$T"          # peer keys land under $T/.lumabri, isolated
 echo "· 1) an encrypted swarm serves the model byte-for-byte"
 env LUMABRI_ENCRYPT=1 ./tracker --port 7640 > "$T/tracker.log" 2>&1 & PIDS+=($!)
 wait_port 7640
+# A user-space tap sits in front of the maintainer: the maintainer listens on
+# 7641 but advertises the tap's port, so every chatter reaches it through the
+# tap, whose log is an exact copy of what crosses that link. This needs no
+# tcpdump and no root, so the "never in the clear" check below runs everywhere,
+# not only where a raw-capture tool happens to be installed.
+python3 wire_tap.py --listen 7642 --to 127.0.0.1:7641 --log "$T/wire.log" \
+    > "$T/tap.out" 2>&1 & PIDS+=($!)
+for _ in $(seq 1 100); do grep -q ready "$T/tap.out" && break; sleep 0.1; done
 env LUMABRI_ENCRYPT=1 ./maintainer --root "$T/src" --port 7641 \
-    --tracker 127.0.0.1:7640 --name origin --model-name fx > "$T/origin.log" 2>&1 & PIDS+=($!)
+    --tracker 127.0.0.1:7640 --name origin --model-name fx \
+    --advertise 127.0.0.1:7642 > "$T/origin.log" 2>&1 & PIDS+=($!)
 wait_port 7641
 sleep 1
 env LUMABRI_ENCRYPT=1 LD_PRELOAD="$PWD/liblumabri.so" LUMABRI_VROOT="$T/v" \
@@ -64,19 +73,35 @@ fi
 echo "   ✓ refused: encryption cannot be silently skipped"
 
 echo "· 3) the model bytes never crossed the wire in the clear"
-# capture the maintainer's traffic on a fresh encrypted fetch and grep the marker
+# A fresh encrypted fetch through the tap, then grep its log for the marker.
+# The successful fetch in step 1 already carried block 0 (where the marker is)
+# across the tap, but do it again from a cold cache so the check does not
+# depend on step 1's ordering.
+env LUMABRI_ENCRYPT=1 LD_PRELOAD="$PWD/liblumabri.so" LUMABRI_VROOT="$T/v3" \
+    LUMABRI_CACHE="$T/c3" LUMABRI_TRACKER=127.0.0.1:7640 LUMABRI_MODEL=fx \
+    LUMABRI_BLOCK_MIB=1 LUMABRI_HS_TIMEOUT_MS=2000 \
+    timeout 30 ./test_shim "$T/v3" "$T/src" > "$T/shim3.log" 2>&1
+grep -q "byte-identical" "$T/shim3.log" || { echo "   encrypted refetch failed"; cat "$T/shim3.log"; exit 1; }
+if grep -a -q "$MARKER" "$T/wire.log"; then
+    echo "   the model marker appeared on the wire in the clear"; exit 1; fi
+# The marker did cross this link (step 1 served it byte-for-byte); it simply
+# never appeared as plaintext. Confirm the tap actually observed traffic, so a
+# silently empty log can never pass this check.
+[ -s "$T/wire.log" ] || { echo "   the tap logged nothing — capture is not proving anything"; exit 1; }
+echo "   ✓ the marker is not in the tapped ciphertext ($(wc -c < "$T/wire.log") bytes observed)"
+
+# Where a raw-capture tool is available, confirm the same at the kernel wire as
+# well — belt and braces, but never the only check.
 if command -v tcpdump >/dev/null 2>&1 && tcpdump -D >/dev/null 2>&1; then
     tcpdump -i lo -w "$T/cap.pcap" "tcp port 7641" > /dev/null 2>&1 & TD=$!
     sleep 0.5
-    env LUMABRI_ENCRYPT=1 LD_PRELOAD="$PWD/liblumabri.so" LUMABRI_VROOT="$T/v3" \
-        LUMABRI_CACHE="$T/c3" LUMABRI_TRACKER=127.0.0.1:7640 LUMABRI_MODEL=fx \
-        LUMABRI_BLOCK_MIB=1 LUMABRI_HS_TIMEOUT_MS=2000 timeout 30 ./test_shim "$T/v3" "$T/src" > /dev/null 2>&1
+    env LUMABRI_ENCRYPT=1 LD_PRELOAD="$PWD/liblumabri.so" LUMABRI_VROOT="$T/v4" \
+        LUMABRI_CACHE="$T/c4" LUMABRI_TRACKER=127.0.0.1:7640 LUMABRI_MODEL=fx \
+        LUMABRI_BLOCK_MIB=1 LUMABRI_HS_TIMEOUT_MS=2000 timeout 30 ./test_shim "$T/v4" "$T/src" > /dev/null 2>&1
     sleep 0.5; kill "$TD" 2>/dev/null || true; wait "$TD" 2>/dev/null || true
     if grep -a -q "$MARKER" "$T/cap.pcap"; then
-        echo "   the model marker appeared on the wire in the clear"; exit 1; fi
-    echo "   ✓ the marker is not in the captured ciphertext"
-else
-    echo "   (skipped wire capture: tcpdump unavailable in this environment)"
+        echo "   the model marker appeared on the raw wire in the clear"; exit 1; fi
+    echo "   ✓ confirmed at the kernel wire too (tcpdump)"
 fi
 
 echo "LUMABRI ENCRYPTED TRANSPORT TEST: PASS"
