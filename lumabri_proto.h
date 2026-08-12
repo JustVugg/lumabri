@@ -64,6 +64,7 @@
  * the size arithmetic on a model with a large hidden dimension. */
 #define LMB_MAX_EXEC_ROWS 4096u
 #define LMB_PATH_MAX  512
+#define LMB_TOKEN_MAX 127u
 #define LMB_HASH_CHUNK (1u << 20)   /* integrity granularity: sha256 per MiB */
 #define LMB_HASH_MAGIC 0x48414853u  /* "SHAH": optional hash section marker */
 #define LMB_PEER_AUTH_MAGIC 0x52554150u /* "PAUR": trailing peer-identity block */
@@ -671,8 +672,9 @@ static int lmb_listen(int port) {
 static int lmb_auth(int fd) {
     const char *tok = getenv("LUMABRI_TOKEN");
     if (!tok || !tok[0]) return 0;
+    if (strlen(tok) > LMB_TOKEN_MAX) { errno = EMSGSIZE; return -1; }
     LmbBuf b = {0};
-    lmb_buf_str(&b, tok);
+    if (lmb_buf_str(&b, tok)) { free(b.p); return -1; }
     int rc = lmb_send(fd, LMB_AUTH, b.p, (uint32_t)b.len, NULL, 0);
     free(b.p);
     if (rc) return rc;

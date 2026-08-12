@@ -71,7 +71,7 @@ typedef struct {
 static Peer g_peers[MAX_PEERS];
 static pthread_mutex_t g_lk = PTHREAD_MUTEX_INITIALIZER;
 static int g_known_logged[MAX_PEERS];
-static char g_token[128];        /* --token: private swarm, invite required */
+static char g_token[LMB_TOKEN_MAX + 1]; /* --token: private swarm, invite required */
 static LmbConnGate g_conn_gate = LMB_CONN_GATE_INIT;
 static double g_stale_s = STALE_S;
 
@@ -1227,10 +1227,10 @@ static void *conn_thread(void *arg) {
         }
         switch (m.op) {
         case LMB_AUTH: {
-            char tok[128] = "";
+            char tok[LMB_TOKEN_MAX + 1] = "";
             LmbCur c = { m.body, m.body_len, 0 };
-            lmb_cur_str(&c, tok, sizeof tok);
-            if (!g_token[0] || !strcmp(tok, g_token)) {
+            int bad = lmb_cur_str(&c, tok, sizeof tok) || c.off != c.len;
+            if (!bad && (!g_token[0] || !strcmp(tok, g_token))) {
                 authed = 1;
                 rc = lmb_send(fd, LMB_OK, NULL, 0, NULL, 0);
             } else { send_err(fd, "bad token"); rc = -1; }
@@ -1303,8 +1303,15 @@ int main(int argc, char **argv) {
     int port = 7300;
     for (int i = 1; i < argc; i++)
         if (!strcmp(argv[i], "--port") && i + 1 < argc) port = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--token") && i + 1 < argc)
-            snprintf(g_token, sizeof g_token, "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--token") && i + 1 < argc) {
+            const char *tok = argv[++i];
+            if (strlen(tok) > LMB_TOKEN_MAX) {
+                fprintf(stderr, "[tracker] --token must be at most %u bytes\n",
+                        (unsigned)LMB_TOKEN_MAX);
+                return 2;
+            }
+            snprintf(g_token, sizeof g_token, "%s", tok);
+        }
         else if (!strcmp(argv[i], "--pubkey") && i + 1 < argc) {
             const char *spec = argv[++i];
             if (lmb_trust_load_spec(&g_trust, spec)) {

@@ -1753,9 +1753,15 @@ int main(int argc, char **argv) {
     g_tty = isatty(1);
     lmb_secure_init();      /* honours LUMABRI_ENCRYPT for this process's own
                                tracker queries; children inherit the env */
+    if (argc >= 2 && !strcmp(argv[1], "key")) return cmd_key(argc - 2, argv + 2);
+    const char *tok = getenv("LUMABRI_TOKEN");
+    if (tok && strlen(tok) > LMB_TOKEN_MAX) {
+        fprintf(stderr, "LUMABRI_TOKEN must be at most %u bytes\n",
+                (unsigned)LMB_TOKEN_MAX);
+        return 2;
+    }
     if (argc >= 2 && !strcmp(argv[1], "serve")) return cmd_serve(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "chat"))  return cmd_chat(argc - 2, argv + 2);
-    if (argc >= 2 && !strcmp(argv[1], "key"))   return cmd_key(argc - 2, argv + 2);
     /* No arguments and a terminal: this is a person, not a script. Chat is
      * the only thing a person wants by default, and everything it needs is
      * either remembered or asked for in the panel. */
