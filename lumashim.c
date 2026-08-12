@@ -56,6 +56,8 @@
 #define MAX_RPEERS    32
 #define MAX_FPEERS    8
 #define POOL_SOCKS    4
+#define TRUTH_MAGIC   "LMBTRTH1"
+#define TRUTH_VERSION 1u
 
 /* ---- real libc entry points ------------------------------------------- */
 
@@ -115,6 +117,7 @@ typedef struct {
     uint64_t size;
     uint32_t nblocks;
     uint8_t *map;         /* 1 = block present in the local mirror */
+    uint8_t *verified;    /* process-local: present block matched current truth */
     uint8_t *inflight;    /* 1 = a thread is fetching it right now */
     int peer_idx[MAX_FPEERS]; int npeers;
     int wfd;              /* mirror write fd, opened on first fetch */
@@ -124,6 +127,10 @@ typedef struct {
     uint32_t nh;
     int hstate;           /* 0 unknown · 1 have · 2 tracker has none */
     int signed_;          /* the truth carried a valid operator signature */
+    int truth_invalid;    /* a persisted truth exists but cannot be used */
+    char truth_model[64];
+    uint8_t truth_sig[64];
+    int truth_has_sig;
     pthread_mutex_t lk;
     pthread_mutex_t commit_lk;
     pthread_cond_t cv;
@@ -308,6 +315,121 @@ static const char *vrel(const char *path) {
 static void data_path(char *dst, size_t cap, const char *rel) {
     if (rel[0]) snprintf(dst, cap, "%s/%s", g.data_dir, rel);
     else        snprintf(dst, cap, "%s", g.data_dir);
+}
+
+static void map_path(char *dst, size_t cap, const RFile *f, const char *ext) {
+    snprintf(dst, cap, "%s/%s.%s", g.maps_dir, f->rel, ext);
+}
+
+static int write_all(int fd, const uint8_t *p, size_t n) {
+    while (n) {
+        ssize_t w = write(fd, p, n);
+        if (w < 0) { if (errno == EINTR) continue; return -1; }
+        p += (size_t)w; n -= (size_t)w;
+    }
+    return 0;
+}
+
+/* ---- persisted truth ----------------------------------------------------
+ * The signed hash vector lives only in tracker memory, so a restart used to
+ * demote every warm block to "unverifiable".  Persist the exact record as a
+ * sidecar next to the map: magic, version, model, path, hash chunk, file
+ * size, hash count, signature flag/signature, then the raw hash vector.
+ * The sidecar is a courier for the tracker record, never a new authority —
+ * offline it is only believed after its signature checks out against the
+ * out-of-band operator trust set, exactly like the live record. */
+static int truth_save(RFile *f) {
+    if (f->hstate != 1) return -1;
+    LmbBuf b = {0};
+    if (lmb_buf_bytes(&b, (const uint8_t *)TRUTH_MAGIC, 8) ||
+        lmb_buf_u32(&b, TRUTH_VERSION) ||
+        lmb_buf_str(&b, f->truth_model) || lmb_buf_str(&b, f->rel) ||
+        lmb_buf_u32(&b, LMB_HASH_CHUNK) || lmb_buf_u64(&b, f->size) ||
+        lmb_buf_u32(&b, f->nh) || lmb_buf_u32(&b, (uint32_t)f->truth_has_sig) ||
+        (f->truth_has_sig && lmb_buf_bytes(&b, f->truth_sig, 64)) ||
+        lmb_buf_bytes(&b, f->hash, (size_t)f->nh * 32)) {
+        free(b.p); return -1;
+    }
+    char path[LMB_PATH_MAX * 2], tmp[LMB_PATH_MAX * 2 + 64];
+    map_path(path, sizeof path, f, "truth");
+    mkdir_parent(path);
+    static _Atomic uint64_t tmp_seq;
+    snprintf(tmp, sizeof tmp, "%s.tmp.%ld.%llu", path, (long)getpid(),
+             (unsigned long long)atomic_fetch_add(&tmp_seq, 1));
+    int fd = real_open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    int rc = fd < 0 || write_all(fd, b.p, b.len) || fdatasync(fd);
+    if (fd >= 0 && real_close(fd)) rc = -1;
+    if (!rc && rename(tmp, path)) rc = -1;
+    if (!rc) (void)fsync_parent_dir(path);
+    if (rc) unlink(tmp);
+    free(b.p);
+    return rc ? -1 : 0;
+}
+
+static int truth_sidecar_exists(RFile *f) {
+    char path[LMB_PATH_MAX * 2];
+    map_path(path, sizeof path, f, "truth");
+    struct stat st;
+    return lstat(path, &st) == 0;
+}
+
+static int truth_load(RFile *f) {
+    /* Without an out-of-band key the sidecar is only a cache hint: whoever
+     * can rewrite the mirror could rewrite it too.  LUMABRI_REQUIRE_HASH
+     * explicitly asks us not to accept that kind of authority. */
+    if (getenv("LUMABRI_REQUIRE_HASH") && !g.trust.n) return -1;
+    char path[LMB_PATH_MAX * 2];
+    map_path(path, sizeof path, f, "truth");
+    int fd = real_open(path, O_RDONLY | O_NOFOLLOW);
+    if (fd < 0) return -1;
+    struct stat st;
+    if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_size < 8 ||
+        st.st_size > (off_t)LMB_MAX_PAY + LMB_PATH_MAX + 256) {
+        real_close(fd); return -1;
+    }
+    size_t len = (size_t)st.st_size;
+    uint8_t *raw = (uint8_t *)malloc(len);
+    if (!raw) { real_close(fd); return -1; }
+    ssize_t got = real_pread(fd, raw, len, 0);
+    real_close(fd);
+    if (got != (ssize_t)len) { free(raw); return -1; }
+
+    LmbCur c = { raw, len, 0 };
+    uint8_t magic[8], sig[64];
+    uint32_t version = 0, chunk = 0, nh = 0, has_sig = 0;
+    uint64_t size = 0;
+    char model[64], rel[LMB_PATH_MAX];
+    const char *want_model = getenv("LUMABRI_MODEL");
+    int bad = lmb_cur_bytes(&c, magic, 8) || memcmp(magic, TRUTH_MAGIC, 8) ||
+        lmb_cur_u32(&c, &version) || version != TRUTH_VERSION ||
+        lmb_cur_str(&c, model, sizeof model) || lmb_cur_str(&c, rel, sizeof rel) ||
+        lmb_cur_u32(&c, &chunk) || lmb_cur_u64(&c, &size) ||
+        lmb_cur_u32(&c, &nh) || lmb_cur_u32(&c, &has_sig) || has_sig > 1 ||
+        (has_sig && lmb_cur_bytes(&c, sig, 64)) ||
+        chunk != LMB_HASH_CHUNK || size != f->size || strcmp(rel, f->rel) ||
+        (want_model && want_model[0] && strcmp(want_model, model)) ||
+        nh != (uint32_t)(f->size / LMB_HASH_CHUNK +
+                         (f->size % LMB_HASH_CHUNK != 0)) ||
+        c.off > c.len || c.len - c.off != (size_t)nh * 32;
+    if (bad) { free(raw); return -1; }
+    uint8_t *hash = (uint8_t *)malloc((size_t)nh * 32);
+    if (!hash) { free(raw); return -1; }
+    memcpy(hash, raw + c.off, (size_t)nh * 32);
+    int signed_ok = 0;
+    if (g.trust.n) {
+        size_t mlen = 0;
+        uint8_t *msg = has_sig
+            ? lmb_truth_msg(model, rel, chunk, size, hash, nh, &mlen) : NULL;
+        signed_ok = msg && lmb_trust_verify(&g.trust, sig, msg, mlen) == 0;
+        free(msg);
+        if (!signed_ok) { free(hash); free(raw); return -1; }
+    }
+    f->hash = hash; f->nh = nh; f->signed_ = signed_ok;
+    f->truth_has_sig = (int)has_sig;
+    if (has_sig) memcpy(f->truth_sig, sig, 64);
+    snprintf(f->truth_model, sizeof f->truth_model, "%s", model);
+    free(raw);
+    return 0;
 }
 
 static int rfile_cmp(const void *a, const void *b) {
@@ -899,7 +1021,13 @@ static void shim_init_impl(void) {
     uint64_t total = 0, have = 0;
     for (int i = 0; i < g.nfiles; i++) {
         RFile *f = &g.files[i];
-        f->nblocks = (uint32_t)((f->size + g.block - 1) / g.block);
+        uint64_t nblocks = f->size / g.block + (f->size % g.block != 0);
+        if (f->size > (uint64_t)INT64_MAX || nblocks > UINT32_MAX) {
+            fprintf(stderr, "[lumabri] %s has unsupported mirror geometry — disabled\n",
+                    f->rel);
+            cache_lock_release(); return;
+        }
+        f->nblocks = (uint32_t)nblocks;
         pthread_mutex_init(&f->lk, NULL);
         pthread_mutex_init(&f->commit_lk, NULL);
         pthread_cond_init(&f->cv, NULL);
@@ -923,6 +1051,7 @@ static void shim_init_impl(void) {
         mkdir_parent(mpath);
         int map_new = stat(mpath, &before) != 0;
         f->map = (uint8_t *)calloc(f->nblocks ? f->nblocks : 1, 1);
+        f->verified = (uint8_t *)calloc(f->nblocks ? f->nblocks : 1, 1);
         f->inflight = (uint8_t *)calloc(f->nblocks ? f->nblocks : 1, 1);
         f->map_fd = real_open(mpath, O_RDWR | O_CREAT, 0644);
         off_t map_size = (off_t)(f->nblocks ? f->nblocks : 1);
@@ -930,7 +1059,7 @@ static void shim_init_impl(void) {
         int map_stale = !map_new && f->map_fd >= 0 &&
                         fstat(f->map_fd, &mst) == 0 && mst.st_size != map_size;
         int pair_stale = data_new != map_new;
-        if (!f->map || !f->inflight || f->map_fd < 0) {
+        if (!f->map || !f->verified || !f->inflight || f->map_fd < 0) {
             fprintf(stderr, "[lumabri] map alloc failed for %s\n", f->rel);
             real_close(fd); cache_lock_release(); return;
         }
@@ -946,6 +1075,13 @@ static void shim_init_impl(void) {
                 fprintf(stderr, "[lumabri] cannot clear map for %s — disabled\n", f->rel);
                 real_close(fd); cache_lock_release(); return;
             }
+        }
+        if (identity_reset) {
+            /* the checkpoint itself changed: a persisted truth for the old
+             * bytes must not survive into the new identity */
+            char tpath[LMB_PATH_MAX * 2];
+            map_path(tpath, sizeof tpath, f, "truth");
+            unlink(tpath);
         }
         if ((map_new || stale || map_stale || pair_stale || identity_reset) &&
             ftruncate(f->map_fd, map_size)) {
@@ -1143,9 +1279,13 @@ static void hashes_ensure(RFile *f) {
     uint8_t *hash = NULL;
     uint32_t nh = 0;
     int signed_ok = 0;
+    int has_sig_ok = 0, sidecar_unusable = 0;
+    uint8_t saved_sig[64];
+    char saved_model[64] = "";
     const char *tracker = getenv("LUMABRI_TRACKER");
     if (tracker && tracker[0]) {
         const char *model = getenv("LUMABRI_MODEL");
+        const char *requested_model = model ? model : "";
         LmbBuf b = {0};
         lmb_buf_str(&b, model ? model : "");
         lmb_buf_str(&b, f->rel);
@@ -1161,9 +1301,12 @@ static void hashes_ensure(RFile *f) {
             if (!lmb_cur_str(&c, tmodel, sizeof tmodel) &&
                 !lmb_cur_u32(&c, &chunk) && !lmb_cur_u32(&c, &n) &&
                 !lmb_cur_u64(&c, &tsize) && !lmb_cur_u32(&c, &has_sig) &&
-                (!has_sig || !lmb_cur_bytes(&c, sig, 64)) &&
-                chunk == LMB_HASH_CHUNK && m.pay_len == n * 32 && tsize == f->size &&
-                n == (uint32_t)((f->size + LMB_HASH_CHUNK - 1) / LMB_HASH_CHUNK)) {
+                (!has_sig || !lmb_cur_bytes(&c, sig, 64)) && c.off == c.len &&
+                (!requested_model[0] || !strcmp(tmodel, requested_model)) &&
+                chunk == LMB_HASH_CHUNK && n <= LMB_MAX_PAY / 32 &&
+                m.pay_len == n * 32 && tsize == f->size &&
+                n == (uint32_t)(f->size / LMB_HASH_CHUNK +
+                                (f->size % LMB_HASH_CHUNK != 0))) {
                 /* The signature is what makes the tracker a courier: we
                  * rebuild the signed message ourselves and check it against
                  * a key obtained out of band, so a compromised tracker can
@@ -1184,16 +1327,41 @@ static void hashes_ensure(RFile *f) {
                 }
                 if (!g.trust.n || signed_ok) {
                     hash = m.pay; nh = n; m.pay = NULL;
+                    has_sig_ok = (int)has_sig;
+                    if (has_sig) memcpy(saved_sig, sig, 64);
+                    snprintf(saved_model, sizeof saved_model, "%s", tmodel);
                 }
             }
         }
         lmb_msg_free(&m);
     }
+    if (!hash && truth_load(f) == 0) {
+        hash = f->hash; nh = f->nh; signed_ok = f->signed_;
+        f->hash = NULL; f->nh = 0;
+        fprintf(stderr, "[lumabri] %s: using persisted%s integrity truth\n",
+                f->rel, signed_ok ? " signed" : "");
+    }
+    if (!hash && truth_sidecar_exists(f)) {
+        /* A sidecar that exists but cannot be believed is not the same as no
+         * sidecar at all: this cache once had a truth, so its warm blocks do
+         * not get the legacy benefit of the doubt. */
+        sidecar_unusable = 1;
+        fprintf(stderr, "[lumabri] %s: persisted truth exists but is unusable — "
+                        "warm blocks will not be trusted\n", f->rel);
+    }
     pthread_mutex_lock(&f->lk);
     f->hash = hash; f->nh = nh; f->signed_ = signed_ok;
+    f->truth_invalid = sidecar_unusable;
+    if (saved_model[0]) {
+        snprintf(f->truth_model, sizeof f->truth_model, "%s", saved_model);
+        f->truth_has_sig = has_sig_ok;
+        if (has_sig_ok) memcpy(f->truth_sig, saved_sig, 64);
+    }
     f->hstate = hash ? 1 : 2;
     pthread_cond_broadcast(&f->cv);
     pthread_mutex_unlock(&f->lk);
+    if (hash && saved_model[0] && truth_save(f))
+        fprintf(stderr, "[lumabri] %s: could not persist integrity truth\n", f->rel);
     if (!hash)
         fprintf(stderr, "[lumabri] no usable integrity data for %s — fetches are "
                         "UNVERIFIED%s\n", f->rel,
@@ -1215,6 +1383,24 @@ static int block_verify(RFile *f, uint64_t off, const uint8_t *data, uint32_t le
         if (memcmp(h, f->hash + (size_t)ci * 32, 32)) return -1;
     }
     return 0;
+}
+
+/* 0 = the bytes of one mirror block, as they sit on disk, match the truth */
+static int local_block_verify(RFile *f, uint32_t blk, int fd) {
+    uint64_t off = (uint64_t)blk * g.block;
+    uint32_t len = (uint32_t)(off + g.block <= f->size ? g.block : f->size - off);
+    uint8_t *data = (uint8_t *)malloc(len ? len : 1);
+    if (!data) return -1;
+    uint32_t got = 0;
+    while (got < len) {
+        ssize_t n = real_pread(fd, data + got, len - got, (off_t)(off + got));
+        if (n < 0) { if (errno == EINTR) continue; free(data); return -1; }
+        if (n == 0) { free(data); return -1; }
+        got += (uint32_t)n;
+    }
+    int rc = block_verify(f, off, data, len);
+    free(data);
+    return rc;
 }
 
 /* ---- local content-addressed store ------------------------------------
@@ -1294,27 +1480,34 @@ static void cas_publish(RFile *f, uint64_t off, const uint8_t *data, uint32_t le
     }
 }
 
-/* Make one block present in the mirror. 0 on success. */
+/* Make one block present in the mirror. 0 on success.
+ *
+ * A set presence bit — ours from the startup snapshot or another process's
+ * published byte — is only a hint that bytes may be there.  The first touch
+ * in each process hashes the local bytes against the current truth before
+ * serving them; a mismatch clears the bit and falls through to an ordinary
+ * fetch, which is what repair is.  None of this takes a cross-process lock:
+ * a block can only pass verification if every chunk equals the signed truth,
+ * so no interleaving of writers can make wrong bytes verifiable — at worst a
+ * torn view fails the hash and is fetched again. */
 static int ensure_block(RFile *f, uint32_t blk) {
     pthread_mutex_lock(&f->lk);
     for (;;) {
-        if (f->map[blk]) { pthread_mutex_unlock(&f->lk); return 0; }
+        if (f->map[blk] && f->verified[blk]) { pthread_mutex_unlock(&f->lk); return 0; }
         if (!f->inflight[blk]) break;
         pthread_cond_wait(&f->cv, &f->lk);
     }
     /* Another process sharing this checkpoint may have published the block
-     * since our startup snapshot. The persisted bit is safe to trust because
-     * every committer fdatasyncs mirror data before setting it. */
-    uint8_t shared = 0;
-    if (f->map_fd >= 0 && flock(f->map_fd, LOCK_SH) == 0) {
-        ssize_t r = real_pread(f->map_fd, &shared, 1, (off_t)blk);
-        flock(f->map_fd, LOCK_UN);
-        if (r == 1 && shared == 1) {
+     * since our startup snapshot.  The single-byte read needs no flock: the
+     * committer makes data durable before setting the byte, a one-byte write
+     * cannot tear, and merges only ever add bits while we hold the shared
+     * cache lock that excludes resets. */
+    if (!f->map[blk] && f->map_fd >= 0) {
+        uint8_t shared = 0;
+        if (real_pread(f->map_fd, &shared, 1, (off_t)blk) == 1 && shared == 1)
             f->map[blk] = 1;
-            pthread_mutex_unlock(&f->lk);
-            return 0;
-        }
     }
+    int present = f->map[blk];
     f->inflight[blk] = 1;
     if (f->wfd < 0) {
         char path[LMB_PATH_MAX * 2];
@@ -1332,6 +1525,44 @@ static int ensure_block(RFile *f, uint32_t blk) {
     /* a configured public key implies strict mode: the whole point of
      * carrying one is refusing to run on bytes nobody signed */
     int require = getenv("LUMABRI_REQUIRE_HASH") != NULL || g.trust.n;
+
+    if (present && wfd >= 0) {
+        int trust_it = 0;
+        if (f->hstate == 1) {
+            trust_it = local_block_verify(f, blk, wfd) == 0;
+            if (!trust_it) {
+                /* the bytes on disk are not the bytes the operator signed:
+                 * withdraw the bit in memory first so our own committer stops
+                 * republishing it, then withdraw the published byte, then
+                 * repair like any cold block.  No fdatasync: if the zero is
+                 * lost in a crash, the next process verifies and re-clears. */
+                pthread_mutex_lock(&f->lk);
+                f->map[blk] = 0;
+                pthread_mutex_unlock(&f->lk);
+                uint8_t zero = 0;
+                if (f->map_fd >= 0)
+                    (void)pwrite(f->map_fd, &zero, 1, (off_t)blk);
+                fprintf(stderr, "[lumabri] local integrity failure: block %u of %s "
+                                "does not match authenticated truth — invalidated\n",
+                        blk, f->rel);
+            }
+        } else if (!require && !f->truth_invalid) {
+            static _Atomic int legacy_warned;
+            if (!atomic_exchange(&legacy_warned, 1))
+                fprintf(stderr, "[lumabri] WARNING: legacy warm cache has no "
+                                "authenticated truth; trusting present blocks\n");
+            trust_it = 1;
+        }
+        if (trust_it) {
+            pthread_mutex_lock(&f->lk);
+            f->verified[blk] = 1;
+            f->inflight[blk] = 0;
+            pthread_cond_broadcast(&f->cv);
+            pthread_mutex_unlock(&f->lk);
+            return 0;
+        }
+    }
+
     if (f->hstate == 1 && (data = cas_load(f, off, len)) != NULL) {
         from_cas = 1;
     } else if (require && f->hstate != 1) {
@@ -1413,7 +1644,7 @@ static int ensure_block(RFile *f, uint32_t blk) {
 
     pthread_mutex_lock(&f->lk);
     f->inflight[blk] = 0;
-    if (ok) { f->map[blk] = 1; f->dirty_gen++; }
+    if (ok) { f->map[blk] = 1; f->verified[blk] = 1; f->dirty_gen++; }
     pthread_cond_broadcast(&f->cv);
     pthread_mutex_unlock(&f->lk);
     return ok ? 0 : -1;

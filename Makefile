@@ -239,6 +239,7 @@ test: all test_key_rotation test_hedge
 	./selftest.sh
 	./donate_test.sh
 	./signed_donor_test.sh
+	./hot_cache_integrity_test.sh
 	./role_test.sh
 	./security_test.sh
 	./expert_input_test.sh
