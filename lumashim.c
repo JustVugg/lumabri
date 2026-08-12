@@ -443,21 +443,32 @@ static int manifest_load(void) {
     snprintf(path, sizeof path, "%s/manifest.txt", g.maps_dir);
     FILE *fp = real_fopen(path, "r");
     if (!fp) return -1;
+    int first = g.nfiles, bad = 0;
     char line[LMB_PATH_MAX + 64];
     while (fgets(line, sizeof line, fp)) {
-        unsigned long long size;
-        char rel[LMB_PATH_MAX];
+        size_t len = strlen(line);
+        if (!len || line[len - 1] != '\n') { bad = 1; break; }
+        line[--len] = 0;
         char *tab = strchr(line, '\t');
-        if (!tab) continue;
-        *tab = 0;
-        size = strtoull(line, NULL, 10);
-        snprintf(rel, sizeof rel, "%s", tab + 1);
-        size_t l = strlen(rel);
-        if (l && rel[l - 1] == '\n') rel[l - 1] = 0;
-        if (rel[0]) file_add(rel, size);
+        if (!tab || tab == line || strchr(tab + 1, '\t')) { bad = 1; break; }
+        *tab++ = 0;
+        char *end = NULL;
+        errno = 0;
+        unsigned long long size = strtoull(line, &end, 10);
+        if (line[0] < '0' || line[0] > '9' || errno == ERANGE || !end || *end ||
+            !lmb_rel_ok(tab) || !file_add(tab, (uint64_t)size)) {
+            bad = 1;
+            break;
+        }
     }
+    if (ferror(fp)) bad = 1;
     fclose(fp);
-    return g.nfiles ? 0 : -1;
+    if (bad) {
+        g.nfiles = first;
+        fprintf(stderr, "[lumabri] saved manifest contains an invalid entry - refusing it\n");
+        return -1;
+    }
+    return g.nfiles > first ? 0 : -1;
 }
 
 typedef struct {
