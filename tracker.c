@@ -274,6 +274,24 @@ static int name_key_ok(const char *name, int is_expert, const uint8_t pk[32]) {
     return 0;
 }
 
+/* Authentication stops anonymous junk from taking a slot, but one attacker
+ * can still mint many keys. Cap how many distinct names a single identity may
+ * hold, so no key can monopolise the 64-slot table: a real machine uses a
+ * handful (serve = origin + executor, a donor one or two). Counts live slots
+ * only, so a restart that reclaims the same names is unaffected. */
+#define MAX_NAMES_PER_KEY 8
+static int identity_has_room(const uint8_t pk[32], const char *name, int is_expert) {
+    int held = 0;
+    for (int i = 0; i < MAX_PEERS; i++) {
+        if (!g_peers[i].used || !g_peers[i].has_key) continue;
+        if (memcmp(g_peers[i].pubkey, pk, 32)) continue;
+        if (g_peers[i].is_expert == is_expert && !strcmp(g_peers[i].name, name))
+            return 1;                      /* reclaiming a name it already holds */
+        held++;
+    }
+    return held < MAX_NAMES_PER_KEY;
+}
+
 static Peer *handle_register(int fd, LmbMsg *m, const uint8_t *nonce) {
     uint8_t peer_pk[32], peer_sig[64];
     int have_auth = 0;
@@ -408,6 +426,15 @@ static Peer *handle_register(int fd, LmbMsg *m, const uint8_t *nonce) {
         send_err(fd, "name held by another key");
         return NULL;
     }
+    if (!identity_has_room(peer_pk, name, 0)) {
+        pthread_mutex_unlock(&g_lk);
+        printf("[tracker] REJECTED: one key already holds %d names\n", MAX_NAMES_PER_KEY);
+        fflush(stdout);
+        for (uint32_t i = 0; i < n; i++) free(fh[i]);
+        free(fh); free(fnh); free(fsig); free(fhas); free(files);
+        send_err(fd, "too many names for one key");
+        return NULL;
+    }
     for (int i = 0; i < MAX_PEERS; i++)
         if (g_peers[i].used && !g_peers[i].is_expert &&
             !strcmp(g_peers[i].name, name)) { slot = &g_peers[i]; idx = i; break; }
@@ -505,6 +532,12 @@ static Peer *handle_ereg(int fd, LmbMsg *m, const uint8_t *nonce) {
         pthread_mutex_unlock(&g_lk);
         printf("[tracker] REJECTED: expert %s is already held by another key\n", name);
         fflush(stdout); send_err(fd, "name held by another key");
+        return NULL;
+    }
+    if (!identity_has_room(peer_pk, name, 1)) {
+        pthread_mutex_unlock(&g_lk);
+        printf("[tracker] REJECTED: one key already holds %d names\n", MAX_NAMES_PER_KEY);
+        fflush(stdout); send_err(fd, "too many names for one key");
         return NULL;
     }
     for (int i = 0; i < MAX_PEERS; i++)

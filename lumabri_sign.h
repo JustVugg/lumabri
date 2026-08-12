@@ -149,7 +149,7 @@ static void lmb_car(lmb_gf o) {
         o[i] += (1LL << 16);
         int64_t c = o[i] >> 16;
         o[(i + 1) * (i < 15)] += c - 1 + 37 * (c - 1) * (i == 15);
-        o[i] -= c << 16;
+        o[i] -= c * 65536;          /* not c<<16: c may be negative (UB) */
     }
 }
 
@@ -303,7 +303,8 @@ static void lmb_modL(uint8_t *r, int64_t x[64]) {
         for (j = i - 32; j < i - 12; ++j) {
             x[j] += carry - 16 * x[i] * (int64_t)lmb_L[j - (i - 32)];
             carry = (x[j] + 128) >> 8;
-            x[j] -= carry << 8;
+            x[j] -= carry * 256;     /* not carry<<8: carry may be negative,
+                                        and left-shifting a negative is UB */
         }
         x[j] += carry;
         x[i] = 0;
