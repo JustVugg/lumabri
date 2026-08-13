@@ -18,6 +18,7 @@ cd "$(dirname "$0")"
 make -s tracker maintainer
 
 T=$(mktemp -d /tmp/lumabri-peerid.XXXXXX)
+export HOME="$T"
 PIDS=()
 cleanup() { kill "${PIDS[@]}" 2>/dev/null || true; rm -rf "$T"; }
 trap cleanup EXIT
@@ -78,7 +79,7 @@ int main(int argc, char **argv) {
 EOF
 cc -O2 -w -I. "$T/noauth.c" -o "$T/noauth" -lpthread
 
-./tracker --port 7640 > "$T/tracker.log" 2>&1 & PIDS+=($!)
+./tracker --port 7640 > "$T/tracker.log" 2>&1 & TRACKER=$!; PIDS+=($TRACKER)
 wait_port 7640
 
 run_origin() {   # run_origin PORT KEYFILE  -> background pid in $LASTPID
@@ -130,5 +131,23 @@ echo "   ✓ reclaimed with the same key"
 echo "· 4) a REGISTER with no signature is refused"
 "$T/noauth" 127.0.0.1:7640 || { echo "   an unsigned REGISTER was accepted"; exit 1; }
 echo "   ✓ unauthenticated registration refused"
+
+echo "· 5) the name binding survives a tracker restart"
+kill "$TRACKER" 2>/dev/null || true
+wait "$TRACKER" 2>/dev/null || true
+./tracker --port 7640 > "$T/tracker-restart.log" 2>&1 & TRACKER2=$!; PIDS+=($TRACKER2)
+wait_port 7640
+# keyB is already retrying in the background; it must remain rejected while
+# the honest keyA control connection reconnects and reclaims the placement.
+for _ in $(seq 1 100); do
+    grep -q "already held by another key" "$T/tracker-restart.log" &&
+    "$T/probe" 127.0.0.1:7640 fx 127.0.0.1:7643 && break
+    sleep 0.1
+done
+grep -q "already held by another key" "$T/tracker-restart.log" || {
+    echo "   restarted tracker forgot the bound key"; cat "$T/tracker-restart.log"; exit 1; }
+"$T/probe" 127.0.0.1:7640 fx 127.0.0.1:7643 || {
+    echo "   honest key could not reclaim after tracker restart"; exit 1; }
+echo "   ✓ persisted binding rejected keyB and admitted keyA after restart"
 
 echo "LUMABRI PEER IDENTITY TEST: PASS"

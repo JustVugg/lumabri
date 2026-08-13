@@ -384,7 +384,7 @@ static void lumi_maybe_discover(void) {
  * every model that has one. */
 static void lumi_init_ex(int n_layers, int n_experts, int hidden,
                          const unsigned char *routed) {
-    lmb_secure_init();
+    if (lmb_secure_init()) return;
     const char *spec = getenv("LUMABRI_EXPERTS");
     if (getenv("LUMABRI_NO_EXEC")) return;
     const char *tracker = getenv("LUMABRI_TRACKER");
@@ -560,7 +560,7 @@ static float *lumi_finish_exec(int layer, int eid, const float *x, int D, int nr
             int i = map[q];
             LmbMsg m = {0};
             if (lmb_recv(fd[i], &m) == 0 && m.op == LMB_EXEC_R && m.pay_len == want) {
-                float *res = (float *)m.pay; m.pay = NULL; lmb_msg_free(&m);
+                float *res = (float *)lmb_msg_take_pay(&m); lmb_msg_free(&m);
                 lumi_put_sock(p[i], fd[i]); fd[i] = -1;
                 if (i == 1) L.hedge_wins++;
                 for (int j = 0; j < 2; j++) if (fd[j] >= 0) close(fd[j]);
@@ -600,7 +600,7 @@ static float *lumi_exec_relay(int layer, int eid, const float *x, int D, int nr,
     uint32_t want = (uint32_t)((size_t)nr * D * sizeof(float));
     float *out = NULL;
     if (!rc && m.op == LMB_REXEC_R && m.pay_len == want) {
-        out = (float *)m.pay; m.pay = NULL; L.relays++;
+        out = (float *)lmb_msg_take_pay(&m); L.relays++;
     } else if (!rc && m.op == LMB_ERR) {
         char why[160] = "relay refused the call";
         LmbCur c = { m.body, m.body_len, 0 };
@@ -668,8 +668,7 @@ static float *lumi_exec_retry(int layer, int eid, const float *x, int D, int nr,
             fprintf(stderr, "[lumabri] peer %s failed — trying next replica\n", p->addr);
             continue;
         }
-        float *res = (float *)m.pay;
-        m.pay = NULL;
+        float *res = (float *)lmb_msg_take_pay(&m);
         lmb_msg_free(&m);
         lumi_put_sock(p, fd);
         L.failovers++;

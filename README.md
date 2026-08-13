@@ -173,6 +173,40 @@ maintainer commands also accept repeated `--pubkey`.
 There is still one signature per object; the overlap belongs to the verifier,
 so the wire format does not change during rotation.
 
+### Encrypted transport and peer identity
+
+Set `LUMABRI_ENCRYPT=1` on every tracker, maintainer, expert node and chatter
+to encrypt tokens, model blocks and activations with an authenticated
+X25519/Ed25519 handshake and ChaCha20-Poly1305 frames. If a peer key cannot be
+loaded or created, networking fails closed instead of falling back to
+plaintext.
+
+Each machine keeps its private endpoint identity in `~/.lumabri/peer.key` and
+prints the public half with `lumabri peer-key`. Outbound endpoints are recorded
+in `~/.lumabri/known_hosts`; a changed key is refused on later connections.
+For first-contact MITM protection, distribute an operator-managed file before
+connecting:
+
+```text
+SERVER:7300 64_HEX_PEER_KEY
+SERVER:7301 64_HEX_PEER_KEY
+SERVER:7302 64_HEX_PEER_KEY
+```
+
+Then set `LUMABRI_PEER_PINS=/path/to/peer-pins`. Strict pin files must list
+every endpoint the process may contact. `LUMABRI_REQUIRE_PIN=1` applies the
+same no-learning rule to a preseeded `known_hosts`. The endpoint key is not
+the model-signing key: `LUMABRI_PUBKEY` authenticates model contents, while
+peer pins authenticate network endpoints. For endpoint-key rotation, publish
+two rows for the same address containing old and new keys, switch the server,
+then remove the old row. Persistent TOFU instead requires an explicit
+`known_hosts` update after verifying the replacement key out of band.
+
+The tracker also persists the first key that owns each maintainer/executor
+name. A restart rebuilds placements from heartbeats but does not reopen names
+for takeover. Per-key and per-source live-name quotas limit table exhaustion;
+they are admission controls, not a claim to solve distributed Sybil attacks.
+
 The server also runs an expert node on the whole model, so a fresh swarm works
 on day zero with the server executing everything, and donors that join later win
 the calls they are nearest for. The nearest replica sets the speed: an expert
@@ -186,14 +220,18 @@ make test
 ```
 
 runs the core suites: byte identity, donor integrity, role parsing, security
-(path escape, hostile frame lengths, idle connections), protocol input
-validation and prefetch policy. Per-engine expert identity runs with fixtures
+(path escape, hostile frame lengths, aggregate receive memory, idle
+connections, durable identities and admission quotas), protocol input
+validation, cryptographic vectors, encrypted transport and prefetch policy.
+Per-engine expert identity runs with fixtures
 (`make test-engines`), and DeepSeek V4 against a real model
 (`make test-phase2-deepseek MODEL=<dir>`). Assignment, concurrency and signing
 have their own scripts (`assign_test.sh`, `concurrency_test.sh`,
 `sign_test.sh`). The newer mechanisms have focused targets:
-`make test-cas test-key-rotation test-hedge test-relay-exec`. Every claim in
-this README has a script behind it.
+`make test-cas test-key-rotation test-hedge test-relay-exec`. Relay EXEC needs
+an OLMoE engine source under `ENGINE`; its script reports `SKIP` explicitly
+when that external checkout is absent. Every claim in this README has a script
+behind it.
 
 ## How it compares
 
@@ -217,7 +255,9 @@ binaries.
 Working prototype, deployable. Open swarms verify bytes (sha256 per MiB and a
 signed complete-model root, checked by the chatter against its own trust set)
 and results (spot-check on a second replica). Private swarms add an invite token
-everywhere with `LUMABRI_TOKEN`. Multi-row speculative verification, fixed-delay
+everywhere with `LUMABRI_TOKEN`; `LUMABRI_ENCRYPT=1` protects that token and
+activations in transit, using persistent TOFU or strict endpoint pins.
+Multi-row speculative verification, fixed-delay
 hedging, a local cross-checkpoint CAS, manual old+new key rotation and NAT relay
 for both READ and EXEC are implemented. Automatic SLA tuning, distributed/S3
 CAS, KMS/HSM integration and automatic revocation are intentionally not part of

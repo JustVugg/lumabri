@@ -624,8 +624,17 @@ static int lmb_peer_identity(const char *path, uint8_t sk[64], uint8_t pk[32]) {
      * winner has not finished writing it. */
     for (int attempt = 0; attempt < 200; attempt++) {
         char hex[200] = "";
-        FILE *f = fopen(path, "r");
-        if (f) {
+        int rflags = O_RDONLY;
+#ifdef O_NOFOLLOW
+        rflags |= O_NOFOLLOW;
+#endif
+        int rfd = open(path, rflags);
+        if (rfd >= 0) {
+            struct stat st;
+            if (fstat(rfd, &st) || !S_ISREG(st.st_mode) || st.st_uid != geteuid() ||
+                (st.st_mode & 077) != 0) { close(rfd); errno = EACCES; return -1; }
+            FILE *f = fdopen(rfd, "r");
+            if (!f) { close(rfd); return -1; }
             int got = fscanf(f, "%198s", hex) == 1;
             fclose(f);
             if (got && strlen(hex) == 128 && !lmb_unhex(sk, hex, 64)) {
@@ -643,10 +652,18 @@ static int lmb_peer_identity(const char *path, uint8_t sk[64], uint8_t pk[32]) {
         uint8_t seed[32];
         lmb_random(seed, sizeof seed);
         lmb_sign_keypair(pk, sk, seed);
+        memset(seed, 0, sizeof seed);
         char out[130];
         lmb_hex(out, sk, 64);
         out[128] = '\n'; out[129] = 0;
-        int wrote = (int)write(fd, out, 129) == 129;
+        size_t off = 0;
+        while (off < 129) {
+            ssize_t n = write(fd, out + off, 129 - off);
+            if (n < 0 && errno == EINTR) continue;
+            if (n <= 0) break;
+            off += (size_t)n;
+        }
+        int wrote = off == 129;
         if (fsync(fd)) wrote = 0;
         close(fd);
         if (!wrote) { unlink(path); return -1; }

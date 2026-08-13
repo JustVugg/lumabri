@@ -16,9 +16,9 @@
  * cannot forge without a key the peer would recognise as wrong.
  *
  * This defeats passive capture of tokens and activations and frame tampering
- * and replay. Full MITM resistance still needs the verifier to pin the peer's
- * identity out of band (LUMABRI_PUBKEY for a signed swarm); without a pin it
- * is trust-on-first-use, the SSH first-connect model.
+ * and replay. LUMABRI_PEER_PINS provides strict out-of-band endpoint pinning;
+ * without it, persistent known_hosts provides the SSH first-connect model.
+ * LUMABRI_PUBKEY is separate: it authenticates model contents, not endpoints.
  */
 #ifndef LUMABRI_SECURE_H
 #define LUMABRI_SECURE_H
@@ -26,6 +26,8 @@
 #include "lumabri_proto.h"
 #include "lumabri_crypto.h"
 #include "lumabri_sign.h"
+#include <ctype.h>
+#include <sys/file.h>
 
 typedef struct {
     int active;
@@ -75,6 +77,14 @@ static int lmb_secure_handshake(int fd, int is_client,
         memcpy(eph_c, peer_eph, 32); memcpy(eph_s, eph_pk, 32);
     }
 
+    /* RFC 7748 permits protocols to reject the all-zero result.  We must:
+     * accepting a low-order public point destroys contributory behaviour and
+     * produces a publicly predictable traffic secret. */
+    uint8_t shared[32], shared_or = 0;
+    lc_x25519(shared, eph_sk, peer_eph);
+    for (size_t i = 0; i < sizeof shared; i++) shared_or |= shared[i];
+    if (!shared_or) { errno = EPROTO; return -1; }
+
     /* transcript both sides sign: tag || client ephemeral || server ephemeral */
     uint8_t tr[sizeof(LMB_HS_TAG) - 1 + 64];
     size_t tl = 0;
@@ -90,27 +100,31 @@ static int lmb_secure_handshake(int fd, int is_client,
         /* the server sends its identity and signature right after its
          * ephemeral; read and verify them, then send ours */
         if (lmb_read_full(fd, peer_id, 32) || lmb_read_full(fd, peer_sig, 64)) return -1;
-        if (lmb_sign_verify(peer_sig, tr, tl, peer_id)) return -1;
+        if (lmb_sign_verify(peer_sig, tr, tl, peer_id)) { errno = EKEYREJECTED; return -1; }
         if (lmb_write_full(fd, id_pk, 32) || lmb_write_full(fd, my_sig, 64)) return -1;
     } else {
         if (lmb_write_full(fd, id_pk, 32) || lmb_write_full(fd, my_sig, 64)) return -1;
         if (lmb_read_full(fd, peer_id, 32) || lmb_read_full(fd, peer_sig, 64)) return -1;
-        if (lmb_sign_verify(peer_sig, tr, tl, peer_id)) return -1;
+        if (lmb_sign_verify(peer_sig, tr, tl, peer_id)) { errno = EKEYREJECTED; return -1; }
     }
     memcpy(s->peer_id, peer_id, 32); s->have_peer_id = 1;
 
-    uint8_t shared[32];
-    lc_x25519(shared, eph_sk, peer_eph);
-
     uint8_t info[64], keys[64];
     memcpy(info, eph_c, 32); memcpy(info + 32, eph_s, 32);
-    lc_hkdf((const uint8_t *)"lumabri-secure-v1", 17, shared, 32, info, 64, keys, 64);
+    if (lc_hkdf((const uint8_t *)"lumabri-secure-v1", 17,
+                shared, 32, info, 64, keys, 64)) {
+        errno = EOVERFLOW;
+        return -1;
+    }
     /* client sends with keys[0..31], server sends with keys[32..63] */
     if (is_client) { memcpy(s->tx_key, keys, 32); memcpy(s->rx_key, keys + 32, 32); }
     else           { memcpy(s->tx_key, keys + 32, 32); memcpy(s->rx_key, keys, 32); }
     s->tx_ctr = s->rx_ctr = 0;
     s->active = 1;
     lmb_hs_deadline(fd, 0);            /* back to the normal io timeout */
+    memset(eph_sk, 0, sizeof eph_sk);
+    memset(shared, 0, sizeof shared);
+    memset(keys, 0, sizeof keys);
     return 0;
 }
 
@@ -126,17 +140,18 @@ static int lmb_secure_send(LmbSecure *s, int fd, uint32_t op,
     uint8_t hdr[16];
     lc_st32(hdr, LMB_MAGIC); lc_st32(hdr + 4, op);
     lc_st32(hdr + 8, body_len); lc_st32(hdr + 12, pay_len);
-    uint8_t *pt = (uint8_t *)malloc(total ? total : 1);
     uint8_t *ct = (uint8_t *)malloc(total ? total : 1);
     uint8_t tag[16];
-    if (!pt || !ct) { free(pt); free(ct); return -1; }
-    if (body_len) memcpy(pt, body, body_len);
-    if (pay_len)  memcpy(pt + body_len, pay, pay_len);
+    if (!ct) return -1;
+    if (body_len) memcpy(ct, body, body_len);
+    if (pay_len)  memcpy(ct + body_len, pay, pay_len);
     uint8_t nonce[12]; lmb_sec_nonce(nonce, s->tx_ctr++);
-    lc_aead_seal(s->tx_key, nonce, hdr, 16, pt, total, ct, tag);
+    /* ChaCha20 is safe in place, so an outbound 64 MiB frame also needs only
+     * one frame-sized allocation. */
+    lc_aead_seal(s->tx_key, nonce, hdr, 16, ct, total, ct, tag);
     int rc = lmb_write_full(fd, hdr, 16) || lmb_write_full(fd, ct, total) ||
              lmb_write_full(fd, tag, 16);
-    free(pt); free(ct);
+    free(ct);
     return rc ? -1 : 0;
 }
 
@@ -150,21 +165,117 @@ static int lmb_secure_recv(LmbSecure *s, int fd, LmbMsg *m) {
     m->body_len = lc_ld32(hdr + 8);
     m->pay_len = lc_ld32(hdr + 12);
     if (!lmb_frame_shape_ok(m->op, m->body_len, m->pay_len)) return -1;
-    uint32_t total = m->body_len + m->pay_len;
-    uint8_t *ct = (uint8_t *)malloc(total ? total : 1);
-    uint8_t *pt = (uint8_t *)malloc(total ? total : 1);
+    uint64_t total64 = (uint64_t)m->body_len + m->pay_len;
+    if (total64 > UINT32_MAX) { errno = EMSGSIZE; return -1; }
+    uint32_t total = (uint32_t)total64;
+    if (lmb_rx_reserve(m, total)) return -1;
+    /* AEAD open is safe in-place: authenticate ciphertext first, then XOR the
+     * ChaCha stream over the same bytes.  One legal 64 MiB frame therefore
+     * costs 64 MiB, not two or three copies. */
+    uint8_t *wire = (uint8_t *)malloc(total ? total : 1);
     uint8_t tag[16];
-    if (!ct || !pt) { free(ct); free(pt); return -1; }
-    if (lmb_read_full(fd, ct, total) || lmb_read_full(fd, tag, 16)) { free(ct); free(pt); return -1; }
-    uint8_t nonce[12]; lmb_sec_nonce(nonce, s->rx_ctr++);
-    if (lc_aead_open(s->rx_key, nonce, hdr, 16, ct, total, tag, pt)) {
-        free(ct); free(pt); return -1;             /* tamper, replay, or wrong key */
+    if (!wire) { lmb_rx_release(m); return -1; }
+    if (lmb_read_full(fd, wire, total) || lmb_read_full(fd, tag, 16)) {
+        free(wire); lmb_rx_release(m); return -1;
     }
-    free(ct);
-    if (m->body_len) { m->body = (uint8_t *)malloc(m->body_len); memcpy(m->body, pt, m->body_len); }
-    if (m->pay_len)  { m->pay  = (uint8_t *)malloc(m->pay_len);  memcpy(m->pay, pt + m->body_len, m->pay_len); }
-    free(pt);
+    uint8_t nonce[12]; lmb_sec_nonce(nonce, s->rx_ctr++);
+    if (lc_aead_open(s->rx_key, nonce, hdr, 16, wire, total, tag, wire)) {
+        free(wire); lmb_rx_release(m); return -1;  /* tamper, replay, or wrong key */
+    }
+    m->storage = wire;
+    if (m->body_len) m->body = wire;
+    if (m->pay_len) m->pay = wire + m->body_len;
     return 0;
+}
+
+/* ---- peer pinning and persistent TOFU ----------------------------------
+ *
+ * A self-signed handshake proves possession of *a* key, not that it is the
+ * key belonging to the endpoint the caller intended.  Outbound connections
+ * therefore check "address -> Ed25519 key" here before any application frame
+ * (and thus before an invite token or activation) is sent.
+ *
+ * LUMABRI_PEER_PINS points at a strict, operator-managed file.  Every outbound
+ * address must occur in it.  Otherwise ~/.lumabri/known_hosts is persistent
+ * TOFU: first contact is recorded durably, later changes are refused.
+ * LUMABRI_REQUIRE_PIN=1 disables learning and accepts existing known_hosts
+ * entries only.  File format: one `host:port 64hex` pair per line. */
+
+static int lmb_sec_addr_ok(const char *addr) {
+    if (!addr || !*addr || strlen(addr) >= 256) return 0;
+    for (const unsigned char *p = (const unsigned char *)addr; *p; p++)
+        if (isspace(*p) || *p < 0x21 || *p == 0x7f) return 0;
+    return 1;
+}
+
+static const char *lmb_sec_known_hosts_path(char out[512]) {
+    const char *e = getenv("LUMABRI_KNOWN_HOSTS");
+    if (e && *e) { snprintf(out, 512, "%s", e); return out; }
+    const char *home = getenv("HOME");
+    if (!home || !*home) return NULL;
+    char dir[448];
+    if (snprintf(dir, sizeof dir, "%s/.lumabri", home) >= (int)sizeof dir) return NULL;
+    if (mkdir(dir, 0700) && errno != EEXIST) return NULL;
+    if (snprintf(out, 512, "%s/known_hosts", dir) >= 512) return NULL;
+    return out;
+}
+
+/* Returns 0 match/learned, -1 mismatch/missing/error. */
+static int lmb_sec_pin_file(const char *path, const char *addr,
+                            const uint8_t peer[32], int learn) {
+    int flags = learn ? (O_RDWR | O_CREAT) : O_RDONLY;
+#ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+#endif
+    int fd = open(path, flags, 0600);
+    if (fd < 0) return -1;
+    struct stat st;
+    if (fstat(fd, &st) || !S_ISREG(st.st_mode) ||
+        (learn && (st.st_uid != geteuid() || (st.st_mode & 022)))) {
+        close(fd); errno = EACCES; return -1;
+    }
+    if (flock(fd, learn ? LOCK_EX : LOCK_SH)) { close(fd); return -1; }
+    FILE *fp = fdopen(fd, learn ? "r+" : "r");
+    if (!fp) { close(fd); return -1; }
+    char line[768], host[256], hex[65], extra;
+    int found = 0, seen_addr = 0, bad = 0;
+    rewind(fp);
+    while (fgets(line, sizeof line, fp)) {
+        char *p = line;
+        while (isspace((unsigned char)*p)) p++;
+        if (!*p || *p == '#') continue;
+        int n = sscanf(p, "%255s %64s %c", host, hex, &extra);
+        if (n != 2) { bad = 1; break; }
+        if (strcmp(host, addr)) continue;
+        uint8_t key[32];
+        if (lmb_unhex(key, hex, sizeof key)) { bad = 1; break; }
+        if (learn) {
+            /* known_hosts owns exactly one key per endpoint. */
+            if (seen_addr++ || memcmp(key, peer, 32)) { bad = 1; break; }
+            found = 1;
+        } else if (!memcmp(key, peer, 32)) {
+            /* An operator pin set may carry old+new rows during rotation. */
+            found = 1;
+        }
+    }
+    if (!bad && !found && learn) {
+        char ph[65]; lmb_hex(ph, peer, 32);
+        if (fseek(fp, 0, SEEK_END) || fprintf(fp, "%s %s\n", addr, ph) < 0 ||
+            fflush(fp) || fsync(fd)) bad = 1;
+        else found = 1;
+    }
+    fclose(fp); /* also unlocks and closes fd */
+    return !bad && found ? 0 : -1;
+}
+
+static int lmb_sec_check_peer(const char *addr, const uint8_t peer[32]) {
+    if (!lmb_sec_addr_ok(addr)) return -1;
+    const char *pins = getenv("LUMABRI_PEER_PINS");
+    if (pins && *pins) return lmb_sec_pin_file(pins, addr, peer, 0);
+    char path[512];
+    if (!lmb_sec_known_hosts_path(path)) return -1;
+    int require = lmb_env_int("LUMABRI_REQUIRE_PIN", 0, 0, 1);
+    return lmb_sec_pin_file(path, addr, peer, !require);
 }
 
 /* ---- opt-in transport integration -------------------------------------
@@ -177,62 +288,160 @@ static int lmb_secure_recv(LmbSecure *s, int fd, LmbMsg *m) {
 #include <pthread.h>
 
 #define LMB_SEC_MAXFD 65536
-static LmbSecure *g_sec_reg[LMB_SEC_MAXFD];
+typedef struct {
+    LmbSecure sec;
+    unsigned refs;
+    int closing;
+    pthread_mutex_t tx_lk, rx_lk;
+} LmbSecEntry;
+static LmbSecEntry *g_sec_reg[LMB_SEC_MAXFD];
 static pthread_mutex_t g_sec_lk = PTHREAD_MUTEX_INITIALIZER;
 static uint8_t g_sec_sk[64], g_sec_pk[32];
+static int g_sec_enabled, g_sec_failed;
 
-static LmbSecure *lmb_sec_get(int fd) {
+static void lmb_sec_wipe(void *p, size_t n) {
+    volatile uint8_t *v = (volatile uint8_t *)p;
+    while (n--) *v++ = 0;
+}
+
+static void lmb_sec_entry_free(LmbSecEntry *e) {
+    pthread_mutex_destroy(&e->tx_lk);
+    pthread_mutex_destroy(&e->rx_lk);
+    lmb_sec_wipe(&e->sec, sizeof e->sec);
+    free(e);
+}
+
+/* Take a lifetime reference before dropping the registry lock.  close() may
+ * run on another application thread while send/recv is blocked; without this
+ * reference it could free the session under the AEAD operation. */
+static LmbSecEntry *lmb_sec_acquire(int fd) {
     if (fd < 0 || fd >= LMB_SEC_MAXFD) return NULL;
     pthread_mutex_lock(&g_sec_lk);
-    LmbSecure *s = g_sec_reg[fd];
+    LmbSecEntry *e = g_sec_reg[fd];
+    if (e && !e->closing) e->refs++;
+    else e = NULL;
     pthread_mutex_unlock(&g_sec_lk);
-    return s;
+    return e;
+}
+
+static void lmb_sec_release(LmbSecEntry *e) {
+    int reap = 0;
+    pthread_mutex_lock(&g_sec_lk);
+    if (e->refs) e->refs--;
+    if (e->closing && !e->refs) reap = 1;
+    pthread_mutex_unlock(&g_sec_lk);
+    if (reap) lmb_sec_entry_free(e);
 }
 
 static int lmb_sec_send_hook(int fd, uint32_t op, const void *b, uint32_t bl,
                              const void *p, uint32_t pl) {
-    LmbSecure *s = lmb_sec_get(fd);
-    if (!s) return -2;                     /* not an encrypted fd: plaintext */
-    return lmb_secure_send(s, fd, op, b, bl, p, pl);
+    LmbSecEntry *e = lmb_sec_acquire(fd);
+    if (!e) return -2;                     /* not an encrypted fd: plaintext */
+    pthread_mutex_lock(&e->tx_lk);         /* counters and frames stay ordered */
+    int rc = lmb_secure_send(&e->sec, fd, op, b, bl, p, pl);
+    pthread_mutex_unlock(&e->tx_lk);
+    lmb_sec_release(e);
+    return rc;
 }
 static int lmb_sec_recv_hook(int fd, LmbMsg *m) {
-    LmbSecure *s = lmb_sec_get(fd);
-    if (!s) return -2;
-    return lmb_secure_recv(s, fd, m);
+    LmbSecEntry *e = lmb_sec_acquire(fd);
+    if (!e) return -2;
+    pthread_mutex_lock(&e->rx_lk);
+    int rc = lmb_secure_recv(&e->sec, fd, m);
+    pthread_mutex_unlock(&e->rx_lk);
+    lmb_sec_release(e);
+    return rc;
 }
-static int lmb_sec_wrap_hook(int fd, int is_client) {
-    if (fd < 0 || fd >= LMB_SEC_MAXFD) return -1;
-    LmbSecure *s = (LmbSecure *)calloc(1, sizeof *s);
-    if (!s) return -1;
-    if (lmb_secure_handshake(fd, is_client, g_sec_sk, g_sec_pk, s)) { free(s); return -1; }
+static void lmb_sec_forget_hook(int fd) {
+    if (fd < 0 || fd >= LMB_SEC_MAXFD) return;
+    int reap = 0;
     pthread_mutex_lock(&g_sec_lk);
-    free(g_sec_reg[fd]);                    /* a reused fd drops the old session */
-    g_sec_reg[fd] = s;
+    LmbSecEntry *e = g_sec_reg[fd];
+    g_sec_reg[fd] = NULL;
+    if (e) { e->closing = 1; if (!e->refs) reap = 1; }
+    pthread_mutex_unlock(&g_sec_lk);
+    if (reap) lmb_sec_entry_free(e);
+}
+
+static int lmb_sec_wrap_hook(int fd, int is_client, const char *addr) {
+    if (fd < 0 || fd >= LMB_SEC_MAXFD) return -1;
+    LmbSecEntry *e = (LmbSecEntry *)calloc(1, sizeof *e);
+    if (!e) return -1;
+    if (pthread_mutex_init(&e->tx_lk, NULL)) { free(e); return -1; }
+    if (pthread_mutex_init(&e->rx_lk, NULL)) {
+        pthread_mutex_destroy(&e->tx_lk); free(e); return -1;
+    }
+    if (lmb_secure_handshake(fd, is_client, g_sec_sk, g_sec_pk, &e->sec) ||
+        (is_client && lmb_sec_check_peer(addr, e->sec.peer_id))) {
+        lmb_sec_entry_free(e); return -1;
+    }
+    lmb_sec_forget_hook(fd);                 /* fd reuse drops the old keys */
+    pthread_mutex_lock(&g_sec_lk);
+    g_sec_reg[fd] = e;
     pthread_mutex_unlock(&g_sec_lk);
     return 0;
+}
+
+static int lmb_sec_reject_send(int fd, uint32_t op, const void *b, uint32_t bl,
+                               const void *p, uint32_t pl) {
+    (void)fd; (void)op; (void)b; (void)bl; (void)p; (void)pl;
+    errno = EACCES; return -1;
+}
+static int lmb_sec_reject_recv(int fd, LmbMsg *m) {
+    (void)fd; (void)m; errno = EACCES; return -1;
+}
+static int lmb_sec_reject_wrap(int fd, int is_client, const char *addr) {
+    (void)fd; (void)is_client; (void)addr; errno = EACCES; return -1;
 }
 
 /* handshake an accepted (inbound) fd; 0 when encryption is off or the wrap
  * succeeds, -1 when an enabled handshake fails and the caller must drop it */
 static int lmb_secure_server(int fd) {
     if (!lmb_enc_wrap) return 0;
-    return lmb_enc_wrap(fd, 0);
+    return lmb_enc_wrap(fd, 0, NULL);
 }
 
-static void lmb_secure_init(void) {
+/* 1 when fd is encrypted and its handshake identity equals pk; 0 otherwise. */
+static int lmb_secure_peer_matches(int fd, const uint8_t pk[32]) {
+    LmbSecEntry *e = lmb_sec_acquire(fd);
+    if (!e) return 0;
+    int match = e->sec.active && e->sec.have_peer_id &&
+                !memcmp(e->sec.peer_id, pk, 32);
+    lmb_sec_release(e);
+    return match;
+}
+
+static int lmb_secure_enabled(void) { return g_sec_enabled && !g_sec_failed; }
+
+static int lmb_secure_init(void) {
     const char *e = getenv("LUMABRI_ENCRYPT");
-    if (!e || !e[0] || e[0] == '0') return;
+    if (!e || !e[0] || e[0] == '0') return 0;
+    if (g_sec_enabled) return g_sec_failed ? -1 : 0;
+    g_sec_enabled = 1;
     char kp[512];
     if (lmb_peer_identity(lmb_peer_key_path(kp, sizeof kp), g_sec_sk, g_sec_pk)) {
         fprintf(stderr, "[lumabri] LUMABRI_ENCRYPT set but no peer key at %s — "
-                        "staying plaintext\n", kp);
-        return;
+                        "refusing all network traffic\n", kp);
+        g_sec_failed = 1;
+        lmb_enc_send = lmb_sec_reject_send;
+        lmb_enc_recv = lmb_sec_reject_recv;
+        lmb_enc_wrap = lmb_sec_reject_wrap;
+        return -1;
     }
     lmb_enc_send = lmb_sec_send_hook;
     lmb_enc_recv = lmb_sec_recv_hook;
     lmb_enc_wrap = lmb_sec_wrap_hook;
+    lmb_enc_forget = lmb_sec_forget_hook;
     fprintf(stderr, "[lumabri] transport encryption on "
-                    "(X25519 + ChaCha20-Poly1305, identity-authenticated)\n");
+                    "(X25519 + ChaCha20-Poly1305, pinned/persistent-TOFU identity)\n");
+    return 0;
 }
+
+/* Source files including this header get lifecycle-safe closes automatically.
+ * The LD_PRELOAD shim defines its own close interposer and opts out, then calls
+ * lmb_sec_forget_hook itself. */
+#ifndef LMB_SECURE_NO_CLOSE_REDIRECT
+#define close(fd) lmb_close(fd)
+#endif
 
 #endif /* LUMABRI_SECURE_H */

@@ -22,6 +22,7 @@ cd "$(dirname "$0")"
 make -s liblumabri.so tracker maintainer
 
 T=$(mktemp -d /tmp/lumabri-prefetch.XXXXXX)
+export LUMABRI_PEER_BINDINGS="$T/peer-bindings"
 PIDS=()
 cleanup() { kill "${PIDS[@]}" 2>/dev/null || true; rm -rf "$T"; }
 trap cleanup EXIT

@@ -159,6 +159,34 @@ it, put it in the README of your swarm, read it over the phone:
 cat swarm.pub
 ```
 
+This signing key authenticates model contents. Transport endpoints use a
+separate per-machine identity. Print the server's public endpoint key as the
+service user:
+
+```sh
+su - lumabri -c 'lumabri peer-key'
+```
+
+Clients can preseed a strict pin file with that value for the three server
+addresses:
+
+```text
+YOUR_SERVER_IP:7300 64_HEX_ENDPOINT_KEY
+YOUR_SERVER_IP:7301 64_HEX_ENDPOINT_KEY
+YOUR_SERVER_IP:7302 64_HEX_ENDPOINT_KEY
+```
+
+Without a strict file, encrypted clients persist first contact in
+`~/.lumabri/known_hosts` and refuse later key changes. That is convenient but
+does not protect the very first connection from an active MITM. A strict pin
+file does. New direct donor endpoints must be added to the file; unlisted NAT
+donors remain reachable through the pinned tracker's relay.
+
+Endpoint-key rotation uses an overlap just like host-key rotation: add a second
+row for the same address with the new endpoint key, switch the server, then
+remove the old row. A TOFU `known_hosts` file deliberately accepts one key per
+address and must be edited only after the new key is verified out of band.
+
 ### Manual key rotation
 
 Create the replacement key, then distribute a trust file containing the old
@@ -227,6 +255,7 @@ ExecStart=/usr/local/bin/lumabri serve \
     --exec-cache 256
 Restart=always
 RestartSec=5
+Environment=LUMABRI_ENCRYPT=1
 # a private swarm: uncomment and set the same value on every client
 # Environment=LUMABRI_TOKEN=choose-a-long-random-string
 
@@ -298,6 +327,8 @@ the question for scripts and services.
 **Chat** — this is the whole point:
 
 ```sh
+LUMABRI_ENCRYPT=1 \
+LUMABRI_PEER_PINS=/path/to/peer-pins \
 LUMABRI_PUBKEY=<contents of swarm.pub> \
 lumabri chat --tracker YOUR_SERVER_IP:7300 --engines-dir ~/colibri/c
 ```
@@ -387,8 +418,10 @@ systemctl restart lumabri
 
 Two things worth knowing:
 
-- **A tracker restart is free.** State is in RAM and every peer
-  re-registers within one heartbeat (10 s).
+- **A tracker restart rebuilds placements automatically.** Liveness is in RAM
+  and every peer re-registers within one heartbeat (10 s). Name-to-peer-key
+  ownership is persisted under `~/.lumabri/tracker_peer_bindings`, so restart
+  does not reopen names for takeover.
 - **A client with a warm mirror keeps working with the server off.** That
   is the design, and `selftest.sh` pass 3 tests exactly it.
 
@@ -398,7 +431,10 @@ Two things worth knowing:
 
 - SSH keys only: `PasswordAuthentication no` in `/etc/ssh/sshd_config`.
 - Private swarm: set `LUMABRI_TOKEN` in the unit **and** on every client.
-  It is checked by the tracker, every maintainer and every expert node.
+  It is checked by the tracker, every maintainer and every expert node. Keep
+  `LUMABRI_ENCRYPT=1`; a bearer token over plaintext is not private.
+- For production, distribute `LUMABRI_PEER_PINS`. Persistent TOFU detects
+  later key replacement, while pins also authenticate first contact.
 - Keep the operator secret key off the server if you can (see §3).
 - The peers you accept are still untrusted-but-verified: they cannot change
   bytes (signatures) and cannot fake results undetected if clients run

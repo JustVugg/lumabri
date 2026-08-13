@@ -8,7 +8,8 @@
 #   1) an encrypted swarm serves a model byte-for-byte over the AEAD channel;
 #   2) a plaintext chatter against an encrypted maintainer gets nothing, not
 #      the bytes in the clear — encryption is not silently skippable;
-#   3) the model bytes never appear on the wire in the clear.
+#   3) the model bytes never appear on the wire in the clear;
+#   4) a wrong endpoint pin is rejected before any application frame.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -95,13 +96,55 @@ echo "   ✓ the marker is not in the tapped ciphertext ($(wc -c < "$T/wire.log"
 if command -v tcpdump >/dev/null 2>&1 && tcpdump -D >/dev/null 2>&1; then
     tcpdump -i lo -w "$T/cap.pcap" "tcp port 7641" > /dev/null 2>&1 & TD=$!
     sleep 0.5
-    env LUMABRI_ENCRYPT=1 LD_PRELOAD="$PWD/liblumabri.so" LUMABRI_VROOT="$T/v4" \
-        LUMABRI_CACHE="$T/c4" LUMABRI_TRACKER=127.0.0.1:7640 LUMABRI_MODEL=fx \
-        LUMABRI_BLOCK_MIB=1 LUMABRI_HS_TIMEOUT_MS=2000 timeout 30 ./test_shim "$T/v4" "$T/src" > /dev/null 2>&1
-    sleep 0.5; kill "$TD" 2>/dev/null || true; wait "$TD" 2>/dev/null || true
-    if grep -a -q "$MARKER" "$T/cap.pcap"; then
-        echo "   the model marker appeared on the raw wire in the clear"; exit 1; fi
-    echo "   ✓ confirmed at the kernel wire too (tcpdump)"
+    if kill -0 "$TD" 2>/dev/null; then
+        env LUMABRI_ENCRYPT=1 LD_PRELOAD="$PWD/liblumabri.so" LUMABRI_VROOT="$T/v4" \
+            LUMABRI_CACHE="$T/c4" LUMABRI_TRACKER=127.0.0.1:7640 LUMABRI_MODEL=fx \
+            LUMABRI_BLOCK_MIB=1 LUMABRI_HS_TIMEOUT_MS=2000 timeout 30 ./test_shim "$T/v4" "$T/src" > /dev/null 2>&1
+        sleep 0.5; kill "$TD" 2>/dev/null || true; wait "$TD" 2>/dev/null || true
+        if [ ! -s "$T/cap.pcap" ] || ! tcpdump -r "$T/cap.pcap" -c 1 >/dev/null 2>&1; then
+            echo "   · kernel capture skipped: tcpdump produced no readable packets"
+        elif grep -a -q "$MARKER" "$T/cap.pcap"; then
+            echo "   the model marker appeared on the raw wire in the clear"; exit 1
+        else
+            echo "   ✓ confirmed at the kernel wire too (tcpdump)"
+        fi
+    else
+        wait "$TD" 2>/dev/null || true
+        echo "   · kernel capture skipped: tcpdump could not start"
+    fi
+else
+    echo "   · kernel capture skipped: tcpdump unavailable (user-space tap passed)"
 fi
+
+echo "· 4) a wrong endpoint pin is rejected"
+printf '127.0.0.1:7640 %064d\n' 0 > "$T/wrong.pins"
+set +e
+env LUMABRI_ENCRYPT=1 LUMABRI_PEER_PINS="$T/wrong.pins" \
+    LD_PRELOAD="$PWD/liblumabri.so" LUMABRI_VROOT="$T/v5" LUMABRI_CACHE="$T/c5" \
+    LUMABRI_TRACKER=127.0.0.1:7640 LUMABRI_MODEL=fx LUMABRI_BLOCK_MIB=1 \
+    LUMABRI_HS_TIMEOUT_MS=2000 timeout 20 ./test_shim "$T/v5" "$T/src" \
+    > "$T/wrong-pin.log" 2>&1
+PIN_RC=$?
+set -e
+if [ "$PIN_RC" -eq 0 ] && grep -q "byte-identical" "$T/wrong-pin.log"; then
+    echo "   client accepted the wrong tracker identity pin"; exit 1
+fi
+grep -q '^127\.0\.0\.1:7640 ' "$T/.lumabri/known_hosts" || {
+    echo "   tracker identity was not persisted in known_hosts"; exit 1; }
+echo "   ✓ wrong pin refused; successful TOFU identity persisted"
+
+echo "· 5) encryption cannot downgrade when its identity key is unavailable"
+set +e
+env HOME="$T" LUMABRI_ENCRYPT=1 \
+    LUMABRI_PEER_KEY="$T/missing-parent/peer.key" \
+    ./tracker --port 7649 > "$T/fail-closed.log" 2>&1
+KEY_RC=$?
+set -e
+if [ "$KEY_RC" -eq 0 ]; then
+    echo "   tracker continued after encrypted identity setup failed"; exit 1
+fi
+grep -q "refusing all network traffic" "$T/fail-closed.log" || {
+    echo "   encrypted identity failure was not explicit"; cat "$T/fail-closed.log"; exit 1; }
+echo "   ✓ startup refused; no plaintext listener was opened"
 
 echo "LUMABRI ENCRYPTED TRANSPORT TEST: PASS"

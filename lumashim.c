@@ -48,6 +48,7 @@
 #include <sys/stat.h>
 #include <time.h>
 
+#define LMB_SECURE_NO_CLOSE_REDIRECT 1
 #include "lumabri_proto.h"
 #include "lumabri_secure.h"
 #include "lumabri_sha.h"
@@ -715,13 +716,13 @@ static void *probe_thread(void *arg) {
     p->rtt_us = LONG_MAX;
     int fd = lmb_connect_ms(p->addr, 2000);
     if (fd < 0) return NULL;
-    if (lmb_auth(fd)) { real_close(fd); return NULL; }
+    if (lmb_auth(fd)) { lmb_close(fd); return NULL; }
     for (int i = 0; i < 2; i++) {
         struct timespec a, b;
         clock_gettime(CLOCK_MONOTONIC, &a);
         LmbMsg m = {0};
         if (lmb_send(fd, LMB_PING, NULL, 0, NULL, 0) || lmb_recv(fd, &m)) {
-            real_close(fd);
+            lmb_close(fd);
             return NULL;
         }
         lmb_msg_free(&m);
@@ -732,7 +733,7 @@ static void *probe_thread(void *arg) {
     pthread_mutex_lock(&p->lk);
     if (p->nidle < POOL_SOCKS) { p->idle[p->nidle++] = fd; fd = -1; }
     pthread_mutex_unlock(&p->lk);
-    if (fd >= 0) real_close(fd);
+    if (fd >= 0) lmb_close(fd);
     return NULL;
 }
 
@@ -850,7 +851,7 @@ static void *stats_thread(void *arg) {
 
 static void shim_init_impl(void) {
     shim_resolve();
-    lmb_secure_init();
+    if (lmb_secure_init()) return; /* fail closed: hooks reject every network fd */
     const char *cache = getenv("LUMABRI_CACHE");
     if (!cache || !cache[0]) {
         fprintf(stderr, "[lumabri] LUMABRI_VROOT is set but LUMABRI_CACHE is not — disabled\n");
@@ -1201,7 +1202,7 @@ static uint8_t *peer_fetch(RPeer *p, const char *rel, uint64_t off, uint32_t len
         if (fd < 0) {
             fd = lmb_connect_ms(p->addr, 2500);
             if (fd < 0) return NULL;             /* unreachable: relay decides */
-            if (lmb_auth(fd)) { real_close(fd); return NULL; }
+            if (lmb_auth(fd)) { lmb_close(fd); return NULL; }
         }
 
         LmbBuf b = {0};
@@ -1210,15 +1211,14 @@ static uint8_t *peer_fetch(RPeer *p, const char *rel, uint64_t off, uint32_t len
         free(b.p);
         LmbMsg m = {0};
         if (rc == 0) rc = lmb_recv(fd, &m);
-        if (rc != 0) { real_close(fd); continue; }   /* dead socket: retry fresh */
+        if (rc != 0) { lmb_close(fd); continue; }   /* dead socket: retry fresh */
 
         if (m.op == LMB_READ_R && m.pay_len == len) {
-            uint8_t *data = m.pay;
-            m.pay = NULL;                       /* steal the payload */
+            uint8_t *data = lmb_msg_take_pay(&m);
             lmb_msg_free(&m);
             pthread_mutex_lock(&p->lk);
             if (p->nidle < POOL_SOCKS) p->idle[p->nidle++] = fd;
-            else { pthread_mutex_unlock(&p->lk); real_close(fd); return data; }
+            else { pthread_mutex_unlock(&p->lk); lmb_close(fd); return data; }
             pthread_mutex_unlock(&p->lk);
             return data;
         }
@@ -1227,7 +1227,7 @@ static uint8_t *peer_fetch(RPeer *p, const char *rel, uint64_t off, uint32_t len
         lmb_msg_free(&m);
         pthread_mutex_lock(&p->lk);
         if (p->nidle < POOL_SOCKS) p->idle[p->nidle++] = fd;
-        else { pthread_mutex_unlock(&p->lk); real_close(fd); return NULL; }
+        else { pthread_mutex_unlock(&p->lk); lmb_close(fd); return NULL; }
         pthread_mutex_unlock(&p->lk);
         return NULL;
     }
@@ -1255,8 +1255,7 @@ static uint8_t *relay_fetch(const char *rel, uint64_t off, uint32_t len) {
         lmb_msg_free(&m);
         return NULL;
     }
-    uint8_t *data = m.pay;
-    m.pay = NULL;
+    uint8_t *data = lmb_msg_take_pay(&m);
     lmb_msg_free(&m);
     return data;
 }
@@ -1328,7 +1327,7 @@ static void hashes_ensure(RFile *f) {
                                         : "is not signed by the operator key");
                 }
                 if (!g.trust.n || signed_ok) {
-                    hash = m.pay; nh = n; m.pay = NULL;
+                    hash = lmb_msg_take_pay(&m); nh = n;
                     has_sig_ok = (int)has_sig;
                     if (has_sig) memcpy(saved_sig, sig, 64);
                     snprintf(saved_model, sizeof saved_model, "%s", tmodel);
@@ -1857,5 +1856,6 @@ void *mmap64(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
 int close(int fd) {
     shim_resolve();
     if (fdmap_get(fd)) fdmap_set(fd, NULL);
+    lmb_sec_forget_hook(fd);
     return real_close(fd);
 }
