@@ -155,6 +155,9 @@ static int model_identity_check(const char *model, const LmbModelIdentity *id,
 static int truth_check(const char *model, const char *path, uint64_t size,
                        uint32_t nh, uint8_t **hash,
                        const uint8_t *sig, int has_sig) {
+    uint64_t expected_nh = size / LMB_HASH_CHUNK +
+                           (size % LMB_HASH_CHUNK != 0);
+    if (expected_nh != nh || (nh && !*hash)) return 0;
     int sig_rank = -1;
     if (g_have_pubkey) {
         if (!has_sig) return 0;
@@ -170,7 +173,7 @@ static int truth_check(const char *model, const char *path, uint64_t size,
     for (int i = 0; i < g_ntruth; i++)
         if (!strcmp(g_truth[i].model, model) && !strcmp(g_truth[i].path, path)) {
             if (g_truth[i].nh != nh || g_truth[i].size != size ||
-                memcmp(g_truth[i].hash, *hash, (size_t)nh * 32)) return 0;
+                (nh && memcmp(g_truth[i].hash, *hash, (size_t)nh * 32))) return 0;
             if ((!g_truth[i].has_sig && has_sig) ||
                 (has_sig && sig_rank > g_truth[i].sig_rank)) {
                 memcpy(g_truth[i].sig, sig, 64);
@@ -397,8 +400,8 @@ static Peer *handle_register(int fd, LmbMsg *m, const uint8_t *nonce) {
          * swarm's ground truth — or, with --pubkey, is not signed by the
          * operator — is stripped from this peer's offer */
         for (uint32_t i = 0; i < n; ) {
-            if (fnh[i] && !truth_check(model, files[i].path, files[i].size,
-                                       fnh[i], &fh[i], fsig[i], fhas[i])) {
+            if (!truth_check(model, files[i].path, files[i].size,
+                             fnh[i], &fh[i], fsig[i], fhas[i])) {
                 printf("[tracker] REJECTED: %s announces %s bytes for %s/%s\n",
                        name, g_have_pubkey && !fhas[i] ? "unsigned" : "different",
                        model, files[i].path);
@@ -671,22 +674,26 @@ static int handle_hashes(int fd, LmbMsg *m) {
     uint64_t size = 0;
     uint8_t *copy = NULL, sig[64];
     char found_model[64] = "";
-    int has_sig = 0;
+    int found = 0, has_sig = 0;
     /* an empty model matches any, exactly as PLACEMENT treats it */
     for (int i = 0; i < g_ntruth; i++)
         if ((!model[0] || !strcmp(g_truth[i].model, model)) &&
             !strcmp(g_truth[i].path, path)) {
+            found = 1;
             nh = g_truth[i].nh;
             size = g_truth[i].size;
             has_sig = g_truth[i].has_sig;
             if (has_sig) memcpy(sig, g_truth[i].sig, 64);
             snprintf(found_model, sizeof found_model, "%s", g_truth[i].model);
-            copy = (uint8_t *)malloc((size_t)nh * 32);
-            if (copy) memcpy(copy, g_truth[i].hash, (size_t)nh * 32);
+            if (nh) {
+                copy = (uint8_t *)malloc((size_t)nh * 32);
+                if (copy) memcpy(copy, g_truth[i].hash, (size_t)nh * 32);
+            }
             break;
         }
     pthread_mutex_unlock(&g_lk);
-    if (!copy) { send_err(fd, "no integrity data"); return 0; }
+    if (!found) { send_err(fd, "no integrity data"); return 0; }
+    if (nh && !copy) { send_err(fd, "oom"); return -1; }
     /* the reply carries everything the verifier needs to rebuild the signed
      * message itself — the tracker is a courier, not a witness to trust */
     LmbBuf b = {0};
