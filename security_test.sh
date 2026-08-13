@@ -21,6 +21,7 @@ cd "$(dirname "$0")"
 
 make -s all
 T=$(mktemp -d /tmp/lumabri-sec.XXXXXX)
+export HOME="$T"
 PIDS=()
 cleanup() { kill "${PIDS[@]}" 2>/dev/null || true; rm -rf "$T"; }
 trap cleanup EXIT
@@ -239,7 +240,8 @@ int main(int argc, char **argv) {         /* addr name keyfile */
 EOF
 cc -O2 -w -I. "$T/authreg.c" -o "$T/authreg" -lpthread
 
-env LUMABRI_STALE_MS=100 ./tracker --port 7555 > "$T/reuse.log" 2>&1 & PIDS+=($!)
+env LUMABRI_STALE_MS=100 LUMABRI_MAX_NAMES_PER_SOURCE=64 \
+    ./tracker --port 7555 > "$T/reuse.log" 2>&1 & PIDS+=($!)
 sleep 0.3
 for i in $(seq 0 63); do
     "$T/authreg" 127.0.0.1:7555 "gone-$i" "$T/jk-$i" || {
@@ -261,5 +263,36 @@ done
 if "$T/authreg" 127.0.0.1:7556 "mine-9" "$T/onekey"; then
     echo "   a 9th name under the same key was accepted"; exit 1; fi
 echo "   ✓ 8 names held, the 9th refused; anonymous junk cannot exhaust the table"
+
+echo "· 8) one source address cannot bypass the cap with many identity keys"
+env LUMABRI_STALE_MS=600000 LUMABRI_MAX_NAMES_PER_SOURCE=8 \
+    ./tracker --port 7557 > "$T/source-cap.log" 2>&1 & PIDS+=($!)
+sleep 0.3
+ok=0
+for i in $(seq 1 8); do
+    "$T/authreg" 127.0.0.1:7557 "source-$i" "$T/source-key-$i" && ok=$((ok+1))
+done
+[ "$ok" -eq 8 ] || { echo "   the first 8 identities from one source were not accepted ($ok)"; exit 1; }
+if "$T/authreg" 127.0.0.1:7557 "source-9" "$T/source-key-9"; then
+    echo "   a 9th identity from the same source address was accepted"; exit 1; fi
+echo "   ✓ source quota holds even when every name uses a different key"
+
+echo "· 9) aggregate receive memory is bounded across legal frames"
+cat > "$T/rxbudget.c" <<'EOF'
+#include "lumabri_proto.h"
+int main(void) {
+    LmbMsg a = {0}, b = {0};
+    setenv("LUMABRI_RX_BUDGET_MIB", "16", 1);
+    if (lmb_rx_reserve(&a, 10u << 20)) return 1;
+    if (lmb_rx_reserve(&b, 10u << 20) == 0) return 2;
+    lmb_rx_release(&a);
+    if (lmb_rx_reserve(&b, 10u << 20)) return 3;
+    lmb_rx_release(&b);
+    return atomic_load(&lmb_rx_inflight) != 0;
+}
+EOF
+cc -O2 -w -I. "$T/rxbudget.c" -o "$T/rxbudget" -lpthread
+"$T/rxbudget" || { echo "   aggregate receive budget failed"; exit 1; }
+echo "   ✓ concurrent frame reservations cannot exceed the configured budget"
 
 echo "LUMABRI SECURITY TEST: PASS"

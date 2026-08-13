@@ -419,7 +419,7 @@ static void *conn_thread(void *arg) {
             char tok[LMB_TOKEN_MAX + 1] = "";
             LmbCur c = { m.body, m.body_len, 0 };
             int bad = lmb_cur_str(&c, tok, sizeof tok) || c.off != c.len;
-            if (!bad && (!g.token[0] || !strcmp(tok, g.token))) {
+            if (!bad && (!g.token[0] || lmb_token_equal(tok, g.token))) {
                 authed = 1;
                 rc = lmb_send(fd, LMB_OK, NULL, 0, NULL, 0);
             } else { send_err(fd, "bad token"); rc = -1; }
@@ -858,7 +858,7 @@ int main(int argc, char **argv) {
     }
     pthread_t t;
     lmb_conn_gate_init(&g_conn_gate);
-    lmb_secure_init();
+    if (lmb_secure_init()) return 1;
     if (g.tracker[0]) { pthread_create(&t, NULL, control_thread, NULL); pthread_detach(t); }
     pthread_create(&t, NULL, stats_thread, NULL); pthread_detach(t);
 

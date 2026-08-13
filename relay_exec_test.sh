@@ -2,11 +2,17 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-make -s tracker expert_node test_relay_exec fixture
+ENGINE_DIR=${ENGINE:-../colibri/c}
+if [ ! -f "$ENGINE_DIR/olmoe.c" ]; then
+    echo "LUMABRI RELAY EXEC TEST: SKIP (no olmoe.c under ENGINE=$ENGINE_DIR)"
+    exit 0
+fi
+make -s ENGINE="$ENGINE_DIR" tracker expert_node test_relay_exec fixture
 T=$(mktemp -d /tmp/lumabri-relay-exec.XXXXXX)
 PIDS=()
 cleanup() { kill "${PIDS[@]}" 2>/dev/null || true; rm -rf "$T"; }
 trap cleanup EXIT
+export LUMABRI_PEER_BINDINGS="$T/peer-bindings"
 
 ./tracker --port 7560 >"$T/tracker.log" 2>&1 & PIDS+=($!)
 OMP_NUM_THREADS=2 COLI_NO_OMP_TUNE=1 ./expert_node \

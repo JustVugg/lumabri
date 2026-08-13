@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # lumabri — the transport primitives against their published test vectors.
 #
-# ChaCha20, Poly1305 and the AEAD from RFC 8439, and X25519 from RFC 7748.
+# ChaCha20, Poly1305 and the AEAD from RFC 8439, X25519 from RFC 7748,
+# HMAC-SHA512 from RFC 4231, and an independently generated HKDF-SHA512
+# vector using RFC 5869's first test-case inputs.
 # A cipher that merely round-trips proves nothing; a cipher that reproduces
 # the RFC's own bytes is the real check, the same standard sign_test holds
 # Ed25519 to. Also a tamper case: one flipped byte must fail the tag.
@@ -93,6 +95,32 @@ int main(void) {
         lc_x25519(sa, a, B); lc_x25519(sb, b, A);
         if (memcmp(sa, sb, 32)) { printf("  FAIL X25519 DH disagreement\n"); fail = 1; }
         else printf("  ok   X25519 DH agreement\n");
+    }
+    /* RFC 4231 test case 1 — HMAC-SHA512 */
+    {
+        uint8_t key[20], out[64]; memset(key, 0x0b, sizeof key);
+        lc_hmac_sha512(key, sizeof key, (const uint8_t *)"Hi There", 8, out);
+        hx("HMAC-SHA512 (RFC 4231 case 1)", out,
+           "87aa7cdea5ef619d4ff0b4241a1d6cb02379f4e2ce4ec2787ad0b30545e17cded"
+           "aa833b7d6b8a702038b274eaea3f4e4be9d914eeb61f1702e696c203a126854", 64);
+    }
+    /* HKDF-SHA512 with RFC 5869 case-1 IKM/salt/info.  Expected bytes were
+     * generated independently with Python's hashlib+hmac, not this code. */
+    {
+        uint8_t ikm[22], salt[13], info[10], out[64];
+        memset(ikm, 0x0b, sizeof ikm);
+        for (int i = 0; i < 13; i++) salt[i] = (uint8_t)i;
+        for (int i = 0; i < 10; i++) info[i] = (uint8_t)(0xf0 + i);
+        if (lc_hkdf(salt, sizeof salt, ikm, sizeof ikm,
+                    info, sizeof info, out, sizeof out)) {
+            printf("  FAIL HKDF-SHA512 returned an error\n"); fail = 1;
+        } else hx("HKDF-SHA512 expand", out,
+           "832390086cda71fb47625bb5ceb168e4c8e26a1a16ed34d9fc7fe92c148157933"
+           "8da362cb8d9f925d7cbcce0dff7098769cf15959867d571c1715450cb530137", 64);
+        if (lc_hkdf(salt, sizeof salt, ikm, sizeof ikm,
+                    info, sizeof info, out, 65) == 0) {
+            printf("  FAIL HKDF accepted an oversized output\n"); fail = 1;
+        } else printf("  ok   HKDF rejects oversized output\n");
     }
     puts(fail ? "LUMABRI CRYPTO TEST: FAIL" : "LUMABRI CRYPTO TEST: PASS");
     return fail;

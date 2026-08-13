@@ -6,6 +6,7 @@ cd "$(dirname "$0")"
 
 make -s all
 T=$(mktemp -d /tmp/lumabri-hot-cache.XXXXXX)
+export LUMABRI_PEER_BINDINGS="$T/peer-bindings"
 PIDS=()
 cleanup() {
     if [ "${#PIDS[@]}" -gt 0 ]; then

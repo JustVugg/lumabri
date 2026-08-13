@@ -4,6 +4,7 @@ cd "$(dirname "$0")"
 
 make -s tracker maintainer liblumabri.so test_shim
 T=$(mktemp -d /tmp/lumabri-cas.XXXXXX)
+export LUMABRI_PEER_BINDINGS="$T/peer-bindings"
 PIDS=()
 cleanup() { kill "${PIDS[@]}" 2>/dev/null || true; rm -rf "$T"; }
 trap cleanup EXIT

@@ -123,21 +123,22 @@ static pid_t spawn_argv(char *const argv[]) {
 
 static pid_t g_children[8];
 static int g_nchildren = 0;
+/* The async handler never reads the mutable table/count.  Each fixed slot is
+ * one sig_atomic_t publication, so delivery on any worker thread cannot see a
+ * compacted/torn child table. */
+static volatile sig_atomic_t g_signal_children[8];
 /* what each child was, and how to start it again: a supervisor that cannot
  * name or restart what died is just a process that happens to be the parent */
 static char **g_cargv[8];
 static const char *g_cwhat[8];
 
-/* on_sigint reads g_children/g_nchildren; the main thread writes them. Block
- * the two signals around every write so the handler never sees the array
- * half-updated (a torn read would kill a stale pid or miss a live child). */
-static void children_lock(sigset_t *saved) {
-    sigset_t s; sigemptyset(&s);
-    sigaddset(&s, SIGINT); sigaddset(&s, SIGTERM);
-    sigprocmask(SIG_BLOCK, &s, saved);
+static void child_publish(int idx, pid_t pid) {
+    g_children[idx] = pid;
+    g_signal_children[idx] = (sig_atomic_t)pid;
 }
-static void children_unlock(const sigset_t *saved) {
-    sigprocmask(SIG_SETMASK, saved, NULL);
+static void child_unpublish(int idx) {
+    g_signal_children[idx] = 0;
+    g_children[idx] = 0;
 }
 
 static void spawn_tracked(char *const argv[], const char *what) {
@@ -146,13 +147,11 @@ static void spawn_tracked(char *const argv[], const char *what) {
     char **copy = (char **)calloc((size_t)n + 1, sizeof *copy);
     for (int i = 0; i < n; i++) copy[i] = strdup(argv[i]);
     pid_t pid = spawn_argv(argv);          /* the slow part, outside the mask */
-    sigset_t saved; children_lock(&saved);
     int idx = g_nchildren;
     g_cargv[idx] = copy;
     g_cwhat[idx] = what;
-    g_children[idx] = pid;
+    child_publish(idx, pid);
     g_nchildren++;
-    children_unlock(&saved);
 }
 
 static volatile sig_atomic_t g_stopping = 0;
@@ -160,7 +159,10 @@ static volatile sig_atomic_t g_stopping = 0;
 static void on_sigint(int sig) {
     (void)sig;
     g_stopping = 1;
-    for (int i = 0; i < g_nchildren; i++) kill(g_children[i], SIGTERM);
+    for (int i = 0; i < 8; i++) {
+        sig_atomic_t p = g_signal_children[i];
+        if (p > 0) kill((pid_t)p, SIGTERM);
+    }
 }
 
 /* Which expert-node binary can execute this model's experts, or NULL when
@@ -369,19 +371,17 @@ static int cmd_serve(int argc, char **argv) {
 
     printf("\n%sserving%s %s %s(tracker %s%s)%s\n", C_GRN, C_R, model, C_DIM, taddr,
            with_exec ? " · executing experts for the swarm" : "", C_R);
-    /* Without --advertise every peer here registers as 127.0.0.1, and the
-     * tracker's correction cannot help: it only rewrites the host when the
-     * registration arrives from OFF this machine, and these arrive over
-     * loopback. A remote chatter then gets 127.0.0.1, fails to connect, falls
-     * back to the relay for bytes — and phase 2 never starts at all, because
-     * expert execution has no relay. It looks like a slow swarm instead of a
-     * misconfigured one, so say it plainly. */
+    /* Without --advertise every local peer registers as 127.0.0.1, and the
+     * tracker's correction cannot help because these registrations arrive
+     * over loopback. A remote chatter then uses the READ/EXEC tracker relay.
+     * That works through NAT but adds an extra hop and centralises traffic,
+     * so say plainly that --advertise is required for the direct P2P path. */
     if (!advertise && !join)
-        printf("%s⚠ nessun --advertise: questo sciame è raggiungibile SOLO da "
-               "questa macchina.%s\n"
-               "%s  I peer si annunciano come 127.0.0.1 e un chatter remoto non "
-               "può collegarsi.%s\n"
-               "%s  Per aprirlo:  lumabri serve --model %s --advertise <ip-pubblico>%s\n",
+        printf("%s⚠ nessun --advertise: i chatter remoti useranno il relay del "
+               "tracker per READ ed EXEC.%s\n"
+               "%s  Funziona anche dietro NAT, ma aggiunge un hop e carica il "
+               "tracker; --advertise abilita il P2P diretto.%s\n"
+               "%s  Per il percorso diretto: lumabri serve --model %s --advertise <ip-pubblico>%s\n",
                C_RED, C_R, C_DIM, C_R, C_DIM, model, C_R);
     printf("%schat from this machine:   lumabri chat%s\n", C_DIM, C_R);
     printf("%schat from another one:    lumabri chat --tracker <this-ip>:%d%s\n\n",
@@ -408,17 +408,16 @@ static int cmd_serve(int argc, char **argv) {
             fflush(stdout);
             sleep(5);
             pid_t np = spawn_argv(g_cargv[idx]);
-            sigset_t saved; children_lock(&saved);
-            g_children[idx] = np;
-            children_unlock(&saved);
+            child_publish(idx, np);
             printf("  %s%s riavviato%s\n", C_DIM, g_cwhat[idx], C_R);
             fflush(stdout);
             continue;
         }
         if (idx >= 0) {
-            sigset_t saved; children_lock(&saved);
-            g_children[idx] = g_children[--g_nchildren];
-            children_unlock(&saved);
+            int last = --g_nchildren;
+            pid_t moved = g_children[last];
+            if (idx != last) child_publish(idx, moved); /* duplicate is harmless */
+            child_unpublish(last);
         }
     }
     return 0;
@@ -1280,8 +1279,7 @@ static void role_start(const Role *r, const char *tracker, const char *model,
             const char *pub = getenv("LUMABRI_PUBKEY");
             if (pub && pub[0]) { argv[a++] = "--pubkey"; argv[a++] = (char *)pub; }
             argv[a] = NULL;
-            { pid_t np = spawn_argv(argv); sigset_t sv; children_lock(&sv);
-              g_children[g_nchildren++] = np; children_unlock(&sv); }
+            { pid_t np = spawn_argv(argv); child_publish(g_nchildren++, np); }
             printf("  %s\xe2\x9c\xa6 dono %.0f GB di %s%s%s%s: il tracker mi assegna "
                    "i file piu\xcc\x80 rari%s\n",
                    C_GRN, r->gb, C_R, C_BOLD, model, C_DIM, C_R);
@@ -1310,8 +1308,7 @@ static void role_start(const Role *r, const char *tracker, const char *model,
             argv[a++] = "--model-name"; argv[a++] = (char *)model;
             argv[a++] = "--cache";      argv[a++] = "64";
             argv[a] = NULL;
-            { pid_t np = spawn_argv(argv); sigset_t sv; children_lock(&sv);
-              g_children[g_nchildren++] = np; children_unlock(&sv); }
+            { pid_t np = spawn_argv(argv); child_publish(g_nchildren++, np); }
             printf("  %s\xe2\x9c\xa6 eseguo esperti per lo sciame%s %s(%s)%s\n",
                    C_GRN, C_R, C_DIM, node, C_R);
         }
@@ -1692,8 +1689,10 @@ static int cmd_chat(int argc, char **argv) {
      * running as an orphan, still serving, with nobody left who knew it
      * existed. */
     for (int i = 0; i < g_nchildren; i++) {
-        kill(g_children[i], SIGTERM);
-        waitpid(g_children[i], NULL, 0);
+        pid_t p = g_children[i];
+        child_unpublish(i);
+        kill(p, SIGTERM);
+        waitpid(p, NULL, 0);
     }
     if (g_nchildren) printf("  %sdonazione chiusa%s\n", C_DIM, C_R);
     printf("\n");
@@ -1747,13 +1746,28 @@ static int cmd_key(int argc, char **argv) {
     return 0;
 }
 
+/* Print this machine's transport/registration identity.  Operators use this
+ * public value to build LUMABRI_PEER_PINS without exposing peer.key. */
+static int cmd_peer_key(int argc, char **argv) {
+    (void)argv;
+    if (argc) { fprintf(stderr, "usage: lumabri peer-key\n"); return 2; }
+    char path[512], hex[65]; uint8_t sk[64], pk[32];
+    const char *kp = lmb_peer_key_path(path, sizeof path);
+    if (lmb_peer_identity(kp, sk, pk)) { perror(kp); return 1; }
+    lmb_hex(hex, pk, sizeof pk);
+    printf("%s\n", hex);
+    memset(sk, 0, sizeof sk);
+    return 0;
+}
+
 /* ---- main --------------------------------------------------------------- */
 
 int main(int argc, char **argv) {
     g_tty = isatty(1);
-    lmb_secure_init();      /* honours LUMABRI_ENCRYPT for this process's own
-                               tracker queries; children inherit the env */
     if (argc >= 2 && !strcmp(argv[1], "key")) return cmd_key(argc - 2, argv + 2);
+    if (argc >= 2 && !strcmp(argv[1], "peer-key"))
+        return cmd_peer_key(argc - 2, argv + 2);
+    if (lmb_secure_init()) return 1; /* children inherit the same strict mode */
     const char *tok = getenv("LUMABRI_TOKEN");
     if (tok && strlen(tok) > LMB_TOKEN_MAX) {
         fprintf(stderr, "LUMABRI_TOKEN must be at most %u bytes\n",
@@ -1769,6 +1783,7 @@ int main(int argc, char **argv) {
     fprintf(stderr,
         "lumabri: run huge models from a swarm of peers\n\n"
         "  lumabri                                                    chat (asks what it needs)\n"
+        "  lumabri peer-key                                           print this machine's endpoint identity\n"
         "  lumabri serve --model DIR [--port 7300] [--join TRACKER]   share a model\n"
         "  lumabri chat  [--tracker HOST:7300] [--model NAME]         chat with it\n"
         "  lumabri key   [--out NAME]                                 operator keypair\n");

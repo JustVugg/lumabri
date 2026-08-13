@@ -25,6 +25,7 @@ make -s tracker expert_node ENGINE="$ENGINE"
 [ -f "$MODEL/config.json" ] || make -s fixture
 
 T=$(mktemp -d /tmp/lumabri-assign.XXXXXX)
+export LUMABRI_PEER_BINDINGS="$T/peer-bindings"
 PIDS=()
 cleanup() { kill "${PIDS[@]}" 2>/dev/null || true; rm -rf "$T"; }
 trap cleanup EXIT

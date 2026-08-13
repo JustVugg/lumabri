@@ -1,6 +1,7 @@
 # lumabri — design
 
-Data: 2026-08-04. Fase 1 (distribuzione P2P dei byte) funzionante in locale.
+Aggiornato: 2026-08-12. Distribuzione P2P dei byte, esecuzione remota degli
+esperti, relay NAT, integrità firmata e trasporto cifrato sono implementati.
 
 ## Il problema e la scelta
 
@@ -14,16 +15,16 @@ Due varianti studiate:
   *sotto* l'SSD del chatter: banda-limitata da freddo (100 Mbps–1 Gbps casa),
   velocità locale piena da caldo. Nessun problema di latenza per token,
   nessun leak di conversazione, integrità verificabile con hash.
-- **B — i peer eseguono gli esperti** (fase 2). Attivazioni da ~4-8 KB per
+- **B — i peer eseguono gli esperti** (implementata dalla fase 2). Attivazioni da ~4-8 KB per
   esperto: banda irrilevante, ma i layer sono sequenziali → il RTT domina
   (43 layer × 30 ms ≈ 1.3 s/forward). Si amortizza col draft speculativo
   (batch-union: un round trip per layer per l'intero draft da 5 token →
-  ~2 tok/s stimati su RTT 30 ms). Problemi aperti: straggler (il layer
-  aspetta il più lento dei k peer), churn, verifica di output non fidati,
-  privacy delle attivazioni.
+  ~2 tok/s stimati su RTT 30 ms). Batch-union, hedging fisso, failover,
+  verifica su replica e cifratura delle attivazioni sono ora nel core.
 
-Scelta MVP: A, perché ogni pezzo (indice, protocollo, failover, cache) serve
-identico anche a B, e A è utile da sola (il problema "862 GB di download").
+La prima release scelse A perché ogni pezzo (indice, protocollo, failover,
+cache) serviva anche a B. Il sistema attuale le usa entrambe: il chatter
+scarica la parte densa su richiesta ed esegue gli esperti sui peer.
 
 ## Perché LD_PRELOAD e non FUSE
 
@@ -53,9 +54,10 @@ Frame: `{u32 magic "LMB1", u32 op, u32 body_len, u32 pay_len}` + body + pay,
 little-endian, stringhe con prefisso u16. Il pay bulk ha cap 64 MiB;
 REGISTER può portare fino a 64 MiB di hash, i controlli normali 4 MiB e i
 messaggi piccoli 64 KiB. Forma e limiti sono verificati dai soli 16 byte di
-header, prima di allocare o attendere il body. Timeout I/O e numero massimo
-di connessioni sono configurabili e hanno limiti di default. Op sconosciuta
-→ `ERR` esplicito (mai indovinare).
+header, prima di allocare o attendere il body. `LUMABRI_RX_BUDGET_MIB` limita
+anche la memoria aggregata riservata dalle connessioni, non solo il singolo
+frame. Timeout I/O e numero massimo di connessioni sono configurabili e hanno
+limiti di default. Op sconosciuta → `ERR` esplicito (mai indovinare).
 
 | op | flusso | uso |
 |---|---|---|
@@ -65,9 +67,18 @@ di connessioni sono configurabili e hanno limiti di default. Op sconosciuta
 | `REGISTER{name,addr,files}` → `OK` | maintainer→tracker | heartbeat 10 s |
 | `PLACEMENT` → `PLACEMENT_R` | chatter→tracker | file → {size, peer…} |
 
-Il tracker è **solo indice** (Napster docet): mai un byte di modello, stato
-in RAM, restart gratis (tutti si ri-registrano entro un heartbeat). Peer
-silenzioso da >30 s → escluso dai placement.
+Il tracker è **solo indice** (Napster docet): mai un byte di modello. Placement
+e liveness sono in RAM e si ricostruiscono dagli heartbeat; il binding
+nome→chiave Ed25519 è persistito prima dell'ammissione, così un restart non
+riapre i nomi. Peer silenzioso da >30 s → escluso dai placement.
+
+Con `LUMABRI_ENCRYPT=1`, prima del primo frame ogni socket fa un handshake
+X25519 effimero autenticato dall'identità Ed25519 della macchina. HKDF-SHA512
+separa le chiavi per direzione; header, body e payload sono protetti da
+ChaCha20-Poly1305 con contatori anti-replay. Il fallimento nel caricamento
+della chiave blocca la rete, senza downgrade a plaintext. Gli endpoint in
+uscita usano TOFU persistente in `known_hosts`, oppure pin stretti distribuiti
+dall'operatore con `LUMABRI_PEER_PINS`.
 
 ## Lato chatter (lumishim.c)
 
@@ -120,6 +131,11 @@ silenzioso da >30 s → escluso dai placement.
   usano sugli shard; LD_PRELOAD sopravvive comunque all'exec).
 - fd ≥ 65536 su file del modello → EMFILE (limite tabella).
 - Un solo vroot per processo.
+- Il pinning stretto richiede che l'operatore distribuisca tutti gli endpoint.
+  Il default `known_hosts` è TOFU persistente: rileva cambi successivi ma non
+  autentica il primo contatto contro un MITM attivo.
+- Quote per chiave e indirizzo sorgente frenano l'esaurimento della tabella,
+  ma nessun tracker centrale può eliminare un Sybil distribuito su molti IP.
 
 ## Fase 3 — la guerra all'RTT (2026-08-05)
 
@@ -287,13 +303,13 @@ repliche (fase 5) e non da una firma — un peer non può firmare un calcolo
 che dipende dall'input, servirebbe attestazione o prova, ed è un problema
 aperto in tutta la letteratura.
 
-## Fase 2 (esperti remoti) — appunti
+## Fase 2 (esperti remoti) — implementazione
 
-Il punto d'aggancio nel motore è il path `expert_load`/`ColiExpertStore`:
-già oggi è una sorgente di byte intercambiabile (disco, mirror dual-SSD).
-Un backend "peer" che spedisce l'attivazione invece di chiedere i byte
-riusa: l'indice del tracker, il pool/failover dello shim, il batch-union
-(un round per layer per l'unione degli esperti del draft) e la LRU separata
-del drafter (DSpark) perché il drafting non deve pagare rete. La verifica
-resta quella di colibrì: il draft si verifica sempre, la rete non tocca la
-semantica.
+Il punto d'aggancio è il blocco MoE di ogni motore. La patch viene applicata a
+una copia della sorgente e invia l'attivazione invece di leggere i pesi routed
+sul chatter. OLMoE, GLM, Inkling, Kimi K3 e DeepSeek V4 hanno adattatori
+separati perché forma, quantizzazione e ordine delle operazioni differiscono.
+Il tracker, il pool/failover, il batch-union e il relay EXEC sono condivisi;
+il profilo numerico impedisce di mescolare build che potrebbero produrre float
+diversi. Le suite per motore confrontano il risultato remoto e locale byte per
+byte.

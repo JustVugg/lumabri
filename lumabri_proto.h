@@ -69,6 +69,17 @@
 #define LMB_HASH_MAGIC 0x48414853u  /* "SHAH": optional hash section marker */
 #define LMB_PEER_AUTH_MAGIC 0x52554150u /* "PAUR": trailing peer-identity block */
 
+/* Both arguments must point at the fixed LMB_TOKEN_MAX+1 authentication
+ * buffers used by the daemons.  Compare the complete buffers so a remote
+ * caller cannot learn a shared invite token one prefix at a time. */
+static int lmb_token_equal(const char a[LMB_TOKEN_MAX + 1],
+                           const char b[LMB_TOKEN_MAX + 1]) {
+    unsigned diff = 0;
+    for (size_t i = 0; i <= LMB_TOKEN_MAX; i++)
+        diff |= (unsigned)(uint8_t)a[i] ^ (unsigned)(uint8_t)b[i];
+    return diff == 0;
+}
+
 enum {
     LMB_PING = 1, LMB_OK = 2, LMB_ERR = 3,
     LMB_MANIFEST = 4, LMB_MANIFEST_R = 5,
@@ -176,6 +187,10 @@ typedef struct {
     uint32_t op;
     uint8_t *body; uint32_t body_len;
     uint8_t *pay;  uint32_t pay_len;
+    /* Encrypted frames are decrypted into one allocation and body/pay point
+     * inside it.  Plain frames keep the legacy two-allocation layout. */
+    uint8_t *storage;
+    uint32_t rx_reserved;
 } LmbMsg;
 
 typedef struct {
@@ -277,7 +292,38 @@ static int lmb_frame_shape_ok(uint32_t op, uint32_t body_len, uint32_t pay_len) 
  * -2). Static per translation unit, so only a .c that opts in is affected. */
 static int (*lmb_enc_send)(int, uint32_t, const void *, uint32_t, const void *, uint32_t);
 static int (*lmb_enc_recv)(int, LmbMsg *);
-static int (*lmb_enc_wrap)(int fd, int is_client);   /* handshake+register; 0 ok */
+static int (*lmb_enc_wrap)(int fd, int is_client, const char *addr);
+static void (*lmb_enc_forget)(int fd);
+static int lmb_env_int(const char *name, int fallback, int lo, int hi);
+
+/* Bound aggregate receive memory, not just each individual frame.  Without
+ * this, the connection gate multiplied by a legal 64 MiB payload is still an
+ * easy multi-gigabyte OOM. */
+static _Atomic uint64_t lmb_rx_inflight;
+
+static int lmb_rx_reserve(LmbMsg *m, uint32_t n) {
+    if (!n) return 0;
+    uint64_t cap = (uint64_t)lmb_env_int("LUMABRI_RX_BUDGET_MIB", 256, 16, 4096)
+                   << 20;
+    uint64_t old = atomic_load(&lmb_rx_inflight);
+    do {
+        if ((uint64_t)n > cap || old > cap - n) { errno = ENOBUFS; return -1; }
+    } while (!atomic_compare_exchange_weak(&lmb_rx_inflight, &old, old + n));
+    m->rx_reserved = n;
+    return 0;
+}
+
+static void lmb_rx_release(LmbMsg *m) {
+    if (m->rx_reserved) {
+        atomic_fetch_sub(&lmb_rx_inflight, m->rx_reserved);
+        m->rx_reserved = 0;
+    }
+}
+
+static int lmb_close(int fd) {
+    if (lmb_enc_forget) lmb_enc_forget(fd);
+    return close(fd);
+}
 
 static int lmb_send(int fd, uint32_t op, const void *body, uint32_t body_len,
                     const void *pay, uint32_t pay_len) {
@@ -307,22 +353,51 @@ static int lmb_recv(int fd, LmbMsg *m) {
         errno = EMSGSIZE;
         return -1;
     }
+    uint64_t total64 = (uint64_t)m->body_len + m->pay_len;
+    if (total64 > UINT32_MAX || lmb_rx_reserve(m, (uint32_t)total64)) return -1;
     if (m->body_len) {
-        if (!(m->body = (uint8_t *)malloc(m->body_len))) return -1;
-        if (lmb_read_full(fd, m->body, m->body_len)) { free(m->body); m->body = NULL; return -1; }
+        if (!(m->body = (uint8_t *)malloc(m->body_len))) { lmb_rx_release(m); return -1; }
+        if (lmb_read_full(fd, m->body, m->body_len)) {
+            free(m->body); m->body = NULL; lmb_rx_release(m); return -1;
+        }
     }
     if (m->pay_len) {
-        if (!(m->pay = (uint8_t *)malloc(m->pay_len))) { free(m->body); m->body = NULL; return -1; }
+        if (!(m->pay = (uint8_t *)malloc(m->pay_len))) {
+            free(m->body); m->body = NULL; lmb_rx_release(m); return -1;
+        }
         if (lmb_read_full(fd, m->pay, m->pay_len)) {
-            free(m->body); free(m->pay); m->body = m->pay = NULL; return -1;
+            free(m->body); free(m->pay); m->body = m->pay = NULL;
+            lmb_rx_release(m); return -1;
         }
     }
     return 0;
 }
 
 static void lmb_msg_free(LmbMsg *m) {
-    free(m->body); free(m->pay);
+    if (m->storage) free(m->storage);
+    else { free(m->body); free(m->pay); }
     m->body = m->pay = NULL;
+    m->storage = NULL;
+    lmb_rx_release(m);
+}
+
+/* Transfer a payload out of a message without relying on body/pay being
+ * separate mallocs.  For a secure combined frame, compact the payload to the
+ * front and transfer the one allocation. */
+static uint8_t *lmb_msg_take_pay(LmbMsg *m) {
+    if (!m || !m->pay) return NULL;
+    uint8_t *out;
+    if (m->storage) {
+        out = m->storage;
+        if (m->pay != out) memmove(out, m->pay, m->pay_len);
+        m->storage = NULL;
+    } else {
+        out = m->pay;
+        free(m->body);
+    }
+    m->body = m->pay = NULL;
+    lmb_rx_release(m);
+    return out;
 }
 
 /* ---- body builder / cursor -------------------------------------------- */
@@ -593,7 +668,7 @@ static int lmb_connect_ms(const char *addr, int timeout_ms) {
                                            LMB_DEFAULT_IO_TIMEOUT_MS, 100, 3600000));
         /* when this component has enabled encryption, every outbound
          * connection handshakes here, before any frame is sent */
-        if (lmb_enc_wrap && lmb_enc_wrap(fd, 1)) { close(fd); fd = -1; }
+        if (lmb_enc_wrap && lmb_enc_wrap(fd, 1, addr)) { lmb_close(fd); fd = -1; }
     }
     return fd;
 }
@@ -696,7 +771,7 @@ static int lmb_request_pay(const char *addr, uint32_t op,
     int rc = lmb_auth(fd);
     if (rc == 0) rc = lmb_send(fd, op, body, body_len, pay, pay_len);
     if (rc == 0) rc = lmb_recv(fd, resp);
-    close(fd);
+    lmb_close(fd);
     return rc;
 }
 

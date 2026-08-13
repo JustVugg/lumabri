@@ -16,6 +16,7 @@ cd "$(dirname "$0")"
 make -s lumabri tracker maintainer
 
 T=$(mktemp -d /tmp/lumabri-role.XXXXXX)
+export LUMABRI_PEER_BINDINGS="$T/peer-bindings"
 PIDS=()
 cleanup() { kill "${PIDS[@]}" 2>/dev/null || true; rm -rf "$T"; }
 trap cleanup EXIT

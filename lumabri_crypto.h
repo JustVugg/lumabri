@@ -290,19 +290,23 @@ static void lc_hmac_sha512(const uint8_t *key, size_t klen,
     lmb_sha512_update(&s, inner, 64); lmb_sha512_final(&s, out);
 }
 
-/* HKDF-Extract+Expand to `n` bytes (n <= 64: one block is plenty here). */
-static void lc_hkdf(const uint8_t *salt, size_t slen,
-                    const uint8_t *ikm, size_t ilen,
-                    const uint8_t *info, size_t inflen,
-                    uint8_t *out, size_t n) {
+/* HKDF-Extract+Expand to `n` bytes.  This transport only needs one SHA-512
+ * block; reject larger requests and oversized info instead of truncating the
+ * output or overflowing the fixed expand buffer. */
+static int lc_hkdf(const uint8_t *salt, size_t slen,
+                   const uint8_t *ikm, size_t ilen,
+                   const uint8_t *info, size_t inflen,
+                   uint8_t *out, size_t n) {
     uint8_t prk[64], t[64 + 64];
+    if (n > 64 || inflen > sizeof(t) - 1) return -1;
     lc_hmac_sha512(salt, slen, ikm, ilen, prk);      /* extract */
     size_t tl = 0;
     memcpy(t + tl, info, inflen); tl += inflen;
     t[tl++] = 1;
     uint8_t okm[64];
     lc_hmac_sha512(prk, 64, t, tl, okm);             /* expand, block 1 */
-    memcpy(out, okm, n < 64 ? n : 64);
+    memcpy(out, okm, n);
+    return 0;
 }
 
 #endif /* LUMABRI_CRYPTO_H */

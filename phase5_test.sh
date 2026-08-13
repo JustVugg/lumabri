@@ -20,6 +20,7 @@ cd "$(dirname "$0")"
 make -s all
 
 T=$(mktemp -d /tmp/lumabri-phase5.XXXXXX)
+export LUMABRI_PEER_BINDINGS="$T/peer-bindings"
 PIDS=()
 cleanup() { kill "${PIDS[@]}" 2>/dev/null || true; rm -rf "$T"; }
 trap cleanup EXIT

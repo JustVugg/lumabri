@@ -10,8 +10,9 @@
  * maintainer behind any home NAT thus serves with zero router configuration;
  * direct peer-to-peer remains the first choice and the relay the fallback.
  *
- * State is in-memory only. A tracker restart costs nothing: every maintainer
- * reconnects within one heartbeat.
+ * Placement/liveness state is in memory and rebuilt from heartbeats after a
+ * restart. Name-to-identity ownership is the exception: it is persisted
+ * before admission, so restarting the tracker cannot reopen an honest name.
  *
  *   ./tracker [--port 7300]
  */
@@ -34,7 +35,7 @@
 typedef struct { char path[LMB_PATH_MAX]; uint64_t size; } PFile;
 
 typedef struct {
-    char name[64], addr[64], model[64];
+    char name[64], addr[64], model[64], source[64];
     char engine[64], profile[LMB_BUILD_PROFILE_MAX];
     uint32_t bits, hidden, slots, total_experts;
     uint64_t held_bytes, served_bytes, served_reads;
@@ -74,6 +75,155 @@ static int g_known_logged[MAX_PEERS];
 static char g_token[LMB_TOKEN_MAX + 1]; /* --token: private swarm, invite required */
 static LmbConnGate g_conn_gate = LMB_CONN_GATE_INIT;
 static double g_stale_s = STALE_S;
+static int g_max_names_per_source = 16;
+
+/* Unlike liveness/placement state, identity ownership must survive a tracker
+ * restart.  Otherwise "TOFU" means only "trust until the process exits" and
+ * an attacker can claim the honest name during the next boot. */
+#define MAX_BINDINGS 4096
+typedef struct { char name[64]; uint8_t pubkey[32]; int is_expert; } Binding;
+static Binding g_bindings[MAX_BINDINGS];
+static int g_nbindings;
+static char g_bindings_path[512];
+
+static int binding_name_ok(const char *s) {
+    if (!s || !*s || strlen(s) >= 64) return 0;
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++)
+        if (*p == '\t' || *p == '\n' || *p == '\r' || *p < 0x20) return 0;
+    return 1;
+}
+
+static int binding_find(const char *name, int is_expert) {
+    for (int i = 0; i < g_nbindings; i++)
+        if (g_bindings[i].is_expert == is_expert &&
+            !strcmp(g_bindings[i].name, name)) return i;
+    return -1;
+}
+
+static int binding_path_default(void) {
+    if (g_bindings_path[0]) return 0;
+    const char *e = getenv("LUMABRI_PEER_BINDINGS");
+    if (e && *e) return snprintf(g_bindings_path, sizeof g_bindings_path, "%s", e)
+                         < (int)sizeof g_bindings_path ? 0 : -1;
+    const char *home = getenv("HOME");
+    if (!home || !*home) return -1;
+    char dir[448];
+    if (snprintf(dir, sizeof dir, "%s/.lumabri", home) >= (int)sizeof dir) return -1;
+    if (mkdir(dir, 0700) && errno != EEXIST) return -1;
+    return snprintf(g_bindings_path, sizeof g_bindings_path,
+                    "%s/tracker_peer_bindings", dir) < (int)sizeof g_bindings_path ? 0 : -1;
+}
+
+static int bindings_load(void) {
+    if (binding_path_default()) return -1;
+    int flags = O_RDONLY;
+#ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+#endif
+    int fd = open(g_bindings_path, flags);
+    if (fd < 0) return errno == ENOENT ? 0 : -1;
+    struct stat st;
+    if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_uid != geteuid() ||
+        (st.st_mode & 022)) { close(fd); errno = EACCES; return -1; }
+    FILE *fp = fdopen(fd, "r");
+    if (!fp) { close(fd); return -1; }
+    char line[768]; int rc = 0;
+    while (fgets(line, sizeof line, fp)) {
+        size_t n = strlen(line);
+        if (n && line[n - 1] == '\n') line[--n] = 0;
+        if (!n || line[0] == '#') continue;
+        char *a = strchr(line, '\t'), *b = a ? strchr(a + 1, '\t') : NULL;
+        if (!a || !b || a != line + 1 || (line[0] != 'M' && line[0] != 'E')) { rc = -1; break; }
+        *a++ = 0; *b++ = 0;
+        if (strlen(a) != 64 || !binding_name_ok(b) || g_nbindings >= MAX_BINDINGS) { rc = -1; break; }
+        Binding x = {0}; x.is_expert = line[0] == 'E';
+        snprintf(x.name, sizeof x.name, "%s", b);
+        if (lmb_unhex(x.pubkey, a, 32)) { rc = -1; break; }
+        int old = binding_find(x.name, x.is_expert);
+        if (old >= 0) {
+            if (memcmp(g_bindings[old].pubkey, x.pubkey, 32)) { rc = -1; break; }
+        } else g_bindings[g_nbindings++] = x;
+    }
+    if (ferror(fp)) rc = -1;
+    fclose(fp);
+    return rc;
+}
+
+/* Called under g_lk.  Durable publication precedes admission to the live
+ * table, so a crash can lose liveness but never ownership. */
+static int binding_check_or_add(const char *name, int is_expert,
+                                const uint8_t pk[32]) {
+    int old = binding_find(name, is_expert);
+    if (old >= 0) return memcmp(g_bindings[old].pubkey, pk, 32) ? -1 : 0;
+    if (!binding_name_ok(name) || g_nbindings >= MAX_BINDINGS) return -1;
+    int flags = O_RDWR | O_CREAT;
+#ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+#endif
+    int fd = open(g_bindings_path, flags, 0600);
+    if (fd < 0 || flock(fd, LOCK_EX)) { if (fd >= 0) close(fd); return -1; }
+    struct stat st;
+    if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_uid != geteuid() ||
+        (st.st_mode & 022)) {
+        flock(fd, LOCK_UN); close(fd); errno = EACCES; return -1;
+    }
+    /* A second tracker may share the durable state during a rolling restart.
+     * Re-read it while holding the file lock, so two processes cannot append
+     * conflicting owners from stale in-memory snapshots. */
+    int dfd = dup(fd), disk_found = 0, disk_bad = dfd < 0;
+    FILE *rf = dfd >= 0 ? fdopen(dfd, "r") : NULL;
+    if (!rf && dfd >= 0) { close(dfd); disk_bad = 1; }
+    if (rf) {
+        char line[768];
+        while (fgets(line, sizeof line, rf)) {
+            size_t n = strlen(line);
+            if (n && line[n - 1] == '\n') line[--n] = 0;
+            if (!n || line[0] == '#') continue;
+            char kind = line[0], *a = strchr(line, '\t');
+            char *b = a ? strchr(a + 1, '\t') : NULL;
+            if (!a || !b || a != line + 1 || (kind != 'M' && kind != 'E')) {
+                disk_bad = 1; break;
+            }
+            *a++ = 0; *b++ = 0;
+            uint8_t saved[32];
+            if (strlen(a) != 64 || !binding_name_ok(b) ||
+                lmb_unhex(saved, a, sizeof saved)) { disk_bad = 1; break; }
+            if ((kind == 'E') == is_expert && !strcmp(b, name)) {
+                if (memcmp(saved, pk, sizeof saved)) { disk_bad = 1; break; }
+                disk_found = 1;
+            }
+        }
+        if (ferror(rf)) disk_bad = 1;
+        fclose(rf);
+    }
+    if (disk_bad) { flock(fd, LOCK_UN); close(fd); return -1; }
+    if (disk_found) {
+        flock(fd, LOCK_UN); close(fd);
+        Binding *x = &g_bindings[g_nbindings++];
+        memset(x, 0, sizeof *x); x->is_expert = is_expert;
+        snprintf(x->name, sizeof x->name, "%s", name); memcpy(x->pubkey, pk, 32);
+        return 0;
+    }
+    char hex[65], row[768]; lmb_hex(hex, pk, 32);
+    int rn = snprintf(row, sizeof row, "%c\t%s\t%s\n", is_expert ? 'E' : 'M', hex, name);
+    int ok = rn > 0 && rn < (int)sizeof row;
+    off_t end = lseek(fd, 0, SEEK_END);
+    size_t off = 0;
+    if (end < 0) ok = 0;
+    while (ok && off < (size_t)rn) {
+        ssize_t w = write(fd, row + off, (size_t)rn - off);
+        if (w < 0 && errno == EINTR) continue;
+        if (w <= 0) { ok = 0; break; }
+        off += (size_t)w;
+    }
+    if (ok && fsync(fd)) ok = 0;
+    flock(fd, LOCK_UN); close(fd);
+    if (!ok) return -1;
+    Binding *x = &g_bindings[g_nbindings++];
+    memset(x, 0, sizeof *x); x->is_expert = is_expert;
+    snprintf(x->name, sizeof x->name, "%s", name); memcpy(x->pubkey, pk, 32);
+    return 0;
+}
 
 /* Ground truth: sha256 per LMB_HASH_CHUNK of every (model, path), taken
  * from the FIRST registrant — the origin server registers before any donor
@@ -268,6 +418,8 @@ static size_t peer_auth_strip(const LmbMsg *m, uint8_t pk[32], uint8_t sig[64],
 /* 0 if this name may be held by this key: unclaimed, or already this key.
  * -1 if the name is owned by a different key (the takeover this closes). */
 static int name_key_ok(const char *name, int is_expert, const uint8_t pk[32]) {
+    int bi = binding_find(name, is_expert);
+    if (bi >= 0 && memcmp(g_bindings[bi].pubkey, pk, 32)) return -1;
     for (int i = 0; i < MAX_PEERS; i++)
         if (g_peers[i].used && g_peers[i].is_expert == is_expert &&
             g_peers[i].has_key && !strcmp(g_peers[i].name, name))
@@ -281,16 +433,28 @@ static int name_key_ok(const char *name, int is_expert, const uint8_t pk[32]) {
  * handful (serve = origin + executor, a donor one or two). Counts live slots
  * only, so a restart that reclaims the same names is unaffected. */
 #define MAX_NAMES_PER_KEY 8
-static int identity_has_room(const uint8_t pk[32], const char *name, int is_expert) {
-    int held = 0;
+static int identity_has_room(const uint8_t pk[32], const char *name, int is_expert,
+                             const char *source) {
+    int held = 0, from_source = 0;
+    double now = now_s();
     for (int i = 0; i < MAX_PEERS; i++) {
         if (!g_peers[i].used || !g_peers[i].has_key) continue;
-        if (memcmp(g_peers[i].pubkey, pk, 32)) continue;
         if (g_peers[i].is_expert == is_expert && !strcmp(g_peers[i].name, name))
             return 1;                      /* reclaiming a name it already holds */
-        held++;
+        int live = now - g_peers[i].ts <= g_stale_s || g_peers[i].ctrl_fd >= 0;
+        if (!live) continue;
+        if (!memcmp(g_peers[i].pubkey, pk, 32)) held++;
+        if (source && *source && !strcmp(g_peers[i].source, source)) from_source++;
     }
-    return held < MAX_NAMES_PER_KEY;
+    return held < MAX_NAMES_PER_KEY && from_source < g_max_names_per_source;
+}
+
+static void connection_source(int fd, char out[64]) {
+    out[0] = 0;
+    struct sockaddr_storage ss; socklen_t sl = sizeof ss;
+    if (getpeername(fd, (struct sockaddr *)&ss, &sl)) return;
+    if (getnameinfo((struct sockaddr *)&ss, sl, out, 64, NULL, 0,
+                    NI_NUMERICHOST)) out[0] = 0;
 }
 
 static Peer *handle_register(int fd, LmbMsg *m, const uint8_t *nonce) {
@@ -299,6 +463,7 @@ static Peer *handle_register(int fd, LmbMsg *m, const uint8_t *nonce) {
     size_t blen = peer_auth_strip(m, peer_pk, peer_sig, &have_auth);
     LmbCur c = { m->body, blen, 0 };
     char name[64], addr[64], model[64];
+    char source[64]; connection_source(fd, source);
     uint64_t held, sbytes, sreads;
     uint32_t n;
     if (lmb_cur_str(&c, name, sizeof name) || lmb_cur_str(&c, addr, sizeof addr) ||
@@ -319,6 +484,12 @@ static Peer *handle_register(int fd, LmbMsg *m, const uint8_t *nonce) {
     if (!aml || lmb_sign_verify(peer_sig, authmsg, aml, peer_pk)) {
         printf("[tracker] REJECTED: %s has a bad identity signature\n", name);
         fflush(stdout); send_err(fd, "bad identity signature");
+        return NULL;
+    }
+    if (lmb_secure_enabled() && !lmb_secure_peer_matches(fd, peer_pk)) {
+        printf("[tracker] REJECTED: %s registration key differs from its "
+               "encrypted-channel identity\n", name);
+        fflush(stdout); send_err(fd, "channel/registration identity mismatch");
         return NULL;
     }
     PFile *files = (PFile *)calloc(n ? n : 1, sizeof *files);
@@ -427,13 +598,13 @@ static Peer *handle_register(int fd, LmbMsg *m, const uint8_t *nonce) {
         send_err(fd, "name held by another key");
         return NULL;
     }
-    if (!identity_has_room(peer_pk, name, 0)) {
+    if (!identity_has_room(peer_pk, name, 0, source)) {
         pthread_mutex_unlock(&g_lk);
-        printf("[tracker] REJECTED: one key already holds %d names\n", MAX_NAMES_PER_KEY);
+        printf("[tracker] REJECTED: peer identity or source reached its live-name quota\n");
         fflush(stdout);
         for (uint32_t i = 0; i < n; i++) free(fh[i]);
         free(fh); free(fnh); free(fsig); free(fhas); free(files);
-        send_err(fd, "too many names for one key");
+        send_err(fd, "peer identity or source admission quota reached");
         return NULL;
     }
     for (int i = 0; i < MAX_PEERS; i++)
@@ -442,6 +613,13 @@ static Peer *handle_register(int fd, LmbMsg *m, const uint8_t *nonce) {
     if (!slot) {
         slot = peer_slot_new(0, &idx);
         fresh = slot != NULL;
+    }
+    if (slot && binding_check_or_add(name, 0, peer_pk)) {
+        pthread_mutex_unlock(&g_lk);
+        for (uint32_t i = 0; i < n; i++) free(fh[i]);
+        free(fh); free(fnh); free(fsig); free(fhas); free(files);
+        send_err(fd, "cannot persist peer identity binding");
+        return NULL;
     }
     if (slot) { memcpy(slot->pubkey, peer_pk, 32); slot->has_key = 1; }
     /* observed address: a maintainer that advertises localhost from another
@@ -467,6 +645,7 @@ static Peer *handle_register(int fd, LmbMsg *m, const uint8_t *nonce) {
         snprintf(slot->name, sizeof slot->name, "%s", name);
         snprintf(slot->addr, sizeof slot->addr, "%s", use_addr);
         snprintf(slot->model, sizeof slot->model, "%s", model);
+        snprintf(slot->source, sizeof slot->source, "%s", source);
     }
     pthread_mutex_unlock(&g_lk);
     for (uint32_t i = 0; i < n; i++) free(fh[i]);   /* stolen ones are NULL */
@@ -492,6 +671,7 @@ static Peer *handle_ereg(int fd, LmbMsg *m, const uint8_t *nonce) {
     size_t blen = peer_auth_strip(m, peer_pk, peer_sig, &have_auth);
     LmbCur c = { m->body, blen, 0 };
     char name[64], addr[64], model[64];
+    char source[64]; connection_source(fd, source);
     uint32_t nexperts;
     if (lmb_cur_str(&c, name, sizeof name) || lmb_cur_str(&c, addr, sizeof addr) ||
         lmb_cur_str(&c, model, sizeof model) || lmb_cur_u32(&c, &nexperts)) {
@@ -509,6 +689,12 @@ static Peer *handle_ereg(int fd, LmbMsg *m, const uint8_t *nonce) {
           fflush(stdout); send_err(fd, "bad identity signature");
           return NULL;
       } }
+    if (lmb_secure_enabled() && !lmb_secure_peer_matches(fd, peer_pk)) {
+        printf("[tracker] REJECTED: expert %s key differs from its "
+               "encrypted-channel identity\n", name);
+        fflush(stdout); send_err(fd, "channel/registration identity mismatch");
+        return NULL;
+    }
     /* optional, appended by newer nodes: the bitmap of what it holds */
     uint32_t bl = 0; const uint8_t *bits = NULL;
     if (!lmb_cur_u32(&c, &bl) && bl && bl <= (1u << 20) && c.off + bl <= c.len) {
@@ -535,10 +721,10 @@ static Peer *handle_ereg(int fd, LmbMsg *m, const uint8_t *nonce) {
         fflush(stdout); send_err(fd, "name held by another key");
         return NULL;
     }
-    if (!identity_has_room(peer_pk, name, 1)) {
+    if (!identity_has_room(peer_pk, name, 1, source)) {
         pthread_mutex_unlock(&g_lk);
-        printf("[tracker] REJECTED: one key already holds %d names\n", MAX_NAMES_PER_KEY);
-        fflush(stdout); send_err(fd, "too many names for one key");
+        printf("[tracker] REJECTED: peer identity or source reached its live-name quota\n");
+        fflush(stdout); send_err(fd, "peer identity or source admission quota reached");
         return NULL;
     }
     for (int i = 0; i < MAX_PEERS; i++)
@@ -547,6 +733,11 @@ static Peer *handle_ereg(int fd, LmbMsg *m, const uint8_t *nonce) {
     if (!slot) {
         slot = peer_slot_new(1, NULL);
         fresh = slot != NULL;
+    }
+    if (slot && binding_check_or_add(name, 1, peer_pk)) {
+        pthread_mutex_unlock(&g_lk);
+        send_err(fd, "cannot persist expert identity binding");
+        return NULL;
     }
     if (slot) { memcpy(slot->pubkey, peer_pk, 32); slot->has_key = 1; }
     const char *use_addr = addr;
@@ -568,6 +759,7 @@ static Peer *handle_ereg(int fd, LmbMsg *m, const uint8_t *nonce) {
         snprintf(slot->name, sizeof slot->name, "%s", name);
         snprintf(slot->addr, sizeof slot->addr, "%s", use_addr);
         snprintf(slot->model, sizeof slot->model, "%s", model);
+        snprintf(slot->source, sizeof slot->source, "%s", source);
         snprintf(slot->engine, sizeof slot->engine, "%s", engine);
         snprintf(slot->profile, sizeof slot->profile, "%s", profile);
         slot->bits = qbits; slot->hidden = hidden;
@@ -1144,8 +1336,7 @@ static void relay_complete(Peer *p, LmbMsg *m) {
     if (p->rq_busy && p->rq_sent && id == p->rq_id && m->op == expect &&
         !p->rq_done) {
         p->rq_ok = ok && m->pay_len > 0;
-        p->rq_resp = m->pay; p->rq_resp_len = m->pay_len;
-        m->pay = NULL;                        /* stolen */
+        p->rq_resp = lmb_msg_take_pay(m); p->rq_resp_len = m->pay_len;
         p->rq_done = 1;
         pthread_cond_broadcast(&p->rq_cv);
     }
@@ -1230,7 +1421,7 @@ static void *conn_thread(void *arg) {
             char tok[LMB_TOKEN_MAX + 1] = "";
             LmbCur c = { m.body, m.body_len, 0 };
             int bad = lmb_cur_str(&c, tok, sizeof tok) || c.off != c.len;
-            if (!bad && (!g_token[0] || !strcmp(tok, g_token))) {
+            if (!bad && (!g_token[0] || lmb_token_equal(tok, g_token))) {
                 authed = 1;
                 rc = lmb_send(fd, LMB_OK, NULL, 0, NULL, 0);
             } else { send_err(fd, "bad token"); rc = -1; }
@@ -1321,13 +1512,27 @@ int main(int argc, char **argv) {
                 return 2;
             }
         }
-        else { fprintf(stderr, "usage: %s [--port N] [--token S] [--pubkey FILE]\n",
+        else if (!strcmp(argv[i], "--peer-bindings") && i + 1 < argc) {
+            if (snprintf(g_bindings_path, sizeof g_bindings_path, "%s", argv[++i]) >=
+                (int)sizeof g_bindings_path) {
+                fprintf(stderr, "[tracker] --peer-bindings path is too long\n");
+                return 2;
+            }
+        }
+        else { fprintf(stderr, "usage: %s [--port N] [--token S] [--pubkey FILE] "
+                               "[--peer-bindings FILE]\n",
                        argv[0]); return 2; }
     signal(SIGPIPE, SIG_IGN);   /* a vanished peer must not kill the tracker */
     g_stale_s = (double)lmb_env_int("LUMABRI_STALE_MS", (int)(STALE_S * 1000),
                                     100, 3600000) / 1000.0;
+    g_max_names_per_source = lmb_env_int("LUMABRI_MAX_NAMES_PER_SOURCE", 16, 1, MAX_PEERS);
+    if (bindings_load()) {
+        fprintf(stderr, "[tracker] cannot load trusted peer bindings from %s\n",
+                g_bindings_path[0] ? g_bindings_path : "the state directory");
+        return 1;
+    }
     lmb_conn_gate_init(&g_conn_gate);
-    lmb_secure_init();
+    if (lmb_secure_init()) return 1;
     int lfd = lmb_listen(port);
     if (lfd < 0) { perror("[tracker] listen"); return 1; }
     printf("[tracker] listening on :%d\n", port);

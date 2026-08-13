@@ -169,18 +169,14 @@ static int sidecar_path(const MFile *f, const char *ext, char *out, size_t cap) 
                        g.root, f->rel, ext);
 }
 
-/* Stage under a name unique to this process. Two maintainers may share one
- * --root (phase5_test does, and so does any machine donating from the tree it
- * already serves): with a single fixed .tmp they collide on the same staging
- * file, one truncating the other mid-write, and the loser's rename then fails
- * on a file that is no longer its own. The rename is what makes the sidecar
- * appear atomically, so per-process staging removes the race entirely rather
- * than tolerating it — every other staging site in the tree already
- * uniquifies by pid this way. */
+/* Stage in the destination directory under a kernel-created unique name.
+ * mkstemp gives concurrent threads/processes separate files and O_EXCL
+ * prevents a stale predictable name or local symlink from being followed.
+ * rename then publishes the complete, durable sidecar atomically. */
 static int sidecar_write(const char *path, const void *a, size_t na,
                          const void *b, size_t nb) {
-    char tmp[LMB_LOCAL_PATH_MAX + 32], dir[LMB_LOCAL_PATH_MAX];
-    if (path_printf(tmp, sizeof tmp, "%s.tmp.%ld", path, (long)getpid()) ||
+    char tmp[LMB_LOCAL_PATH_MAX + 48], dir[LMB_LOCAL_PATH_MAX];
+    if (path_printf(tmp, sizeof tmp, "%s.tmp.%ld.XXXXXX", path, (long)getpid()) ||
         path_printf(dir, sizeof dir, "%s", path)) return -1;
     char *slash = strrchr(dir, '/');
     if (slash) { *slash = 0;
@@ -188,8 +184,10 @@ static int sidecar_write(const char *path, const void *a, size_t na,
             { *p = 0; mkdir(dir, 0755); *p = '/'; }
         mkdir(dir, 0755);
     }
-    FILE *fp = fopen(tmp, "wb");
-    if (!fp) return -1;
+    int tfd = mkstemp(tmp);
+    if (tfd < 0) return -1;
+    FILE *fp = fdopen(tfd, "wb");
+    if (!fp) { close(tfd); unlink(tmp); return -1; }
     int ok = (!na || fwrite(a, 1, na, fp) == na) &&
              (!nb || fwrite(b, 1, nb, fp) == nb) &&
              fflush(fp) == 0 && fsync(fileno(fp)) == 0;
@@ -560,7 +558,7 @@ static void *conn_thread(void *arg) {
             char tok[LMB_TOKEN_MAX + 1] = "";
             LmbCur c = { m.body, m.body_len, 0 };
             int bad = lmb_cur_str(&c, tok, sizeof tok) || c.off != c.len;
-            if (!bad && (!g.token[0] || !strcmp(tok, g.token))) {
+            if (!bad && (!g.token[0] || lmb_token_equal(tok, g.token))) {
                 authed = 1;
                 rc = lmb_send(fd, LMB_OK, NULL, 0, NULL, 0);
             } else { send_err(fd, "bad token"); rc = -1; }
@@ -646,7 +644,7 @@ static int fetch_truth(const char *rel, Truth *t) {
         return -1;
     }
     t->has_sig = has_sig != 0;
-    t->hash = m.pay; m.pay = NULL;
+    t->hash = lmb_msg_take_pay(&m);
     lmb_msg_free(&m);
 
     /* With the operator's public key we check the signature ourselves, so a
@@ -771,7 +769,7 @@ static int pull_file(const char *rel, uint64_t size, Truth *tr) {
             free(rb.p);
             if (rc == 0 && rm.op == LMB_READ_R && rm.pay_len == want) {
                 if (chunks_ok(truth, truth_n, rm.pay, off, want)) {
-                    data = rm.pay; got = rm.pay_len; rm.pay = NULL;
+                    data = lmb_msg_take_pay(&rm); got = rm.pay_len;
                 } else {
                     fprintf(stderr, "[maintainer %s] %s served corrupt bytes of "
                             "%s — rejected\n", g.name, addrs[ai], rel);
@@ -788,7 +786,7 @@ static int pull_file(const char *rel, uint64_t size, Truth *tr) {
             if (lmb_request(g.tracker, LMB_RREAD, rb.p, (uint32_t)rb.len, &rm) == 0 &&
                 rm.op == LMB_RREAD_R && rm.pay_len == want &&
                 chunks_ok(truth, truth_n, rm.pay, off, want)) {
-                data = rm.pay; got = rm.pay_len; rm.pay = NULL;
+                data = lmb_msg_take_pay(&rm); got = rm.pay_len;
             }
             free(rb.p); lmb_msg_free(&rm);
         }
@@ -1048,7 +1046,7 @@ int main(int argc, char **argv) {
     if (tok) snprintf(g.token, sizeof g.token, "%s", tok);
     signal(SIGPIPE, SIG_IGN);   /* a vanished chatter must not kill the peer */
     lmb_conn_gate_init(&g_conn_gate);
-    lmb_secure_init();
+    if (lmb_secure_init()) return 1;
     size_t rl = strlen(g.root);
     while (rl > 1 && g.root[rl - 1] == '/') g.root[--rl] = 0;
     if (!g.name[0]) snprintf(g.name, sizeof g.name, "peer-%d", port);
