@@ -226,6 +226,9 @@ test_key_rotation: test_key_rotation.c lumabri_sign.h
 test_hedge: test_hedge.c lumabri_client.h lumabri_proto.h lumabri_sign.h $(SECURE_DEPS)
 	$(CC) $(CFLAGS) -pthread test_hedge.c -o $@
 
+test_verify_failover: test_verify_failover.c lumabri_client.h lumabri_proto.h lumabri_sign.h
+	$(CC) $(CFLAGS) -pthread test_verify_failover.c -o $@
+
 test-relay-exec: tracker expert_node test_relay_exec fixture
 	./relay_exec_test.sh
 
@@ -238,7 +241,7 @@ test-key-rotation: test_key_rotation
 test-hedge: test_hedge
 	./test_hedge
 
-test: all test_key_rotation test_hedge
+test: all test_key_rotation test_hedge test_verify_failover
 	./selftest.sh
 	./donate_test.sh
 	./signed_donor_test.sh
@@ -254,6 +257,7 @@ test: all test_key_rotation test_hedge
 	./crypto_test.sh
 	./secure_test.sh
 	./encrypted_transport_test.sh
+	./verify_failover_test.sh
 	./test_key_rotation
 	./test_hedge
 
