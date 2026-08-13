@@ -644,7 +644,19 @@ static int fetch_truth(const char *rel, Truth *t) {
         return -1;
     }
     t->has_sig = has_sig != 0;
-    t->hash = lmb_msg_take_pay(&m);
+    if (t->nh) {
+        t->hash = lmb_msg_take_pay(&m);
+    } else {
+        /* a zero-byte file has no hash chunks, but a NULL hash reads
+         * downstream as "no integrity data": give it a non-NULL empty buffer
+         * so a signed empty file keeps its truth */
+        t->hash = (uint8_t *)malloc(1);
+        if (!t->hash) {
+            lmb_msg_free(&m);
+            memset(t, 0, sizeof *t);
+            return -1;
+        }
+    }
     lmb_msg_free(&m);
 
     /* With the operator's public key we check the signature ourselves, so a
@@ -750,7 +762,7 @@ static int pull_file(const char *rel, uint64_t size, Truth *tr) {
     if (out < 0) { truth_free(tr); return -1; }
 
     int src = -1, ai = 0;
-    for (uint64_t off = 0; off < size || (size == 0 && off == 0); ) {
+    for (uint64_t off = 0; off < size; ) {
         uint32_t want = (uint32_t)(size - off < PULL_CHUNK ? size - off : PULL_CHUNK);
         uint8_t *data = NULL;
         uint32_t got = 0;
@@ -799,7 +811,6 @@ static int pull_file(const char *rel, uint64_t size, Truth *tr) {
         }
         free(data);
         off += want;
-        if (size == 0) break;
     }
     if (src >= 0) close(src);
     close(out);
