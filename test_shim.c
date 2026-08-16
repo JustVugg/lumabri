@@ -31,10 +31,25 @@ static void die(const char *what, const char *path) {
     exit(1);
 }
 
+static void join_path(char *dst, size_t cap, const char *left,
+                      const char *right) {
+    size_t nl = strlen(left), nr = strlen(right);
+    int slash = nl != 0 && nr != 0;
+    if (nl >= cap || nr > cap - nl - 1 ||
+        (slash && nr > cap - nl - 2)) {
+        errno = ENAMETOOLONG;
+        die("path too long", right);
+    }
+    memcpy(dst, left, nl);
+    size_t at = nl;
+    if (slash) dst[at++] = '/';
+    memcpy(dst + at, right, nr + 1);
+}
+
 static void compare_file(const char *rel) {
     char vpath[1024], spath[1024];
-    snprintf(vpath, sizeof vpath, "%s/%s", g_vroot, rel);
-    snprintf(spath, sizeof spath, "%s/%s", g_src, rel);
+    join_path(vpath, sizeof vpath, g_vroot, rel);
+    join_path(spath, sizeof spath, g_src, rel);
 
     int vfd = open(vpath, O_RDONLY);
     int sfd = open(spath, O_RDONLY);
@@ -95,8 +110,7 @@ static void compare_file(const char *rel) {
 
 static void walk(const char *rel) {
     char vpath[1024];
-    if (rel[0]) snprintf(vpath, sizeof vpath, "%s/%s", g_vroot, rel);
-    else        snprintf(vpath, sizeof vpath, "%s", g_vroot);
+    join_path(vpath, sizeof vpath, g_vroot, rel);
     DIR *d = opendir(vpath);
     if (!d) die("opendir", vpath);
     struct dirent *e;
@@ -104,9 +118,8 @@ static void walk(const char *rel) {
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
         if (!strcmp(e->d_name, "manifest.txt")) continue;   /* lumabri's own */
         char sub[1024], spath[1024];
-        if (rel[0]) snprintf(sub, sizeof sub, "%s/%s", rel, e->d_name);
-        else        snprintf(sub, sizeof sub, "%s", e->d_name);
-        snprintf(spath, sizeof spath, "%s/%s", g_src, sub);
+        join_path(sub, sizeof sub, rel, e->d_name);
+        join_path(spath, sizeof spath, g_src, sub);
         struct stat st;
         if (stat(spath, &st)) continue;         /* chatter-local extras */
         if (S_ISDIR(st.st_mode)) walk(sub);
@@ -131,9 +144,9 @@ int main(int argc, char **argv) {
     while (d && (e = readdir(d))) {
         char p[1024];
         struct stat st;
-        snprintf(p, sizeof p, "%s/%s", g_src, e->d_name);
+        join_path(p, sizeof p, g_src, e->d_name);
         if (!stat(p, &st) && S_ISREG(st.st_mode)) {
-            snprintf(first, sizeof first, "%s/%s", g_vroot, e->d_name);
+            join_path(first, sizeof first, g_vroot, e->d_name);
             break;
         }
     }
@@ -149,7 +162,7 @@ int main(int argc, char **argv) {
     /* chatter-local state beside the model (the engines write .coli_usage
      * into the snap dir) must work */
     char note[1024];
-    snprintf(note, sizeof note, "%s/.coli_usage_selftest", g_vroot);
+    join_path(note, sizeof note, g_vroot, ".coli_usage_selftest");
     FILE *nf = fopen(note, "w");
     if (!nf || fputs("lumabri\n", nf) == EOF) {
         fprintf(stderr, "FAIL: chatter-local write beside the model failed\n");

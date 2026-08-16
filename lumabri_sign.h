@@ -25,6 +25,14 @@
 #include <errno.h>
 #include <sys/stat.h>
 
+#ifndef LMB_MAYBE_UNUSED
+#if defined(__GNUC__) || defined(__clang__)
+#define LMB_MAYBE_UNUSED __attribute__((unused))
+#else
+#define LMB_MAYBE_UNUSED
+#endif
+#endif
+
 /* ---- SHA-512 (FIPS 180-4) ---------------------------------------------- */
 
 typedef struct { uint64_t h[8]; uint64_t len; uint8_t buf[128]; size_t off; } LmbSha512;
@@ -440,9 +448,11 @@ static int lmb_sign_verify(const uint8_t sig[64], const uint8_t *msg, size_t n,
 
 #define LMB_TRUTH_TAG "lumabri-truth-v1"
 
-static uint8_t *lmb_truth_msg(const char *model, const char *path,
-                              uint32_t chunk, uint64_t size,
-                              const uint8_t *hashes, uint32_t nh, size_t *out_len) {
+static LMB_MAYBE_UNUSED uint8_t *lmb_truth_msg(const char *model,
+                                               const char *path,
+                                               uint32_t chunk, uint64_t size,
+                                               const uint8_t *hashes, uint32_t nh,
+                                               size_t *out_len) {
     size_t ml = strlen(model), pl = strlen(path);
     size_t n = sizeof(LMB_TRUTH_TAG) + ml + 1 + pl + 1 + 4 + 8 + (size_t)nh * 32;
     uint8_t *m = (uint8_t *)malloc(n);
@@ -463,8 +473,9 @@ static uint8_t *lmb_truth_msg(const char *model, const char *path,
  * valid root from being relabelled by a tracker. */
 #define LMB_MODEL_ID_TAG "lumabri-model-id-v1"
 
-static uint8_t *lmb_model_id_msg(const char *model, const uint8_t root[32],
-                                 size_t *out_len) {
+static LMB_MAYBE_UNUSED uint8_t *lmb_model_id_msg(const char *model,
+                                                  const uint8_t root[32],
+                                                  size_t *out_len) {
     size_t ml = strlen(model);
     if (ml > SIZE_MAX - sizeof(LMB_MODEL_ID_TAG) - 1 - 32) return NULL;
     size_t n = sizeof(LMB_MODEL_ID_TAG) + ml + 1 + 32;
@@ -543,8 +554,9 @@ static int lmb_trust_match(const LmbTrustKeys *t, const uint8_t sig[64],
     return -1;
 }
 
-static int lmb_trust_verify(const LmbTrustKeys *t, const uint8_t sig[64],
-                            const uint8_t *msg, size_t n) {
+static LMB_MAYBE_UNUSED int lmb_trust_verify(const LmbTrustKeys *t,
+                                             const uint8_t sig[64],
+                                             const uint8_t *msg, size_t n) {
     return lmb_trust_match(t, sig, msg, n) >= 0 ? 0 : -1;
 }
 
@@ -567,7 +579,8 @@ static int lmb_trust_load_stream(LmbTrustKeys *t, FILE *fp) {
     return 0;
 }
 
-static int lmb_trust_load_spec(LmbTrustKeys *t, const char *spec) {
+static LMB_MAYBE_UNUSED int lmb_trust_load_spec(LmbTrustKeys *t,
+                                                const char *spec) {
     if (!t || !spec || !*spec) return -1;
     FILE *fp = fopen(spec, "r");
     if (fp) {
@@ -615,7 +628,8 @@ static void lmb_random(void *buf, size_t n) {
  * One key per machine: every role it runs shares the identity, and each of
  * their names is bound to it. Returns 0, or -1 if the file is unreadable and
  * cannot be created. */
-static int lmb_peer_identity(const char *path, uint8_t sk[64], uint8_t pk[32]) {
+static LMB_MAYBE_UNUSED int lmb_peer_identity(const char *path, uint8_t sk[64],
+                                              uint8_t pk[32]) {
     /* Two roles on one machine (a serve's maintainer and expert node) start
      * together and both may find no key. Exclusive-create on the real path so
      * exactly one writes it; the loser re-reads the winner's file instead of
@@ -674,7 +688,7 @@ static int lmb_peer_identity(const char *path, uint8_t sk[64], uint8_t pk[32]) {
 
 /* This machine's default peer-key path: $LUMABRI_PEER_KEY, else
  * $HOME/.lumabri/peer.key, else ./.lumabri_peer.key. */
-static const char *lmb_peer_key_path(char *buf, size_t cap) {
+static LMB_MAYBE_UNUSED const char *lmb_peer_key_path(char *buf, size_t cap) {
     const char *e = getenv("LUMABRI_PEER_KEY");
     if (e && e[0]) { snprintf(buf, cap, "%s", e); return buf; }
     const char *home = getenv("HOME");
@@ -693,9 +707,11 @@ static const char *lmb_peer_key_path(char *buf, size_t cap) {
  * this REGISTER claims. Built in one place so the tracker and the peer cannot
  * disagree by a byte. Returns the length, or 0 if it would not fit. */
 #define LMB_PEER_AUTH_TAG "lumabri-peer-auth-v1"
-static size_t lmb_peer_auth_msg(const uint8_t nonce[32], const char *name,
-                                const char *model, const char *addr,
-                                uint8_t *out, size_t cap) {
+static LMB_MAYBE_UNUSED size_t lmb_peer_auth_msg(const uint8_t nonce[32],
+                                                 const char *name,
+                                                 const char *model,
+                                                 const char *addr,
+                                                 uint8_t *out, size_t cap) {
     size_t nl = strlen(name), ml = strlen(model), al = strlen(addr);
     size_t need = sizeof(LMB_PEER_AUTH_TAG) + 32 + nl + 1 + ml + 1 + al + 1;
     if (need > cap) return 0;

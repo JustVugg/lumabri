@@ -8,6 +8,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef LMB_MAYBE_UNUSED
+#if defined(__GNUC__) || defined(__clang__)
+#define LMB_MAYBE_UNUSED __attribute__((unused))
+#else
+#define LMB_MAYBE_UNUSED
+#endif
+#endif
+
 typedef struct { uint32_t h[8]; uint64_t len; uint8_t buf[64]; size_t off; } LmbSha;
 
 static const uint32_t lmb_sha_k[64] = {
@@ -83,7 +91,8 @@ static void lmb_sha_final(LmbSha *s, uint8_t out[32]) {
     }
 }
 
-static void lmb_sha256(const void *data, size_t n, uint8_t out[32]) {
+static LMB_MAYBE_UNUSED void lmb_sha256(const void *data, size_t n,
+                                        uint8_t out[32]) {
     LmbSha s;
     lmb_sha_init(&s);
     lmb_sha_update(&s, data, n);
@@ -119,8 +128,9 @@ static void lmb_sha_le64(LmbSha *s, uint64_t v) {
     lmb_sha_update(s, b, sizeof b);
 }
 
-static int lmb_model_root(const char *model, const LmbModelItem *items, size_t n,
-                          uint8_t out[32]) {
+static LMB_MAYBE_UNUSED int lmb_model_root(const char *model,
+                                           const LmbModelItem *items, size_t n,
+                                           uint8_t out[32]) {
     static const char tag[] = "lumabri-model-root-v1";
     if (!model || (!items && n) || n > UINT32_MAX) return -1;
     const LmbModelItem **ord = (const LmbModelItem **)malloc((n ? n : 1) * sizeof *ord);

@@ -28,6 +28,7 @@
 #include <math.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
@@ -75,6 +76,36 @@ static void mkdir_p(const char *path) {
     for (char *p = tmp + 1; *p; p++)
         if (*p == '/') { *p = 0; mkdir(tmp, 0755); *p = '/'; }
     mkdir(tmp, 0755);
+}
+
+/* snprintf truncation is especially dangerous for executable, tracker and
+ * model names: a valid-looking prefix can select the wrong resource. Keep
+ * the convenience of formatting, but make every such truncation an error. */
+static int checked_printf(char *dst, size_t cap, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(dst, cap, fmt, ap);
+    va_end(ap);
+    if (n < 0 || (size_t)n >= cap) {
+        if (cap) dst[0] = 0;
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    return 0;
+}
+
+static int tracker_addr_set(char *dst, size_t cap, const char *input) {
+    static const char port[] = ":7300";
+    size_t n = strlen(input);
+    size_t extra = strchr(input, ':') ? 0 : sizeof port - 1;
+    if (n >= cap || extra > cap - n - 1) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    memcpy(dst, input, n);
+    if (extra) memcpy(dst + n, port, sizeof port);
+    else dst[n] = 0;
+    return 0;
 }
 
 /* ---- the logo ------------------------------------------------------------
@@ -570,7 +601,11 @@ static int swarm_models(const char *tracker, char names[][64], int cap) {
     for (int i = 0; i < n; i++) {
         int seen = 0;
         for (int j = 0; j < out; j++) if (!strcmp(names[j], rows[i].model)) seen = 1;
-        if (!seen && out < cap) snprintf(names[out++], 64, "%s", rows[i].model);
+        if (!seen && out < cap) {
+            memcpy(names[out], rows[i].model, sizeof rows[i].model);
+            names[out][sizeof rows[i].model - 1] = 0;
+            out++;
+        }
     }
     return out;
 }
@@ -953,7 +988,10 @@ static void engine_stop(Engine *e) {
 
 static int resolve_engine(const char *engines_dir, const char *engine_path,
                           const char *model_type, char *out, size_t cap) {
-    if (engine_path) { snprintf(out, cap, "%s", engine_path); return access(out, X_OK); }
+    if (engine_path) {
+        if (checked_printf(out, cap, "%s", engine_path)) return -1;
+        return access(out, X_OK);
+    }
     const char *eng = engine_for(model_type);
     const char *dir = engines_dir ? engines_dir : "../moe-stream/c";
     /* prefer the P2P build when one exists: it is the same engine (identical
@@ -961,11 +999,11 @@ static int resolve_engine(const char *engines_dir, const char *engine_path,
      * the swarm when the tracker offers executors */
     char me[1200];
     exe_dir(me, sizeof me);
-    snprintf(out, cap, "%s/%s_p2p", dir, eng);
+    if (checked_printf(out, cap, "%s/%s_p2p", dir, eng)) return -1;
     if (access(out, X_OK) == 0) return 0;
-    snprintf(out, cap, "%s/%s_p2p", me, eng);
+    if (checked_printf(out, cap, "%s/%s_p2p", me, eng)) return -1;
     if (access(out, X_OK) == 0) return 0;
-    snprintf(out, cap, "%s/%s", dir, eng);
+    if (checked_printf(out, cap, "%s/%s", dir, eng)) return -1;
     return access(out, X_OK);
 }
 
@@ -981,10 +1019,10 @@ static void disk_preflight(const char *model, uint64_t model_bytes) {
     if (statvfs(cache, &vfs)) return;
     double free_gb = (double)vfs.f_bavail * (double)vfs.f_frsize / 1e9;
     double need_gb = (double)model_bytes / 1e9;
-    printf("  %smirror in %s: %.0f GB liberi. Tiene solo i blocchi che tocchi "
+    printf("  %smirror di %s in %s: %.0f GB liberi. Tiene solo i blocchi che tocchi "
            "— la parte densa sempre, gli esperti solo se nessun peer li esegue "
            "(al limite %.0f GB)%s\n",
-           C_DIM, cache, free_gb, need_gb, C_R);
+           C_DIM, model, cache, free_gb, need_gb, C_R);
     /* the dense part is the floor; a tenth of the model is a generous guess
      * at it, and below that even a warm phase-2 chatter cannot boot */
     if (free_gb < need_gb * 0.1)
@@ -1029,9 +1067,12 @@ static void cfg_load(Cfg *c) {
         *eq = 0;
         char *v = eq + 1, *nl = strchr(v, '\n');
         if (nl) *nl = 0;
-        if (!strcmp(line, "tracker")) snprintf(c->tracker, sizeof c->tracker, "%s", v);
-        else if (!strcmp(line, "pubkey")) snprintf(c->pubkey, sizeof c->pubkey, "%s", v);
-        else if (!strcmp(line, "engines")) snprintf(c->engines, sizeof c->engines, "%s", v);
+        if (!strcmp(line, "tracker"))
+            (void)checked_printf(c->tracker, sizeof c->tracker, "%s", v);
+        else if (!strcmp(line, "pubkey"))
+            (void)checked_printf(c->pubkey, sizeof c->pubkey, "%s", v);
+        else if (!strcmp(line, "engines"))
+            (void)checked_printf(c->engines, sizeof c->engines, "%s", v);
     }
     fclose(f);
 }
@@ -1059,17 +1100,19 @@ static int find_engines(char *dst, size_t cap) {
     const char *names[] = { "colibri_p2p", "olmoe_p2p", "colibri", "olmoe" };
     char cand[8][1100];
     int n = 0;
-    snprintf(cand[n++], 1100, "%s", me);
-    snprintf(cand[n++], 1100, ".");
-    snprintf(cand[n++], 1100, "%s/colibri/c", home);
-    snprintf(cand[n++], 1100, "../moe-stream/c");
-    snprintf(cand[n++], 1100, "../colibri/c");
-    snprintf(cand[n++], 1100, "/usr/local/bin");
+    if (!checked_printf(cand[n], sizeof cand[n], "%s", me)) n++;
+    if (!checked_printf(cand[n], sizeof cand[n], ".")) n++;
+    if (!checked_printf(cand[n], sizeof cand[n], "%s/colibri/c", home)) n++;
+    if (!checked_printf(cand[n], sizeof cand[n], "../moe-stream/c")) n++;
+    if (!checked_printf(cand[n], sizeof cand[n], "../colibri/c")) n++;
+    if (!checked_printf(cand[n], sizeof cand[n], "/usr/local/bin")) n++;
     for (int i = 0; i < n; i++)
         for (size_t k = 0; k < sizeof names / sizeof *names; k++) {
             char probe[1300];
-            snprintf(probe, sizeof probe, "%s/%s", cand[i], names[k]);
-            if (access(probe, X_OK) == 0) { snprintf(dst, cap, "%s", cand[i]); return 0; }
+            if (checked_printf(probe, sizeof probe, "%s/%s", cand[i], names[k]))
+                continue;
+            if (access(probe, X_OK) == 0)
+                return checked_printf(dst, cap, "%s", cand[i]);
         }
     return -1;
 }
@@ -1121,8 +1164,8 @@ static void setup_panel(Cfg *c) {
     fflush(stdout);
     if (!prompt_line(line, sizeof line) && line[0]) {
         /* a bare host means the default port: nobody should have to know it */
-        if (strchr(line, ':')) snprintf(c->tracker, sizeof c->tracker, "%s", line);
-        else snprintf(c->tracker, sizeof c->tracker, "%s:7300", line);
+        if (tracker_addr_set(c->tracker, sizeof c->tracker, line))
+            printf("  %sindirizzo troppo lungo, uso quello salvato%s\n", C_RED, C_R);
     } else if (!c->tracker[0])
         snprintf(c->tracker, sizeof c->tracker, "127.0.0.1:7300");
 
@@ -1460,9 +1503,10 @@ static int cmd_chat(int argc, char **argv) {
             fflush(stdout);
             char l[1200];
             if (!prompt_line(l, sizeof l) && l[0]) {
-                if (strchr(l, ':')) snprintf(cfg.tracker, sizeof cfg.tracker, "%s", l);
-                else snprintf(cfg.tracker, sizeof cfg.tracker, "%s:7300", l);
-                cfg_save(&cfg);
+                if (tracker_addr_set(cfg.tracker, sizeof cfg.tracker, l))
+                    printf("  %sindirizzo troppo lungo, uso quello salvato%s\n", C_RED, C_R);
+                else
+                    cfg_save(&cfg);
             }
             printf("\n");
         }
@@ -1489,7 +1533,12 @@ static int cmd_chat(int argc, char **argv) {
     char model[64];
     if (local_dir) {
         const char *base = strrchr(local_dir, '/');
-        snprintf(model, sizeof model, "%s", base && base[1] ? base + 1 : local_dir);
+        if (checked_printf(model, sizeof model, "%s",
+                           base && base[1] ? base + 1 : local_dir)) {
+            fprintf(stderr, "model name is longer than %zu bytes\n",
+                    sizeof model - 1);
+            return 2;
+        }
     } else {
         nmodels = swarm_models(tracker, models, 16);
         if (nmodels <= 0) {
@@ -1499,7 +1548,12 @@ static int cmd_chat(int argc, char **argv) {
                             "lumabri chat --local <dir>\n", C_RED, tracker, C_R);
             return 1;
         }
-        snprintf(model, sizeof model, "%s", want_model ? want_model : models[0]);
+        if (checked_printf(model, sizeof model, "%s",
+                           want_model ? want_model : models[0])) {
+            fprintf(stderr, "model name is longer than %zu bytes\n",
+                    sizeof model - 1);
+            return 2;
+        }
     }
 
     char dir[1024], shim[1200];
@@ -1613,8 +1667,11 @@ static int cmd_chat(int argc, char **argv) {
                 continue;
             }
             if (!strcmp(arg, model)) { printf("  %sgià su %s%s\n", C_DIM, model, C_R); continue; }
+            if (checked_printf(model, sizeof model, "%s", arg)) {
+                printf("  %snome modello troppo lungo%s\n", C_RED, C_R);
+                continue;
+            }
             engine_stop(&eng);
-            snprintf(model, sizeof model, "%s", arg);
             if (model_boot(tracker, model, shim, engines_dir, engine_path, local_dir,
                            ctx, max_new, cap_experts, &eng, &sw))
                 return 1;
