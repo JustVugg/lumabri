@@ -43,10 +43,11 @@ start_swarm() {
 }
 
 run_shim() {
+    local pubkey=${PUBKEY-$PUB}
     env LD_PRELOAD="$PWD/liblumabri.so" \
         LUMABRI_VROOT="$T/v" LUMABRI_CACHE="$T/cache" \
         LUMABRI_MODEL=fx LUMABRI_BLOCK_MIB="${BLOCK_MIB:-1}" \
-        LUMABRI_PUBKEY="${PUBKEY:-$PUB}" \
+        LUMABRI_PUBKEY="$pubkey" \
         LUMABRI_CAS="${CAS_DIR:-$T/cache/cas}" \
         ${TRACKER_ENV:-} ./test_shim "$T/v" "$T/src"
 }
@@ -150,6 +151,58 @@ if grep -q "bytes differ" "$T/wrong.err"; then
     exit 1
 fi
 echo "   ✓ out-of-band authority remains decisive"
+
+echo "· a malformed public key fails closed instead of disabling verification"
+set +e
+PUBKEY=not-a-public-key TRACKER_ENV= run_shim >"$T/malformed.out" 2>"$T/malformed.err"
+RC=$?
+set -e
+[ "$RC" -ne 0 ] || { echo "   malformed key silently enabled unsigned mode"; exit 1; }
+grep -q "not a valid key/keyring — refusing the model" "$T/malformed.err" || {
+    cat "$T/malformed.err"; exit 1;
+}
+if grep -q "test_shim: PASS" "$T/malformed.out" ||
+   grep -q "bytes differ" "$T/malformed.err"; then
+    echo "   model bytes escaped after trust configuration failed"
+    exit 1
+fi
+echo "   ✓ an explicit but invalid trust policy cannot fall back to unsigned mode"
+
+echo "· an explicitly empty public key also fails closed"
+set +e
+PUBKEY= TRACKER_ENV= run_shim >"$T/empty-key.out" 2>"$T/empty-key.err"
+RC=$?
+set -e
+[ "$RC" -ne 0 ] || { echo "   empty key silently enabled unsigned mode"; exit 1; }
+grep -q "not a valid key/keyring — refusing the model" "$T/empty-key.err" || {
+    cat "$T/empty-key.err"; exit 1;
+}
+echo "   ✓ an empty override cannot suppress trust verification"
+
+echo "· a malformed keyring file fails closed"
+printf 'not-a-public-key\n' > "$T/malformed.pub"
+set +e
+PUBKEY="$T/malformed.pub" TRACKER_ENV= \
+    run_shim >"$T/malformed-file.out" 2>"$T/malformed-file.err"
+RC=$?
+set -e
+[ "$RC" -ne 0 ] || { echo "   malformed keyring enabled unsigned mode"; exit 1; }
+grep -q "not a valid key/keyring — refusing the model" "$T/malformed-file.err" || {
+    cat "$T/malformed-file.err"; exit 1;
+}
+echo "   ✓ unreadable trust contents cannot weaken the configured policy"
+
+echo "· one valid literal cannot hide a malformed key beside it"
+set +e
+PUBKEY="$PUB,not-a-public-key" TRACKER_ENV= \
+    run_shim >"$T/partial-key.out" 2>"$T/partial-key.err"
+RC=$?
+set -e
+[ "$RC" -ne 0 ] || { echo "   partially malformed trust set was accepted"; exit 1; }
+grep -q "not a valid key/keyring — refusing the model" "$T/partial-key.err" || {
+    cat "$T/partial-key.err"; exit 1;
+}
+echo "   ✓ trust parsing is atomic: any bad member rejects the whole set"
 
 echo "· REQUIRE_HASH without an out-of-band key rejects cached sidecars"
 set +e

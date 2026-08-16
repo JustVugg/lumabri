@@ -896,9 +896,9 @@ static void shim_init_impl(void) {
      * This is the only thing a chatter must obtain out of band — with it,
      * nothing else in the swarm needs to be trusted. */
     const char *pkspec = getenv("LUMABRI_PUBKEY");
-    if (pkspec && pkspec[0]) {
-        FILE *pf = real_fopen(pkspec, "r");
-        int bad = 0;
+    if (pkspec) {
+        FILE *pf = pkspec[0] ? real_fopen(pkspec, "r") : NULL;
+        int bad = !pkspec[0];
         size_t trust_before = g.trust.n;
         if (pf) { bad = lmb_trust_load_stream(&g.trust, pf); fclose(pf); }
         else {
@@ -913,8 +913,11 @@ static void shim_init_impl(void) {
             }
         }
         if (bad) g.trust.n = trust_before;
-        if (bad || !g.trust.n)
-            fprintf(stderr, "[lumabri] LUMABRI_PUBKEY is not a valid key/keyring — ignored\n");
+        if (bad || g.trust.n == trust_before) {
+            fprintf(stderr, "[lumabri] LUMABRI_PUBKEY is not a valid key/keyring "
+                            "— refusing the model\n");
+            return;
+        }
     }
 
     long mib = 8;
