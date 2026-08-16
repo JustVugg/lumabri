@@ -37,6 +37,17 @@
 #include <time.h>
 #include <unistd.h>
 
+/* Public helpers live in headers so every Lumabri binary stays a single
+ * translation unit. A particular binary intentionally uses only a subset;
+ * mark that contract explicitly without hiding warnings in ordinary .c code. */
+#ifndef LMB_MAYBE_UNUSED
+#if defined(__GNUC__) || defined(__clang__)
+#define LMB_MAYBE_UNUSED __attribute__((unused))
+#else
+#define LMB_MAYBE_UNUSED
+#endif
+#endif
+
 #ifndef MSG_NOSIGNAL
 #define MSG_NOSIGNAL 0     /* platforms without it deliver SIGPIPE; the
                               daemons ignore the signal themselves */
@@ -72,8 +83,8 @@
 /* Both arguments must point at the fixed LMB_TOKEN_MAX+1 authentication
  * buffers used by the daemons.  Compare the complete buffers so a remote
  * caller cannot learn a shared invite token one prefix at a time. */
-static int lmb_token_equal(const char a[LMB_TOKEN_MAX + 1],
-                           const char b[LMB_TOKEN_MAX + 1]) {
+static LMB_MAYBE_UNUSED int lmb_token_equal(const char a[LMB_TOKEN_MAX + 1],
+                                            const char b[LMB_TOKEN_MAX + 1]) {
     unsigned diff = 0;
     for (size_t i = 0; i <= LMB_TOKEN_MAX; i++)
         diff |= (unsigned)(uint8_t)a[i] ^ (unsigned)(uint8_t)b[i];
@@ -384,7 +395,7 @@ static void lmb_msg_free(LmbMsg *m) {
 /* Transfer a payload out of a message without relying on body/pay being
  * separate mallocs.  For a secure combined frame, compact the payload to the
  * front and transfer the one allocation. */
-static uint8_t *lmb_msg_take_pay(LmbMsg *m) {
+static LMB_MAYBE_UNUSED uint8_t *lmb_msg_take_pay(LmbMsg *m) {
     if (!m || !m->pay) return NULL;
     uint8_t *out;
     if (m->storage) {
@@ -428,7 +439,7 @@ static int lmb_buf_u32(LmbBuf *b, uint32_t v) {
     lmb_put32(b->p + b->len, v); b->len += 4;
     return 0;
 }
-static int lmb_buf_u64(LmbBuf *b, uint64_t v) {
+static LMB_MAYBE_UNUSED int lmb_buf_u64(LmbBuf *b, uint64_t v) {
     if (lmb_buf_u32(b, (uint32_t)v)) return -1;
     return lmb_buf_u32(b, (uint32_t)(v >> 32));
 }
@@ -449,7 +460,8 @@ static int lmb_buf_str(LmbBuf *b, const char *s) {  /* u16 len + bytes */
 /* Append the 100-byte peer-identity block a REGISTER/EREG ends with. The
  * caller signs {nonce,name,model,addr} with lmb_peer_auth_msg + lmb_sign;
  * this only lays the bytes down, so lumabri_proto.h stays crypto-free. */
-static int lmb_buf_peer_auth(LmbBuf *b, const uint8_t pk[32], const uint8_t sig[64]) {
+static LMB_MAYBE_UNUSED int lmb_buf_peer_auth(LmbBuf *b, const uint8_t pk[32],
+                                              const uint8_t sig[64]) {
     if (lmb_buf_u32(b, LMB_PEER_AUTH_MAGIC)) return -1;
     if (lmb_buf_bytes(b, pk, 32)) return -1;
     return lmb_buf_bytes(b, sig, 64);
@@ -457,7 +469,7 @@ static int lmb_buf_peer_auth(LmbBuf *b, const uint8_t pk[32], const uint8_t sig[
 
 /* Ask the tracker for this connection's identity nonce. 0 and fills nonce, or
  * -1. Sent once per control connection, right after connect (and AUTH). */
-static int lmb_request_challenge(int fd, uint8_t nonce[32]) {
+static LMB_MAYBE_UNUSED int lmb_request_challenge(int fd, uint8_t nonce[32]) {
     if (lmb_send(fd, LMB_CHALLENGE, NULL, 0, NULL, 0)) return -1;
     LmbMsg m;
     if (lmb_recv(fd, &m)) return -1;
@@ -489,7 +501,7 @@ static int lmb_cur_u16(LmbCur *c, uint16_t *v) {
  * backslashes (a Windows port would treat them as separators), nothing below
  * space or above ASCII. Deliberately narrow — model directories are boring,
  * and anything interesting here is an attack. */
-static int lmb_rel_ok(const char *rel) {
+static LMB_MAYBE_UNUSED int lmb_rel_ok(const char *rel) {
     if (!rel || !rel[0] || rel[0] == '/' || strlen(rel) >= LMB_PATH_MAX) return 0;
     const char *p = rel;
     while (*p) {
@@ -558,7 +570,7 @@ static int lmb_rel_ok(const char *rel) {
 #define LMB_PROFILE_CC "unknown-cc"
 #endif
 
-static void lmb_build_profile(char *out, size_t cap) {
+static LMB_MAYBE_UNUSED void lmb_build_profile(char *out, size_t cap) {
     snprintf(out, cap, "abi=2;engine=%s;src=%s;cc=%s;isa=%s;omp=%s;math=%s;f32=%zu",
              LMBE_ENGINE_ID, LMBE_SOURCE_ID, LMB_PROFILE_CC, LMB_PROFILE_ISA,
              LMB_PROFILE_OMP, LMB_PROFILE_MATH, sizeof(float));
@@ -569,7 +581,7 @@ static int lmb_cur_u32(LmbCur *c, uint32_t *v) {
     *v = lmb_get32(c->p + c->off); c->off += 4;
     return 0;
 }
-static int lmb_cur_u64(LmbCur *c, uint64_t *v) {
+static LMB_MAYBE_UNUSED int lmb_cur_u64(LmbCur *c, uint64_t *v) {
     uint32_t lo, hi;
     if (lmb_cur_u32(c, &lo) || lmb_cur_u32(c, &hi)) return -1;
     *v = (uint64_t)lo | ((uint64_t)hi << 32);
@@ -613,12 +625,12 @@ static void lmb_set_io_timeout(int fd, int timeout_ms) {
 typedef struct { _Atomic unsigned active; unsigned limit; } LmbConnGate;
 #define LMB_CONN_GATE_INIT { .active = 0, .limit = LMB_DEFAULT_MAX_CONNECTIONS }
 
-static void lmb_conn_gate_init(LmbConnGate *g) {
+static LMB_MAYBE_UNUSED void lmb_conn_gate_init(LmbConnGate *g) {
     g->limit = (unsigned)lmb_env_int("LUMABRI_MAX_CONNECTIONS",
                                      (int)LMB_DEFAULT_MAX_CONNECTIONS, 1, 65536);
 }
 
-static int lmb_conn_gate_enter(LmbConnGate *g) {
+static LMB_MAYBE_UNUSED int lmb_conn_gate_enter(LmbConnGate *g) {
     unsigned n = atomic_load(&g->active);
     while (n < g->limit) {
         if (atomic_compare_exchange_weak(&g->active, &n, n + 1)) return 1;
@@ -626,7 +638,7 @@ static int lmb_conn_gate_enter(LmbConnGate *g) {
     return 0;
 }
 
-static void lmb_conn_gate_leave(LmbConnGate *g) {
+static LMB_MAYBE_UNUSED void lmb_conn_gate_leave(LmbConnGate *g) {
     atomic_fetch_sub(&g->active, 1);
 }
 
@@ -726,7 +738,7 @@ static inline int lmb_emu_active(void) {
     return lmb_emu_rtt_us > 0 || lmb_emu_jitter_us > 0 || lmb_emu_loss_ppm > 0;
 }
 
-static int lmb_listen(int port) {
+static LMB_MAYBE_UNUSED int lmb_listen(int port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
     int one = 1;
@@ -782,8 +794,9 @@ static int lmb_request(const char *addr, uint32_t op,
 
 /* Fetch the operator-bound identity of a complete model. Signature checking
  * stays with the caller because only the caller owns the public key. */
-static int lmb_model_identity_get(const char *tracker, const char *model,
-                                  LmbModelIdentity *id) {
+static LMB_MAYBE_UNUSED int lmb_model_identity_get(const char *tracker,
+                                                   const char *model,
+                                                   LmbModelIdentity *id) {
     memset(id, 0, sizeof *id);
     if (!tracker || !*tracker || !model || !*model) return -1;
     LmbBuf b = {0};

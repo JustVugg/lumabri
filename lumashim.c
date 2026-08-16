@@ -60,6 +60,7 @@
 #define POOL_SOCKS    4
 #define TRUTH_MAGIC   "LMBTRTH1"
 #define TRUTH_VERSION 1u
+#define LMB_CACHE_PATH_MAX (LMB_PATH_MAX * 2 + 128)
 
 /* ---- real libc entry points ------------------------------------------- */
 
@@ -141,7 +142,8 @@ typedef struct {
 static struct {
     int ok;                       /* full init succeeded */
     char vroot[LMB_PATH_MAX]; size_t vroot_len;
-    char data_dir[LMB_PATH_MAX], maps_dir[LMB_PATH_MAX], cas_dir[LMB_PATH_MAX];
+    char data_dir[LMB_CACHE_PATH_MAX], maps_dir[LMB_CACHE_PATH_MAX];
+    char cas_dir[LMB_CACHE_PATH_MAX];
     int cache_lock_fd;              /* shared for process lifetime; exclusive on reset */
     int reset_lock_fd;              /* elects one resetter without queuing behind its chat */
     uint32_t block;
@@ -267,7 +269,7 @@ static void shim_learn_vroot(void) {
 /* ---- small helpers ----------------------------------------------------- */
 
 static void mkdir_p(const char *path) {
-    char tmp[LMB_PATH_MAX * 2 + 64];
+    char tmp[LMB_CACHE_PATH_MAX];
     snprintf(tmp, sizeof tmp, "%s", path);
     for (char *p = tmp + 1; *p; p++)
         if (*p == '/') { *p = 0; mkdir(tmp, 0755); *p = '/'; }
@@ -275,14 +277,14 @@ static void mkdir_p(const char *path) {
 }
 
 static void mkdir_parent(const char *path) {
-    char tmp[LMB_PATH_MAX * 2 + 64];
+    char tmp[LMB_CACHE_PATH_MAX];
     snprintf(tmp, sizeof tmp, "%s", path);
     char *slash = strrchr(tmp, '/');
     if (slash && slash != tmp) { *slash = 0; mkdir_p(tmp); }
 }
 
 static int fsync_parent_dir(const char *path) {
-    char dir[LMB_PATH_MAX * 2 + 64];
+    char dir[LMB_CACHE_PATH_MAX];
     snprintf(dir, sizeof dir, "%s", path);
     char *slash = strrchr(dir, '/');
     if (!slash) return 0;
@@ -314,13 +316,26 @@ static const char *vrel(const char *path) {
     return r;
 }
 
-static void data_path(char *dst, size_t cap, const char *rel) {
-    if (rel[0]) snprintf(dst, cap, "%s/%s", g.data_dir, rel);
-    else        snprintf(dst, cap, "%s", g.data_dir);
+static int path_printf(char *dst, size_t cap, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(dst, cap, fmt, ap);
+    va_end(ap);
+    if (n < 0 || (size_t)n >= cap) {
+        if (cap) dst[0] = 0;
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    return 0;
 }
 
-static void map_path(char *dst, size_t cap, const RFile *f, const char *ext) {
-    snprintf(dst, cap, "%s/%s.%s", g.maps_dir, f->rel, ext);
+static int data_path(char *dst, size_t cap, const char *rel) {
+    return rel[0] ? path_printf(dst, cap, "%s/%s", g.data_dir, rel)
+                  : path_printf(dst, cap, "%s", g.data_dir);
+}
+
+static int map_path(char *dst, size_t cap, const RFile *f, const char *ext) {
+    return path_printf(dst, cap, "%s/%s.%s", g.maps_dir, f->rel, ext);
 }
 
 static int write_all(int fd, const uint8_t *p, size_t n) {
@@ -352,12 +367,14 @@ static int truth_save(RFile *f) {
         lmb_buf_bytes(&b, f->hash, (size_t)f->nh * 32)) {
         free(b.p); return -1;
     }
-    char path[LMB_PATH_MAX * 2], tmp[LMB_PATH_MAX * 2 + 64];
-    map_path(path, sizeof path, f, "truth");
+    char path[LMB_CACHE_PATH_MAX], tmp[LMB_CACHE_PATH_MAX];
+    if (map_path(path, sizeof path, f, "truth")) { free(b.p); return -1; }
     mkdir_parent(path);
     static _Atomic uint64_t tmp_seq;
-    snprintf(tmp, sizeof tmp, "%s.tmp.%ld.%llu", path, (long)getpid(),
-             (unsigned long long)atomic_fetch_add(&tmp_seq, 1));
+    if (path_printf(tmp, sizeof tmp, "%s.tmp.%ld.%llu", path, (long)getpid(),
+                    (unsigned long long)atomic_fetch_add(&tmp_seq, 1))) {
+        free(b.p); return -1;
+    }
     int fd = real_open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
     int rc = fd < 0 || write_all(fd, b.p, b.len) || fdatasync(fd);
     if (fd >= 0 && real_close(fd)) rc = -1;
@@ -369,8 +386,8 @@ static int truth_save(RFile *f) {
 }
 
 static int truth_sidecar_exists(RFile *f) {
-    char path[LMB_PATH_MAX * 2];
-    map_path(path, sizeof path, f, "truth");
+    char path[LMB_CACHE_PATH_MAX];
+    if (map_path(path, sizeof path, f, "truth")) return 0;
     struct stat st;
     return lstat(path, &st) == 0;
 }
@@ -380,8 +397,8 @@ static int truth_load(RFile *f) {
      * can rewrite the mirror could rewrite it too.  LUMABRI_REQUIRE_HASH
      * explicitly asks us not to accept that kind of authority. */
     if (getenv("LUMABRI_REQUIRE_HASH") && !g.trust.n) return -1;
-    char path[LMB_PATH_MAX * 2];
-    map_path(path, sizeof path, f, "truth");
+    char path[LMB_CACHE_PATH_MAX];
+    if (map_path(path, sizeof path, f, "truth")) return -1;
     int fd = real_open(path, O_RDONLY | O_NOFOLLOW);
     if (fd < 0) return -1;
     struct stat st;
@@ -549,9 +566,10 @@ static int placement_from_peer(const char *addr) {
  * peer AND the tracker offline: reads of present blocks never need the
  * network; only a miss does, and a miss with no peers is a loud EIO. */
 static int manifest_save(void) {
-    char path[LMB_PATH_MAX * 2], tmp[LMB_PATH_MAX * 2 + 32];
-    snprintf(path, sizeof path, "%s/manifest.txt", g.maps_dir);
-    snprintf(tmp, sizeof tmp, "%s.tmp.%ld", path, (long)getpid());
+    char path[LMB_CACHE_PATH_MAX], tmp[LMB_CACHE_PATH_MAX];
+    if (path_printf(path, sizeof path, "%s/manifest.txt", g.maps_dir) ||
+        path_printf(tmp, sizeof tmp, "%s.tmp.%ld", path, (long)getpid()))
+        return -1;
     FILE *fp = real_fopen(tmp, "w");
     if (!fp) return -1;
     for (int i = 0; i < g.nfiles; i++)
@@ -563,8 +581,8 @@ static int manifest_save(void) {
 }
 
 static int manifest_load(void) {
-    char path[LMB_PATH_MAX * 2];
-    snprintf(path, sizeof path, "%s/manifest.txt", g.maps_dir);
+    char path[LMB_CACHE_PATH_MAX];
+    if (path_printf(path, sizeof path, "%s/manifest.txt", g.maps_dir)) return -1;
     FILE *fp = real_fopen(path, "r");
     if (!fp) return -1;
     int first = g.nfiles, bad = 0;
@@ -605,8 +623,8 @@ typedef struct {
 } CacheIdentity;
 
 static int cache_identity_load(CacheIdentity *rec) {
-    char path[LMB_PATH_MAX * 2];
-    snprintf(path, sizeof path, "%s/identity.bin", g.maps_dir);
+    char path[LMB_CACHE_PATH_MAX];
+    if (path_printf(path, sizeof path, "%s/identity.bin", g.maps_dir)) return -1;
     FILE *fp = real_fopen(path, "rb");
     if (!fp) return -1;
     int ok = fread(rec, sizeof *rec, 1, fp) == 1 &&
@@ -625,9 +643,10 @@ static int cache_identity_save(const LmbModelIdentity *id) {
     rec.has_sig = id->has_sig ? 1u : 0u;
     if (id->has_sig) memcpy(rec.sig, id->sig, 64);
     rec.block = g.block;
-    char path[LMB_PATH_MAX * 2], tmp[LMB_PATH_MAX * 2 + 32];
-    snprintf(path, sizeof path, "%s/identity.bin", g.maps_dir);
-    snprintf(tmp, sizeof tmp, "%s.tmp.%ld", path, (long)getpid());
+    char path[LMB_CACHE_PATH_MAX], tmp[LMB_CACHE_PATH_MAX];
+    if (path_printf(path, sizeof path, "%s/identity.bin", g.maps_dir) ||
+        path_printf(tmp, sizeof tmp, "%s.tmp.%ld", path, (long)getpid()))
+        return -1;
     FILE *fp = real_fopen(tmp, "wb");
     if (!fp) return -1;
     int ok = fwrite(&rec, sizeof rec, 1, fp) == 1 &&
@@ -666,15 +685,15 @@ static int cache_identity_differs(const LmbModelIdentity *current,
 }
 
 static int cache_lock_shared_open(void) {
-    char path[LMB_PATH_MAX * 2];
-    snprintf(path, sizeof path, "%s/cache.lock", g.maps_dir);
+    char path[LMB_CACHE_PATH_MAX];
+    if (path_printf(path, sizeof path, "%s/cache.lock", g.maps_dir)) return -1;
     g.cache_lock_fd = real_open(path, O_RDWR | O_CREAT, 0644);
     return g.cache_lock_fd < 0 || cache_flock(LOCK_SH) ? -1 : 0;
 }
 
 static int cache_reset_lock(void) {
-    char path[LMB_PATH_MAX * 2];
-    snprintf(path, sizeof path, "%s/reset.lock", g.maps_dir);
+    char path[LMB_CACHE_PATH_MAX];
+    if (path_printf(path, sizeof path, "%s/reset.lock", g.maps_dir)) return -1;
     g.reset_lock_fd = real_open(path, O_RDWR | O_CREAT, 0644);
     if (g.reset_lock_fd < 0) return -1;
     int rc;
@@ -687,16 +706,16 @@ static int cache_reset_lock(void) {
  * process-wide exclusive cache lock so a running chatter never observes the
  * truncate between its bitmap check and pread. */
 static int cache_has_stale_layout(void) {
-    char path[LMB_PATH_MAX * 2 + 16];
+    char path[LMB_CACHE_PATH_MAX];
     struct stat st;
     for (int i = 0; i < g.nfiles; i++) {
         RFile *f = &g.files[i];
-        data_path(path, sizeof path, f->rel);
+        if (data_path(path, sizeof path, f->rel)) return 1;
         int have_data = stat(path, &st) == 0;
         int bad_data = have_data && (uint64_t)st.st_size != f->size;
         uint64_t nb = (f->size + g.block - 1) / g.block;
         off_t want = (off_t)(nb ? nb : 1);
-        snprintf(path, sizeof path, "%s/%s.lmap", g.maps_dir, f->rel);
+        if (map_path(path, sizeof path, f, "lmap")) return 1;
         int have_map = stat(path, &st) == 0;
         if (!have_data || !have_map || bad_data || st.st_size != want)
             return 1;
@@ -857,11 +876,18 @@ static void shim_init_impl(void) {
         fprintf(stderr, "[lumabri] LUMABRI_VROOT is set but LUMABRI_CACHE is not — disabled\n");
         return;
     }
-    snprintf(g.data_dir, sizeof g.data_dir, "%s/data", cache);
-    snprintf(g.maps_dir, sizeof g.maps_dir, "%s/maps", cache);
+    if (path_printf(g.data_dir, sizeof g.data_dir, "%s/data", cache) ||
+        path_printf(g.maps_dir, sizeof g.maps_dir, "%s/maps", cache)) {
+        fprintf(stderr, "[lumabri] LUMABRI_CACHE path is too long — disabled\n");
+        return;
+    }
     const char *cas = getenv("LUMABRI_CAS");
-    snprintf(g.cas_dir, sizeof g.cas_dir, "%s", cas && cas[0] ? cas : "");
-    if (!g.cas_dir[0]) snprintf(g.cas_dir, sizeof g.cas_dir, "%s/cas", cache);
+    if ((cas && cas[0] && path_printf(g.cas_dir, sizeof g.cas_dir, "%s", cas)) ||
+        ((!cas || !cas[0]) && path_printf(g.cas_dir, sizeof g.cas_dir,
+                                          "%s/cas", cache))) {
+        fprintf(stderr, "[lumabri] content-store path is too long — disabled\n");
+        return;
+    }
     mkdir_p(g.data_dir);
     mkdir_p(g.maps_dir);
     mkdir_p(g.cas_dir);
@@ -1039,9 +1065,14 @@ static void shim_init_impl(void) {
         pthread_cond_init(&f->cv, NULL);
         f->wfd = -1;
 
-        char dpath[LMB_PATH_MAX * 2 + 16], mpath[LMB_PATH_MAX * 2 + 16];
+        char dpath[LMB_CACHE_PATH_MAX], mpath[LMB_CACHE_PATH_MAX];
         struct stat before;
-        data_path(dpath, sizeof dpath, f->rel);
+        if (data_path(dpath, sizeof dpath, f->rel) ||
+            map_path(mpath, sizeof mpath, f, "lmap")) {
+            fprintf(stderr, "[lumabri] mirror path too long for %s — disabled\n",
+                    f->rel);
+            cache_lock_release(); return;
+        }
         mkdir_parent(dpath);
         int data_new = stat(dpath, &before) != 0;
         int fd = real_open(dpath, O_RDWR | O_CREAT, 0644);
@@ -1053,7 +1084,6 @@ static void shim_init_impl(void) {
         int stale = !data_new && fstat(fd, &st) == 0 &&
                     (uint64_t)st.st_size != f->size;
 
-        snprintf(mpath, sizeof mpath, "%s/%s.lmap", g.maps_dir, f->rel);
         mkdir_parent(mpath);
         int map_new = stat(mpath, &before) != 0;
         f->map = (uint8_t *)calloc(f->nblocks ? f->nblocks : 1, 1);
@@ -1085,8 +1115,12 @@ static void shim_init_impl(void) {
         if (identity_reset) {
             /* the checkpoint itself changed: a persisted truth for the old
              * bytes must not survive into the new identity */
-            char tpath[LMB_PATH_MAX * 2];
-            map_path(tpath, sizeof tpath, f, "truth");
+            char tpath[LMB_CACHE_PATH_MAX];
+            if (map_path(tpath, sizeof tpath, f, "truth")) {
+                fprintf(stderr, "[lumabri] truth path too long for %s — disabled\n",
+                        f->rel);
+                real_close(fd); cache_lock_release(); return;
+            }
             unlink(tpath);
         }
         if ((map_new || stale || map_stale || pair_stale || identity_reset) &&
@@ -1416,9 +1450,9 @@ static int local_block_verify(RFile *f, uint32_t blk, int fd) {
  * points LUMABRI_CAS at ~/.lumabri/cas; direct shim users may choose another
  * local directory, including a fast shared volume.
  */
-static void cas_path(char *dst, size_t cap, const uint8_t hash[32]) {
+static int cas_path(char *dst, size_t cap, const uint8_t hash[32]) {
     char hex[65]; lmb_hex(hex, hash, 32);
-    snprintf(dst, cap, "%s/%.2s/%s", g.cas_dir, hex, hex);
+    return path_printf(dst, cap, "%s/%.2s/%s", g.cas_dir, hex, hex);
 }
 
 static int cas_read_full(int fd, uint8_t *p, uint32_t n) {
@@ -1439,9 +1473,11 @@ static uint8_t *cas_load(RFile *f, uint64_t off, uint32_t len) {
     for (uint32_t o = 0; o < len; o += LMB_HASH_CHUNK) {
         uint32_t ci = (uint32_t)((off + o) / LMB_HASH_CHUNK);
         uint32_t n = len - o < LMB_HASH_CHUNK ? len - o : LMB_HASH_CHUNK;
-        char path[LMB_PATH_MAX * 2];
+        char path[LMB_CACHE_PATH_MAX];
         if (ci >= f->nh) { free(data); return NULL; }
-        cas_path(path, sizeof path, f->hash + (size_t)ci * 32);
+        if (cas_path(path, sizeof path, f->hash + (size_t)ci * 32)) {
+            free(data); return NULL;
+        }
         int fd = real_open(path, O_RDONLY | O_NOFOLLOW);
         struct stat st;
         uint8_t got[32];
@@ -1462,12 +1498,12 @@ static void cas_publish(RFile *f, uint64_t off, const uint8_t *data, uint32_t le
         uint32_t ci = (uint32_t)((off + o) / LMB_HASH_CHUNK);
         uint32_t n = len - o < LMB_HASH_CHUNK ? len - o : LMB_HASH_CHUNK;
         if (ci >= f->nh) return;
-        char path[LMB_PATH_MAX * 2], tmp[LMB_PATH_MAX * 2 + 96];
-        cas_path(path, sizeof path, f->hash + (size_t)ci * 32);
+        char path[LMB_CACHE_PATH_MAX], tmp[LMB_CACHE_PATH_MAX];
+        if (cas_path(path, sizeof path, f->hash + (size_t)ci * 32)) return;
         if (!access(path, R_OK)) continue;
         mkdir_parent(path);
-        snprintf(tmp, sizeof tmp, "%s.tmp.%ld.%lu", path, (long)getpid(),
-                 (unsigned long)pthread_self());
+        if (path_printf(tmp, sizeof tmp, "%s.tmp.%ld.%lu", path, (long)getpid(),
+                        (unsigned long)pthread_self())) return;
         int fd = real_open(tmp, O_WRONLY | O_CREAT | O_EXCL, 0600);
         if (fd < 0) continue;
         uint32_t put = 0;
@@ -1514,9 +1550,9 @@ static int ensure_block(RFile *f, uint32_t blk) {
     int present = f->map[blk];
     f->inflight[blk] = 1;
     if (f->wfd < 0) {
-        char path[LMB_PATH_MAX * 2];
-        data_path(path, sizeof path, f->rel);
-        f->wfd = real_open(path, O_RDWR);
+        char path[LMB_CACHE_PATH_MAX];
+        if (!data_path(path, sizeof path, f->rel))
+            f->wfd = real_open(path, O_RDWR);
     }
     int wfd = f->wfd;
     pthread_mutex_unlock(&f->lk);
@@ -1544,8 +1580,14 @@ static int ensure_block(RFile *f, uint32_t blk) {
                 f->map[blk] = 0;
                 pthread_mutex_unlock(&f->lk);
                 uint8_t zero = 0;
-                if (f->map_fd >= 0)
-                    (void)pwrite(f->map_fd, &zero, 1, (off_t)blk);
+                if (f->map_fd >= 0) {
+                    ssize_t wrote;
+                    do wrote = pwrite(f->map_fd, &zero, 1, (off_t)blk);
+                    while (wrote < 0 && errno == EINTR);
+                    if (wrote != 1)
+                        fprintf(stderr, "[lumabri] cannot persist invalidation "
+                                        "for block %u of %s\n", blk, f->rel);
+                }
                 fprintf(stderr, "[lumabri] local integrity failure: block %u of %s "
                                 "does not match authenticated truth — invalidated\n",
                         blk, f->rel);
@@ -1683,8 +1725,8 @@ static int open_common(const char *path, int flags, mode_t mode) {
     if (!rel) return real_open(path, flags, mode);
     shim_init();
     if (!g.ok) { errno = EIO; return -1; }
-    char cpath[LMB_PATH_MAX * 2];
-    data_path(cpath, sizeof cpath, rel);
+    char cpath[LMB_CACHE_PATH_MAX];
+    if (data_path(cpath, sizeof cpath, rel)) return -1;
     RFile *f = rfind(rel);
     if (f && (flags & (O_WRONLY | O_RDWR | O_TRUNC))) { errno = EROFS; return -1; }
     if (!f && (flags & O_CREAT)) mkdir_parent(cpath);
@@ -1743,7 +1785,7 @@ int openat(int dirfd, const char *path, int flags, ...) {
         va_end(ap);
     }
     shim_resolve();
-    if (path && path[0] == '/' && vrel(path)) return open_common(path, flags, mode);
+    if (path[0] == '/' && vrel(path)) return open_common(path, flags, mode);
     return real_openat(dirfd, path, flags, mode);
 }
 
@@ -1755,7 +1797,7 @@ int openat64(int dirfd, const char *path, int flags, ...) {
         va_end(ap);
     }
     shim_resolve();
-    if (path && path[0] == '/' && vrel(path)) return open_common(path, flags | O_LARGEFILE, mode);
+    if (path[0] == '/' && vrel(path)) return open_common(path, flags | O_LARGEFILE, mode);
     return real_openat64 ? real_openat64(dirfd, path, flags, mode)
                          : real_openat(dirfd, path, flags, mode);
 }
@@ -1765,8 +1807,8 @@ static FILE *fopen_common(const char *path, const char *mode, FILE *(*fn)(const 
     if (!rel) return fn(path, mode);
     shim_init();
     if (!g.ok) { errno = EIO; return NULL; }
-    char cpath[LMB_PATH_MAX * 2];
-    data_path(cpath, sizeof cpath, rel);
+    char cpath[LMB_CACHE_PATH_MAX];
+    if (data_path(cpath, sizeof cpath, rel)) return NULL;
     RFile *f = rfind(rel);
     if (f) {
         if (strpbrk(mode, "wa+")) { errno = EROFS; return NULL; }
@@ -1796,8 +1838,8 @@ DIR *opendir(const char *path) {
     if (!rel) return real_opendir(path);
     shim_init();
     if (!g.ok) { errno = EIO; return NULL; }
-    char cpath[LMB_PATH_MAX * 2];
-    data_path(cpath, sizeof cpath, rel);
+    char cpath[LMB_CACHE_PATH_MAX];
+    if (data_path(cpath, sizeof cpath, rel)) return NULL;
     return real_opendir(cpath);
 }
 

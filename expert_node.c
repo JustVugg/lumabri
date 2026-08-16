@@ -151,6 +151,17 @@ static double nowd(void) {
     return (double)t.tv_sec + (double)t.tv_nsec * 1e-9;
 }
 
+static int node_arg_copy(char *dst, size_t cap, const char *src,
+                         const char *label) {
+    size_t n = strlen(src);
+    if (n >= cap) {
+        fprintf(stderr, "%s must be at most %zu bytes\n", label, cap - 1);
+        return -1;
+    }
+    memcpy(dst, src, n + 1);
+    return 0;
+}
+
 /* ---- the compute gate ---------------------------------------------------
  * The default is not a constant but a division: cores / threads-per-expert.
  * With OMP_NUM_THREADS=1 the teams are single-threaded and the gate opens
@@ -636,20 +647,20 @@ int main(int argc, char **argv) {
     const char *dir = NULL;
     int port = 7401, stride = 1, offset = 0, cache = 0, bits = 8, hold = 0;
     int layers[512], nlayers = 0, parallel = 0;
-    snprintf(g.name, sizeof g.name, "node");
+    memcpy(g.name, "node", sizeof "node");
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--model") && i + 1 < argc) dir = argv[++i];
         else if (!strcmp(argv[i], "--port") && i + 1 < argc) port = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--name") && i + 1 < argc)
-            snprintf(g.name, sizeof g.name, "%s", argv[++i]);
-        else if (!strcmp(argv[i], "--model-name") && i + 1 < argc)
-            snprintf(g.model, sizeof g.model, "%s", argv[++i]);
-        else if (!strcmp(argv[i], "--tracker") && i + 1 < argc)
-            snprintf(g.tracker, sizeof g.tracker, "%s", argv[++i]);
-        else if (!strcmp(argv[i], "--advertise") && i + 1 < argc)
-            snprintf(g.advertise, sizeof g.advertise, "%s", argv[++i]);
-        else if (!strcmp(argv[i], "--cache") && i + 1 < argc) cache = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--name") && i + 1 < argc) {
+            if (node_arg_copy(g.name, sizeof g.name, argv[++i], "--name")) return 2;
+        } else if (!strcmp(argv[i], "--model-name") && i + 1 < argc) {
+            if (node_arg_copy(g.model, sizeof g.model, argv[++i], "--model-name")) return 2;
+        } else if (!strcmp(argv[i], "--tracker") && i + 1 < argc) {
+            if (node_arg_copy(g.tracker, sizeof g.tracker, argv[++i], "--tracker")) return 2;
+        } else if (!strcmp(argv[i], "--advertise") && i + 1 < argc) {
+            if (node_arg_copy(g.advertise, sizeof g.advertise, argv[++i], "--advertise")) return 2;
+        } else if (!strcmp(argv[i], "--cache") && i + 1 < argc) cache = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--bits") && i + 1 < argc) bits = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--hold") && i + 1 < argc) hold = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--parallel") && i + 1 < argc) parallel = atoi(argv[++i]);
@@ -679,12 +690,18 @@ int main(int argc, char **argv) {
     }
     if (tok) snprintf(g.token, sizeof g.token, "%s", tok);
     if (!g.model[0]) {                /* default model name: the dir basename */
-        char tmp[LMB_PATH_MAX];
-        snprintf(tmp, sizeof tmp, "%s", dir);
-        size_t l = strlen(tmp);
-        while (l > 1 && tmp[l - 1] == '/') tmp[--l] = 0;
-        const char *base = strrchr(tmp, '/');
-        snprintf(g.model, sizeof g.model, "%s", base ? base + 1 : tmp);
+        const char *end = dir + strlen(dir);
+        while (end > dir + 1 && end[-1] == '/') end--;
+        const char *base = end;
+        while (base > dir && base[-1] != '/') base--;
+        size_t n = (size_t)(end - base);
+        if (!n || n >= sizeof g.model) {
+            fprintf(stderr, "model directory basename must be 1..%zu bytes; "
+                            "use --model-name\n", sizeof g.model - 1);
+            return 2;
+        }
+        memcpy(g.model, base, n);
+        g.model[n] = 0;
     }
     if (!g.advertise[0]) snprintf(g.advertise, sizeof g.advertise, "127.0.0.1:%d", port);
 

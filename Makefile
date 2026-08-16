@@ -4,6 +4,14 @@ ENGINE  ?= ../colibri/c
 
 all: tracker maintainer liblumabri.so test_shim lumabri
 
+# Compile every standalone repository-owned binary under the normal warning
+# set and promote warnings to errors. Engine amalgamations are checked by
+# their own upstream builds, because treating their warnings as Lumabri
+# regressions would make this gate depend on whichever checkout ENGINE names.
+check-warnings:
+	$(MAKE) -B all test_relay_exec test_key_rotation test_hedge \
+		test_verify_failover CFLAGS='$(CFLAGS) -Werror'
+
 SECURE_DEPS = lumabri_secure.h lumabri_crypto.h
 
 lumabri: lumabri.c lumabri_proto.h lumabri_sign.h $(SECURE_DEPS)
@@ -145,7 +153,7 @@ patches-check:
 build/%_p2p.c: $(ENGINE)/%.c engine_patches/%-p2p.diff Makefile
 	@mkdir -p build
 	@if grep -q LUMIBRI_P2P $<; then cp $< $@; \
-	 else patch -s -p2 -o $@ $< engine_patches/$*-p2p.diff; fi
+	 else patch -s --read-only=ignore -p2 -o $@ $< engine_patches/$*-p2p.diff; fi
 	@sed -i 's/if (L\.on) {/if (lumi_layer_on(layer)) {/' $@
 
 ENGINE_P2P_DEPS = lumabri_client.h lumibri_client.h lumabri_proto.h lumabri_sign.h \
@@ -281,13 +289,13 @@ install: all
 
 clean:
 	rm -f tracker maintainer liblumabri.so test_shim lumabri \
-	      test_relay_exec test_key_rotation test_hedge \
+	      test_relay_exec test_key_rotation test_hedge test_verify_failover \
 	      olmoe_p2p colibri_p2p inkling_p2p kimi_k3_p2p deepseek_p2p \
 	      expert_node expert_node_glm expert_node_inkling expert_node_kimi \
 	      expert_node_deepseek
 	rm -rf build
 
-.PHONY: all test clean install phase2 phase2-glm engines chatters phase2-all \
+.PHONY: all check-warnings test clean install phase2 phase2-glm engines chatters phase2-all \
         fixture test-phase2 \
         test-phase2-glm test-phase2-inkling test-phase2-kimi \
         test-phase2-deepseek test-engines \

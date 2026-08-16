@@ -396,13 +396,14 @@ static int lmb_sec_reject_wrap(int fd, int is_client, const char *addr) {
 
 /* handshake an accepted (inbound) fd; 0 when encryption is off or the wrap
  * succeeds, -1 when an enabled handshake fails and the caller must drop it */
-static int lmb_secure_server(int fd) {
+static LMB_MAYBE_UNUSED int lmb_secure_server(int fd) {
     if (!lmb_enc_wrap) return 0;
     return lmb_enc_wrap(fd, 0, NULL);
 }
 
 /* 1 when fd is encrypted and its handshake identity equals pk; 0 otherwise. */
-static int lmb_secure_peer_matches(int fd, const uint8_t pk[32]) {
+static LMB_MAYBE_UNUSED int lmb_secure_peer_matches(int fd,
+                                                    const uint8_t pk[32]) {
     LmbSecEntry *e = lmb_sec_acquire(fd);
     if (!e) return 0;
     int match = e->sec.active && e->sec.have_peer_id &&
@@ -411,7 +412,9 @@ static int lmb_secure_peer_matches(int fd, const uint8_t pk[32]) {
     return match;
 }
 
-static int lmb_secure_enabled(void) { return g_sec_enabled && !g_sec_failed; }
+static LMB_MAYBE_UNUSED int lmb_secure_enabled(void) {
+    return g_sec_enabled && !g_sec_failed;
+}
 
 static int lmb_secure_init(void) {
     const char *e = getenv("LUMABRI_ENCRYPT");

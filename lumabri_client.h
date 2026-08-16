@@ -460,13 +460,13 @@ static void lumi_init_ex(int n_layers, int n_experts, int hidden,
 }
 
 /* olmoe's shape: every layer routes */
-static void lumi_init(int n_layers, int n_experts, int hidden) {
+static LMB_MAYBE_UNUSED void lumi_init(int n_layers, int n_experts, int hidden) {
     lumi_init_ex(n_layers, n_experts, hidden, NULL);
 }
 
 /* Does this (slot, expert) pair belong on the swarm? The engines call it
  * before handing a layer over, so an unrouted slot is never a wire error. */
-static int lumi_layer_on(int layer) {
+static LMB_MAYBE_UNUSED int lumi_layer_on(int layer) {
     lumi_maybe_discover();
     if (!L.on || layer < 0 || layer >= L.n_layers) return 0;
     return !L.routed || L.routed[layer];
@@ -741,7 +741,8 @@ static void lumi_maybe_spot_check(int layer, int eid, const float *x, int D,
 /* Run the K selected experts of one layer on their peers and accumulate into
  * `out` with the router weights. A peer failure costs a retry on the next
  * replica; only a replica-exhausted expert is fatal. */
-static void lumi_moe_apply(int layer, const int *idx, const float *val, int K,
+static LMB_MAYBE_UNUSED void lumi_moe_apply(int layer, const int *idx,
+                           const float *val, int K,
                            const float *x, int D, float *out) {
     if (K > LUMI_MAX_K) lumi_die("top-k larger than the client supports");
     int fds[LUMI_MAX_K];
@@ -820,7 +821,8 @@ static void lumi_moe_apply(int layer, const int *idx, const float *val, int K,
  */
 #define LUMI_BLOCK 64
 
-static void lumi_moe_apply_batch(int layer, const int *idxs, const float *ws,
+static LMB_MAYBE_UNUSED void lumi_moe_apply_batch(int layer, const int *idxs,
+                                 const float *ws,
                                  const int *keff, int K, const float *x,
                                  int S, int D, float *out) {
     unsigned char *seen = (unsigned char *)calloc((size_t)L.n_experts, 1);
@@ -920,7 +922,8 @@ static void lumi_moe_apply_batch(int layer, const int *idxs, const float *ws,
  * weights. It also runs its experts in the LATENT space, so `D` here is
  * c->latent, not hidden — the peer must agree, which is what the manifest's
  * dimension check enforces. */
-static void lumi_moe_apply_union(int layer, int nu, const int *uid,
+static LMB_MAYBE_UNUSED void lumi_moe_apply_union(int layer, int nu,
+                                 const int *uid,
                                  const int *pfirst, const int *pcnt,
                                  const int *poslist, const float *wlist,
                                  const float *Z, int D, float *U) {
@@ -1007,7 +1010,8 @@ static void lumi_moe_apply_union(int layer, int nu, const int *uid,
  * walks the batch in order. Both are copied here, because the order of a
  * float sum is part of the answer.
  */
-static void lumi_moe_apply_v4(int layer, const int *indices, const float *weights,
+static LMB_MAYBE_UNUSED void lumi_moe_apply_v4(int layer, const int *indices,
+                              const float *weights,
                               int topk, const float *x, int batch, int D,
                               float *out) {
     unsigned char *used = (unsigned char *)calloc((size_t)L.n_experts, 1);
@@ -1103,7 +1107,7 @@ static void lumi_moe_apply_v4(int layer, const int *indices, const float *weight
     free(used); free(uid); free(rows); free(rw); free(xg);
 }
 
-static void lumi_report(void) {
+static LMB_MAYBE_UNUSED void lumi_report(void) {
     if (!L.on) return;
     fprintf(stderr, "[lumabri] %llu remote expert calls in %llu layer rounds · "
                     "%.2fs waiting on peers (%.2f ms per layer round) · "
