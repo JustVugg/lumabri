@@ -261,6 +261,7 @@ test: all test_key_rotation test_hedge test_verify_failover
 	./cas_test.sh
 	./relay_exec_test.sh
 	./peer_identity_test.sh
+	./key_test.sh
 	./sign_test.sh
 	./crypto_test.sh
 	./secure_test.sh

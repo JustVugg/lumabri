@@ -1777,6 +1777,16 @@ static int cmd_chat(int argc, char **argv) {
  * signatures are computed once. The public half is what everyone else
  * needs, and it is the ONLY thing a chatter must get out of band: with it,
  * neither the tracker nor any peer has to be trusted. */
+static int key_write_full(int fd, const char *data, size_t len) {
+    while (len) {
+        ssize_t n = write(fd, data, len);
+        if (n < 0) { if (errno == EINTR) continue; return -1; }
+        if (n == 0) { errno = EIO; return -1; }
+        data += n; len -= (size_t)n;
+    }
+    return 0;
+}
+
 static int cmd_key(int argc, char **argv) {
     const char *out = "lumabri";
     for (int i = 0; i < argc; i++) {
@@ -1793,28 +1803,52 @@ static int cmd_key(int argc, char **argv) {
     fclose(ur);
     lmb_sign_keypair(pk, sk, seed);
 
-    char skpath[1100], pkpath[1100], hex[200];
-    snprintf(skpath, sizeof skpath, "%s.key", out);
-    snprintf(pkpath, sizeof pkpath, "%s.pub", out);
-    int fd = open(skpath, O_WRONLY | O_CREAT | O_TRUNC, 0600);   /* secret: 0600 */
-    if (fd < 0) { perror(skpath); return 1; }
-    lmb_hex(hex, sk, 64);
-    if (write(fd, hex, strlen(hex)) < 0 || write(fd, "\n", 1) < 0) { perror(skpath); close(fd); return 1; }
-    close(fd);
-    FILE *pf = fopen(pkpath, "w");
-    if (!pf) { perror(pkpath); return 1; }
-    lmb_hex(hex, pk, 32);
-    fprintf(pf, "%s\n", hex);
-    fclose(pf);
+    char skpath[1100], pkpath[1100], skhex[130], pkhex[66];
+    int sn = snprintf(skpath, sizeof skpath, "%s.key", out);
+    int pn = snprintf(pkpath, sizeof pkpath, "%s.pub", out);
+    if (sn < 0 || (size_t)sn >= sizeof skpath ||
+        pn < 0 || (size_t)pn >= sizeof pkpath) {
+        fprintf(stderr, "key output path is too long\n");
+        return 1;
+    }
+
+    int flags = O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC;
+#ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+#endif
+    int skfd = open(skpath, flags, 0600);
+    if (skfd < 0) { perror(skpath); return 1; }
+    int pkfd = open(pkpath, flags, 0644);
+    if (pkfd < 0) {
+        int saved = errno;
+        close(skfd); unlink(skpath); errno = saved;
+        perror(pkpath);
+        return 1;
+    }
+
+    lmb_hex(skhex, sk, 64); skhex[128] = '\n'; skhex[129] = 0;
+    lmb_hex(pkhex, pk, 32); pkhex[64] = '\n'; pkhex[65] = 0;
+    int ok = fchmod(skfd, 0600) == 0 &&
+             key_write_full(skfd, skhex, 129) == 0 && fsync(skfd) == 0 &&
+             key_write_full(pkfd, pkhex, 65) == 0 && fsync(pkfd) == 0;
+    int saved = errno;
+    if (close(skfd) && ok) { ok = 0; saved = errno; }
+    if (close(pkfd) && ok) { ok = 0; saved = errno; }
+    if (!ok) {
+        unlink(skpath); unlink(pkpath); errno = saved;
+        perror("cannot write operator keypair");
+        return 1;
+    }
+    pkhex[64] = 0;
 
     printf("\n  %ssecret%s %s  %s(0600 — keep it off the swarm)%s\n",
            C_BOLD, C_R, skpath, C_DIM, C_R);
-    printf("  %spublic%s %s  %s%s%s\n\n", C_BOLD, C_R, pkpath, C_DIM, hex, C_R);
+    printf("  %spublic%s %s  %s%s%s\n\n", C_BOLD, C_R, pkpath, C_DIM, pkhex, C_R);
     printf("  serve the model as its origin:\n");
     printf("    %slumabri serve --model DIR --key %s%s\n", C_DIM, skpath, C_R);
     printf("  let everyone verify (give them the public value, not the file):\n");
     printf("    %sLUMABRI_PUBKEY=%s lumabri chat --tracker HOST:7300%s\n\n",
-           C_DIM, hex, C_R);
+           C_DIM, pkhex, C_R);
     return 0;
 }
 
