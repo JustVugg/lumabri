@@ -198,13 +198,28 @@ static void local_model_type(const char *model_dir, char *out, size_t cap) {
     }
 }
 
+static int parse_serve_port(const char *s, int *port) {
+    char *end = NULL;
+    errno = 0;
+    long v = strtol(s, &end, 10);
+    if (s[0] < '0' || s[0] > '9' || errno == ERANGE || !end || *end ||
+        v < 1 || v > 65533) return -1;
+    *port = (int)v;
+    return 0;
+}
+
 static int cmd_serve(int argc, char **argv) {
     const char *model = NULL, *join = NULL, *mname = NULL, *donate = NULL;
     const char *key = NULL, *pubkey = NULL, *advertise = NULL;
     int port = 7300, no_exec = 0, cache_slots = 128;
     for (int i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "--model") && i + 1 < argc) model = argv[++i];
-        else if (!strcmp(argv[i], "--port") && i + 1 < argc) port = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--port") && i + 1 < argc) {
+            if (parse_serve_port(argv[++i], &port)) {
+                fprintf(stderr, "--port must be an integer from 1 to 65533\n");
+                return 2;
+            }
+        }
         else if (!strcmp(argv[i], "--join") && i + 1 < argc) join = argv[++i];
         else if (!strcmp(argv[i], "--model-name") && i + 1 < argc) mname = argv[++i];
         else if (!strcmp(argv[i], "--donate") && i + 1 < argc) donate = argv[++i];
