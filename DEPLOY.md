@@ -100,6 +100,9 @@ exit
 cd /home/lumabri/lumabri && make install
 ```
 
+On macOS, install Homebrew's OpenMP runtime before building phase 2:
+`brew install libomp`. The phase-1 build does not need it.
+
 `make phase2-all` builds both halves for every engine and **does not touch
 the colibri checkout**: each patch is applied to a copy under `build/`.
 

@@ -29,6 +29,10 @@
 #include <ctype.h>
 #include <sys/file.h>
 
+#ifndef EKEYREJECTED
+#define EKEYREJECTED EACCES
+#endif
+
 typedef struct {
     int active;
     uint8_t tx_key[32], rx_key[32];

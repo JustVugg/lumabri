@@ -75,7 +75,9 @@
 #include <pthread.h>
 #include <sched.h>
 #include <stdatomic.h>
+#ifdef __linux__
 #include <sys/prctl.h>
+#endif
 
 #define HEARTBEAT_S 10
 
@@ -708,7 +710,9 @@ int main(int argc, char **argv) {
     /* 1 µs of timer slack instead of the default 50: without this a 250 µs
      * emulated LAN would land anywhere up to 300 µs. Process-local, no
      * privileges, nothing outside this peer is affected. */
+#ifdef __linux__
     if (lmb_emu_active()) prctl(PR_SET_TIMERSLACK, 1000UL, 0, 0, 0);
+#endif
     { const char *cp = getenv("LUMABRI_CORRUPT_PPM");
       if (cp && atol(cp) > 0) {
           g_corrupt_ppm = atol(cp);

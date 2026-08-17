@@ -21,8 +21,34 @@ lumabri: lumabri.c lumabri_proto.h lumabri_sign.h $(SECURE_DEPS)
 # Both sides are built from the engine's own source so the expert math cannot
 # drift between local and remote: expert_node.c includes olmoe.c, and the
 # chatter is olmoe.c itself with -DLUMABRI_P2P.
-P2P_CFLAGS = -O2 -fopenmp -Wall -I. -I$(ENGINE) \
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+P2P_OMPDIR := $(shell brew --prefix libomp 2>/dev/null)
+P2P_OMP_CFLAGS = -Xclang -fopenmp -I$(P2P_OMPDIR)/include
+P2P_OMP_LDFLAGS = -L$(P2P_OMPDIR)/lib -lomp
+else
+P2P_OMP_CFLAGS = -fopenmp
+P2P_OMP_LDFLAGS = -fopenmp
+endif
+
+P2P_CFLAGS = -O2 $(P2P_OMP_CFLAGS) -Wall -I. -I$(ENGINE) \
              -Wno-unused-function -Wno-unused-parameter
+P2P_LDLIBS = $(P2P_OMP_LDFLAGS) -lm -lpthread
+
+.PHONY: p2p-openmp-check
+p2p-openmp-check:
+ifeq ($(UNAME_S),Darwin)
+	@test -f "$(P2P_OMPDIR)/include/omp.h" && \
+	 test -n "$(wildcard $(P2P_OMPDIR)/lib/libomp.*)" || \
+	 { echo "Homebrew libomp is required: brew install libomp" >&2; exit 1; }
+else
+	@:
+endif
+
+P2P_TARGETS = expert_node expert_node_glm expert_node_inkling expert_node_kimi \
+              expert_node_deepseek olmoe_p2p colibri_p2p inkling_p2p \
+              kimi_k3_p2p deepseek_p2p
+$(P2P_TARGETS): | p2p-openmp-check
 
 phase2: expert_node olmoe_p2p
 phase2-glm: expert_node_glm
@@ -48,13 +74,14 @@ MISSING_ENGINES = $(filter-out $(HAVE_ENGINES),olmoe colibri inkling kimi_k3 dee
 # profiles. Hash contents only (not absolute paths), then inject the same ID
 # into the chatter and expert-node build for that family. Compiler/ISA/OpenMP
 # details are appended at runtime by lmb_build_profile().
+SHA256 := $(shell command -v sha256sum >/dev/null 2>&1 && echo sha256sum || echo 'shasum -a 256')
 ENGINE_PROFILE_DEPS := $(sort $(wildcard $(ENGINE)/*.h)) \
                        lumabri_client.h lumabri_proto.h lumabri_sign.h lumabri_sha.h \
                        $(SECURE_DEPS)
 define engine_source_id
-$(shell sha256sum $(ENGINE)/$(1).c $(ENGINE_PROFILE_DEPS) \
+$(shell $(SHA256) $(ENGINE)/$(1).c $(ENGINE_PROFILE_DEPS) \
         expert_engines/$(2).h engine_patches/$(1)-p2p.diff 2>/dev/null | \
-        awk '{print $$1}' | sha256sum | cut -c1-16)
+        awk '{print $$1}' | $(SHA256) | cut -c1-16)
 endef
 SRCID_olmoe   := $(call engine_source_id,olmoe,olmoe)
 SRCID_colibri := $(call engine_source_id,colibri,colibri)
@@ -83,22 +110,22 @@ EXPERT_DEPS = expert_node.c lumabri_proto.h lumabri_sign.h $(SECURE_DEPS)
 
 expert_node: $(EXPERT_DEPS) expert_engines/olmoe.h $(ENGINE)/olmoe.c \
              engine_patches/olmoe-p2p.diff $(ENGINE_PROFILE_DEPS)
-	$(CC) $(P2P_CFLAGS) $(PROFILE_olmoe) expert_node.c -o $@ -lm -lpthread
+	$(CC) $(P2P_CFLAGS) $(PROFILE_olmoe) expert_node.c -o $@ $(P2P_LDLIBS)
 
 expert_node_glm: $(EXPERT_DEPS) expert_engines/colibri.h $(ENGINE)/colibri.c \
                  engine_patches/colibri-p2p.diff $(ENGINE_PROFILE_DEPS)
 	$(CC) $(P2P_CFLAGS) $(PROFILE_colibri) -DLMBE_ENGINE_HEADER='"expert_engines/colibri.h"' \
-	      expert_node.c -o $@ -lm -lpthread
+	      expert_node.c -o $@ $(P2P_LDLIBS)
 
 expert_node_inkling: $(EXPERT_DEPS) expert_engines/inkling.h $(ENGINE)/inkling.c \
                      engine_patches/inkling-p2p.diff $(ENGINE_PROFILE_DEPS)
 	$(CC) $(P2P_CFLAGS) $(PROFILE_inkling) -DLMBE_ENGINE_HEADER='"expert_engines/inkling.h"' \
-	      expert_node.c -o $@ -lm -lpthread
+	      expert_node.c -o $@ $(P2P_LDLIBS)
 
 expert_node_kimi: $(EXPERT_DEPS) expert_engines/kimi_k3.h $(ENGINE)/kimi_k3.c \
                   engine_patches/kimi_k3-p2p.diff $(ENGINE_PROFILE_DEPS)
 	$(CC) $(P2P_CFLAGS) $(PROFILE_kimi_k3) -DLMBE_ENGINE_HEADER='"expert_engines/kimi_k3.h"' \
-	      expert_node.c -o $@ -lm -lpthread
+	      expert_node.c -o $@ $(P2P_LDLIBS)
 
 # DeepSeek V4 needs two extra things at build time.
 #
@@ -126,7 +153,7 @@ expert_node_deepseek: $(EXPERT_DEPS) expert_engines/deepseek.h build/deepseek_no
                       engine_patches/deepseek-p2p.diff $(ENGINE_PROFILE_DEPS)
 	$(CC) $(P2P_CFLAGS) $(PROFILE_deepseek) $(DS_CFLAGS) -Ibuild \
 	      -DLMBE_ENGINE_HEADER='"expert_engines/deepseek.h"' \
-	      expert_node.c -o $@ -lm -lpthread
+	      expert_node.c -o $@ $(P2P_LDLIBS)
 
 # Regenerate the engine patches from a colibri checkout (never modifies it)
 patches:
@@ -153,26 +180,27 @@ patches-check:
 build/%_p2p.c: $(ENGINE)/%.c engine_patches/%-p2p.diff Makefile
 	@mkdir -p build
 	@if grep -q LUMIBRI_P2P $<; then cp $< $@; \
-	 else patch -s --read-only=ignore -p2 -o $@ $< engine_patches/$*-p2p.diff; fi
-	@sed -i 's/if (L\.on) {/if (lumi_layer_on(layer)) {/' $@
+	 else patch -f -s -p2 -o $@ $< engine_patches/$*-p2p.diff; fi
+	@sed 's/if (L\.on) {/if (lumi_layer_on(layer)) {/' $@ > $@.tmp
+	@mv $@.tmp $@
 
 ENGINE_P2P_DEPS = lumabri_client.h lumibri_client.h lumabri_proto.h lumabri_sign.h \
                   $(SECURE_DEPS)
 
 olmoe_p2p: build/olmoe_p2p.c $(ENGINE_P2P_DEPS)
-	$(CC) $(P2P_CFLAGS) $(PROFILE_olmoe) -DLUMABRI_P2P -DLUMIBRI_P2P $< -o $@ -lm -lpthread
+	$(CC) $(P2P_CFLAGS) $(PROFILE_olmoe) -DLUMABRI_P2P -DLUMIBRI_P2P $< -o $@ $(P2P_LDLIBS)
 
 colibri_p2p: build/colibri_p2p.c $(ENGINE_P2P_DEPS)
-	$(CC) $(P2P_CFLAGS) $(PROFILE_colibri) -DLUMABRI_P2P -DLUMIBRI_P2P $< -o $@ -lm -lpthread
+	$(CC) $(P2P_CFLAGS) $(PROFILE_colibri) -DLUMABRI_P2P -DLUMIBRI_P2P $< -o $@ $(P2P_LDLIBS)
 
 inkling_p2p: build/inkling_p2p.c $(ENGINE_P2P_DEPS)
-	$(CC) $(P2P_CFLAGS) $(PROFILE_inkling) -DLUMABRI_P2P -DLUMIBRI_P2P $< -o $@ -lm -lpthread
+	$(CC) $(P2P_CFLAGS) $(PROFILE_inkling) -DLUMABRI_P2P -DLUMIBRI_P2P $< -o $@ $(P2P_LDLIBS)
 
 kimi_k3_p2p: build/kimi_k3_p2p.c $(ENGINE_P2P_DEPS)
-	$(CC) $(P2P_CFLAGS) $(PROFILE_kimi_k3) -DLUMABRI_P2P -DLUMIBRI_P2P $< -o $@ -lm -lpthread
+	$(CC) $(P2P_CFLAGS) $(PROFILE_kimi_k3) -DLUMABRI_P2P -DLUMIBRI_P2P $< -o $@ $(P2P_LDLIBS)
 
 deepseek_p2p: build/deepseek_p2p.c $(ENGINE_P2P_DEPS)
-	$(CC) $(P2P_CFLAGS) $(PROFILE_deepseek) $(DS_CFLAGS) -DLUMABRI_P2P -DLUMIBRI_P2P $< -o $@ -lm -lpthread
+	$(CC) $(P2P_CFLAGS) $(PROFILE_deepseek) $(DS_CFLAGS) -DLUMABRI_P2P -DLUMIBRI_P2P $< -o $@ $(P2P_LDLIBS)
 
 # what a CHATTER needs; `engines` is what a compute DONOR needs
 chatters: $(ENGINE_CHATTERS)
@@ -296,7 +324,7 @@ clean:
 	rm -rf build
 
 .PHONY: all check-warnings test clean install phase2 phase2-glm engines chatters phase2-all \
-        fixture test-phase2 \
+        fixture test-phase2 p2p-openmp-check \
         test-phase2-glm test-phase2-inkling test-phase2-kimi \
         test-phase2-deepseek test-engines \
         patches patches-check test-relay-exec test-cas test-key-rotation test-hedge
