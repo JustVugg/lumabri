@@ -49,16 +49,9 @@ NODE_kimi_k3  = expert_node_kimi
 NODE_deepseek = expert_node_deepseek
 
 ENGINE_NODES    = $(foreach e,$(HAVE_ENGINES),$(NODE_$(e)))
-# The expert-node (donor) side builds for either DeepSeek layout. The chatter
-# patch is written against the single-file deepseek.c, so on current multi-file
-# colibri the DeepSeek chatter is not yet ported — skip it rather than fail the
-# build; the peer node is what makes DeepSeek experts available to a swarm.
+# Both the expert node and the chatter build for either DeepSeek layout: the
+# single file with a line patch, the multi-file source with an anchored one.
 CHATTER_ENGINES := $(HAVE_ENGINES)
-ifneq ($(DS_MULTI),)
-ifeq ($(DS_SINGLE),)
-CHATTER_ENGINES := $(filter-out deepseek,$(CHATTER_ENGINES))
-endif
-endif
 ENGINE_CHATTERS = $(foreach e,$(CHATTER_ENGINES),$(e)_p2p)
 MISSING_ENGINES = $(filter-out $(HAVE_ENGINES),olmoe colibri inkling kimi_k3 deepseek)
 MISSING_CHATTERS = $(filter-out $(CHATTER_ENGINES),$(HAVE_ENGINES))
@@ -166,6 +159,27 @@ expert_node_deepseek: $(EXPERT_DEPS) expert_engines/deepseek.h $(DS_OBJS) $(ENGI
 	$(CC) $(P2P_CFLAGS) $(PROFILE_deepseek) $(DS_CFLAGS) -DLMBE_DS_MULTIFILE -I$(ENGINE) \
 	      -DLMBE_ENGINE_HEADER='"expert_engines/deepseek.h"' \
 	      expert_node.c $(DS_OBJS) -o $@ -lm -lpthread
+
+# The chatter: the same units WITH main (it is the CLI), patched at the three
+# expert-apply sites to delegate routed experts to peers. The lumabri client
+# state lives in one object (lumi_v4_bridge.o) so it is not duplicated per unit.
+DS_P2P_OBJS := $(patsubst %,build/dsp2p_%.o,$(DS_UNITS))
+
+build/deepseek_v4_p2p.c: $(ENGINE)/deepseek_v4.c engine_patches/deepseek_v4_p2p.py
+	@mkdir -p build
+	@python3 engine_patches/deepseek_v4_p2p.py $< $@
+
+build/lumi_v4_bridge.o: lumi_v4_bridge.c $(ENGINE_P2P_DEPS)
+	@mkdir -p build
+	$(CC) -O2 -fopenmp -pthread -I. -Wno-unused-function $(PROFILE_deepseek) $(DS_CFLAGS) \
+	      -c lumi_v4_bridge.c -o $@
+
+build/dsp2p_%.o: build/deepseek_v4_p2p.c $(DS_HDRS) lumi_v4_ext.h
+	@mkdir -p build
+	$(CC) $(DS_UNIT_CFLAGS) -I. -include lumi_v4_ext.h -DLUMABRI_P2P -DLUMIBRI_P2P -D$* -c $< -o $@
+
+deepseek_p2p: $(DS_P2P_OBJS) build/lumi_v4_bridge.o
+	$(CC) -O2 -fopenmp $(DS_P2P_OBJS) build/lumi_v4_bridge.o -o $@ -lm -lpthread
 else
 # ---- older colibri: single generated deepseek.c -------------------------
 # It undefines `main` halfway through, so the CLI entry is renamed textually
@@ -231,8 +245,12 @@ inkling_p2p: build/inkling_p2p.c $(ENGINE_P2P_DEPS)
 kimi_k3_p2p: build/kimi_k3_p2p.c $(ENGINE_P2P_DEPS)
 	$(CC) $(P2P_CFLAGS) $(PROFILE_kimi_k3) -DLUMABRI_P2P -DLUMIBRI_P2P $< -o $@ -lm -lpthread
 
+# The single-file chatter rule; the multi-file one is defined near the node,
+# above, so only one deepseek_p2p recipe exists for a given colibri layout.
+ifeq ($(DS_MULTI),)
 deepseek_p2p: build/deepseek_p2p.c $(ENGINE_P2P_DEPS)
 	$(CC) $(P2P_CFLAGS) $(PROFILE_deepseek) $(DS_CFLAGS) -DLUMABRI_P2P -DLUMIBRI_P2P $< -o $@ -lm -lpthread
+endif
 
 # what a CHATTER needs; `engines` is what a compute DONOR needs
 chatters: $(ENGINE_CHATTERS)
