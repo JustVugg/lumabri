@@ -81,11 +81,14 @@ because the engines do not share a shape:
 | Kimi K3 | `kimi_k3-p2p.diff` | `make expert_node_kimi` | `expert_node_kimi` |
 | DeepSeek V4 | `deepseek-p2p.diff` | `make expert_node_deepseek` | `expert_node_deepseek` |
 
-DeepSeek is the one that needs a step first: colibri's `deepseek.c` is
-**generated** by `tools/amalgamate_deepseek.py` and is not in a fresh clone.
-`make phase2-all` notices it is missing, builds the other four and says so;
-`deepseek_v4.c` is not a substitute — it is one unit of a multi-file build,
-not the amalgamated one this expects.
+DeepSeek is built from whichever layout your colibri checkout ships. Current
+colibri has the unit-amalgamated `deepseek_v4.c`; `make expert_node_deepseek`
+compiles its `COLI_V4_UNIT_*` objects and links them, no extra step. Older
+colibri trees had a single generated `deepseek.c`, which still works. On the
+current multi-file layout the **expert node** (the donor side) builds; the
+DeepSeek **chatter** patch is written against the old single file and is not
+yet ported, so `make chatters` skips it and says so — a DeepSeek swarm can
+serve and execute experts, and the chat-side delegation patch is a follow-up.
 
 Skip this whole section if you only want phase 1: a server that serves the
 model's bytes works for every engine, DeepSeek included, and `lumabri chat`

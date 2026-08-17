@@ -23,11 +23,23 @@
 #ifndef LMBE_DEEPSEEK_H
 #define LMBE_DEEPSEEK_H
 
-/* NOT the engine's own path: deepseek.c undefines `main` halfway through, so
- * the usual rename-by-macro does not survive. The Makefile writes a build
- * copy with the CLI entry point renamed textually and nothing else changed —
- * see build/deepseek_noentry.c. colibri itself is untouched. */
+/* Two colibri layouts, one glue:
+ *
+ *  LMBE_DS_MULTIFILE — current colibri ships DeepSeek V4 as deepseek_v4.c
+ *    compiled once per COLI_V4_UNIT_* into separate objects (see
+ *    Makefile.deepseek-v4.units). The Makefile builds those units and links
+ *    them, so here we only need the declarations from the engine's internal
+ *    header; the definitions arrive at link time.
+ *
+ *  otherwise — the older single amalgamated deepseek.c, included directly
+ *    (main renamed textually into build/deepseek_noentry.c because that file
+ *    undefines `main` halfway through). colibri itself is untouched either way.
+ */
+#ifdef LMBE_DS_MULTIFILE
+#include "deepseek_v4_internal.h"
+#else
 #include "deepseek_noentry.c"
+#endif
 
 typedef struct { int layer, eid; } LmbeSlot;
 
