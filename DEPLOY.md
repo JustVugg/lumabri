@@ -85,10 +85,14 @@ DeepSeek is built from whichever layout your colibri checkout ships. Current
 colibri has the unit-amalgamated `deepseek_v4.c`; `make expert_node_deepseek`
 compiles its `COLI_V4_UNIT_*` objects and links them, no extra step. Older
 colibri trees had a single generated `deepseek.c`, which still works. On the
-current multi-file layout the **expert node** (the donor side) builds; the
-DeepSeek **chatter** patch is written against the old single file and is not
-yet ported, so `make chatters` skips it and says so — a DeepSeek swarm can
-serve and execute experts, and the chat-side delegation patch is a follow-up.
+current multi-file layout **both** sides build: the **expert node** (the donor)
+and the **chatter** (chat-side expert delegation). The chatter is the newer
+half — `deepseek_v4.c` is unit-amalgamated, so instead of the old line patch it
+is hooked by an anchored script and a single client bridge object. `make
+chatters` includes DeepSeek and prints no "skipped" line, so a DeepSeek swarm
+both serves/executes experts and delegates them from the chat side. Verified
+byte-identical against a real V4 model: 3087 remote expert calls over 215 layer
+rounds, PREFILL 10/10 and GREEDY 4/4 against the local oracle.
 
 Skip this whole section if you only want phase 1: a server that serves the
 model's bytes works for every engine, DeepSeek included, and `lumabri chat`
