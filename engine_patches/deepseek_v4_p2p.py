@@ -35,11 +35,18 @@ def main():
          '    }\n'
          '#endif\n'
          '    for (int expert_id = 0; !result && expert_id < n; expert_id++) {'),
-        # site 2 — moe_token_pipeline: dual loader, reset selected
+        # site 2 — moe_token_pipeline: dual loader, reset selected.
+        # Current colibri allocates a `views` array (and, under COLI_V4_GPU_TIER,
+        # a batch path) before the per-expert loop, so the anchor is the malloc,
+        # not the loop. selected=0 stays correct on the CPU build we compile:
+        # the GPU batch path is #ifdef'd out, so the only tail that runs is
+        # `output = round(output + shared)` — identical to sites 1 and 3, with
+        # the routed partial already written remotely. (views = malloc(0) is a
+        # valid non-NULL pointer on glibc; selected==topk>0 in every local run.)
         ('    if (!result) memset(output, 0, (size_t)d * sizeof(*output));\n'
          '\n'
          '#ifdef COLI_V4_EXPERIMENTAL_DUAL_EXPERT_LOADER\n'
-         '    for (int current = 0; !result && current < selected; current++) {',
+         '    ColiExpertView *views = malloc((size_t)selected * sizeof(*views));',
          '    if (!result) memset(output, 0, (size_t)d * sizeof(*output));\n'
          '#ifdef LUMABRI_P2P\n'
          '    if (!result && lumi_v4_bridge_on(weights->plan.layer)) {\n'
@@ -50,7 +57,7 @@ def main():
          '#endif\n'
          '\n'
          '#ifdef COLI_V4_EXPERIMENTAL_DUAL_EXPERT_LOADER\n'
-         '    for (int current = 0; !result && current < selected; current++) {'),
+         '    ColiExpertView *views = malloc((size_t)selected * sizeof(*views));'),
         # site 3 — v4_moe_batch_union: batch, reset n
         ('    if (!result)\n'
          '        memset(outputs, 0, (size_t)batch * d * sizeof(*outputs));\n'

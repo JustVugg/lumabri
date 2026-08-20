@@ -576,6 +576,41 @@ static LMB_MAYBE_UNUSED void lmb_build_profile(char *out, size_t cap) {
              LMB_PROFILE_OMP, LMB_PROFILE_MATH, sizeof(float));
 }
 
+/* Name the first `key=val` segment of two build profiles that differs, so an
+ * "incompatible manifest" points at the one knob to match — nearly always a
+ * different compiler version (cc=) or -march tier (isa=) between the two
+ * machines, or a src= from a different engine checkout — instead of a blank
+ * "build". Writes "<key>: peer='<a>' vs local='<b>'"; falls back to the whole
+ * strings if they differ only in structure. */
+static LMB_MAYBE_UNUSED void lmb_profile_diff(const char *peer, const char *local,
+                                              char *out, size_t cap) {
+    const char *a = peer, *b = local;
+    while (*a && *b) {
+        const char *ae = a; while (*ae && *ae != ';') ae++;
+        const char *be = b; while (*be && *be != ';') be++;
+        size_t an = (size_t)(ae - a), bn = (size_t)(be - b);
+        if (an != bn || memcmp(a, b, an)) {
+            size_t kn = 0;                          /* key is up to '=' */
+            while (kn < an && a[kn] != '=') kn++;
+            const char *av = kn < an ? a + kn + 1 : a;   /* value after '=' */
+            int avn = kn < an ? (int)(an - kn - 1) : (int)an;
+            size_t lk = 0;
+            while (lk < bn && b[lk] != '=') lk++;
+            const char *bv = lk < bn ? b + lk + 1 : b;
+            int bvn = lk < bn ? (int)(bn - lk - 1) : (int)bn;
+            snprintf(out, cap, "%.*s: peer='%.*s' vs local='%.*s'",
+                     (int)kn, a, avn, av, bvn, bv);
+            return;
+        }
+        a = *ae ? ae + 1 : ae;
+        b = *be ? be + 1 : be;
+    }
+    if (strcmp(peer, local))
+        snprintf(out, cap, "peer='%s' vs local='%s'", peer, local);
+    else
+        snprintf(out, cap, "identical");
+}
+
 static int lmb_cur_u32(LmbCur *c, uint32_t *v) {
     if (c->off > c->len || 4 > c->len - c->off) return -1;
     *v = lmb_get32(c->p + c->off); c->off += 4;

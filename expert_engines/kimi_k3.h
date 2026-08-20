@@ -48,7 +48,13 @@ static void lmbe_slot_load(int slot, int eid, LmbeSlot *s) {
     s->eid = eid;
 }
 
-typedef struct { float *gate, *up, *hz; } LmbeScratch;
+typedef struct {
+    float *gate, *up, *hz;
+#ifdef LMBE_K3_EXPERT_APPLY_ZQ
+    int8_t *zq;                       /* one pre-quantized z row, mxfp4_qx form */
+    float  *zsc;                      /* its per-32-block scales */
+#endif
+} LmbeScratch;
 
 static void *lmbe_scratch_new(int nrows) {
     (void)nrows;                      /* K3's kernels are one row at a time */
@@ -56,12 +62,20 @@ static void *lmbe_scratch_new(int nrows) {
     sc->gate = falloc(lmbe_M.c.moe_inter);
     sc->up   = falloc(lmbe_M.c.moe_inter);
     sc->hz   = falloc(lmbe_M.c.latent);
+#ifdef LMBE_K3_EXPERT_APPLY_ZQ
+    sc->zq   = (int8_t *)malloc((size_t)lmbe_M.c.latent);
+    sc->zsc  = falloc(lmbe_M.c.latent / 32 + 1);
+#endif
     return sc;
 }
 
 static void lmbe_scratch_free(void *p) {
     LmbeScratch *sc = (LmbeScratch *)p;
-    free(sc->gate); free(sc->up); free(sc->hz); free(sc);
+    free(sc->gate); free(sc->up); free(sc->hz);
+#ifdef LMBE_K3_EXPERT_APPLY_ZQ
+    free(sc->zq); free(sc->zsc);
+#endif
+    free(sc);
 }
 
 /* The engine's OWN expert_apply, not a transcription of it.
@@ -80,9 +94,29 @@ static void lmbe_apply(const LmbeSlot *ec, int slot, const float *z, float *out,
     int LT = lmbe_M.c.latent;
     (void)slot;
     memset(out, 0, (size_t)nrows * LT * sizeof(float));
-    for (int r = 0; r < nrows; r++)
-        expert_apply(&lmbe_M, s, z + (int64_t)r * LT, 1.0f,
-                     out + (int64_t)r * LT, sc->gate, sc->up, sc->hz);
+#ifdef LMBE_K3_EXPERT_APPLY_ZQ
+    /* Match the engine's batch path exactly. With int8-activation matmuls on
+     * (K3_IDOT, the default) and the latent tiling into 32-wide blocks, the
+     * engine pre-quantizes each z row once with mxfp4_qx and feeds expert_apply
+     * the shared zq/zsc. Passing NULL there is NOT equivalent: expert_apply
+     * then requantizes z in-call, which rounds differently and diverges in the
+     * low bits — a distinct token a few steps later. So the donor quantizes on
+     * exactly the same condition (g_k3_idot && LT%32==0) with the same routine;
+     * otherwise NULL is right, because the engine also feeds NULL then. */
+    int use_zq = g_k3_idot && (LT % 32 == 0) && sc->zq && sc->zsc;
+#endif
+    for (int r = 0; r < nrows; r++) {
+        const float *zr = z + (int64_t)r * LT;
+#ifdef LMBE_K3_EXPERT_APPLY_ZQ
+        if (use_zq) mxfp4_qx(zr, 1, LT, sc->zq, sc->zsc);
+        expert_apply(&lmbe_M, s, zr, 1.0f, out + (int64_t)r * LT,
+                     sc->gate, sc->up, sc->hz,
+                     use_zq ? sc->zq : NULL, use_zq ? sc->zsc : NULL);
+#else
+        expert_apply(&lmbe_M, s, zr, 1.0f, out + (int64_t)r * LT,
+                     sc->gate, sc->up, sc->hz);
+#endif
+    }
 }
 
 #endif

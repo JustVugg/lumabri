@@ -188,6 +188,7 @@ static int lumi_add_peer(const char *addr) {
     uint32_t magic = 0, bits = 0, have_id = 0, has_sig = 0;
     uint32_t n = 0, peer_hidden = 0;
     char engine[64] = "", profile[LMB_BUILD_PROFILE_MAX] = "", peer_model[64] = "";
+    char why[224] = "";   /* which manifest field made this peer incompatible */
     LmbModelIdentity peer_id = {0};
     int bad = lmb_cur_u32(&c, &magic) || magic != LMB_EXPERT_MANIFEST_MAGIC ||
               lmb_cur_str(&c, engine, sizeof engine) ||
@@ -201,15 +202,33 @@ static int lumi_add_peer(const char *addr) {
               (has_sig && lmb_cur_bytes(&c, peer_id.sig, sizeof peer_id.sig));
         peer_id.has_sig = has_sig != 0;
     }
-    if (!bad) bad = lmb_cur_u32(&c, &n) ||
-                    n > (uint64_t)L.n_layers * (uint64_t)L.n_experts;
-    if (!bad && (strcmp(engine, LMBE_ENGINE_ID) || strcmp(profile, L.profile) ||
-                 bits != (uint32_t)L.expected_bits ||
-                 (L.expected_model[0] && strcmp(peer_model, L.expected_model)) ||
-                 ((L.have_identity || L.trust.n) && !have_id) ||
-                 (have_id && !lumi_identity_valid(peer_model, &peer_id)) ||
-                 (L.have_identity && memcmp(L.identity.root, peer_id.root, 32)))) {
+    if (!bad) bad = lmb_cur_u32(&c, &n);
+    if (!bad && n > (uint64_t)L.n_layers * (uint64_t)L.n_experts) {
+        snprintf(why, sizeof why, "shape: peer lists %u experts, this model has %llu",
+                 n, (unsigned long long)((uint64_t)L.n_layers * L.n_experts));
         bad = 1;
+    }
+    if (!bad && !why[0]) {
+        if (strcmp(engine, LMBE_ENGINE_ID))
+            snprintf(why, sizeof why, "engine: peer='%s' vs local='%s'",
+                     engine, LMBE_ENGINE_ID);
+        else if (strcmp(profile, L.profile)) {
+            char d[192];
+            lmb_profile_diff(profile, L.profile, d, sizeof d);
+            snprintf(why, sizeof why, "build %s", d);
+        } else if (bits != (uint32_t)L.expected_bits)
+            snprintf(why, sizeof why, "bits: peer=%u vs local=%d",
+                     bits, L.expected_bits);
+        else if (L.expected_model[0] && strcmp(peer_model, L.expected_model))
+            snprintf(why, sizeof why, "model: peer='%s' vs local='%s'",
+                     peer_model, L.expected_model);
+        else if ((L.have_identity || L.trust.n) && !have_id)
+            snprintf(why, sizeof why, "peer sent no signed model identity");
+        else if (have_id && !lumi_identity_valid(peer_model, &peer_id))
+            snprintf(why, sizeof why, "peer model identity failed to verify");
+        else if (L.have_identity && memcmp(L.identity.root, peer_id.root, 32))
+            snprintf(why, sizeof why, "model identity differs from the pinned one");
+        if (why[0]) bad = 1;
     }
     size_t gids = (size_t)L.n_layers * L.n_experts;
     uint8_t *seen = reprobe >= 0 ? (uint8_t *)calloc(gids, 1) : NULL;
@@ -234,16 +253,20 @@ static int lumi_add_peer(const char *addr) {
                     bad = 1;
                     break;
                 }
-    if (bad || lmb_cur_u32(&c, &peer_hidden) ||
-        peer_hidden != (uint32_t)L.hidden || c.off != c.len || m.pay_len != 0) {
+    int tail_bad = lmb_cur_u32(&c, &peer_hidden) || c.off != c.len || m.pay_len != 0;
+    if (!bad && !why[0] && !tail_bad && peer_hidden != (uint32_t)L.hidden)
+        snprintf(why, sizeof why, "shape: peer hidden=%u vs local hidden=%d",
+                 peer_hidden, L.hidden);
+    if (bad || tail_bad || peer_hidden != (uint32_t)L.hidden) {
         /* roll the claims back: this peer must not own anything */
         if (reprobe < 0)
             for (size_t i = 0; i < gids * LUMI_MAX_REP; i++)
                 if (L.own[i] == pi) L.own[i] = -1;
         free(seen);
         lmb_msg_free(&m);
-        fprintf(stderr, "[lumabri] peer %s: incompatible manifest "
-                        "(model/build/engine/bits/shape) — skipped\n", p->addr);
+        fprintf(stderr, "[lumabri] peer %s: incompatible manifest — %s — skipped\n",
+                p->addr,
+                why[0] ? why : "malformed or model/build/engine/bits/shape mismatch");
         return -1;
     }
     if (!L.expected_model[0]) snprintf(L.expected_model, sizeof L.expected_model,
