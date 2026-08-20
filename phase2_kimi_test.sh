@@ -35,7 +35,10 @@ run() { OMP_NUM_THREADS="${THREADS:-2}" "$@" \
 echo
 echo "══ A) LOCAL — experts read and run by the engine itself"
 run env > "$T/local.out" 2>"$T/local.err" || { tail -20 "$T/local.err"; exit 1; }
-A=$(tr -s ' \n' ' ' < "$T/local.out" | sed 's/^ *//;s/ *$//')
+# Current colibri prints a "TUNE decode: N tokens in Xs" timing line on stdout;
+# it varies run to run and is not part of the output. Compare only the token ids
+# before it — the whole point of this test.
+A=$(tr -s ' \n' ' ' < "$T/local.out" | sed 's/TUNE.*//' | sed 's/^ *//;s/ *$//')
 [ -n "$A" ] || { echo "no tokens from the local run"; tail -20 "$T/local.err"; exit 1; }
 echo "  tokens: $A"
 
@@ -61,7 +64,7 @@ grep -h "dense and route nothing\|holding" "$T/node0.log" || true
 echo
 echo "══ B) P2P — every routed expert runs on a peer"
 run env LUMABRI_EXPERTS="$ADDRS" > "$T/p2p.out" 2>"$T/p2p.err" || { tail -20 "$T/p2p.err"; exit 1; }
-B=$(tr -s ' \n' ' ' < "$T/p2p.out" | sed 's/^ *//;s/ *$//')
+B=$(tr -s ' \n' ' ' < "$T/p2p.out" | sed 's/TUNE.*//' | sed 's/^ *//;s/ *$//')
 echo "  tokens: $B"
 grep -E "^\[lumabri\]" "$T/p2p.err" || true
 

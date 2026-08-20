@@ -42,6 +42,13 @@ DS_MULTI  := $(wildcard $(ENGINE)/deepseek_v4.c)
 HAVE_ENGINES := $(notdir $(basename $(wildcard $(ENGINE)/olmoe.c $(ENGINE)/colibri.c \
                  $(ENGINE)/inkling.c $(ENGINE)/kimi_k3.c)))
 HAVE_ENGINES += $(if $(DS_MULTI)$(DS_SINGLE),deepseek)
+
+# Current colibri's kimi expert_apply grew two i8-activation params (zq,zsc);
+# older trees took eight. The donor glue passes NULL,NULL (the float fallback,
+# byte-identical) only when the source has them. Probe the exact signature tail
+# so a stray zq elsewhere can't flip it. Empty on missing file or old layout.
+K3_ZQ := $(shell grep -c 'const int8_t \*zq, const float \*zsc' $(ENGINE)/kimi_k3.c 2>/dev/null)
+K3_ZQ_FLAG := $(if $(filter-out 0,$(K3_ZQ)),-DLMBE_K3_EXPERT_APPLY_ZQ,)
 NODE_olmoe    = expert_node
 NODE_colibri  = expert_node_glm
 NODE_inkling  = expert_node_inkling
@@ -113,7 +120,7 @@ expert_node_inkling: $(EXPERT_DEPS) expert_engines/inkling.h $(ENGINE)/inkling.c
 
 expert_node_kimi: $(EXPERT_DEPS) expert_engines/kimi_k3.h $(ENGINE)/kimi_k3.c \
                   engine_patches/kimi_k3-p2p.diff $(ENGINE_PROFILE_DEPS)
-	$(CC) $(P2P_CFLAGS) $(PROFILE_kimi_k3) -DLMBE_ENGINE_HEADER='"expert_engines/kimi_k3.h"' \
+	$(CC) $(P2P_CFLAGS) $(PROFILE_kimi_k3) $(K3_ZQ_FLAG) -DLMBE_ENGINE_HEADER='"expert_engines/kimi_k3.h"' \
 	      expert_node.c -o $@ -lm -lpthread
 
 # DeepSeek V4 needs two extra things at build time.
@@ -144,6 +151,25 @@ DS_OBJS  := $(patsubst %,build/ds_%.o,$(DS_UNITS))
 DS_UNIT_CFLAGS = -O2 -fopenmp -pthread -D_GNU_SOURCE -include pthread.h -I$(ENGINE) $(DS_CFLAGS)
 DS_HDRS := $(wildcard $(ENGINE)/deepseek_v4*.h $(ENGINE)/deepseek_v4*.inc)
 
+# Current colibri split the pluggable expert-store backend out of deepseek_v4.c
+# into a standalone sibling TU that every V4 link now folds in
+# (Makefile.deepseek-v4: V4_OBJS = target units + REGISTRY_OBJ). It is not a
+# COLI_V4_UNIT_*, so deepseek_v4.c references it (coli_expert_store_backend_*)
+# but our unit objects do not define it — link fails without it. Discover the
+# source from colibri's own REGISTRY_OBJ so a rename follows us, and gate on the
+# file existing so trees that predate the split link exactly as before. The one
+# object is identical for node and chatter (no P2P, no ext header), so it is
+# shared by both links.
+DS_REGISTRY_OBJNAME := $(shell awk -F= '/^REGISTRY_OBJ[ \t]*=/{gsub(/[ \t]/,"",$$2);print $$2}' \
+                         $(ENGINE)/Makefile.deepseek-v4 2>/dev/null)
+DS_SIBLING_SRCS := $(foreach o,$(DS_REGISTRY_OBJNAME),$(wildcard $(ENGINE)/$(o:.o=.c)))
+DS_SIBLING_HDRS := $(wildcard $(ENGINE)/expert_store*.h)
+DS_SIBLING_OBJS := $(patsubst $(ENGINE)/%.c,build/dssib_%.o,$(DS_SIBLING_SRCS))
+
+build/dssib_%.o: $(ENGINE)/%.c $(DS_HDRS) $(DS_SIBLING_HDRS)
+	@mkdir -p build
+	$(CC) $(DS_UNIT_CFLAGS) -c $< -o $@
+
 build/deepseek_v4_noentry.c: $(ENGINE)/deepseek_v4.c
 	@mkdir -p build
 	@awk '/^int main\(int argc, char \*\*argv\) \{/{c++; sub(/^int main/,"int coli_v4_cli_unused_main_"c)} {print}' \
@@ -155,10 +181,10 @@ build/ds_%.o: build/deepseek_v4_noentry.c $(DS_HDRS)
 	@mkdir -p build
 	$(CC) $(DS_UNIT_CFLAGS) -D$* -c $< -o $@
 
-expert_node_deepseek: $(EXPERT_DEPS) expert_engines/deepseek.h $(DS_OBJS) $(ENGINE_PROFILE_DEPS)
+expert_node_deepseek: $(EXPERT_DEPS) expert_engines/deepseek.h $(DS_OBJS) $(DS_SIBLING_OBJS) $(ENGINE_PROFILE_DEPS)
 	$(CC) $(P2P_CFLAGS) $(PROFILE_deepseek) $(DS_CFLAGS) -DLMBE_DS_MULTIFILE -I$(ENGINE) \
 	      -DLMBE_ENGINE_HEADER='"expert_engines/deepseek.h"' \
-	      expert_node.c $(DS_OBJS) -o $@ -lm -lpthread
+	      expert_node.c $(DS_OBJS) $(DS_SIBLING_OBJS) -o $@ -lm -lpthread
 
 # The chatter: the same units WITH main (it is the CLI), patched at the three
 # expert-apply sites to delegate routed experts to peers. The lumabri client
@@ -178,8 +204,8 @@ build/dsp2p_%.o: build/deepseek_v4_p2p.c $(DS_HDRS) lumi_v4_ext.h
 	@mkdir -p build
 	$(CC) $(DS_UNIT_CFLAGS) -I. -include lumi_v4_ext.h -DLUMABRI_P2P -DLUMIBRI_P2P -D$* -c $< -o $@
 
-deepseek_p2p: $(DS_P2P_OBJS) build/lumi_v4_bridge.o
-	$(CC) -O2 -fopenmp $(DS_P2P_OBJS) build/lumi_v4_bridge.o -o $@ -lm -lpthread
+deepseek_p2p: $(DS_P2P_OBJS) build/lumi_v4_bridge.o $(DS_SIBLING_OBJS)
+	$(CC) -O2 -fopenmp $(DS_P2P_OBJS) build/lumi_v4_bridge.o $(DS_SIBLING_OBJS) -o $@ -lm -lpthread
 else
 # ---- older colibri: single generated deepseek.c -------------------------
 # It undefines `main` halfway through, so the CLI entry is renamed textually
