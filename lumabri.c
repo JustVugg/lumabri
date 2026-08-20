@@ -1873,11 +1873,10 @@ static int cmd_chat(int argc, char **argv) {
         } else
             printf("\n> ");
         fflush(stdout);
-        int got = fgets(line, sizeof line, stdin) != NULL;
+        int got = prompt_line(line, sizeof line) == 0;   /* line editor when a tty */
         if (g_tty) hline("\xe2\x95\xb0", "\xe2\x95\xaf", w);
         if (!got) break;
-        size_t L = strlen(line);
-        while (L && (line[L-1] == '\n' || line[L-1] == '\r')) line[--L] = 0;
+        size_t L = strlen(line);   /* prompt_line already stripped the newline */
         if (!L) continue;
         if (!strcmp(line, "/quit") || !strcmp(line, "/exit")) break;
         if (!strcmp(line, "/swarm")) { render_swarm(tracker); continue; }
