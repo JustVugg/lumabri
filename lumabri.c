@@ -944,6 +944,17 @@ static int engine_spawn(const char *engine, const char *shim, const char *tracke
          * a local run keeps colibri's own AUTOPIN. overwrite=0 either way, so
          * an explicit PIN still wins. */
         if (!local_dir) setenv("PIN", "0", 0);
+        /* Same split for the expert cache. A swarm chatter caches almost nothing
+         * (experts run on peers), so its cap stays at the small default. But a
+         * --local run holds its own experts, and there the cap IS the resident
+         * set: cap_experts is a swarm-shaped default (64), and colibri only
+         * auto-grows the cache to fit RAM when CAP_RAISE is on — which it turns
+         * OFF by default on a fast SSD. Left alone, a --local GLM cached 64 of
+         * 19456 experts and streamed the rest (TIERS 0…, ~0.1 tok/s) with the
+         * box's RAM sitting idle. Turn the RAM auto-raise on for local runs so
+         * the cache grows to whatever RAM_GB (or the auto 88%) allows; overwrite=0
+         * keeps an explicit CAP_RAISE=… authoritative. */
+        if (local_dir) setenv("CAP_RAISE", "1", 0);
         setenv("CHAT", "1", 1);                    /* olmoe's dialect */
         setenv("SERVE", "1", 1);                   /* everyone else's */
         setenv("KV_SLOTS", "1", 1);
