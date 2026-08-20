@@ -61,6 +61,7 @@ static struct {
     LmbTrustKeys trust;
     double next_discover, discover_period_s;
     int verify_pct;             /* LUMABRI_VERIFY: % of calls double-checked */
+    int allow_codegen_skew;     /* LUMABRI_ALLOW_CODEGEN_SKEW: cc/isa -> warn, not refuse */
     int hedge_ms;               /* 0 disables; base policy, fixed delay */
     unsigned long long calls, layers_done, failovers, verified, relays;
     unsigned long long hedges, hedge_wins, batch_calls, batch_rows;
@@ -213,9 +214,22 @@ static int lumi_add_peer(const char *addr) {
             snprintf(why, sizeof why, "engine: peer='%s' vs local='%s'",
                      engine, LMBE_ENGINE_ID);
         else if (strcmp(profile, L.profile)) {
+            /* Field-aware: identity/ABI (abi/engine/src/math/f32) always gates;
+             * cc/isa gate unless LUMABRI_ALLOW_CODEGEN_SKEW (then a warning, with
+             * the spot-check as the net); omp never gates (version alone changes
+             * no bits). A blanket strcmp used to refuse two boxes for a libgomp
+             * version or a gcc point release with identical output. */
             char d[192];
-            lmb_profile_diff(profile, L.profile, d, sizeof d);
-            snprintf(why, sizeof why, "build %s", d);
+            int r = lmb_profile_compat(profile, L.profile,
+                                       L.allow_codegen_skew, d, sizeof d);
+            if (r == 1)
+                snprintf(why, sizeof why, "build %s", d);
+            else if (r == 2)
+                fprintf(stderr, "[lumabri] peer %s: build %s — admitted "
+                        "(LUMABRI_ALLOW_CODEGEN_SKEW; spot-check %s)\n",
+                        p->addr, d,
+                        L.verify_pct ? "on" : "OFF — set LUMABRI_VERIFY=<pct>");
+            /* r == 0: differ only in omp — compatible, admit silently */
         } else if (bits != (uint32_t)L.expected_bits)
             snprintf(why, sizeof why, "bits: peer=%u vs local=%d",
                      bits, L.expected_bits);
@@ -444,6 +458,14 @@ static void lumi_init_ex(int n_layers, int n_experts, int hidden,
         L.verify_pct = atoi(v);
         if (L.verify_pct < 0) L.verify_pct = 0;
         if (L.verify_pct > 100) L.verify_pct = 100;
+    }
+    if (getenv("LUMABRI_ALLOW_CODEGEN_SKEW")) {
+        L.allow_codegen_skew = 1;
+        /* A peer with a different cc/isa may round the low bits differently; the
+         * spot-check (rerun on another replica, demand agreement) is what turns
+         * that from an unchecked risk into a caught one. Default a small rate on
+         * unless the operator set LUMABRI_VERIFY themselves. */
+        if (!v && L.verify_pct == 0) L.verify_pct = 5;
     }
     L.hedge_ms = lmb_env_int("LUMABRI_HEDGE_MS", 0, 0, 60000);
     L.initialized = 1;

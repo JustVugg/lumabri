@@ -611,6 +611,70 @@ static LMB_MAYBE_UNUSED void lmb_profile_diff(const char *peer, const char *loca
         snprintf(out, cap, "identical");
 }
 
+/* Value of one `key=` segment of a build profile, "" if absent. */
+static LMB_MAYBE_UNUSED int lmb_prof_field(const char *p, const char *key,
+                                           char *out, size_t cap) {
+    size_t klen = strlen(key);
+    for (const char *s = p; *s; ) {
+        if (!strncmp(s, key, klen) && s[klen] == '=') {
+            const char *v = s + klen + 1, *e = v;
+            while (*e && *e != ';') e++;
+            size_t n = (size_t)(e - v);
+            if (n >= cap) n = cap - 1;
+            memcpy(out, v, n); out[n] = 0;
+            return 0;
+        }
+        while (*s && *s != ';') s++;
+        if (*s == ';') s++;
+    }
+    if (cap) out[0] = 0;
+    return -1;
+}
+
+/* Compare two build profiles field by field, three tiers:
+ *  - identity/ABI (abi, engine, src, math, f32): a mismatch means the peer runs
+ *    different code or a different model — always incompatible.
+ *  - codegen (cc, isa): the peer may round the low bits differently. Incompatible
+ *    by default — byte-identity is the guarantee — but with allow_codegen it is
+ *    downgraded to a warning so a heterogeneous swarm is possible for callers
+ *    that accept approximate results and pair it with spot-check verification.
+ *  - omp: the OpenMP *version* does not change results on its own — the thread
+ *    count and reduction order do, and neither is in the profile — so it never
+ *    gates (two libgomp versions no longer refuse each other).
+ * Returns 0 compatible, 1 incompatible (why = the differing field), 2 compatible
+ * with a codegen warning (why = the field that may round differently). */
+static LMB_MAYBE_UNUSED int lmb_profile_compat(const char *peer, const char *local,
+                                               int allow_codegen,
+                                               char *why, size_t cap) {
+    static const char *const hard[] = { "abi", "engine", "src", "math", "f32" };
+    static const char *const codegen[] = { "cc", "isa" };
+    char a[72], b[72];   /* a profile value; longest in practice is cc= (~40) */
+    for (size_t i = 0; i < sizeof hard / sizeof *hard; i++) {
+        lmb_prof_field(peer, hard[i], a, sizeof a);
+        lmb_prof_field(local, hard[i], b, sizeof b);
+        if (strcmp(a, b)) {
+            snprintf(why, cap, "%s: peer='%s' vs local='%s'", hard[i], a, b);
+            return 1;
+        }
+    }
+    int warned = 0;
+    for (size_t i = 0; i < sizeof codegen / sizeof *codegen; i++) {
+        lmb_prof_field(peer, codegen[i], a, sizeof a);
+        lmb_prof_field(local, codegen[i], b, sizeof b);
+        if (strcmp(a, b)) {
+            if (!allow_codegen) {
+                snprintf(why, cap, "%s: peer='%s' vs local='%s'", codegen[i], a, b);
+                return 1;
+            }
+            if (!warned) {
+                snprintf(why, cap, "%s: peer='%s' vs local='%s'", codegen[i], a, b);
+                warned = 1;
+            }
+        }
+    }
+    return warned ? 2 : 0;   /* 0: differ only in omp (ignored) */
+}
+
 static int lmb_cur_u32(LmbCur *c, uint32_t *v) {
     if (c->off > c->len || 4 > c->len - c->off) return -1;
     *v = lmb_get32(c->p + c->off); c->off += 4;
