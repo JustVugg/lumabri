@@ -51,7 +51,9 @@ them, so a script never inherits somebody's saved answers.
 
 Inside the chat, `/swarm` shows the network live and anonymous (peers are
 numbered, never named), and `/model` lists the models on the swarm and switches
-between them on the fly.
+between them on the fly. The prompt is a real line editor — arrow keys, Home/End,
+word and line kill, and Up/Down through the session's history — so a typo is one
+keystroke back, not a retyped line.
 
 ## How it works
 
@@ -84,7 +86,12 @@ distributed run are one code path and produce identical tokens. A peer also
 advertises its exact build (engine, source hash, ISA, compiler, quantization,
 model root), and a chatter refuses a peer whose build differs before it sends a
 single activation, because a `-march=native` rebuild can change the last bit and
-that must never happen silently.
+that must never happen silently. The refusal names the field that diverged, and
+the gate splits by what a mismatch means: engine, source hash, model and math
+flags always refuse; the OpenMP version never does; compiler and ISA refuse by
+default but `LUMABRI_ALLOW_CODEGEN_SKEW=1` downgrades them to a warning and turns
+spot-checking on, for a mixed-hardware swarm that accepts verified-but-approximate
+results instead of bit-identical ones.
 
 **Peers are not trusted.** Every maintainer computes a sha256 per MiB of what it
 holds and sends it with its registration. The origin can sign that truth with an
