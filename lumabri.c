@@ -34,7 +34,9 @@
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/wait.h>
+#include <termios.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "lumabri_proto.h"
 #include "lumabri_sign.h"
@@ -1174,7 +1176,202 @@ static double free_gb_at(const char *path) {
     return (double)v.f_bavail * (double)v.f_frsize / 1e9;
 }
 
+/* --- a small line editor -------------------------------------------------
+ * fgets leaves the terminal in canonical mode, where the arrow keys are not
+ * handled and arrive as raw escape bytes (^[[D) that land in the text. This
+ * gives the prompt the editing people expect — left/right, Home/End,
+ * backspace/Delete, word/line kill, and up/down history — by reading in raw
+ * mode and repainting only the input, so the caller's prompt (a drawn box) is
+ * left untouched. Non-interactive input (a pipe, a test) still uses fgets.
+ * Cursor moves are relative and per-character (UTF-8 aware), so it assumes the
+ * input does not wrap past the terminal width — fine for a chat line. */
+#define LE_HIST 64
+static char *le_hist[LE_HIST];
+static int le_hist_n = 0;
+
+static void le_hist_push(const char *s) {
+    if (!s || !*s) return;
+    char *last = le_hist_n ? le_hist[(le_hist_n - 1) % LE_HIST] : NULL;
+    if (last && !strcmp(last, s)) return;      /* no consecutive duplicate */
+    char *d = strdup(s);
+    if (!d) return;
+    free(le_hist[le_hist_n % LE_HIST]);
+    le_hist[le_hist_n % LE_HIST] = d;
+    le_hist_n++;
+}
+
+static int le_lead(unsigned char c) { return (c & 0xC0) != 0x80; }
+static int le_cols(const char *s, int a, int b) {   /* characters in [a,b) */
+    int n = 0;
+    for (int i = a; i < b; i++)
+        if (le_lead((unsigned char)s[i])) n++;
+    return n;
+}
+static int le_prev(const char *s, int pos) {        /* start of char before pos */
+    int i = pos - 1;
+    while (i > 0 && !le_lead((unsigned char)s[i])) i--;
+    return i < 0 ? 0 : i;
+}
+static int le_next(const char *s, int len, int pos) {
+    int i = pos + 1;
+    while (i < len && !le_lead((unsigned char)s[i])) i++;
+    return i > len ? len : i;
+}
+static void le_left(int n) { if (n > 0) printf("\x1b[%dD", n); }
+
+/* Replace the visible input with `text` (history recall / line kill). */
+static void le_set(char *buf, size_t cap, int *len, int *pos, const char *text) {
+    le_left(le_cols(buf, 0, *pos));            /* to input start */
+    printf("\x1b[K");                          /* clear to end of line */
+    snprintf(buf, cap, "%s", text ? text : "");
+    *len = (int)strlen(buf);
+    *pos = *len;
+    fwrite(buf, 1, (size_t)*len, stdout);
+}
+
+static int line_edit(char *buf, size_t cap) {
+    struct termios old, raw;
+    if (tcgetattr(0, &old)) return -2;         /* not a real tty -> caller fgets */
+    raw = old;
+    raw.c_lflag &= ~(tcflag_t)(ICANON | ECHO);
+    raw.c_cc[VMIN] = 1;
+    raw.c_cc[VTIME] = 0;
+    if (tcsetattr(0, TCSANOW, &raw)) return -2;
+
+    int len = 0, pos = 0, rc = 0;
+    int hidx = le_hist_n;                       /* == "the line being typed" */
+    char save[64];                              /* in-progress line, for down */
+    save[0] = 0;
+    buf[0] = 0;
+
+    for (;;) {
+        unsigned char c;
+        if (read(0, &c, 1) <= 0) { rc = -1; break; }
+
+        if (c == '\r' || c == '\n') { printf("\r\n"); break; }
+        if (c == 3) {                            /* Ctrl-C: cancel, keep old semantics */
+            tcsetattr(0, TCSANOW, &old);
+            printf("\r\n");
+            raise(SIGINT);
+            rc = -1; len = 0; break;
+        }
+        if (c == 4) {                            /* Ctrl-D: EOF on empty, else Delete */
+            if (len == 0) { rc = -1; break; }
+            if (pos < len) {
+                int nx = le_next(buf, len, pos);
+                memmove(buf + pos, buf + nx, (size_t)(len - nx));
+                len -= nx - pos;
+                fwrite(buf + pos, 1, (size_t)(len - pos), stdout);
+                printf(" ");
+                le_left(le_cols(buf, pos, len) + 1);
+            }
+        } else if (c == 127 || c == 8) {         /* Backspace */
+            if (pos > 0) {
+                int p = le_prev(buf, pos);
+                memmove(buf + p, buf + pos, (size_t)(len - pos));
+                len -= pos - p;
+                pos = p;
+                le_left(1);
+                fwrite(buf + pos, 1, (size_t)(len - pos), stdout);
+                printf(" ");
+                le_left(le_cols(buf, pos, len) + 1);
+            }
+        } else if (c == 1) {                     /* Ctrl-A: Home */
+            le_left(le_cols(buf, 0, pos)); pos = 0;
+        } else if (c == 5) {                     /* Ctrl-E: End */
+            fwrite(buf + pos, 1, (size_t)(len - pos), stdout); pos = len;
+        } else if (c == 21) {                    /* Ctrl-U: clear line */
+            le_set(buf, cap, &len, &pos, "");
+        } else if (c == 11) {                    /* Ctrl-K: kill to end */
+            printf("\x1b[K"); len = pos; buf[len] = 0;
+        } else if (c == 23) {                    /* Ctrl-W: delete previous word */
+            int p = pos;
+            while (p > 0 && buf[p-1] == ' ') p--;
+            while (p > 0 && buf[p-1] != ' ') p--;
+            if (p < pos) {
+                le_left(le_cols(buf, p, pos));
+                memmove(buf + p, buf + pos, (size_t)(len - pos));
+                int killed = le_cols(buf, p, pos);
+                len -= pos - p; pos = p;
+                fwrite(buf + pos, 1, (size_t)(len - pos), stdout);
+                for (int k = 0; k < killed; k++) printf(" ");
+                le_left(le_cols(buf, pos, len) + killed);
+            }
+        } else if (c == 27) {                    /* an escape sequence */
+            unsigned char a, b;
+            if (read(0, &a, 1) <= 0) continue;
+            if (a != '[' && a != 'O') continue;
+            if (read(0, &b, 1) <= 0) continue;
+            if (b == 'D') {                      /* Left */
+                if (pos > 0) { pos = le_prev(buf, pos); le_left(1); }
+            } else if (b == 'C') {               /* Right */
+                if (pos < len) { int nx = le_next(buf, len, pos);
+                    fwrite(buf + pos, 1, (size_t)(nx - pos), stdout); pos = nx; }
+            } else if (b == 'H') {               /* Home */
+                le_left(le_cols(buf, 0, pos)); pos = 0;
+            } else if (b == 'F') {               /* End */
+                fwrite(buf + pos, 1, (size_t)(len - pos), stdout); pos = len;
+            } else if (b == 'A' || b == 'B') {   /* Up / Down: history */
+                int avail = le_hist_n < LE_HIST ? le_hist_n : LE_HIST;
+                int oldest = le_hist_n - avail;
+                if (b == 'A' && hidx > oldest) {
+                    if (hidx == le_hist_n) snprintf(save, sizeof save, "%s", buf);
+                    hidx--;
+                    le_set(buf, cap, &len, &pos, le_hist[hidx % LE_HIST]);
+                } else if (b == 'B' && hidx < le_hist_n) {
+                    hidx++;
+                    le_set(buf, cap, &len, &pos,
+                           hidx == le_hist_n ? save : le_hist[hidx % LE_HIST]);
+                }
+            } else if (b >= '0' && b <= '9') {   /* extended: read to the final '~' */
+                unsigned char t = b, last = b;
+                while (read(0, &t, 1) == 1 && t != '~') last = t;
+                (void)last;
+                if (b == '3' && pos < len) {     /* Delete */
+                    int nx = le_next(buf, len, pos);
+                    memmove(buf + pos, buf + nx, (size_t)(len - nx));
+                    len -= nx - pos;
+                    fwrite(buf + pos, 1, (size_t)(len - pos), stdout);
+                    printf(" ");
+                    le_left(le_cols(buf, pos, len) + 1);
+                } else if (b == '1' || b == '7') {         /* Home */
+                    le_left(le_cols(buf, 0, pos)); pos = 0;
+                } else if (b == '4' || b == '8') {         /* End */
+                    fwrite(buf + pos, 1, (size_t)(len - pos), stdout); pos = len;
+                }
+            }
+        } else if (c >= 0x20) {                  /* a printable char (maybe UTF-8) */
+            unsigned char cb[4]; int nb = 1;
+            cb[0] = c;
+            if (c >= 0xC0) {
+                nb = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : 2;
+                for (int k = 1; k < nb; k++)
+                    if (read(0, &cb[k], 1) <= 0) { nb = k; break; }
+            }
+            if (len + nb < (int)cap - 1) {
+                memmove(buf + pos + nb, buf + pos, (size_t)(len - pos));
+                memcpy(buf + pos, cb, (size_t)nb);
+                len += nb;
+                fwrite(buf + pos, 1, (size_t)(len - pos), stdout);
+                le_left(le_cols(buf, pos + nb, len));
+                pos += nb;
+            }
+        }
+        buf[len] = 0;
+        fflush(stdout);
+    }
+
+    buf[len] = 0;
+    tcsetattr(0, TCSANOW, &old);
+    if (rc == 0) le_hist_push(buf);
+    return rc;
+}
+
 static int prompt_line(char *buf, size_t cap) {
+    if (g_tty && isatty(0)) {
+        int r = line_edit(buf, cap);
+        if (r != -2) return r;                   /* -2 = no tty, fall through */
+    }
     if (!fgets(buf, (int)cap, stdin)) return -1;
     size_t n = strlen(buf);
     while (n && (buf[n-1] == '\n' || buf[n-1] == '\r')) buf[--n] = 0;
