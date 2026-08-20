@@ -933,12 +933,17 @@ static int engine_spawn(const char *engine, const char *shim, const char *tracke
             setenv("LUMABRI_STATS", "2", 1);       /* boot progress, not a log */
             setenv("SNAP", vroot, 1);
         }
-        /* Pinning is for an engine that owns its experts. A chatter never
+        /* Pinning is for an engine that owns its experts. A SWARM chatter never
          * does: either they run on peers (pinning is pointless) or they come
          * over the network (pinning is catastrophic — colibri's AUTOPIN reads
          * a shipped .coli_usage and preloads GBs of them before the first
-         * token). overwrite=0, so an explicit PIN still wins. */
-        setenv("PIN", "0", 0);
+         * token). But a --local run owns its experts on disk, and there pinning
+         * the hot ones in RAM is the whole difference between decode from RAM
+         * and streaming every expert off disk each token (measured: GLM at
+         * TIERS 0 resident → ~0.1 tok/s). So only force it off for the swarm;
+         * a local run keeps colibri's own AUTOPIN. overwrite=0 either way, so
+         * an explicit PIN still wins. */
+        if (!local_dir) setenv("PIN", "0", 0);
         setenv("CHAT", "1", 1);                    /* olmoe's dialect */
         setenv("SERVE", "1", 1);                   /* everyone else's */
         setenv("KV_SLOTS", "1", 1);
