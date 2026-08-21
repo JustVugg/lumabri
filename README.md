@@ -125,6 +125,7 @@ fails loudly instead of applying in the wrong place.
 | `inkling` | Inkling | yes | `expert_node_inkling`, proven by `phase2_inkling_test.sh` |
 | `kimi_k3` | Kimi K3 | yes | `expert_node_kimi`, proven by `phase2_kimi_test.sh` |
 | `deepseek` | DeepSeek V4 | yes | `expert_node_deepseek`, proven by `phase2_deepseek_test.sh` |
+| `qwen36` | Qwen3.6 | yes | `expert_node_qwen36`, proven by `phase2_qwen36_test.sh` |
 
 "Proven" means the experiment, not the claim: the same engine and the same
 prompt, generated twice, once with the experts local and once with every one of
