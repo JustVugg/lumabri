@@ -40,7 +40,7 @@ phase2-glm: expert_node_glm
 DS_SINGLE := $(wildcard $(ENGINE)/deepseek.c)
 DS_MULTI  := $(wildcard $(ENGINE)/deepseek_v4.c)
 HAVE_ENGINES := $(notdir $(basename $(wildcard $(ENGINE)/olmoe.c $(ENGINE)/colibri.c \
-                 $(ENGINE)/inkling.c $(ENGINE)/kimi_k3.c)))
+                 $(ENGINE)/inkling.c $(ENGINE)/kimi_k3.c $(ENGINE)/qwen36.c)))
 HAVE_ENGINES += $(if $(DS_MULTI)$(DS_SINGLE),deepseek)
 
 # Current colibri's kimi expert_apply grew two i8-activation params (zq,zsc);
@@ -54,13 +54,14 @@ NODE_colibri  = expert_node_glm
 NODE_inkling  = expert_node_inkling
 NODE_kimi_k3  = expert_node_kimi
 NODE_deepseek = expert_node_deepseek
+NODE_qwen36   = expert_node_qwen36
 
 ENGINE_NODES    = $(foreach e,$(HAVE_ENGINES),$(NODE_$(e)))
 # Both the expert node and the chatter build for either DeepSeek layout: the
 # single file with a line patch, the multi-file source with an anchored one.
 CHATTER_ENGINES := $(HAVE_ENGINES)
 ENGINE_CHATTERS = $(foreach e,$(CHATTER_ENGINES),$(e)_p2p)
-MISSING_ENGINES = $(filter-out $(HAVE_ENGINES),olmoe colibri inkling kimi_k3 deepseek)
+MISSING_ENGINES = $(filter-out $(HAVE_ENGINES),olmoe colibri inkling kimi_k3 deepseek qwen36)
 MISSING_CHATTERS = $(filter-out $(CHATTER_ENGINES),$(HAVE_ENGINES))
 
 # A strict distributed run must not mix engine sources or numeric build
@@ -79,6 +80,7 @@ SRCID_olmoe   := $(call engine_source_id,olmoe,olmoe)
 SRCID_colibri := $(call engine_source_id,colibri,colibri)
 SRCID_inkling := $(call engine_source_id,inkling,inkling)
 SRCID_kimi_k3 := $(call engine_source_id,kimi_k3,kimi_k3)
+SRCID_qwen36  := $(call engine_source_id,qwen36,qwen36)
 ifneq ($(DS_MULTI),)
 SRCID_deepseek := $(call engine_source_id,deepseek_v4,deepseek)
 else
@@ -89,6 +91,7 @@ PROFILE_olmoe   = -DLMBE_ENGINE_ID='"olmoe"'      -DLMBE_SOURCE_ID='"$(SRCID_olm
 PROFILE_colibri = -DLMBE_ENGINE_ID='"colibri"'    -DLMBE_SOURCE_ID='"$(SRCID_colibri)"' -DLMBE_EXPECT_BITS=8
 PROFILE_inkling = -DLMBE_ENGINE_ID='"inkling"'    -DLMBE_SOURCE_ID='"$(SRCID_inkling)"' -DLMBE_EXPECT_BITS=8
 PROFILE_kimi_k3 = -DLMBE_ENGINE_ID='"kimi_k3"'    -DLMBE_SOURCE_ID='"$(SRCID_kimi_k3)"' -DLMBE_EXPECT_BITS=0
+PROFILE_qwen36  = -DLMBE_ENGINE_ID='"qwen36"'     -DLMBE_SOURCE_ID='"$(SRCID_qwen36)"'  -DLMBE_EXPECT_BITS=0
 PROFILE_deepseek= -DLMBE_ENGINE_ID='"deepseek_v4"' -DLMBE_SOURCE_ID='"$(SRCID_deepseek)"' -DLMBE_EXPECT_BITS=0
 
 # every engine's peer in one go — the ones this checkout has
@@ -121,6 +124,14 @@ expert_node_inkling: $(EXPERT_DEPS) expert_engines/inkling.h $(ENGINE)/inkling.c
 expert_node_kimi: $(EXPERT_DEPS) expert_engines/kimi_k3.h $(ENGINE)/kimi_k3.c \
                   engine_patches/kimi_k3-p2p.diff $(ENGINE_PROFILE_DEPS)
 	$(CC) $(P2P_CFLAGS) $(PROFILE_kimi_k3) $(K3_ZQ_FLAG) -DLMBE_ENGINE_HEADER='"expert_engines/kimi_k3.h"' \
+	      expert_node.c -o $@ -lm -lpthread
+
+# qwen36 (Qwen3.6): olmoe dialect, experts group-scaled and int4/int8, one row
+# at a time. The CUDA VRAM tier is compiled out on CPU (qwen36_tier.h supplies
+# inline stubs), so nothing beside qwen36.c needs linking.
+expert_node_qwen36: $(EXPERT_DEPS) expert_engines/qwen36.h $(ENGINE)/qwen36.c \
+                    engine_patches/qwen36-p2p.diff $(ENGINE_PROFILE_DEPS)
+	$(CC) $(P2P_CFLAGS) $(PROFILE_qwen36) -DLMBE_ENGINE_HEADER='"expert_engines/qwen36.h"' \
 	      expert_node.c -o $@ -lm -lpthread
 
 # DeepSeek V4 needs two extra things at build time.
@@ -268,6 +279,9 @@ colibri_p2p: build/colibri_p2p.c $(ENGINE_P2P_DEPS)
 inkling_p2p: build/inkling_p2p.c $(ENGINE_P2P_DEPS)
 	$(CC) $(P2P_CFLAGS) $(PROFILE_inkling) -DLUMABRI_P2P -DLUMIBRI_P2P $< -o $@ -lm -lpthread
 
+qwen36_p2p: build/qwen36_p2p.c $(ENGINE_P2P_DEPS)
+	$(CC) $(P2P_CFLAGS) $(PROFILE_qwen36) -DLUMABRI_P2P -DLUMIBRI_P2P $< -o $@ -lm -lpthread
+
 kimi_k3_p2p: build/kimi_k3_p2p.c $(ENGINE_P2P_DEPS)
 	$(CC) $(P2P_CFLAGS) $(PROFILE_kimi_k3) -DLUMABRI_P2P -DLUMIBRI_P2P $< -o $@ -lm -lpthread
 
@@ -302,6 +316,9 @@ test-phase2-kimi: expert_node_kimi
 # script's header for why)
 test-phase2-deepseek: expert_node_deepseek
 	./phase2_deepseek_test.sh
+
+test-phase2-qwen36: expert_node_qwen36
+	./phase2_qwen36_test.sh
 
 # Every engine's byte-identity proof, one after the other. DeepSeek V4 has no
 # synthetic fixture (see phase2_deepseek_test.sh), so it runs only when a real
