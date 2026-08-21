@@ -345,7 +345,30 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--engine-dir", default=os.environ.get("ENGINE", "../moe-stream/c"))
     ap.add_argument("--check", action="store_true")
+    ap.add_argument("--apply-one", metavar="ENGINE.c",
+                    help="apply this engine's hooks and write the patched source to --out")
+    ap.add_argument("--out", help="output path for --apply-one")
     a = ap.parse_args()
+    if a.apply_one:
+        # Build the patched chatter source by anchor, not by a shipped unified
+        # diff: colibri moves the code around each of the engine's lines, and a
+        # line-numbered diff's context drifts out from under `patch` (it can drop
+        # a hunk — e.g. the client include — and leave the rest, which compiles
+        # with implicit-declaration errors). Anchoring on one distinctive line
+        # each survives that, and if an anchor genuinely moved apply_hooks exits
+        # loudly naming it, instead of a silent half-patch.
+        fname = a.apply_one
+        if fname not in ENGINES:
+            sys.exit("make_patches: no hooks defined for %s" % fname)
+        if not a.out:
+            sys.exit("make_patches: --apply-one needs --out")
+        src = pristine(a.engine_dir, fname)
+        if src is None:
+            sys.exit("make_patches: %s not found in %s" % (fname, a.engine_dir))
+        out = src if "LUMIBRI_P2P" in src else apply_hooks(src, ENGINES[fname], fname)
+        with open(a.out, "w", encoding="utf-8", errors="surrogateescape") as f:
+            f.write(out)
+        return
     if a.check:
         tmp = tempfile.mkdtemp()
         try:

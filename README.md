@@ -254,7 +254,9 @@ is also what makes spot-check verification of untrusted peers possible at all.
 
 ## Requirements
 
-Linux, gcc, GNU make. Python 3 with numpy only for the test fixtures. A
+Linux, gcc, GNU make, and Python 3 (it applies the chatter hooks to the engine
+by anchor at build time, so a patch survives colibri moving the code around it;
+numpy is only needed for the synthetic test fixtures). A
 [colibri](https://github.com/JustVugg/colibri) build provides the engine
 binaries.
 
