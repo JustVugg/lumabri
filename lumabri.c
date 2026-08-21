@@ -1235,20 +1235,28 @@ static int line_edit(char *buf, size_t cap) {
     struct termios old, raw;
     if (tcgetattr(0, &old)) return -2;         /* not a real tty -> caller fgets */
     raw = old;
-    raw.c_lflag &= ~(tcflag_t)(ICANON | ECHO);
+    /* Clear ISIG/IEXTEN too, and IXON, so Ctrl-C / Ctrl-Z / Ctrl-S reach read()
+     * as bytes instead of the tty acting on them behind our back — otherwise the
+     * Ctrl-C branch below is dead and Ctrl-Z suspends with the terminal still in
+     * raw mode, leaving a garbled shell. */
+    raw.c_lflag &= ~(tcflag_t)(ICANON | ECHO | ISIG | IEXTEN);
+    raw.c_iflag &= ~(tcflag_t)(IXON);
     raw.c_cc[VMIN] = 1;
     raw.c_cc[VTIME] = 0;
     if (tcsetattr(0, TCSANOW, &raw)) return -2;
 
     int len = 0, pos = 0, rc = 0;
     int hidx = le_hist_n;                       /* == "the line being typed" */
-    char save[64];                              /* in-progress line, for down */
+    char *save = (char *)malloc(cap);           /* in-progress line, for down */
+    if (!save) { tcsetattr(0, TCSANOW, &old); return -2; }   /* -> caller fgets */
     save[0] = 0;
     buf[0] = 0;
 
     for (;;) {
         unsigned char c;
-        if (read(0, &c, 1) <= 0) { rc = -1; break; }
+        ssize_t rn = read(0, &c, 1);
+        if (rn < 0 && errno == EINTR) continue;  /* a signal, not end of input */
+        if (rn <= 0) { rc = -1; break; }
 
         if (c == '\r' || c == '\n') { printf("\r\n"); break; }
         if (c == 3) {                            /* Ctrl-C: cancel, keep old semantics */
@@ -1256,6 +1264,12 @@ static int line_edit(char *buf, size_t cap) {
             printf("\r\n");
             raise(SIGINT);
             rc = -1; len = 0; break;
+        }
+        if (c == 26) {                           /* Ctrl-Z: suspend, terminal restored */
+            tcsetattr(0, TCSANOW, &old);
+            raise(SIGTSTP);
+            tcsetattr(0, TCSANOW, &raw);         /* resumed: back to raw */
+            continue;
         }
         if (c == 4) {                            /* Ctrl-D: EOF on empty, else Delete */
             if (len == 0) { rc = -1; break; }
@@ -1291,9 +1305,9 @@ static int line_edit(char *buf, size_t cap) {
             while (p > 0 && buf[p-1] == ' ') p--;
             while (p > 0 && buf[p-1] != ' ') p--;
             if (p < pos) {
-                le_left(le_cols(buf, p, pos));
+                int killed = le_cols(buf, p, pos);   /* columns removed — count BEFORE the shift */
+                le_left(killed);
                 memmove(buf + p, buf + pos, (size_t)(len - pos));
-                int killed = le_cols(buf, p, pos);
                 len -= pos - p; pos = p;
                 fwrite(buf + pos, 1, (size_t)(len - pos), stdout);
                 for (int k = 0; k < killed; k++) printf(" ");
@@ -1317,7 +1331,7 @@ static int line_edit(char *buf, size_t cap) {
                 int avail = le_hist_n < LE_HIST ? le_hist_n : LE_HIST;
                 int oldest = le_hist_n - avail;
                 if (b == 'A' && hidx > oldest) {
-                    if (hidx == le_hist_n) snprintf(save, sizeof save, "%s", buf);
+                    if (hidx == le_hist_n) snprintf(save, cap, "%s", buf);
                     hidx--;
                     le_set(buf, cap, &len, &pos, le_hist[hidx % LE_HIST]);
                 } else if (b == 'B' && hidx < le_hist_n) {
@@ -1366,6 +1380,7 @@ static int line_edit(char *buf, size_t cap) {
     buf[len] = 0;
     tcsetattr(0, TCSANOW, &old);
     if (rc == 0) le_hist_push(buf);
+    free(save);
     return rc;
 }
 

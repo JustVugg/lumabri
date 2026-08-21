@@ -43,6 +43,7 @@ static void lmbe_open(const char *dir, int cap, int bits) {
      * stores every layer under its own index). Without this the resident-mode
      * preload dereferences a NULL and the node segfaults before serving. */
     lmbe_M.active_of = (int *)malloc((size_t)lmbe_M.c.n_layers * sizeof(int));
+    if (!lmbe_M.active_of) { fprintf(stderr, "OOM allocating active_of\n"); exit(1); }
     for (int i = 0; i < lmbe_M.c.n_layers; i++) lmbe_M.active_of[i] = i;
 }
 
