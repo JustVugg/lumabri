@@ -1,7 +1,7 @@
 diff --git a/c/colibri.c b/c/colibri.c
 --- a/c/colibri.c
 +++ b/c/colibri.c
-@@ -63,6 +63,13 @@
+@@ -68,6 +68,13 @@
  #include "schema_gbnf.h"                          /* SCHEMA=: JSON-Schema -> GBNF for method F */
  #include "decode_batch.h"
  #include "route_trace.h"                           /* ROUTE_TRACE + .coli_usage, engine-agnostic (#700) */
@@ -12,10 +12,10 @@ diff --git a/c/colibri.c b/c/colibri.c
 + * at runtime unless the swarm can cover every expert. */
 +#include "lumibri_client.h"
 +#endif
+ #include "kv_fp8.h"                               /* KV8=1: cache latente in fp8 e4m3 + scala per-riga */
+ #include "kv_tq.h"                                /* KV_TQ=3|4: cache latente PolarQuant (rot+polare) */
  #ifdef _OPENMP
- #include <omp.h>                                  /* scratch per-thread nell'attention */
- #else
-@@ -1918,6 +1925,19 @@
+@@ -2417,6 +2424,19 @@
      for(int i=0;i<c->n_layers;i++) if(!m->L[i].sparse) rt_drop_row(i);
      if(!m->has_mtp) rt_drop_row(c->n_layers);
      m->resident_bytes=rb;
@@ -35,7 +35,7 @@ diff --git a/c/colibri.c b/c/colibri.c
  }
  
  /* embed: dequantizza la riga del token (scala per-riga) in x[hidden] */
-@@ -4015,6 +4035,17 @@
+@@ -5089,6 +5109,17 @@
          int e=idxs[(int64_t)s*K+kk];
          if(!seen[e]){ seen[e]=1; uniq[nu++]=e; }
      }

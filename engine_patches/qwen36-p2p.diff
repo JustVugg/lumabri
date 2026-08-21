@@ -1,0 +1,40 @@
+diff --git a/c/qwen36.c b/c/qwen36.c
+--- a/c/qwen36.c
++++ b/c/qwen36.c
+@@ -60,6 +60,13 @@
+ #include "st.h"
+ #include "json.h"   /* tokenizer.json parsing (reuse minimal parser) */
+ #include "qwen36_tier.h"   /* optional transparent Vulkan compute backend for MoE experts */
++
++#ifdef LUMIBRI_P2P
++/* lumabri: with a tracker (or LUMABRI_EXPERTS) the routed experts run on
++ * peers instead of being read from disk. Inert without the define, and inert
++ * at runtime unless the swarm can cover every expert. */
++#include "lumibri_client.h"
++#endif
+ 
+ #ifdef _WIN32
+ #include <windows.h>
+@@ -1180,6 +1187,10 @@
+     if (cl < 0.1f) cl = 0.1f; if (cl > 1.0f) cl = 1.0f;
+     m->pilot_conf_limit = cl;
+     m->dense_load_s = now_s() - t0;
++#ifdef LUMIBRI_P2P
++    lumi_init(c->n_layers, c->n_experts, c->hidden);
++    atexit(lumi_report);
++#endif
+ }
+ 
+ /* scale counts per expert matrix: per-row (gs=0) or grouped along input dim */
+@@ -1619,6 +1630,11 @@
+         }
+         const float *xs = x + (int64_t)s*D;
+         int shared_done = 0;
++#ifdef LUMIBRI_P2P
++        if (lumi_layer_on(layer)) {   /* the K routed experts run on peers; routing, the sum and the shared expert stay here */
++            lumi_moe_apply(layer, idx, val, K, xs, D, out + (int64_t)s*D);
++        } else
++#endif
+         if (qt_ready()) {
+             /* CUDA expert tier: run the resident experts as async groups on
+              * all devices, compute the misses on the CPU (overlapped), then

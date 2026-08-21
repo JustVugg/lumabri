@@ -1,7 +1,7 @@
 diff --git a/c/inkling.c b/c/inkling.c
 --- a/c/inkling.c
 +++ b/c/inkling.c
-@@ -153,6 +153,13 @@
+@@ -162,6 +162,13 @@
  static double rss_gb(void) { struct rusage r; getrusage(RUSAGE_SELF, &r); return r.ru_maxrss / (1024.0*1024.0); }
  #endif
  static float *falloc(int64_t n) { float *p = malloc(n*sizeof(float)); if(!p){fprintf(stderr,"OOM %ld\n",(long)n);exit(1);} return p; }
@@ -15,7 +15,7 @@ diff --git a/c/inkling.c b/c/inkling.c
  static float sigmoidf(float x) { return 1.f / (1.f + expf(-x)); }
  static float siluf(float x) { return x / (1.f + expf(-x)); }
  /* TOPP=p (0..1): top-p adattivo sui routed — tieni gli esperti fino al peso
-@@ -867,6 +874,16 @@
+@@ -952,6 +959,16 @@
      for (int i = 0; i < c->n_layers; i++) if (!c->sparse[i]) rt_drop_row(i);
      rt_drop_row(c->n_layers);                     /* inkling has no MTP row */
      m->eusage = rt_counts_all();                  /* alias: the bump sites stay as they are */
@@ -32,7 +32,7 @@ diff --git a/c/inkling.c b/c/inkling.c
      m->dense_load_s = now_s() - t0;
  }
  
-@@ -1185,6 +1202,16 @@
+@@ -1318,6 +1335,16 @@
          }
          m->euse += keff[s];
      }
@@ -49,9 +49,9 @@ diff --git a/c/inkling.c b/c/inkling.c
      /* Il ciclo sotto ACQUISISCE uno slot per ogni coppia (token, esperto) e ne tiene
       * il puntatore fino al calcolo. slot_acquire evince l'LRU quando la cache e'
       * piena — anche uno slot gia' consegnato in QUESTA chiamata: il puntatore resta
-@@ -1202,6 +1229,9 @@
-     float *g = falloc(2*I), *u = g + I, *hh = falloc(D);
+@@ -1336,6 +1363,9 @@
      int q4 = m->xq && m->rb13*2 == D;   /* packed int4 vs int8 container */
+     int shared_done = 0;                /* set when overlapped with the last GPU round */
      int64_t npair = (int64_t)S*K;
 +#ifdef LUMIBRI_P2P
 +    if (lumi_remote) npair = 0;       /* nothing left to acquire, fill or compute */

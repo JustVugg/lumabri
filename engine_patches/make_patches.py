@@ -236,12 +236,40 @@ fail:
 """),
 ]
 
+# --------------------------------------------------------------------------
+# qwen36 (Qwen3.6): olmoe's dialect and one row at a time, but every layer also
+# has a SHARED expert after the routed loop, plus a CUDA tier branch behind
+# qt_ready() (a stub returning 0 without COLI_CUDA). So the hook must NOT
+# `continue` — it delegates the K routed experts and lets the shared expert and
+# the row's tail run locally. It lands right after `int shared_done = 0;` and
+# ends in `} else`, so it becomes an `else if` in front of the qt_ready() branch:
+# the CPU path delegates, shared_done stays 0, and the shared expert still adds
+# itself to `out`. Without the macro the added lines vanish and qt_ready() is a
+# plain `if` again.
+# --------------------------------------------------------------------------
+QWEN36 = [
+    hook('#include "qwen36_tier.h"   /* optional transparent Vulkan compute backend for MoE experts */\n',
+         INCLUDE),
+    hook("    m->dense_load_s = now_s() - t0;\n", """#ifdef LUMIBRI_P2P
+    lumi_init(c->n_layers, c->n_experts, c->hidden);
+    atexit(lumi_report);
+#endif
+"""),
+    hook("        int shared_done = 0;\n", """#ifdef LUMIBRI_P2P
+        if (lumi_layer_on(layer)) {   /* the K routed experts run on peers; routing, the sum and the shared expert stay here */
+            lumi_moe_apply(layer, idx, val, K, xs, D, out + (int64_t)s*D);
+        } else
+#endif
+"""),
+]
+
 ENGINES = {
     "olmoe.c": OLMOE,
     "colibri.c": COLIBRI,
     "inkling.c": INKLING,
     "kimi_k3.c": KIMI,
     "deepseek.c": DEEPSEEK,
+    "qwen36.c": QWEN36,
 }
 
 

@@ -1,10 +1,10 @@
 diff --git a/c/kimi_k3.c b/c/kimi_k3.c
 --- a/c/kimi_k3.c
 +++ b/c/kimi_k3.c
-@@ -173,6 +173,13 @@
+@@ -265,6 +265,13 @@
+     return fcalloc(n);
+ #endif
  }
- static float *falloc(int64_t n){ float *p=malloc((size_t)n*sizeof(float)); if(!p){fprintf(stderr,"OOM %lld floats\n",(long long)n);exit(1);} return p; }
- static float *fcalloc(int64_t n){ float *p=calloc((size_t)n,sizeof(float)); if(!p){fprintf(stderr,"OOM %lld floats\n",(long long)n);exit(1);} return p; }
 +
 +#ifdef LUMIBRI_P2P
 +/* lumabri: with a tracker (or LUMABRI_EXPERTS) the routed experts run on
@@ -15,7 +15,7 @@ diff --git a/c/kimi_k3.c b/c/kimi_k3.c
  static inline float sigmoidf_(float x){ return 1.f/(1.f+expf(-x)); }
  static inline float siluf_(float x){ return x/(1.f+expf(-x)); }
  static void softmax_(float *x, int n){ float m=x[0]; for(int i=1;i<n;i++) if(x[i]>m)m=x[i];
-@@ -632,6 +639,16 @@
+@@ -1030,6 +1037,16 @@
      }
      fprintf(stderr,"[K3] init done in %.1fs | %d layers | expert cache %d/layer (%.1f MB/slot) | RSS %.1f GB\n",
              now_s()-t0,c->n_layers,cap,m->e_slot/1e6,rss_gb());
@@ -29,10 +29,10 @@ diff --git a/c/kimi_k3.c b/c/kimi_k3.c
 +        atexit(lumi_report);
 +    }
 +#endif
-     #undef NM
- }
- 
-@@ -1146,6 +1163,15 @@
+     /* Phase 9: layer validation init */
+     { const char *vl=getenv("K3_VALIDATE_LAYER");
+       const char *vt=getenv("K3_VALIDATE_TOKEN");
+@@ -1873,6 +1890,15 @@
              nu=keep;
          }
  #endif

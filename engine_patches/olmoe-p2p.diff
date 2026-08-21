@@ -1,21 +1,21 @@
 diff --git a/c/olmoe.c b/c/olmoe.c
 --- a/c/olmoe.c
 +++ b/c/olmoe.c
-@@ -38,6 +38,13 @@
+@@ -37,6 +37,13 @@
+ #endif
  #include "omp_tune.h"
  #include "route_trace.h"                    /* shared routing telemetry (#700) */
- 
++
 +#ifdef LUMIBRI_P2P
 +/* lumabri: with a tracker (or LUMABRI_EXPERTS) the routed experts run on
 + * peers instead of being read from disk. Inert without the define, and inert
 + * at runtime unless the swarm can cover every expert. */
 +#include "lumibri_client.h"
 +#endif
-+
+ #include "serve_codec.h"
+ 
  #ifdef _WIN32
- #include <windows.h>
- #define sleep_ms(ms) Sleep(ms)
-@@ -347,6 +354,10 @@
+@@ -392,6 +399,10 @@
      if (cl < 0.1f) cl = 0.1f; if (cl > 1.0f) cl = 1.0f;
      m->pilot_conf_limit = cl;
      m->dense_load_s = now_s() - t0;
@@ -26,7 +26,7 @@ diff --git a/c/olmoe.c b/c/olmoe.c
  
      // Persistent Hot Pinning: try to load hot_pinned.bin
      char pinpath[512];
-@@ -666,6 +677,12 @@
+@@ -730,6 +741,12 @@
              if (freq_l) for (int kk = 0; kk < K; kk++) if (idx[kk] >= 0) freq_l[idx[kk]]++;
          }
          const float *xs = x + (int64_t)s*D;
@@ -38,4 +38,4 @@ diff --git a/c/olmoe.c b/c/olmoe.c
 +#endif
          for (int kk = 0; kk < K; kk++) {
              Slot *e; expert_get(m, layer, idx[kk], &e);
-             matmul_q(g, xs, e->g, e->gs, D, I);     /* gate_proj [I,D] */
+ #if defined(__AVX2__)

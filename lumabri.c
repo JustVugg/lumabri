@@ -207,6 +207,7 @@ static const char *expert_node_for(const char *model_type) {
     if (strstr(model_type, "inkling"))  return "expert_node_inkling";
     if (strstr(model_type, "kimi"))     return "expert_node_kimi";
     if (strstr(model_type, "deepseek")) return "expert_node_deepseek";
+    if (strstr(model_type, "qwen"))     return "expert_node_qwen36";
     return NULL;
 }
 
@@ -887,6 +888,7 @@ static const char *engine_for(const char *model_type) {
     if (strstr(model_type, "deepseek")) return "deepseek";
     if (strstr(model_type, "kimi")) return "kimi_k3";
     if (strstr(model_type, "inkling")) return "inkling";
+    if (strstr(model_type, "qwen")) return "qwen36";
     return "colibri";
 }
 
