@@ -261,10 +261,9 @@ patches-check:
 #
 # -DLUMIBRI_P2P: the patches predate the rename and test that macro; both
 # spellings are defined so either vintage compiles.
-build/%_p2p.c: $(ENGINE)/%.c engine_patches/%-p2p.diff Makefile
+build/%_p2p.c: $(ENGINE)/%.c engine_patches/make_patches.py engine_patches/%-p2p.diff Makefile
 	@mkdir -p build
-	@if grep -q LUMIBRI_P2P $<; then cp $< $@; \
-	 else patch -s --read-only=ignore -p2 -o $@ $< engine_patches/$*-p2p.diff; fi
+	python3 engine_patches/make_patches.py --engine-dir $(ENGINE) --apply-one $*.c --out $@
 	@sed -i 's/if (L\.on) {/if (lumi_layer_on(layer)) {/' $@
 
 ENGINE_P2P_DEPS = lumabri_client.h lumibri_client.h lumabri_proto.h lumabri_sign.h \
