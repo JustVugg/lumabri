@@ -1785,7 +1785,7 @@ static void role_start(const Role *r, const char *tracker, const char *model,
             argv[a++] = "--tracker";    argv[a++] = (char *)tracker;
             argv[a++] = "--name";       argv[a++] = name;
             argv[a++] = "--model-name"; argv[a++] = (char *)model;
-            argv[a++] = "--cache";      argv[a++] = "64";
+            argv[a++] = "--hold";       argv[a++] = "auto";   /* the tracker hands us a disjoint slice; the node sizes it to free RAM */
             argv[a] = NULL;
             { pid_t np = spawn_argv(argv); child_publish(g_nchildren++, np); }
             printf("  %s\xe2\x9c\xa6 eseguo esperti per lo sciame%s %s(%s)%s\n",
