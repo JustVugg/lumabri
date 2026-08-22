@@ -970,11 +970,26 @@ static int sr_line(SReader *s, char *out, size_t cap) {
         if (sr_fill(s) <= 0) { out[got] = 0; return got ? (int)got : -1; }
     }
 }
-static int sr_take(SReader *s, size_t n, int emit) {      /* copy/discard n bytes */
+/* A growable capture of the assistant's reply, to feed back as history. */
+typedef struct { char *p; size_t len, cap; } Cap;
+static int cap_add(Cap *c, const char *d, size_t n) {
+    if (c->len + n + 1 > c->cap) {
+        size_t nc = c->cap ? c->cap : 4096;
+        while (nc < c->len + n + 1) nc *= 2;
+        char *np = realloc(c->p, nc);
+        if (!np) return -1;
+        c->p = np; c->cap = nc;
+    }
+    memcpy(c->p + c->len, d, n); c->len += n; c->p[c->len] = 0;
+    return 0;
+}
+
+static int sr_take(SReader *s, size_t n, int emit, Cap *cap) {   /* copy/discard n bytes */
     while (n) {
         if (s->off >= s->len && sr_fill(s) <= 0) return -1;
         size_t avail = s->len - s->off, take = avail < n ? avail : n;
         if (emit) fwrite(s->b + s->off, 1, take, stdout);
+        if (cap && cap_add(cap, (char *)s->b + s->off, take)) return -1;
         s->off += take; n -= take;
     }
     if (emit) fflush(stdout);
@@ -982,26 +997,31 @@ static int sr_take(SReader *s, size_t n, int emit) {      /* copy/discard n byte
 }
 
 /* Read a serve-codec reply: DATA frames (the generated text) until DONE. Bare
- * dashboard lines (EMAP/TIERS/…) and ACCEPT are skipped. 0 with the STAT tail in
- * statline, -1 if the engine died. */
-static int stream_serve2(Engine *e, char *statline, size_t scap) {
+ * dashboard lines (EMAP/TIERS/…) and ACCEPT are skipped. On success returns 0
+ * with the STAT tail in statline and, if captured != NULL, the assistant text
+ * malloc'd into *captured (for the conversation history). -1 if the engine died. */
+static int stream_serve2(Engine *e, char *statline, size_t scap, char **captured) {
     SReader s = { e->from, {0}, 0, 0 };
     char line[600];
+    Cap cap = {0};
     if (statline && scap) statline[0] = 0;
+    if (captured) *captured = NULL;
     for (;;) {
-        if (sr_line(&s, line, sizeof line) < 0) return -1;
+        if (sr_line(&s, line, sizeof line) < 0) { free(cap.p); return -1; }
         if (!strncmp(line, "DATA ", 5)) {
             char *sp = strchr(line + 5, ' ');            /* DATA <id> <bytes> */
             size_t n = sp ? strtoull(sp + 1, NULL, 10) : 0;
-            if (sr_take(&s, n, 1) < 0) return -1;
-            if (sr_take(&s, 1, 0) < 0) return -1;         /* the frame's closing '\n' */
+            if (sr_take(&s, n, 1, captured ? &cap : NULL) < 0) { free(cap.p); return -1; }
+            if (sr_take(&s, 1, 0, NULL) < 0) { free(cap.p); return -1; } /* frame '\n' */
         } else if (!strncmp(line, "DONE ", 5)) {
             char *st = strstr(line, "STAT ");
             if (st && statline && scap) snprintf(statline, scap, "%s", st);
+            if (captured) *captured = cap.p; else free(cap.p);
             return 0;
         } else if (!strncmp(line, "ERROR ", 6)) {
             char *msg = strchr(line + 6, ' ');            /* skip the id */
             printf("%s%s%s", C_RED, msg ? msg + 1 : line + 6, C_R);
+            free(cap.p);
             return 0;
         }
         /* ACCEPT / EMAP / TIERS / HITS / HWINFO / PROF / other: skip */
@@ -1010,26 +1030,28 @@ static int stream_serve2(Engine *e, char *statline, size_t scap) {
 
 /* DeepSeek V4's serve tokenizes the SUBMIT payload as-is — unlike GLM's serve it
  * does not apply a chat template, and coli_v4_prompt_build() runs only on its CLI
- * path. Without the turn markers the model continues the text instead of
- * answering, so wrap the prompt here in exactly the template the engine's CLI
- * uses (mirrors v4_bos / v4_user / v4_assistant in deepseek_v4.c; the trailing
- * </think> is the non-thinking "answer now" form). ｜ is U+FF5C, ▁ is U+2581.
- * Note: this is per-turn, so it is single-turn — full multi-turn history would
- * mean carrying the whole templated conversation. Keep in step with colibri's
- * markers; the ideal home is the engine's serve, as GLM already does. */
-#define DS_PIPE "\xef\xbd\x9c"       /* ｜ U+FF5C — its own literal so the next */
-#define DS_USCR "\xe2\x96\x81"       /* ▁ U+2581   letter isn't eaten as hex   */
-#define DS_TMPL_HEAD "<" DS_PIPE "begin" DS_USCR "of" DS_USCR "sentence" DS_PIPE ">" \
-                     "<" DS_PIPE "User" DS_PIPE ">"
-#define DS_TMPL_TAIL "<" DS_PIPE "Assistant" DS_PIPE "></think>"
+ * path. So the client supplies the turn markers (mirrors v4_bos/v4_user/
+ * v4_assistant in deepseek_v4.c; the trailing </think> is the non-thinking
+ * "answer now" form). ｜ is U+FF5C, ▁ is U+2581 — each its own literal so the
+ * next letter is not eaten by the \x escape. The whole conversation is resent
+ * each turn (bos + prior user/assistant turns + this user turn); the serve
+ * reuses the KV prefix, so it stays a real multi-turn chat without reprocessing
+ * the history. Keep in step with colibri's markers; the ideal home is the
+ * engine's serve, as GLM already does. */
+#define DS_PIPE "\xef\xbd\x9c"
+#define DS_USCR "\xe2\x96\x81"
+#define DS_BOS  "<" DS_PIPE "begin" DS_USCR "of" DS_USCR "sentence" DS_PIPE ">"
+#define DS_USER "<" DS_PIPE "User" DS_PIPE ">"
+#define DS_ASST "<" DS_PIPE "Assistant" DS_PIPE "></think>"
 
-/* Send one prompt as a serve-codec SUBMIT. 0, or -1 on a write/alloc error. */
-static int submit_serve2(Engine *e, const char *prompt, int max_new) {
+/* SUBMIT: bos + history + <User>prompt<Assistant></think>. 0, or -1 on error. */
+static int submit_serve2(Engine *e, const char *history, const char *prompt, int max_new) {
     static unsigned id = 0;
-    size_t plen = strlen(DS_TMPL_HEAD) + strlen(prompt) + strlen(DS_TMPL_TAIL);
+    size_t plen = strlen(DS_BOS) + strlen(history) + strlen(DS_USER) +
+                  strlen(prompt) + strlen(DS_ASST);
     char *payload = malloc(plen + 1);
     if (!payload) return -1;
-    snprintf(payload, plen + 1, "%s%s%s", DS_TMPL_HEAD, prompt, DS_TMPL_TAIL);
+    snprintf(payload, plen + 1, "%s%s%s%s%s", DS_BOS, history, DS_USER, prompt, DS_ASST);
     char hdr[128];
     int hn = snprintf(hdr, sizeof hdr, "SUBMIT %u 0 %zu %d 0.7 0.95\n",
                       ++id, plen, max_new < 1 ? 1 : max_new);
@@ -1038,6 +1060,18 @@ static int submit_serve2(Engine *e, const char *prompt, int max_new) {
              write(e->to, "\n", 1) >= 0;                  /* payload terminator */
     free(payload);
     return ok ? 0 : -1;
+}
+
+/* Append this finished turn to the running conversation. Returns the new
+ * history (frees the old); NULL on OOM, leaving the old freed. */
+static char *serve2_history_append(char *history, const char *user,
+                                    const char *reply) {
+    size_t n = strlen(history) + strlen(DS_USER) + strlen(user) +
+               strlen(DS_ASST) + strlen(reply);
+    char *nh = malloc(n + 1);
+    if (nh) snprintf(nh, n + 1, "%s%s%s%s%s", history, DS_USER, user, DS_ASST, reply);
+    free(history);
+    return nh;
 }
 
 static const char *engine_for(const char *model_type) {
@@ -2043,6 +2077,7 @@ static int cmd_chat(int argc, char **argv) {
         role_start(&role, tracker, model, sw.model_type);
     }
 
+    char *conv = calloc(1, 1);   /* serve-codec conversation history (after bos) */
     char line[4096];
     for (;;) {
         int w = term_w() - 2;
@@ -2087,13 +2122,14 @@ static int cmd_chat(int argc, char **argv) {
 
         int is_reset = !strcmp(line, "/reset");
         if (eng.proto == PROTO_SERVE2) {
-            /* the serve codec has no conversation-reset command; the KV slot is
-             * reused per turn, so note it and keep the slot rather than hang. */
+            /* the serve codec has no reset command; dropping the local history
+             * (and starting a fresh bos) is the conversation reset. */
             if (is_reset) {
-                printf("  %s\xe2\x9c\xa6 /reset non supportato da questo motore%s\n", C_DIM, C_R);
+                free(conv); conv = calloc(1, 1);
+                printf("  %s\xe2\x9c\xa6 nuova conversazione%s\n", C_DIM, C_R);
                 continue;
             }
-            if (submit_serve2(&eng, line, max_new)) break;
+            if (!conv || submit_serve2(&eng, conv, line, max_new)) break;
         } else if (eng.proto == PROTO_FRAMED) {
             /* framed dialect: reset is a control byte, everything else is the
              * prompt line as-is */
@@ -2114,13 +2150,17 @@ static int cmd_chat(int argc, char **argv) {
         char stat[128] = "";
 
         if (eng.proto == PROTO_SERVE2) {
+            char *reply = NULL;
             printf("%s%s\xe2\x97\x86 %s%s\n  ", C_BOLD, C_CORAL, model, C_R);
-            if (stream_serve2(&eng, stat, sizeof stat)) {
+            if (stream_serve2(&eng, stat, sizeof stat, &reply)) {
                 fprintf(stderr, "\n%sengine exited%s\n", C_RED, C_R);
                 engine_diag(&eng, 0);
+                free(reply);
                 break;
             }
             printf("\n");
+            conv = serve2_history_append(conv, line, reply ? reply : "");
+            free(reply);
         } else if (eng.proto == PROTO_FRAMED) {
             if (!is_reset) printf("%s%s\xe2\x97\x86 %s%s\n  ", C_BOLD, C_CORAL, model, C_R);
             if (stream_until_end(&eng, stat, sizeof stat)) {
@@ -2163,6 +2203,7 @@ static int cmd_chat(int argc, char **argv) {
         printf("%s\n", C_R);
     }
 
+    free(conv);
     engine_stop(&eng);
     /* The picker promises the donation lasts as long as the chat. That was
      * only true for Ctrl-C: a normal /quit returned and left the maintainer
