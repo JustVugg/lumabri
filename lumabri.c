@@ -782,14 +782,42 @@ static void *spinner_thread(void *arg) {
 #define FRAME_READY "\x01\x01" "READY" "\x01\x01"
 #define FRAME_END   "\x01\x01" "END" "\x01\x01"
 
-/* PROTO_SERVE2 is colibri's newer serve codec (DeepSeek V4): the client sends
- * `SUBMIT <id> <slot> <bytes> <max> <temp> <top_p>\n<prompt>\n` and reads back
- * ACCEPT / DATA <id> <n> frames / DONE — not the raw-prompt-then-FRAME_END
- * dialect the older engines speak. Both announce readiness with FRAME_READY and
- * a STAT line, so they can't be told apart from the handshake; the engine that
- * speaks it is known by name (deepseek), like the olmoe line-protocol probe. */
+/* PROTO_SERVE2 is colibri's newer serve codec (every engine but GLM): the client
+ * sends `SUBMIT <id> <slot> <bytes> <max> <temp> <top_p>\n<prompt>\n` and reads
+ * back ACCEPT / DATA <id> <n> frames / DONE — not the raw-prompt-then-FRAME_END
+ * dialect GLM speaks. Both announce readiness with FRAME_READY and a STAT line,
+ * so they can't be told apart from the handshake; which one an engine speaks is
+ * known by its kind (engine_kind_of), the way the olmoe line probe once was. */
 typedef enum { PROTO_UNKNOWN = 0, PROTO_LINE, PROTO_FRAMED, PROTO_SERVE2 } Proto;
-typedef struct { pid_t pid; int to, from; Proto proto; } Engine;
+/* Which colibri engine we launched. The serve-codec engines (everyone but GLM)
+ * hand their SUBMIT payload straight to the tokenizer — coli_v4_prompt_build()
+ * and its siblings run only on the CLI path — so lumabri, standing in for the
+ * gateway, must apply each engine's own chat template. GLM (EK_GLM) templates
+ * inside its serve and speaks the older framed dialect, so it needs neither. */
+typedef enum {
+    EK_GLM = 0,        /* colibri monolith: framed, templates internally */
+    EK_DEEPSEEK,       /* deepseek_v4:  <｜User｜>…<｜Assistant｜></think>       */
+    EK_OLMOE,          /* olmoe:        |||IP_ADDRESS|||<|user|>…<|assistant|> */
+    EK_QWEN36,         /* qwen36:       ChatML <|im_start|>…                   */
+    EK_INKLING,        /* inkling:      <|message_user|><|content_text|>…      */
+    EK_KIMI            /* kimi_k3:      K3CHAT1 byte-counted wire              */
+} EngKind;
+typedef struct { pid_t pid; int to, from; Proto proto; EngKind kind; } Engine;
+
+/* Map the resolved engine binary name to its kind. Unknown ⇒ EK_GLM, the safe
+ * default: the framed dialect with no client-side templating, which is exactly
+ * how lumabri behaved before per-engine templates existed. */
+static EngKind engine_kind_of(const char *engine) {
+    if (strstr(engine, "deepseek")) return EK_DEEPSEEK;
+    if (strstr(engine, "olmoe"))    return EK_OLMOE;
+    if (strstr(engine, "qwen"))     return EK_QWEN36;
+    if (strstr(engine, "inkling"))  return EK_INKLING;
+    if (strstr(engine, "kimi"))     return EK_KIMI;
+    return EK_GLM;
+}
+/* The serve-codec engines: framed READY at boot, but SUBMIT/DATA/DONE turns and
+ * a raw (un-templated) payload. Everything but GLM. */
+static int kind_is_serve2(EngKind k) { return k != EK_GLM; }
 
 static char *read_until_prompt(int fd) {
     size_t cap = 8192, len = 0;
@@ -983,6 +1011,16 @@ static int cap_add(Cap *c, const char *d, size_t n) {
     memcpy(c->p + c->len, d, n); c->len += n; c->p[c->len] = 0;
     return 0;
 }
+static int cap_str(Cap *c, const char *s) { return cap_add(c, s, strlen(s)); }
+/* Append a printf-formatted fragment (used for kimi's `M <role> <len>\n` heads). */
+static int cap_addf(Cap *c, const char *fmt, ...) {
+    char tmp[64];
+    va_list ap; va_start(ap, fmt);
+    int n = vsnprintf(tmp, sizeof tmp, fmt, ap);
+    va_end(ap);
+    if (n < 0 || (size_t)n >= sizeof tmp) return -1;
+    return cap_add(c, tmp, (size_t)n);
+}
 
 static int sr_take(SReader *s, size_t n, int emit, Cap *cap) {   /* copy/discard n bytes */
     while (n) {
@@ -1028,50 +1066,107 @@ static int stream_serve2(Engine *e, char *statline, size_t scap, char **captured
     }
 }
 
-/* DeepSeek V4's serve tokenizes the SUBMIT payload as-is — unlike GLM's serve it
- * does not apply a chat template, and coli_v4_prompt_build() runs only on its CLI
- * path. So the client supplies the turn markers (mirrors v4_bos/v4_user/
- * v4_assistant in deepseek_v4.c; the trailing </think> is the non-thinking
- * "answer now" form). ｜ is U+FF5C, ▁ is U+2581 — each its own literal so the
- * next letter is not eaten by the \x escape. The whole conversation is resent
- * each turn (bos + prior user/assistant turns + this user turn); the serve
- * reuses the KV prefix, so it stays a real multi-turn chat without reprocessing
- * the history. Keep in step with colibri's markers; the ideal home is the
- * engine's serve, as GLM already does. */
+/* The serve-codec engines tokenize the SUBMIT payload as-is: coli_v4_prompt_build
+ * and its per-engine siblings run only on the CLI path, so lumabri — standing in
+ * for openai_server.py — applies each engine's own chat template. The whole
+ * conversation is resent every turn (prefix + prior user/assistant turns + this
+ * user turn ending at the assistant-generation marker); the serve reuses the KV
+ * prefix, so it stays a real multi-turn chat without reprocessing the history.
+ *
+ * Each marker set mirrors its engine's serve/CLI source. Only DeepSeek and olmoe
+ * are exercised against a real model here; qwen36/inkling/kimi are transcribed
+ * from colibri and unverified — see the PR notes. Keep them in step with colibri;
+ * the ideal home is each engine's serve, as GLM already does.
+ *
+ * DeepSeek: ｜ is U+FF5C, ▁ is U+2581 — each its own literal so the next letter
+ * is not eaten by the \x escape. </think> is the non-thinking "answer now" form. */
 #define DS_PIPE "\xef\xbd\x9c"
 #define DS_USCR "\xe2\x96\x81"
 #define DS_BOS  "<" DS_PIPE "begin" DS_USCR "of" DS_USCR "sentence" DS_PIPE ">"
 #define DS_USER "<" DS_PIPE "User" DS_PIPE ">"
 #define DS_ASST "<" DS_PIPE "Assistant" DS_PIPE "></think>"
+/* olmoe (olmoe.c fmt_user_turn): bos/eos is |||IP_ADDRESS|||; the first turn glues
+ * <|user|> to it, later turns put a newline between. The reply is stored raw — the
+ * next turn's leading |||IP_ADDRESS||| is the eos that closes it. */
+#define OLMO_U0   "|||IP_ADDRESS|||<|user|>\n"
+#define OLMO_UL   "|||IP_ADDRESS|||\n<|user|>\n"
+#define OLMO_ASST "\n<|assistant|>\n"
+/* qwen36 (qwen36.c: ChatML, no BOS). */
+#define QW_U    "<|im_start|>user\n"
+#define QW_ASST "<|im_end|>\n<|im_start|>assistant\n"
+#define QW_AEND "<|im_end|>\n"
+/* inkling (inkling.c chat template, thinking-effort system line dropped). */
+#define INK_U    "<|message_user|><|content_text|>"
+#define INK_ASST "<|end_message|><|message_model|>"
+#define INK_AEND "<|end_message|>"
 
-/* SUBMIT: bos + history + <User>prompt<Assistant></think>. 0, or -1 on error. */
+/* Append one turn for engine kind k. `first` = the conversation is empty so far
+ * (matters only where the leading marker differs by position). reply==NULL builds
+ * the *pending* turn — user text ending at the assistant-generation marker, for
+ * the SUBMIT payload; reply!=NULL builds a *completed* turn — user text plus the
+ * assistant's reply, for the running history. 0, or -1 on OOM. */
+static int serve2_turn(Cap *c, EngKind k, int first, const char *u, const char *reply) {
+    switch (k) {
+    case EK_DEEPSEEK:
+        if (cap_str(c, DS_USER) || cap_str(c, u) || cap_str(c, DS_ASST)) return -1;
+        return reply ? cap_str(c, reply) : 0;
+    case EK_OLMOE:
+        if (cap_str(c, first ? OLMO_U0 : OLMO_UL) || cap_str(c, u) ||
+            cap_str(c, OLMO_ASST)) return -1;
+        return reply ? cap_str(c, reply) : 0;
+    case EK_QWEN36:
+        if (cap_str(c, QW_U) || cap_str(c, u) || cap_str(c, QW_ASST)) return -1;
+        return reply ? (cap_str(c, reply) || cap_str(c, QW_AEND)) : 0;
+    case EK_INKLING:
+        if (cap_str(c, INK_U) || cap_str(c, u) || cap_str(c, INK_ASST)) return -1;
+        return reply ? (cap_str(c, reply) || cap_str(c, INK_AEND)) : 0;
+    case EK_KIMI:
+        /* K3CHAT1 wire (kimi_k3.c chat_build_wire): `M <role> <bytes>\n<text>`,
+         * byte-counted so the text may hold newlines. The engine appends the
+         * assistant-generation open after the wire, so a pending user turn needs
+         * no trailing marker. */
+        if (cap_addf(c, "M user %zu\n", strlen(u)) || cap_str(c, u)) return -1;
+        return reply ? (cap_addf(c, "M assistant %zu\n", strlen(reply)) ||
+                        cap_str(c, reply)) : 0;
+    default:                                    /* EK_GLM never speaks serve-codec */
+        return -1;
+    }
+}
+
+/* The once-at-front SUBMIT prefix (kept out of the stored history). */
+static int serve2_prefix(Cap *c, EngKind k) {
+    if (k == EK_DEEPSEEK) return cap_str(c, DS_BOS);
+    if (k == EK_KIMI)     return cap_str(c, "K3CHAT1\n");
+    return 0;
+}
+
+/* SUBMIT: prefix + history + this pending user turn. 0, or -1 on error. */
 static int submit_serve2(Engine *e, const char *history, const char *prompt, int max_new) {
     static unsigned id = 0;
-    size_t plen = strlen(DS_BOS) + strlen(history) + strlen(DS_USER) +
-                  strlen(prompt) + strlen(DS_ASST);
-    char *payload = malloc(plen + 1);
-    if (!payload) return -1;
-    snprintf(payload, plen + 1, "%s%s%s%s%s", DS_BOS, history, DS_USER, prompt, DS_ASST);
+    Cap c = {0};
+    if (serve2_prefix(&c, e->kind) || cap_str(&c, history) ||
+        serve2_turn(&c, e->kind, history[0] == 0, prompt, NULL)) { free(c.p); return -1; }
     char hdr[128];
     int hn = snprintf(hdr, sizeof hdr, "SUBMIT %u 0 %zu %d 0.7 0.95\n",
-                      ++id, plen, max_new < 1 ? 1 : max_new);
+                      ++id, c.len, max_new < 1 ? 1 : max_new);
     int ok = hn >= 0 && write(e->to, hdr, (size_t)hn) >= 0 &&
-             write(e->to, payload, plen) >= 0 &&
+             write(e->to, c.p, c.len) >= 0 &&
              write(e->to, "\n", 1) >= 0;                  /* payload terminator */
-    free(payload);
+    free(c.p);
     return ok ? 0 : -1;
 }
 
 /* Append this finished turn to the running conversation. Returns the new
  * history (frees the old); NULL on OOM, leaving the old freed. */
-static char *serve2_history_append(char *history, const char *user,
+static char *serve2_history_append(Engine *e, char *history, const char *user,
                                     const char *reply) {
-    size_t n = strlen(history) + strlen(DS_USER) + strlen(user) +
-               strlen(DS_ASST) + strlen(reply);
-    char *nh = malloc(n + 1);
-    if (nh) snprintf(nh, n + 1, "%s%s%s%s%s", history, DS_USER, user, DS_ASST, reply);
+    Cap c = {0};
+    if (cap_str(&c, history) ||
+        serve2_turn(&c, e->kind, history[0] == 0, user, reply ? reply : "")) {
+        free(c.p); free(history); return NULL;
+    }
     free(history);
-    return nh;
+    return c.p ? c.p : calloc(1, 1);
 }
 
 static const char *engine_for(const char *model_type) {
@@ -1164,6 +1259,7 @@ static int engine_spawn(const char *engine, const char *shim, const char *tracke
     close(in_pipe[0]); close(out_pipe[1]); close(err_pipe[1]);
     e->pid = pid; e->to = in_pipe[1]; e->from = out_pipe[0];
     e->proto = PROTO_UNKNOWN;
+    e->kind = engine_kind_of(engine);
     pthread_t t;
     pthread_create(&t, NULL, stderr_thread, (void *)(intptr_t)err_pipe[0]);
     pthread_detach(t);
@@ -1870,11 +1966,13 @@ static int model_boot(const char *tracker, const char *model, const char *shim,
     g_eng.spinning = 0;
     if (g_tty) pthread_join(tspin, NULL);
     g_eng.booting = 0;
-    /* DeepSeek V4 hands out FRAME_READY like the older framed engines but then
-     * speaks the SUBMIT/DATA/DONE serve codec, not raw-prompt/FRAME_END. The
-     * two are identical at the handshake, so switch on the engine, the way the
-     * olmoe line dialect is picked. */
-    if (e->proto == PROTO_FRAMED && strstr(engine, "deepseek"))
+    /* Every engine but GLM hands out FRAME_READY like the older framed engines
+     * but then speaks the SUBMIT/DATA/DONE serve codec, not raw-prompt/FRAME_END
+     * — and the two are identical at the handshake (both announce with
+     * FRAME_READY + a STAT line; qwen36's boot STAT even has GLM's 4-field shape,
+     * so the field count can't tell them apart). So switch on the engine kind,
+     * the way the olmoe line dialect used to be picked. */
+    if (e->proto == PROTO_FRAMED && kind_is_serve2(e->kind))
         e->proto = PROTO_SERVE2;
     if (ready) {
         printf("  %s✗ il motore non è arrivato a essere pronto%s\n", C_RED, C_R);
@@ -2159,7 +2257,7 @@ static int cmd_chat(int argc, char **argv) {
                 break;
             }
             printf("\n");
-            conv = serve2_history_append(conv, line, reply ? reply : "");
+            conv = serve2_history_append(&eng, conv, line, reply ? reply : "");
             free(reply);
         } else if (eng.proto == PROTO_FRAMED) {
             if (!is_reset) printf("%s%s\xe2\x97\x86 %s%s\n  ", C_BOLD, C_CORAL, model, C_R);
