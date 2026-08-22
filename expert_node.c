@@ -642,10 +642,23 @@ static void runtime_prepare(int argc, char **argv) {
 #endif
 }
 
+/* Free RAM in KB (MemAvailable), or -1 if it cannot be read. Used by --hold auto
+ * to size how many experts this donor should carry. */
+static long meminfo_avail_kb(void) {
+    FILE *f = fopen("/proc/meminfo", "r");
+    if (!f) return -1;
+    char line[256];
+    long kb = -1;
+    while (fgets(line, sizeof line, f))
+        if (sscanf(line, "MemAvailable: %ld kB", &kb) == 1) break;
+    fclose(f);
+    return kb;
+}
+
 int main(int argc, char **argv) {
     runtime_prepare(argc, argv); /* must precede every other main-side action */
     const char *dir = NULL;
-    int port = 7401, stride = 1, offset = 0, cache = 0, bits = 8, hold = 0;
+    int port = 7401, stride = 1, offset = 0, cache = 0, bits = 8, hold = 0, hold_auto = 0;
     int layers[512], nlayers = 0, parallel = 0;
     memcpy(g.name, "node", sizeof "node");
 
@@ -662,7 +675,10 @@ int main(int argc, char **argv) {
             if (node_arg_copy(g.advertise, sizeof g.advertise, argv[++i], "--advertise")) return 2;
         } else if (!strcmp(argv[i], "--cache") && i + 1 < argc) cache = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--bits") && i + 1 < argc) bits = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--hold") && i + 1 < argc) hold = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--hold") && i + 1 < argc) {
+            if (!strcmp(argv[i + 1], "auto")) hold_auto = 1; else hold = atoi(argv[i + 1]);
+            i++;
+        }
         else if (!strcmp(argv[i], "--parallel") && i + 1 < argc) parallel = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--stride") && i + 1 < argc)
             sscanf(argv[++i], "%d:%d", &stride, &offset);
@@ -735,6 +751,25 @@ int main(int argc, char **argv) {
     g.n_experts = lmbe_n_experts();
     g.hidden    = lmbe_hidden();
     g.inter     = lmbe_inter();
+    if (hold_auto) {
+        /* Hold as many experts as this machine's free RAM can keep resident, and
+         * ask the tracker for exactly that many: it hands back the least-covered
+         * slice, so several "donate compute" machines auto-spread into disjoint
+         * shares instead of every one holding the whole model. */
+        long avail_kb = meminfo_avail_kb();
+        double avail_b = (avail_kb > 0 ? (double)avail_kb * 1024.0 : 8e9) * 0.85;
+        double ebytes = 3.0 * g.inter * g.hidden;     /* same width the cache MB uses */
+        int total = 0;
+        for (int l = 0; l < g.n_slots; l++) if (lmbe_routed(l)) total += g.n_experts;
+        long n = ebytes > 0 ? (long)(avail_b / ebytes) : total;
+        if (n < 1) n = 1;
+        if (n > total) n = total;
+        hold = (int)n;
+        if (cache <= 0) cache = hold;                 /* keep the whole share resident */
+        fprintf(stderr, "[%s] auto-hold: up to %d experts (~%.1f GB) fit in free RAM; "
+                        "the tracker assigns the least-covered slice\n",
+                g.name, hold, (double)hold * ebytes / 1e9);
+    }
     int cells = g.n_slots * g.n_experts, dense = 0;
     g.holds = calloc((size_t)cells, 1);
     for (int l = 0; l < g.n_slots; l++) {
