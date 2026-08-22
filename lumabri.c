@@ -835,10 +835,63 @@ static int engine_wait_ready(Engine *e) {
 
 /* Framed turn: print the tokens as they arrive, stop at the END sentinel,
  * then pick up the STAT line that follows it. */
+
+/* Some engines (DeepSeek V4) print a dashboard on stdout between the reply text:
+ * whole lines like `EMAP 43 256 <hex>`, `TIERS 0 …`, `HITS …`, `HWINFO …`,
+ * `PROF …`. They are diagnostics, not generated tokens, and they used to land
+ * raw in the chat. Drop any line that starts with one of those keywords
+ * followed by a space and a digit (the real dashboard shape — so a sentence
+ * that merely begins "PROF ..." is left alone), and stream everything else live.
+ * State persists across reads; call le_flush_tel() at the end to emit a trailing
+ * partial line that turned out to be ordinary text. */
+typedef struct { int mode; char pfx[8]; int pfxn; } TelFilter;
+enum { TF_LINESTART = 0, TF_MID, TF_DROP };
+
+static void emit_no_tel(const char *p, size_t n, TelFilter *t) {
+    static const char *const kw[] = { "TIERS ", "EMAP ", "HITS ", "HWINFO ", "PROF " };
+    for (size_t i = 0; i < n; i++) {
+        char c = p[i];
+        if (t->mode == TF_DROP) { if (c == '\n') t->mode = TF_LINESTART; continue; }
+        if (t->mode == TF_MID) { putchar(c); if (c == '\n') t->mode = TF_LINESTART; continue; }
+        /* TF_LINESTART: buffer until we can classify the line */
+        if (c == '\n') {                       /* short line, can't be a dashboard row */
+            fwrite(t->pfx, 1, (size_t)t->pfxn, stdout); putchar('\n');
+            t->pfxn = 0; continue;
+        }
+        if (t->pfxn < (int)sizeof t->pfx) t->pfx[t->pfxn++] = c;
+        int is_tel = 0, maybe = 0;
+        for (size_t k = 0; k < sizeof kw / sizeof *kw; k++) {
+            size_t kl = strlen(kw[k]);
+            if ((size_t)t->pfxn >= kl + 1) {
+                if (!memcmp(t->pfx, kw[k], kl) && t->pfx[kl] >= '0' && t->pfx[kl] <= '9')
+                    { is_tel = 1; break; }
+            } else if (!memcmp(t->pfx, kw[k], (size_t)t->pfxn)) {
+                maybe = 1;                     /* still a possible prefix */
+            }
+        }
+        if (is_tel) { t->pfxn = 0; t->mode = TF_DROP; }
+        else if (!maybe || t->pfxn == (int)sizeof t->pfx) {   /* ruled out: it is text */
+            fwrite(t->pfx, 1, (size_t)t->pfxn, stdout);
+            t->pfxn = 0; t->mode = TF_MID;
+        }
+        /* else: keep buffering (a keyword prefix so far) */
+    }
+    fflush(stdout);
+}
+
+static void le_flush_tel(TelFilter *t) {       /* trailing buffered text at stream end */
+    if (t->mode == TF_LINESTART && t->pfxn > 0) {
+        fwrite(t->pfx, 1, (size_t)t->pfxn, stdout);
+        t->pfxn = 0;
+    }
+    fflush(stdout);
+}
+
 static int stream_until_end(Engine *e, char *statline, size_t scap) {
     const char *S = FRAME_END;
     size_t SL = strlen(S), cap = 8192, len = 0, shown = 0;
     char *buf = malloc(cap), *hit = NULL;
+    TelFilter tf = {0};
     if (statline && scap) statline[0] = 0;
     if (!buf) return -1;
     for (;;) {
@@ -856,12 +909,12 @@ static int stream_until_end(Engine *e, char *statline, size_t scap) {
         /* hold back SL-1 bytes: a sentinel may straddle two reads */
         size_t safe = hit ? (size_t)(hit - buf) : (len > SL ? len - SL : 0);
         if (safe > shown) {
-            fwrite(buf + shown, 1, safe - shown, stdout);
-            fflush(stdout);
+            emit_no_tel(buf + shown, safe - shown, &tf);
             shown = safe;
         }
         if (hit) break;
     }
+    le_flush_tel(&tf);
     size_t after = (size_t)(hit - buf) + SL;
     char rest[256];
     size_t rl = len > after ? len - after : 0;
