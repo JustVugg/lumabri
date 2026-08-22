@@ -1008,16 +1008,36 @@ static int stream_serve2(Engine *e, char *statline, size_t scap) {
     }
 }
 
-/* Send one prompt as a serve-codec SUBMIT. 0, or -1 on a write error. */
+/* DeepSeek V4's serve tokenizes the SUBMIT payload as-is — unlike GLM's serve it
+ * does not apply a chat template, and coli_v4_prompt_build() runs only on its CLI
+ * path. Without the turn markers the model continues the text instead of
+ * answering, so wrap the prompt here in exactly the template the engine's CLI
+ * uses (mirrors v4_bos / v4_user / v4_assistant in deepseek_v4.c; the trailing
+ * </think> is the non-thinking "answer now" form). ｜ is U+FF5C, ▁ is U+2581.
+ * Note: this is per-turn, so it is single-turn — full multi-turn history would
+ * mean carrying the whole templated conversation. Keep in step with colibri's
+ * markers; the ideal home is the engine's serve, as GLM already does. */
+#define DS_PIPE "\xef\xbd\x9c"       /* ｜ U+FF5C — its own literal so the next */
+#define DS_USCR "\xe2\x96\x81"       /* ▁ U+2581   letter isn't eaten as hex   */
+#define DS_TMPL_HEAD "<" DS_PIPE "begin" DS_USCR "of" DS_USCR "sentence" DS_PIPE ">" \
+                     "<" DS_PIPE "User" DS_PIPE ">"
+#define DS_TMPL_TAIL "<" DS_PIPE "Assistant" DS_PIPE "></think>"
+
+/* Send one prompt as a serve-codec SUBMIT. 0, or -1 on a write/alloc error. */
 static int submit_serve2(Engine *e, const char *prompt, int max_new) {
     static unsigned id = 0;
+    size_t plen = strlen(DS_TMPL_HEAD) + strlen(prompt) + strlen(DS_TMPL_TAIL);
+    char *payload = malloc(plen + 1);
+    if (!payload) return -1;
+    snprintf(payload, plen + 1, "%s%s%s", DS_TMPL_HEAD, prompt, DS_TMPL_TAIL);
     char hdr[128];
-    size_t plen = strlen(prompt);
     int hn = snprintf(hdr, sizeof hdr, "SUBMIT %u 0 %zu %d 0.7 0.95\n",
                       ++id, plen, max_new < 1 ? 1 : max_new);
-    if (hn < 0 || write(e->to, hdr, (size_t)hn) < 0) return -1;
-    if (plen && write(e->to, prompt, plen) < 0) return -1;
-    return write(e->to, "\n", 1) < 0 ? -1 : 0;            /* payload terminator */
+    int ok = hn >= 0 && write(e->to, hdr, (size_t)hn) >= 0 &&
+             write(e->to, payload, plen) >= 0 &&
+             write(e->to, "\n", 1) >= 0;                  /* payload terminator */
+    free(payload);
+    return ok ? 0 : -1;
 }
 
 static const char *engine_for(const char *model_type) {
