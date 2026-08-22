@@ -782,7 +782,13 @@ static void *spinner_thread(void *arg) {
 #define FRAME_READY "\x01\x01" "READY" "\x01\x01"
 #define FRAME_END   "\x01\x01" "END" "\x01\x01"
 
-typedef enum { PROTO_UNKNOWN = 0, PROTO_LINE, PROTO_FRAMED } Proto;
+/* PROTO_SERVE2 is colibri's newer serve codec (DeepSeek V4): the client sends
+ * `SUBMIT <id> <slot> <bytes> <max> <temp> <top_p>\n<prompt>\n` and reads back
+ * ACCEPT / DATA <id> <n> frames / DONE — not the raw-prompt-then-FRAME_END
+ * dialect the older engines speak. Both announce readiness with FRAME_READY and
+ * a STAT line, so they can't be told apart from the handshake; the engine that
+ * speaks it is known by name (deepseek), like the olmoe line-protocol probe. */
+typedef enum { PROTO_UNKNOWN = 0, PROTO_LINE, PROTO_FRAMED, PROTO_SERVE2 } Proto;
 typedef struct { pid_t pid; int to, from; Proto proto; } Engine;
 
 static char *read_until_prompt(int fd) {
@@ -934,6 +940,84 @@ static int stream_until_end(Engine *e, char *statline, size_t scap) {
         rl += (size_t)r;
         rest[rl] = 0;
     }
+}
+
+/* ---- serve codec (PROTO_SERVE2) client — DeepSeek V4 --------------------- */
+typedef struct { int fd; unsigned char b[16384]; size_t off, len; } SReader;
+
+static ssize_t sr_fill(SReader *s) {
+    if (s->off) { memmove(s->b, s->b + s->off, s->len - s->off); s->len -= s->off; s->off = 0; }
+    if (s->len >= sizeof s->b) return -1;              /* a header longer than the buffer */
+    ssize_t r = read(s->fd, s->b + s->len, sizeof s->b - s->len);
+    if (r > 0) s->len += (size_t)r;
+    return r;
+}
+/* One '\n'-terminated line. Only the first cap-1 bytes are kept in `out` (enough
+ * to read the DATA/DONE/… keyword), but the WHOLE line is consumed — DeepSeek's
+ * EMAP row is tens of KB of hex, far past any header, and must be swallowed, not
+ * overflow the reader. -1 on EOF with nothing buffered. */
+static int sr_line(SReader *s, char *out, size_t cap) {
+    size_t got = 0;
+    for (;;) {
+        unsigned char *start = s->b + s->off, *nl = memchr(start, '\n', s->len - s->off);
+        size_t avail = nl ? (size_t)(nl - start) : s->len - s->off;
+        if (got < cap - 1) {
+            size_t room = cap - 1 - got, take = avail < room ? avail : room;
+            memcpy(out + got, start, take); got += take;
+        }
+        s->off += avail + (nl ? 1 : 0);
+        if (nl) { out[got] = 0; return (int)got; }
+        if (sr_fill(s) <= 0) { out[got] = 0; return got ? (int)got : -1; }
+    }
+}
+static int sr_take(SReader *s, size_t n, int emit) {      /* copy/discard n bytes */
+    while (n) {
+        if (s->off >= s->len && sr_fill(s) <= 0) return -1;
+        size_t avail = s->len - s->off, take = avail < n ? avail : n;
+        if (emit) fwrite(s->b + s->off, 1, take, stdout);
+        s->off += take; n -= take;
+    }
+    if (emit) fflush(stdout);
+    return 0;
+}
+
+/* Read a serve-codec reply: DATA frames (the generated text) until DONE. Bare
+ * dashboard lines (EMAP/TIERS/…) and ACCEPT are skipped. 0 with the STAT tail in
+ * statline, -1 if the engine died. */
+static int stream_serve2(Engine *e, char *statline, size_t scap) {
+    SReader s = { e->from, {0}, 0, 0 };
+    char line[600];
+    if (statline && scap) statline[0] = 0;
+    for (;;) {
+        if (sr_line(&s, line, sizeof line) < 0) return -1;
+        if (!strncmp(line, "DATA ", 5)) {
+            char *sp = strchr(line + 5, ' ');            /* DATA <id> <bytes> */
+            size_t n = sp ? strtoull(sp + 1, NULL, 10) : 0;
+            if (sr_take(&s, n, 1) < 0) return -1;
+            if (sr_take(&s, 1, 0) < 0) return -1;         /* the frame's closing '\n' */
+        } else if (!strncmp(line, "DONE ", 5)) {
+            char *st = strstr(line, "STAT ");
+            if (st && statline && scap) snprintf(statline, scap, "%s", st);
+            return 0;
+        } else if (!strncmp(line, "ERROR ", 6)) {
+            char *msg = strchr(line + 6, ' ');            /* skip the id */
+            printf("%s%s%s", C_RED, msg ? msg + 1 : line + 6, C_R);
+            return 0;
+        }
+        /* ACCEPT / EMAP / TIERS / HITS / HWINFO / PROF / other: skip */
+    }
+}
+
+/* Send one prompt as a serve-codec SUBMIT. 0, or -1 on a write error. */
+static int submit_serve2(Engine *e, const char *prompt, int max_new) {
+    static unsigned id = 0;
+    char hdr[128];
+    size_t plen = strlen(prompt);
+    int hn = snprintf(hdr, sizeof hdr, "SUBMIT %u 0 %zu %d 0.7 0.95\n",
+                      ++id, plen, max_new < 1 ? 1 : max_new);
+    if (hn < 0 || write(e->to, hdr, (size_t)hn) < 0) return -1;
+    if (plen && write(e->to, prompt, plen) < 0) return -1;
+    return write(e->to, "\n", 1) < 0 ? -1 : 0;            /* payload terminator */
 }
 
 static const char *engine_for(const char *model_type) {
@@ -1732,6 +1816,12 @@ static int model_boot(const char *tracker, const char *model, const char *shim,
     g_eng.spinning = 0;
     if (g_tty) pthread_join(tspin, NULL);
     g_eng.booting = 0;
+    /* DeepSeek V4 hands out FRAME_READY like the older framed engines but then
+     * speaks the SUBMIT/DATA/DONE serve codec, not raw-prompt/FRAME_END. The
+     * two are identical at the handshake, so switch on the engine, the way the
+     * olmoe line dialect is picked. */
+    if (e->proto == PROTO_FRAMED && strstr(engine, "deepseek"))
+        e->proto = PROTO_SERVE2;
     if (ready) {
         printf("  %s✗ il motore non è arrivato a essere pronto%s\n", C_RED, C_R);
         engine_diag(e, 1);
@@ -1976,7 +2066,15 @@ static int cmd_chat(int argc, char **argv) {
         }
 
         int is_reset = !strcmp(line, "/reset");
-        if (eng.proto == PROTO_FRAMED) {
+        if (eng.proto == PROTO_SERVE2) {
+            /* the serve codec has no conversation-reset command; the KV slot is
+             * reused per turn, so note it and keep the slot rather than hang. */
+            if (is_reset) {
+                printf("  %s\xe2\x9c\xa6 /reset non supportato da questo motore%s\n", C_DIM, C_R);
+                continue;
+            }
+            if (submit_serve2(&eng, line, max_new)) break;
+        } else if (eng.proto == PROTO_FRAMED) {
             /* framed dialect: reset is a control byte, everything else is the
              * prompt line as-is */
             const char *send = is_reset ? "\x02RESET" : line;
@@ -1995,7 +2093,15 @@ static int cmd_chat(int argc, char **argv) {
         double m0 = g_eng.net_mb, r0 = nowd();
         char stat[128] = "";
 
-        if (eng.proto == PROTO_FRAMED) {
+        if (eng.proto == PROTO_SERVE2) {
+            printf("%s%s\xe2\x97\x86 %s%s\n  ", C_BOLD, C_CORAL, model, C_R);
+            if (stream_serve2(&eng, stat, sizeof stat)) {
+                fprintf(stderr, "\n%sengine exited%s\n", C_RED, C_R);
+                engine_diag(&eng, 0);
+                break;
+            }
+            printf("\n");
+        } else if (eng.proto == PROTO_FRAMED) {
             if (!is_reset) printf("%s%s\xe2\x97\x86 %s%s\n  ", C_BOLD, C_CORAL, model, C_R);
             if (stream_until_end(&eng, stat, sizeof stat)) {
                 fprintf(stderr, "\n%sengine exited%s\n", C_RED, C_R);
