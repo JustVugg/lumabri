@@ -49,6 +49,13 @@ key, finds the engines itself, and remembers all of it in `~/.lumabri/config`.
 The second time it is Enter, Enter, and you are in. Flags still win when you give
 them, so a script never inherits somebody's saved answers.
 
+When you join it also asks how you want to take part — just chat, or **lend your
+machine too**: hold part of the model on disk, or run some of its experts. Pick
+"run experts" and your computer automatically takes a share of the experts sized
+to its free RAM; as more people do the same, the swarm splits the experts
+between them and each token is computed on several machines at once, so it gets
+faster the more join. Nothing to configure — Enter picks "just chat".
+
 Inside the chat, `/swarm` shows the network live and anonymous (peers are
 numbered, never named), and `/model` lists the models on the swarm and switches
 between them on the fly. The prompt is a real line editor — arrow keys, Home/End,
@@ -162,13 +169,19 @@ On every other machine, pick a role:
 | chat | `lumabri chat --tracker SERVER:7300 --engines-dir /path/to/colibri/c` |
 | chat on the machine that holds the model | `lumabri chat --local DIR` |
 | donate disk (hold bytes) | `lumabri serve --model ./slice --join SERVER:7300 --model-name NAME --donate GB` |
-| donate compute (run experts) | `expert_node<engine> --model DIR --tracker SERVER:7300 --cache N` |
+| donate compute (run experts) | pick it in the join menu — or `expert_node<engine> --model DIR --tracker SERVER:7300 --hold auto` |
 
 A disk donor is told which files to hold, rarest first, by the tracker. A
-compute donor says only how many experts it can carry (`--hold N`) and the
-tracker gives it the set nobody else covers. Neither needs to know the others
-exist. While a reply is generating you can kill a donor: you get one failover
-line and the tokens continue, identical.
+compute donor says how many experts it can carry — `--hold auto` sizes that to
+its free RAM — and the tracker gives it the set nobody else covers. So several
+compute donors **split the model into disjoint slices automatically**, and one
+token's experts then run across them in parallel: more machines, faster
+tokens. (`--hold N` sets the count by hand; `--stride 2:0` / `--stride 2:1` or
+`--layers …` split it explicitly if you want to size each machine yourself.)
+When two donors happen to hold the *same* expert, add `LUMABRI_SPREAD=1` on the
+chatter to balance the load between them too. Neither donor needs to know the
+others exist. While a reply is generating you can kill a donor: you get one
+failover line and the tokens continue, identical.
 
 For a manual signing-key rotation, distribute a keyring containing one public
 key per line. `--pubkey keyring` and `LUMABRI_PUBKEY=keyring` accept every key
@@ -180,6 +193,20 @@ Comma-separated public keys are accepted too; the low-level tracker and
 maintainer commands also accept repeated `--pubkey`.
 There is still one signature per object; the overlap belongs to the verifier,
 so the wire format does not change during rotation.
+
+### Optional knobs
+
+Everything works with none of these set. Turn one on by putting it in front of
+the command, e.g. `LUMABRI_SPREAD=1 lumabri chat …`.
+
+| set | to |
+|---|---|
+| `LUMABRI_SPREAD=1` | spread the load across peers that hold the *same* expert (default: the nearest one wins) |
+| `LUMABRI_VERIFY=N` | re-run N% of expert calls on a second peer and demand the same answer — a lie stops the run |
+| `LUMABRI_HEDGE_MS=N` | after N ms with no reply, ask a second peer too and take whichever comes first |
+| `LUMABRI_ALLOW_CODEGEN_SKEW=1` | let peers built with a different compiler or CPU join (results are then verified, not bit-identical) |
+| `LUMABRI_ENCRYPT=1` | encrypt the transport (see below) |
+| `RAM_GB=N` | tell a `--local` run how much RAM it may use to keep experts resident |
 
 ### Encrypted transport and peer identity
 
