@@ -62,6 +62,7 @@ static struct {
     double next_discover, discover_period_s;
     int verify_pct;             /* LUMABRI_VERIFY: % of calls double-checked */
     int allow_codegen_skew;     /* LUMABRI_ALLOW_CODEGEN_SKEW: cc/isa -> warn, not refuse */
+    int spread;                 /* LUMABRI_SPREAD: near-band replica spreading, not strict argmin */
     int hedge_ms;               /* 0 disables; base policy, fixed delay */
     unsigned long long calls, layers_done, failovers, verified, relays;
     unsigned long long hedges, hedge_wins, batch_calls, batch_rows;
@@ -389,9 +390,9 @@ static void lumi_enable_if_complete(void) {
     int direct = 0;
     for (int i = 0; i < L.npeers; i++) if (!L.peers[i].dead) direct++;
     fprintf(stderr, "[lumabri] phase 2 active: every expert runs on a peer, "
-                    "%d direct peer(s), %d experts, hidden=%d, nearest replica "
-                    "preferred%s\n",
+                    "%d direct peer(s), %d experts, hidden=%d, %s%s\n",
             direct, L.expected, L.hidden,
+            L.spread ? "spreading across near replicas" : "nearest replica preferred",
             L.verify_pct ? " · spot-check verification on" : "");
 }
 
@@ -467,6 +468,7 @@ static void lumi_init_ex(int n_layers, int n_experts, int hidden,
          * unless the operator set LUMABRI_VERIFY themselves. */
         if (!v && L.verify_pct == 0) L.verify_pct = 5;
     }
+    L.spread = getenv("LUMABRI_SPREAD") && atoi(getenv("LUMABRI_SPREAD")) != 0;
     L.hedge_ms = lmb_env_int("LUMABRI_HEDGE_MS", 0, 0, 60000);
     L.initialized = 1;
 
@@ -518,6 +520,22 @@ static LMB_MAYBE_UNUSED int lumi_layer_on(int layer) {
 }
 
 /* nearest live replica of (layer,eid) not yet tried this call, or -1 */
+static uint32_t lumi_hash_gid(int gid) {   /* fnv1a over the (layer,expert) id */
+    uint32_t h = 2166136261u;
+    for (int i = 0; i < 4; i++) { h ^= (uint32_t)((unsigned)gid >> (i * 8)) & 0xffu; h *= 16777619u; }
+    return h;
+}
+
+/* Which replica of `gid` to send to. Default: the nearest live, untried one
+ * (strict argmin — deliberate, and what a single-holder-per-expert swarm wants).
+ * With LUMABRI_SPREAD on and this expert held by several near-equal replicas,
+ * spread instead: keep the ones within 25% + 2 ms of the best, order them
+ * canonically by address so every chatter agrees, and pick by a stable
+ * per-expert hash — so different experts land on different replicas (load
+ * spreads) while one expert keeps a home (cache locality). Collapses to argmin
+ * whenever the band has one member, nothing is near-equal, or the best is still
+ * unprobed (LONG_MAX), which also keeps the percentage arithmetic from
+ * overflowing. Never returns a dead, tried, or absent replica. */
 static int lumi_pick(int gid, uint32_t tried) {
     const int *own = &L.own[(size_t)gid * LUMI_MAX_REP];
     int best = -1;
@@ -528,7 +546,23 @@ static int lumi_pick(int gid, uint32_t tried) {
         if (best < 0 || L.peers[pi].rtt_us < bestr)
             { best = r; bestr = L.peers[pi].rtt_us; }
     }
-    return best;
+    if (best < 0 || !L.spread || bestr == LONG_MAX) return best;
+
+    long band = bestr + bestr / 4 + 2000;   /* 1.25*best + 2ms; bestr is finite here */
+    int cand[LUMI_MAX_REP], nc = 0;
+    for (int r = 0; r < LUMI_MAX_REP; r++) {
+        int pi = own[r];
+        if (pi < 0 || ((tried >> r) & 1) || L.peers[pi].dead) continue;
+        long rt = L.peers[pi].rtt_us;
+        if (rt != LONG_MAX && rt <= band) cand[nc++] = r;
+    }
+    if (nc <= 1) return best;
+    for (int i = 1; i < nc; i++)            /* canonical: sort the band by address */
+        for (int j = i; j > 0 &&
+             strcmp(L.peers[own[cand[j]]].addr, L.peers[own[cand[j-1]]].addr) < 0; j--) {
+            int t = cand[j]; cand[j] = cand[j-1]; cand[j-1] = t;
+        }
+    return cand[lumi_hash_gid(gid) % (uint32_t)nc];
 }
 
 /* One request carries every row that this layer routed to this expert.
