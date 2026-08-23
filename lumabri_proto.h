@@ -90,7 +90,7 @@
 #define LMB_EREG_STATS_MAGIC     0x31545345u /* "EST1" */
 #define LMB_EREG_STATS_VERSION   1u
 #define LMB_EREG_STATS_LENGTH    12u
-#define LMB_SWARM_EXEC_MAGIC     0x31584553u /* "SEX1" */
+#define LMB_SWARM_EXEC_MAGIC     0x31585753u /* "SWX1" */
 #define LMB_SWARM_EXEC_VERSION   1u
 
 /* Both arguments must point at the fixed LMB_TOKEN_MAX+1 authentication

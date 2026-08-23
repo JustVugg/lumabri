@@ -718,23 +718,25 @@ static Peer *handle_ereg(int fd, LmbMsg *m, const uint8_t *nonce) {
                    lmb_cur_u32(&c, &qbits) || lmb_cur_u32(&c, &hidden) ||
                    lmb_cur_u32(&c, &slots) || lmb_cur_u32(&c, &total_experts);
     }
-    /* A recognized envelope is optional. Unknown trailing bytes are still a
-     * malformed EREG, while a damaged or newer telemetry payload only makes
-     * the statistics unavailable and never invalidates the base heartbeat. */
+    /* A recognized envelope is optional. Unknown trailing bytes and damaged
+     * current-version telemetry are malformed EREG frames. A complete future
+     * version may be skipped with its statistics left unavailable. */
     if (!bad_meta && c.off < c.len) {
         uint32_t smagic = 0, sversion = 0, slen = 0;
         if (lmb_cur_u32(&c, &smagic) || smagic != LMB_EREG_STATS_MAGIC ||
-            lmb_cur_u32(&c, &sversion) || lmb_cur_u32(&c, &slen)) {
+            lmb_cur_u32(&c, &sversion) || lmb_cur_u32(&c, &slen) ||
+            slen > c.len - c.off) {
             bad_meta = 1;
-        } else if (slen > c.len - c.off) {
-            c.off = c.len;
         } else {
             LmbCur stats = { c.p + c.off, slen, 0 };
-            if (sversion == LMB_EREG_STATS_VERSION &&
-                slen == LMB_EREG_STATS_LENGTH &&
-                !lmb_cur_u64(&stats, &exec_calls) &&
-                !lmb_cur_u32(&stats, &exec_inflight) && stats.off == stats.len)
-                have_exec_stats = 1;
+            if (sversion == LMB_EREG_STATS_VERSION) {
+                if (slen != LMB_EREG_STATS_LENGTH ||
+                    lmb_cur_u64(&stats, &exec_calls) ||
+                    lmb_cur_u32(&stats, &exec_inflight) || stats.off != stats.len)
+                    bad_meta = 1;
+                else
+                    have_exec_stats = 1;
+            }
             c.off += slen;
             if (c.off != c.len) bad_meta = 1;
         }
