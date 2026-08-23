@@ -80,6 +80,19 @@
 #define LMB_HASH_MAGIC 0x48414853u  /* "SHAH": optional hash section marker */
 #define LMB_PEER_AUTH_MAGIC 0x52554150u /* "PAUR": trailing peer-identity block */
 
+/* Optional executor telemetry is negotiated on the existing EREG LMB_OK.
+ * Every extension has its own magic, version, and bounded payload length so
+ * old peers keep using the exact legacy body and new peers can skip versions
+ * they do not understand without changing any opcode. */
+#define LMB_EREG_CAP_MAGIC       0x50414345u /* "ECAP" */
+#define LMB_EREG_CAP_VERSION     1u
+#define LMB_EREG_CAP_STATS       0x00000001u
+#define LMB_EREG_STATS_MAGIC     0x31545345u /* "EST1" */
+#define LMB_EREG_STATS_VERSION   1u
+#define LMB_EREG_STATS_LENGTH    12u
+#define LMB_SWARM_EXEC_MAGIC     0x31585753u /* "SWX1" */
+#define LMB_SWARM_EXEC_VERSION   1u
+
 /* Both arguments must point at the fixed LMB_TOKEN_MAX+1 authentication
  * buffers used by the daemons.  Compare the complete buffers so a remote
  * caller cannot learn a shared invite token one prefix at a time. */
