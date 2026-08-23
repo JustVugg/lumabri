@@ -601,21 +601,60 @@ typedef struct {
     uint32_t age_s, nfiles;
 } SwarmRow;
 
-static int swarm_stats(const char *tracker, SwarmRow *rows, int cap) {
+typedef struct {
+    char model[64];
+    uint64_t calls;
+    uint32_t in_flight, age_s;
+    int have_stats;
+} ExecSwarmRow;
+
+static int swarm_stats(const char *tracker, SwarmRow *rows, int cap,
+                       ExecSwarmRow *exec_rows, int exec_cap, int *exec_out) {
     LmbMsg m = {0};
-    if (lmb_request(tracker, LMB_SWARM, NULL, 0, &m) || m.op != LMB_SWARM_R) return -1;
+    if (exec_out) *exec_out = 0;
+    if (lmb_request(tracker, LMB_SWARM, NULL, 0, &m)) return -1;
+    if (m.op != LMB_SWARM_R) { lmb_msg_free(&m); return -1; }
     LmbCur c = { m.body, m.body_len, 0 };
     uint32_t n = 0;
     if (lmb_cur_u32(&c, &n)) { lmb_msg_free(&m); return -1; }
     int out = 0;
-    for (uint32_t i = 0; i < n && out < cap; i++) {
-        SwarmRow *r = &rows[out];
-        if (lmb_cur_str(&c, r->model, sizeof r->model) ||
-            lmb_cur_u64(&c, &r->held) || lmb_cur_u64(&c, &r->served_bytes) ||
-            lmb_cur_u64(&c, &r->served_reads) || lmb_cur_u32(&c, &r->age_s) ||
-            lmb_cur_u32(&c, &r->nfiles)) break;
-        out++;
+    /* Consume every legacy row even when the caller's output array is full;
+     * the optional executor suffix starts only after the complete prefix. */
+    for (uint32_t i = 0; i < n; i++) {
+        SwarmRow r = {0};
+        if (lmb_cur_str(&c, r.model, sizeof r.model) ||
+            lmb_cur_u64(&c, &r.held) || lmb_cur_u64(&c, &r.served_bytes) ||
+            lmb_cur_u64(&c, &r.served_reads) || lmb_cur_u32(&c, &r.age_s) ||
+            lmb_cur_u32(&c, &r.nfiles)) {
+            lmb_msg_free(&m); return -1;
+        }
+        if (out < cap) rows[out++] = r;
     }
+    int eout = 0;
+    if (c.len - c.off >= 12) {
+        uint32_t magic = 0, version = 0, len = 0;
+        LmbCur suffix = c;
+        if (!lmb_cur_u32(&suffix, &magic) && magic == LMB_SWARM_EXEC_MAGIC &&
+            !lmb_cur_u32(&suffix, &version) && !lmb_cur_u32(&suffix, &len) &&
+            len <= suffix.len - suffix.off && version == LMB_SWARM_EXEC_VERSION) {
+            LmbCur section = { suffix.p + suffix.off, len, 0 };
+            uint32_t en = 0;
+            int valid = !lmb_cur_u32(&section, &en) && en <= 4096;
+            for (uint32_t i = 0; valid && i < en; i++) {
+                ExecSwarmRow r = {0};
+                uint32_t have = 0;
+                valid = !lmb_cur_str(&section, r.model, sizeof r.model) &&
+                        !lmb_cur_u32(&section, &have) &&
+                        !lmb_cur_u64(&section, &r.calls) &&
+                        !lmb_cur_u32(&section, &r.in_flight) &&
+                        !lmb_cur_u32(&section, &r.age_s);
+                r.have_stats = have != 0;
+                if (valid && eout < exec_cap) exec_rows[eout++] = r;
+            }
+            if (!valid || section.off != section.len) eout = 0;
+        }
+    }
+    if (exec_out) *exec_out = eout;
     lmb_msg_free(&m);
     return out;
 }
@@ -623,25 +662,44 @@ static int swarm_stats(const char *tracker, SwarmRow *rows, int cap) {
 /* /swarm: the network, anonymous. Peers are numbered, never named. */
 static void render_swarm(const char *tracker) {
     SwarmRow rows[64];
-    int n = swarm_stats(tracker, rows, 64);
+    ExecSwarmRow exec_rows[64];
+    int ne = 0;
+    int n = swarm_stats(tracker, rows, 64, exec_rows, 64, &ne);
     if (n < 0) { printf("  %stracker unreachable%s\n", C_RED, C_R); return; }
-    char lines[65][256];
-    snprintf(lines[0], sizeof lines[0], "%s%sla rete adesso%s  %s%d peer vivi%s",
-             C_BOLD, C_CORAL, C_R, C_DIM, n, C_R);
+    char lines[132][256];
+    int nl = 0;
+    snprintf(lines[nl++], sizeof lines[0],
+             "%s%sswarm status%s  %s%d storage peers | %d executors%s",
+             C_BOLD, C_CORAL, C_R, C_DIM, n, ne, C_R);
+    snprintf(lines[nl++], sizeof lines[0], "%sstorage peers%s", C_BOLD, C_R);
     for (int i = 0; i < n; i++)
-        snprintf(lines[i + 1], sizeof lines[0],
-                 "%speer-%d%s  %-12.12s %5.1f GB  %s%.0f MB out · %llu req · hb %us%s",
+        snprintf(lines[nl++], sizeof lines[0],
+                 "%sstorage-%d%s  %-12.12s %5.1f GB  %s%.0f MB out | %llu reads | hb %us%s",
                  C_BOLD, i + 1, C_R, rows[i].model, (double)rows[i].held / 1e9,
                  C_DIM, (double)rows[i].served_bytes / 1e6,
                  (unsigned long long)rows[i].served_reads, rows[i].age_s, C_R);
+    snprintf(lines[nl++], sizeof lines[0], "%sexecutors%s", C_BOLD, C_R);
+    for (int i = 0; i < ne; i++) {
+        if (exec_rows[i].have_stats)
+            snprintf(lines[nl++], sizeof lines[0],
+                     "%sexecutor-%d%s  %-12.12s %s%llu calls | %u in flight | hb %us%s",
+                     C_BOLD, i + 1, C_R, exec_rows[i].model, C_DIM,
+                     (unsigned long long)exec_rows[i].calls,
+                     exec_rows[i].in_flight, exec_rows[i].age_s, C_R);
+        else
+            snprintf(lines[nl++], sizeof lines[0],
+                     "%sexecutor-%d%s  %-12.12s %sstats unavailable | hb %us%s",
+                     C_BOLD, i + 1, C_R, exec_rows[i].model, C_DIM,
+                     exec_rows[i].age_s, C_R);
+    }
     /* the box fits its widest line; the terminal caps it */
     int w = 0;
-    for (int i = 0; i <= n; i++)
+    for (int i = 0; i < nl; i++)
         if (vis_len(lines[i]) + 6 > w) w = vis_len(lines[i]) + 6;
     if (w > term_w() - 2) w = term_w() - 2;
     printf("\n");
     hline("\xe2\x95\xad", "\xe2\x95\xae", w);
-    for (int i = 0; i <= n; i++) {
+    for (int i = 0; i < nl; i++) {
         int pad = w - 4 - vis_len(lines[i]);
         printf("%s\xe2\x94\x82%s  %s%*s%s\xe2\x94\x82%s\n", C_GRAY, C_R, lines[i],
                pad > 0 ? pad : 0, "", C_GRAY, C_R);
@@ -652,7 +710,7 @@ static void render_swarm(const char *tracker) {
 /* distinct model names on the swarm; returns count */
 static int swarm_models(const char *tracker, char names[][64], int cap) {
     SwarmRow rows[64];
-    int n = swarm_stats(tracker, rows, 64), out = 0;
+    int n = swarm_stats(tracker, rows, 64, NULL, 0, NULL), out = 0;
     for (int i = 0; i < n; i++) {
         int seen = 0;
         for (int j = 0; j < out; j++) if (!strcmp(names[j], rows[i].model)) seen = 1;

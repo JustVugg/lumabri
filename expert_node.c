@@ -127,6 +127,7 @@ static struct {
     LmbModelIdentity identity; int have_identity;
     pthread_mutex_t identity_lk;
     _Atomic uint64_t calls, cold;
+    _Atomic uint32_t in_flight;
     double busy_s;
     pthread_mutex_t stat_lk;
 } g = { .c_lk = PTHREAD_MUTEX_INITIALIZER, .load_lk = PTHREAD_MUTEX_INITIALIZER,
@@ -298,6 +299,10 @@ static int exec_compute(LmbMsg *m, float **outp, uint32_t *out_len) {
      * box stops multiplying and starts context-switching. The measured cost
      * of that was a tenfold collapse at four clients. Queueing is the cheaper
      * failure — everyone waits a little instead of everyone thrashing. */
+    /* Count both work waiting at the compute gate and work currently running.
+     * Keep it visible through configured response delays as those calls still
+     * consume end-to-end executor capacity from the chatter's perspective. */
+    atomic_fetch_add(&g.in_flight, 1);
     gate_enter();
 
     /* one scratch per connection thread: the kernels are called concurrently */
@@ -325,6 +330,7 @@ static int exec_compute(LmbMsg *m, float **outp, uint32_t *out_len) {
       if (slow && atoi(slow) > 0) usleep((useconds_t)atoi(slow) * 1000u); }
     lmb_emu_delay();   /* the reply's flight time, when one is being emulated */
     atomic_fetch_add(&g.calls, 1);
+    atomic_fetch_sub(&g.in_flight, 1);
     pthread_mutex_lock(&g.stat_lk); g.busy_s += dt; pthread_mutex_unlock(&g.stat_lk);
     *outp = out; *out_len = (uint32_t)obytes;
     return 0;
@@ -454,7 +460,7 @@ static void *conn_thread(void *arg) {
 
 /* ---- tracker heartbeat: this is how chatters find us --------------------- */
 
-static int send_ereg(int fd, const uint8_t nonce[32]) {
+static int send_ereg(int fd, const uint8_t nonce[32], int send_stats) {
     LmbBuf b = {0};
     lmb_buf_str(&b, g.name);
     lmb_buf_str(&b, g.advertise);
@@ -478,6 +484,13 @@ static int send_ereg(int fd, const uint8_t nonce[32]) {
     lmb_buf_u32(&b, (uint32_t)g.hidden);
     lmb_buf_u32(&b, (uint32_t)g.n_slots);
     lmb_buf_u32(&b, (uint32_t)g.n_experts);
+    if (send_stats) {
+        lmb_buf_u32(&b, LMB_EREG_STATS_MAGIC);
+        lmb_buf_u32(&b, LMB_EREG_STATS_VERSION);
+        lmb_buf_u32(&b, LMB_EREG_STATS_LENGTH);
+        lmb_buf_u64(&b, atomic_load(&g.calls));
+        lmb_buf_u32(&b, atomic_load(&g.in_flight));
+    }
     /* identity: sign the connection nonce with this machine's peer key */
     uint8_t msg[512], sig[64];
     size_t ml = lmb_peer_auth_msg(nonce, g.name, g.model, g.advertise, msg, sizeof msg);
@@ -534,12 +547,16 @@ static void *control_thread(void *arg) {
         if (lmb_request_challenge(fd, nonce)) { close(fd); sleep(1); continue; }
         struct timeval tv = { HEARTBEAT_S, 0 };
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-        if (send_ereg(fd, nonce)) { close(fd); sleep(1); continue; }
+        /* Capability state belongs to this tracker connection. The first
+         * heartbeat is always legacy, and reconnecting resets negotiation so
+         * a node can safely move from a new tracker to an old one. */
+        int stats_enabled = 0;
+        if (send_ereg(fd, nonce, stats_enabled)) { close(fd); sleep(1); continue; }
         for (;;) {
             LmbMsg m;
             if (lmb_recv(fd, &m) != 0) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    if (send_ereg(fd, nonce)) break;
+                    if (send_ereg(fd, nonce, stats_enabled)) break;
                     continue;
                 }
                 break;
@@ -555,6 +572,11 @@ static void *control_thread(void *arg) {
                     break;              /* reconnect and register the new name */
                 }
             }
+            else if (m.op == LMB_OK && m.body_len == 12 &&
+                     lmb_get32(m.body) == LMB_EREG_CAP_MAGIC &&
+                     lmb_get32(m.body + 4) == LMB_EREG_CAP_VERSION &&
+                     (lmb_get32(m.body + 8) & LMB_EREG_CAP_STATS))
+                stats_enabled = 1;
             lmb_msg_free(&m);
             if (rc) break;
             pthread_mutex_lock(&g.identity_lk);

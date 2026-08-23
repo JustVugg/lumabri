@@ -39,6 +39,9 @@ typedef struct {
     char engine[64], profile[LMB_BUILD_PROFILE_MAX];
     uint32_t bits, hidden, slots, total_experts;
     uint64_t held_bytes, served_bytes, served_reads;
+    uint64_t exec_calls;
+    uint32_t exec_inflight;
+    int have_exec_stats;
     PFile *files; uint32_t nfiles;
     double ts;
     int used;
@@ -704,17 +707,39 @@ static Peer *handle_ereg(int fd, LmbMsg *m, const uint8_t *nonce) {
         bits = c.p + c.off; c.off += bl;
     } else bl = 0;
     uint32_t meta = 0, qbits = 0, hidden = 0, slots = 0, total_experts = 0;
+    uint64_t exec_calls = 0;
+    uint32_t exec_inflight = 0;
+    int have_exec_stats = 0, bad_meta = 0;
     char engine[64] = "", profile[LMB_BUILD_PROFILE_MAX] = "";
     if (c.off < c.len) {
-        if (lmb_cur_u32(&c, &meta) || meta != LMB_EXPERT_MANIFEST_MAGIC ||
-            lmb_cur_str(&c, engine, sizeof engine) ||
-            lmb_cur_str(&c, profile, sizeof profile) ||
-            lmb_cur_u32(&c, &qbits) || lmb_cur_u32(&c, &hidden) ||
-            lmb_cur_u32(&c, &slots) || lmb_cur_u32(&c, &total_experts) ||
-            c.off != c.len) {
-            send_err(fd, "bad ereg metadata"); return NULL;
+        bad_meta = lmb_cur_u32(&c, &meta) || meta != LMB_EXPERT_MANIFEST_MAGIC ||
+                   lmb_cur_str(&c, engine, sizeof engine) ||
+                   lmb_cur_str(&c, profile, sizeof profile) ||
+                   lmb_cur_u32(&c, &qbits) || lmb_cur_u32(&c, &hidden) ||
+                   lmb_cur_u32(&c, &slots) || lmb_cur_u32(&c, &total_experts);
+    }
+    /* A recognized envelope is optional. Unknown trailing bytes are still a
+     * malformed EREG, while a damaged or newer telemetry payload only makes
+     * the statistics unavailable and never invalidates the base heartbeat. */
+    if (!bad_meta && c.off < c.len) {
+        uint32_t smagic = 0, sversion = 0, slen = 0;
+        if (lmb_cur_u32(&c, &smagic) || smagic != LMB_EREG_STATS_MAGIC ||
+            lmb_cur_u32(&c, &sversion) || lmb_cur_u32(&c, &slen)) {
+            bad_meta = 1;
+        } else if (slen > c.len - c.off) {
+            c.off = c.len;
+        } else {
+            LmbCur stats = { c.p + c.off, slen, 0 };
+            if (sversion == LMB_EREG_STATS_VERSION &&
+                slen == LMB_EREG_STATS_LENGTH &&
+                !lmb_cur_u64(&stats, &exec_calls) &&
+                !lmb_cur_u32(&stats, &exec_inflight) && stats.off == stats.len)
+                have_exec_stats = 1;
+            c.off += slen;
+            if (c.off != c.len) bad_meta = 1;
         }
     }
+    if (bad_meta) { send_err(fd, "bad ereg metadata"); return NULL; }
     Peer *slot = NULL;
     int fresh = 0;
     pthread_mutex_lock(&g_lk);
@@ -767,6 +792,9 @@ static Peer *handle_ereg(int fd, LmbMsg *m, const uint8_t *nonce) {
         snprintf(slot->profile, sizeof slot->profile, "%s", profile);
         slot->bits = qbits; slot->hidden = hidden;
         slot->slots = slots; slot->total_experts = total_experts;
+        slot->exec_calls = exec_calls;
+        slot->exec_inflight = exec_inflight;
+        slot->have_exec_stats = have_exec_stats;
         if (bl) {
             uint8_t *nb = (uint8_t *)realloc(slot->ebits, bl);
             if (nb) { slot->ebits = nb; memcpy(slot->ebits, bits, bl);
@@ -780,12 +808,18 @@ static Peer *handle_ereg(int fd, LmbMsg *m, const uint8_t *nonce) {
                name, use_addr, model, nexperts);
         fflush(stdout);
     }
-    if (lmb_send(fd, LMB_OK, NULL, 0, NULL, 0)) {
+    LmbBuf ack = {0};
+    lmb_buf_u32(&ack, LMB_EREG_CAP_MAGIC);
+    lmb_buf_u32(&ack, LMB_EREG_CAP_VERSION);
+    lmb_buf_u32(&ack, LMB_EREG_CAP_STATS);
+    if (lmb_send(fd, LMB_OK, ack.p, (uint32_t)ack.len, NULL, 0)) {
+        free(ack.p);
         pthread_mutex_lock(&g_lk);
         if (slot->ctrl_fd == fd) slot->ctrl_fd = -1;
         pthread_mutex_unlock(&g_lk);
         return NULL;
     }
+    free(ack.p);
     return slot;
 }
 
@@ -975,13 +1009,16 @@ static int handle_placement(int fd, LmbMsg *m) {
 /* ---- SWARM: anonymous by construction ----------------------------------- */
 
 static int handle_swarm(int fd) {
-    LmbBuf b = {0};
+    LmbBuf b = {0}, exec = {0};
     double now = now_s();
     pthread_mutex_lock(&g_lk);
-    uint32_t live = 0;
-    for (int i = 0; i < MAX_PEERS; i++)
-        if (g_peers[i].used && !g_peers[i].is_expert &&
-            now - g_peers[i].ts <= g_stale_s) live++;
+    uint32_t live = 0, live_exec = 0;
+    for (int i = 0; i < MAX_PEERS; i++) {
+        if (!g_peers[i].used || now - g_peers[i].ts > g_stale_s) continue;
+        if (g_peers[i].is_expert) live_exec++;
+        else live++;
+    }
+    /* Keep this legacy storage-peer prefix byte-for-byte compatible. */
     lmb_buf_u32(&b, live);
     for (int i = 0; i < MAX_PEERS; i++) {
         Peer *p = &g_peers[i];
@@ -993,7 +1030,24 @@ static int handle_swarm(int fd) {
         lmb_buf_u32(&b, (uint32_t)(now - p->ts));
         lmb_buf_u32(&b, p->nfiles);
     }
+    /* Executors are anonymous and live in a versioned suffix. Old clients
+     * stop after the storage rows and ignore these trailing bytes. */
+    lmb_buf_u32(&exec, live_exec);
+    for (int i = 0; i < MAX_PEERS; i++) {
+        Peer *p = &g_peers[i];
+        if (!p->used || !p->is_expert || now - p->ts > g_stale_s) continue;
+        lmb_buf_str(&exec, p->model);
+        lmb_buf_u32(&exec, p->have_exec_stats ? 1u : 0u);
+        lmb_buf_u64(&exec, p->have_exec_stats ? p->exec_calls : 0);
+        lmb_buf_u32(&exec, p->have_exec_stats ? p->exec_inflight : 0);
+        lmb_buf_u32(&exec, (uint32_t)(now - p->ts));
+    }
     pthread_mutex_unlock(&g_lk);
+    lmb_buf_u32(&b, LMB_SWARM_EXEC_MAGIC);
+    lmb_buf_u32(&b, LMB_SWARM_EXEC_VERSION);
+    lmb_buf_u32(&b, (uint32_t)exec.len);
+    lmb_buf_bytes(&b, exec.p, exec.len);
+    free(exec.p);
     int rc = lmb_send(fd, LMB_SWARM_R, b.p, (uint32_t)b.len, NULL, 0);
     free(b.p);
     return rc;
