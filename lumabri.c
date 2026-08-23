@@ -1472,7 +1472,34 @@ static int find_engines(char *dst, size_t cap) {
  * a compute donor is an expert node, and chatters already discover it by
  * heartbeat. The role is entirely a client-side decision.
  */
-typedef struct { int disk, compute; double gb; char model_dir[1024]; } Role;
+typedef struct {
+    int disk, compute;
+    double gb;
+    char model_dir[1024];
+    char donor_name[48];        /* --donor-name; "" = auto from the hostname */
+} Role;
+
+/* Donor names used to be "donor-exec-<port>" — the same string on every
+ * machine that donates on the default port. The tracker binds a name to the
+ * first peer key that registers it (anti-takeover), so the second machine on
+ * Earth to donate was silently rejected forever. Put the hostname in the
+ * automatic name so machines stop colliding; --donor-name overrides it. */
+static void donor_base_name(const Role *r, char *out, size_t cap) {
+    if (r->donor_name[0]) { snprintf(out, cap, "%s", r->donor_name); return; }
+    char host[64] = "";
+    if (gethostname(host, sizeof host - 1)) host[0] = 0;
+    char clean[24];
+    size_t n = 0;
+    for (const char *p = host; *p && n < sizeof clean - 1; p++) {
+        char c = *p;
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')
+            clean[n++] = c;
+    }
+    clean[n] = 0;
+    if (n) snprintf(out, cap, "donor-%s", clean);
+    else   snprintf(out, cap, "donor");
+}
 
 /* free space where the donated slice would live, in GB */
 static double free_gb_at(const char *path) {
@@ -1851,9 +1878,11 @@ static void role_start(const Role *r, const char *tracker, const char *model,
             printf("  %snon riesco ad avviare il maintainer: dono disco saltato%s\n",
                    C_DIM, C_R);
         } else {
+            char base[48];
+            donor_base_name(r, base, sizeof base);
             snprintf(portstr, sizeof portstr, "%d", port);
             snprintf(gbstr, sizeof gbstr, "%.2f", r->gb);
-            snprintf(name, sizeof name, "donor-%d", port);
+            snprintf(name, sizeof name, "%s-disk-%d", base, port);
             char *argv[20];
             int a = 0;
             argv[a++] = bin;
@@ -1937,9 +1966,10 @@ static void role_start(const Role *r, const char *tracker, const char *model,
                 if (!getenv("PIN")) envv[ne++] = (char *)"PIN=0";
                 envv[ne] = NULL;
             }
-            char portstr[16], name[64];
+            char portstr[16], name[64], base[48];
+            donor_base_name(r, base, sizeof base);
             snprintf(portstr, sizeof portstr, "%d", port);
-            snprintf(name, sizeof name, "donor-exec-%d", port);
+            snprintf(name, sizeof name, "%s-exec-%d", base, port);
             char *argv[20];
             int a = 0;
             argv[a++] = bin;
@@ -2065,6 +2095,7 @@ static int cmd_chat(int argc, char **argv) {
     const char *engine_path = NULL, *engines_dir = getenv("LUMABRI_ENGINES");
     const char *want_model = NULL, *local_dir = NULL;
     const char *role_arg = NULL, *model_dir_arg = NULL;
+    const char *donor_name_arg = NULL;
     double donate_gb = 0;
     int max_new = 256, ctx = 2048, cap_experts = 64;
     for (int i = 0; i < argc; i++) {
@@ -2079,12 +2110,13 @@ static int cmd_chat(int argc, char **argv) {
         else if (!strcmp(argv[i], "--role") && i + 1 < argc) role_arg = argv[++i];
         else if (!strcmp(argv[i], "--model-dir") && i + 1 < argc) model_dir_arg = argv[++i];
         else if (!strcmp(argv[i], "--donate") && i + 1 < argc) donate_gb = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--donor-name") && i + 1 < argc) donor_name_arg = argv[++i];
         else if (!strcmp(argv[i], "--plain")) g_tty = 0;
         else { fprintf(stderr, "usage: lumabri chat [--tracker H:P] [--model NAME] "
                                "[--local DIR] [--engine BIN] [--engines-dir DIR]\n"
                                "                    [--max-new N] [--ctx N] [--cap N]\n"
                                "                    [--role chat|disk|compute|all] "
-                               "[--donate GB] [--model-dir DIR]\n");
+                               "[--donate GB] [--model-dir DIR] [--donor-name S]\n");
                return 2; }
     }
 
@@ -2208,6 +2240,8 @@ static int cmd_chat(int argc, char **argv) {
     /* the role, before the engine boots: a donor started now warms up while
      * the dense weights cross the wire, instead of after */
     Role role = {0};
+    if (donor_name_arg)
+        snprintf(role.donor_name, sizeof role.donor_name, "%s", donor_name_arg);
     if (!local_dir && role_arg) {
         char bad[40];
         if (role_unknown(role_arg, bad, sizeof bad)) {
