@@ -663,6 +663,57 @@ static Peer *handle_register(int fd, LmbMsg *m, const uint8_t *nonce) {
     return slot;
 }
 
+/* ---- promised expert assignments -----------------------------------------
+ * An EASSIGN answer is a promise: the node spends minutes loading its slice
+ * before the first EREG heartbeat makes the holding visible. Counting only
+ * registered peers made two nodes that asked back-to-back both receive the
+ * same "least-covered" slice — half the model assigned twice, the other half
+ * to nobody (#52). Remember what was promised and count it as coverage until
+ * the EREG arrives (reality supersedes the promise) or it goes stale. All
+ * access under g_lk. */
+#define MAX_PROMISES 64
+#define PROMISE_TTL_S 1800.0
+typedef struct {
+    int used;
+    char model[64], name[64];
+    uint8_t *bits; size_t nbytes;        /* same layout as Peer.ebits */
+    double ts;
+} Promise;
+static Promise g_promise[MAX_PROMISES];
+
+static void promise_clear(const char *model, const char *name) {
+    for (int i = 0; i < MAX_PROMISES; i++)
+        if (g_promise[i].used && !strcmp(g_promise[i].model, model) &&
+            !strcmp(g_promise[i].name, name)) {
+            free(g_promise[i].bits);
+            memset(&g_promise[i], 0, sizeof g_promise[i]);
+        }
+}
+
+static void promise_store(const char *model, const char *name,
+                          const uint8_t *bits, size_t nbytes) {
+    Promise *slot = NULL;
+    for (int i = 0; i < MAX_PROMISES && !slot; i++)
+        if (g_promise[i].used && !strcmp(g_promise[i].model, model) &&
+            !strcmp(g_promise[i].name, name)) slot = &g_promise[i];
+    for (int i = 0; i < MAX_PROMISES && !slot; i++)
+        if (!g_promise[i].used) slot = &g_promise[i];
+    if (!slot) {                          /* full: the stalest promise goes */
+        slot = &g_promise[0];
+        for (int i = 1; i < MAX_PROMISES; i++)
+            if (g_promise[i].ts < slot->ts) slot = &g_promise[i];
+        free(slot->bits);
+        memset(slot, 0, sizeof *slot);
+    }
+    uint8_t *nb = (uint8_t *)realloc(slot->bits, nbytes);
+    if (!nb) return;                      /* a lost promise, not a lost donor */
+    memcpy(nb, bits, nbytes);
+    slot->bits = nb; slot->nbytes = nbytes;
+    slot->used = 1; slot->ts = now_s();
+    snprintf(slot->model, sizeof slot->model, "%s", model);
+    snprintf(slot->name, sizeof slot->name, "%s", name);
+}
+
 /* ---- EREG / EPEERS: expert nodes -----------------------------------------
  * Same shape as REGISTER: a heartbeat that names a model and an address.
  * Expert peers never enter placements (they hold no files); EPEERS is how a
@@ -771,6 +822,7 @@ static Peer *handle_ereg(int fd, LmbMsg *m, const uint8_t *nonce) {
             uint8_t *nb = (uint8_t *)realloc(slot->ebits, bl);
             if (nb) { slot->ebits = nb; memcpy(slot->ebits, bits, bl);
                       slot->enbits = bl * 8; }
+            promise_clear(model, name);   /* the promise became a holding */
         }
     }
     pthread_mutex_unlock(&g_lk);
@@ -1044,17 +1096,43 @@ static int handle_eassign(int fd, LmbMsg *m) {
      * would have to claim it holds everything. */
     pthread_mutex_lock(&g_lk);
     double now = now_s();
+    int have_mine = 0;
     for (int i = 0; i < MAX_PEERS; i++) {
         Peer *p = &g_peers[i];
         if (!p->used || !p->is_expert || strcmp(p->model, model) || !p->ebits) continue;
         if (!strcmp(p->name, name)) {                 /* this node, as it was */
             memcpy(mine, p->ebits, ((cells + 7) / 8 < (p->enbits + 7) / 8
                                     ? (cells + 7) / 8 : (p->enbits + 7) / 8));
+            have_mine = 1;
             continue;
         }
         if (now - p->ts > g_stale_s) continue;
         for (size_t k = 0; k < cells && k < p->enbits; k++)
             if (p->ebits[k >> 3] & (1u << (k & 7))) cnt[k]++;
+    }
+    /* Slices promised to nodes still loading count as coverage too (#52),
+     * and this node's own promise is its past on a re-ask mid-load. A live
+     * EREG under the same name has already been counted above and wins. */
+    for (int i = 0; i < MAX_PROMISES; i++) {
+        Promise *pr = &g_promise[i];
+        if (!pr->used || strcmp(pr->model, model)) continue;
+        if (now - pr->ts > PROMISE_TTL_S) continue;
+        if (!strcmp(pr->name, name)) {
+            if (!have_mine) {
+                size_t nb = (cells + 7) / 8 < pr->nbytes ? (cells + 7) / 8
+                                                         : pr->nbytes;
+                memcpy(mine, pr->bits, nb);
+            }
+            continue;
+        }
+        int live = 0;
+        for (int j = 0; j < MAX_PEERS; j++)
+            if (g_peers[j].used && g_peers[j].is_expert && g_peers[j].ebits &&
+                !strcmp(g_peers[j].name, pr->name) &&
+                !strcmp(g_peers[j].model, model)) { live = 1; break; }
+        if (live) continue;
+        for (size_t k = 0; k < cells && (k >> 3) < pr->nbytes; k++)
+            if (pr->bits[k >> 3] & (1u << (k & 7))) cnt[k]++;
     }
     pthread_mutex_unlock(&g_lk);
 
@@ -1074,6 +1152,20 @@ static int handle_eassign(int fd, LmbMsg *m) {
             pick[n++] = (uint32_t)k;
             cnt[k] = 0xffff;
         }
+
+    /* remember the promise, so the NEXT asker sees this slice as covered */
+    {
+        size_t nb = (cells + 7) / 8;
+        uint8_t *pb = (uint8_t *)calloc(nb, 1);
+        if (pb) {
+            for (uint32_t i = 0; i < n; i++)
+                pb[pick[i] >> 3] |= (uint8_t)(1u << (pick[i] & 7));
+            pthread_mutex_lock(&g_lk);
+            promise_store(model, name, pb, nb);
+            pthread_mutex_unlock(&g_lk);
+            free(pb);
+        }
+    }
 
     LmbBuf b = {0};
     lmb_buf_u32(&b, n);
