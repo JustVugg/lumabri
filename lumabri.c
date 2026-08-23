@@ -154,15 +154,36 @@ static pid_t spawn_argv(char *const argv[]) {
     return pid;
 }
 
-/* spawn_argv with extra KEY=VAL entries in the child's environment only.
- * The swarm-fed expert node needs the shim wired up (LD_PRELOAD and the
- * mirror's coordinates), and none of that may leak into our own process:
- * a chat client running behind its own shim would mirror every file it
- * touches. */
-static pid_t spawn_argv_env(char *const argv[], char *const envv[]) {
+/* Donor processes used to inherit the chat's terminal, so their stats and
+ * retries printed straight into the streamed reply ("Page[donor-exec] 3114
+ * exec calls…"). Give each donor its own log file instead; /debug tails it.
+ * If the log cannot be opened the donor still runs on the terminal — a
+ * noisy donation beats a missed one. `envv` carries KEY=VAL pairs for the
+ * child's environment only: the swarm-fed expert node needs the shim wired
+ * up (LD_PRELOAD and the mirror's coordinates), and none of that may leak
+ * into our own process — a chat client running behind its own shim would
+ * mirror every file it touches. */
+static char g_donor_logs[8][1200];
+static int g_ndonor_logs = 0;
+
+static const char *donor_log_path(const char *name, char *buf, size_t cap) {
+    const char *home = getenv("HOME") ? getenv("HOME") : ".";
+    char dir[1100];
+    snprintf(dir, sizeof dir, "%s/.lumabri/logs", home);
+    mkdir_p(dir);
+    snprintf(buf, cap, "%s/%s.log", dir, name);
+    if (g_ndonor_logs < 8)
+        snprintf(g_donor_logs[g_ndonor_logs++], sizeof g_donor_logs[0], "%s", buf);
+    return buf;
+}
+
+static pid_t spawn_argv_logged(char *const argv[], char *const envv[],
+                               const char *logpath) {
     pid_t pid = fork();
     if (pid == 0) {
         for (int i = 0; envv && envv[i]; i++) putenv(envv[i]);
+        int lfd = open(logpath, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (lfd >= 0) { dup2(lfd, 1); dup2(lfd, 2); close(lfd); }
         execv(argv[0], argv);
         perror(argv[0]);
         _exit(127);
@@ -661,6 +682,8 @@ static struct {
     volatile double local_gb;        /* already in the mirror when we started */
     volatile int    spinning;
     volatile int    booting;
+    volatile int    streaming;       /* a reply is being echoed token by token */
+    volatile int    deferred;        /* net lines swallowed while streaming */
     volatile double last_out;        /* when the child last said anything */
     char            phase[160];      /* its own words for what it is doing */
     char            tail[ETAIL][256];
@@ -725,11 +748,51 @@ static void *stderr_thread(void *arg) {
             continue;
         }
         if (strstr(line, "[lumabri]") || strstr(line, "resident weights") ||
-            strstr(line, "[chat]") || strstr(line, "[USAGE]"))
+            strstr(line, "[chat]") || strstr(line, "[USAGE]")) {
+            /* Mid-reply these lines splice themselves into the streamed text
+             * ("Page[lumabri] peer …") and a redraw can even eat the last
+             * token off the line. They are already in the tail: keep the
+             * reply clean, count them, and let /debug show them. */
+            if (g_eng.streaming) { g_eng.deferred++; continue; }
             fprintf(stderr, "%s  %s%s\n", C_DIM, line, C_R);
+        }
     }
     fclose(f);
     return NULL;
+}
+
+/* /debug: the last engine lines and each donor's log tail — everything that
+ * used to shout over the streamed reply, on demand instead. */
+static void tail_file(const char *path, int max) {
+    FILE *f = fopen(path, "r");
+    if (!f) { printf("    %s(niente ancora)%s\n", C_DIM, C_R); return; }
+    char ring[8][256];
+    int n = 0;
+    if (max > 8) max = 8;
+    char l[256];
+    while (fgets(l, sizeof l, f)) {
+        size_t k = strlen(l);
+        while (k && (l[k - 1] == '\n' || l[k - 1] == '\r')) l[--k] = 0;
+        if (!k) continue;
+        snprintf(ring[n % 8], sizeof ring[0], "%s", l);
+        n++;
+    }
+    fclose(f);
+    int show = n < max ? n : max;
+    for (int i = n - show; i < n; i++)
+        printf("    %s\xe2\x94\x82%s %s\n", C_GRAY, C_R, ring[i % 8]);
+    if (!n) printf("    %s(niente ancora)%s\n", C_DIM, C_R);
+}
+
+static void render_debug(void) {
+    printf("  %sultime righe del motore:%s\n", C_DIM, C_R);
+    tail_dump(15);
+    for (int i = 0; i < g_ndonor_logs; i++) {
+        printf("  %s%s%s\n", C_DIM, g_donor_logs[i], C_R);
+        tail_file(g_donor_logs[i], 8);
+    }
+    if (!g_ndonor_logs)
+        printf("  %snessun donatore in questa sessione%s\n", C_DIM, C_R);
 }
 
 /* one line, rewritten in place: the star, what it is doing, how far along */
@@ -1898,7 +1961,10 @@ static void role_start(const Role *r, const char *tracker, const char *model,
             const char *pub = getenv("LUMABRI_PUBKEY");
             if (pub && pub[0]) { argv[a++] = "--pubkey"; argv[a++] = (char *)pub; }
             argv[a] = NULL;
-            { pid_t np = spawn_argv(argv); child_publish(g_nchildren++, np); }
+            { char lp[1200];
+              pid_t np = spawn_argv_logged(argv, NULL,
+                                           donor_log_path(name, lp, sizeof lp));
+              child_publish(g_nchildren++, np); }
             printf("  %s\xe2\x9c\xa6 dono %.0f GB di %s%s%s%s: il tracker mi assegna "
                    "i file piu\xcc\x80 rari%s\n",
                    C_GRN, r->gb, C_R, C_BOLD, model, C_DIM, C_R);
@@ -1981,14 +2047,17 @@ static void role_start(const Role *r, const char *tracker, const char *model,
             argv[a++] = "--model-name"; argv[a++] = (char *)model;
             argv[a++] = "--hold";       argv[a++] = "auto";   /* the tracker hands us a disjoint slice; the node sizes it to free RAM */
             argv[a] = NULL;
-            { pid_t np = local ? spawn_argv(argv) : spawn_argv_env(argv, envv);
+            { char lp[1200];
+              pid_t np = spawn_argv_logged(argv, local ? NULL : envv,
+                                           donor_log_path(name, lp, sizeof lp));
               child_publish(g_nchildren++, np); }
             if (local)
-                printf("  %s\xe2\x9c\xa6 eseguo esperti per lo sciame%s %s(%s)%s\n",
+                printf("  %s\xe2\x9c\xa6 eseguo esperti per lo sciame%s %s(%s · "
+                       "log in ~/.lumabri/logs, /debug per vederli)%s\n",
                        C_GRN, C_R, C_DIM, node, C_R);
             else
                 printf("  %s\xe2\x9c\xa6 eseguo esperti per lo sciame%s %s(%s, "
-                       "la fetta assegnata arriva dallo sciame)%s\n",
+                       "la fetta assegnata arriva dallo sciame · /debug per i log)%s\n",
                        C_GRN, C_R, C_DIM, node, C_R);
         }
     }
@@ -2085,7 +2154,7 @@ static int model_boot(const char *tracker, const char *model, const char *shim,
         return -1;
     }
     printf("  %s\xe2\x9c\x93 %s pronto in %.1fs%s%s · net %.0f MB · "
-           "/swarm /model /reset /quit%s\n",
+           "/swarm /model /debug /reset /quit%s\n",
            C_GRN, model, nowd() - t0, C_R, C_DIM, g_eng.net_mb, C_R);
     return 0;
 }
@@ -2301,6 +2370,7 @@ static int cmd_chat(int argc, char **argv) {
         if (!L) continue;
         if (!strcmp(line, "/quit") || !strcmp(line, "/exit")) break;
         if (!strcmp(line, "/swarm")) { render_swarm(tracker); continue; }
+        if (!strcmp(line, "/debug")) { render_debug(); continue; }
         if (!strncmp(line, "/model", 6)) {
             const char *arg = line + 6;
             while (*arg == ' ') arg++;
@@ -2358,7 +2428,10 @@ static int cmd_chat(int argc, char **argv) {
         if (eng.proto == PROTO_SERVE2) {
             char *reply = NULL;
             printf("%s%s\xe2\x97\x86 %s%s\n  ", C_BOLD, C_CORAL, model, C_R);
-            if (stream_serve2(&eng, stat, sizeof stat, &reply)) {
+            g_eng.streaming = 1;
+            int dead = stream_serve2(&eng, stat, sizeof stat, &reply);
+            g_eng.streaming = 0;
+            if (dead) {
                 fprintf(stderr, "\n%sengine exited%s\n", C_RED, C_R);
                 engine_diag(&eng, 0);
                 free(reply);
@@ -2369,7 +2442,10 @@ static int cmd_chat(int argc, char **argv) {
             free(reply);
         } else if (eng.proto == PROTO_FRAMED) {
             if (!is_reset) printf("%s%s\xe2\x97\x86 %s%s\n  ", C_BOLD, C_CORAL, model, C_R);
-            if (stream_until_end(&eng, stat, sizeof stat)) {
+            g_eng.streaming = 1;
+            int dead = stream_until_end(&eng, stat, sizeof stat);
+            g_eng.streaming = 0;
+            if (dead) {
                 fprintf(stderr, "\n%sengine exited%s\n", C_RED, C_R);
                 engine_diag(&eng, 0);
                 break;
@@ -2393,6 +2469,12 @@ static int cmd_chat(int argc, char **argv) {
             printf("%s%s\xe2\x97\x86 %s%s\n", C_BOLD, C_CORAL, model, C_R);
             printf("  %s\n", text);
             free(reply);
+        }
+
+        if (g_eng.deferred) {
+            printf("  %s\xe2\x9c\xa6 %d righe di rete durante la risposta — "
+                   "/debug per vederle%s\n", C_DIM, g_eng.deferred, C_R);
+            g_eng.deferred = 0;
         }
 
         /* STAT <tokens> <tok/s> <cache hit%> <rss GB> */
