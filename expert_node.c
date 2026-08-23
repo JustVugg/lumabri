@@ -488,6 +488,33 @@ static int send_ereg(int fd, const uint8_t nonce[32]) {
     return rc;
 }
 
+/* The tracker binds a name to the first peer key that registers it and
+ * refuses every other key from then on (anti-takeover). The reply is an
+ * LMB_ERR on the heartbeat connection — which this loop used to ignore, so a
+ * node whose name was already taken hammered the tracker forever, invisibly
+ * rejected. Rotate to "<name>-2", "-3", … instead: the swarm gets the
+ * donation under a free name, and the log says what happened. */
+static void ereg_name_rotate(void) {
+    static int attempt = 1;
+    char base[sizeof g.name];
+    snprintf(base, sizeof base, "%s", g.name);
+    if (attempt > 1) {                      /* strip the previous "-N" */
+        char *dash = strrchr(base, '-');
+        if (dash) *dash = 0;
+    }
+    if (attempt >= 9) {
+        fprintf(stderr, "[%s] the tracker refuses every name I try — is the "
+                        "bindings table full of stale entries?\n", g.name);
+        return;
+    }
+    attempt++;
+    char next[sizeof g.name];
+    snprintf(next, sizeof next, "%.56s-%u", base, (unsigned)attempt % 10u);
+    fprintf(stderr, "[%s] tracker: name held by another key — retrying as %s\n",
+            g.name, next);
+    snprintf(g.name, sizeof g.name, "%s", next);
+}
+
 static void *control_thread(void *arg) {
     (void)arg;
     int warned = 0;
@@ -519,6 +546,15 @@ static void *control_thread(void *arg) {
             }
             int rc = 0;
             if (m.op == LMB_REXEC_FWD) rc = handle_rexec_fwd(fd, &m);
+            else if (m.op == LMB_ERR) {
+                LmbCur ec = { m.body, m.body_len, 0 };
+                char why[128] = "";
+                if (!lmb_cur_str(&ec, why, sizeof why) && strstr(why, "held")) {
+                    ereg_name_rotate();
+                    lmb_msg_free(&m);
+                    break;              /* reconnect and register the new name */
+                }
+            }
             lmb_msg_free(&m);
             if (rc) break;
             pthread_mutex_lock(&g.identity_lk);
