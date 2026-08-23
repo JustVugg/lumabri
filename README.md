@@ -173,7 +173,10 @@ On every other machine, pick a role:
 
 A disk donor is told which files to hold, rarest first, by the tracker. A
 compute donor says how many experts it can carry — `--hold auto` sizes that to
-its free RAM — and the tracker gives it the set nobody else covers. So several
+its free RAM — and the tracker gives it the set nobody else covers. Donating
+compute does not require owning the model: picked from the menu with no local
+container, the node runs behind the swarm mirror and pulls exactly its
+assigned slice, hash-verified, so the whole model never lands on the donor. So several
 compute donors **split the model into disjoint slices automatically**, and one
 token's experts then run across them in parallel: more machines, faster
 tokens. (`--hold N` sets the count by hand; `--stride 2:0` / `--stride 2:1` or

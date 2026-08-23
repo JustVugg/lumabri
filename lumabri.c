@@ -154,6 +154,22 @@ static pid_t spawn_argv(char *const argv[]) {
     return pid;
 }
 
+/* spawn_argv with extra KEY=VAL entries in the child's environment only.
+ * The swarm-fed expert node needs the shim wired up (LD_PRELOAD and the
+ * mirror's coordinates), and none of that may leak into our own process:
+ * a chat client running behind its own shim would mirror every file it
+ * touches. */
+static pid_t spawn_argv_env(char *const argv[], char *const envv[]) {
+    pid_t pid = fork();
+    if (pid == 0) {
+        for (int i = 0; envv && envv[i]; i++) putenv(envv[i]);
+        execv(argv[0], argv);
+        perror(argv[0]);
+        _exit(127);
+    }
+    return pid;
+}
+
 static pid_t g_children[8];
 static int g_nchildren = 0;
 /* The async handler never reads the mutable table/count.  Each fixed slot is
@@ -1763,14 +1779,13 @@ static int role_pick(Role *r, const char *model, int have_model_dir) {
            C_CORAL, C_R, C_DIM, C_R);
     printf("    %s2%s  chatti e doni disco  %stieni un pezzo di %s per lo sciame%s\n",
            C_CORAL, C_R, C_DIM, model, C_R);
-    if (have_model_dir) {
+    if (have_model_dir)
         printf("    %s3%s  chatti e doni calcolo %sesegui esperti per gli altri%s\n",
                C_CORAL, C_R, C_DIM, C_R);
-        printf("    %s4%s  tutti e due%s\n", C_CORAL, C_R, C_R);
-    } else {
-        printf("    %s3%s  %sdonare calcolo: serve il modello sul tuo disco "
-               "(--model-dir DIR)%s\n", C_GRAY, C_R, C_DIM, C_R);
-    }
+    else
+        printf("    %s3%s  chatti e doni calcolo %sla tua fetta di esperti "
+               "arriva dallo sciame%s\n", C_CORAL, C_R, C_DIM, C_R);
+    printf("    %s4%s  tutti e due%s\n", C_CORAL, C_R, C_R);
     printf("\n  %sinvio = solo chattare%s\n", C_DIM, C_R);
     printf("\n%s\xe2\x94\x82%s %s%s\xe2\x80\xba%s ", C_GRAY, C_R, C_CORAL, C_BOLD, C_R);
     fflush(stdout);
@@ -1780,7 +1795,7 @@ static int role_pick(Role *r, const char *model, int have_model_dir) {
     int c = line[0] ? line[0] : '1';
     if (c == 'q') return -1;
     if (c == '2' || c == '4') r->disk = 1;
-    if ((c == '3' || c == '4') && have_model_dir) r->compute = 1;
+    if (c == '3' || c == '4') r->compute = 1;
     if (!r->disk && !r->compute) return 0;
 
     if (r->disk) {
@@ -1866,26 +1881,85 @@ static void role_start(const Role *r, const char *tracker, const char *model,
         char bin[1200];
         snprintf(bin, sizeof bin, "%s/%s", dir, node ? node : "expert_node");
         int port = free_port(7701);
+        /* Which container does the node read? The user's local copy when
+         * there is one. Otherwise the model's vroot behind the shim: every
+         * loader read becomes a verified block fetch from the swarm, so the
+         * node pulls exactly the experts the tracker assigned it — donating
+         * compute no longer requires owning the model. Weights still never
+         * cross the EXEC channel; this is the disk-donor delivery path,
+         * hash-verified, feeding an executor. */
+        char probe[1100], shim[1200];
+        snprintf(probe, sizeof probe, "%s/config.json", r->model_dir);
+        int local = r->model_dir[0] && access(probe, R_OK) == 0;
+        snprintf(shim, sizeof shim, "%s/liblumabri.so", dir);
+        if (access(shim, R_OK))
+            snprintf(shim, sizeof shim, "%s/../lib/lumabri/liblumabri.so", dir);
         if (!node || !port || access(bin, X_OK)) {
             printf("  %snessun expert node per %s (make engines): dono calcolo "
                    "saltato%s\n", C_DIM, model_type ? model_type : "?", C_R);
+        } else if (!local && access(shim, R_OK)) {
+            printf("  %sliblumabri.so mancante (make): dono calcolo saltato%s\n",
+                   C_DIM, C_R);
         } else {
+            /* same mirror the chatter uses: dense blocks are shared, and the
+             * shim's cache lock is shared for a process lifetime */
+            const char *home = getenv("HOME") ? getenv("HOME") : ".";
+            char vroot[1024], cachedir[1024], casdir[1040];
+            char e_pre[1216], e_vr[1040], e_ca[1040], e_cs[1056],
+                 e_tr[160], e_mo[96];
+            char *envv[8];
+            int ne = 0;
+            if (!local) {
+                const char *ve = getenv("LUMABRI_VROOT");
+                const char *ce = getenv("LUMABRI_CACHE");
+                if (ve && ve[0]) snprintf(vroot, sizeof vroot, "%s", ve);
+                else snprintf(vroot, sizeof vroot, "%s/.lumabri/%s/vroot",
+                              home, model);
+                if (ce && ce[0]) snprintf(cachedir, sizeof cachedir, "%s", ce);
+                else snprintf(cachedir, sizeof cachedir, "%s/.lumabri/%s/cache",
+                              home, model);
+                snprintf(casdir, sizeof casdir, "%s/.lumabri/cas", home);
+                mkdir_p(cachedir);              /* the vroot stays virtual */
+                snprintf(e_pre, sizeof e_pre, "LD_PRELOAD=%s", shim);
+                snprintf(e_vr, sizeof e_vr, "LUMABRI_VROOT=%s", vroot);
+                snprintf(e_ca, sizeof e_ca, "LUMABRI_CACHE=%s", cachedir);
+                snprintf(e_cs, sizeof e_cs, "LUMABRI_CAS=%s", casdir);
+                snprintf(e_tr, sizeof e_tr, "LUMABRI_TRACKER=%s", tracker);
+                snprintf(e_mo, sizeof e_mo, "LUMABRI_MODEL=%s", model);
+                envv[ne++] = e_pre;
+                envv[ne++] = e_vr;
+                envv[ne++] = e_ca;
+                if (!getenv("LUMABRI_CAS")) envv[ne++] = e_cs;
+                envv[ne++] = e_tr;
+                envv[ne++] = e_mo;
+                /* AUTOPIN behind the shim would mirror GBs of experts the
+                 * tracker never assigned; an explicit PIN still wins */
+                if (!getenv("PIN")) envv[ne++] = (char *)"PIN=0";
+                envv[ne] = NULL;
+            }
             char portstr[16], name[64];
             snprintf(portstr, sizeof portstr, "%d", port);
             snprintf(name, sizeof name, "donor-exec-%d", port);
             char *argv[20];
             int a = 0;
             argv[a++] = bin;
-            argv[a++] = "--model";      argv[a++] = (char *)r->model_dir;
+            argv[a++] = "--model";      argv[a++] = local ? (char *)r->model_dir
+                                                          : vroot;
             argv[a++] = "--port";       argv[a++] = portstr;
             argv[a++] = "--tracker";    argv[a++] = (char *)tracker;
             argv[a++] = "--name";       argv[a++] = name;
             argv[a++] = "--model-name"; argv[a++] = (char *)model;
             argv[a++] = "--hold";       argv[a++] = "auto";   /* the tracker hands us a disjoint slice; the node sizes it to free RAM */
             argv[a] = NULL;
-            { pid_t np = spawn_argv(argv); child_publish(g_nchildren++, np); }
-            printf("  %s\xe2\x9c\xa6 eseguo esperti per lo sciame%s %s(%s)%s\n",
-                   C_GRN, C_R, C_DIM, node, C_R);
+            { pid_t np = local ? spawn_argv(argv) : spawn_argv_env(argv, envv);
+              child_publish(g_nchildren++, np); }
+            if (local)
+                printf("  %s\xe2\x9c\xa6 eseguo esperti per lo sciame%s %s(%s)%s\n",
+                       C_GRN, C_R, C_DIM, node, C_R);
+            else
+                printf("  %s\xe2\x9c\xa6 eseguo esperti per lo sciame%s %s(%s, "
+                       "la fetta assegnata arriva dallo sciame)%s\n",
+                       C_GRN, C_R, C_DIM, node, C_R);
         }
     }
     if (r->disk || r->compute)

@@ -9,8 +9,8 @@ all: tracker maintainer liblumabri.so test_shim lumabri
 # their own upstream builds, because treating their warnings as Lumabri
 # regressions would make this gate depend on whichever checkout ENGINE names.
 check-warnings:
-	$(MAKE) -B all test_relay_exec test_key_rotation test_hedge \
-		test_verify_failover CFLAGS='$(CFLAGS) -Werror'
+	$(MAKE) -B all test_relay_exec test_swarm_fed test_key_rotation \
+		test_hedge test_verify_failover CFLAGS='$(CFLAGS) -Werror'
 
 SECURE_DEPS = lumabri_secure.h lumabri_crypto.h
 
@@ -360,6 +360,12 @@ test_verify_failover: test_verify_failover.c lumabri_client.h lumabri_proto.h lu
 test-relay-exec: tracker expert_node test_relay_exec fixture
 	./relay_exec_test.sh
 
+test_swarm_fed: test_swarm_fed.c lumabri_proto.h
+	$(CC) $(CFLAGS) -pthread test_swarm_fed.c -o $@
+
+test-swarm-fed: tracker maintainer liblumabri.so expert_node test_swarm_fed fixture
+	./swarm_fed_exec_test.sh
+
 test-cas: tracker maintainer liblumabri.so test_shim
 	./cas_test.sh
 
@@ -410,7 +416,8 @@ install: all
 
 clean:
 	rm -f tracker maintainer liblumabri.so test_shim lumabri \
-	      test_relay_exec test_key_rotation test_hedge test_verify_failover \
+	      test_relay_exec test_swarm_fed test_key_rotation test_hedge \
+	      test_verify_failover \
 	      olmoe_p2p colibri_p2p inkling_p2p kimi_k3_p2p deepseek_p2p \
 	      expert_node expert_node_glm expert_node_inkling expert_node_kimi \
 	      expert_node_deepseek
@@ -420,4 +427,5 @@ clean:
         fixture test-phase2 \
         test-phase2-glm test-phase2-inkling test-phase2-kimi \
         test-phase2-deepseek test-engines \
-        patches patches-check test-relay-exec test-cas test-key-rotation test-hedge
+        patches patches-check test-relay-exec test-swarm-fed test-cas \
+        test-key-rotation test-hedge
