@@ -94,6 +94,19 @@ PROFILE_kimi_k3 = -DLMBE_ENGINE_ID='"kimi_k3"'    -DLMBE_SOURCE_ID='"$(SRCID_kim
 PROFILE_qwen36  = -DLMBE_ENGINE_ID='"qwen36"'     -DLMBE_SOURCE_ID='"$(SRCID_qwen36)"'  -DLMBE_EXPECT_BITS=0
 PROFILE_deepseek= -DLMBE_ENGINE_ID='"deepseek_v4"' -DLMBE_SOURCE_ID='"$(SRCID_deepseek)"' -DLMBE_EXPECT_BITS=0
 
+# The src= hash is baked into every PROFILE-carrying compile, but make tracks
+# the mtimes of listed prerequisites, not the hash's VALUE. A rule whose
+# prerequisites miss one hashed input (the chatters lack the engine headers;
+# the deepseek bridge lacks the engine entirely) kept linking an object with
+# a stale hash after a colibri update — three binaries, three epochs, three
+# "incompatible manifest" rejections on one machine. A stamp per engine holds
+# the value: rewritten only when the value changes, so depending on it makes
+# a rule follow the hash without listing every hashed file.
+build/srcid_%: FORCE
+	@mkdir -p build
+	@v='$(SRCID_$*)'; { [ -f $@ ] && [ "$$(cat $@)" = "$$v" ]; } || printf '%s\n' "$$v" > $@
+FORCE:
+
 # every engine's peer in one go — the ones this checkout has
 engines: $(ENGINE_NODES)
 	@$(if $(MISSING_ENGINES),echo "  skipped (no engine source in $(ENGINE)): $(MISSING_ENGINES)",:)
@@ -206,7 +219,7 @@ build/deepseek_v4_p2p.c: $(ENGINE)/deepseek_v4.c engine_patches/deepseek_v4_p2p.
 	@mkdir -p build
 	@python3 engine_patches/deepseek_v4_p2p.py $< $@
 
-build/lumi_v4_bridge.o: lumi_v4_bridge.c $(ENGINE_P2P_DEPS)
+build/lumi_v4_bridge.o: lumi_v4_bridge.c $(ENGINE_P2P_DEPS) build/srcid_deepseek
 	@mkdir -p build
 	$(CC) -O2 -fopenmp -pthread -I. -Wno-unused-function $(PROFILE_deepseek) $(DS_CFLAGS) \
 	      -c lumi_v4_bridge.c -o $@
@@ -269,25 +282,25 @@ build/%_p2p.c: $(ENGINE)/%.c engine_patches/make_patches.py engine_patches/%-p2p
 ENGINE_P2P_DEPS = lumabri_client.h lumibri_client.h lumabri_proto.h lumabri_sign.h \
                   $(SECURE_DEPS)
 
-olmoe_p2p: build/olmoe_p2p.c $(ENGINE_P2P_DEPS)
+olmoe_p2p: build/olmoe_p2p.c $(ENGINE_P2P_DEPS) build/srcid_olmoe
 	$(CC) $(P2P_CFLAGS) $(PROFILE_olmoe) -DLUMABRI_P2P -DLUMIBRI_P2P $< -o $@ -lm -lpthread
 
-colibri_p2p: build/colibri_p2p.c $(ENGINE_P2P_DEPS)
+colibri_p2p: build/colibri_p2p.c $(ENGINE_P2P_DEPS) build/srcid_colibri
 	$(CC) $(P2P_CFLAGS) $(PROFILE_colibri) -DLUMABRI_P2P -DLUMIBRI_P2P $< -o $@ -lm -lpthread
 
-inkling_p2p: build/inkling_p2p.c $(ENGINE_P2P_DEPS)
+inkling_p2p: build/inkling_p2p.c $(ENGINE_P2P_DEPS) build/srcid_inkling
 	$(CC) $(P2P_CFLAGS) $(PROFILE_inkling) -DLUMABRI_P2P -DLUMIBRI_P2P $< -o $@ -lm -lpthread
 
-qwen36_p2p: build/qwen36_p2p.c $(ENGINE_P2P_DEPS)
+qwen36_p2p: build/qwen36_p2p.c $(ENGINE_P2P_DEPS) build/srcid_qwen36
 	$(CC) $(P2P_CFLAGS) $(PROFILE_qwen36) -DLUMABRI_P2P -DLUMIBRI_P2P $< -o $@ -lm -lpthread
 
-kimi_k3_p2p: build/kimi_k3_p2p.c $(ENGINE_P2P_DEPS)
+kimi_k3_p2p: build/kimi_k3_p2p.c $(ENGINE_P2P_DEPS) build/srcid_kimi_k3
 	$(CC) $(P2P_CFLAGS) $(PROFILE_kimi_k3) -DLUMABRI_P2P -DLUMIBRI_P2P $< -o $@ -lm -lpthread
 
 # The single-file chatter rule; the multi-file one is defined near the node,
 # above, so only one deepseek_p2p recipe exists for a given colibri layout.
 ifeq ($(DS_MULTI),)
-deepseek_p2p: build/deepseek_p2p.c $(ENGINE_P2P_DEPS)
+deepseek_p2p: build/deepseek_p2p.c $(ENGINE_P2P_DEPS) build/srcid_deepseek
 	$(CC) $(P2P_CFLAGS) $(PROFILE_deepseek) $(DS_CFLAGS) -DLUMABRI_P2P -DLUMIBRI_P2P $< -o $@ -lm -lpthread
 endif
 
