@@ -22,9 +22,13 @@ cleanup() {
 trap cleanup EXIT
 
 wait_port() {
-    for _ in $(seq 1 300); do
+    # A node opens its port only after loading every held expert — through the
+    # swarm mirror that took ~34 s for the 0.7 GB fixture on a slow container
+    # (reported in #59's validation), so 30 s was a baseline failure, not a
+    # regression detector. Two minutes keeps the test about correctness.
+    for _ in $(seq 1 600); do
         (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && { exec 3<&-; return 0; }
-        sleep 0.1
+        sleep 0.2
     done
     echo "port $1 never opened"
     return 1
