@@ -313,3 +313,24 @@ Il tracker, il pool/failover, il batch-union e il relay EXEC sono condivisi;
 il profilo numerico impedisce di mescolare build che potrebbero produrre float
 diversi. Le suite per motore confrontano il risultato remoto e locale byte per
 byte.
+
+## Next milestone: segment execution (the latency protocol)
+
+Per-token latency over a WAN is `n_moe_layers × RTT`: the layers are
+sequential, so 58 layers at 50 ms cannot beat ~3 s/token no matter how many
+experts are covered. The protocol that removes this — the one worth
+inventing — is segment execution:
+
+  SEG_OPEN  <model> <session>            → peer allocates KV for a layer range
+  SEG_RUN   <session> <layer a..b> <hidden state in> → <hidden state out>
+  SEG_CLOSE <session>
+
+A peer that holds a CONTIGUOUS range of layers (dense weights + experts +
+that range's KV) runs the whole block on one round trip: 58 RTTs per token
+become one per segment — two machines, two hops. Failover is a replay: the
+chatter checkpoints the running hidden state every K tokens and can rebuild
+a lost segment's KV on any replica. Bit-identity holds because the segment
+runs the same engine kernels the local path runs; the spot-check applies to
+segments exactly as it does to single experts. Layer-aligned elastic
+assignment (already shipped) is the natural donor shape for this: a donor's
+whole layers become its segment.
