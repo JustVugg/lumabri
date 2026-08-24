@@ -24,6 +24,7 @@
  * where mirroring would mean a second copy of the same bytes.
  */
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <fcntl.h>
 #include <math.h>
 #include <pthread.h>
@@ -843,6 +844,55 @@ static void tail_file(const char *path, int max) {
     for (int i = n - show; i < n; i++)
         printf("    %s\xe2\x94\x82%s %s\n", C_GRAY, C_R, ring[i % 8]);
     if (!n) printf("    %s(niente ancora)%s\n", C_DIM, C_R);
+}
+
+/* /storage: where the disk went. The mirror is a cache — every byte is
+ * re-fetchable from the swarm — but it grew silently for long enough that
+ * "perché ho 92 GB in più?" became a reasonable question. Show it, and
+ * show the one command that frees it. */
+static uint64_t du_bytes(const char *path, int depth) {
+    if (depth > 6) return 0;
+    struct stat st;
+    if (lstat(path, &st)) return 0;
+    if (S_ISREG(st.st_mode)) return (uint64_t)st.st_size;
+    if (!S_ISDIR(st.st_mode)) return 0;
+    DIR *d = opendir(path);
+    if (!d) return 0;
+    uint64_t tot = 0;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        char p[2048];
+        snprintf(p, sizeof p, "%s/%s", path, e->d_name);
+        tot += du_bytes(p, depth + 1);
+    }
+    closedir(d);
+    return tot;
+}
+
+static void render_storage(void) {
+    const char *home = getenv("HOME") ? getenv("HOME") : ".";
+    char root[1100];
+    snprintf(root, sizeof root, "%s/.lumabri", home);
+    DIR *d = opendir(root);
+    if (!d) { printf("  %sniente in %s%s\n", C_DIM, root, C_R); return; }
+    printf("  %sdisco usato da lumabri in %s:%s\n", C_DIM, root, C_R);
+    struct dirent *e;
+    uint64_t tot = 0;
+    while ((e = readdir(d))) {
+        if (e->d_name[0] == '.') continue;
+        char p[1400];
+        snprintf(p, sizeof p, "%.1099s/%.255s", root, e->d_name);
+        uint64_t b = du_bytes(p, 0);
+        tot += b;
+        if (b < (1u << 20)) continue;      /* chiavi e log sotto il MB: rumore */
+        printf("    %s%-24s%s %8.1f GB\n", C_BOLD, e->d_name, C_R, (double)b / 1e9);
+    }
+    closedir(d);
+    printf("  %stotale %.1f GB · il mirror è una cache: ogni byte è "
+           "riscaricabile dallo sciame.%s\n"
+           "  %sper liberare un modello:  rm -rf %s/<modello>/cache%s\n",
+           C_DIM, (double)tot / 1e9, C_R, C_DIM, root, C_R);
 }
 
 static void render_debug(void) {
@@ -2262,7 +2312,7 @@ static int model_boot(const char *tracker, const char *model, const char *shim,
         return -1;
     }
     printf("  %s\xe2\x9c\x93 %s pronto in %.1fs%s%s · net %.0f MB · "
-           "/swarm /model /debug /reset /quit%s\n",
+           "/swarm /model /debug /storage /reset /quit%s\n",
            C_GRN, model, nowd() - t0, C_R, C_DIM, g_eng.net_mb, C_R);
     return 0;
 }
@@ -2479,6 +2529,7 @@ static int cmd_chat(int argc, char **argv) {
         if (!strcmp(line, "/quit") || !strcmp(line, "/exit")) break;
         if (!strcmp(line, "/swarm")) { render_swarm(tracker); continue; }
         if (!strcmp(line, "/debug")) { render_debug(); continue; }
+        if (!strcmp(line, "/storage")) { render_storage(); continue; }
         if (!strncmp(line, "/model", 6)) {
             const char *arg = line + 6;
             while (*arg == ' ') arg++;
