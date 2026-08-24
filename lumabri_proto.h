@@ -80,6 +80,13 @@
 #define LMB_HASH_MAGIC 0x48414853u  /* "SHAH": optional hash section marker */
 #define LMB_PEER_AUTH_MAGIC 0x52554150u /* "PAUR": trailing peer-identity block */
 
+/* Segment v2 is model-neutral: the opcodes carry versioned envelopes from
+ * lumabri_segment.h, while model math and state stay behind the Colibri ABI.
+ * No existing binary dispatches these operations until an adapter explicitly
+ * opts in, so adding the wire vocabulary does not change local inference. */
+#define LMB_SEG_V2_MAGIC          0x32474553u /* "SEG2" */
+#define LMB_SEG_V2_VERSION        2u
+
 /* Optional executor telemetry is negotiated on the existing EREG LMB_OK.
  * Every extension has its own magic, version, and bounded payload length so
  * old peers keep using the exact legacy body and new peers can skip versions
@@ -201,6 +208,17 @@ enum {
      * nonce, so the tracker binds each name to the key that first claimed it
      * and refuses a different key under the same name. */
     LMB_CHALLENGE = 37, LMB_CHALLENGE_R = 38,
+
+    /* Model-neutral Segment v2. Every state-mutating operation carries a
+     * session id, request id, lease id, fencing epoch and route generation.
+     * Snapshot/restore payloads are chunked; the 64 MiB frame cap therefore
+     * never becomes a limit on the complete remote state. */
+    LMB_SEG_OPEN = 39, LMB_SEG_OPEN_R = 40,
+    LMB_SEG_RUN = 41, LMB_SEG_RUN_R = 42,
+    LMB_SEG_SNAPSHOT = 43, LMB_SEG_SNAPSHOT_R = 44,
+    LMB_SEG_RESTORE = 45, LMB_SEG_RESTORE_R = 46,
+    LMB_SEG_CLOSE = 47, LMB_SEG_CLOSE_R = 48,
+    LMB_SEG_HEALTH = 49, LMB_SEG_HEALTH_R = 50,
 };
 
 /* REGISTER body: str name, str addr, str model, u64 held_bytes,
@@ -290,6 +308,10 @@ static void lmb_frame_caps(uint32_t op, uint32_t *body_cap, uint32_t *pay_cap) {
     case LMB_HASHES_R:
     case LMB_EXEC_R:
     case LMB_REXEC_R:
+    case LMB_SEG_RUN:
+    case LMB_SEG_RUN_R:
+    case LMB_SEG_SNAPSHOT_R:
+    case LMB_SEG_RESTORE:
         *pay_cap = LMB_MAX_PAY;
         break;
     case LMB_RREAD_FWD:
