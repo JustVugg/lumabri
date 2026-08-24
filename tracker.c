@@ -1208,7 +1208,40 @@ static int handle_eassign(int fd, LmbMsg *m) {
             cnt[k] = 0xffff;                     /* taken: never picked twice */
         }
     }
-    /* pass 2: fill the rest with the least-replicated, rarest first */
+    /* pass 2: whole layers first, least-covered layer first. Phase 2 gates
+     * per layer — a layer fully held by donors runs on the swarm while its
+     * neighbours run locally — so completing layers is worth strictly more
+     * than scattering the same count across all of them: every completed
+     * layer removes one WAN round from every token that routes through it.
+     * A scattered 5% used to light up exactly nothing. */
+    while (n < capacity) {
+        int best = -1;
+        long best_cov = 0;
+        uint32_t best_free = 0;
+        for (uint32_t l = 0; l < slots; l++) {
+            if (!routed[l]) continue;
+            long cov = 0;
+            uint32_t fc = 0;
+            for (uint32_t e = 0; e < nexp; e++) {
+                size_t k = (size_t)l * nexp + e;
+                if (cnt[k] == 0xffff) continue;      /* already mine or picked */
+                cov += cnt[k];
+                fc++;
+            }
+            if (!fc || fc > capacity - n) continue;  /* complete, or won't fit */
+            if (best < 0 || cov < best_cov) { best = (int)l; best_cov = cov; best_free = fc; }
+        }
+        if (best < 0) break;
+        (void)best_free;
+        for (uint32_t e = 0; e < nexp && n < capacity; e++) {
+            size_t k = (size_t)best * nexp + e;
+            if (cnt[k] == 0xffff) continue;
+            pick[n++] = (uint32_t)k;
+            cnt[k] = 0xffff;
+        }
+    }
+    /* pass 3: capacity smaller than any remaining layer — the old
+     * rarest-first scattering fills what is left */
     for (uint16_t want = 0; want < 64 && n < capacity; want++)
         for (size_t k = 0; k < cells && n < capacity; k++) {
             if (!routed[k / nexp] || cnt[k] != want) continue;

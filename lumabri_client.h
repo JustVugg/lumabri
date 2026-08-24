@@ -54,6 +54,8 @@ static struct {
     int *own;                   /* [gid * LUMI_MAX_REP] → peer index, -1 = free */
     unsigned char *relay;       /* tracker tunnel covers this (slot,expert) */
     unsigned char *routed;      /* [n_layers] 1 = this slot routes to experts */
+    unsigned char *layer_ok;    /* [n_layers] 1 = every expert of it has a peer */
+    int ok_layers, routed_layers, announced_ok;
     int n_layers, n_experts, hidden;
     int expected, expected_bits;
     char expected_model[64], profile[LMB_BUILD_PROFILE_MAX];
@@ -365,36 +367,62 @@ static int lumi_relay_coverage(void) {
     return bad ? 0 : 1;
 }
 
+/* Coverage per LAYER, not per model. The engines hand a layer to the swarm
+ * through lumi_layer_on(), so a layer whose every routed expert has a live
+ * holder (or relay) can run remotely even while its neighbours run locally
+ * from the mirror. The old policy was all-or-nothing: one uncovered expert
+ * anywhere kept phase 2 dark and every donor idle — the single deepest
+ * "my expert node does nothing" in the project's history (#52's field
+ * report; a 5%-coverage donor was worth exactly zero). */
 static int lumi_missing_experts(void) {
-    int missing = 0, expected = 0;
+    int missing = 0, expected = 0, ok = 0, routed = 0;
+    if (!L.layer_ok && L.n_layers > 0)
+        L.layer_ok = (unsigned char *)calloc((size_t)L.n_layers, 1);
     for (int l = 0; l < L.n_layers; l++) {
         if (L.routed && !L.routed[l]) continue;
+        routed++;
+        int gap = 0;
         for (int e = 0; e < L.n_experts; e++) {
             expected++;
             size_t gid = (size_t)l * L.n_experts + e;
-            if (L.own[gid * LUMI_MAX_REP] < 0 && (!L.relay || !L.relay[gid])) missing++;
+            if (L.own[gid * LUMI_MAX_REP] < 0 && (!L.relay || !L.relay[gid]))
+                { missing++; gap++; }
         }
+        if (L.layer_ok) L.layer_ok[l] = (gap == 0);
+        if (!gap) ok++;
     }
     L.expected = expected;
+    L.ok_layers = ok;
+    L.routed_layers = routed;
     return missing;
 }
 
 static void lumi_enable_if_complete(void) {
-    if (L.on) return;
     int missing = lumi_missing_experts();
-    if (missing) return;
-    L.on = 1;
-    /* Tell the byte-mirror in this same process to stop reading ahead: from
-     * here on the experts run on peers, and a readahead past a dense block
-     * would pull adjacent expert weights the chatter will never execute. */
-    setenv("LUMABRI_REMOTE_EXPERTS", "1", 1);
+    L.on = L.ok_layers > 0;
+    if (!L.on || L.ok_layers == L.announced_ok) return;
+    L.announced_ok = L.ok_layers;
     int direct = 0;
     for (int i = 0; i < L.npeers; i++) if (!L.peers[i].dead) direct++;
-    fprintf(stderr, "[lumabri] phase 2 active: every expert runs on a peer, "
-                    "%d direct peer(s), %d experts, hidden=%d, %s%s\n",
-            direct, L.expected, L.hidden,
-            L.spread ? "spreading across near replicas" : "nearest replica preferred",
-            L.verify_pct ? " · spot-check verification on" : "");
+    if (!missing) {
+        /* Tell the byte-mirror in this same process to stop reading ahead:
+         * every expert runs on peers, and a readahead past a dense block
+         * would pull adjacent expert weights the chatter will never execute.
+         * Under PARTIAL coverage the mirror must keep reading ahead — the
+         * local layers still stream their experts from it. */
+        setenv("LUMABRI_REMOTE_EXPERTS", "1", 1);
+        fprintf(stderr, "[lumabri] phase 2 active: every expert runs on a peer, "
+                        "%d direct peer(s), %d experts, hidden=%d, %s%s\n",
+                direct, L.expected, L.hidden,
+                L.spread ? "spreading across near replicas" : "nearest replica preferred",
+                L.verify_pct ? " · spot-check verification on" : "");
+    } else
+        fprintf(stderr, "[lumabri] phase 2 partial: %d of %d routed layers run "
+                        "on peers (%d peer(s)); the other %d run locally from "
+                        "the mirror%s\n",
+                L.ok_layers, L.routed_layers, direct,
+                L.routed_layers - L.ok_layers,
+                L.verify_pct ? " · spot-check verification on" : "");
 }
 
 static void lumi_maybe_discover(void) {
@@ -501,17 +529,16 @@ static void lumi_init_ex(int n_layers, int n_experts, int hidden,
     }
 
     int missing = lumi_missing_experts();
-    if (missing) {
-        fprintf(stderr, "[lumabri] %d of %d experts have no peer — ", missing,
-                L.expected);
-        if (discovery) {
-            fprintf(stderr, "running experts locally\n");
-            return; /* layer_on keeps discovering and enables once complete */
-        }
-        fprintf(stderr, "refusing to run "
-                "(a partial explicit network would silently change the model)\n");
+    if (missing && !discovery) {
+        fprintf(stderr, "[lumabri] %d of %d experts have no peer — refusing to "
+                "run (a partial explicit network would silently change the "
+                "model)\n", missing, L.expected);
         exit(1);
     }
+    if (missing && !L.ok_layers)
+        fprintf(stderr, "[lumabri] %d of %d experts have no peer and no layer "
+                "is fully covered — running experts locally (discovery "
+                "continues)\n", missing, L.expected);
     lumi_enable_if_complete();
 }
 
@@ -525,7 +552,8 @@ static LMB_MAYBE_UNUSED void lumi_init(int n_layers, int n_experts, int hidden) 
 static LMB_MAYBE_UNUSED int lumi_layer_on(int layer) {
     lumi_maybe_discover();
     if (!L.on || layer < 0 || layer >= L.n_layers) return 0;
-    return !L.routed || L.routed[layer];
+    if (L.routed && !L.routed[layer]) return 0;
+    return !L.layer_ok || L.layer_ok[layer];
 }
 
 /* nearest live replica of (layer,eid) not yet tried this call, or -1 */

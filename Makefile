@@ -382,6 +382,9 @@ test-swarm-fed: tracker maintainer liblumabri.so expert_node test_swarm_fed fixt
 test-assign-race: tracker
 	./assign_race_test.sh
 
+test-partial-phase2: tracker phase2 fixture
+	./partial_phase2_test.sh
+
 test-cas: tracker maintainer liblumabri.so test_shim
 	./cas_test.sh
 
@@ -443,5 +446,5 @@ clean:
         fixture test-phase2 \
         test-phase2-glm test-phase2-inkling test-phase2-kimi \
         test-phase2-deepseek test-engines \
-        patches patches-check test-relay-exec test-swarm-fed test-assign-race \
+        patches patches-check test-relay-exec test-swarm-fed test-assign-race test-partial-phase2 \
         test-cas test-key-rotation test-hedge
