@@ -656,11 +656,23 @@ static LMB_MAYBE_UNUSED int lmb_prof_field(const char *p, const char *key,
  *    gates (two libgomp versions no longer refuse each other).
  * Returns 0 compatible, 1 incompatible (why = the differing field), 2 compatible
  * with a codegen warning (why = the field that may round differently). */
+/* Which differences refuse a peer and which admit it under verification.
+ *
+ * abi/engine/f32 stay hard: a different wire ABI, engine family or float
+ * width produces garbage-shaped activations — no verification can save that.
+ * src/math moved OUT of the hard set: a peer built from a different engine
+ * checkout (or math mode) computes the same shapes and is exactly as
+ * checkable as one built by a different compiler, and refusing it was the
+ * single biggest reason real users could not join a swarm — every machine
+ * had to hold byte-identical colibri+lumabri checkouts AND the same gcc.
+ * Now they are admitted like cc/isa: a warning, spot-check verification,
+ * and LMB strict mode (`LUMABRI_STRICT=1`) for the bit-identity purist —
+ * which restores the refusal for all five. */
 static LMB_MAYBE_UNUSED int lmb_profile_compat(const char *peer, const char *local,
                                                int allow_codegen,
                                                char *why, size_t cap) {
-    static const char *const hard[] = { "abi", "engine", "src", "math", "f32" };
-    static const char *const codegen[] = { "cc", "isa" };
+    static const char *const hard[] = { "abi", "engine", "f32" };
+    static const char *const codegen[] = { "src", "math", "cc", "isa" };
     char a[72], b[72];   /* a profile value; longest in practice is cc= (~40) */
     for (size_t i = 0; i < sizeof hard / sizeof *hard; i++) {
         lmb_prof_field(peer, hard[i], a, sizeof a);

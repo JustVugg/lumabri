@@ -215,11 +215,12 @@ static int lumi_add_peer(const char *addr) {
             snprintf(why, sizeof why, "engine: peer='%s' vs local='%s'",
                      engine, LMBE_ENGINE_ID);
         else if (strcmp(profile, L.profile)) {
-            /* Field-aware: identity/ABI (abi/engine/src/math/f32) always gates;
-             * cc/isa gate unless LUMABRI_ALLOW_CODEGEN_SKEW (then a warning, with
-             * the spot-check as the net); omp never gates (version alone changes
-             * no bits). A blanket strcmp used to refuse two boxes for a libgomp
-             * version or a gcc point release with identical output. */
+            /* Field-aware: shape/ABI (abi/engine/f32) always gates; a build
+             * difference (src/math/cc/isa) is admitted by default with the
+             * spot-check as the net, refused under LUMABRI_STRICT=1; omp
+             * never gates (version alone changes no bits). A blanket strcmp
+             * used to refuse two boxes for a libgomp version or a gcc point
+             * release with identical output. */
             char d[192];
             int r = lmb_profile_compat(profile, L.profile,
                                        L.allow_codegen_skew, d, sizeof d);
@@ -227,7 +228,7 @@ static int lumi_add_peer(const char *addr) {
                 snprintf(why, sizeof why, "build %s", d);
             else if (r == 2)
                 fprintf(stderr, "[lumabri] peer %s: build %s — admitted "
-                        "(LUMABRI_ALLOW_CODEGEN_SKEW; spot-check %s)\n",
+                        "(spot-check %s; LUMABRI_STRICT=1 rifiuta)\n",
                         p->addr, d,
                         L.verify_pct ? "on" : "OFF — set LUMABRI_VERIFY=<pct>");
             /* r == 0: differ only in omp — compatible, admit silently */
@@ -460,11 +461,19 @@ static void lumi_init_ex(int n_layers, int n_experts, int hidden,
         if (L.verify_pct < 0) L.verify_pct = 0;
         if (L.verify_pct > 100) L.verify_pct = 100;
     }
-    if (getenv("LUMABRI_ALLOW_CODEGEN_SKEW")) {
+    /* Peers built from a different source, math mode, compiler or ISA are
+     * ADMITTED by default and spot-check verified: demanding byte-identical
+     * toolchains from every stranger on a swarm was the single biggest
+     * reason people bounced off. LUMABRI_STRICT=1 restores the old refusal
+     * (bit-identity lab mode); LUMABRI_ALLOW_CODEGEN_SKEW stays accepted
+     * for compatibility and is now the default. */
+    if (getenv("LUMABRI_STRICT") && atoi(getenv("LUMABRI_STRICT")) != 0) {
+        L.allow_codegen_skew = 0;
+    } else {
         L.allow_codegen_skew = 1;
-        /* A peer with a different cc/isa may round the low bits differently; the
-         * spot-check (rerun on another replica, demand agreement) is what turns
-         * that from an unchecked risk into a caught one. Default a small rate on
+        /* A skewed peer may round the low bits differently; the spot-check
+         * (rerun on another replica, demand agreement) is what turns that
+         * from an unchecked risk into a caught one. Default a small rate on
          * unless the operator set LUMABRI_VERIFY themselves. */
         if (!v && L.verify_pct == 0) L.verify_pct = 5;
     }
