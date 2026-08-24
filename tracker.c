@@ -922,9 +922,16 @@ static int handle_ecover(int fd, LmbMsg *m) {
     pthread_mutex_lock(&g_lk);
     for (int i = 0; i < MAX_PEERS; i++) {
         Peer *q = &g_peers[i];
+        /* Relay coverage matches on shape (engine, bits, hidden, slots,
+         * experts) but no longer on the full build profile: a relayed EXEC
+         * from a peer built with another compiler or checkout is exactly as
+         * spot-checkable as a direct one, and demanding byte-identical
+         * profiles left half the swarm's coverage invisible. The chatter's
+         * own admission gate (lmb_profile_compat, hard fields only) still
+         * refuses shape-incompatible peers it talks to directly. */
         if (!q->used || !q->is_expert || q->ctrl_fd < 0 || q->evfd < 0 ||
             now - q->ts > g_stale_s || strcmp(q->model, model) ||
-            strcmp(q->engine, engine) || strcmp(q->profile, profile) ||
+            strcmp(q->engine, engine) ||
             q->bits != bits || q->hidden != hidden || q->slots != slots ||
             q->total_experts != nexp) continue;
         size_t take = (q->enbits + 7) / 8;
