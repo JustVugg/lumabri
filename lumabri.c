@@ -1436,6 +1436,26 @@ static void engine_diag(Engine *e, int booting) {
                C_RED, C_R, C_DIM, C_R);
     printf("  %sultime righe del motore:%s\n", C_DIM, C_R);
     tail_dump(25);
+    /* A known fatal line deserves its cure, not just its epitaph. The tail
+     * told the truth all along — but nobody reads a truth buried under
+     * twenty lines of boot noise, so name the fix explicitly. */
+    pthread_mutex_lock(&g_eng.lk);
+    int n = g_eng.ntail < ETAIL ? g_eng.ntail : ETAIL;
+    int tok_missing = 0, xtml_missing = 0;
+    for (int i = g_eng.ntail - n; i < g_eng.ntail; i++) {
+        const char *l = g_eng.tail[i % ETAIL];
+        if (strstr(l, "needs tokenizer.json")) tok_missing = 1;
+        if (strstr(l, "XTML")) xtml_missing = 1;
+    }
+    pthread_mutex_unlock(&g_eng.lk);
+    if (tok_missing || xtml_missing)
+        printf("  %s→ il container non ha un tokenizer.json %s. Il repo HF di "
+               "Kimi K3 non lo distribuisce: va sintetizzato una volta con\n"
+               "    python3 <colibri>/c/tools/k3_tokenizer.py <model_dir> "
+               "-o <model_dir>/tokenizer.json\n"
+               "  su un container locale lumabri lo fa da solo al prossimo "
+               "avvio; su uno sciame deve farlo l'operatore del server.%s\n",
+               C_RED, xtml_missing ? "con i token XTML" : "utilizzabile", C_R);
 }
 
 static void engine_stop(Engine *e) {
@@ -2127,6 +2147,31 @@ static void role_start(const Role *r, const char *tracker, const char *model,
                "sopravvive alla sessione: lumabri serve --join%s\n", C_DIM, C_R);
 }
 
+/* Kimi K3's HF repo ships tiktoken.model but no tokenizer.json; the engine
+ * refuses to serve without one and points at a python tool most users have
+ * never heard of. When the model is local and the tool sits right there in
+ * the engine checkout, run it — a setup step the machine can do is not the
+ * user's job. */
+static void kimi_tokenizer_selfheal(const char *model_dir, const char *engines_dir) {
+    char tok[1100], tool[1200], cmd[4096];
+    snprintf(tok, sizeof tok, "%s/tokenizer.json", model_dir);
+    if (access(tok, R_OK) == 0) return;
+    if (!engines_dir || !engines_dir[0]) return;
+    snprintf(tool, sizeof tool, "%s/tools/k3_tokenizer.py", engines_dir);
+    if (access(tool, R_OK)) return;
+    printf("  %skimi: il container non ha tokenizer.json — lo sintetizzo con "
+           "k3_tokenizer.py…%s\n", C_DIM, C_R);
+    snprintf(cmd, sizeof cmd, "python3 '%s' '%s' -o '%s' >/dev/null 2>&1",
+             tool, model_dir, tok);
+    if (system(cmd) == 0 && access(tok, R_OK) == 0)
+        printf("  %s\xe2\x9c\x93 tokenizer.json generato in %s%s\n",
+               C_DIM, model_dir, C_R);
+    else
+        printf("  %s✗ non sono riuscito a generarlo (serve python3). "
+               "Comando manuale:\n    python3 %s %s -o %s%s\n",
+               C_RED, tool, model_dir, tok, C_R);
+}
+
 /* boot one model: inspect, resolve, spawn, wait for readiness */
 static int model_boot(const char *tracker, const char *model, const char *shim,
                       const char *engines_dir, const char *engine_path,
@@ -2138,6 +2183,8 @@ static int model_boot(const char *tracker, const char *model, const char *shim,
         local_model_type(local_dir, mtype, sizeof mtype);
         printf("  %smodello locale %s%s%s%s · niente rete, niente mirror%s\n",
                C_DIM, C_R, C_BOLD, local_dir, C_DIM, C_R);
+        if (strstr(mtype, "kimi"))
+            kimi_tokenizer_selfheal(local_dir, engines_dir);
     } else {
         printf("  %schiedo allo sciame chi ha %s…%s\n", C_DIM, model, C_R);
         if (swarm_inspect(tracker, model, sw)) {
