@@ -1157,6 +1157,16 @@ static int handle_eassign(int fd, LmbMsg *m) {
      * different slice. The tracker is the memory here — the node sends
      * nothing about its past, because on a fresh start it has no past and
      * would have to claim it holds everything. */
+    /* Deterministic replica rank, for the elastic release below: among the
+     * holders of one expert, order by a hash of the NAME mixed with the cell, so the surplus spreads across nodes instead of electing one loser. Only the tracker
+     * computes it, so two nodes can never disagree about who is surplus —
+     * the failure mode where every replica politely releases the same cell
+     * at the same time and coverage drops to zero. */
+    uint64_t myh = 1469598103934665603ull;
+    for (const char *s = name; *s; s++) { myh ^= (uint8_t)*s; myh *= 1099511628211ull; }
+    uint8_t *lower = (uint8_t *)calloc(cells, 1);   /* higher-rank holders */
+    if (!lower) { free(cnt); free(pick); free(mine); send_err(fd, "oom"); return -1; }
+
     pthread_mutex_lock(&g_lk);
     double now = now_s();
     int have_mine = 0;
@@ -1170,8 +1180,14 @@ static int handle_eassign(int fd, LmbMsg *m) {
             continue;
         }
         if (now - p->ts > g_stale_s) continue;
+        uint64_t ph = 1469598103934665603ull;
+        for (const char *s = p->name; *s; s++) { ph ^= (uint8_t)*s; ph *= 1099511628211ull; }
         for (size_t k = 0; k < cells && k < p->enbits; k++)
-            if (p->ebits[k >> 3] & (1u << (k & 7))) cnt[k]++;
+            if (p->ebits[k >> 3] & (1u << (k & 7))) {
+                cnt[k]++;
+                uint64_t mix = (uint64_t)k * 0x9E3779B97F4A7C15ull;
+                if ((ph ^ mix) < (myh ^ mix) && lower[k] < 255) lower[k]++;
+            }
     }
     /* Slices promised to nodes still loading count as coverage too (#52),
      * and this node's own promise is its past on a re-ask mid-load. A live
@@ -1194,16 +1210,33 @@ static int handle_eassign(int fd, LmbMsg *m) {
                 !strcmp(g_peers[j].name, pr->name) &&
                 !strcmp(g_peers[j].model, model)) { live = 1; break; }
         if (live) continue;
+        uint64_t ph = 1469598103934665603ull;
+        for (const char *s = pr->name; *s; s++) { ph ^= (uint8_t)*s; ph *= 1099511628211ull; }
         for (size_t k = 0; k < cells && (k >> 3) < pr->nbytes; k++)
-            if (pr->bits[k >> 3] & (1u << (k & 7))) cnt[k]++;
+            if (pr->bits[k >> 3] & (1u << (k & 7))) {
+                cnt[k]++;
+                uint64_t mix = (uint64_t)k * 0x9E3779B97F4A7C15ull;
+                if ((ph ^ mix) < (myh ^ mix) && lower[k] < 255) lower[k]++;
+            }
     }
     pthread_mutex_unlock(&g_lk);
 
-    /* pass 1: keep what it already had — no churn, no re-download */
+    /* pass 1: keep what it already had — no churn, no re-download — UNLESS
+     * the expert is a surplus copy: this node ranks at or below the keep
+     * limit among its holders. Releasing it is what makes the share elastic:
+     * as donors join, over-replicated experts are let go and the freed
+     * capacity refills with what the swarm still lacks. Released cells are
+     * marked unpickable for THIS reply, or pass 2 would hand them straight
+     * back and nothing would ever shrink. */
+    #define EASSIGN_KEEP_REPLICAS 2
     uint32_t n = 0;
     for (size_t k = 0; k < cells && n < capacity; k++) {
         if (!routed[k / nexp]) continue;
         if (mine[k >> 3] & (1u << (k & 7))) {
+            if (lower[k] >= EASSIGN_KEEP_REPLICAS) {
+                cnt[k] = 0xfffe;                 /* released: not pickable now */
+                continue;
+            }
             pick[n++] = (uint32_t)k;
             cnt[k] = 0xffff;                     /* taken: never picked twice */
         }
@@ -1224,7 +1257,7 @@ static int handle_eassign(int fd, LmbMsg *m) {
             uint32_t fc = 0;
             for (uint32_t e = 0; e < nexp; e++) {
                 size_t k = (size_t)l * nexp + e;
-                if (cnt[k] == 0xffff) continue;      /* already mine or picked */
+                if (cnt[k] >= 0xfffe) continue;      /* mine, picked or released */
                 cov += cnt[k];
                 fc++;
             }
@@ -1235,7 +1268,7 @@ static int handle_eassign(int fd, LmbMsg *m) {
         (void)best_free;
         for (uint32_t e = 0; e < nexp && n < capacity; e++) {
             size_t k = (size_t)best * nexp + e;
-            if (cnt[k] == 0xffff) continue;
+            if (cnt[k] >= 0xfffe) continue;
             pick[n++] = (uint32_t)k;
             cnt[k] = 0xffff;
         }
@@ -1269,7 +1302,7 @@ static int handle_eassign(int fd, LmbMsg *m) {
         lmb_buf_u32(&b, pick[i] / nexp);
         lmb_buf_u32(&b, pick[i] % nexp);
     }
-    free(cnt); free(pick); free(mine);
+    free(cnt); free(pick); free(mine); free(lower);
     int rc = lmb_send(fd, LMB_EASSIGN_R, b.p, (uint32_t)b.len, NULL, 0);
     free(b.p);
     printf("[tracker] assign: %u experts of %s to an executor "

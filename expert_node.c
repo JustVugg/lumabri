@@ -120,6 +120,7 @@ static struct {
     pthread_cond_t c_cv;
     pthread_mutex_t load_lk;    /* the engine loader is used one call at a time */
     char name[64], model[64], advertise[64], tracker[64];
+    int want_hold;              /* auto/numeric --hold capacity; 0 = no EASSIGN */
     char token[LMB_TOKEN_MAX + 1];
     char profile[LMB_BUILD_PROFILE_MAX];
     uint8_t peer_sk[64], peer_pk[32];   /* identity to the tracker */
@@ -455,6 +456,93 @@ static void *conn_thread(void *arg) {
     }
     close(fd);
     lmb_conn_gate_leave(&g_conn_gate);
+    return NULL;
+}
+
+/* Ask the tracker which experts to hold (capacity `hold`); returns a
+ * malloc'd [n_slots*n_experts] bitmap, or NULL when the tracker is old,
+ * unreachable, or the reply is malformed. Shared by the startup assignment
+ * and the elastic rebalance below. */
+static uint8_t *eassign_request(int hold) {
+    size_t cells = (size_t)g.n_slots * g.n_experts;
+    LmbBuf b = {0};
+    lmb_buf_str(&b, g.model);
+    lmb_buf_str(&b, g.name);          /* so the tracker can recognise us */
+    lmb_buf_u32(&b, (uint32_t)g.n_slots);
+    lmb_buf_u32(&b, (uint32_t)g.n_experts);
+    lmb_buf_u32(&b, (uint32_t)hold);
+    uint8_t *routed = (uint8_t *)calloc((size_t)g.n_slots, 1);
+    if (!routed) { free(b.p); return NULL; }
+    for (int l = 0; l < g.n_slots; l++) routed[l] = lmbe_routed(l) ? 1 : 0;
+    lmb_buf_u32(&b, (uint32_t)g.n_slots);
+    lmb_buf_bytes(&b, routed, (size_t)g.n_slots);
+    free(routed);
+    LmbMsg r = {0};
+    int rc = lmb_request(g.tracker, LMB_EASSIGN, b.p, (uint32_t)b.len, &r);
+    free(b.p);
+    if (rc || r.op != LMB_EASSIGN_R) {
+        fprintf(stderr, "[%s] the tracker did not assign experts "
+                        "(older tracker?) — keeping what --layers/--stride "
+                        "chose\n", g.name);
+        lmb_msg_free(&r);
+        return NULL;
+    }
+    LmbCur c = { r.body, r.body_len, 0 };
+    uint32_t n = 0;
+    uint8_t *assigned = (uint8_t *)calloc(cells ? cells : 1, 1);
+    int bad = !assigned || lmb_cur_u32(&c, &n) || n > (uint32_t)hold ||
+              (size_t)n > cells || r.pay_len != 0;
+    for (uint32_t i = 0; !bad && i < n; i++) {
+        uint32_t l, e;
+        if (lmb_cur_u32(&c, &l) || lmb_cur_u32(&c, &e) ||
+            !expert_index_ok(l, e) || !lmbe_routed((int)l)) { bad = 1; break; }
+        assigned[(size_t)l * (size_t)g.n_experts + e] = 1;
+    }
+    if (!bad && c.off != c.len) bad = 1;
+    lmb_msg_free(&r);
+    if (bad) {
+        fprintf(stderr, "[%s] tracker returned an invalid expert assignment — "
+                        "keeping the local selection\n", g.name);
+        free(assigned);
+        return NULL;
+    }
+    return assigned;
+}
+
+/* ---- elastic hold ---------------------------------------------------------
+ * The share adapts to the swarm. Every LUMABRI_REBALANCE_S the node re-asks
+ * the tracker; the tracker keeps at most a fixed number of ranked replicas
+ * per expert, so as donors join, the surplus copies are released and the
+ * freed capacity refills with whatever the swarm still lacks. Dropping is a
+ * bitmap clear (a stale chatter gets a refusal and refetches the manifest,
+ * exactly as if the node had restarted); loading is lazy — the cache pulls
+ * a newly-held expert on its first call. Only meaningful in cache mode,
+ * which --hold auto always sets. */
+static void *rebalance_thread(void *arg) {
+    (void)arg;
+    long period = 600;
+    const char *e = getenv("LUMABRI_REBALANCE_S");
+    if (e && atol(e) >= 10) period = atol(e);
+    size_t cells = (size_t)g.n_slots * g.n_experts;
+    for (;;) {
+        sleep((unsigned)period);
+        uint8_t *want = eassign_request(g.want_hold);
+        if (!want) continue;
+        int add = 0, drop = 0, total = 0;
+        for (size_t k = 0; k < cells; k++) {
+            if (want[k] && !g.holds[k]) add++;
+            if (!want[k] && g.holds[k]) drop++;
+            total += want[k] ? 1 : 0;
+        }
+        if (add || drop) {
+            memcpy(g.holds, want, cells);   /* byte stores; exec reads bytes */
+            g.nholds = total;
+            printf("[%s] rebalance: +%d \xe2\x88\x92%d experts (now %d) — the "
+                   "swarm changed shape\n", g.name, add, drop, total);
+            fflush(stdout);
+        }
+        free(want);
+    }
     return NULL;
 }
 
@@ -850,52 +938,19 @@ int main(int argc, char **argv) {
         lmb_buf_str(&b, g.model);
         lmb_buf_str(&b, g.name);          /* so the tracker can recognise us */
         lmb_buf_u32(&b, (uint32_t)g.n_slots);
-        lmb_buf_u32(&b, (uint32_t)g.n_experts);
-        lmb_buf_u32(&b, (uint32_t)hold);
-        uint8_t *routed = (uint8_t *)calloc((size_t)g.n_slots, 1);
-        for (int l = 0; l < g.n_slots; l++) routed[l] = lmbe_routed(l) ? 1 : 0;
-        lmb_buf_u32(&b, (uint32_t)g.n_slots);
-        lmb_buf_bytes(&b, routed, (size_t)g.n_slots);
-        free(routed);
+        uint8_t *assigned = eassign_request(hold);
         (void)cells;
-        LmbMsg r = {0};
-        int rc = lmb_request(g.tracker, LMB_EASSIGN, b.p, (uint32_t)b.len, &r);
-        free(b.p);
-        if (rc || r.op != LMB_EASSIGN_R) {
-            fprintf(stderr, "[%s] the tracker did not assign experts "
-                            "(older tracker?) — keeping what --layers/--stride "
-                            "chose\n", g.name);
-            lmb_msg_free(&r);
-        } else {
-            LmbCur c = { r.body, r.body_len, 0 };
-            uint32_t n = 0;
-            uint8_t *assigned = (uint8_t *)calloc(cells ? cells : 1, 1);
-            int assigned_n = 0, bad = !assigned || lmb_cur_u32(&c, &n) ||
-                                         n > (uint32_t)hold ||
-                                         (size_t)n > cells || r.pay_len != 0;
-            for (uint32_t i = 0; !bad && i < n; i++) {
-                uint32_t l, e;
-                if (lmb_cur_u32(&c, &l) || lmb_cur_u32(&c, &e) ||
-                    !expert_index_ok(l, e) || !lmbe_routed((int)l)) {
-                    bad = 1; break;
-                }
-                size_t gid = (size_t)l * (size_t)g.n_experts + e;
-                if (!assigned[gid]) { assigned[gid] = 1; assigned_n++; }
-            }
-            if (!bad && c.off != c.len) bad = 1;
-            if (bad) {
-                fprintf(stderr, "[%s] tracker returned an invalid expert assignment — "
-                                "keeping the local selection\n", g.name);
-            } else {
-                memcpy(g.holds, assigned, cells);
-                g.nholds = assigned_n;
-                printf("[%s] the tracker assigned %d experts (asked for %d): "
-                       "the least replicated of %s\n",
-                       g.name, g.nholds, hold, g.model);
-            }
+        if (assigned) {
+            int assigned_n = 0;
+            for (size_t k = 0; k < cells; k++) assigned_n += assigned[k] ? 1 : 0;
+            memcpy(g.holds, assigned, cells);
+            g.nholds = assigned_n;
             free(assigned);
-            lmb_msg_free(&r);
+            printf("[%s] the tracker assigned %d experts (asked for %d): "
+                   "the least replicated of %s\n",
+                   g.name, g.nholds, hold, g.model);
         }
+        g.want_hold = hold;             /* the rebalance thread re-asks with this */
     }
     if (!g.nholds) { fprintf(stderr, "[%s] no experts selected\n", g.name); return 1; }
     if (dense)
@@ -970,6 +1025,10 @@ int main(int argc, char **argv) {
     lmb_conn_gate_init(&g_conn_gate);
     if (lmb_secure_init()) return 1;
     if (g.tracker[0]) { pthread_create(&t, NULL, control_thread, NULL); pthread_detach(t); }
+    if (g.tracker[0] && g.want_hold > 0 && g.ncs > 0) {
+        pthread_create(&t, NULL, rebalance_thread, NULL);
+        pthread_detach(t);
+    }
     pthread_create(&t, NULL, stats_thread, NULL); pthread_detach(t);
 
     for (;;) {
