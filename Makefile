@@ -10,7 +10,8 @@ all: tracker maintainer liblumabri.so test_shim lumabri
 # regressions would make this gate depend on whichever checkout ENGINE names.
 check-warnings:
 	$(MAKE) -B all test_relay_exec test_swarm_fed test_key_rotation \
-		test_hedge test_verify_failover CFLAGS='$(CFLAGS) -Werror'
+		test_hedge test_verify_failover test_segment_v2 \
+		CFLAGS='$(CFLAGS) -Werror'
 
 SECURE_DEPS = lumabri_secure.h lumabri_crypto.h
 
@@ -370,6 +371,10 @@ test_hedge: test_hedge.c lumabri_client.h lumabri_proto.h lumabri_sign.h $(SECUR
 test_verify_failover: test_verify_failover.c lumabri_client.h lumabri_proto.h lumabri_sign.h
 	$(CC) $(CFLAGS) -pthread test_verify_failover.c -o $@
 
+test_segment_v2: test_segment_v2.c lumabri_segment.c lumabri_segment.h \
+		 lumabri_proto.h lumabri_sha.h
+	$(CC) $(CFLAGS) -pthread test_segment_v2.c lumabri_segment.c -o $@
+
 test-relay-exec: tracker expert_node test_relay_exec fixture
 	./relay_exec_test.sh
 
@@ -397,7 +402,10 @@ test-key-rotation: test_key_rotation
 test-hedge: test_hedge
 	./test_hedge
 
-test: all test_key_rotation test_hedge test_verify_failover
+test-segment-v2: test_segment_v2
+	./test_segment_v2
+
+test: all test_key_rotation test_hedge test_verify_failover test_segment_v2
 	./selftest.sh
 	./donate_test.sh
 	./signed_donor_test.sh
@@ -417,6 +425,7 @@ test: all test_key_rotation test_hedge test_verify_failover
 	./verify_failover_test.sh
 	./test_key_rotation
 	./test_hedge
+	./test_segment_v2
 
 # ---- deploy -------------------------------------------------------------
 # make install                    → /usr/local (needs sudo)
@@ -439,7 +448,7 @@ install: all
 clean:
 	rm -f tracker maintainer liblumabri.so test_shim lumabri \
 	      test_relay_exec test_swarm_fed test_key_rotation test_hedge \
-	      test_verify_failover \
+	      test_verify_failover test_segment_v2 \
 	      olmoe_p2p colibri_p2p inkling_p2p kimi_k3_p2p deepseek_p2p \
 	      expert_node expert_node_glm expert_node_inkling expert_node_kimi \
 	      expert_node_deepseek
@@ -450,4 +459,4 @@ clean:
         test-phase2-glm test-phase2-inkling test-phase2-kimi \
         test-phase2-deepseek test-engines \
         patches patches-check test-relay-exec test-swarm-fed test-assign-race test-partial-phase2 test-elastic \
-        test-cas test-key-rotation test-hedge
+        test-cas test-key-rotation test-hedge test-segment-v2
