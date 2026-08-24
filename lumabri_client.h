@@ -425,6 +425,139 @@ static void lumi_enable_if_complete(void) {
                 L.verify_pct ? " · spot-check verification on" : "");
 }
 
+/* ---- segment execution, chatter side -------------------------------------
+ * A peer that holds a CONTIGUOUS layer range runs the whole block on one
+ * round trip: hidden state out, hidden state back, that range's KV kept on
+ * the peer. Configured with LUMABRI_SEGMENTS="host:port=a-b,...". KV
+ * correctness requires every position to pass through the same peer exactly
+ * once and in order, so once a segment has run a single position there is
+ * no silent fallback: replay is not built yet, and inventing hidden states
+ * is the one thing this client exists not to do. */
+typedef struct { char addr[64]; int a, b, fd, dead; } LumiSeg;
+static LumiSeg lumi_segv[8];
+static int lumi_nseg;
+static int lumi_seg_used;              /* a position already ran remotely */
+
+static void lumi_seg_parse(void) {
+    const char *spec = getenv("LUMABRI_SEGMENTS");
+    if (!spec || !*spec) return;
+    char buf[1024];
+    snprintf(buf, sizeof buf, "%s", spec);
+    for (char *save = NULL, *tok = strtok_r(buf, ",", &save);
+         tok && lumi_nseg < 8; tok = strtok_r(NULL, ",", &save)) {
+        LumiSeg *s = &lumi_segv[lumi_nseg];
+        char *eq = strchr(tok, '=');
+        if (!eq) continue;
+        *eq = 0;
+        if (sscanf(eq + 1, "%d-%d", &s->a, &s->b) != 2 ||
+            s->a < 0 || s->b < s->a) continue;
+        snprintf(s->addr, sizeof s->addr, "%s", tok);
+        s->fd = -1;
+        s->dead = 0;
+        lumi_nseg++;
+    }
+    if (lumi_nseg)
+        fprintf(stderr, "[lumabri] %d segment peer(s) configured\n", lumi_nseg);
+}
+
+static int lumi_seg_connect(LumiSeg *s) {
+    if (s->fd >= 0) return s->fd;
+    int fd = lmb_connect(s->addr);
+    if (fd >= 0 && lmb_auth(fd)) { close(fd); fd = -1; }
+    if (fd < 0) { s->dead = 1; return -1; }
+    LmbMsg m = {0};
+    if (lmb_send(fd, LMB_SEG_OPEN, NULL, 0, NULL, 0) || lmb_recv(fd, &m) ||
+        m.op != LMB_SEG_OPEN_R) {
+        close(fd); s->dead = 1; lmb_msg_free(&m);
+        return -1;
+    }
+    LmbCur c = { m.body, m.body_len, 0 };
+    uint32_t a = 0, b = 0, hid = 0;
+    char eng[64] = "", prof[LMB_BUILD_PROFILE_MAX] = "";
+    int bad = lmb_cur_u32(&c, &a) || lmb_cur_u32(&c, &b) ||
+              lmb_cur_u32(&c, &hid) || lmb_cur_str(&c, eng, sizeof eng) ||
+              lmb_cur_str(&c, prof, sizeof prof);
+    if (!bad && (strcmp(eng, LMBE_ENGINE_ID) || (int)a != s->a ||
+                 (int)b != s->b || (int)hid != L.hidden)) bad = 1;
+    if (!bad && strcmp(prof, L.profile)) {
+        char d[192];
+        int r = lmb_profile_compat(prof, L.profile, L.allow_codegen_skew,
+                                   d, sizeof d);
+        if (r == 1) bad = 1;
+        else if (r == 2)
+            fprintf(stderr, "[lumabri] segment %s: build %s — admitted "
+                    "(spot-check does not cover segments yet)\n", s->addr, d);
+    }
+    lmb_msg_free(&m);
+    if (bad) {
+        fprintf(stderr, "[lumabri] segment %s: incompatible — dropped\n", s->addr);
+        close(fd);
+        s->dead = 1;
+        return -1;
+    }
+    s->fd = fd;
+    fprintf(stderr, "[lumabri] segment %s: layers %d..%d in one round trip\n",
+            s->addr, s->a, s->b);
+    return fd;
+}
+
+/* Called by the engine at the top of its layer loop. Returns 1 when the
+ * segment starting at `layer` ran remotely (x updated in place, *jump_to =
+ * its last layer); 0 when the engine should run this layer itself. */
+static LMB_MAYBE_UNUSED int lumi_seg_take(int layer, float *x, int S,
+                                          int pos_base, int D, int *jump_to) {
+    if (!L.initialized || !lumi_nseg) return 0;
+    for (int i = 0; i < lumi_nseg; i++) {
+        LumiSeg *s = &lumi_segv[i];
+        if (s->dead || s->a != layer) continue;
+        int fd = lumi_seg_connect(s);
+        if (fd < 0) break;
+        uint32_t maxrows =
+            (uint32_t)((LMB_MAX_PAY / 2) / ((uint64_t)D * sizeof(float)));
+        if (!maxrows) break;
+        double t0 = lumi_now();
+        for (int off = 0; off < S; ) {
+            int nr = S - off > (int)maxrows ? (int)maxrows : S - off;
+            LmbBuf b = {0};
+            lmb_buf_u32(&b, (uint32_t)s->a);
+            lmb_buf_u32(&b, (uint32_t)s->b);
+            lmb_buf_u32(&b, (uint32_t)nr);
+            lmb_buf_u32(&b, (uint32_t)(pos_base + off));
+            lmb_buf_u32(&b, (uint32_t)D);
+            LmbMsg m = {0};
+            int rc = lmb_send(fd, LMB_SEG_RUN, b.p, (uint32_t)b.len,
+                              x + (int64_t)off * D,
+                              (uint32_t)((uint64_t)nr * D * sizeof(float))) ||
+                     lmb_recv(fd, &m) || m.op != LMB_SEG_RUN_R ||
+                     m.pay_len != (uint64_t)nr * D * sizeof(float);
+            free(b.p);
+            if (rc) {
+                lmb_msg_free(&m);
+                close(s->fd);
+                s->fd = -1;
+                s->dead = 1;
+                if (lumi_seg_used) {
+                    fprintf(stderr, "[lumabri] segment %s died mid-conversation: "
+                            "its KV is gone and replay is not built yet — "
+                            "restart the chat\n", s->addr);
+                    exit(1);
+                }
+                fprintf(stderr, "[lumabri] segment %s failed before any token — "
+                        "running those layers locally\n", s->addr);
+                return 0;
+            }
+            memcpy(x + (int64_t)off * D, m.pay, m.pay_len);
+            lmb_msg_free(&m);
+            off += nr;
+        }
+        lumi_seg_used = 1;
+        L.wait_s += lumi_now() - t0;
+        *jump_to = s->b;
+        return 1;
+    }
+    return 0;
+}
+
 static void lumi_maybe_discover(void) {
     if (!L.initialized || !L.discovery) return;
     double now = lumi_now();
@@ -456,7 +589,10 @@ static void lumi_init_ex(int n_layers, int n_experts, int hidden,
     if (getenv("LUMABRI_NO_EXEC")) return;
     const char *tracker = getenv("LUMABRI_TRACKER");
     int discovery = !spec || !*spec;
-    if (discovery && (!tracker || !tracker[0])) return;
+    /* segments are their own wiring: a chatter may run whole layer ranges
+     * on peers with no expert swarm configured at all */
+    lumi_seg_parse();
+    if (discovery && (!tracker || !tracker[0]) && !lumi_nseg) return;
     if (n_layers <= 0 || n_experts <= 0 || hidden <= 0 ||
         (size_t)n_layers > SIZE_MAX / (size_t)n_experts / LUMI_MAX_REP)
         lumi_die("invalid expert topology");

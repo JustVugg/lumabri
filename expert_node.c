@@ -121,6 +121,7 @@ static struct {
     pthread_mutex_t load_lk;    /* the engine loader is used one call at a time */
     char name[64], model[64], advertise[64], tracker[64];
     int want_hold;              /* auto/numeric --hold capacity; 0 = no EASSIGN */
+    int seg_a, seg_b;           /* --segment layer range; -1 = not a segment node */
     char token[LMB_TOKEN_MAX + 1];
     char profile[LMB_BUILD_PROFILE_MAX];
     uint8_t peer_sk[64], peer_pk[32];   /* identity to the tracker */
@@ -418,6 +419,9 @@ static int handle_emanifest(int fd) {
     return rc;
 }
 
+static int handle_seg_open(int fd, LmbMsg *m);
+static int handle_seg_run(int fd, LmbMsg *m);
+
 static void *conn_thread(void *arg) {
     int fd = (int)(intptr_t)arg;
     if (lmb_secure_server(fd)) { close(fd); lmb_conn_gate_leave(&g_conn_gate); return NULL; }
@@ -445,6 +449,8 @@ static void *conn_thread(void *arg) {
         }
         case LMB_EXEC:      rc = handle_exec(fd, &m); break;
         case LMB_EMANIFEST: rc = handle_emanifest(fd); break;
+        case LMB_SEG_OPEN:  rc = handle_seg_open(fd, &m); break;
+        case LMB_SEG_RUN:   rc = handle_seg_run(fd, &m); break;
         default:            send_err(fd, "unknown op"); rc = -1; break;
         }
         lmb_msg_free(&m);
@@ -457,6 +463,61 @@ static void *conn_thread(void *arg) {
     close(fd);
     lmb_conn_gate_leave(&g_conn_gate);
     return NULL;
+}
+
+/* ---- segment execution ---------------------------------------------------
+ * One round trip runs a whole contiguous layer range: hidden state in,
+ * hidden state out, this range's KV kept here. Engine support is optional
+ * (LMBE_HAS_SEGMENTS in the engine header); without it the ops answer
+ * LMB_ERR and the chatter runs those layers itself. Execution is serialized
+ * — the engine's Model is single-threaded state, and segment order IS the
+ * KV's correctness. */
+#ifdef LMBE_HAS_SEGMENTS
+static pthread_mutex_t g_seg_lk = PTHREAD_MUTEX_INITIALIZER;
+#endif
+
+static int handle_seg_open(int fd, LmbMsg *m) {
+    (void)m;
+#ifdef LMBE_HAS_SEGMENTS
+    if (g.seg_a >= 0) {
+        LmbBuf b = {0};
+        lmb_buf_u32(&b, (uint32_t)g.seg_a);
+        lmb_buf_u32(&b, (uint32_t)g.seg_b);
+        lmb_buf_u32(&b, (uint32_t)g.hidden);
+        lmb_buf_str(&b, lmbe_engine_name());
+        lmb_buf_str(&b, g.profile);
+        int rc = lmb_send(fd, LMB_SEG_OPEN_R, b.p, (uint32_t)b.len, NULL, 0);
+        free(b.p);
+        return rc;
+    }
+#endif
+    return lmb_send(fd, LMB_ERR, NULL, 0, NULL, 0);
+}
+
+static int handle_seg_run(int fd, LmbMsg *m) {
+#ifdef LMBE_HAS_SEGMENTS
+    LmbCur c = { m->body, m->body_len, 0 };
+    uint32_t a, b2, S, pos, D;
+    if (g.seg_a < 0 || lmb_cur_u32(&c, &a) || lmb_cur_u32(&c, &b2) ||
+        lmb_cur_u32(&c, &S) || lmb_cur_u32(&c, &pos) || lmb_cur_u32(&c, &D) ||
+        c.off != c.len || (int)a != g.seg_a || (int)b2 != g.seg_b ||
+        D != (uint32_t)g.hidden || !S || S > (1u << 16) ||
+        (uint64_t)S * D * sizeof(float) != m->pay_len) return -1;
+    float *x = (float *)malloc((size_t)m->pay_len);
+    if (!x) return -1;
+    memcpy(x, m->pay, m->pay_len);
+    pthread_mutex_lock(&g_seg_lk);
+    int rc = lmbe_seg_run((int)a, (int)b2, x, (int)S, (int)pos);
+    pthread_mutex_unlock(&g_seg_lk);
+    if (rc) { free(x); return -1; }
+    rc = lmb_send(fd, LMB_SEG_RUN_R, NULL, 0, x, (uint32_t)m->pay_len);
+    free(x);
+    atomic_fetch_add(&g.calls, 1);
+    return rc;
+#else
+    (void)fd; (void)m;
+    return -1;
+#endif
 }
 
 /* Ask the tracker which experts to hold (capacity `hold`); returns a
@@ -807,6 +868,7 @@ int main(int argc, char **argv) {
     int port = 7401, stride = 1, offset = 0, cache = 0, bits = 8, hold = 0, hold_auto = 0;
     int layers[512], nlayers = 0, parallel = 0;
     memcpy(g.name, "node", sizeof "node");
+    g.seg_a = g.seg_b = -1;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--model") && i + 1 < argc) dir = argv[++i];
@@ -828,6 +890,13 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--parallel") && i + 1 < argc) parallel = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--stride") && i + 1 < argc)
             sscanf(argv[++i], "%d:%d", &stride, &offset);
+        else if (!strcmp(argv[i], "--segment") && i + 1 < argc) {
+            if (sscanf(argv[++i], "%d:%d", &g.seg_a, &g.seg_b) != 2 ||
+                g.seg_a < 0 || g.seg_b < g.seg_a) {
+                fprintf(stderr, "--segment wants a:b with 0 <= a <= b\n");
+                return 2;
+            }
+        }
         else if (!strcmp(argv[i], "--layers") && i + 1 < argc) {
             char *s = argv[++i], *save = NULL;
             for (char *t = strtok_r(s, ",", &save); t && nlayers < 512; t = strtok_r(NULL, ",", &save))
@@ -836,7 +905,8 @@ int main(int argc, char **argv) {
             fprintf(stderr, "usage: %s --model DIR [--port N] [--name S] "
                             "[--model-name S] [--tracker H:P] [--advertise H:P] "
                             "[--cache N] [--bits N] [--hold N] [--parallel N] "
-                            "[--stride N:OFF] [--layers a,b,c]\n", argv[0]);
+                            "[--stride N:OFF] [--layers a,b,c] [--segment a:b]\n",
+                    argv[0]);
             return 2;
         }
     }
@@ -897,6 +967,37 @@ int main(int argc, char **argv) {
     g.n_experts = lmbe_n_experts();
     g.hidden    = lmbe_hidden();
     g.inter     = lmbe_inter();
+    if (g.seg_a >= 0) {
+#ifdef LMBE_HAS_SEGMENTS
+        if (g.seg_b >= g.n_slots) {
+            fprintf(stderr, "[%s] --segment %d:%d exceeds the model's %d layers\n",
+                    g.name, g.seg_a, g.seg_b, g.n_slots);
+            return 2;
+        }
+        int max_t = getenv("CTX") ? atoi(getenv("CTX")) : 2048;
+        if (max_t < 16) max_t = 16;
+        if (lmbe_seg_open(dir, cache > 0 ? cache : 16, bits, max_t)) {
+            fprintf(stderr, "[%s] segment init failed\n", g.name);
+            return 1;
+        }
+        printf("[%s] serving SEGMENT layers %d..%d on :%d (ctx %d) — hidden "
+               "state in, hidden state out, KV kept here\n",
+               g.name, g.seg_a, g.seg_b, port, max_t);
+        fflush(stdout);
+        int lfd_s = lmb_listen(port);
+        if (lfd_s < 0) { perror("listen"); return 1; }
+        for (;;) {
+            int fd = accept(lfd_s, NULL, NULL);
+            if (fd < 0) continue;
+            pthread_t st;
+            if (pthread_create(&st, NULL, conn_thread, (void *)(intptr_t)fd) == 0)
+                pthread_detach(st);
+        }
+#else
+        fprintf(stderr, "[%s] this engine has no segment support yet\n", g.name);
+        return 2;
+#endif
+    }
     if (hold_auto) {
         /* Hold as many experts as this machine's free RAM can keep resident, and
          * ask the tracker for exactly that many: it hands back the least-covered
