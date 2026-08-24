@@ -201,19 +201,6 @@ enum {
      * nonce, so the tracker binds each name to the key that first claimed it
      * and refuses a different key under the same name. */
     LMB_CHALLENGE = 37, LMB_CHALLENGE_R = 38,
-
-    /* Segment execution — the latency protocol. A peer that holds a
-     * CONTIGUOUS range of layers (dense weights, experts, and that range's
-     * KV) runs the whole block on one round trip: hidden state in, hidden
-     * state out. Per token, one RTT per segment instead of one per layer.
-     * OPEN validates the pairing (range, hidden width, engine) and pins the
-     * KV capacity; RUN carries {seg_a, seg_b, rows, pos_base, hidden} and
-     * S*hidden floats each way. KV correctness needs every position to pass
-     * through the same segment peer exactly once, in order — the client
-     * enforces that by never mixing segment and local execution for the
-     * same layers within one conversation. */
-    LMB_SEG_OPEN = 39, LMB_SEG_OPEN_R = 40,
-    LMB_SEG_RUN = 41, LMB_SEG_RUN_R = 42,
 };
 
 /* REGISTER body: str name, str addr, str model, u64 held_bytes,
@@ -303,8 +290,6 @@ static void lmb_frame_caps(uint32_t op, uint32_t *body_cap, uint32_t *pay_cap) {
     case LMB_HASHES_R:
     case LMB_EXEC_R:
     case LMB_REXEC_R:
-    case LMB_SEG_RUN:
-    case LMB_SEG_RUN_R:
         *pay_cap = LMB_MAX_PAY;
         break;
     case LMB_RREAD_FWD:

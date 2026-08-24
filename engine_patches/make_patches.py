@@ -64,15 +64,6 @@ OLMOE = [
         }
 #endif
 """),
-    # segment execution: a peer holding a contiguous layer range runs the
-    # whole block — attention, experts, KV — in one round trip. The anchor
-    # pairs step()'s unique scratch alloc with its layer loop so the hook
-    # cannot land in model_init's identical-looking loop.
-    hook("    float *nrm = falloc((int64_t)S*D), *tmp = falloc((int64_t)S*D);\n    for (int i = 0; i < c->n_layers; i++) {\n", """#ifdef LUMIBRI_P2P
-        { int _sto;                   /* a whole remote segment: one round trip */
-          if (lumi_seg_take(i, x, S, pos_base, D, &_sto)) { i = _sto; continue; } }
-#endif
-"""),
 ]
 
 # --------------------------------------------------------------------------

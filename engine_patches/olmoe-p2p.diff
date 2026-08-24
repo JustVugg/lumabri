@@ -39,14 +39,3 @@ diff --git a/c/olmoe.c b/c/olmoe.c
          for (int kk = 0; kk < K; kk++) {
              Slot *e; expert_get(m, layer, idx[kk], &e);
  #if defined(__AVX2__)
-@@ -777,6 +794,10 @@
-     for (int s = 0; s < S; s++) memcpy(x + (int64_t)s*D, m->embed + (int64_t)ids[s]*D, D*sizeof(float));
-     float *nrm = falloc((int64_t)S*D), *tmp = falloc((int64_t)S*D);
-     for (int i = 0; i < c->n_layers; i++) {
-+#ifdef LUMIBRI_P2P
-+        { int _sto;                   /* a whole remote segment: one round trip */
-+          if (lumi_seg_take(i, x, S, pos_base, D, &_sto)) { i = _sto; continue; } }
-+#endif
-         Layer *l = &m->L[i];
-         for (int s = 0; s < S; s++) rmsnorm_row(nrm + (int64_t)s*D, x + (int64_t)s*D, l->in_ln, D, c->eps);
-         attention(m, l, i, nrm, S, pos_base, tmp);
