@@ -23,6 +23,7 @@
 #include <time.h>
 
 #include "lumabri_proto.h"
+#include "lumabri_segment_discovery.h"
 #include "lumabri_sha.h"
 #include "lumabri_sign.h"
 #include "lumabri_secure.h"
@@ -42,11 +43,14 @@ typedef struct {
     uint64_t exec_calls;
     uint32_t exec_inflight;
     int have_exec_stats;
+    double expert_ts;
     PFile *files; uint32_t nfiles;
     double ts;
     int used;
     unsigned refs;              /* control/relay users holding this slot */
-    int is_expert;              /* EREG peer: executes experts, holds no files */
+    int is_expert;              /* compute identity (Expert and/or Segment) */
+    int has_expert;             /* EREG capability is independently present */
+    int has_segment;            /* SREG capability is independently present */
     uint8_t pubkey[32];         /* this name's identity, bound on first claim */
     int has_key;
     uint32_t nexperts;
@@ -55,6 +59,10 @@ typedef struct {
      * overlap, and so cannot assign a newcomer the part nobody covers. Sent
      * on the EREG heartbeat; 2.4 KB for a 19456-expert model. */
     uint8_t *ebits; uint32_t enbits;
+    LmbSegAdvert segment;
+    LmbSegOwner segment_owner;
+    double segment_ts;
+    int segment_live;
 
     /* relay mailbox: one in-flight request per peer, serialized. The
      * chatter thread queues it and waits; the peer's control thread
@@ -79,6 +87,68 @@ static char g_token[LMB_TOKEN_MAX + 1]; /* --token: private swarm, invite requir
 static LmbConnGate g_conn_gate = LMB_CONN_GATE_INIT;
 static double g_stale_s = STALE_S;
 static int g_max_names_per_source = 16;
+static uint64_t g_segment_route_generation = 1;
+static int g_segment_generation_ready;
+static char g_bindings_path[512];
+
+/* Reserve one 32-bit generation epoch per tracker process. The durable high
+ * half means a tracker restart can never publish a generation below a route
+ * still cached by a chatter or held by a live executor. The low half is ample
+ * for topology changes during one process lifetime and needs no fsync on each
+ * heartbeat. Rolling trackers serialize epoch allocation with flock. */
+static int segment_generation_init(void) {
+    char path[sizeof g_bindings_path + 32];
+    if (!g_bindings_path[0] ||
+        snprintf(path, sizeof path, "%s.segment-generation", g_bindings_path) >=
+            (int)sizeof path)
+        return -1;
+    int flags = O_RDWR | O_CREAT;
+#ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+#endif
+    int fd = open(path, flags, 0600);
+    if (fd < 0 || flock(fd, LOCK_EX)) { if (fd >= 0) close(fd); return -1; }
+    struct stat st;
+    if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_uid != geteuid() ||
+        (st.st_mode & 022)) {
+        flock(fd, LOCK_UN); close(fd); errno = EACCES; return -1;
+    }
+    char buf[64] = {0};
+    ssize_t n = pread(fd, buf, sizeof buf - 1, 0);
+    char *end = NULL;
+    unsigned long long previous = 0;
+    if (n < 0) { flock(fd, LOCK_UN); close(fd); return -1; }
+    if (n) {
+        errno = 0;
+        previous = strtoull(buf, &end, 10);
+        if (errno || end == buf || (*end && *end != '\n') ||
+            previous >= UINT32_MAX) {
+            flock(fd, LOCK_UN); close(fd); errno = EINVAL; return -1;
+        }
+    }
+    uint32_t epoch = (uint32_t)previous + 1u;
+    int out_len = snprintf(buf, sizeof buf, "%u\n", epoch);
+    /* The decimal counter never shrinks when incremented, so overwrite first
+     * and fsync without truncating the last valid epoch before the new one is
+     * durable. */
+    int bad = out_len <= 0 ||
+              pwrite(fd, buf, (size_t)out_len, 0) != out_len || fsync(fd);
+    flock(fd, LOCK_UN); close(fd);
+    if (bad) return -1;
+    g_segment_route_generation = (uint64_t)epoch << 32 | 1u;
+    return 0;
+}
+
+static void segment_generation_bump(void) {
+    /* Exhausting four billion topology changes without restarting is not a
+     * useful operating state; fail closed at the reserved epoch boundary. */
+    if ((uint32_t)g_segment_route_generation == UINT32_MAX) {
+        fprintf(stderr, "[tracker] Segment generation epoch exhausted; "
+                        "restart to reserve the next durable epoch\n");
+        abort();
+    }
+    g_segment_route_generation++;
+}
 
 /* Unlike liveness/placement state, identity ownership must survive a tracker
  * restart.  Otherwise "TOFU" means only "trust until the process exits" and
@@ -87,7 +157,6 @@ static int g_max_names_per_source = 16;
 typedef struct { char name[64]; uint8_t pubkey[32]; int is_expert; } Binding;
 static Binding g_bindings[MAX_BINDINGS];
 static int g_nbindings;
-static char g_bindings_path[512];
 
 static int binding_name_ok(const char *s) {
     if (!s || !*s || strlen(s) >= 64) return 0;
@@ -811,6 +880,11 @@ static Peer *handle_ereg(int fd, LmbMsg *m, const uint8_t *nonce) {
     for (int i = 0; i < MAX_PEERS; i++)
         if (g_peers[i].used && g_peers[i].is_expert &&
             !strcmp(g_peers[i].name, name)) { slot = &g_peers[i]; break; }
+    if (slot && slot->has_segment && strcmp(slot->segment.model, model)) {
+        pthread_mutex_unlock(&g_lk);
+        send_err(fd, "one compute name cannot mix models");
+        return NULL;
+    }
     if (!slot) {
         slot = peer_slot_new(1, NULL);
         fresh = slot != NULL;
@@ -834,8 +908,9 @@ static Peer *handle_ereg(int fd, LmbMsg *m, const uint8_t *nonce) {
         use_addr = fixed;
     }
     if (slot) {
-        slot->used = 1; slot->is_expert = 1;
+        slot->used = 1; slot->is_expert = 1; slot->has_expert = 1;
         slot->nexperts = nexperts; slot->ts = now_s();
+        slot->expert_ts = slot->ts;
         slot->ctrl_fd = fd;
         snprintf(slot->name, sizeof slot->name, "%s", name);
         snprintf(slot->addr, sizeof slot->addr, "%s", use_addr);
@@ -888,18 +963,221 @@ static int handle_epeers(int fd, LmbMsg *m) {
     pthread_mutex_lock(&g_lk);
     uint32_t n = 0;
     for (int i = 0; i < MAX_PEERS; i++)
-        if (g_peers[i].used && g_peers[i].is_expert &&
-            now - g_peers[i].ts <= g_stale_s &&
+        if (g_peers[i].used && g_peers[i].is_expert && g_peers[i].has_expert &&
+            now - g_peers[i].expert_ts <= g_stale_s &&
             (!want[0] || !strcmp(g_peers[i].model, want))) n++;
     lmb_buf_u32(&b, n);
     for (int i = 0; i < MAX_PEERS; i++)
-        if (g_peers[i].used && g_peers[i].is_expert &&
-            now - g_peers[i].ts <= g_stale_s &&
+        if (g_peers[i].used && g_peers[i].is_expert && g_peers[i].has_expert &&
+            now - g_peers[i].expert_ts <= g_stale_s &&
             (!want[0] || !strcmp(g_peers[i].model, want)))
             lmb_buf_str(&b, g_peers[i].addr);
     pthread_mutex_unlock(&g_lk);
     int rc = lmb_send(fd, LMB_EPEERS_R, b.p, (uint32_t)b.len, NULL, 0);
     free(b.p);
+    return rc;
+}
+
+/* ---- SREG / SEG_ROUTES: stateful range discovery -----------------------
+ * A Segment heartbeat shares the compute identity and persistent control
+ * connection used by EREG, but it is a distinct capability. This matters for
+ * transition releases: a range-only peer must never appear in EPEERS and an
+ * old expert-only peer must never be selected for a stateful session. */
+
+static int segment_model_root_ok(const LmbSegAdvert *advert) {
+    for (int i = 0; i < MAX_MODELS; i++)
+        if (g_models[i].used && !strcmp(g_models[i].id.model, advert->model))
+            return !memcmp(g_models[i].id.root, advert->model_root,
+                           LMB_SEG_ROOT_BYTES);
+    /* Private/development swarms may register compute before the origin. The
+     * query still requires an exact root; once a signed origin is known, a
+     * conflicting heartbeat is rejected here. */
+    return 1;
+}
+
+static int segment_route_shape_equal(const LmbSegAdvert *a,
+                                     const LmbSegAdvert *b) {
+    return !strcmp(a->peer_name, b->peer_name) &&
+           !strcmp(a->addr, b->addr) && !strcmp(a->model, b->model) &&
+           !memcmp(a->model_root, b->model_root, LMB_SEG_ROOT_BYTES) &&
+           !memcmp(a->tokenizer_root, b->tokenizer_root, LMB_SEG_ROOT_BYTES) &&
+           a->layer_begin == b->layer_begin && a->layer_end == b->layer_end &&
+           a->max_context == b->max_context && a->max_rows == b->max_rows &&
+           a->state_dtype == b->state_dtype && a->state_width == b->state_width &&
+           a->max_sessions == b->max_sessions && a->flags == b->flags &&
+           a->capabilities == b->capabilities &&
+           !strcmp(a->engine_id, b->engine_id) &&
+           !strcmp(a->state_schema, b->state_schema) &&
+           !strcmp(a->numeric_class, b->numeric_class);
+}
+
+static Peer *handle_segment_register(int fd, LmbMsg *m, const uint8_t *nonce) {
+    if (!g_segment_generation_ready) {
+        send_err(fd, "segment discovery is unavailable: no durable generation");
+        return NULL;
+    }
+    uint8_t peer_pk[32], peer_sig[64], next_lease[LMB_SEG_ID_BYTES];
+    int have_auth = 0;
+    size_t blen = peer_auth_strip(m, peer_pk, peer_sig, &have_auth);
+    LmbSegAdvert advert;
+    if (lmb_seg_advert_decode(m->body, blen, &advert)) {
+        send_err(fd, "bad segment registration"); return NULL;
+    }
+    if (!have_auth || !nonce) {
+        send_err(fd, "segment registration must be signed (CHALLENGE first)");
+        return NULL;
+    }
+    uint8_t authmsg[512];
+    size_t auth_len = lmb_peer_auth_msg(nonce, advert.peer_name, advert.model,
+                                        advert.addr, authmsg, sizeof authmsg);
+    if (!auth_len || lmb_sign_verify(peer_sig, authmsg, auth_len, peer_pk)) {
+        send_err(fd, "bad identity signature"); return NULL;
+    }
+    if (lmb_secure_enabled() && !lmb_secure_peer_matches(fd, peer_pk)) {
+        send_err(fd, "channel/registration identity mismatch"); return NULL;
+    }
+    char source[64]; connection_source(fd, source);
+    char fixed[64];
+    struct sockaddr_in sin; socklen_t sl = sizeof sin;
+    if (!strncmp(advert.addr, "127.0.0.1:", 10) &&
+        getpeername(fd, (struct sockaddr *)&sin, &sl) == 0 &&
+        sin.sin_family == AF_INET && ntohl(sin.sin_addr.s_addr) != INADDR_LOOPBACK) {
+        snprintf(fixed, sizeof fixed, "%s:%s", inet_ntoa(sin.sin_addr),
+                 strchr(advert.addr, ':') + 1);
+        snprintf(advert.addr, sizeof advert.addr, "%s", fixed);
+    }
+    lmb_random(next_lease, sizeof next_lease);
+
+    Peer *slot = NULL;
+    int fresh = 0, changed = 0;
+    double now = now_s();
+    pthread_mutex_lock(&g_lk);
+    if (!segment_model_root_ok(&advert)) {
+        pthread_mutex_unlock(&g_lk);
+        send_err(fd, "segment model root differs from tracker identity");
+        return NULL;
+    }
+    if (name_key_ok(advert.peer_name, 1, peer_pk) < 0) {
+        pthread_mutex_unlock(&g_lk);
+        send_err(fd, "name held by another key"); return NULL;
+    }
+    if (!identity_has_room(peer_pk, advert.peer_name, 1, source)) {
+        pthread_mutex_unlock(&g_lk);
+        send_err(fd, "peer identity or source admission quota reached");
+        return NULL;
+    }
+    for (int i = 0; i < MAX_PEERS; i++)
+        if (g_peers[i].used && g_peers[i].is_expert &&
+            !strcmp(g_peers[i].name, advert.peer_name)) {
+            slot = &g_peers[i]; break;
+        }
+    if (slot && slot->has_expert && strcmp(slot->model, advert.model)) {
+        pthread_mutex_unlock(&g_lk);
+        send_err(fd, "one compute name cannot mix models");
+        return NULL;
+    }
+    if (!slot) { slot = peer_slot_new(1, NULL); fresh = slot != NULL; }
+    if (slot && binding_check_or_add(advert.peer_name, 1, peer_pk)) {
+        pthread_mutex_unlock(&g_lk);
+        send_err(fd, "cannot persist compute identity binding"); return NULL;
+    }
+    if (slot) {
+        int was_live = slot->has_segment && slot->segment_live &&
+                       now - slot->segment_ts <= g_stale_s;
+        changed = !was_live || !segment_route_shape_equal(&slot->segment, &advert);
+        if (changed) {
+            memcpy(slot->segment_owner.lease_id.bytes, next_lease,
+                   sizeof slot->segment_owner.lease_id.bytes);
+            segment_generation_bump();
+            slot->segment_owner.fencing_epoch = g_segment_route_generation;
+        }
+        slot->segment = advert;
+        slot->segment_ts = now; slot->segment_live = 1;
+        slot->used = 1; slot->is_expert = 1; slot->has_segment = 1;
+        slot->ts = now; slot->ctrl_fd = fd;
+        memcpy(slot->pubkey, peer_pk, 32); slot->has_key = 1;
+        snprintf(slot->name, sizeof slot->name, "%s", advert.peer_name);
+        /* Expert and Segment listeners may use different ports. Keep addr as
+         * the expert data-plane endpoint once EREG exists; Segment routes use
+         * the independent address stored in slot->segment. */
+        if (!slot->has_expert) {
+            snprintf(slot->addr, sizeof slot->addr, "%s", advert.addr);
+            snprintf(slot->model, sizeof slot->model, "%s", advert.model);
+        }
+        snprintf(slot->source, sizeof slot->source, "%s", source);
+        slot->segment_owner.route_generation = g_segment_route_generation;
+    }
+    pthread_mutex_unlock(&g_lk);
+    if (!slot) { send_err(fd, "peer table full"); return NULL; }
+    if (fresh || changed) {
+        printf("[tracker] + segment %s @ %s (%s, layers %u:%u%s)\n",
+               advert.peer_name, advert.addr, advert.model,
+               advert.layer_begin, advert.layer_end,
+               advert.flags & LMB_SEG_ADVERT_DRAINING ? ", draining" : "");
+        fflush(stdout);
+    }
+    uint8_t *reply = NULL; uint32_t reply_len = 0;
+    LmbSegOwner owner;
+    pthread_mutex_lock(&g_lk);
+    owner = slot->segment_owner;
+    owner.route_generation = g_segment_route_generation;
+    pthread_mutex_unlock(&g_lk);
+    if (lmb_seg_registration_reply_encode(&owner, &reply, &reply_len)) {
+        send_err(fd, "cannot encode segment lease"); return NULL;
+    }
+    int rc = lmb_send(fd, LMB_SEG_REGISTER_R, reply, reply_len, NULL, 0);
+    free(reply);
+    return rc ? NULL : slot;
+}
+
+static int handle_segment_routes(int fd, LmbMsg *m) {
+    if (!g_segment_generation_ready) {
+        send_err(fd, "segment discovery is unavailable: no durable generation");
+        return 0;
+    }
+    LmbSegQuery query;
+    if (m->pay_len || lmb_seg_query_decode(m->body, m->body_len, &query)) {
+        send_err(fd, "bad segment route query"); return -1;
+    }
+    LmbSegRouteSnapshot snapshot;
+    memset(&snapshot, 0, sizeof snapshot);
+    double now = now_s();
+    pthread_mutex_lock(&g_lk);
+    /* Liveness is a material placement change, but only once per transition;
+     * repeated queries cannot churn the route generation. */
+    for (int i = 0; i < MAX_PEERS; i++) {
+        Peer *p = &g_peers[i];
+        if (p->used && p->has_segment && p->segment_live &&
+            now - p->segment_ts > g_stale_s) {
+            p->segment_live = 0;
+            segment_generation_bump();
+        }
+    }
+    snapshot.route_generation = g_segment_route_generation;
+    for (int i = 0; i < MAX_PEERS && snapshot.count < LMB_SEG_ROUTE_MAX; i++) {
+        Peer *p = &g_peers[i];
+        if (!p->used || !p->has_segment || !p->segment_live ||
+            now - p->segment_ts > g_stale_s ||
+            !lmb_seg_advert_compatible(&p->segment, &query)) continue;
+        LmbSegRouteEntry *entry = &snapshot.entries[snapshot.count++];
+        entry->advert = p->segment;
+        entry->owner = p->segment_owner;
+        entry->owner.route_generation = snapshot.route_generation;
+        if (entry->advert.addr[0]) entry->transport |= LMB_SEG_TRANSPORT_DIRECT;
+        /* Do not infer Segment relay from the persistent SREG connection.
+         * This tracker can relay READ/EXEC today, but it does not forward the
+         * stateful Segment operations yet. The reserved bit is published only
+         * when that data-plane handler exists. */
+    }
+    snapshot.complete = (uint32_t)lmb_seg_route_complete(&snapshot, &query);
+    pthread_mutex_unlock(&g_lk);
+
+    uint8_t *body = NULL; uint32_t body_len = 0;
+    if (lmb_seg_route_encode(&snapshot, &body, &body_len)) {
+        send_err(fd, "cannot encode segment routes"); return -1;
+    }
+    int rc = lmb_send(fd, LMB_SEG_ROUTES_R, body, body_len, NULL, 0);
+    free(body);
     return rc;
 }
 
@@ -929,8 +1207,9 @@ static int handle_ecover(int fd, LmbMsg *m) {
          * profiles left half the swarm's coverage invisible. The chatter's
          * own admission gate (lmb_profile_compat, hard fields only) still
          * refuses shape-incompatible peers it talks to directly. */
-        if (!q->used || !q->is_expert || q->ctrl_fd < 0 || q->evfd < 0 ||
-            now - q->ts > g_stale_s || strcmp(q->model, model) ||
+        if (!q->used || !q->is_expert || !q->has_expert ||
+            q->ctrl_fd < 0 || q->evfd < 0 ||
+            now - q->expert_ts > g_stale_s || strcmp(q->model, model) ||
             strcmp(q->engine, engine) ||
             q->bits != bits || q->hidden != hidden || q->slots != slots ||
             q->total_experts != nexp) continue;
@@ -1076,8 +1355,10 @@ static int handle_swarm(int fd) {
     uint32_t live = 0, live_exec = 0;
     for (int i = 0; i < MAX_PEERS; i++) {
         if (!g_peers[i].used || now - g_peers[i].ts > g_stale_s) continue;
-        if (g_peers[i].is_expert) live_exec++;
-        else live++;
+        if (g_peers[i].is_expert) {
+            if (g_peers[i].has_expert &&
+                now - g_peers[i].expert_ts <= g_stale_s) live_exec++;
+        } else live++;
     }
     /* Keep this legacy storage-peer prefix byte-for-byte compatible. */
     lmb_buf_u32(&b, live);
@@ -1096,12 +1377,13 @@ static int handle_swarm(int fd) {
     lmb_buf_u32(&exec, live_exec);
     for (int i = 0; i < MAX_PEERS; i++) {
         Peer *p = &g_peers[i];
-        if (!p->used || !p->is_expert || now - p->ts > g_stale_s) continue;
+        if (!p->used || !p->is_expert || !p->has_expert ||
+            now - p->expert_ts > g_stale_s) continue;
         lmb_buf_str(&exec, p->model);
         lmb_buf_u32(&exec, p->have_exec_stats ? 1u : 0u);
         lmb_buf_u64(&exec, p->have_exec_stats ? p->exec_calls : 0);
         lmb_buf_u32(&exec, p->have_exec_stats ? p->exec_inflight : 0);
-        lmb_buf_u32(&exec, (uint32_t)(now - p->ts));
+        lmb_buf_u32(&exec, (uint32_t)(now - p->expert_ts));
     }
     pthread_mutex_unlock(&g_lk);
     lmb_buf_u32(&b, LMB_SWARM_EXEC_MAGIC);
@@ -1172,14 +1454,15 @@ static int handle_eassign(int fd, LmbMsg *m) {
     int have_mine = 0;
     for (int i = 0; i < MAX_PEERS; i++) {
         Peer *p = &g_peers[i];
-        if (!p->used || !p->is_expert || strcmp(p->model, model) || !p->ebits) continue;
+        if (!p->used || !p->is_expert || !p->has_expert ||
+            strcmp(p->model, model) || !p->ebits) continue;
         if (!strcmp(p->name, name)) {                 /* this node, as it was */
             memcpy(mine, p->ebits, ((cells + 7) / 8 < (p->enbits + 7) / 8
                                     ? (cells + 7) / 8 : (p->enbits + 7) / 8));
             have_mine = 1;
             continue;
         }
-        if (now - p->ts > g_stale_s) continue;
+        if (now - p->expert_ts > g_stale_s) continue;
         uint64_t ph = 1469598103934665603ull;
         for (const char *s = p->name; *s; s++) { ph ^= (uint8_t)*s; ph *= 1099511628211ull; }
         for (size_t k = 0; k < cells && k < p->enbits; k++)
@@ -1206,7 +1489,9 @@ static int handle_eassign(int fd, LmbMsg *m) {
         }
         int live = 0;
         for (int j = 0; j < MAX_PEERS; j++)
-            if (g_peers[j].used && g_peers[j].is_expert && g_peers[j].ebits &&
+            if (g_peers[j].used && g_peers[j].is_expert &&
+                g_peers[j].has_expert && g_peers[j].ebits &&
+                now - g_peers[j].expert_ts <= g_stale_s &&
                 !strcmp(g_peers[j].name, pr->name) &&
                 !strcmp(g_peers[j].model, model)) { live = 1; break; }
         if (live) continue;
@@ -1413,7 +1698,8 @@ static int handle_rexec(int fd, LmbMsg *m) {
     for (int i = 0; i < MAX_PEERS && !p; i++) {
         Peer *q = &g_peers[i];
         uint32_t gid = (uint32_t)gid64;
-        if (!q->used || !q->is_expert || now - q->ts > g_stale_s ||
+        if (!q->used || !q->is_expert || !q->has_expert ||
+            now - q->expert_ts > g_stale_s ||
             q->ctrl_fd < 0 || q->evfd < 0 || strcmp(q->model, model) || gid >= q->enbits ||
             !(q->ebits[gid >> 3] & (uint8_t)(1u << (gid & 7)))) continue;
         p = q; p->refs++;
@@ -1700,6 +1986,24 @@ static void *conn_thread(void *arg) {
         case LMB_EASSIGN:   rc = handle_eassign(fd, &m); break;
         case LMB_EPEERS:    rc = handle_epeers(fd, &m); break;
         case LMB_ECOVER:    rc = handle_ecover(fd, &m); break;
+        case LMB_SEG_REGISTER: {
+            Peer *p = handle_segment_register(fd, &m,
+                                               have_nonce ? nonce : NULL);
+            if (p) {
+                if (!ctrl) {
+                    pthread_mutex_lock(&g_lk); p->refs++; pthread_mutex_unlock(&g_lk);
+                    ctrl = p;
+                } else if (ctrl != p) {
+                    pthread_mutex_lock(&g_lk);
+                    if (p->ctrl_fd == fd) p->ctrl_fd = -1;
+                    pthread_mutex_unlock(&g_lk);
+                    send_err(fd, "one compute identity per control connection");
+                    rc = -1;
+                }
+            } else rc = -1;
+            break;
+        }
+        case LMB_SEG_ROUTES: rc = handle_segment_routes(fd, &m); break;
         case LMB_HASHES:    rc = handle_hashes(fd, &m); break;
         case LMB_MODEL_ID:  rc = handle_model_id(fd, &m); break;
         case LMB_PLACEMENT: rc = handle_placement(fd, &m); break;
@@ -1759,6 +2063,12 @@ int main(int argc, char **argv) {
                 g_bindings_path[0] ? g_bindings_path : "the state directory");
         return 1;
     }
+    if (segment_generation_init())
+        fprintf(stderr, "[tracker] warning: cannot reserve a durable Segment "
+                        "route generation next to %s; legacy services remain "
+                        "available but Segment discovery is disabled\n",
+                g_bindings_path);
+    else g_segment_generation_ready = 1;
     lmb_conn_gate_init(&g_conn_gate);
     if (lmb_secure_init()) return 1;
     int lfd = lmb_listen(port);

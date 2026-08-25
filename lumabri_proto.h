@@ -219,6 +219,14 @@ enum {
     LMB_SEG_RESTORE = 45, LMB_SEG_RESTORE_R = 46,
     LMB_SEG_CLOSE = 47, LMB_SEG_CLOSE_R = 48,
     LMB_SEG_HEALTH = 49, LMB_SEG_HEALTH_R = 50,
+
+    /* Segment control plane. SREG is the signed, persistent heartbeat of a
+     * range-native executor; its reply assigns the lease/fencing owner.
+     * SEG_ROUTES is a model/schema/numeric compatibility query and returns a
+     * generation-fenced immutable placement snapshot. Neither opcode is used
+     * from the per-token or per-layer inference path. */
+    LMB_SEG_REGISTER = 51, LMB_SEG_REGISTER_R = 52,
+    LMB_SEG_ROUTES = 53, LMB_SEG_ROUTES_R = 54,
 };
 
 /* REGISTER body: str name, str addr, str model, u64 held_bytes,
@@ -298,6 +306,7 @@ static void lmb_frame_caps(uint32_t op, uint32_t *body_cap, uint32_t *pay_cap) {
     case LMB_EPEERS_R:
     case LMB_EMANIFEST_R:
     case LMB_EASSIGN_R:
+    case LMB_SEG_ROUTES_R:
         *body_cap = LMB_MAX_CONTROL_BODY;
         break;
     case LMB_PLACEMENT_R:

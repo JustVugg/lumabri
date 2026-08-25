@@ -1,15 +1,47 @@
 # Segment protocol v2
 
-Segment v2 is Lumibri's model-neutral state and ownership protocol for running
+Segment v2 is Lumabri's model-neutral state and ownership protocol for running
 a contiguous range of transformer layers on a peer. It does not encode a
 particular model's KV layout. Colibri owns the model math, weights, accelerator
-and opaque state; Lumibri owns transport, session identity, ordering, leases,
+and opaque state; Lumabri owns transport, session identity, ordering, leases,
 fencing and route lifecycle.
 
-This change defines the wire and session contract only. No production binary
-dispatches the new opcodes and no model is advertised as Segment-capable yet.
+The wire/session contract and tracker discovery control plane are implemented.
+No production executor dispatches inference opcodes and no model is advertised
+by the normal CLI as Segment-capable yet: registration is available to the
+upcoming executor, while route discovery is kept out of the inference path.
 Public activation is gated on GLM, Inkling, Kimi K3, Qwen3.6, OLMoE and
 DeepSeek V4 all passing the same conformance suite.
+
+## Tracker discovery
+
+A signed `SEG_REGISTER` heartbeat advertises a half-open layer range together
+with model/tokenizer roots, engine, state schema, numeric class, dtype/width,
+backend capability, resident RAM/VRAM, session capacity, queue, inflight and
+draining state. Expert and Segment advertisements may share one compute name,
+key and control connection, but retain independent addresses and liveness.
+
+`SEG_ROUTES` asks for one exact model/schema/numeric class and a requested
+layer interval. The tracker returns every compatible live range and replica,
+plus:
+
+- a random lease ID and monotonic fencing epoch per executor;
+- a monotonic route generation for the complete placement;
+- data-plane transport capability (`DIRECT` today; `RELAY` remains reserved
+  until Segment forwarding is implemented rather than inferred from SREG);
+- whether the returned interval union covers the requested chain.
+
+Telemetry-only heartbeats do not churn leases or route generations. A range,
+compatibility, address, capability or draining change does; stale/recovered
+registrations do as well. Draining peers remain known but are excluded from
+new placements. The tracker reserves a durable generation epoch beside its
+peer-binding database, so a restart cannot make a cached generation current
+again or move either monotonic fencing value backwards.
+
+`LmbSegDiscovery` polls this control plane on a dedicated thread and publishes
+a fixed-size immutable `LmbSegRouteSnapshot`. The inference thread copies that
+snapshot; it never asks the tracker. A session binds the selected generation
+at `SEG_OPEN`, so later discovery does not silently move a running chat.
 
 ## Wire operations
 
@@ -109,7 +141,8 @@ fencing are both required during a network partition.
 
 ## Conformance coverage
 
-`test_segment_v2.c` runs the same codec against representative tiny schemas
+`test_segment_v2.c` and `test_segment_discovery.c` run the same contracts
+against representative tiny schemas
 for:
 
 - standard KV;
@@ -119,7 +152,10 @@ for:
 - DeltaNet plus convolution ring state;
 - mHC/compressed-attention/compressor/indexer state.
 
-It also covers truncation, version skew, overflow and shape bounds, two-chat
+They also cover truncation, version skew, overflow and shape bounds, two-chat
 isolation, quota, duplicate and conflicting requests, abort, out-of-order
 execution, fence, restore, stale owners, snapshot checks, close and TTL reap.
-These are protocol fixtures, not claims that the model adapters are complete.
+The real-tracker discovery gate additionally covers signed registration,
+compatibility filtering, replicas, complete chains, telemetry stability,
+draining, lease rotation and asynchronous snapshots. These are protocol and
+control-plane fixtures, not a claim that the network executors are complete.
