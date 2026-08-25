@@ -314,7 +314,7 @@ il profilo numerico impedisce di mescolare build che potrebbero produrre float
 diversi. Le suite per motore confrontano il risultato remoto e locale byte per
 byte.
 
-## Next milestone: segment execution (the latency protocol)
+## Segment execution (the latency protocol)
 
 Per-token latency over a WAN is `n_moe_layers × RTT`: the layers are
 sequential, so 58 layers at 50 ms cannot beat ~3 s/token no matter how many
@@ -334,3 +334,12 @@ runs the same engine kernels the local path runs; the spot-check applies to
 segments exactly as it does to single experts. Layer-aligned elastic
 assignment (already shipped) is the natural donor shape for this: a donor's
 whole layers become its segment.
+
+The model-neutral Segment v2 session protocol and tracker discovery are now
+present. A peer can publish one layer-aligned range with its opaque Colibri
+state schema, numeric class, backend, residency and capacity; a chatter gets a
+generation-fenced compatible chain with replicas from an asynchronous control
+thread. What remains before enabling it in `lumabri chat` is the production
+executor/adapter dispatch and then snapshot plus replay failover. Until those
+land, the CLI does not advertise Segment capability and a normal Colibri or
+Lumabri release follows the existing local/Expert paths unchanged.

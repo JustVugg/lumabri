@@ -1,7 +1,7 @@
 /* lumabri_segment.h — model-neutral Segment v2 wire and session contract.
  *
  * This layer knows nothing about KV, MLA, recurrent or convolutional state.
- * Colibri adapters own those bytes. Lumibri owns the session identity,
+ * Colibri adapters own those bytes. Lumabri owns the session identity,
  * ordering, lease, fencing epoch, route generation and bounded wire shapes.
  */
 #ifndef LUMABRI_SEGMENT_H

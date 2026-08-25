@@ -269,7 +269,10 @@ Per-engine expert identity runs with fixtures
 (`make test-phase2-deepseek MODEL=<dir>`). Assignment, concurrency and signing
 have their own scripts (`assign_test.sh`, `concurrency_test.sh`,
 `sign_test.sh`). The newer mechanisms have focused targets:
-`make test-cas test-key-rotation test-hedge test-relay-exec`. Relay EXEC needs
+`make test-cas test-key-rotation test-hedge test-relay-exec` and
+`make test-segment-v2 test-segment-discovery`. Segment discovery runs six tiny state
+families through a real tracker and checks leases, route generations, replicas,
+draining, compatibility and the asynchronous snapshot. Relay EXEC needs
 an OLMoE engine source under `ENGINE`; its script reports `SKIP` explicitly
 when that external checkout is absent. Every claim in this README has a script
 behind it.
