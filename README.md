@@ -145,6 +145,16 @@ Build the peers with `make engines`, the patched chat engines with
 `make chatters`, or both with `make phase2-all ENGINE=/path/to/colibri/c`, for
 the engines your colibri checkout actually has.
 
+### Layer segments (opt-in preview)
+
+The direct Segment path keeps whole contiguous layer ranges and their sequence
+state resident on peers, reducing the network boundary from one request per
+layer/expert to one request per segment. It is now executable for all six
+engine families and has a two-peer oracle gate, but is intentionally not the
+default `lumabri chat` path yet. Build and external-server instructions, plus
+the explicit greedy/direct/no-replay limitations, are in
+**[SEGMENT_DIRECT.md](SEGMENT_DIRECT.md)**.
+
 ## Running a swarm
 
 A full server walkthrough (systemd, firewall, operator key, clients) is in

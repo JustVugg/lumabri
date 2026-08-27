@@ -385,6 +385,32 @@ test_segment_discovery: test_segment_discovery.c lumabri_segment_discovery.c \
 	$(CC) $(CFLAGS) -pthread test_segment_discovery.c \
 		lumabri_segment_discovery.c lumabri_segment.c -o $@
 
+# ---- Segment direct data plane (requires Colibri's additive Edge ABI) ---
+# Kept out of `all`: a rolling Lumabri checkout still builds against the
+# Colibri release branch while the corresponding dev PR is under review.
+COLIBRI_SEGMENT_LIB = $(ENGINE)/build/segment/libcolibri_segment_edge.a
+SEGMENT_CFLAGS = $(CFLAGS) -I. -I$(ENGINE) -fopenmp
+SEGMENT_COMMON = segment_colibri.h lumabri_segment.c lumabri_segment.h \
+		lumabri_segment_discovery.c lumabri_segment_discovery.h \
+		lumabri_proto.h lumabri_sign.h lumabri_sha.h $(SECURE_DEPS)
+
+$(COLIBRI_SEGMENT_LIB):
+	$(MAKE) -C $(ENGINE) segment-edge-library
+
+segment_node: segment_node.c $(SEGMENT_COMMON) $(COLIBRI_SEGMENT_LIB)
+	$(CC) $(SEGMENT_CFLAGS) -pthread segment_node.c lumabri_segment.c \
+		lumabri_segment_discovery.c $(COLIBRI_SEGMENT_LIB) -o $@ -lm
+
+segment_chat: segment_chat.c $(SEGMENT_COMMON) $(COLIBRI_SEGMENT_LIB)
+	$(CC) $(SEGMENT_CFLAGS) -pthread segment_chat.c lumabri_segment.c \
+		lumabri_segment_discovery.c $(COLIBRI_SEGMENT_LIB) -o $@ -lm
+
+.PHONY: segment-direct
+segment-direct: segment_node segment_chat
+
+test-segment-direct-real: tracker segment-direct
+	bash ./segment_direct_test.sh
+
 test-relay-exec: tracker expert_node test_relay_exec fixture
 	./relay_exec_test.sh
 
@@ -416,7 +442,7 @@ test-segment-v2: test_segment_v2
 	./test_segment_v2
 
 test-segment-discovery: tracker test_segment_discovery
-	./segment_discovery_test.sh
+	bash ./segment_discovery_test.sh
 
 test: all test_key_rotation test_hedge test_verify_failover test_segment_v2 \
 		test_segment_discovery
@@ -440,7 +466,7 @@ test: all test_key_rotation test_hedge test_verify_failover test_segment_v2 \
 	./test_key_rotation
 	./test_hedge
 	./test_segment_v2
-	./segment_discovery_test.sh
+	bash ./segment_discovery_test.sh
 
 # ---- deploy -------------------------------------------------------------
 # make install                    → /usr/local (needs sudo)
@@ -456,7 +482,8 @@ install: all
 	install -m 644 liblumabri.so $(DESTDIR)$(PREFIX)/lib/lumabri/
 	@for b in expert_node expert_node_glm expert_node_inkling expert_node_kimi \
 	         expert_node_deepseek \
-	         olmoe_p2p colibri_p2p inkling_p2p kimi_k3_p2p deepseek_p2p; do \
+	         olmoe_p2p colibri_p2p inkling_p2p kimi_k3_p2p deepseek_p2p \
+	         segment_node segment_chat; do \
 	    [ -f $$b ] && install -m 755 $$b $(DESTDIR)$(PREFIX)/bin/ || true; done
 	@echo "installed under $(DESTDIR)$(PREFIX)"
 
@@ -464,6 +491,7 @@ clean:
 	rm -f tracker maintainer liblumabri.so test_shim lumabri \
 	      test_relay_exec test_swarm_fed test_key_rotation test_hedge \
 	      test_verify_failover test_segment_v2 test_segment_discovery \
+	      segment_node segment_chat \
 	      olmoe_p2p colibri_p2p inkling_p2p kimi_k3_p2p deepseek_p2p \
 	      expert_node expert_node_glm expert_node_inkling expert_node_kimi \
 	      expert_node_deepseek
@@ -475,4 +503,4 @@ clean:
         test-phase2-deepseek test-engines \
         patches patches-check test-relay-exec test-swarm-fed test-assign-race test-partial-phase2 test-elastic \
         test-cas test-key-rotation test-hedge test-segment-v2 \
-        test-segment-discovery
+        test-segment-discovery segment-direct test-segment-direct-real

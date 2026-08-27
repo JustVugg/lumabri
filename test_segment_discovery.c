@@ -123,6 +123,17 @@ static void test_codecs(void) {
     free(body);
     route.entries[1].advert.layer_begin = 3;
     assert(!lmb_seg_route_complete(&route, &q));
+
+    /* Interval union alone is insufficient: 0:3 plus 2:4 overlaps layer 2
+     * and cannot be executed as a chain. A shorter replica 0:2 makes 2:4
+     * reachable and must be selected instead of greedy-farthest 0:3. */
+    route.count = 2;
+    route.entries[0].advert = make_advert(0, 2, 0, 3);
+    route.entries[1].advert = make_advert(0, 3, 2, 4);
+    assert(!lmb_seg_route_complete(&route, &q));
+    route.entries[2].advert = make_advert(0, 4, 0, 2);
+    route.count = 3;
+    assert(lmb_seg_route_complete(&route, &q));
 }
 
 typedef struct {
@@ -218,7 +229,7 @@ static void test_tracker(const char *tracker) {
 
     /* Material range changes receive a new lease and generation. Add a
      * second range and one replica: the returned list preserves replicas and
-     * its union forms a complete layer-aligned chain. */
+     * contains a complete exact-boundary chain. */
     adverts[0].layer_end = 2;
     assert(!register_advert(tracker, &adverts[0], 20, &registrations[0]));
     assert(registrations[0].owner.route_generation > before.route_generation);

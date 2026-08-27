@@ -1,3 +1,6 @@
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE
+#endif
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -5,6 +8,7 @@
 #include "lumabri_segment_discovery.h"
 
 #include "lumabri_proto.h"
+#include "lumabri_secure.h"
 
 #include <pthread.h>
 #include <stdlib.h>
@@ -97,19 +101,35 @@ int lmb_seg_advert_compatible(const LmbSegAdvert *a, const LmbSegQuery *q) {
 int lmb_seg_route_complete(const LmbSegRouteSnapshot *s,
                            const LmbSegQuery *q) {
     if (!s || !lmb_seg_query_valid(q) || s->count > LMB_SEG_ROUTE_MAX) return 0;
-    uint32_t cursor = q->layer_begin;
-    while (cursor < q->layer_end) {
-        uint32_t farthest = cursor;
+    /* Coverage is not interval union: executors cannot run half of an
+     * advertised range, and overlapping ranges would execute a layer twice.
+     * Track the exact boundaries reachable from query.begin instead. */
+    uint32_t reachable[LMB_SEG_ROUTE_MAX + 1];
+    size_t reachable_count = 1;
+    reachable[0] = q->layer_begin;
+    for (uint32_t pass = 0; pass < s->count; pass++) {
+        int changed = 0;
         for (uint32_t i = 0; i < s->count; i++) {
             const LmbSegAdvert *a = &s->entries[i].advert;
-            if (lmb_seg_advert_compatible(a, q) && a->layer_begin <= cursor &&
-                a->layer_end > farthest)
-                farthest = a->layer_end;
+            if (!lmb_seg_advert_compatible(a, q) ||
+                a->layer_begin < q->layer_begin || a->layer_end > q->layer_end)
+                continue;
+            int begin_reachable = 0, end_known = 0;
+            for (size_t j = 0; j < reachable_count; j++) {
+                begin_reachable |= reachable[j] == a->layer_begin;
+                end_known |= reachable[j] == a->layer_end;
+            }
+            if (begin_reachable && !end_known &&
+                reachable_count < LMB_SEG_ROUTE_MAX + 1) {
+                reachable[reachable_count++] = a->layer_end;
+                changed = 1;
+            }
         }
-        if (farthest == cursor) return 0;
-        cursor = farthest > q->layer_end ? q->layer_end : farthest;
+        if (!changed) break;
     }
-    return 1;
+    for (size_t i = 0; i < reachable_count; i++)
+        if (reachable[i] == q->layer_end) return 1;
+    return 0;
 }
 
 static int disc_cur_bytes(DiscCur *c, void *out, size_t n) {
@@ -359,6 +379,10 @@ int lmb_seg_registration_reply_decode(const void *body, size_t body_len,
 int lmb_seg_routes_fetch(const char *tracker, const LmbSegQuery *query,
                          LmbSegRouteSnapshot *snapshot) {
     if (!tracker || !*tracker || !snapshot) return -1;
+    /* Transport hooks are translation-unit local. This module owns the
+     * tracker sockets, so encryption must be initialized here as well as in
+     * the calling executable. */
+    if (lmb_secure_init()) return -1;
     uint8_t *body = NULL; uint32_t body_len = 0;
     if (lmb_seg_query_encode(query, &body, &body_len)) return -1;
     LmbMsg reply = {0};
