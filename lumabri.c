@@ -983,6 +983,10 @@ static void *stderr_thread(void *arg) {
         tail_push(line);
         g_eng.last_out = nowd();
 
+        /* Route detail remains available under /debug, but must never race
+         * the readiness handshake and land after the first TUI prompt. */
+        if (!strncmp(line, "[segment-route]", 15)) continue;
+
         double mb, rate, gb, pct;
         if (sscanf(line, "[lumabri] net %lf MB", &mb) == 1) {
             g_eng.net_mb = mb;

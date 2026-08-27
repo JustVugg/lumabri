@@ -128,6 +128,7 @@ static int parse_ids(const char *text, int32_t **ids, size_t *count) {
 }
 
 static int select_chain(const LmbSegRouteSnapshot *snapshot, uint32_t layers,
+                        uint32_t required_context, uint32_t required_rows,
                         RemoteSegment *chain, size_t *chain_count) {
     uint64_t fallback_layers[LMB_SEG_ROUTE_MAX] = {0};
     uint64_t load_cost[LMB_SEG_ROUTE_MAX] = {0};
@@ -139,7 +140,9 @@ static int select_chain(const LmbSegRouteSnapshot *snapshot, uint32_t layers,
             const LmbSegRouteEntry *entry = &snapshot->entries[i];
             if (!(entry->transport & LMB_SEG_TRANSPORT_DIRECT) ||
                 entry->advert.layer_begin >= entry->advert.layer_end ||
-                entry->advert.layer_end > layers) continue;
+                entry->advert.layer_end > layers ||
+                entry->advert.max_context < required_context ||
+                entry->advert.max_rows < required_rows) continue;
             uint64_t own_fallback =
                 entry->advert.flags & LMB_SEG_ADVERT_FALLBACK
                     ? entry->advert.layer_end - entry->advert.layer_begin : 0;
@@ -647,9 +650,10 @@ cleanup:
     return rc;
 }
 
-static void route_print(FILE *stream, const LmbSegRouteSnapshot *snapshot,
+static void route_print(FILE *stream, const char *prefix,
+                        const LmbSegRouteSnapshot *snapshot,
                         const RemoteSegment *chain, size_t chain_count) {
-    fprintf(stream, "[lumabri] Segment route generation %llu: ",
+    fprintf(stream, "%s Segment route generation %llu: ", prefix,
             (unsigned long long)snapshot->route_generation);
     for (size_t index = 0; index < chain_count; index++)
         fprintf(stream, "%s%s[%u:%u]%s", index ? " -> " : "",
@@ -731,12 +735,13 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
         char error[256] = "no complete compatible Segment chain";
         GenerationResult result;
         int bad = have <= 0 || !snapshot.complete ||
-                  select_chain(&snapshot, cap->num_layers,
+                  select_chain(&snapshot, cap->num_layers, context, max_rows,
                                chain, &chain_count);
         if (!bad) {
             if (conversation.active && conversation.route_generation !=
                                        snapshot.route_generation)
-                route_print(stderr, &snapshot, chain, chain_count);
+                route_print(stderr, "[segment-route]", &snapshot,
+                            chain, chain_count);
             bad = segment_generate(edge, cap, chain, chain_count,
                                    model_root, tokenizer_root,
                                    context, max_rows, prompt, prompt_bytes,
@@ -848,7 +853,10 @@ int main(int argc, char **argv) {
     memcpy(query.model_root, model_root, sizeof model_root);
     memcpy(query.tokenizer_root, tokenizer_root, sizeof tokenizer_root);
     query.layer_end = cap.num_layers;
-    query.context_tokens = context;
+    /* Ask discovery for capability truth, not for the caller's preferred
+     * context. Selection below first tries the preference and only then
+     * negotiates down to the largest complete executor chain. */
+    query.context_tokens = 1;
     query.rows = max_rows;
     query.state_dtype = cap.state_dtype;
     query.state_width = cap.state_width;
@@ -883,11 +891,42 @@ int main(int argc, char **argv) {
     }
     RemoteSegment chain[LMB_SEG_ROUTE_MAX];
     size_t chain_count = 0;
-    if (select_chain(&snapshot, cap.num_layers, chain, &chain_count)) {
-        fprintf(stderr, "tracker coverage cannot form an executor-aligned chain\n");
-        lmb_seg_discovery_stop(discovery); return 1;
+    uint32_t requested_context = context;
+    if (select_chain(&snapshot, cap.num_layers, context, max_rows,
+                     chain, &chain_count)) {
+        uint32_t ceiling = context;
+        int selected = 0;
+        while (ceiling > 1 && !selected) {
+            uint32_t next = 0;
+            for (uint32_t i = 0; i < snapshot.count; i++) {
+                uint32_t available = snapshot.entries[i].advert.max_context;
+                if (available < ceiling && available > next) next = available;
+            }
+            if (!next) break;
+            ceiling = next;
+            if (!select_chain(&snapshot, cap.num_layers, ceiling, max_rows,
+                              chain, &chain_count)) {
+                context = ceiling;
+                selected = 1;
+            }
+        }
+        if (!selected) {
+            fprintf(stderr, "tracker coverage cannot form an "
+                            "executor-aligned chain\n");
+            lmb_seg_discovery_stop(discovery); return 1;
+        }
     }
-    route_print(serve_mode ? stderr : stdout, &snapshot, chain, chain_count);
+    for (size_t i = 0; i < chain_count; i++)
+        if (chain[i].route.advert.max_context < context)
+            context = chain[i].route.advert.max_context;
+    if (context < requested_context) {
+        fprintf(stderr, "[lumabri] Segment context negotiated to %u tokens "
+                        "(requested %u; executor capability)\n",
+                context, requested_context);
+    }
+    route_print(serve_mode ? stderr : stdout,
+                serve_mode ? "[segment-route]" : "[lumabri]",
+                &snapshot, chain, chain_count);
     if (serve_mode) {
         int result = segment_serve_loop(edge, &cap, discovery,
                                         model_root, tokenizer_root,

@@ -418,8 +418,9 @@ segment_chat: segment_chat.c $(SEGMENT_COMMON) $(COLIBRI_SEGMENT_LIB)
 .PHONY: segment-direct
 segment-direct: segment_node segment_chat
 
-test-segment-direct-real: tracker segment-direct
+test-segment-direct-real: tracker maintainer liblumabri.so lumabri segment-direct
 	bash ./segment_direct_test.sh
+	bash ./segment_native_test.sh
 
 test-relay-exec: tracker expert_node test_relay_exec fixture
 	./relay_exec_test.sh
