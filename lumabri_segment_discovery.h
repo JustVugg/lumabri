@@ -80,8 +80,8 @@ typedef struct {
 
 /* Fixed-size by design: copying this value produces an immutable routing
  * snapshot with no shared allocation and no tracker access on the inference
- * path. Entries include replicas; complete says their interval union covers
- * the complete requested range. */
+ * path. Entries include replicas; complete says at least one exact-boundary
+ * executor chain covers the complete requested range. */
 typedef struct {
     uint64_t route_generation;
     uint64_t fetched_at_ms;

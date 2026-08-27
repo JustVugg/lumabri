@@ -6,12 +6,13 @@ particular model's KV layout. Colibri owns the model math, weights, accelerator
 and opaque state; Lumabri owns transport, session identity, ordering, leases,
 fencing and route lifecycle.
 
-The wire/session contract and tracker discovery control plane are implemented.
-No production executor dispatches inference opcodes and no model is advertised
-by the normal CLI as Segment-capable yet: registration is available to the
-upcoming executor, while route discovery is kept out of the inference path.
-Public activation is gated on GLM, Inkling, Kimi K3, Qwen3.6, OLMoE and
-DeepSeek V4 all passing the same conformance suite.
+The wire/session contract, tracker discovery and opt-in direct executor are
+implemented. `segment_node` dispatches `SEG_OPEN`, `SEG_RUN`, `SEG_CLOSE` and
+`SEG_HEALTH` through Colibri's public ABI; `segment_chat` keeps Edge math local
+and freezes an immutable complete route before inference. The normal
+interactive CLI does not advertise Segment capability automatically yet.
+Snapshot/restore wire envelopes exist, but snapshot transport and replay are
+still deliberately unadvertised. See [SEGMENT_DIRECT.md](SEGMENT_DIRECT.md).
 
 ## Tracker discovery
 
@@ -29,7 +30,9 @@ plus:
 - a monotonic route generation for the complete placement;
 - data-plane transport capability (`DIRECT` today; `RELAY` remains reserved
   until Segment forwarding is implemented rather than inferred from SREG);
-- whether the returned interval union covers the requested chain.
+- whether the returned ranges contain an exact executable chain. Interval
+  union alone is insufficient because overlapping executors would run a layer
+  twice; replicas may overlap, but the selected boundaries must join exactly.
 
 Telemetry-only heartbeats do not churn leases or route generations. A range,
 compatibility, address, capability or draining change does; stale/recovered
@@ -116,10 +119,10 @@ outside the table lock, then calls `run_commit` or `run_abort`. Commit alone
 advances sequence and position.
 
 The table records the last 16 committed request identities and digests. A
-duplicate is never executed twice. The future network executor must retain the
-corresponding response while it is retryable, or return an explicit
-duplicate-without-payload failure and trigger replay; it must never call the
-model again for the same committed request.
+duplicate is never executed twice. The direct executor retains the most recent
+committed activation response for a safe immediate retry. An older recognized
+duplicate returns `NEEDS_RESTORE`; once replay lands, that status will restore
+from a checkpoint rather than ever calling the model twice.
 
 ## Fencing
 
@@ -158,4 +161,7 @@ execution, fence, restore, stale owners, snapshot checks, close and TTL reap.
 The real-tracker discovery gate additionally covers signed registration,
 compatibility filtering, replicas, complete chains, telemetry stability,
 draining, lease rotation and asynchronous snapshots. These are protocol and
-control-plane fixtures, not a claim that the network executors are complete.
+control-plane fixtures. `segment_direct_test.sh` adds the real data plane: two
+peers per family, real prefill/decode, persistent sessions and three oracle
+tokens for all six models, plus overlapping real sessions, in plaintext and
+encrypted modes.
