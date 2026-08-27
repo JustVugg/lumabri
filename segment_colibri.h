@@ -28,6 +28,15 @@ static int lmb_colibri_register_all(void) {
            coli_deepseek_v4_edge_adapter_register();
 }
 
+/* Colibri's ABI is allowed to return a failure without writing the caller's
+ * error buffer. A buffer that starts as uninitialised stack is then printed
+ * as one: an operator chasing a real MoE failure was shown
+ * "[segment-node] run: q<garbage>v" instead of a reason. Every error buffer
+ * in the Segment binaries starts empty and is read back through here. */
+static const char *engine_error(const char *error) {
+    return error && error[0] ? error : "the engine reported no reason";
+}
+
 static int lmb_hex_root(const char *hex, uint8_t out[32]) {
     if (!hex || strlen(hex) != 64) return -1;
     unsigned any = 0;

@@ -205,6 +205,9 @@ static volatile sig_atomic_t g_signal_children[MAX_CHILDREN];
  * name or restart what died is just a process that happens to be the parent */
 static char **g_cargv[MAX_CHILDREN];
 static const char *g_cwhat[MAX_CHILDREN];
+/* Children that must not share the operator's terminal keep their own log,
+ * and keep it across a supervised restart. */
+static char *g_clog[MAX_CHILDREN];
 
 static void child_publish(int idx, pid_t pid) {
     g_children[idx] = pid;
@@ -215,7 +218,13 @@ static void child_unpublish(int idx) {
     g_children[idx] = 0;
 }
 
-static void spawn_tracked(char *const argv[], const char *what) {
+/* logpath == NULL keeps the child on the operator's terminal, which is what
+ * the tracker and the maintainer want. Several Segment slices share one
+ * origin, and unbuffered stderr from N processes interleaves mid-line: an
+ * operator was shown "run: hybrid b" and "run: q<garbage>v" instead of two
+ * whole diagnoses. Those get a file each. */
+static void spawn_tracked_logged(char *const argv[], const char *what,
+                                 const char *logpath) {
     if (g_nchildren >= MAX_CHILDREN) {
         fprintf(stderr, "cannot start %s: child supervisor is full\n", what);
         return;
@@ -224,12 +233,19 @@ static void spawn_tracked(char *const argv[], const char *what) {
     while (argv[n]) n++;
     char **copy = (char **)calloc((size_t)n + 1, sizeof *copy);
     for (int i = 0; i < n; i++) copy[i] = strdup(argv[i]);
-    pid_t pid = spawn_argv(argv);          /* the slow part, outside the mask */
+    char *log = logpath ? strdup(logpath) : NULL;
+    /* the slow part, outside the mask */
+    pid_t pid = log ? spawn_argv_logged(argv, NULL, log) : spawn_argv(argv);
     int idx = g_nchildren;
     g_cargv[idx] = copy;
     g_cwhat[idx] = what;
+    g_clog[idx] = log;
     child_publish(idx, pid);
     g_nchildren++;
+}
+
+static void spawn_tracked(char *const argv[], const char *what) {
+    spawn_tracked_logged(argv, what, NULL);
 }
 
 static volatile sig_atomic_t g_stopping = 0;
@@ -635,17 +651,28 @@ static int cmd_serve(int argc, char **argv) {
             sargv[a++] = "--sessions";     sargv[a++] = session_text;
             sargv[a++] = "--advertise";    sargv[a++] = sadv;
             sargv[a] = NULL;
-            spawn_tracked(sargv, join ? "l'esecutore Segment peer"
-                                      : "l'esecutore Segment origin");
+            char slog[1200];
+            spawn_tracked_logged(sargv, join ? "l'esecutore Segment peer"
+                                             : "l'esecutore Segment origin",
+                                 donor_log_path(sname, slog, sizeof slog));
             with_segment++;
         }
         double ram_gb = (double)machine_available_ram() / 1e9;
+        const char *home = getenv("HOME") ? getenv("HOME") : ".";
         printf("  %sSegment prepara %d fette layer-aligned sulle porte %d-%d "
                "(%ld CPU, %.1f GB RAM disponibili, %d sessioni/fetta). "
                "%s%s\n",
                C_DIM, chunks, port + 3, port + 2 + chunks, cores, ram_gb,
                sessions, join ? "Sono peer ordinari; " :
                "Sono il fallback sostituibile; ", C_R);
+        /* Their diagnostics belong in one file per slice: N unbuffered
+         * writers on one terminal shred each other's lines exactly when
+         * something has gone wrong and the line matters most. */
+        printf("  %slog delle fette: %s/.lumabri/logs/segment-%s-%d-*.log · "
+               "apri le porte %d-%d sul firewall, altrimenti pubblichi una "
+               "catena che i chatter non riescono ad aprire%s\n",
+               C_DIM, home, join ? "peer" : "origin", port,
+               port + 3, port + 2 + chunks, C_R);
     } else if (!disk_donor && !no_exec && !advertise && segment_engine &&
                access(segment_bin, X_OK) == 0) {
         printf("  %sSegment non viene pubblicato: questa macchina non espone "
@@ -695,7 +722,9 @@ static int cmd_serve(int argc, char **argv) {
                    "scaricano gli esperti invece di farli eseguire%s\n", C_DIM, C_R);
             fflush(stdout);
             sleep(5);
-            pid_t np = spawn_argv(g_cargv[idx]);
+            pid_t np = g_clog[idx]
+                ? spawn_argv_logged(g_cargv[idx], NULL, g_clog[idx])
+                : spawn_argv(g_cargv[idx]);
             child_publish(idx, np);
             printf("  %s%s riavviato%s\n", C_DIM, g_cwhat[idx], C_R);
             fflush(stdout);

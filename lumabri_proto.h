@@ -803,11 +803,31 @@ static LMB_MAYBE_UNUSED void lmb_conn_gate_leave(LmbConnGate *g) {
     atomic_fetch_sub(&g->active, 1);
 }
 
+/* Why the most recent lmb_connect_ms in this translation unit failed. A
+ * filtered port and a dead process both surface as "cannot connect", and an
+ * operator needs opposite actions for them: one is a firewall rule, the other
+ * is a process that is not running. Only the value read immediately after a
+ * failed connect is meaningful. */
+static LMB_MAYBE_UNUSED int lmb_connect_errno;
+
+static LMB_MAYBE_UNUSED const char *lmb_connect_why(void) {
+    switch (lmb_connect_errno) {
+    case 0:            return "unreachable";
+    case ETIMEDOUT:    return "no reply before the timeout — the port is "
+                              "filtered or the host is unreachable (firewall?)";
+    case ECONNREFUSED: return "connection refused — nothing is listening there";
+    case EHOSTUNREACH: return "no route to the host";
+    case ENETUNREACH:  return "no route to that network";
+    default:           return strerror(lmb_connect_errno);
+    }
+}
+
 /* addr is "host:port". Bounded connect: an unreachable peer must cost
  * `timeout_ms`, not the kernel's minutes — the caller has a relay to fall
  * back to. Returns a blocking fd with TCP_NODELAY, or -1. */
 static int lmb_connect_ms(const char *addr, int timeout_ms) {
     char host[256];
+    lmb_connect_errno = 0;
     const char *colon = strrchr(addr, ':');
     if (!colon || (size_t)(colon - addr) >= sizeof host) return -1;
     memcpy(host, addr, (size_t)(colon - addr)); host[colon - addr] = 0;
@@ -826,11 +846,17 @@ static int lmb_connect_ms(const char *addr, int timeout_ms) {
             struct pollfd pf = { fd, POLLOUT, 0 };
             int err = -1;
             socklen_t el = sizeof err;
-            if (poll(&pf, 1, timeout_ms) > 0 &&
+            int ready = poll(&pf, 1, timeout_ms);
+            if (ready > 0 &&
                 getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &el) == 0 && err == 0)
                 r = 0;
+            else
+                lmb_connect_errno = ready == 0 ? ETIMEDOUT
+                                   : (err > 0 ? err : errno);
+        } else if (r < 0) {
+            lmb_connect_errno = errno;
         }
-        if (r == 0) { fcntl(fd, F_SETFL, fl); break; }
+        if (r == 0) { fcntl(fd, F_SETFL, fl); lmb_connect_errno = 0; break; }
         close(fd); fd = -1;
     }
     freeaddrinfo(res);
