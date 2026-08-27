@@ -246,10 +246,38 @@ static int reply_ok(const LmbMsg *msg, uint32_t expected_op,
     return 0;
 }
 
+static const char *segment_status_name(uint32_t status) {
+    switch (status) {
+    case LMB_SEG_STATUS_OK:            return "ok";
+    case LMB_SEG_STATUS_DUPLICATE:     return "duplicate";
+    case LMB_SEG_STATUS_BAD_REQUEST:   return "bad request — the executor's "
+        "model identity, layer range, context, rows or numeric class does not "
+        "match what the tracker advertised";
+    case LMB_SEG_STATUS_NOT_FOUND:     return "session not found";
+    case LMB_SEG_STATUS_STALE_OWNER:   return "stale owner — the route moved "
+        "under this session";
+    case LMB_SEG_STATUS_OUT_OF_ORDER:  return "out of order";
+    case LMB_SEG_STATUS_CONFLICT:      return "conflict";
+    case LMB_SEG_STATUS_EXPIRED:       return "expired";
+    case LMB_SEG_STATUS_BUSY:          return "busy";
+    case LMB_SEG_STATUS_UNSUPPORTED:   return "unsupported";
+    case LMB_SEG_STATUS_QUOTA:         return "quota — the executor has no "
+        "free session slot";
+    case LMB_SEG_STATUS_NEEDS_RESTORE: return "needs restore";
+    case LMB_SEG_STATUS_INTERNAL:      return "internal executor failure — "
+        "look at that peer's log";
+    default:                           return "unknown status";
+    }
+}
+
+/* One message for four causes — a filtered port, a dead executor, a rejected
+ * OPEN and a malformed reply — costs an operator the whole diagnosis, because
+ * the firewall fix and the compatibility fix look identical from here. Say
+ * which one happened. */
 static int remote_open(RemoteSegment *remote, const LmbSegId *session_id,
                        const uint8_t model_root[32],
                        const uint8_t tokenizer_root[32], uint32_t context,
-                       uint32_t max_rows) {
+                       uint32_t max_rows, char *why, size_t why_size) {
     const LmbSegAdvert *advert = &remote->route.advert;
     LmbSegOpen *open = &remote->open;
     memset(open, 0, sizeof *open);
@@ -273,25 +301,65 @@ static int remote_open(RemoteSegment *remote, const LmbSegId *session_id,
              advert->numeric_class);
     uint8_t *body = NULL;
     uint32_t body_len = 0;
-    if (lmb_seg_open_encode(open, &body, &body_len)) return -1;
+    if (lmb_seg_open_encode(open, &body, &body_len)) {
+        snprintf(why, why_size, "cannot encode the OPEN request");
+        return -1;
+    }
     remote->fd = lmb_connect(advert->addr);
-    if (remote->fd < 0 ||
-        lmb_send(remote->fd, LMB_SEG_OPEN, body, body_len, NULL, 0)) {
+    if (remote->fd < 0) {
+        snprintf(why, why_size, "cannot reach %s at %s: %s",
+                 advert->peer_name, advert->addr, lmb_connect_why());
         free(body);
-        if (remote->fd >= 0) { lmb_close(remote->fd); remote->fd = -1; }
+        return -1;
+    }
+    if (lmb_send(remote->fd, LMB_SEG_OPEN, body, body_len, NULL, 0)) {
+        snprintf(why, why_size, "%s at %s closed the connection before the "
+                 "OPEN request was sent", advert->peer_name, advert->addr);
+        free(body);
+        lmb_close(remote->fd); remote->fd = -1;
         return -1;
     }
     free(body);
     LmbMsg msg = {0};
     LmbSegReply reply;
-    int bad = lmb_recv(remote->fd, &msg) ||
-              reply_ok(&msg, LMB_SEG_OPEN_R, session_id, &open->request_id,
-                       open->owner.route_generation, &reply) || msg.pay_len;
+    if (lmb_recv(remote->fd, &msg)) {
+        snprintf(why, why_size, "%s at %s sent no reply to OPEN",
+                 advert->peer_name, advert->addr);
+        lmb_msg_free(&msg);
+        lmb_close(remote->fd); remote->fd = -1;
+        return -1;
+    }
+    if (msg.op == LMB_ERR) {
+        snprintf(why, why_size, "%s at %s refused OPEN: %.*s",
+                 advert->peer_name, advert->addr, (int)msg.body_len,
+                 msg.body ? (const char *)msg.body : "");
+    } else if (msg.op != LMB_SEG_OPEN_R ||
+               lmb_seg_reply_decode(msg.body, msg.body_len, &reply)) {
+        snprintf(why, why_size, "%s at %s answered OPEN with an "
+                 "unreadable message (op %u)", advert->peer_name,
+                 advert->addr, msg.op);
+    } else if (reply.status != LMB_SEG_STATUS_OK &&
+               reply.status != LMB_SEG_STATUS_DUPLICATE) {
+        snprintf(why, why_size, "%s at %s rejected OPEN [%u:%u]: %s",
+                 advert->peer_name, advert->addr, advert->layer_begin,
+                 advert->layer_end, segment_status_name(reply.status));
+    } else if (reply_ok(&msg, LMB_SEG_OPEN_R, session_id, &open->request_id,
+                        open->owner.route_generation, &reply) || msg.pay_len) {
+        /* Accepted, but not for this session/request/route: the placement
+         * moved while we were opening, or the peer is answering someone
+         * else's traffic. Either way this chain is not usable as it stands. */
+        snprintf(why, why_size, "%s at %s accepted OPEN for a different "
+                 "session or route generation", advert->peer_name,
+                 advert->addr);
+    } else {
+        lmb_msg_free(&msg);
+        remote->sequence = reply.next_sequence;
+        remote->position = reply.next_position;
+        return 0;
+    }
     lmb_msg_free(&msg);
-    if (bad) { lmb_close(remote->fd); remote->fd = -1; return -1; }
-    remote->sequence = reply.next_sequence;
-    remote->position = reply.next_position;
-    return 0;
+    lmb_close(remote->fd); remote->fd = -1;
+    return -1;
 }
 
 static int remote_run(RemoteSegment *remote, const int32_t *tokens,
@@ -434,6 +502,9 @@ static int segment_generate(ColiEdgeEngine *edge,
                             GenerationResult *result,
                             char *error, size_t error_size) {
     memset(result, 0, sizeof *result);
+    /* Own the reason from here on: a caller's placeholder left in place would
+     * report the previous stage's failure for this one. */
+    if (error && error_size) error[0] = 0;
     double started = monotonic_seconds();
     size_t opened = 0;
     int32_t *prompt_tokens = NULL;
@@ -501,12 +572,9 @@ static int segment_generate(ColiEdgeEngine *edge,
         for (; opened < active_count; opened++) {
             active_chain[opened].fd = -1;
             if (remote_open(&active_chain[opened], &session_id, model_root,
-                            tokenizer_root, context, max_rows)) {
-                snprintf(error, error_size, "cannot open segment %s at %s",
-                         active_chain[opened].route.advert.peer_name,
-                         active_chain[opened].route.advert.addr);
+                            tokenizer_root, context, max_rows,
+                            error, error_size))
                 goto cleanup;
-            }
         }
         if (conversation) conversation->active = 1;
     } else {
@@ -595,13 +663,23 @@ static int segment_generate(ColiEdgeEngine *edge,
         if (coli_edge_select(edge, &select, error, error_size)) goto cleanup;
         generated_count++;
     }
+    /* The token that stopped generation is a control marker, not text. The
+     * monolithic engines never put it in the reply and the TUI must not
+     * either — a user was shown a literal end-of-sentence marker at the end
+     * of every Segment answer. The raw IDs still carry it: the oracle gate
+     * compares token IDs, not rendered text. */
+    size_t text_tokens = generated_count;
+    while (text_tokens && generated[text_tokens - 1] == cap->eos_token_id)
+        text_tokens--;
     size_t text_bytes = 0;
-    if (coli_edge_detokenize(edge, generated, generated_count, NULL, 0,
+    if (text_tokens &&
+        coli_edge_detokenize(edge, generated, text_tokens, NULL, 0,
                              &text_bytes, error, error_size)) goto cleanup;
     char *text = malloc(text_bytes + 1);
-    if (!text || coli_edge_detokenize(edge, generated, generated_count,
-                                      text, text_bytes + 1, &text_bytes,
-                                      error, error_size)) {
+    if (!text || (text_tokens &&
+                  coli_edge_detokenize(edge, generated, text_tokens,
+                                       text, text_bytes + 1, &text_bytes,
+                                       error, error_size))) {
         free(text);
         goto cleanup;
     }
@@ -637,6 +715,9 @@ static int segment_generate(ColiEdgeEngine *edge,
     rc = 0;
 
 cleanup:
+    if (rc && error && error_size && !error[0])
+        snprintf(error, error_size, "Segment generation failed and the engine "
+                 "reported no reason");
     if (conversation) {
         if (rc) conversation_reset(conversation);
     } else {
@@ -825,15 +906,21 @@ int main(int argc, char **argv) {
         .model_dir = model_dir,
     };
     ColiEdgeEngine *edge = NULL;
-    char error[256];
+    /* Never hand an uninitialised buffer to the engine ABI: a failure that
+     * writes nothing would otherwise be reported as whatever was on the
+     * stack. */
+    char error[256] = "";
     if (coli_edge_engine_open(engine_id, &edge_options, &edge,
                               error, sizeof error)) {
-        fprintf(stderr, "cannot open Colibri Edge engine: %s\n", error);
+        fprintf(stderr, "cannot open Colibri Edge engine: %s\n",
+                engine_error(error));
         return 1;
     }
     ColiEdgeCapabilities cap = { .struct_size = sizeof cap };
+    error[0] = 0;
     if (coli_edge_engine_capabilities(edge, &cap, error, sizeof error)) {
-        fprintf(stderr, "cannot read Edge capabilities: %s\n", error);
+        fprintf(stderr, "cannot read Edge capabilities: %s\n",
+                engine_error(error));
         return 1;
     }
     uint32_t context = cap.max_context_tokens < 4096 ? cap.max_context_tokens : 4096;

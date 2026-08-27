@@ -282,10 +282,11 @@ static int handle_open(Node *node, int fd, const LmbMsg *msg) {
                 .context_tokens = open.context_tokens,
             };
             ColiSegmentSession *session = NULL;
-            char error[256];
+            char error[256] = "";
             if (coli_segment_session_create(node->engine, &options, &session,
                                             error, sizeof error)) {
-                fprintf(stderr, "[segment-node] session create: %s\n", error);
+                fprintf(stderr, "[segment-node] session create: %s\n",
+                        engine_error(error));
                 status = LMB_SEG_STATUS_INTERNAL;
             } else {
                 status = lmb_seg_table_open(node->table, &open, now_ms());
@@ -378,9 +379,17 @@ static int handle_run(Node *node, int fd, const LmbMsg *msg) {
                 .output = output,
                 .output_bytes = bytes,
             };
-            char error[256];
+            char error[256] = "";
             if (coli_segment_run(session, &request, error, sizeof error)) {
-                fprintf(stderr, "[segment-node] run: %s\n", error);
+                /* Name the slice: an origin runs several of these at once and
+                 * an unlabelled line cannot be attributed to a layer range. */
+                fprintf(stderr, "[segment-node %s %u:%u] run failed on %u row%s "
+                        "at position %llu: %s\n",
+                        node->advert.peer_name, node->advert.layer_begin,
+                        node->advert.layer_end, run.rows,
+                        run.rows == 1 ? "" : "s",
+                        (unsigned long long)run.position,
+                        engine_error(error));
                 status = LMB_SEG_STATUS_INTERNAL;
             }
             pthread_mutex_lock(&node->registration.lock);
@@ -651,16 +660,19 @@ int main(int argc, char **argv) {
         .layer_end = end,
         .context_tokens = context,
     };
-    char error[256];
+    char error[256] = "";
     if (coli_segment_engine_open(engine_id, &options, &node.engine,
                                  error, sizeof error)) {
-        fprintf(stderr, "cannot open Colibri Segment engine: %s\n", error);
+        fprintf(stderr, "cannot open Colibri Segment engine: %s\n",
+                engine_error(error));
         return 1;
     }
     node.cap.struct_size = sizeof node.cap;
+    error[0] = 0;
     if (coli_segment_engine_capabilities(node.engine, &node.cap,
                                          error, sizeof error)) {
-        fprintf(stderr, "cannot read Segment capabilities: %s\n", error);
+        fprintf(stderr, "cannot read Segment capabilities: %s\n",
+                engine_error(error));
         return 1;
     }
     if (end > node.cap.num_layers || context > node.cap.max_context_tokens ||
@@ -756,8 +768,10 @@ int main(int argc, char **argv) {
     }
     pthread_mutex_unlock(&node.sessions_lock);
     lmb_seg_table_destroy(node.table);
+    error[0] = 0;
     if (coli_segment_engine_close(node.engine, error, sizeof error))
-        fprintf(stderr, "[segment-node] engine close: %s\n", error);
+        fprintf(stderr, "[segment-node] engine close: %s\n",
+                engine_error(error));
     memset(registration->sk, 0, sizeof registration->sk);
     pthread_cond_destroy(&node.connections_drained);
     pthread_mutex_destroy(&node.connections_lock);
