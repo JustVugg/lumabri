@@ -2,7 +2,7 @@
 
 # Running a lumabri swarm on a Hetzner server
 
-Start to finish: a server that holds a model and executes its experts, and
+Start to finish: a server that holds a model and supplies complete inference, and
 clients anywhere that chat with it or donate to it. Roughly 30 minutes,
 most of it waiting for the model to upload.
 
@@ -13,8 +13,8 @@ Hetzner-specific except the firewall section.
 
 ## 0. What to rent
 
-The server's job is to hold the model on disk and execute experts. It does
-**not** need a GPU.
+The server's job is to hold the model on disk and bootstrap complete Segment
+coverage plus the classic expert fallback. It does **not** need a GPU.
 
 | you serve | disk | RAM | reasonable Hetzner box |
 |---|---|---|---|
@@ -44,16 +44,18 @@ adduser --disabled-password --gecos "" lumabri
 ```
 
 Open only what the swarm needs. Ports: **7300** tracker, **7301**
-maintainer (byte serving), **7302** expert executor.
+maintainer (byte serving), **7302** classic expert executor and, by default,
+**7303-7306** four layer-aligned Segment origin ranges. Allow through 7309 if
+you intentionally set up to seven ranges.
 
 ```sh
 ufw allow OpenSSH
-ufw allow 7300:7302/tcp
+ufw allow 7300:7309/tcp
 ufw --force enable
 ```
 
 In the Hetzner Cloud console, apply the same rule in the **Firewall**
-section (inbound TCP 22, 7300-7302) — the cloud firewall sits in front of
+section (inbound TCP 22, 7300-7309) — the cloud firewall sits in front of
 the machine and a ufw rule alone will not open it.
 
 ---
@@ -64,13 +66,15 @@ the machine and a ufw rule alone will not open it.
 su - lumabri
 git clone https://github.com/JustVugg/lumabri.git
 cd lumabri
-make
+git clone https://github.com/JustVugg/colibri.git ../colibri
+make ENGINE=$HOME/colibri/c
 exit                        # back to root for the install step
 cd /home/lumabri/lumabri && make install     # → /usr/local
 ```
 
-To also execute experts (phase 2) the server needs the colibri engine
-source and the patch for the engine your model uses — they are per engine,
+The command above builds automatic Segment execution for every adapter in the
+matching Colibri dev checkout. To retain the classic fine-grained expert
+fallback too, build the patch for the engine your model uses — they are per engine,
 because the engines do not share a shape:
 
 | model | patch | build | node |
@@ -80,6 +84,7 @@ because the engines do not share a shape:
 | Inkling | `inkling-p2p.diff` | `make expert_node_inkling` | `expert_node_inkling` |
 | Kimi K3 | `kimi_k3-p2p.diff` | `make expert_node_kimi` | `expert_node_kimi` |
 | DeepSeek V4 | `deepseek-p2p.diff` | `make expert_node_deepseek` | `expert_node_deepseek` |
+| Qwen3.6 | `qwen36-p2p.diff` | `make expert_node_qwen36` | `expert_node_qwen36` |
 
 DeepSeek is built from whichever layout your colibri checkout ships. Current
 colibri has the unit-amalgamated `deepseek_v4.c`; `make expert_node_deepseek`
@@ -174,13 +179,17 @@ service user:
 su - lumabri -c 'lumabri peer-key'
 ```
 
-Clients can preseed a strict pin file with that value for the three server
-addresses:
+Clients can preseed a strict pin file with that value for every server
+endpoint (the default four Segment ranges use ports 7303-7306):
 
 ```text
 YOUR_SERVER_IP:7300 64_HEX_ENDPOINT_KEY
 YOUR_SERVER_IP:7301 64_HEX_ENDPOINT_KEY
 YOUR_SERVER_IP:7302 64_HEX_ENDPOINT_KEY
+YOUR_SERVER_IP:7303 64_HEX_ENDPOINT_KEY
+YOUR_SERVER_IP:7304 64_HEX_ENDPOINT_KEY
+YOUR_SERVER_IP:7305 64_HEX_ENDPOINT_KEY
+YOUR_SERVER_IP:7306 64_HEX_ENDPOINT_KEY
 ```
 
 Without a strict file, encrypted clients persist first contact in
@@ -276,21 +285,16 @@ systemctl enable --now lumabri
 journalctl -u lumabri -f
 ```
 
-**`--advertise` is what gives the swarm its fastest direct path.** The
-peers register with the tracker under the address they are told to publish,
-and without it they publish `127.0.0.1` — which is correct for this machine
-and useless for everyone. The tracker cannot fix it either: it rewrites a
-localhost registration only when it arrives from off-machine, and these
-arrive over loopback. A remote chatter then gets `127.0.0.1`, cannot connect,
-and falls back to the outbound heartbeat tunnel for both bytes and expert
-execution. That is correct behind symmetric NAT, but it adds a second network
-leg and tracker load. `serve` still warns because direct P2P should be used
-whenever an inbound address is available.
+**A reachable address gives the swarm its fastest path.** `serve` detects a
+public IPv4 attached to the machine and publishes it automatically. If the
+host sits behind NAT, pass `--advertise` only after forwarding the advertised
+ports. Lumabri deliberately does not publish an unreachable Segment chain;
+bytes and classic experts continue through their outbound tracker relay.
 
 You should see, in order: the maintainer announcing how much it holds, the
-line `ORIGIN: signed the truth of N files with <pubkey>`, the executor
-`serving EXEC on :7302 ... registered with tracker`, and the tracker
-accepting both under `YOUR_SERVER_IP`, not `127.0.0.1`.
+line `ORIGIN: signed the truth of N files with <pubkey>`, the classic executor
+on 7302 and the Segment origin ranges on 7303-7306. The tracker should accept
+all direct endpoints under `YOUR_SERVER_IP`, not `127.0.0.1`.
 
 `--exec-cache 256` is the RAM/SSD trade: 256 expert slots resident, the
 rest streamed from disk on demand. Raise it if the box has spare RAM (the
@@ -313,8 +317,8 @@ ExecStart=/usr/local/bin/lumabri serve \
 ```
 
 Ports go up in tens: each `serve` uses P (its own tracker, unused when it
-joins), P+1 (maintainer) and P+2 (expert executor), so open those in the
-firewall for every model you add. Clients see them all with `/model`, and
+joins), P+1 (maintainer), P+2 (expert executor) and normally P+3 through P+6
+(Segment ranges), so open that block for every model you add. Clients see them all with `/model`, and
 switching works across architectures because the engine binary is chosen
 from each model's `model_type`.
 
@@ -322,12 +326,13 @@ from each model's `model_type`.
 
 ## 6. Clients
 
-Every client needs the binaries (`make && sudo make install`, or just
-`make` and run from the directory) and, for chatting, a colibri build for
-the engine.
+Every client needs Lumabri built against the matching Colibri Segment ABI
+(`make ENGINE=/path/to/colibri/c && sudo make install`). Keep the ordinary or
+P2P Colibri executables installed too if you want the classic fallback when a
+complete Segment route is unavailable.
 
 On first launch the chat asks what you are bringing — Enter for chat only,
-2 to also donate disk, 3 (with `--model-dir`) to also execute experts. The
+2 to also donate disk, 3 to donate compute automatically. The
 donors live as long as the chat does. `--role chat|disk|compute|all` skips
 the question for scripts and services.
 
@@ -337,16 +342,21 @@ the question for scripts and services.
 LUMABRI_ENCRYPT=1 \
 LUMABRI_PEER_PINS=/path/to/peer-pins \
 LUMABRI_PUBKEY=<contents of swarm.pub> \
-lumabri chat --tracker YOUR_SERVER_IP:7300 --engines-dir ~/colibri/c
+lumabri chat --tracker YOUR_SERVER_IP:7300
 ```
+
+`--engines-dir ~/colibri/c` is optional when Lumabri finds the installation;
+it is still a useful explicit fallback path during development.
 
 The public key is not optional in spirit: with it, the client verifies
 every block against the operator's signature and refuses anything
 unsigned. Without it the client still works, but it is trusting the server.
 
-The first answer is slow while the dense weights cross the network; after
-that `~/.lumabri` serves them locally and the swarm is only touched for
-experts. `/swarm` shows the network, `/model` switches model.
+With Segment, the first answer fetches only the local Edge working set
+(tokenizer, embedding, final transform/head) into `~/.lumabri`; layer weights
+and state remain on peers. If Segment is unavailable, the same TUI starts the
+classic expert/CAS path and its dense working set automatically. `/swarm`
+shows the network, `/model` switches model.
 
 Verified chunks are shared across models in `~/.lumabri/cas`; override it
 with `LUMABRI_CAS=/fast/local/path`. To enable the basic straggler hedge, set
@@ -387,9 +397,11 @@ The tracker assigns the 20 GB where the swarm is thinnest (rarest first),
 the donor pulls it — verifying every byte against the signed truth — and
 then serves it.
 
-**Donate compute** — execute experts, the part that actually makes it fast.
-The binary is per engine (§2 has the table); `expert_node` is OLMoE's,
-`expert_node_glm` is GLM's, and so on:
+**Donate compute** — choose `compute` in the normal TUI. If the current chat
+uses Segment, the machine is directly reachable and a range fits after the
+RAM reserve, the tracker assigns its rarest origin range automatically.
+Otherwise Lumabri starts the finer-grained expert donor, including its NAT
+relay. Manual expert commands remain useful diagnostics:
 
 ```sh
 expert_node_glm --model /path/to/model --tracker YOUR_SERVER_IP:7300 \
@@ -402,9 +414,11 @@ and a peer at different bits holds different weights. DeepSeek V4 has no such
 knob — and its peer is the cheap one to run, since the V4 expert store needs
 no dense weights at all.
 
-Chatters discover it automatically and route to it when it is nearer than
-the server. Kill it and they fail over — ultimately back to the server,
-which holds everything.
+Chatters discover it automatically. Ordinary Segment ranges replace matching
+fallback origin ranges on the next route generation, so the original server
+does progressively less work while retaining full coverage. Expert requests
+can fail over to replicas; a selected Segment dying mid-conversation still
+ends that run until checkpoint/replay lands.
 
 ---
 
@@ -454,13 +468,13 @@ Two things worth knowing:
 
 | symptom | cause |
 |---|---|
-| `no swarm at HOST:7300` | cloud firewall: open 7300-7302 in the Hetzner console too |
+| `no swarm at HOST:7300` | cloud firewall: open 7300-7309 in the Hetzner console too |
 | the server logs nothing for minutes on first start | it is hashing the model; the progress lines say how far along |
 | `il motore non è arrivato a essere pronto` | the engine's own last 25 lines are printed underneath — read those |
 | engine killed by signal 9 | out of memory: lower `--ctx` and `--cap`, or take a bigger box |
 | the chatter fills the disk | it mirrors what it reads; on the server use `--local DIR` instead |
 | client says `not signed by the operator key` | server not started with `--key`, or a different key than the client's `LUMABRI_PUBKEY` |
-| `engine not found` on the client | pass `--engines-dir /path/to/colibri/c` |
+| `engine not found` after Segment fallback | install the classic Colibri engine or pass `--engines-dir /path/to/colibri/c` |
 | tracker logs `REJECTED: ... unsigned` | a peer joined a signed swarm without signed truth — that is the defence working |
 | expert cache hit rate very low | raise `--exec-cache`; each slot is one expert of RAM |
 | first start takes minutes | hashing the model; cached afterwards in `.lumabri_hashes/` |

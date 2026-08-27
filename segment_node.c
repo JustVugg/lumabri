@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 
 #define NODE_SESSIONS_MAX 256u
 #define NODE_CONNECTIONS_MAX 256u
@@ -476,14 +477,53 @@ static void *connection_worker(void *opaque) {
 static void usage(const char *program) {
     fprintf(stderr,
         "usage: %s --engine ID --model-dir DIR --model NAME --range A:B "
-        "--port N --tracker HOST:PORT --advertise HOST:PORT --name PEER "
-        "--model-root HEX64 --tokenizer-root HEX64 [--context N] "
-        "[--max-rows N] [--sessions N]\n", program);
+        "(--range A:B | --auto-range) --port N --tracker HOST:PORT "
+        "--advertise HOST:PORT --name PEER "
+        "(--auto-identity | --model-root HEX64 --tokenizer-root HEX64) "
+        "[--fallback] [--context N] [--max-rows N] [--sessions N]\n",
+        program);
 }
 
 static const char *arg_value(int argc, char **argv, const char *name) {
     for (int i = 1; i + 1 < argc; i++) if (!strcmp(argv[i], name)) return argv[i + 1];
     return NULL;
+}
+
+static int has_arg(int argc, char **argv, const char *name) {
+    for (int i = 1; i < argc; i++) if (!strcmp(argv[i], name)) return 1;
+    return 0;
+}
+
+static int auto_range_get(const char *tracker, const char *model,
+                          const char *name, const char *engine_id,
+                          const uint8_t model_root[LMB_SEG_ROOT_BYTES],
+                          unsigned *begin, unsigned *end) {
+    LmbBuf body = {0};
+    if (lmb_buf_u32(&body, LMB_SEG_ASSIGN_MAGIC) ||
+        lmb_buf_u32(&body, LMB_SEG_ASSIGN_VERSION) ||
+        lmb_buf_str(&body, model) || lmb_buf_str(&body, name) ||
+        lmb_buf_str(&body, engine_id) ||
+        lmb_buf_bytes(&body, model_root, LMB_SEG_ROOT_BYTES)) {
+        free(body.p); return -1;
+    }
+    LmbMsg reply = {0};
+    int rc = lmb_request(tracker, LMB_SEG_ASSIGN, body.p,
+                         (uint32_t)body.len, &reply);
+    free(body.p);
+    if (rc || reply.op != LMB_SEG_ASSIGN_R || reply.pay_len) {
+        lmb_msg_free(&reply); return -1;
+    }
+    LmbCur cursor = { reply.body, reply.body_len, 0 };
+    uint32_t magic = 0, version = 0, first = 0, last = 0;
+    rc = lmb_cur_u32(&cursor, &magic) ||
+         lmb_cur_u32(&cursor, &version) ||
+         lmb_cur_u32(&cursor, &first) || lmb_cur_u32(&cursor, &last) ||
+         cursor.off != cursor.len || magic != LMB_SEG_ASSIGN_MAGIC ||
+         version != LMB_SEG_ASSIGN_VERSION || first >= last;
+    lmb_msg_free(&reply);
+    if (rc) return -1;
+    *begin = first; *end = last;
+    return 0;
 }
 
 int main(int argc, char **argv) {
@@ -497,11 +537,17 @@ int main(int argc, char **argv) {
     const char *name = arg_value(argc, argv, "--name");
     const char *model_root = arg_value(argc, argv, "--model-root");
     const char *tokenizer_root = arg_value(argc, argv, "--tokenizer-root");
-    if (!engine_id || !model_dir || !model || !range || !port_text || !tracker ||
-        !advertise || !name || !model_root || !tokenizer_root) {
+    int auto_identity = has_arg(argc, argv, "--auto-identity");
+    int auto_range = has_arg(argc, argv, "--auto-range");
+    int fallback = has_arg(argc, argv, "--fallback");
+    if (!engine_id || !model_dir || !model || ((range != NULL) == auto_range) ||
+        !port_text || !tracker ||
+        !advertise || !name ||
+        (auto_identity ? (model_root || tokenizer_root)
+                       : (!model_root || !tokenizer_root))) {
         usage(argv[0]); return 2;
     }
-    unsigned begin, end;
+    unsigned begin = 0, end = 0;
     char trailing;
     uint32_t port;
     if (strlen(engine_id) >= LMB_SEG_ENGINE_MAX ||
@@ -509,7 +555,8 @@ int main(int argc, char **argv) {
         strlen(tracker) >= sizeof ((TrackerRegistration *)0)->tracker ||
         strlen(advertise) >= LMB_SEG_ADDR_MAX ||
         strlen(name) >= LMB_SEG_PEER_NAME_MAX ||
-        sscanf(range, "%u:%u%c", &begin, &end, &trailing) != 2 || begin >= end ||
+        (range && (sscanf(range, "%u:%u%c", &begin, &end, &trailing) != 2 ||
+                   begin >= end)) ||
         lmb_parse_u32(port_text, 1, 65535, &port)) {
         usage(argv[0]); return 2;
     }
@@ -524,8 +571,72 @@ int main(int argc, char **argv) {
         usage(argv[0]); return 2;
     }
     if (lmb_secure_init()) return 1;
+    signal(SIGINT, stop_handler); signal(SIGTERM, stop_handler);
+    signal(SIGPIPE, SIG_IGN);
+    if (fallback) (void)setpriority(PRIO_PROCESS, 0, 10);
     if (lmb_colibri_register_all()) {
         fprintf(stderr, "cannot register all six Colibri adapters\n"); return 1;
+    }
+    uint8_t resolved_model_root[LMB_SEG_ROOT_BYTES];
+    uint8_t resolved_tokenizer_root[LMB_SEG_ROOT_BYTES];
+    if (auto_identity) {
+        LmbModelIdentity identity;
+        int announced = 0;
+        while (!g_stop && lmb_model_identity_get(tracker, model, &identity)) {
+            if (!announced) {
+                fprintf(stderr, "[segment-node] waiting for model identity "
+                        "%s from tracker %s\n", model, tracker);
+                announced = 1;
+            }
+            struct timespec pause = {1, 0};
+            while (!g_stop && nanosleep(&pause, &pause) && errno == EINTR) { }
+        }
+        if (g_stop) return 0;
+        const char *pubkey = getenv("LUMABRI_PUBKEY");
+        if (pubkey && pubkey[0]) {
+            LmbTrustKeys trust = {0};
+            size_t bytes = 0;
+            uint8_t *message = lmb_model_id_msg(identity.model, identity.root,
+                                                &bytes);
+            int bad = lmb_trust_load_spec(&trust, pubkey) || !identity.has_sig ||
+                      !message || lmb_trust_verify(&trust, identity.sig,
+                                                   message, bytes);
+            free(message);
+            if (bad) {
+                fprintf(stderr, "[segment-node] untrusted model identity\n");
+                return 1;
+            }
+        }
+        memcpy(resolved_model_root, identity.root,
+               sizeof resolved_model_root);
+        /* tokenizer.json is a member of the aggregate signed inventory. */
+        memcpy(resolved_tokenizer_root, identity.root,
+               sizeof resolved_tokenizer_root);
+    } else if (lmb_hex_root(model_root, resolved_model_root) ||
+               lmb_hex_root(tokenizer_root, resolved_tokenizer_root)) {
+        fprintf(stderr, "roots must be non-zero 64-character hex values\n");
+        return 2;
+    }
+
+    if (auto_range) {
+        int announced = 0;
+        while (!g_stop && auto_range_get(tracker, model, name, engine_id,
+                                         resolved_model_root, &begin, &end)) {
+            if (!announced) {
+                fprintf(stderr, "[segment-node] waiting for an automatic "
+                        "range assignment for %s\n", model);
+                announced = 1;
+            }
+            struct timespec pause = {1, 0};
+            while (!g_stop && nanosleep(&pause, &pause) && errno == EINTR) { }
+        }
+        if (g_stop) return 0;
+        fprintf(stderr, "[segment-node] tracker assigned layers %u:%u\n",
+                begin, end);
+        /* A desktop compute donation must lose scheduling contests to the
+         * user's own applications. Server origins use --fallback, which
+         * applies the same priority; explicit low-level nodes remain neutral. */
+        (void)setpriority(PRIO_PROCESS, 0, 10);
     }
     Node node;
     memset(&node, 0, sizeof node);
@@ -561,15 +672,14 @@ int main(int argc, char **argv) {
     snprintf(a->peer_name, sizeof a->peer_name, "%s", name);
     snprintf(a->addr, sizeof a->addr, "%s", advertise);
     snprintf(a->model, sizeof a->model, "%s", model);
-    if (lmb_hex_root(model_root, a->model_root) ||
-        lmb_hex_root(tokenizer_root, a->tokenizer_root)) {
-        fprintf(stderr, "roots must be non-zero 64-character hex values\n");
-        return 2;
-    }
+    memcpy(a->model_root, resolved_model_root, sizeof a->model_root);
+    memcpy(a->tokenizer_root, resolved_tokenizer_root,
+           sizeof a->tokenizer_root);
     a->layer_begin = begin; a->layer_end = end;
     a->max_context = context; a->max_rows = max_rows;
     a->state_dtype = node.cap.state_dtype; a->state_width = node.cap.state_width;
     a->max_sessions = max_sessions;
+    if (fallback) a->flags |= LMB_SEG_ADVERT_FALLBACK;
     a->capabilities = node.cap.flags & LMB_SEG_CAP_KNOWN_MASK;
     /* Snapshot/replay is intentionally not on the network data plane yet. */
     a->capabilities &= ~LMB_SEG_CAP_SNAPSHOT;
@@ -593,7 +703,6 @@ int main(int argc, char **argv) {
                 peer_key_path);
         return 1;
     }
-    signal(SIGINT, stop_handler); signal(SIGTERM, stop_handler); signal(SIGPIPE, SIG_IGN);
     g_listen_fd = lmb_listen((int)port);
     if (g_listen_fd < 0) { perror("segment listen"); return 1; }
     pthread_t registration_thread, reaper_thread;

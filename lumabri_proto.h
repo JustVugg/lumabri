@@ -86,6 +86,8 @@
  * opts in, so adding the wire vocabulary does not change local inference. */
 #define LMB_SEG_V2_MAGIC          0x32474553u /* "SEG2" */
 #define LMB_SEG_V2_VERSION        2u
+#define LMB_SEG_ASSIGN_MAGIC      0x31415347u /* "GSA1" */
+#define LMB_SEG_ASSIGN_VERSION    1u
 
 /* Optional executor telemetry is negotiated on the existing EREG LMB_OK.
  * Every extension has its own magic, version, and bounded payload length so
@@ -227,6 +229,10 @@ enum {
      * from the per-token or per-layer inference path. */
     LMB_SEG_REGISTER = 51, LMB_SEG_REGISTER_R = 52,
     LMB_SEG_ROUTES = 53, LMB_SEG_ROUTES_R = 54,
+    /* A compute donor names the model/engine and receives one of the
+     * origin's exact layer-aligned ranges, rarest first.  The subsequent
+     * signed SEG_REGISTER remains the authority; this is only placement. */
+    LMB_SEG_ASSIGN = 55, LMB_SEG_ASSIGN_R = 56,
 };
 
 /* REGISTER body: str name, str addr, str model, u64 held_bytes,

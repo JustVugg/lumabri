@@ -4,6 +4,15 @@ ENGINE  ?= ../colibri/c
 
 all: tracker maintainer liblumabri.so test_shim lumabri
 
+# A checkout with Colibri's additive ABI gets the transparent Segment path
+# from the ordinary `make`; older/release Colibri trees keep the exact legacy
+# build.  The user still runs only `lumabri serve` and `lumabri chat`.
+HAVE_COLIBRI_SEGMENT := $(and $(wildcard $(ENGINE)/segment_runtime.h),\
+                                  $(wildcard $(ENGINE)/edge_runtime.h))
+ifneq ($(HAVE_COLIBRI_SEGMENT),)
+all: segment-direct
+endif
+
 # Compile every standalone repository-owned binary under the normal warning
 # set and promote warnings to errors. Engine amalgamations are checked by
 # their own upstream builds, because treating their warnings as Lumabri
@@ -386,8 +395,9 @@ test_segment_discovery: test_segment_discovery.c lumabri_segment_discovery.c \
 		lumabri_segment_discovery.c lumabri_segment.c -o $@
 
 # ---- Segment direct data plane (requires Colibri's additive Edge ABI) ---
-# Kept out of `all`: a rolling Lumabri checkout still builds against the
-# Colibri release branch while the corresponding dev PR is under review.
+# `all` includes this only when both additive headers are present. A Lumabri
+# checkout pointed at an older/release Colibri therefore keeps building the
+# legacy product unchanged, while a matching dev checkout gets native UX.
 COLIBRI_SEGMENT_LIB = $(ENGINE)/build/segment/libcolibri_segment_edge.a
 SEGMENT_CFLAGS = $(CFLAGS) -I. -I$(ENGINE) -fopenmp
 SEGMENT_COMMON = segment_colibri.h lumabri_segment.c lumabri_segment.h \
@@ -395,7 +405,7 @@ SEGMENT_COMMON = segment_colibri.h lumabri_segment.c lumabri_segment.h \
 		lumabri_proto.h lumabri_sign.h lumabri_sha.h $(SECURE_DEPS)
 
 $(COLIBRI_SEGMENT_LIB):
-	$(MAKE) -C $(ENGINE) segment-edge-library
+	env -u CFLAGS -u MAKEFLAGS $(MAKE) -C $(ENGINE) MAKEOVERRIDES= segment-edge-library
 
 segment_node: segment_node.c $(SEGMENT_COMMON) $(COLIBRI_SEGMENT_LIB)
 	$(CC) $(SEGMENT_CFLAGS) -pthread segment_node.c lumabri_segment.c \
@@ -481,8 +491,8 @@ install: all
 	install -m 755 lumabri tracker maintainer $(DESTDIR)$(PREFIX)/bin/
 	install -m 644 liblumabri.so $(DESTDIR)$(PREFIX)/lib/lumabri/
 	@for b in expert_node expert_node_glm expert_node_inkling expert_node_kimi \
-	         expert_node_deepseek \
-	         olmoe_p2p colibri_p2p inkling_p2p kimi_k3_p2p deepseek_p2p \
+	         expert_node_deepseek expert_node_qwen36 \
+	         olmoe_p2p colibri_p2p inkling_p2p kimi_k3_p2p deepseek_p2p qwen36_p2p \
 	         segment_node segment_chat; do \
 	    [ -f $$b ] && install -m 755 $$b $(DESTDIR)$(PREFIX)/bin/ || true; done
 	@echo "installed under $(DESTDIR)$(PREFIX)"
@@ -492,9 +502,9 @@ clean:
 	      test_relay_exec test_swarm_fed test_key_rotation test_hedge \
 	      test_verify_failover test_segment_v2 test_segment_discovery \
 	      segment_node segment_chat \
-	      olmoe_p2p colibri_p2p inkling_p2p kimi_k3_p2p deepseek_p2p \
+	      olmoe_p2p colibri_p2p inkling_p2p kimi_k3_p2p deepseek_p2p qwen36_p2p \
 	      expert_node expert_node_glm expert_node_inkling expert_node_kimi \
-	      expert_node_deepseek
+	      expert_node_deepseek expert_node_qwen36
 	rm -rf build
 
 .PHONY: all check-warnings test clean install phase2 phase2-glm engines chatters phase2-all \

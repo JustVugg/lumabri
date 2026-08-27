@@ -1,6 +1,6 @@
 # Direct Segment execution
 
-Lumabri can opt in to Colibri's public Edge/Segment ABI and run one model as a
+Lumabri uses Colibri's public Edge/Segment ABI to run one model as a
 chain of layer-aligned peers:
 
 ```text
@@ -14,24 +14,53 @@ its independent Colibri tiny-model oracle. The gate also overlaps two OLMoE
 chats against the same executors to exercise real session isolation, and
 retransmits a committed run to prove the cached duplicate response is exact.
 
-This is an opt-in data-plane milestone, not yet the default interactive
-`lumabri chat` path. The ordinary Lumabri and Colibri commands are unchanged.
+This is now the preferred data plane of the ordinary `lumabri chat` TUI. If
+the runtime, identity or a complete compatible route is absent, startup falls
+back automatically to the existing expert/CAS Colibri path. Colibri's ordinary
+executables remain unchanged.
 
 ## Build
 
 Use a Colibri checkout containing the additive Edge runtime:
 
 ```sh
-make -C /path/to/colibri/c segment-edge-library
-make segment-direct ENGINE=/path/to/colibri/c
-make tracker
+make ENGINE=/path/to/colibri/c
 ```
 
-`segment-edge-library` produces a CPU-baseline static archive containing both
-public runtimes and all six adapters. It is not linked into ordinary Colibri
-executables.
+When the two additive ABI headers exist, ordinary `make` includes
+`segment_node` and `segment_chat`; older Colibri release trees keep the legacy
+build. `segment-edge-library` contains both public runtimes and all six
+adapters, and is not linked into ordinary Colibri executables.
 
-## Two-peer example
+## Normal use
+
+The model owner runs:
+
+```sh
+lumabri serve --model /models/olmoe --advertise PUBLIC_IP
+```
+
+Lumabri detects the family, layer/context shape, CPU/RAM and public IPv4, then
+starts four disjoint fallback executors. A public interface address removes the
+need for `--advertise`; private/NAT addresses are never guessed.
+
+Every client runs the unchanged TUI:
+
+```sh
+lumabri chat --tracker SERVER:7300
+```
+
+It obtains the signed aggregate model identity from the tracker, opens local
+Edge through the CAS mirror, discovers Segment and expert coverage in the
+background and selects the complete Segment chain when available. There are no
+user-facing model roots, tokenizer roots, ranges or `segment_chat` command.
+
+Choosing `compute` in the TUI asks the tracker for the least-replicated exact
+origin range. The node loads that slice from CAS at low priority if it fits
+after the machine reserve and has a reachable direct address; otherwise
+Lumabri donates auto-sized experts over the relay-capable classic path.
+
+## Low-level two-peer diagnostic
 
 Start a tracker on the publicly reachable control server:
 
@@ -61,8 +90,8 @@ the latter three model properties are read from Colibri automatically.
   --context 4096 --max-rows 64 --sessions 4
 ```
 
-The chatter needs the model's Edge files (tokenizer, embeddings, final
-transform and head), then discovers and freezes a complete compatible route:
+The low-level chatter needs the model's Edge files (tokenizer, embeddings,
+final transform and head), then discovers a complete compatible route:
 
 ```sh
 ./segment_chat \
@@ -74,10 +103,10 @@ transform and head), then discovers and freezes a complete compatible route:
 
 For an isolated experiment with no byte-plane maintainer registered under the
 same model name, the two roots may be any shared non-zero 32-byte hex values.
-For a real swarm, `--model-root` must be the content-plane model identity; the
-tracker rejects a different value. Automatic model/tokenizer root selection is
-still part of the CLI integration work and must replace manual input before
-the final UX is declared complete.
+For a real swarm, prefer `--auto-identity`; explicit roots remain only for
+isolated fixtures and protocol diagnosis. A donor may use `--auto-range` in
+place of `--range`: the tracker keeps a short loading promise so concurrent
+donors do not all choose the same rare slice.
 
 Open the Segment port on each executor's firewall. The current transport is
 direct TCP, so an executor behind an unforwarded NAT is not reachable yet.
@@ -118,8 +147,10 @@ data planes.
   divergent continuation.
 - The archive advertises CPU only. GPU Segment adapters must expose a real
   Colibri backend before Lumabri may publish CUDA/HIP/Metal/Vulkan capability.
-- Machine profiling, resource governance, automatic donation and local
-  fallback are not part of these standalone binaries yet.
+- The current governor is conservative rather than complete: CPU/RAM/context
+  choose chunk/session limits, desktop donors are niced and Segment donation
+  is refused when its estimated range would consume the system reserve. Live
+  pressure migration and state replay are still pending.
 - One chatter process hosts one active Edge model. This also respects Qwen's
   currently process-global tokenizer state.
 

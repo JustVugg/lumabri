@@ -91,6 +91,23 @@ static uint64_t g_segment_route_generation = 1;
 static int g_segment_generation_ready;
 static char g_bindings_path[512];
 
+/* A range assignment is a short promise, like expert EASSIGN's promise: it
+ * stops several donors booting concurrently from all selecting the same
+ * rare slice before their heavyweight engines finish loading and register.
+ * It is not a lease and grants no execution authority. */
+#define MAX_SEGMENT_PROMISES 128
+#define SEGMENT_PROMISE_TTL_S 300.0
+typedef struct {
+    int used;
+    char model[LMB_SEG_MODEL_MAX];
+    char name[LMB_SEG_PEER_NAME_MAX];
+    char engine[LMB_SEG_ENGINE_MAX];
+    uint8_t model_root[LMB_SEG_ROOT_BYTES];
+    uint32_t begin, end;
+    double ts;
+} SegmentPromise;
+static SegmentPromise g_segment_promises[MAX_SEGMENT_PROMISES];
+
 /* Reserve one 32-bit generation epoch per tracker process. The durable high
  * half means a tracker restart can never publish a generation below a route
  * still cached by a chatter or held by a live executor. The low half is ample
@@ -1106,6 +1123,10 @@ static Peer *handle_segment_register(int fd, LmbMsg *m, const uint8_t *nonce) {
         }
         snprintf(slot->source, sizeof slot->source, "%s", source);
         slot->segment_owner.route_generation = g_segment_route_generation;
+        for (int i = 0; i < MAX_SEGMENT_PROMISES; i++)
+            if (g_segment_promises[i].used &&
+                !strcmp(g_segment_promises[i].name, advert.peer_name))
+                g_segment_promises[i].used = 0;
     }
     pthread_mutex_unlock(&g_lk);
     if (!slot) { send_err(fd, "peer table full"); return NULL; }
@@ -1178,6 +1199,173 @@ static int handle_segment_routes(int fd, LmbMsg *m) {
     }
     int rc = lmb_send(fd, LMB_SEG_ROUTES_R, body, body_len, NULL, 0);
     free(body);
+    return rc;
+}
+
+/* A donor does not choose layer numbers. It asks for the least-replicated
+ * exact fallback slice, then opens that range through the same Colibri ABI
+ * and registers normally. Exact origin boundaries guarantee that replacing
+ * one donor never makes the full chain unrouteable. */
+static int handle_segment_assign(int fd, LmbMsg *m) {
+    LmbCur c = { m->body, m->body_len, 0 };
+    uint32_t magic = 0, version = 0;
+    char model[LMB_SEG_MODEL_MAX], name[LMB_SEG_PEER_NAME_MAX];
+    char engine[LMB_SEG_ENGINE_MAX];
+    uint8_t root[LMB_SEG_ROOT_BYTES];
+    if (m->pay_len || lmb_cur_u32(&c, &magic) ||
+        lmb_cur_u32(&c, &version) || magic != LMB_SEG_ASSIGN_MAGIC ||
+        version != LMB_SEG_ASSIGN_VERSION ||
+        lmb_cur_str(&c, model, sizeof model) ||
+        lmb_cur_str(&c, name, sizeof name) ||
+        lmb_cur_str(&c, engine, sizeof engine) ||
+        lmb_cur_bytes(&c, root, sizeof root) || c.off != c.len) {
+        send_err(fd, "bad segment assignment request"); return -1;
+    }
+    unsigned nonzero = 0;
+    for (size_t i = 0; i < sizeof root; i++) nonzero |= root[i];
+    if (!model[0] || !name[0] || !engine[0] || !nonzero) {
+        send_err(fd, "incomplete segment assignment identity"); return -1;
+    }
+
+    uint32_t chosen_begin = 0, chosen_end = 0;
+    uint32_t best_replicas = UINT32_MAX, best_load = UINT32_MAX;
+    int retained = 0;
+    double now = now_s();
+    pthread_mutex_lock(&g_lk);
+
+    /* A restart keeps its previous slice: no unnecessary weight churn. */
+    for (int i = 0; i < MAX_PEERS && !chosen_end; i++) {
+        Peer *p = &g_peers[i];
+        if (p->used && p->has_segment && p->segment_live &&
+            now - p->segment_ts <= g_stale_s &&
+            !strcmp(p->segment.peer_name, name) &&
+            !strcmp(p->segment.model, model) &&
+            !strcmp(p->segment.engine_id, engine) &&
+            !memcmp(p->segment.model_root, root, sizeof root)) {
+            chosen_begin = p->segment.layer_begin;
+            chosen_end = p->segment.layer_end;
+            retained = 1;
+        }
+    }
+    for (int i = 0; i < MAX_SEGMENT_PROMISES && !chosen_end; i++) {
+        SegmentPromise *promise = &g_segment_promises[i];
+        if (promise->used && now - promise->ts > SEGMENT_PROMISE_TTL_S)
+            promise->used = 0;
+        if (promise->used && !strcmp(promise->name, name) &&
+            !strcmp(promise->model, model) &&
+            !strcmp(promise->engine, engine) &&
+            !memcmp(promise->model_root, root, sizeof root)) {
+            chosen_begin = promise->begin;
+            chosen_end = promise->end;
+            retained = 1;
+        }
+    }
+
+    for (int i = 0; i < MAX_PEERS && !retained; i++) {
+        Peer *origin = &g_peers[i];
+        if (!origin->used || !origin->has_segment || !origin->segment_live ||
+            now - origin->segment_ts > g_stale_s ||
+            !(origin->segment.flags & LMB_SEG_ADVERT_FALLBACK) ||
+            (origin->segment.flags & LMB_SEG_ADVERT_DRAINING) ||
+            strcmp(origin->segment.model, model) ||
+            strcmp(origin->segment.engine_id, engine) ||
+            memcmp(origin->segment.model_root, root, sizeof root)) continue;
+        int duplicate = 0;
+        for (int j = 0; j < i; j++) {
+            Peer *previous = &g_peers[j];
+            if (previous->used && previous->has_segment &&
+                previous->segment_live &&
+                (previous->segment.flags & LMB_SEG_ADVERT_FALLBACK) &&
+                !strcmp(previous->segment.model, model) &&
+                !strcmp(previous->segment.engine_id, engine) &&
+                !memcmp(previous->segment.model_root, root, sizeof root) &&
+                previous->segment.layer_begin == origin->segment.layer_begin &&
+                previous->segment.layer_end == origin->segment.layer_end) {
+                duplicate = 1; break;
+            }
+        }
+        if (duplicate) continue;
+
+        uint32_t replicas = 0;
+        for (int j = 0; j < MAX_PEERS; j++) {
+            Peer *peer = &g_peers[j];
+            if (!peer->used || !peer->has_segment || !peer->segment_live ||
+                now - peer->segment_ts > g_stale_s ||
+                (peer->segment.flags & (LMB_SEG_ADVERT_FALLBACK |
+                                        LMB_SEG_ADVERT_DRAINING)) ||
+                strcmp(peer->segment.model, model) ||
+                strcmp(peer->segment.engine_id, engine) ||
+                memcmp(peer->segment.model_root, root, sizeof root)) continue;
+            if (peer->segment.layer_begin == origin->segment.layer_begin &&
+                peer->segment.layer_end == origin->segment.layer_end)
+                replicas++;
+        }
+        for (int j = 0; j < MAX_SEGMENT_PROMISES; j++) {
+            SegmentPromise *promise = &g_segment_promises[j];
+            if (!promise->used || now - promise->ts > SEGMENT_PROMISE_TTL_S ||
+                !strcmp(promise->name, name) ||
+                strcmp(promise->model, model) ||
+                strcmp(promise->engine, engine) ||
+                memcmp(promise->model_root, root, sizeof root)) continue;
+            if (promise->begin == origin->segment.layer_begin &&
+                promise->end == origin->segment.layer_end)
+                replicas++;
+        }
+        uint64_t raw_load = (uint64_t)origin->segment.active_sessions +
+                            origin->segment.queue_depth + origin->segment.inflight;
+        uint32_t load = raw_load > UINT32_MAX ? UINT32_MAX : (uint32_t)raw_load;
+        if (replicas < best_replicas ||
+            (replicas == best_replicas && load < best_load) ||
+            (replicas == best_replicas && load == best_load &&
+             origin->segment.layer_begin < chosen_begin)) {
+            best_replicas = replicas;
+            best_load = load;
+            chosen_begin = origin->segment.layer_begin;
+            chosen_end = origin->segment.layer_end;
+        }
+    }
+
+    if (chosen_end) {
+        SegmentPromise *slot = NULL;
+        for (int i = 0; i < MAX_SEGMENT_PROMISES; i++) {
+            if (g_segment_promises[i].used &&
+                !strcmp(g_segment_promises[i].name, name)) {
+                slot = &g_segment_promises[i]; break;
+            }
+            if (!slot && (!g_segment_promises[i].used ||
+                now - g_segment_promises[i].ts > SEGMENT_PROMISE_TTL_S))
+                slot = &g_segment_promises[i];
+        }
+        if (slot) {
+            memset(slot, 0, sizeof *slot);
+            slot->used = 1; slot->ts = now;
+            slot->begin = chosen_begin; slot->end = chosen_end;
+            snprintf(slot->model, sizeof slot->model, "%s", model);
+            snprintf(slot->name, sizeof slot->name, "%s", name);
+            snprintf(slot->engine, sizeof slot->engine, "%s", engine);
+            memcpy(slot->model_root, root, sizeof root);
+        }
+    }
+    pthread_mutex_unlock(&g_lk);
+    if (!chosen_end) {
+        send_err(fd, "no compatible origin Segment slice"); return 0;
+    }
+    LmbBuf reply = {0};
+    lmb_buf_u32(&reply, LMB_SEG_ASSIGN_MAGIC);
+    lmb_buf_u32(&reply, LMB_SEG_ASSIGN_VERSION);
+    lmb_buf_u32(&reply, chosen_begin);
+    lmb_buf_u32(&reply, chosen_end);
+    int rc = lmb_send(fd, LMB_SEG_ASSIGN_R, reply.p,
+                      (uint32_t)reply.len, NULL, 0);
+    free(reply.p);
+    if (retained)
+        printf("[tracker] Segment assign %s: %s layers %u:%u (retained)\n",
+               name, model, chosen_begin, chosen_end);
+    else
+        printf("[tracker] Segment assign %s: %s layers %u:%u "
+               "(%u replica%s)\n", name, model, chosen_begin, chosen_end,
+               best_replicas, best_replicas == 1 ? "" : "s");
+    fflush(stdout);
     return rc;
 }
 
@@ -2004,6 +2192,7 @@ static void *conn_thread(void *arg) {
             break;
         }
         case LMB_SEG_ROUTES: rc = handle_segment_routes(fd, &m); break;
+        case LMB_SEG_ASSIGN: rc = handle_segment_assign(fd, &m); break;
         case LMB_HASHES:    rc = handle_hashes(fd, &m); break;
         case LMB_MODEL_ID:  rc = handle_model_id(fd, &m); break;
         case LMB_PLACEMENT: rc = handle_placement(fd, &m); break;

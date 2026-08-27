@@ -53,7 +53,8 @@ int lmb_seg_advert_valid(const LmbSegAdvert *a) {
         !lmb_seg_dtype_size(a->state_dtype) ||
         !a->state_width || a->state_width > LMB_SEG_MAX_STATE_WIDTH ||
         !a->max_sessions || a->active_sessions > a->max_sessions ||
-        (a->flags & ~LMB_SEG_ADVERT_DRAINING) ||
+        (a->flags & ~(LMB_SEG_ADVERT_DRAINING |
+                      LMB_SEG_ADVERT_FALLBACK)) ||
         (a->capabilities & ~LMB_SEG_CAP_KNOWN_MASK) ||
         !(a->capabilities & LMB_SEG_CAP_RANGE_NATIVE) ||
         !(a->capabilities & LMB_SEG_CAP_MULTI_SESSION) ||

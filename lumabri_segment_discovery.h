@@ -22,6 +22,10 @@
 
 enum {
     LMB_SEG_ADVERT_DRAINING = 1u << 0,
+    /* An origin may keep complete coverage online so a new swarm works from
+     * minute zero.  Placement prefers ordinary donated ranges and consumes a
+     * fallback range only where no non-fallback exact chain is available. */
+    LMB_SEG_ADVERT_FALLBACK = 1u << 1,
 };
 
 enum {

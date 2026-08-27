@@ -5,8 +5,10 @@ Run huge mixture-of-experts models from a swarm of peers, with the
 
 One machine shares a model. Any other machine chats with it. Nothing is
 downloaded up front: the bytes an inference actually touches arrive from a peer
-on first use and stay in a local mirror, so the second question is served from
-local disk at full speed. The engine binary is never modified.
+on first use and stay in the shared CAS. With Segment available, the chatter
+keeps only tokenizer, embeddings, final transform/head and conversation state;
+whole layer ranges and their state remain resident on executor peers. Colibri's
+ordinary executables and local-inference behaviour are unchanged.
 
 Any machine may join, GPU or not. The engine was built for CPU and SSD first; a
 GPU only makes it faster, never different, and the output is byte-for-byte the
@@ -16,7 +18,7 @@ from everyone.
 ## Quick start
 
 ```sh
-make
+make ENGINE=/path/to/colibri/c
 ```
 
 On the machine that has a model (any colibri model directory):
@@ -25,15 +27,17 @@ On the machine that has a model (any colibri model directory):
 ./lumabri serve --model /path/to/model
 ```
 
-On a machine that wants to chat (it needs a colibri build for the engine):
+On a machine that wants to chat:
 
 ```sh
-./lumabri chat --tracker <server-ip>:7300 --engines-dir /path/to/colibri/c
+./lumabri chat --tracker <server-ip>:7300
 ```
 
-That is all. The first answer is slower while the working set crosses the
-network. Afterwards the mirror in `~/.lumabri` keeps serving even if the server
-goes offline.
+That is all. The first answer is slower while the Edge working set crosses the
+network. If no complete compatible Segment route exists, the same command
+automatically falls back to the existing expert/CAS engine, then to local
+execution as coverage permits; there is no separate `segment_chat` command for
+an end user.
 
 No model at hand? `make fixture` builds a tiny synthetic one so every step above
 is real, just small.
@@ -50,11 +54,12 @@ The second time it is Enter, Enter, and you are in. Flags still win when you giv
 them, so a script never inherits somebody's saved answers.
 
 When you join it also asks how you want to take part — just chat, or **lend your
-machine too**: hold part of the model on disk, or run some of its experts. Pick
-"run experts" and your computer automatically takes a share of the experts sized
-to its free RAM; as more people do the same, the swarm splits the experts
-between them and each token is computed on several machines at once, so it gets
-faster the more join. Nothing to configure — Enter picks "just chat".
+machine too**. `disk` receives complete rarest-first files up to the chosen GB
+budget (transferred and verified in MiB blocks). `compute` takes the rarest
+tracker-assigned Segment slice when a direct endpoint and enough spare RAM are
+available; otherwise it uses the finer-grained expert donor and its NAT relay.
+Both run at low priority and die with the TUI. Nothing to configure — Enter
+picks "just chat".
 
 Inside the chat, `/swarm` shows the network live and anonymous (peers are
 numbered, never named), and `/model` lists the models on the swarm and switches
@@ -84,6 +89,24 @@ once and can rebuild a different sparse mirror without a byte server.
 from, never which bytes. Writing a model file returns `EROFS`. A block no peer
 can serve is a loud `EIO`, never silent zeros. Byte identity is verified cold,
 warm, and with every peer dead.
+
+**Layers run as stateful segments.** `serve` reads `model_type`, layer count,
+context, CPU count, available RAM and reachable network address, then starts a
+small set of disjoint layer-aligned executors automatically. The origin ranges
+are marked fallback. Compute donors ask only for a model; the tracker promises
+the least-replicated exact range while they load it, and the asynchronous route
+selector prefers their ordinary ranges over the matching origin ranges on the
+next turn. Thus the original server begins with complete coverage and loses its
+pipeline progressively without ever making the route incomplete. Every turn
+uses one request per segment, with its model-specific KV/recurrent/conv state
+kept in an isolated remote session.
+
+The local Edge opens through `liblumabri.so`, so a user supplies neither a model
+directory nor roots: the signed aggregate model identity comes from the tracker
+and only blocks actually read by tokenizer/embedding/head enter the CAS. Four
+origin ranges is the current latency/replacement compromise. Segment endpoints
+are direct TCP today; a server auto-publishes a real public IPv4, refuses to
+guess private/NAT addresses, and retains READ/EXEC relay fallback there.
 
 **Experts run on peers.** For a mixture-of-experts model the chatter keeps only
 the dense weights, the router and the KV cache, and sends the 4 KB activation to
@@ -145,14 +168,15 @@ Build the peers with `make engines`, the patched chat engines with
 `make chatters`, or both with `make phase2-all ENGINE=/path/to/colibri/c`, for
 the engines your colibri checkout actually has.
 
-### Layer segments (opt-in preview)
+### Layer segments
 
-The direct Segment path keeps whole contiguous layer ranges and their sequence
-state resident on peers, reducing the network boundary from one request per
-layer/expert to one request per segment. It is now executable for all six
-engine families and has a two-peer oracle gate, but is intentionally not the
-default `lumabri chat` path yet. Build and external-server instructions, plus
-the explicit greedy/direct/no-replay limitations, are in
+The Segment path keeps whole contiguous layer ranges and their sequence state
+resident on peers, reducing the network boundary from one request per
+layer/expert to one request per segment. It is the preferred path of ordinary
+`lumabri chat` when the matching Colibri ABI and a complete compatible route
+exist. GLM, Inkling, Kimi K3, OLMoE, Qwen3.6 and DeepSeek V4 are all release
+gates; OLMoE is not a special-case definition of complete. Build details and
+the explicit greedy/direct/no-replay limitations are in
 **[SEGMENT_DIRECT.md](SEGMENT_DIRECT.md)**.
 
 ## Running a swarm
@@ -161,32 +185,36 @@ A full server walkthrough (systemd, firewall, operator key, clients) is in
 **[DEPLOY.md](DEPLOY.md)**. The short version:
 
 ```sh
-make && make phase2-all ENGINE=/path/to/colibri/c   # phase2-all optional
+make ENGINE=/path/to/colibri/c
+make phase2-all ENGINE=/path/to/colibri/c           # classic expert fallback
 sudo make install                                    # or PREFIX=$HOME/.local
 ```
 
-On the server, `lumabri serve --model /srv/model` opens TCP 7300 to 7302
-(tracker, maintainer, executor). Add `--advertise <public-ip>` for the fastest
-direct path, and `--key swarm.key` to sign the model. If a byte or compute donor
-cannot accept inbound traffic, its outbound heartbeat doubles as a tracker
-relay. Direct P2P remains preferred; symmetric NAT no longer excludes it from
-the swarm.
+On the server, `lumabri serve --model /srv/model` starts tracker, maintainer,
+classic expert executor and the automatic Segment origin. With the default four
+ranges it opens TCP 7300 through 7306; allow 7300:7309 if deployments may use up
+to seven. A public IPv4 attached to the machine is detected automatically;
+otherwise add `--advertise <reachable-ip>` or Lumabri deliberately withholds
+Segment and uses the proven READ/EXEC relay. Add `--key swarm.key` to sign the
+model.
 
 On every other machine, pick a role:
 
 | you want to | run |
 |---|---|
-| chat | `lumabri chat --tracker SERVER:7300 --engines-dir /path/to/colibri/c` |
+| chat | `lumabri chat --tracker SERVER:7300` |
 | chat on the machine that holds the model | `lumabri chat --local DIR` |
 | donate disk (hold bytes) | `lumabri serve --model ./slice --join SERVER:7300 --model-name NAME --donate GB` |
-| donate compute (run experts) | pick it in the join menu — or `expert_node<engine> --model DIR --tracker SERVER:7300 --hold auto` |
+| donate compute | pick `compute` in the join menu; Segment range or experts are selected automatically |
 
-A disk donor is told which files to hold, rarest first, by the tracker. A
-compute donor says how many experts it can carry — `--hold auto` sizes that to
-its free RAM — and the tracker gives it the set nobody else covers. Donating
-compute does not require owning the model: picked from the menu with no local
-container, the node runs behind the swarm mirror and pulls exactly its
-assigned slice, hash-verified, so the whole model never lands on the donor.
+A disk donor is told which complete files to hold, rarest first, by the tracker;
+the GB budget is a hard placement input, not permission to fill the disk. A
+compute donor needs no model: when Segment is active, directly reachable and a
+quarter-range fits after the system reserve, it receives the least-replicated
+origin range. Otherwise `--hold auto` sizes an expert slice to free RAM and the
+tracker gives it what nobody else covers through direct EXEC or relay. Both
+load through the verified swarm mirror, so the whole model never lands on the
+donor.
 Donors register under `donor-<hostname>-…` (pick one with `--donor-name`);
 a name already owned by another peer key is retried with a numbered suffix
 instead of being silently rejected forever. So several
@@ -196,8 +224,10 @@ tokens. (`--hold N` sets the count by hand; `--stride 2:0` / `--stride 2:1` or
 `--layers …` split it explicitly if you want to size each machine yourself.)
 When two donors happen to hold the *same* expert, add `LUMABRI_SPREAD=1` on the
 chatter to balance the load between them too. Neither donor needs to know the
-others exist. While a reply is generating you can kill a donor: you get one
-failover line and the tokens continue, identical.
+others exist. Expert requests can fail over to another replica. A selected
+stateful Segment dying mid-conversation is different: checkpoint/replay is not
+on the wire yet, so the run stops with that explicit error instead of silently
+restarting from divergent state.
 
 For a manual signing-key rotation, distribute a keyring containing one public
 key per line. `--pubkey keyring` and `LUMABRI_PUBKEY=keyring` accept every key
@@ -258,7 +288,7 @@ name. A restart rebuilds placements from heartbeats but does not reopen names
 for takeover. Per-key and per-source live-name quotas limit table exhaustion;
 they are admission controls, not a claim to solve distributed Sybil attacks.
 
-The server also runs an expert node on the whole model, so a fresh swarm works
+For the classic expert path, the server also runs an expert node on the whole model, so a fresh swarm works
 on day zero with the server executing everything, and donors that join later win
 the calls they are nearest for. The nearest replica sets the speed: an expert
 held at 2 ms and at 30 ms runs at 10.5 tok/s, not 1.4, because only your closest
@@ -280,9 +310,12 @@ Per-engine expert identity runs with fixtures
 have their own scripts (`assign_test.sh`, `concurrency_test.sh`,
 `sign_test.sh`). The newer mechanisms have focused targets:
 `make test-cas test-key-rotation test-hedge test-relay-exec` and
-`make test-segment-v2 test-segment-discovery`. Segment discovery runs six tiny state
-families through a real tracker and checks leases, route generations, replicas,
-draining, compatibility and the asynchronous snapshot. Relay EXEC needs
+`make test-segment-v2 test-segment-discovery test-segment-direct-real`.
+Segment discovery checks leases, route generations, replicas, draining,
+compatibility and the asynchronous snapshot. The direct gate runs all six tiny
+families through real TCP executors, matches independent Colibri token oracles,
+drives the persistent TUI codec, overlaps sessions, and proves rarest-first
+automatic range replacement. Relay EXEC needs
 an OLMoE engine source under `ENGINE`; its script reports `SKIP` explicitly
 when that external checkout is absent. Every claim in this README has a script
 behind it.

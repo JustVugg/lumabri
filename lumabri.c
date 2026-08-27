@@ -24,8 +24,10 @@
  * where mirroring would mean a second copy of the same bytes.
  */
 #define _GNU_SOURCE
+#include <arpa/inet.h>
 #include <dirent.h>
 #include <fcntl.h>
+#include <ifaddrs.h>
 #include <math.h>
 #include <pthread.h>
 #include <signal.h>
@@ -192,16 +194,17 @@ static pid_t spawn_argv_logged(char *const argv[], char *const envv[],
     return pid;
 }
 
-static pid_t g_children[8];
+#define MAX_CHILDREN 16
+static pid_t g_children[MAX_CHILDREN];
 static int g_nchildren = 0;
 /* The async handler never reads the mutable table/count.  Each fixed slot is
  * one sig_atomic_t publication, so delivery on any worker thread cannot see a
  * compacted/torn child table. */
-static volatile sig_atomic_t g_signal_children[8];
+static volatile sig_atomic_t g_signal_children[MAX_CHILDREN];
 /* what each child was, and how to start it again: a supervisor that cannot
  * name or restart what died is just a process that happens to be the parent */
-static char **g_cargv[8];
-static const char *g_cwhat[8];
+static char **g_cargv[MAX_CHILDREN];
+static const char *g_cwhat[MAX_CHILDREN];
 
 static void child_publish(int idx, pid_t pid) {
     g_children[idx] = pid;
@@ -213,6 +216,10 @@ static void child_unpublish(int idx) {
 }
 
 static void spawn_tracked(char *const argv[], const char *what) {
+    if (g_nchildren >= MAX_CHILDREN) {
+        fprintf(stderr, "cannot start %s: child supervisor is full\n", what);
+        return;
+    }
     int n = 0;
     while (argv[n]) n++;
     char **copy = (char **)calloc((size_t)n + 1, sizeof *copy);
@@ -230,7 +237,7 @@ static volatile sig_atomic_t g_stopping = 0;
 static void on_sigint(int sig) {
     (void)sig;
     g_stopping = 1;
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < MAX_CHILDREN; i++) {
         sig_atomic_t p = g_signal_children[i];
         if (p > 0) kill((pid_t)p, SIGTERM);
     }
@@ -246,6 +253,19 @@ static const char *expert_node_for(const char *model_type) {
     if (strstr(model_type, "kimi"))     return "expert_node_kimi";
     if (strstr(model_type, "deepseek")) return "expert_node_deepseek";
     if (strstr(model_type, "qwen"))     return "expert_node_qwen36";
+    return NULL;
+}
+
+/* Public Colibri Segment adapter ID for the same model family.  Unlike the
+ * expert executors, these names are the stable ABI IDs rather than binary
+ * basenames. */
+static const char *segment_engine_for(const char *model_type) {
+    if (strstr(model_type, "olmoe"))    return "olmoe";
+    if (strstr(model_type, "glm"))      return "glm";
+    if (strstr(model_type, "inkling")) return "inkling";
+    if (strstr(model_type, "kimi"))     return "kimi";
+    if (strstr(model_type, "deepseek")) return "deepseek_v4";
+    if (strstr(model_type, "qwen"))     return "qwen36";
     return NULL;
 }
 
@@ -270,12 +290,101 @@ static void local_model_type(const char *model_dir, char *out, size_t cap) {
     }
 }
 
+/* All current Colibri families publish num_hidden_layers in config.json.
+ * Keep this deliberately narrow: guessing a different key could advertise a
+ * plausible but incorrect range and execute the wrong graph. */
+static int local_model_u32(const char *model_dir, const char *name,
+                           uint32_t *result) {
+    char path[1200];
+    if (!model_dir || !name || !result ||
+        checked_printf(path, sizeof path, "%s/config.json", model_dir))
+        return -1;
+    FILE *file = fopen(path, "r");
+    if (!file) return -1;
+    if (fseek(file, 0, SEEK_END)) { fclose(file); return -1; }
+    long length = ftell(file);
+    if (length <= 0 || length > 16 * 1024 * 1024 ||
+        fseek(file, 0, SEEK_SET)) { fclose(file); return -1; }
+    char *json = malloc((size_t)length + 1);
+    if (!json) { fclose(file); return -1; }
+    int bad = fread(json, 1, (size_t)length, file) != (size_t)length;
+    fclose(file);
+    json[length] = 0;
+    char quoted[128];
+    if (checked_printf(quoted, sizeof quoted, "\"%s\"", name)) {
+        free(json); return -1;
+    }
+    char *key = bad ? NULL : strstr(json, quoted);
+    char *colon = key ? strchr(key, ':') : NULL;
+    char *end = NULL;
+    errno = 0;
+    unsigned long value = colon ? strtoul(colon + 1, &end, 10) : 0;
+    bad = !colon || errno || end == colon + 1 || !value || value > UINT32_MAX;
+    free(json);
+    if (bad) return -1;
+    *result = (uint32_t)value;
+    return 0;
+}
+
+static int local_model_layers(const char *model_dir, uint32_t *layers) {
+    return local_model_u32(model_dir, "num_hidden_layers", layers);
+}
+
+static uint64_t machine_available_ram(void) {
+    FILE *file = fopen("/proc/meminfo", "r");
+    if (!file) return 0;
+    char line[256];
+    unsigned long long kib = 0;
+    while (fgets(line, sizeof line, file))
+        if (sscanf(line, "MemAvailable: %llu kB", &kib) == 1) break;
+    fclose(file);
+    return (uint64_t)kib * 1024u;
+}
+
+/* A server with a real public IPv4 should need no networking flag. Private,
+ * loopback, link-local and CGNAT addresses are deliberately not guessed:
+ * publishing one to an Internet swarm would create a "complete" Segment
+ * route that remote chatters cannot reach. NAT installations keep the
+ * proven READ/EXEC relay path unless the operator supplies --advertise. */
+static int machine_public_ipv4(char *out, size_t cap) {
+    struct ifaddrs *all = NULL;
+    if (getifaddrs(&all)) return -1;
+    int found = -1;
+    for (struct ifaddrs *it = all; it; it = it->ifa_next) {
+        if (!it->ifa_addr || it->ifa_addr->sa_family != AF_INET) continue;
+        uint32_t ip = ntohl(((struct sockaddr_in *)it->ifa_addr)->sin_addr.s_addr);
+        if ((ip >> 24) == 0 || (ip >> 24) == 10 || (ip >> 24) == 127 ||
+            (ip >> 16) == 0xa9fe || (ip >> 20) == 0xac1 ||
+            (ip >> 16) == 0xc0a8 || (ip >> 22) == 0x0191) continue;
+        char text[INET_ADDRSTRLEN];
+        if (!inet_ntop(AF_INET, &((struct sockaddr_in *)it->ifa_addr)->sin_addr,
+                       text, sizeof text) || strlen(text) >= cap) continue;
+        snprintf(out, cap, "%s", text);
+        found = 0;
+        break;
+    }
+    freeifaddrs(all);
+    return found;
+}
+
+static const char *model_name_for(const char *model_dir, const char *explicit,
+                                  char *storage, size_t cap) {
+    if (explicit && explicit[0]) return explicit;
+    size_t length = strlen(model_dir);
+    while (length > 1 && model_dir[length - 1] == '/') length--;
+    const char *base = model_dir + length;
+    while (base > model_dir && base[-1] != '/') base--;
+    if (!length || (size_t)(model_dir + length - base) >= cap) return NULL;
+    snprintf(storage, cap, "%.*s", (int)(model_dir + length - base), base);
+    return storage;
+}
+
 static int parse_serve_port(const char *s, int *port) {
     char *end = NULL;
     errno = 0;
     long v = strtol(s, &end, 10);
     if (s[0] < '0' || s[0] > '9' || errno == ERANGE || !end || *end ||
-        v < 1 || v > 65533) return -1;
+        v < 1 || v > 65525) return -1;
     *port = (int)v;
     return 0;
 }
@@ -288,7 +397,7 @@ static int cmd_serve(int argc, char **argv) {
         if (!strcmp(argv[i], "--model") && i + 1 < argc) model = argv[++i];
         else if (!strcmp(argv[i], "--port") && i + 1 < argc) {
             if (parse_serve_port(argv[++i], &port)) {
-                fprintf(stderr, "--port must be an integer from 1 to 65533\n");
+                fprintf(stderr, "--port must be an integer from 1 to 65525\n");
                 return 2;
             }
         }
@@ -343,6 +452,14 @@ static int cmd_serve(int argc, char **argv) {
                     C_RED, model, C_R, model);
             return 2;
         }
+    }
+
+    char auto_advertise[INET_ADDRSTRLEN] = "";
+    if (!advertise && machine_public_ipv4(auto_advertise,
+                                           sizeof auto_advertise) == 0) {
+        advertise = auto_advertise;
+        printf("  %srete: pubblico automaticamente %s%s\n",
+               C_DIM, advertise, C_R);
     }
 
     char dir[1024], tracker_bin[1200], maint_bin[1200], portstr[16], mport[16], taddr[64];
@@ -453,11 +570,95 @@ static int cmd_serve(int argc, char **argv) {
                "quando ha finito. Un chatter che si collega prima non lo "
                "trovera' e scarichera' gli esperti.%s\n",
                C_DIM, port + 2, C_R);
+
+    /* Segment bootstrap: the origin publishes complete stateful coverage in
+     * addition to the expert executor.  This binary exists only in builds
+     * made against Colibri's additive Edge/Segment archive; release builds
+     * without it preserve the exact old serve topology. */
+    char segment_bin[1200], segment_model_storage[64];
+    snprintf(segment_bin, sizeof segment_bin, "%s/segment_node", dir);
+    const char *segment_engine = segment_engine_for(mtype);
+    const char *segment_model = model_name_for(
+        model, mname, segment_model_storage, sizeof segment_model_storage);
+    uint32_t segment_layers = 0;
+    int with_segment = 0;
+    if (!disk_donor && !no_exec && advertise && segment_engine && segment_model &&
+        access(segment_bin, X_OK) == 0 &&
+        local_model_layers(model, &segment_layers) == 0) {
+        long cores = sysconf(_SC_NPROCESSORS_ONLN);
+        if (cores < 1) cores = 1;
+        int chunks = lmb_env_int("LUMABRI_SEGMENT_CHUNKS", 4, 1, 7);
+        if ((uint32_t)chunks > segment_layers) chunks = (int)segment_layers;
+        int sessions = (int)(cores / chunks);
+        if (sessions < 1) sessions = 1;
+        if (sessions > 8) sessions = 8;
+        uint32_t segment_context = 4096, model_context = 0;
+        if (!local_model_u32(model, "max_position_embeddings", &model_context) &&
+            model_context < segment_context)
+            segment_context = model_context;
+        char context[16], session_text[16];
+        snprintf(context, sizeof context, "%u", segment_context);
+        snprintf(session_text, sizeof session_text, "%d", sessions);
+
+        /* A few disjoint origin slices retain the single-copy weight total,
+         * but give placement exact boundaries it can replace independently:
+         * as ordinary server-class peers join, each non-fallback slice wins
+         * over its matching origin slice and this machine loses that portion
+         * of the pipeline. Four is the latency/granularity default; the
+         * operator may tune 1..7 without exposing layer ranges to users. */
+        for (int chunk = 0; chunk < chunks; chunk++) {
+            uint32_t begin = (uint32_t)((uint64_t)segment_layers * chunk /
+                                         (uint32_t)chunks);
+            uint32_t end = (uint32_t)((uint64_t)segment_layers * (chunk + 1) /
+                                       (uint32_t)chunks);
+            char sport[16], range[40], sname[64], sadv[80];
+            snprintf(sport, sizeof sport, "%d", port + 3 + chunk);
+            snprintf(range, sizeof range, "%u:%u", begin, end);
+            snprintf(sname, sizeof sname, "segment-%s-%d-%d",
+                     join ? "peer" : "origin", port, chunk);
+            snprintf(sadv, sizeof sadv, "%s:%d",
+                     advertise ? advertise : "127.0.0.1", port + 3 + chunk);
+            char *sargv[32];
+            a = 0;
+            sargv[a++] = segment_bin;
+            sargv[a++] = "--engine";       sargv[a++] = (char *)segment_engine;
+            sargv[a++] = "--model-dir";    sargv[a++] = (char *)model;
+            sargv[a++] = "--model";        sargv[a++] = (char *)segment_model;
+            sargv[a++] = "--range";        sargv[a++] = range;
+            sargv[a++] = "--port";         sargv[a++] = sport;
+            sargv[a++] = "--tracker";      sargv[a++] = taddr;
+            sargv[a++] = "--name";         sargv[a++] = sname;
+            sargv[a++] = "--auto-identity";
+            if (!join) sargv[a++] = "--fallback";
+            sargv[a++] = "--context";      sargv[a++] = context;
+            sargv[a++] = "--max-rows";     sargv[a++] = "16";
+            sargv[a++] = "--sessions";     sargv[a++] = session_text;
+            sargv[a++] = "--advertise";    sargv[a++] = sadv;
+            sargv[a] = NULL;
+            spawn_tracked(sargv, join ? "l'esecutore Segment peer"
+                                      : "l'esecutore Segment origin");
+            with_segment++;
+        }
+        double ram_gb = (double)machine_available_ram() / 1e9;
+        printf("  %sSegment prepara %d fette layer-aligned sulle porte %d-%d "
+               "(%ld CPU, %.1f GB RAM disponibili, %d sessioni/fetta). "
+               "%s%s\n",
+               C_DIM, chunks, port + 3, port + 2 + chunks, cores, ram_gb,
+               sessions, join ? "Sono peer ordinari; " :
+               "Sono il fallback sostituibile; ", C_R);
+    } else if (!disk_donor && !no_exec && !advertise && segment_engine &&
+               access(segment_bin, X_OK) == 0) {
+        printf("  %sSegment non viene pubblicato: questa macchina non espone "
+               "un IPv4 pubblico. READ/EXEC continuano via relay; usa "
+               "--advertise IP solo quando le porte sono raggiungibili.%s\n",
+               C_DIM, C_R);
+    }
     signal(SIGINT, on_sigint);
     signal(SIGTERM, on_sigint);
 
     printf("\n%sserving%s %s %s(tracker %s%s)%s\n", C_GRN, C_R, model, C_DIM, taddr,
-           with_exec ? " · executing experts for the swarm" : "", C_R);
+           with_segment ? " · Segment origin attivo" :
+           (with_exec ? " · executing experts for the swarm" : ""), C_R);
     /* Without --advertise every local peer registers as 127.0.0.1, and the
      * tracker's correction cannot help because these registrations arrive
      * over loopback. A remote chatter then uses the READ/EXEC tracker relay.
@@ -992,7 +1193,13 @@ typedef enum {
     EK_INKLING,        /* inkling:      <|message_user|><|content_text|>…      */
     EK_KIMI            /* kimi_k3:      K3CHAT1 byte-counted wire              */
 } EngKind;
-typedef struct { pid_t pid; int to, from; Proto proto; EngKind kind; } Engine;
+typedef struct {
+    pid_t pid;
+    int to, from;
+    Proto proto;
+    EngKind kind;
+    int segment;
+} Engine;
 
 /* Map the resolved engine binary name to its kind. Unknown ⇒ EK_GLM, the safe
  * default: the framed dialect with no client-side templating, which is exactly
@@ -1281,6 +1488,12 @@ static int stream_serve2(Engine *e, char *statline, size_t scap, char **captured
 #define OLMO_U0   "|||IP_ADDRESS|||<|user|>\n"
 #define OLMO_UL   "|||IP_ADDRESS|||\n<|user|>\n"
 #define OLMO_ASST "\n<|assistant|>\n"
+/* GLM-5.2 (colibri.c's official chat_template.jinja path).  The monolithic
+ * engine applies this internally; Segment Edge deliberately accepts exact
+ * bytes, so only the Segment Serve2 path reaches this case. */
+#define GLM_BOS  "[gMASK]<sop>"
+#define GLM_U    "<|user|>"
+#define GLM_ASST "<|assistant|><think></think>"
 /* qwen36 (qwen36.c: ChatML, no BOS). */
 #define QW_U    "<|im_start|>user\n"
 #define QW_ASST "<|im_end|>\n<|im_start|>assistant\n"
@@ -1296,7 +1509,11 @@ static int stream_serve2(Engine *e, char *statline, size_t scap, char **captured
  * the SUBMIT payload; reply!=NULL builds a *completed* turn — user text plus the
  * assistant's reply, for the running history. 0, or -1 on OOM. */
 static int serve2_turn(Cap *c, EngKind k, int first, const char *u, const char *reply) {
+    (void)first;
     switch (k) {
+    case EK_GLM:
+        if (cap_str(c, GLM_U) || cap_str(c, u) || cap_str(c, GLM_ASST)) return -1;
+        return reply ? cap_str(c, reply) : 0;
     case EK_DEEPSEEK:
         if (cap_str(c, DS_USER) || cap_str(c, u) || cap_str(c, DS_ASST)) return -1;
         return reply ? cap_str(c, reply) : 0;
@@ -1318,13 +1535,14 @@ static int serve2_turn(Cap *c, EngKind k, int first, const char *u, const char *
         if (cap_addf(c, "M user %zu\n", strlen(u)) || cap_str(c, u)) return -1;
         return reply ? (cap_addf(c, "M assistant %zu\n", strlen(reply)) ||
                         cap_str(c, reply)) : 0;
-    default:                                    /* EK_GLM never speaks serve-codec */
+    default:
         return -1;
     }
 }
 
 /* The once-at-front SUBMIT prefix (kept out of the stored history). */
 static int serve2_prefix(Cap *c, EngKind k) {
+    if (k == EK_GLM)      return cap_str(c, GLM_BOS);
     if (k == EK_DEEPSEEK) return cap_str(c, DS_BOS);
     if (k == EK_KIMI)     return cap_str(c, "K3CHAT1\n");
     return 0;
@@ -1450,9 +1668,74 @@ static int engine_spawn(const char *engine, const char *shim, const char *tracke
     e->pid = pid; e->to = in_pipe[1]; e->from = out_pipe[0];
     e->proto = PROTO_UNKNOWN;
     e->kind = engine_kind_of(engine);
+    e->segment = 0;
     pthread_t t;
     pthread_create(&t, NULL, stderr_thread, (void *)(intptr_t)err_pipe[0]);
     pthread_detach(t);
+    return 0;
+}
+
+/* Segment speaks the same SUBMIT/DATA/DONE codec already consumed by the TUI,
+ * but its Edge loader runs over Lumabri's virtual mirror.  Therefore a client
+ * with no model directory fetches only config/tokenizer/embedding/head through
+ * the existing signed CAS, while all transformer layers stay on the selected
+ * peers. */
+static int segment_engine_spawn(const char *engine, const char *shim,
+                                const char *tracker, const char *model,
+                                const char *model_type, int ctx, Engine *e) {
+    const char *segment_id = segment_engine_for(model_type);
+    if (!segment_id) return -1;
+    const char *home = getenv("HOME") ? getenv("HOME") : ".";
+    char vroot[1024], cache[1024], cas[1024];
+    const char *vroot_env = getenv("LUMABRI_VROOT");
+    const char *cache_env = getenv("LUMABRI_CACHE");
+    if (vroot_env && vroot_env[0]) snprintf(vroot, sizeof vroot, "%s", vroot_env);
+    else snprintf(vroot, sizeof vroot, "%s/.lumabri/%s/vroot", home, model);
+    if (cache_env && cache_env[0]) snprintf(cache, sizeof cache, "%s", cache_env);
+    else snprintf(cache, sizeof cache, "%s/.lumabri/%s/cache", home, model);
+    snprintf(cas, sizeof cas, "%s/.lumabri/cas", home);
+    mkdir_p(cache);
+
+    int in_pipe[2], out_pipe[2], err_pipe[2];
+    if (pipe(in_pipe) || pipe(out_pipe) || pipe(err_pipe)) return -1;
+    pid_t pid = fork();
+    if (pid == 0) {
+        dup2(in_pipe[0], 0); dup2(out_pipe[1], 1); dup2(err_pipe[1], 2);
+        close(in_pipe[1]); close(out_pipe[0]); close(err_pipe[0]);
+        setenv("LD_PRELOAD", shim, 1);
+        setenv("LUMABRI_VROOT", vroot, 1);
+        setenv("LUMABRI_CACHE", cache, 1);
+        setenv("LUMABRI_CAS", cas, 0);
+        setenv("LUMABRI_TRACKER", tracker, 1);
+        setenv("LUMABRI_MODEL", model, 1);
+        setenv("LUMABRI_STATS", "2", 1);
+        char context[32];
+        snprintf(context, sizeof context, "%d", ctx);
+        char *argv[] = {
+            (char *)engine,
+            "--serve",
+            "--engine", (char *)segment_id,
+            "--model-dir", vroot,
+            "--model", (char *)model,
+            "--tracker", (char *)tracker,
+            "--context", context,
+            "--max-rows", "16",
+            "--discovery-timeout-ms", "2500",
+            NULL
+        };
+        execv(engine, argv);
+        perror(engine);
+        _exit(127);
+    }
+    close(in_pipe[0]); close(out_pipe[1]); close(err_pipe[1]);
+    e->pid = pid; e->to = in_pipe[1]; e->from = out_pipe[0];
+    e->proto = PROTO_UNKNOWN;
+    e->kind = engine_kind_of(model_type);
+    e->segment = 1;
+    pthread_t thread;
+    pthread_create(&thread, NULL, stderr_thread,
+                   (void *)(intptr_t)err_pipe[0]);
+    pthread_detach(thread);
     return 0;
 }
 
@@ -2057,10 +2340,129 @@ static int free_port(int from) {
     return 0;
 }
 
+/* Prefer one tracker-assigned Segment slice when this chat is already using
+ * Segment and the machine can publish a genuinely reachable address. Home
+ * NAT peers keep donating through the mature EXEC relay instead of poisoning
+ * discovery with an endpoint that only looks public from the tracker. */
+static int role_start_segment(const Role *r, const char *tracker,
+                              const char *model, const char *model_type,
+                              int context, uint64_t model_bytes) {
+    const char *engine = segment_engine_for(model_type ? model_type : "");
+    if (!engine) return 0;
+    char dir[1024], bin[1200], shim[1200];
+    exe_dir(dir, sizeof dir);
+    snprintf(bin, sizeof bin, "%s/segment_node", dir);
+    if (access(bin, X_OK)) return 0;
+    snprintf(shim, sizeof shim, "%s/liblumabri.so", dir);
+    if (access(shim, R_OK))
+        snprintf(shim, sizeof shim, "%s/../lib/lumabri/liblumabri.so", dir);
+
+    char host[INET_ADDRSTRLEN] = "";
+    const char *forced = getenv("LUMABRI_ADVERTISE");
+    struct in_addr forced_address;
+    if (forced && forced[0]) {
+        if (strlen(forced) >= sizeof host ||
+            inet_pton(AF_INET, forced, &forced_address) != 1)
+            return 0;
+        snprintf(host, sizeof host, "%s", forced);
+    }
+    else if (!strncmp(tracker, "127.0.0.1:", 10) ||
+             !strncmp(tracker, "localhost:", 10))
+        snprintf(host, sizeof host, "127.0.0.1");
+    else if (machine_public_ipv4(host, sizeof host))
+        return 0;
+
+    /* The origin's default four-way partition makes one slice roughly a
+     * quarter of the checkpoint. Keep both a fixed OS reserve and 25% of the
+     * currently available RAM; if it would not fit, the expert donor below
+     * is the finer-grained, auto-sized contribution. This is intentionally
+     * conservative: a donation must never win by pushing the desktop to swap. */
+    uint64_t available = machine_available_ram();
+    uint64_t reserve = available / 4;
+    if (reserve < 4ull * 1000 * 1000 * 1000)
+        reserve = 4ull * 1000 * 1000 * 1000;
+    uint64_t estimated = model_bytes / 4 + model_bytes / 20;
+    if (!available || reserve >= available || estimated > available - reserve)
+        return 0;
+
+    char probe[1100];
+    snprintf(probe, sizeof probe, "%s/config.json", r->model_dir);
+    int local = r->model_dir[0] && access(probe, R_OK) == 0;
+    if (!local && access(shim, R_OK)) return 0;
+
+    const char *home = getenv("HOME") ? getenv("HOME") : ".";
+    char vroot[1024], cachedir[1024], casdir[1040];
+    char e_pre[1216], e_vr[1040], e_ca[1040], e_cs[1056];
+    char e_tr[160], e_mo[96];
+    char *envv[8];
+    int ne = 0;
+    if (!local) {
+        const char *ve = getenv("LUMABRI_VROOT");
+        const char *ce = getenv("LUMABRI_CACHE");
+        if (ve && ve[0]) snprintf(vroot, sizeof vroot, "%s", ve);
+        else snprintf(vroot, sizeof vroot, "%s/.lumabri/%s/vroot", home, model);
+        if (ce && ce[0]) snprintf(cachedir, sizeof cachedir, "%s", ce);
+        else snprintf(cachedir, sizeof cachedir, "%s/.lumabri/%s/cache", home, model);
+        snprintf(casdir, sizeof casdir, "%s/.lumabri/cas", home);
+        mkdir_p(cachedir);
+        snprintf(e_pre, sizeof e_pre, "LD_PRELOAD=%s", shim);
+        snprintf(e_vr, sizeof e_vr, "LUMABRI_VROOT=%s", vroot);
+        snprintf(e_ca, sizeof e_ca, "LUMABRI_CACHE=%s", cachedir);
+        snprintf(e_cs, sizeof e_cs, "LUMABRI_CAS=%s", casdir);
+        snprintf(e_tr, sizeof e_tr, "LUMABRI_TRACKER=%s", tracker);
+        snprintf(e_mo, sizeof e_mo, "LUMABRI_MODEL=%s", model);
+        envv[ne++] = e_pre; envv[ne++] = e_vr; envv[ne++] = e_ca;
+        if (!getenv("LUMABRI_CAS")) envv[ne++] = e_cs;
+        envv[ne++] = e_tr; envv[ne++] = e_mo; envv[ne] = NULL;
+    }
+
+    int port = free_port(7801);
+    if (!port) return 0;
+    long cores = sysconf(_SC_NPROCESSORS_ONLN);
+    int sessions = cores > 1 ? (int)(cores / 2) : 1;
+    if (sessions > 4) sessions = 4;
+    char port_text[16], context_text[16], sessions_text[16];
+    char address[80], name[64], base[48];
+    snprintf(port_text, sizeof port_text, "%d", port);
+    snprintf(context_text, sizeof context_text, "%d", context);
+    snprintf(sessions_text, sizeof sessions_text, "%d", sessions);
+    snprintf(address, sizeof address, "%s:%d", host, port);
+    donor_base_name(r, base, sizeof base);
+    snprintf(name, sizeof name, "%s-segment-%d", base, port);
+    char *argv[30];
+    int a = 0;
+    argv[a++] = bin;
+    argv[a++] = "--engine";        argv[a++] = (char *)engine;
+    argv[a++] = "--model-dir";     argv[a++] = local ? (char *)r->model_dir : vroot;
+    argv[a++] = "--model";         argv[a++] = (char *)model;
+    argv[a++] = "--auto-range";
+    argv[a++] = "--port";          argv[a++] = port_text;
+    argv[a++] = "--tracker";       argv[a++] = (char *)tracker;
+    argv[a++] = "--advertise";     argv[a++] = address;
+    argv[a++] = "--name";          argv[a++] = name;
+    argv[a++] = "--auto-identity";
+    argv[a++] = "--context";       argv[a++] = context_text;
+    argv[a++] = "--max-rows";      argv[a++] = "16";
+    argv[a++] = "--sessions";      argv[a++] = sessions_text;
+    argv[a] = NULL;
+    if (g_nchildren >= MAX_CHILDREN) return 0;
+    char logpath[1200];
+    pid_t pid = spawn_argv_logged(argv, local ? NULL : envv,
+                                  donor_log_path(name, logpath,
+                                                 sizeof logpath));
+    if (pid <= 0) return 0;
+    child_publish(g_nchildren++, pid);
+    printf("  %s\xe2\x9c\xa6 eseguo una fetta Segment assegnata dal tracker "
+           "per lo sciame%s %s(priorita' bassa, %d sessioni massime)%s\n",
+           C_GRN, C_R, C_DIM, sessions, C_R);
+    return 1;
+}
+
 /* Start whatever was chosen. Never fatal: a donation that cannot start is a
  * missed contribution, not a reason to refuse someone a conversation. */
 static void role_start(const Role *r, const char *tracker, const char *model,
-                       const char *model_type) {
+                       const char *model_type, int segment_active, int context,
+                       uint64_t model_bytes) {
     char dir[1024];
     exe_dir(dir, sizeof dir);
 
@@ -2103,6 +2505,10 @@ static void role_start(const Role *r, const char *tracker, const char *model,
     }
 
     if (r->compute) {
+        int segment_started = segment_active &&
+            role_start_segment(r, tracker, model, model_type, context,
+                               model_bytes);
+        if (!segment_started) {
         const char *node = expert_node_for(model_type ? model_type : "");
         char bin[1200];
         snprintf(bin, sizeof bin, "%s/%s", dir, node ? node : "expert_node");
@@ -2191,6 +2597,7 @@ static void role_start(const Role *r, const char *tracker, const char *model,
                        "la fetta assegnata arriva dallo sciame · /debug per i log)%s\n",
                        C_GRN, C_R, C_DIM, node, C_R);
         }
+        }
     }
     if (r->disk || r->compute)
         printf("  %sfinche\xcc\x81 questa chat resta aperta. Per un donatore che "
@@ -2246,6 +2653,54 @@ static int model_boot(const char *tracker, const char *model, const char *shim,
                sw->nfiles, (double)sw->total_bytes / 1e9, sw->npeers,
                mtype[0] ? mtype : "?", C_R);
         disk_preflight(model, sw->total_bytes);
+    }
+
+    /* Prefer a complete Segment route when the optional runtime is installed.
+     * The probe is the real engine boot: Edge files arrive through the same
+     * signed mirror, then discovery either publishes READY or exits.  Exiting
+     * before READY is an ordinary coverage miss, not a chat failure; the
+     * unchanged expert/local engine starts immediately afterwards. */
+    if (!local_dir && !getenv("LUMABRI_NO_SEGMENT")) {
+        char self[1024], segment_bin[1200];
+        exe_dir(self, sizeof self);
+        snprintf(segment_bin, sizeof segment_bin, "%s/segment_chat", self);
+        if (access(segment_bin, X_OK) == 0 &&
+            segment_engine_for(mtype) != NULL) {
+            printf("  %sprovo una catena Segment completa; se manca uso "
+                   "automaticamente expert/CAS%s\n", C_DIM, C_R);
+            if (!segment_engine_spawn(segment_bin, shim, tracker, model,
+                                      mtype, ctx, e)) {
+                g_eng.booting = 1;
+                g_eng.last_out = nowd();
+                g_eng.spinning = 1;
+                pthread_t segment_spinner;
+                if (g_tty)
+                    pthread_create(&segment_spinner, NULL, spinner_thread,
+                                   (void *)"cerco segmenti compatibili");
+                double segment_started = nowd();
+                int segment_ready = engine_wait_ready(e);
+                g_eng.spinning = 0;
+                if (g_tty) pthread_join(segment_spinner, NULL);
+                g_eng.booting = 0;
+                if (!segment_ready) {
+                    e->proto = PROTO_SERVE2;
+                    printf("  %s\xe2\x9c\x93 %s pronto via Segment in %.1fs%s%s "
+                           "\xc2\xb7 Edge nel CAS \xc2\xb7 /swarm /model /debug "
+                           "/storage /reset /quit%s\n",
+                           C_GRN, model, nowd() - segment_started, C_R,
+                           C_DIM, C_R);
+                    return 0;
+                }
+                engine_stop(e);
+                if (getenv("LUMABRI_SEGMENT_REQUIRED")) {
+                    printf("  %sSegment richiesto ma non disponibile%s\n",
+                           C_RED, C_R);
+                    return -1;
+                }
+                printf("  %snessuna catena Segment completa: continuo con "
+                       "il percorso expert/CAS%s\n", C_DIM, C_R);
+            }
+        }
     }
 
     char engine[1200];
@@ -2507,7 +2962,8 @@ static int cmd_chat(int argc, char **argv) {
     if (role.disk || role.compute) {
         signal(SIGINT, on_sigint);            /* the donors die with the chat */
         signal(SIGTERM, on_sigint);
-        role_start(&role, tracker, model, sw.model_type);
+        role_start(&role, tracker, model, sw.model_type, eng.segment, ctx,
+                   sw.total_bytes);
     }
 
     char *conv = calloc(1, 1);   /* serve-codec conversation history (after bos) */
