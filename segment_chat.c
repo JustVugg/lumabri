@@ -21,7 +21,30 @@ typedef struct {
     uint64_t position;
 } RemoteSegment;
 
+typedef struct {
+    int active;
+    uint64_t route_generation;
+    RemoteSegment chain[LMB_SEG_ROUTE_MAX];
+    size_t chain_count;
+    /* Tokens whose state is already committed on every remote range. The
+     * final sampled token is deliberately absent until the next turn sends
+     * it through the chain. */
+    int32_t *committed_tokens;
+    size_t committed_count;
+} SegmentConversation;
+
+typedef struct {
+    char *text;
+    size_t text_bytes;
+    int32_t *tokens;
+    size_t token_count;
+    size_t prompt_count;
+    double elapsed_seconds;
+} GenerationResult;
+
 static int retry_first_run;
+
+#define SEGMENT_FRAME_READY "\x01\x01" "READY" "\x01\x01"
 
 static void sleep_ms(unsigned ms) {
     struct timespec ts = { (time_t)(ms / 1000u),
@@ -34,13 +57,52 @@ static const char *arg_value(int argc, char **argv, const char *name) {
     return NULL;
 }
 
+static int has_arg(int argc, char **argv, const char *name) {
+    for (int i = 1; i < argc; i++) if (!strcmp(argv[i], name)) return 1;
+    return 0;
+}
+
 static void usage(const char *program) {
     fprintf(stderr,
         "usage: %s --engine ID --model-dir DIR --model NAME "
-        "--tracker HOST:PORT --model-root HEX64 --tokenizer-root HEX64 "
-        "(--prompt TEXT | --prompt-ids CSV) [--expect-ids CSV] "
-        "[--tokens N] [--context N] [--max-rows N] [--retry-first-run]\n",
+        "--tracker HOST:PORT [--model-root HEX64 --tokenizer-root HEX64] "
+        "((--prompt TEXT | --prompt-ids CSV) | --serve) "
+        "[--expect-ids CSV] [--tokens N] [--context N] [--max-rows N] "
+        "[--discovery-timeout-ms N] [--retry-first-run]\n",
         program);
+}
+
+static int model_identity_resolve(const char *tracker, const char *model,
+                                  const char *model_root_text,
+                                  const char *tokenizer_root_text,
+                                  uint8_t model_root[32],
+                                  uint8_t tokenizer_root[32]) {
+    if (model_root_text || tokenizer_root_text) {
+        if (!model_root_text || !tokenizer_root_text ||
+            lmb_hex_root(model_root_text, model_root) ||
+            lmb_hex_root(tokenizer_root_text, tokenizer_root))
+            return -1;
+        return 0;
+    }
+    LmbModelIdentity identity;
+    if (lmb_model_identity_get(tracker, model, &identity)) return -1;
+    const char *pubkey = getenv("LUMABRI_PUBKEY");
+    if (pubkey && pubkey[0]) {
+        LmbTrustKeys trust = {0};
+        size_t bytes = 0;
+        uint8_t *message = lmb_model_id_msg(identity.model, identity.root,
+                                            &bytes);
+        int bad = lmb_trust_load_spec(&trust, pubkey) || !identity.has_sig ||
+                  !message || lmb_trust_verify(&trust, identity.sig,
+                                               message, bytes);
+        free(message);
+        if (bad) return -1;
+    }
+    memcpy(model_root, identity.root, 32);
+    /* tokenizer.json belongs to the signed inventory represented by this
+     * root, so the aggregate identity is also a stable tokenizer identity. */
+    memcpy(tokenizer_root, identity.root, 32);
+    return 0;
 }
 
 static int parse_ids(const char *text, int32_t **ids, size_t *count) {
@@ -66,21 +128,73 @@ static int parse_ids(const char *text, int32_t **ids, size_t *count) {
 }
 
 static int select_chain(const LmbSegRouteSnapshot *snapshot, uint32_t layers,
+                        uint32_t required_context, uint32_t required_rows,
                         RemoteSegment *chain, size_t *chain_count) {
+    uint64_t fallback_layers[LMB_SEG_ROUTE_MAX] = {0};
+    uint64_t load_cost[LMB_SEG_ROUTE_MAX] = {0};
+    uint32_t hops[LMB_SEG_ROUTE_MAX] = {0};
     unsigned viable[LMB_SEG_ROUTE_MAX] = {0};
     for (uint32_t pass = 0; pass < snapshot->count; pass++) {
         int changed = 0;
         for (uint32_t i = 0; i < snapshot->count; i++) {
             const LmbSegRouteEntry *entry = &snapshot->entries[i];
-            if (viable[i] || !(entry->transport & LMB_SEG_TRANSPORT_DIRECT) ||
+            if (!(entry->transport & LMB_SEG_TRANSPORT_DIRECT) ||
                 entry->advert.layer_begin >= entry->advert.layer_end ||
-                entry->advert.layer_end > layers) continue;
-            int reaches_end = entry->advert.layer_end == layers;
-            for (uint32_t j = 0; j < snapshot->count && !reaches_end; j++)
-                reaches_end = viable[j] &&
-                    snapshot->entries[j].advert.layer_begin ==
-                    entry->advert.layer_end;
-            if (reaches_end) { viable[i] = 1; changed = 1; }
+                entry->advert.layer_end > layers ||
+                entry->advert.max_context < required_context ||
+                entry->advert.max_rows < required_rows) continue;
+            uint64_t own_fallback =
+                entry->advert.flags & LMB_SEG_ADVERT_FALLBACK
+                    ? entry->advert.layer_end - entry->advert.layer_begin : 0;
+            uint64_t own_load = (uint64_t)entry->advert.queue_depth +
+                                entry->advert.inflight;
+            if (entry->advert.layer_end == layers) {
+                if (!viable[i] || own_fallback < fallback_layers[i] ||
+                    (own_fallback == fallback_layers[i] && 1 < hops[i]) ||
+                    (own_fallback == fallback_layers[i] && hops[i] == 1 &&
+                     own_load < load_cost[i])) {
+                    viable[i] = 1;
+                    fallback_layers[i] = own_fallback;
+                    load_cost[i] = own_load;
+                    hops[i] = 1;
+                    changed = 1;
+                }
+                continue;
+            }
+            int found = 0;
+            uint64_t best_fallback = UINT64_MAX, best_load = UINT64_MAX;
+            uint32_t best_hops = UINT32_MAX;
+            for (uint32_t j = 0; j < snapshot->count; j++) {
+                if (!viable[j] || snapshot->entries[j].advert.layer_begin !=
+                                  entry->advert.layer_end) continue;
+                uint64_t candidate_fallback = own_fallback + fallback_layers[j];
+                uint64_t candidate_load = own_load + load_cost[j];
+                uint32_t candidate_hops = 1 + hops[j];
+                if (!found || candidate_fallback < best_fallback ||
+                    (candidate_fallback == best_fallback &&
+                     candidate_hops < best_hops) ||
+                    (candidate_fallback == best_fallback &&
+                     candidate_hops == best_hops &&
+                     candidate_load < best_load)) {
+                    found = 1;
+                    best_fallback = candidate_fallback;
+                    best_hops = candidate_hops;
+                    best_load = candidate_load;
+                }
+            }
+            if (found) {
+                if (!viable[i] || best_fallback < fallback_layers[i] ||
+                    (best_fallback == fallback_layers[i] &&
+                     best_hops < hops[i]) ||
+                    (best_fallback == fallback_layers[i] &&
+                     best_hops == hops[i] && best_load < load_cost[i])) {
+                    viable[i] = 1;
+                    fallback_layers[i] = best_fallback;
+                    hops[i] = best_hops;
+                    load_cost[i] = best_load;
+                    changed = 1;
+                }
+            }
         }
         if (!changed) break;
     }
@@ -93,10 +207,18 @@ static int select_chain(const LmbSegRouteSnapshot *snapshot, uint32_t layers,
             if (!viable[i] ||
                 candidate->advert.layer_begin != cursor ||
                 candidate->advert.layer_end > layers) continue;
-            if (!best || candidate->advert.layer_end > best->advert.layer_end ||
-                (candidate->advert.layer_end == best->advert.layer_end &&
-                 candidate->advert.queue_depth + candidate->advert.inflight <
-                 best->advert.queue_depth + best->advert.inflight))
+            if (!best) { best = candidate; continue; }
+            uint32_t best_index = (uint32_t)(best - snapshot->entries);
+            if (fallback_layers[i] < fallback_layers[best_index] ||
+                (fallback_layers[i] == fallback_layers[best_index] &&
+                 hops[i] < hops[best_index]) ||
+                (fallback_layers[i] == fallback_layers[best_index] &&
+                 hops[i] == hops[best_index] &&
+                 load_cost[i] < load_cost[best_index]) ||
+                (fallback_layers[i] == fallback_layers[best_index] &&
+                 hops[i] == hops[best_index] &&
+                 load_cost[i] == load_cost[best_index] &&
+                 candidate->advert.layer_end > best->advert.layer_end))
                 best = candidate;
         }
         if (!best) return -1;
@@ -142,7 +264,7 @@ static int remote_open(RemoteSegment *remote, const LmbSegId *session_id,
     open->max_rows = max_rows;
     open->state_dtype = advert->state_dtype;
     open->state_width = advert->state_width;
-    open->ttl_ms = 60000;
+    open->ttl_ms = LMB_SEG_MAX_TTL_MS;
     open->capabilities = advert->capabilities;
     snprintf(open->engine_id, sizeof open->engine_id, "%s", advert->engine_id);
     snprintf(open->state_schema, sizeof open->state_schema, "%s",
@@ -155,7 +277,9 @@ static int remote_open(RemoteSegment *remote, const LmbSegId *session_id,
     remote->fd = lmb_connect(advert->addr);
     if (remote->fd < 0 ||
         lmb_send(remote->fd, LMB_SEG_OPEN, body, body_len, NULL, 0)) {
-        free(body); return -1;
+        free(body);
+        if (remote->fd >= 0) { lmb_close(remote->fd); remote->fd = -1; }
+        return -1;
     }
     free(body);
     LmbMsg msg = {0};
@@ -164,7 +288,7 @@ static int remote_open(RemoteSegment *remote, const LmbSegId *session_id,
               reply_ok(&msg, LMB_SEG_OPEN_R, session_id, &open->request_id,
                        open->owner.route_generation, &reply) || msg.pay_len;
     lmb_msg_free(&msg);
-    if (bad) return -1;
+    if (bad) { lmb_close(remote->fd); remote->fd = -1; return -1; }
     remote->sequence = reply.next_sequence;
     remote->position = reply.next_position;
     return 0;
@@ -245,6 +369,31 @@ static void remote_close(RemoteSegment *remote) {
     remote->fd = -1;
 }
 
+static void conversation_reset(SegmentConversation *conversation) {
+    if (!conversation) return;
+    for (size_t i = 0; i < conversation->chain_count; i++)
+        remote_close(&conversation->chain[i]);
+    free(conversation->committed_tokens);
+    memset(conversation, 0, sizeof *conversation);
+}
+
+static int conversation_route_equal(const SegmentConversation *conversation,
+                                    const RemoteSegment *desired,
+                                    size_t desired_count,
+                                    uint64_t generation) {
+    if (!conversation || !conversation->active ||
+        conversation->route_generation != generation ||
+        conversation->chain_count != desired_count) return 0;
+    for (size_t i = 0; i < desired_count; i++) {
+        const LmbSegAdvert *a = &conversation->chain[i].route.advert;
+        const LmbSegAdvert *b = &desired[i].route.advert;
+        if (a->layer_begin != b->layer_begin || a->layer_end != b->layer_end ||
+            strcmp(a->peer_name, b->peer_name) || strcmp(a->addr, b->addr))
+            return 0;
+    }
+    return 1;
+}
+
 static int chain_run(RemoteSegment *chain, size_t count,
                      const int32_t *tokens, uint32_t rows,
                      uint8_t **first, uint8_t **second, size_t bytes) {
@@ -255,6 +404,369 @@ static int chain_run(RemoteSegment *chain, size_t count,
     }
     *first = input;
     *second = output;
+    return 0;
+}
+
+static double monotonic_seconds(void) {
+    struct timespec value;
+    clock_gettime(CLOCK_MONOTONIC, &value);
+    return (double)value.tv_sec + (double)value.tv_nsec * 1e-9;
+}
+
+static void generation_result_free(GenerationResult *result) {
+    if (!result) return;
+    free(result->text);
+    free(result->tokens);
+    memset(result, 0, sizeof *result);
+}
+
+static int segment_generate(ColiEdgeEngine *edge,
+                            const ColiEdgeCapabilities *cap,
+                            RemoteSegment *chain, size_t chain_count,
+                            const uint8_t model_root[32],
+                            const uint8_t tokenizer_root[32],
+                            uint32_t context, uint32_t max_rows,
+                            const char *prompt, size_t prompt_bytes,
+                            const int32_t *provided_tokens,
+                            size_t provided_count, uint32_t wanted_tokens,
+                            SegmentConversation *conversation,
+                            uint64_t route_generation,
+                            GenerationResult *result,
+                            char *error, size_t error_size) {
+    memset(result, 0, sizeof *result);
+    double started = monotonic_seconds();
+    size_t opened = 0;
+    int32_t *prompt_tokens = NULL;
+    int32_t *generated = NULL;
+    uint8_t *buffer_a = NULL, *buffer_b = NULL;
+    RemoteSegment *active_chain = chain;
+    size_t active_count = chain_count;
+    size_t prefilled = 0;
+    int rc = -1;
+
+    size_t prompt_count = provided_count;
+    if (provided_tokens) {
+        if (!provided_count || provided_count > SIZE_MAX / sizeof *prompt_tokens)
+            goto cleanup;
+        prompt_tokens = malloc(provided_count * sizeof *prompt_tokens);
+        if (!prompt_tokens) goto cleanup;
+        memcpy(prompt_tokens, provided_tokens,
+               provided_count * sizeof *prompt_tokens);
+    } else {
+        if (!prompt ||
+            coli_edge_tokenize(edge, prompt, prompt_bytes, NULL, 0,
+                               &prompt_count, error, error_size) ||
+            !prompt_count || prompt_count > SIZE_MAX / sizeof *prompt_tokens)
+            goto cleanup;
+        prompt_tokens = malloc(prompt_count * sizeof *prompt_tokens);
+        size_t actual_count = 0;
+        if (!prompt_tokens ||
+            coli_edge_tokenize(edge, prompt, prompt_bytes, prompt_tokens,
+                               prompt_count, &actual_count,
+                               error, error_size) ||
+            actual_count != prompt_count)
+            goto cleanup;
+    }
+
+    if (conversation) {
+        int same_route = conversation_route_equal(conversation, chain,
+                                                  chain_count,
+                                                  route_generation);
+        int same_prefix = same_route &&
+            conversation->committed_count <= prompt_count &&
+            (!conversation->committed_count ||
+             !memcmp(conversation->committed_tokens, prompt_tokens,
+                     conversation->committed_count * sizeof *prompt_tokens));
+        if (!same_prefix) {
+            conversation_reset(conversation);
+            memcpy(conversation->chain, chain,
+                   chain_count * sizeof *conversation->chain);
+            conversation->chain_count = chain_count;
+            conversation->route_generation = route_generation;
+            for (size_t i = 0; i < chain_count; i++)
+                conversation->chain[i].fd = -1;
+        } else {
+            prefilled = conversation->committed_count;
+            if (prefilled)
+                fprintf(stderr, "[lumabri] Segment KV reuse: %zu/%zu prompt "
+                        "tokens already resident\n", prefilled, prompt_count);
+        }
+        active_chain = conversation->chain;
+        active_count = conversation->chain_count;
+    }
+
+    if (!conversation || !conversation->active) {
+        LmbSegId session_id;
+        lmb_random(session_id.bytes, sizeof session_id.bytes);
+        for (; opened < active_count; opened++) {
+            active_chain[opened].fd = -1;
+            if (remote_open(&active_chain[opened], &session_id, model_root,
+                            tokenizer_root, context, max_rows)) {
+                snprintf(error, error_size, "cannot open segment %s at %s",
+                         active_chain[opened].route.advert.peer_name,
+                         active_chain[opened].route.advert.addr);
+                goto cleanup;
+            }
+        }
+        if (conversation) conversation->active = 1;
+    } else {
+        opened = active_count;
+    }
+    if (prompt_count > context || wanted_tokens > context - prompt_count) {
+        snprintf(error, error_size, "prompt plus output exceeds context (%u)",
+                 context);
+        goto cleanup;
+    }
+    if (prefilled >= prompt_count) {
+        /* We do not keep the last hidden row at Edge. A normal chat turn
+         * always appends role/user tokens; an identical resubmission safely
+         * rebuilds instead of sampling from stale or duplicated state. */
+        if (conversation) {
+            conversation_reset(conversation);
+            snprintf(error, error_size, "Segment prompt did not extend the "
+                     "resident conversation; retry after session rebuild");
+        }
+        goto cleanup;
+    }
+    generated = malloc((size_t)wanted_tokens * sizeof *generated);
+    size_t max_bytes = lmb_state_bytes(max_rows, cap->state_width,
+                                       cap->state_dtype);
+    buffer_a = max_bytes ? malloc(max_bytes) : NULL;
+    buffer_b = max_bytes ? malloc(max_bytes) : NULL;
+    if (!generated || !buffer_a || !buffer_b) {
+        snprintf(error, error_size, "out of memory preparing Segment run");
+        goto cleanup;
+    }
+    uint8_t *final_state = NULL;
+    uint32_t final_rows = 0;
+    for (size_t offset = prefilled; offset < prompt_count; offset += max_rows) {
+        uint32_t rows = (uint32_t)(prompt_count - offset);
+        if (rows > max_rows) rows = max_rows;
+        size_t bytes = lmb_state_bytes(rows, cap->state_width,
+                                       cap->state_dtype);
+        ColiEdgeEmbedRequest embed = {
+            .struct_size = sizeof embed, .rows = rows,
+            .token_ids = prompt_tokens + offset, .token_count = rows,
+            .output = buffer_a, .output_bytes = bytes,
+        };
+        if (coli_edge_embed(edge, &embed, error, error_size)) goto cleanup;
+        uint8_t *first = buffer_a, *second = buffer_b;
+        if (chain_run(active_chain, active_count, prompt_tokens + offset, rows,
+                      &first, &second, bytes)) {
+            snprintf(error, error_size, "Segment peer failed; checkpoint/replay "
+                     "is not available yet");
+            goto cleanup;
+        }
+        final_state = first;
+        final_rows = rows;
+        if (first != buffer_a) {
+            uint8_t *swap = buffer_a; buffer_a = buffer_b; buffer_b = swap;
+        }
+    }
+    size_t element = cap->state_dtype == COLI_EDGE_DTYPE_F32 ? 4u : 2u;
+    const uint8_t *last = final_state +
+        (size_t)(final_rows - 1) * cap->state_width * element;
+    ColiEdgeSelectRequest select = {
+        .struct_size = sizeof select, .rows = 1,
+        .input = last, .input_bytes = (size_t)cap->state_width * element,
+        .token_ids = generated, .token_capacity = 1,
+    };
+    if (coli_edge_select(edge, &select, error, error_size)) goto cleanup;
+    size_t generated_count = 1;
+    while (generated_count < wanted_tokens &&
+           generated[generated_count - 1] != cap->eos_token_id) {
+        int32_t token = generated[generated_count - 1];
+        size_t bytes = lmb_state_bytes(1, cap->state_width, cap->state_dtype);
+        ColiEdgeEmbedRequest embed = {
+            .struct_size = sizeof embed, .rows = 1,
+            .token_ids = &token, .token_count = 1,
+            .output = buffer_a, .output_bytes = bytes,
+        };
+        if (coli_edge_embed(edge, &embed, error, error_size)) goto cleanup;
+        uint8_t *first = buffer_a, *second = buffer_b;
+        if (chain_run(active_chain, active_count, &token, 1,
+                      &first, &second, bytes)) {
+            snprintf(error, error_size, "Segment peer failed; checkpoint/replay "
+                     "is not available yet");
+            goto cleanup;
+        }
+        select.input = first;
+        select.token_ids = generated + generated_count;
+        if (coli_edge_select(edge, &select, error, error_size)) goto cleanup;
+        generated_count++;
+    }
+    size_t text_bytes = 0;
+    if (coli_edge_detokenize(edge, generated, generated_count, NULL, 0,
+                             &text_bytes, error, error_size)) goto cleanup;
+    char *text = malloc(text_bytes + 1);
+    if (!text || coli_edge_detokenize(edge, generated, generated_count,
+                                      text, text_bytes + 1, &text_bytes,
+                                      error, error_size)) {
+        free(text);
+        goto cleanup;
+    }
+    text[text_bytes] = 0;
+    if (conversation) {
+        size_t generated_committed = generated_count ? generated_count - 1 : 0;
+        size_t committed_count = prompt_count + generated_committed;
+        if (committed_count > SIZE_MAX / sizeof *prompt_tokens) {
+            free(text); goto cleanup;
+        }
+        int32_t *committed = malloc(committed_count * sizeof *committed);
+        if (!committed) {
+            free(text);
+            snprintf(error, error_size, "out of memory retaining Segment KV "
+                     "token prefix");
+            goto cleanup;
+        }
+        memcpy(committed, prompt_tokens, prompt_count * sizeof *committed);
+        if (generated_committed)
+            memcpy(committed + prompt_count, generated,
+                   generated_committed * sizeof *committed);
+        free(conversation->committed_tokens);
+        conversation->committed_tokens = committed;
+        conversation->committed_count = committed_count;
+    }
+    result->text = text;
+    result->text_bytes = text_bytes;
+    result->tokens = generated;
+    result->token_count = generated_count;
+    result->prompt_count = prompt_count;
+    result->elapsed_seconds = monotonic_seconds() - started;
+    generated = NULL;
+    rc = 0;
+
+cleanup:
+    if (conversation) {
+        if (rc) conversation_reset(conversation);
+    } else {
+        for (size_t index = 0; index < opened; index++)
+            remote_close(&active_chain[index]);
+    }
+    free(prompt_tokens);
+    free(generated);
+    free(buffer_a);
+    free(buffer_b);
+    return rc;
+}
+
+static void route_print(FILE *stream, const char *prefix,
+                        const LmbSegRouteSnapshot *snapshot,
+                        const RemoteSegment *chain, size_t chain_count) {
+    fprintf(stream, "%s Segment route generation %llu: ", prefix,
+            (unsigned long long)snapshot->route_generation);
+    for (size_t index = 0; index < chain_count; index++)
+        fprintf(stream, "%s%s[%u:%u]%s", index ? " -> " : "",
+                chain[index].route.advert.peer_name,
+                chain[index].route.advert.layer_begin,
+                chain[index].route.advert.layer_end,
+                chain[index].route.advert.flags & LMB_SEG_ADVERT_FALLBACK
+                    ? "(fallback)" : "");
+    fputc('\n', stream);
+    if (getenv("LUMABRI_SEGMENT_DEBUG_ROUTES"))
+        for (uint32_t index = 0; index < snapshot->count; index++) {
+            const LmbSegRouteEntry *entry = &snapshot->entries[index];
+            fprintf(stream, "[lumabri] Segment candidate %s[%u:%u] "
+                    "flags=%u load=%u/%u transport=%u context=%u rows=%u "
+                    "numeric=%s\n",
+                    entry->advert.peer_name, entry->advert.layer_begin,
+                    entry->advert.layer_end, entry->advert.flags,
+                    entry->advert.queue_depth, entry->advert.inflight,
+                    entry->transport, entry->advert.max_context,
+                    entry->advert.max_rows, entry->advert.numeric_class);
+        }
+    fflush(stream);
+}
+
+static int read_exact_stdin(void *output, size_t bytes) {
+    unsigned char *cursor = output;
+    while (bytes) {
+        size_t got = fread(cursor, 1, bytes, stdin);
+        if (!got) return -1;
+        cursor += got;
+        bytes -= got;
+    }
+    return 0;
+}
+
+static int segment_serve_loop(ColiEdgeEngine *edge,
+                              const ColiEdgeCapabilities *cap,
+                              LmbSegDiscovery *discovery,
+                              const uint8_t model_root[32],
+                              const uint8_t tokenizer_root[32],
+                              uint32_t context, uint32_t max_rows) {
+    printf(SEGMENT_FRAME_READY "\nSTAT 0 0 0 0\n");
+    fflush(stdout);
+    fprintf(stderr, "[lumabri] Segment Edge v1 is greedy; temperature/top-p "
+            "remain on the classic path\n");
+    SegmentConversation conversation;
+    memset(&conversation, 0, sizeof conversation);
+    char header[512];
+    while (fgets(header, sizeof header, stdin)) {
+        unsigned request_id = 0, slot = 0, max_tokens = 0;
+        size_t prompt_bytes = 0;
+        double temperature = 0.0, top_p = 0.0;
+        char trailing = 0;
+        if (sscanf(header, "SUBMIT %u %u %zu %u %lf %lf %c",
+                   &request_id, &slot, &prompt_bytes, &max_tokens,
+                   &temperature, &top_p, &trailing) != 6 ||
+            !max_tokens || max_tokens > 4096 || prompt_bytes > (64u << 20)) {
+            printf("ERROR %u invalid Segment SUBMIT\n", request_id);
+            fflush(stdout);
+            continue;
+        }
+        (void)slot; (void)temperature; (void)top_p;
+        char *prompt = malloc(prompt_bytes + 1);
+        if (!prompt || read_exact_stdin(prompt, prompt_bytes)) {
+            free(prompt); conversation_reset(&conversation); return 1;
+        }
+        prompt[prompt_bytes] = 0;
+        int terminator = fgetc(stdin);
+        if (terminator != '\n') {
+            free(prompt); conversation_reset(&conversation); return 1;
+        }
+        printf("ACCEPT %u\n", request_id);
+        fflush(stdout);
+
+        LmbSegRouteSnapshot snapshot;
+        int have = lmb_seg_discovery_snapshot(discovery, &snapshot);
+        RemoteSegment chain[LMB_SEG_ROUTE_MAX];
+        size_t chain_count = 0;
+        char error[256] = "no complete compatible Segment chain";
+        GenerationResult result;
+        int bad = have <= 0 || !snapshot.complete ||
+                  select_chain(&snapshot, cap->num_layers, context, max_rows,
+                               chain, &chain_count);
+        if (!bad) {
+            if (conversation.active && conversation.route_generation !=
+                                       snapshot.route_generation)
+                route_print(stderr, "[segment-route]", &snapshot,
+                            chain, chain_count);
+            bad = segment_generate(edge, cap, chain, chain_count,
+                                   model_root, tokenizer_root,
+                                   context, max_rows, prompt, prompt_bytes,
+                                   NULL, 0, max_tokens, &conversation,
+                                   snapshot.route_generation, &result,
+                                   error, sizeof error);
+        }
+        free(prompt);
+        if (bad) {
+            printf("ERROR %u %s\n", request_id, error);
+            fflush(stdout);
+            continue;
+        }
+        printf("DATA %u %zu\n", request_id, result.text_bytes);
+        if (result.text_bytes)
+            fwrite(result.text, 1, result.text_bytes, stdout);
+        fputc('\n', stdout);
+        double rate = result.elapsed_seconds > 0.0
+            ? (double)result.token_count / result.elapsed_seconds : 0.0;
+        printf("DONE %u STAT %zu %.3f 0 0 %zu 0\n", request_id,
+               result.token_count, rate, result.prompt_count);
+        fflush(stdout);
+        generation_result_free(&result);
+    }
+    conversation_reset(&conversation);
     return 0;
 }
 
@@ -271,10 +783,12 @@ int main(int argc, char **argv) {
     const char *prompt = arg_value(argc, argv, "--prompt");
     const char *prompt_ids_text = arg_value(argc, argv, "--prompt-ids");
     const char *expect_ids_text = arg_value(argc, argv, "--expect-ids");
+    int serve_mode = has_arg(argc, argv, "--serve");
     for (int i = 1; i < argc; i++)
         if (!strcmp(argv[i], "--retry-first-run")) retry_first_run = 1;
-    if (!engine_id || !model_dir || !model || !tracker || !model_root_text ||
-        !tokenizer_root_text || (!!prompt == !!prompt_ids_text)) {
+    if (!engine_id || !model_dir || !model || !tracker ||
+        (serve_mode ? (prompt || prompt_ids_text || expect_ids_text)
+                    : (!!prompt == !!prompt_ids_text))) {
         usage(argv[0]); return 2;
     }
     if (strlen(engine_id) >= LMB_SEG_ENGINE_MAX ||
@@ -282,11 +796,6 @@ int main(int argc, char **argv) {
         usage(argv[0]); return 2;
     }
     uint8_t model_root[32], tokenizer_root[32];
-    if (lmb_hex_root(model_root_text, model_root) ||
-        lmb_hex_root(tokenizer_root_text, tokenizer_root)) {
-        fprintf(stderr, "roots must be non-zero 64-character hex values\n");
-        return 2;
-    }
     uint32_t wanted_tokens = 3;
     const char *value = arg_value(argc, argv, "--tokens");
     if (value && lmb_parse_u32(value, 1, 4096, &wanted_tokens)) {
@@ -301,6 +810,13 @@ int main(int argc, char **argv) {
         return 2;
     }
     if (lmb_secure_init()) return 1;
+    if (model_identity_resolve(tracker, model, model_root_text,
+                               tokenizer_root_text, model_root,
+                               tokenizer_root)) {
+        fprintf(stderr, "cannot resolve a trusted model identity for %s\n",
+                model);
+        return 1;
+    }
     if (lmb_colibri_register_all()) {
         fprintf(stderr, "cannot register all six Colibri adapters\n"); return 1;
     }
@@ -322,10 +838,13 @@ int main(int argc, char **argv) {
     }
     uint32_t context = cap.max_context_tokens < 4096 ? cap.max_context_tokens : 4096;
     uint32_t max_rows = cap.max_batch_rows < 64 ? cap.max_batch_rows : 64;
+    uint32_t discovery_timeout_ms = serve_mode ? 2500u : 15000u;
     if (((value = arg_value(argc, argv, "--context")) &&
          lmb_parse_u32(value, 1, cap.max_context_tokens, &context)) ||
         ((value = arg_value(argc, argv, "--max-rows")) &&
-         lmb_parse_u32(value, 1, cap.max_batch_rows, &max_rows))) {
+         lmb_parse_u32(value, 1, cap.max_batch_rows, &max_rows)) ||
+        ((value = arg_value(argc, argv, "--discovery-timeout-ms")) &&
+         lmb_parse_u32(value, 250, 60000, &discovery_timeout_ms))) {
         usage(argv[0]); return 2;
     }
     LmbSegQuery query;
@@ -334,7 +853,10 @@ int main(int argc, char **argv) {
     memcpy(query.model_root, model_root, sizeof model_root);
     memcpy(query.tokenizer_root, tokenizer_root, sizeof tokenizer_root);
     query.layer_end = cap.num_layers;
-    query.context_tokens = context;
+    /* Ask discovery for capability truth, not for the caller's preferred
+     * context. Selection below first tries the preference and only then
+     * negotiates down to the largest complete executor chain. */
+    query.context_tokens = 1;
     query.rows = max_rows;
     query.state_dtype = cap.state_dtype;
     query.state_width = cap.state_width;
@@ -348,17 +870,19 @@ int main(int argc, char **argv) {
     LmbSegRouteSnapshot snapshot;
     memset(&snapshot, 0, sizeof snapshot);
     int have = 0, fetched = 0;
-    for (int i = 0; i < 60 && !have; i++) {
+    uint32_t discovery_attempts = (discovery_timeout_ms + 249u) / 250u;
+    for (uint32_t i = 0; i < discovery_attempts && !have; i++) {
         sleep_ms(250);
         have = lmb_seg_discovery_snapshot(discovery, &snapshot);
         if (have > 0) fetched = 1;
         if (have > 0 && !snapshot.complete) have = 0;
     }
     if (!have) {
-        fprintf(stderr, "no complete compatible Segment chain after 15 seconds "
+        fprintf(stderr, "no complete compatible Segment chain after %.2f seconds "
                         "(snapshot=%s, compatible peers=%u, engine=%s, "
                         "schema=%s, numeric=%s, dtype=%u, width=%u, "
                         "layers=0:%u, rows=%u, context=%u)\n",
+                (double)discovery_timeout_ms / 1000.0,
                 fetched ? "yes" : "no", fetched ? snapshot.count : 0,
                 query.engine_id, query.state_schema, query.numeric_class,
                 query.state_dtype, query.state_width, query.layer_end,
@@ -367,142 +891,96 @@ int main(int argc, char **argv) {
     }
     RemoteSegment chain[LMB_SEG_ROUTE_MAX];
     size_t chain_count = 0;
-    if (select_chain(&snapshot, cap.num_layers, chain, &chain_count)) {
-        fprintf(stderr, "tracker coverage cannot form an executor-aligned chain\n");
-        lmb_seg_discovery_stop(discovery); return 1;
-    }
-    LmbSegId session_id;
-    lmb_random(session_id.bytes, sizeof session_id.bytes);
-    for (size_t i = 0; i < chain_count; i++) {
-        if (remote_open(&chain[i], &session_id, model_root, tokenizer_root,
-                        context, max_rows)) {
-            fprintf(stderr, "cannot open segment %s at %s\n",
-                    chain[i].route.advert.peer_name, chain[i].route.advert.addr);
-            for (size_t j = 0; j < i; j++) remote_close(&chain[j]);
+    uint32_t requested_context = context;
+    if (select_chain(&snapshot, cap.num_layers, context, max_rows,
+                     chain, &chain_count)) {
+        uint32_t ceiling = context;
+        int selected = 0;
+        while (ceiling > 1 && !selected) {
+            uint32_t next = 0;
+            for (uint32_t i = 0; i < snapshot.count; i++) {
+                uint32_t available = snapshot.entries[i].advert.max_context;
+                if (available < ceiling && available > next) next = available;
+            }
+            if (!next) break;
+            ceiling = next;
+            if (!select_chain(&snapshot, cap.num_layers, ceiling, max_rows,
+                              chain, &chain_count)) {
+                context = ceiling;
+                selected = 1;
+            }
+        }
+        if (!selected) {
+            fprintf(stderr, "tracker coverage cannot form an "
+                            "executor-aligned chain\n");
             lmb_seg_discovery_stop(discovery); return 1;
         }
     }
-    printf("[lumabri] route generation %llu: ",
-           (unsigned long long)snapshot.route_generation);
     for (size_t i = 0; i < chain_count; i++)
-        printf("%s%s[%u:%u]", i ? " -> " : "",
-               chain[i].route.advert.peer_name,
-               chain[i].route.advert.layer_begin,
-               chain[i].route.advert.layer_end);
-    printf("\n"); fflush(stdout);
+        if (chain[i].route.advert.max_context < context)
+            context = chain[i].route.advert.max_context;
+    if (context < requested_context) {
+        fprintf(stderr, "[lumabri] Segment context negotiated to %u tokens "
+                        "(requested %u; executor capability)\n",
+                context, requested_context);
+    }
+    route_print(serve_mode ? stderr : stdout,
+                serve_mode ? "[segment-route]" : "[lumabri]",
+                &snapshot, chain, chain_count);
+    if (serve_mode) {
+        int result = segment_serve_loop(edge, &cap, discovery,
+                                        model_root, tokenizer_root,
+                                        context, max_rows);
+        lmb_seg_discovery_stop(discovery);
+        coli_edge_engine_close(edge);
+        free(expected);
+        return result;
+    }
 
     size_t prompt_count = 0;
     int32_t *prompt_tokens = NULL;
-    if (prompt_ids_text) {
-        if (parse_ids(prompt_ids_text, &prompt_tokens, &prompt_count)) {
-            fprintf(stderr, "invalid --prompt-ids list\n"); return 2;
-        }
-    } else {
-        if (coli_edge_tokenize(edge, prompt, strlen(prompt), NULL, 0,
-                               &prompt_count, error, sizeof error) || !prompt_count) {
-            fprintf(stderr, "cannot tokenize prompt: %s\n", error); return 1;
-        }
-        prompt_tokens = malloc(prompt_count * sizeof *prompt_tokens);
-        size_t actual_count = 0;
-        if (!prompt_tokens ||
-            coli_edge_tokenize(edge, prompt, strlen(prompt), prompt_tokens,
-                               prompt_count, &actual_count, error, sizeof error) ||
-            actual_count != prompt_count) {
-            fprintf(stderr, "cannot tokenize prompt: %s\n", error); return 1;
-        }
+    if (prompt_ids_text && parse_ids(prompt_ids_text, &prompt_tokens,
+                                     &prompt_count)) {
+        fprintf(stderr, "invalid --prompt-ids list\n");
+        lmb_seg_discovery_stop(discovery);
+        coli_edge_engine_close(edge);
+        free(expected);
+        return 2;
     }
-    if (prompt_count + wanted_tokens > context) {
-        fprintf(stderr, "prompt plus output exceeds context (%u)\n", context);
+    GenerationResult generated;
+    int bad = segment_generate(edge, &cap, chain, chain_count,
+                               model_root, tokenizer_root,
+                               context, max_rows,
+                               prompt, prompt ? strlen(prompt) : 0,
+                               prompt_tokens, prompt_count, wanted_tokens,
+                               NULL, 0,
+                               &generated, error, sizeof error);
+    free(prompt_tokens);
+    if (bad) {
+        fprintf(stderr, "%s\n", error[0] ? error : "Segment generation failed");
+        lmb_seg_discovery_stop(discovery);
+        coli_edge_engine_close(edge);
+        free(expected);
         return 1;
     }
-    int32_t *generated = malloc(wanted_tokens * sizeof *generated);
-    size_t max_bytes = lmb_state_bytes(max_rows, cap.state_width, cap.state_dtype);
-    uint8_t *buffer_a = max_bytes ? malloc(max_bytes) : NULL;
-    uint8_t *buffer_b = max_bytes ? malloc(max_bytes) : NULL;
-    if (!generated || !buffer_a || !buffer_b) return 1;
-    uint8_t *final_state = NULL;
-    uint32_t final_rows = 0;
-    for (size_t offset = 0; offset < prompt_count; offset += max_rows) {
-        uint32_t rows = (uint32_t)(prompt_count - offset);
-        if (rows > max_rows) rows = max_rows;
-        size_t bytes = lmb_state_bytes(rows, cap.state_width, cap.state_dtype);
-        ColiEdgeEmbedRequest embed = {
-            .struct_size = sizeof embed, .rows = rows,
-            .token_ids = prompt_tokens + offset, .token_count = rows,
-            .output = buffer_a, .output_bytes = bytes,
-        };
-        if (coli_edge_embed(edge, &embed, error, sizeof error)) {
-            fprintf(stderr, "embedding failed: %s\n", error); return 1;
-        }
-        uint8_t *first = buffer_a, *second = buffer_b;
-        if (chain_run(chain, chain_count, prompt_tokens + offset, rows,
-                      &first, &second, bytes)) {
-            fprintf(stderr, "Segment peer failed; session ended because checkpoint/replay is not available yet\n");
-            return 1;
-        }
-        final_state = first; final_rows = rows;
-        if (first != buffer_a) { uint8_t *swap = buffer_a; buffer_a = buffer_b; buffer_b = swap; }
-    }
-    size_t element = cap.state_dtype == COLI_EDGE_DTYPE_F32 ? 4u : 2u;
-    const uint8_t *last = final_state + (size_t)(final_rows - 1) * cap.state_width * element;
-    ColiEdgeSelectRequest select = {
-        .struct_size = sizeof select, .rows = 1,
-        .input = last, .input_bytes = (size_t)cap.state_width * element,
-        .token_ids = generated, .token_capacity = 1,
-    };
-    if (coli_edge_select(edge, &select, error, sizeof error)) {
-        fprintf(stderr, "token selection failed: %s\n", error); return 1;
-    }
-    size_t generated_count = 1;
-    while (generated_count < wanted_tokens &&
-           generated[generated_count - 1] != cap.eos_token_id) {
-        int32_t token = generated[generated_count - 1];
-        size_t bytes = lmb_state_bytes(1, cap.state_width, cap.state_dtype);
-        ColiEdgeEmbedRequest embed = {
-            .struct_size = sizeof embed, .rows = 1,
-            .token_ids = &token, .token_count = 1,
-            .output = buffer_a, .output_bytes = bytes,
-        };
-        if (coli_edge_embed(edge, &embed, error, sizeof error)) {
-            fprintf(stderr, "embedding failed: %s\n", error); return 1;
-        }
-        uint8_t *first = buffer_a, *second = buffer_b;
-        if (chain_run(chain, chain_count, &token, 1, &first, &second, bytes)) {
-            fprintf(stderr, "Segment peer failed; session ended because checkpoint/replay is not available yet\n");
-            return 1;
-        }
-        select.input = first;
-        select.token_ids = generated + generated_count;
-        if (coli_edge_select(edge, &select, error, sizeof error)) {
-            fprintf(stderr, "token selection failed: %s\n", error); return 1;
-        }
-        generated_count++;
-    }
-    size_t text_bytes = 0;
-    if (coli_edge_detokenize(edge, generated, generated_count, NULL, 0,
-                             &text_bytes, error, sizeof error)) {
-        fprintf(stderr, "detokenize sizing failed: %s\n", error); return 1;
-    }
-    char *text = malloc(text_bytes + 1);
-    if (!text || coli_edge_detokenize(edge, generated, generated_count,
-                                      text, text_bytes + 1, &text_bytes,
-                                      error, sizeof error)) {
-        fprintf(stderr, "detokenize failed: %s\n", error); return 1;
-    }
-    text[text_bytes] = 0;
-    printf("%s\n", text);
+    printf("%s\n", generated.text);
     printf("[lumabri] token-ids:");
-    for (size_t i = 0; i < generated_count; i++) printf("%s%d", i ? "," : " ", generated[i]);
+    for (size_t i = 0; i < generated.token_count; i++)
+        printf("%s%d", i ? "," : " ", generated.tokens[i]);
     printf("\n");
-    if (expected && (generated_count != expected_count ||
-        memcmp(generated, expected, expected_count * sizeof *expected))) {
+    if (expected && (generated.token_count != expected_count ||
+        memcmp(generated.tokens, expected,
+               expected_count * sizeof *expected))) {
         fprintf(stderr, "generated token IDs differ from independent oracle\n");
+        generation_result_free(&generated);
+        lmb_seg_discovery_stop(discovery);
+        coli_edge_engine_close(edge);
+        free(expected);
         return 1;
     }
-    for (size_t i = 0; i < chain_count; i++) remote_close(&chain[i]);
+    generation_result_free(&generated);
     lmb_seg_discovery_stop(discovery);
     coli_edge_engine_close(edge);
-    free(text); free(prompt_tokens); free(generated); free(expected);
-    free(buffer_a); free(buffer_b);
+    free(expected);
     return 0;
 }

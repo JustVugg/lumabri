@@ -98,14 +98,14 @@ print(",".join(map(str,prompt))+"|"+",".join(map(str,full[len(prompt):len(prompt
         --tracker 127.0.0.1:7868 --advertise 127.0.0.1:7869 \
         --name "$family-left" --model-root "$model_root" \
         --tokenizer-root "$tokenizer_root" --context 64 --max-rows 16 \
-        --sessions 4 >"$TMP/$family-left.log" 2>&1 &
+        --sessions 4 --fallback >"$TMP/$family-left.log" 2>&1 &
     left=$!
     "${run_env[@]}" "$SEGMENT_NODE_BIN" --engine "$family" --model-dir "$model_dir" \
         --model "$model" --range "$split:$total" --port 7870 \
         --tracker 127.0.0.1:7868 --advertise 127.0.0.1:7870 \
         --name "$family-right" --model-root "$model_root" \
         --tokenizer-root "$tokenizer_root" --context 64 --max-rows 16 \
-        --sessions 4 >"$TMP/$family-right.log" 2>&1 &
+        --sessions 4 --fallback >"$TMP/$family-right.log" 2>&1 &
     right=$!
     NODE_PIDS=("$left" "$right")
     if ! wait_port 7869 || ! wait_port 7870; then
@@ -120,7 +120,75 @@ print(",".join(map(str,prompt))+"|"+",".join(map(str,full[len(prompt):len(prompt
         cat "$TMP/$family-left.log" "$TMP/$family-right.log" "$TMP/tracker.log"
         exit 1
     fi
+
+    # The user-facing TUI drives the same engine through Colibri's
+    # SUBMIT/DATA/DONE gateway codec.  Exercise that persistent mode for every
+    # family as well as the token-ID oracle above; a single text turn is enough
+    # to prove tokenizer, framing, route/session lifecycle and clean EOF.
+    serve_output=$(printf 'SUBMIT 1 0 2 2 0.7 0.95\nhi\n' | \
+        "${run_env[@]}" "$SEGMENT_CHAT_BIN" --serve --engine "$family" \
+        --model-dir "$model_dir" --model "$model" \
+        --tracker 127.0.0.1:7868 --model-root "$model_root" \
+        --tokenizer-root "$tokenizer_root" --context 64 --max-rows 16)
+    if ! grep -q $'\001\001READY\001\001' <<<"$serve_output" ||
+       ! grep -q '^DATA 1 ' <<<"$serve_output" ||
+       ! grep -q '^DONE 1 STAT ' <<<"$serve_output"; then
+        printf '%s\n' "$serve_output"
+        cat "$TMP/$family-left.log" "$TMP/$family-right.log"
+        echo "SEGMENT DIRECT $family: serve-codec gate failed" >&2
+        exit 1
+    fi
     if [[ "$family" == olmoe ]]; then
+        # A second request must reuse the remote state established by the
+        # first one. Keep generation to one token so the committed prefix is
+        # exactly the first prompt, then append a new turn and require the
+        # executor's explicit reuse diagnostic.
+        "${run_env[@]}" python3 - "$SEGMENT_CHAT_BIN" "$model_dir" "$model" \
+            "$model_root" "$tokenizer_root" <<'PY'
+import subprocess, sys
+
+binary, model_dir, model, model_root, tokenizer_root = sys.argv[1:]
+process = subprocess.Popen([
+    binary, "--serve", "--engine", "olmoe", "--model-dir", model_dir,
+    "--model", model, "--tracker", "127.0.0.1:7868",
+    "--model-root", model_root, "--tokenizer-root", tokenizer_root,
+    "--context", "64", "--max-rows", "16",
+], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+def line():
+    value = process.stdout.readline()
+    if not value:
+        raise RuntimeError("Segment gateway closed unexpectedly")
+    return value
+
+if b"READY" not in line() or not line().startswith(b"STAT "):
+    raise RuntimeError("Segment gateway did not become ready")
+
+def turn(request_id, prompt):
+    header = f"SUBMIT {request_id} 0 {len(prompt)} 1 0.7 0.95\n".encode()
+    process.stdin.write(header + prompt + b"\n")
+    process.stdin.flush()
+    if line() != f"ACCEPT {request_id}\n".encode():
+        raise RuntimeError("Segment request was not accepted")
+    data_header = line().split()
+    if data_header[:2] != [b"DATA", str(request_id).encode()]:
+        raise RuntimeError("Segment response has no DATA frame")
+    size = int(data_header[2])
+    data = process.stdout.read(size)
+    if len(data) != size or process.stdout.read(1) != b"\n":
+        raise RuntimeError("Segment DATA frame is truncated")
+    if not line().startswith(f"DONE {request_id} STAT ".encode()):
+        raise RuntimeError("Segment response has no DONE frame")
+
+turn(91, b"hi\n")
+turn(92, b"hi\nthere\n")
+process.stdin.close()
+if process.wait(timeout=15):
+    raise RuntimeError("Segment gateway exited with an error")
+diagnostics = process.stderr.read().decode("utf-8", "replace")
+if "Segment KV reuse:" not in diagnostics:
+    raise RuntimeError("the second turn did not reuse remote Segment state")
+PY
         client_pids=()
         for client in 1 2; do
             "${run_env[@]}" "$SEGMENT_CHAT_BIN" --engine "$family" \
@@ -140,13 +208,38 @@ print(",".join(map(str,prompt))+"|"+",".join(map(str,full[len(prompt):len(prompt
                 "$TMP/$family-left.log" "$TMP/$family-right.log"
             exit 1
         fi
-        echo "SEGMENT DIRECT olmoe: PASS (two concurrent isolated sessions)"
+        # A normal compute donor never receives layer numbers from a user.
+        # It asks the tracker for the rarest exact origin slice; the selected
+        # route must replace that fallback while retaining the other half.
+        "${run_env[@]}" "$SEGMENT_NODE_BIN" --engine "$family" \
+            --model-dir "$model_dir" --model "$model" --auto-range --port 7871 \
+            --tracker 127.0.0.1:7868 --advertise 127.0.0.1:7871 \
+            --name "$family-auto" --model-root "$model_root" \
+            --tokenizer-root "$tokenizer_root" --context 64 --max-rows 16 \
+            --sessions 4 >"$TMP/$family-auto.log" 2>&1 &
+        auto=$!
+        NODE_PIDS+=("$auto")
+        if ! wait_port 7871; then
+            cat "$TMP/$family-auto.log" "$TMP/tracker.log"
+            exit 1
+        fi
+        auto_output=$("${run_env[@]}" "$SEGMENT_CHAT_BIN" --engine "$family" \
+            --model-dir "$model_dir" --model "$model" \
+            --tracker 127.0.0.1:7868 --model-root "$model_root" \
+            --tokenizer-root "$tokenizer_root" --prompt-ids "$prompt_ids" \
+            --tokens 3 --expect-ids "$expected" --context 64 --max-rows 16)
+        if ! grep -q "${family}-auto\[0:${split}\].*${family}-right\[${split}:${total}\](fallback)" \
+             <<<"$auto_output"; then
+            printf '%s\n' "$auto_output"
+            cat "$TMP/$family-auto.log" "$TMP/tracker.log"
+            exit 1
+        fi
+        echo "SEGMENT DIRECT olmoe: PASS (KV reuse + concurrent isolated sessions)"
     fi
-    kill "$left" "$right" 2>/dev/null || true
-    wait "$left" 2>/dev/null || true
-    wait "$right" 2>/dev/null || true
+    for pid in "${NODE_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
+    for pid in "${NODE_PIDS[@]}"; do wait "$pid" 2>/dev/null || true; done
     NODE_PIDS=()
-    echo "SEGMENT DIRECT $family: PASS (two peers, three oracle tokens)"
+    echo "SEGMENT DIRECT $family: PASS (two peers, oracle + TUI codec)"
 done
 
 echo "SEGMENT DIRECT: PASS (all six Colibri families)"
