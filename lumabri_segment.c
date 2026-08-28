@@ -536,6 +536,7 @@ typedef struct {
     uint64_t next_position;
     uint64_t expires_at_ms;
     LmbSegRun pending;
+    LmbSegTransfer pending_restore;
     uint8_t pending_digest[32];
     SegHistory history[LMB_SEG_HISTORY_SLOTS];
     size_t history_next;
@@ -891,6 +892,77 @@ LmbSegStatus lmb_seg_table_restore_commit(LmbSegTable *table,
             slot->history_next = 0;
             seg_touch(slot, now_ms);
         }
+    }
+    pthread_mutex_unlock(&table->lock);
+    return status;
+}
+
+LmbSegStatus lmb_seg_table_restore_begin(LmbSegTable *table,
+                                         const LmbSegTransfer *transfer,
+                                         uint64_t now_ms) {
+    if (!table || !seg_transfer_valid(transfer) ||
+        !(transfer->flags & LMB_SEG_XFER_BEGIN))
+        return LMB_SEG_STATUS_BAD_REQUEST;
+    pthread_mutex_lock(&table->lock);
+    SegSlot *slot = seg_find(table, &transfer->session_id);
+    LmbSegStatus status = LMB_SEG_STATUS_OK;
+    if (!slot) status = LMB_SEG_STATUS_NOT_FOUND;
+    else if (seg_expired(slot, now_ms)) status = LMB_SEG_STATUS_EXPIRED;
+    else if (!(slot->open.capabilities & LMB_SEG_CAP_SNAPSHOT))
+        status = LMB_SEG_STATUS_UNSUPPORTED;
+    else if (slot->busy) status = LMB_SEG_STATUS_BUSY;
+    else if (transfer->position > slot->open.context_tokens ||
+             transfer->sequence == UINT64_MAX)
+        status = LMB_SEG_STATUS_BAD_REQUEST;
+    else {
+        int relation = seg_owner_relation(&transfer->owner, &slot->open.owner);
+        if (relation < 0) status = LMB_SEG_STATUS_STALE_OWNER;
+        else if (relation == 2) status = LMB_SEG_STATUS_CONFLICT;
+        else if (relation == 0 &&
+                 (transfer->sequence < slot->next_sequence ||
+                  transfer->position < slot->next_position))
+            status = LMB_SEG_STATUS_OUT_OF_ORDER;
+        else {
+            slot->busy = 1;
+            slot->pending_restore = *transfer;
+            seg_touch(slot, now_ms);
+        }
+    }
+    pthread_mutex_unlock(&table->lock);
+    return status;
+}
+
+LmbSegStatus lmb_seg_table_restore_finish(LmbSegTable *table,
+                                          const LmbSegTransfer *transfer,
+                                          int commit, uint64_t now_ms) {
+    if (!table || !transfer || lmb_seg_id_is_zero(&transfer->session_id) ||
+        lmb_seg_id_is_zero(&transfer->request_id))
+        return LMB_SEG_STATUS_BAD_REQUEST;
+    pthread_mutex_lock(&table->lock);
+    SegSlot *slot = seg_find(table, &transfer->session_id);
+    LmbSegStatus status = LMB_SEG_STATUS_OK;
+    if (!slot) status = LMB_SEG_STATUS_NOT_FOUND;
+    else if (!slot->busy ||
+             !lmb_seg_id_equal(&slot->pending_restore.request_id,
+                               &transfer->request_id) ||
+             slot->pending_restore.sequence != transfer->sequence ||
+             slot->pending_restore.position != transfer->position ||
+             slot->pending_restore.snapshot_size != transfer->snapshot_size ||
+             seg_owner_relation(&transfer->owner,
+                                &slot->pending_restore.owner) != 0)
+        status = LMB_SEG_STATUS_CONFLICT;
+    else {
+        slot->busy = 0;
+        memset(&slot->pending_restore, 0, sizeof slot->pending_restore);
+        if (commit) {
+            slot->open.owner = transfer->owner;
+            slot->next_sequence = transfer->sequence;
+            slot->next_position = transfer->position;
+            slot->needs_restore = 0;
+            memset(slot->history, 0, sizeof slot->history);
+            slot->history_next = 0;
+        }
+        seg_touch(slot, now_ms);
     }
     pthread_mutex_unlock(&table->lock);
     return status;

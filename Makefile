@@ -411,16 +411,31 @@ segment_node: segment_node.c $(SEGMENT_COMMON) $(COLIBRI_SEGMENT_LIB)
 	$(CC) $(SEGMENT_CFLAGS) -pthread segment_node.c lumabri_segment.c \
 		lumabri_segment_discovery.c $(COLIBRI_SEGMENT_LIB) -o $@ -lm
 
-segment_chat: segment_chat.c $(SEGMENT_COMMON) $(COLIBRI_SEGMENT_LIB)
+segment_chat: segment_chat.c lumabri_sampling.c lumabri_sampling.h \
+		$(SEGMENT_COMMON) $(COLIBRI_SEGMENT_LIB)
 	$(CC) $(SEGMENT_CFLAGS) -pthread segment_chat.c lumabri_segment.c \
-		lumabri_segment_discovery.c $(COLIBRI_SEGMENT_LIB) -o $@ -lm
+		lumabri_segment_discovery.c lumabri_sampling.c \
+		$(COLIBRI_SEGMENT_LIB) -o $@ -lm
+
+test_sampling: test_sampling.c lumabri_sampling.c lumabri_sampling.h
+	$(CC) $(CFLAGS) test_sampling.c lumabri_sampling.c -o $@ -lm
 
 .PHONY: segment-direct
 segment-direct: segment_node segment_chat
 
-test-segment-direct-real: tracker maintainer liblumabri.so lumabri segment-direct
+test-segment-direct-real: tracker maintainer liblumabri.so lumabri \
+		segment-direct test_sampling
+	./test_sampling
 	bash ./segment_direct_test.sh
+	bash ./segment_relay_test.sh
+	bash ./segment_failover_test.sh
 	bash ./segment_native_test.sh
+
+test-segment-relay-real: tracker segment-direct
+	bash ./segment_relay_test.sh
+
+test-segment-failover-real: tracker segment-direct
+	bash ./segment_failover_test.sh
 
 test-relay-exec: tracker expert_node test_relay_exec fixture
 	./relay_exec_test.sh
@@ -501,8 +516,10 @@ install: all
 clean:
 	rm -f tracker maintainer liblumabri.so test_shim lumabri \
 	      test_relay_exec test_swarm_fed test_key_rotation test_hedge \
-	      test_verify_failover test_segment_v2 test_segment_discovery \
-	      segment_node segment_chat \
+	      test_verify_failover test_segment_v2 test_segment_discovery test_sampling \
+	      test_segment_v2_tsan tracker_tsan \
+	      segment_node segment_chat segment_node_asan segment_chat_asan \
+	      segment_node_tsan segment_chat_tsan \
 	      olmoe_p2p colibri_p2p inkling_p2p kimi_k3_p2p deepseek_p2p qwen36_p2p \
 	      expert_node expert_node_glm expert_node_inkling expert_node_kimi \
 	      expert_node_deepseek expert_node_qwen36
@@ -514,4 +531,5 @@ clean:
         test-phase2-deepseek test-engines \
         patches patches-check test-relay-exec test-swarm-fed test-assign-race test-partial-phase2 test-elastic \
         test-cas test-key-rotation test-hedge test-segment-v2 \
-        test-segment-discovery segment-direct test-segment-direct-real
+        test-segment-discovery segment-direct test-segment-direct-real \
+        test-segment-relay-real test-segment-failover-real

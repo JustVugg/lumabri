@@ -5,6 +5,14 @@ a tag stay under Unreleased until a new tag is created.
 
 ## Unreleased
 
+- Segment temperature/top-p sampling through Colibri Edge logits, while
+  preserving the exact greedy path at temperature zero.
+- Stateful Segment relay over signed outbound tracker tunnels, including
+  relay-only NAT executors and automatic direct-to-relay retry.
+- Chunked opaque snapshots, transactional restore and exact-range replica
+  replay after peer failure; checkpoint copies are skipped without a replica.
+- End-to-end gates for all six Colibri families, relay-only serving, failover
+  replay and the ordinary `lumabri serve` + `lumabri chat` path.
 - Persistent endpoint TOFU and strict `LUMABRI_PEER_PINS` verification.
 - Fail-closed encrypted startup, X25519 low-order rejection, bounded aggregate
   receive memory, one-buffer AEAD frames and encrypted-fd lifecycle cleanup.

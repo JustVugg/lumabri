@@ -267,6 +267,11 @@ static void test_control_wire(void) {
     assert(lmb_frame_shape_ok(LMB_SEG_RUN, 32, LMB_MAX_PAY));
     assert(lmb_frame_shape_ok(LMB_SEG_SNAPSHOT_R, 32, LMB_MAX_PAY));
     assert(lmb_frame_shape_ok(LMB_SEG_RESTORE, 32, LMB_MAX_PAY));
+    assert(lmb_frame_shape_ok(LMB_RSEG, LMB_MAX_CONTROL_BODY, LMB_MAX_PAY));
+    assert(lmb_frame_shape_ok(LMB_RSEG_FWD,
+                              LMB_MAX_CONTROL_BODY, LMB_MAX_PAY));
+    assert(lmb_frame_shape_ok(LMB_RSEG_R,
+                              LMB_MAX_CONTROL_BODY, LMB_MAX_PAY));
 }
 
 static void test_session_table(void) {
@@ -368,6 +373,28 @@ static void test_session_table(void) {
     snapshot.chunk_len = 10;
     snapshot.flags = LMB_SEG_XFER_BEGIN;
     assert(lmb_seg_table_snapshot_check(table, &snapshot, 122) ==
+           LMB_SEG_STATUS_OK);
+
+    /* A restore larger than one frame reserves the session until the final
+     * chunk, then commits sequence/position independently of chunk_len. */
+    LmbSegTransfer large_restore = snapshot;
+    fill_id(&large_restore.request_id, 186);
+    large_restore.snapshot_size = (uint64_t)LMB_MAX_PAY + 1u;
+    large_restore.offset = 0;
+    large_restore.chunk_len = LMB_MAX_PAY;
+    large_restore.flags = LMB_SEG_XFER_BEGIN;
+    assert(lmb_seg_table_restore_begin(table, &large_restore, 123) ==
+           LMB_SEG_STATUS_OK);
+    assert(lmb_seg_table_snapshot_check(table, &snapshot, 123) ==
+           LMB_SEG_STATUS_BUSY);
+    assert(lmb_seg_table_restore_finish(table, &large_restore, 0, 124) ==
+           LMB_SEG_STATUS_OK);
+    assert(lmb_seg_table_restore_begin(table, &large_restore, 125) ==
+           LMB_SEG_STATUS_OK);
+    large_restore.offset = LMB_MAX_PAY;
+    large_restore.chunk_len = 1;
+    large_restore.flags = LMB_SEG_XFER_END;
+    assert(lmb_seg_table_restore_finish(table, &large_restore, 1, 126) ==
            LMB_SEG_STATUS_OK);
 
     LmbSegControl close = {

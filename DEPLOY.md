@@ -43,20 +43,22 @@ apt update && apt install -y build-essential git python3-numpy ufw
 adduser --disabled-password --gecos "" lumabri
 ```
 
-Open only what the swarm needs. Ports: **7300** tracker, **7301**
-maintainer (byte serving), **7302** classic expert executor and, by default,
-**7303-7306** four layer-aligned Segment origin ranges. Allow through 7309 if
-you intentionally set up to seven ranges.
+Open only what the swarm needs. **7300** is the required tracker/control port.
+The signed relay makes every data path work with only that inbound port. For
+the lower-latency direct path also open **7301** (bytes), **7302** (classic
+experts) and, by default, **7303-7306** (four Segment ranges). Allow through
+7309 only when intentionally using up to seven public ranges.
 
 ```sh
 ufw allow OpenSSH
-ufw allow 7300:7309/tcp
+ufw allow 7300/tcp
+# fastest public-server path (optional): ufw allow 7301:7309/tcp
 ufw --force enable
 ```
 
-In the Hetzner Cloud console, apply the same rule in the **Firewall**
-section (inbound TCP 22, 7300-7309) — the cloud firewall sits in front of
-the machine and a ufw rule alone will not open it.
+In the Hetzner Cloud console, apply the same selected rule in the **Firewall**
+section — the cloud firewall sits in front of the machine and a ufw rule alone
+will not open it.
 
 ---
 
@@ -288,13 +290,14 @@ journalctl -u lumabri -f
 **A reachable address gives the swarm its fastest path.** `serve` detects a
 public IPv4 attached to the machine and publishes it automatically. If the
 host sits behind NAT, pass `--advertise` only after forwarding the advertised
-ports. Lumabri deliberately does not publish an unreachable Segment chain;
-bytes and classic experts continue through their outbound tracker relay.
+ports. Otherwise Lumabri publishes Segment as relay-only and carries bytes,
+experts and stateful layer runs through signed outbound tracker tunnels.
 
 You should see, in order: the maintainer announcing how much it holds, the
 line `ORIGIN: signed the truth of N files with <pubkey>`, the classic executor
-on 7302 and the Segment origin ranges on 7303-7306. The tracker should accept
-all direct endpoints under `YOUR_SERVER_IP`, not `127.0.0.1`.
+and the Segment origin ranges. A public deployment should advertise direct
+endpoints under `YOUR_SERVER_IP`; a NAT deployment explicitly reports
+`data plane relay` and needs no public Segment endpoint.
 
 `--exec-cache 256` is the RAM/SSD trade: 256 expert slots resident, the
 rest streamed from disk on demand. Raise it if the box has spare RAM (the
@@ -398,10 +401,10 @@ the donor pulls it — verifying every byte against the signed truth — and
 then serves it.
 
 **Donate compute** — choose `compute` in the normal TUI. If the current chat
-uses Segment, the machine is directly reachable and a range fits after the
-RAM reserve, the tracker assigns its rarest origin range automatically.
-Otherwise Lumabri starts the finer-grained expert donor, including its NAT
-relay. Manual expert commands remain useful diagnostics:
+uses Segment and a range fits after the RAM reserve, the tracker assigns its
+rarest origin range automatically. A reachable machine uses direct P2P; a NAT
+machine uses Segment relay. If the range does not fit, Lumabri starts the
+finer-grained expert donor. Manual expert commands remain useful diagnostics:
 
 ```sh
 expert_node_glm --model /path/to/model --tracker YOUR_SERVER_IP:7300 \
@@ -417,8 +420,10 @@ no dense weights at all.
 Chatters discover it automatically. Ordinary Segment ranges replace matching
 fallback origin ranges on the next route generation, so the original server
 does progressively less work while retaining full coverage. Expert requests
-can fail over to replicas; a selected Segment dying mid-conversation still
-ends that run until checkpoint/replay lands.
+fail over to replicas. Stateful Segment checkpoints at completed turns when a
+compatible replica exists; a dead selected peer is replaced by an exact-range
+replica, restored and replayed. If no compatible replica exists the run fails
+explicitly.
 
 ---
 
@@ -468,7 +473,7 @@ Two things worth knowing:
 
 | symptom | cause |
 |---|---|
-| `no swarm at HOST:7300` | cloud firewall: open 7300-7309 in the Hetzner console too |
+| `no swarm at HOST:7300` | cloud firewall: open tracker TCP 7300 in the provider console too |
 | the server logs nothing for minutes on first start | it is hashing the model; the progress lines say how far along |
 | `il motore non è arrivato a essere pronto` | the engine's own last 25 lines are printed underneath — read those |
 | engine killed by signal 9 | out of memory: lower `--ctx` and `--cap`, or take a bigger box |

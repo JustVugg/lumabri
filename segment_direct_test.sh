@@ -7,6 +7,7 @@ cd "$(dirname "$0")"
 
 SEGMENT_NODE_BIN=${SEGMENT_NODE_BIN:-./segment_node}
 SEGMENT_CHAT_BIN=${SEGMENT_CHAT_BIN:-./segment_chat}
+TRACKER_BIN=${TRACKER_BIN:-./tracker}
 
 : "${GLM_EDGE_MODEL:?set GLM_EDGE_MODEL}"
 : "${GLM_EDGE_REF:?set GLM_EDGE_REF}"
@@ -48,7 +49,7 @@ wait_port() {
 
 env LUMABRI_PEER_KEY="$TMP/tracker.peer.key" \
     LUMABRI_KNOWN_HOSTS="$TMP/tracker.known_hosts" \
-    ./tracker --port 7868 --peer-bindings "$TMP/bindings" \
+    "$TRACKER_BIN" --port 7868 --peer-bindings "$TMP/bindings" \
     >"$TMP/tracker.log" 2>&1 &
 TRACKER_PID=$!
 wait_port 7868

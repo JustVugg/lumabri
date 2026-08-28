@@ -233,6 +233,11 @@ enum {
      * origin's exact layer-aligned ranges, rarest first.  The subsequent
      * signed SEG_REGISTER remains the authority; this is only placement. */
     LMB_SEG_ASSIGN = 55, LMB_SEG_ASSIGN_R = 56,
+    /* Stateful Segment relay. The caller names one exact registered peer and
+     * wraps an ordinary Segment request. The tracker only forwards bytes over
+     * that peer's signed outbound control connection; the executor remains
+     * the sole authority for session, lease and request-id validation. */
+    LMB_RSEG = 57, LMB_RSEG_FWD = 58, LMB_RSEG_R = 59,
 };
 
 /* REGISTER body: str name, str addr, str model, u64 held_bytes,
@@ -327,7 +332,12 @@ static void lmb_frame_caps(uint32_t op, uint32_t *body_cap, uint32_t *pay_cap) {
     case LMB_SEG_RUN_R:
     case LMB_SEG_SNAPSHOT_R:
     case LMB_SEG_RESTORE:
+    case LMB_RSEG:
+    case LMB_RSEG_FWD:
+    case LMB_RSEG_R:
         *pay_cap = LMB_MAX_PAY;
+        if (op == LMB_RSEG || op == LMB_RSEG_FWD || op == LMB_RSEG_R)
+            *body_cap = LMB_MAX_CONTROL_BODY;
         break;
     case LMB_RREAD_FWD:
     case LMB_EXEC:

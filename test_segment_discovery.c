@@ -208,7 +208,10 @@ static void test_tracker(const char *tracker) {
         assert(!lmb_seg_routes_fetch(tracker, &q, &s));
         assert(s.complete && s.count == 1);
         assert(s.entries[0].owner.route_generation == s.route_generation);
-        assert(s.entries[0].transport == LMB_SEG_TRANSPORT_DIRECT);
+        /* A reachable executor advertises the preferred direct endpoint and
+         * the live signed control tunnel as an exact-peer fallback. */
+        assert(s.entries[0].transport ==
+               (LMB_SEG_TRANSPORT_DIRECT | LMB_SEG_TRANSPORT_RELAY));
     }
 
     /* Telemetry may refresh at heartbeat frequency without fencing sessions

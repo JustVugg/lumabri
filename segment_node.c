@@ -17,6 +17,7 @@
 
 #define NODE_SESSIONS_MAX 256u
 #define NODE_CONNECTIONS_MAX 256u
+#define NODE_SNAPSHOT_CHUNK (1u << 20)
 
 typedef struct {
     int used;
@@ -26,11 +27,26 @@ typedef struct {
     LmbSegId cached_request;
     uint8_t *cached_output;
     size_t cached_bytes;
+    uint8_t *snapshot;
+    size_t snapshot_bytes;
+    uint64_t snapshot_sequence;
+    uint64_t snapshot_position;
+    uint8_t *restore;
+    size_t restore_bytes;
+    size_t restore_received;
+    LmbSegTransfer restore_transfer;
+    uint64_t restore_updated_ms;
+    int restore_active;
+    LmbSegId restored_request;
+    uint64_t restored_sequence;
+    uint64_t restored_position;
+    int restored_valid;
 } NodeSession;
 
 typedef struct {
     pthread_mutex_t lock;
     char tracker[256];
+    char local_addr[64];
     LmbSegAdvert advert;
     uint8_t pk[32], sk[64];
     LmbSegOwner owner;
@@ -85,8 +101,8 @@ static int registration_owner(TrackerRegistration *r,
     return ok;
 }
 
-static int tracker_heartbeat(int fd, const uint8_t nonce[32],
-                             TrackerRegistration *r) {
+static int tracker_register_send(int fd, const uint8_t nonce[32],
+                                 TrackerRegistration *r) {
     LmbSegAdvert advert;
     pthread_mutex_lock(&r->lock);
     advert = r->advert;
@@ -106,22 +122,63 @@ static int tracker_heartbeat(int fd, const uint8_t nonce[32],
         return -1;
     }
     free(body.p);
-    LmbMsg reply = {0};
+    return 0;
+}
+
+static int tracker_registration_reply(TrackerRegistration *r,
+                                      const LmbMsg *reply) {
     LmbSegOwner owner;
-    int received = !lmb_recv(fd, &reply);
-    if (received && reply.op == LMB_ERR)
-        fprintf(stderr, "[segment-node] tracker rejected registration: %.*s\n",
-                (int)reply.body_len, reply.body ? (char *)reply.body : "");
-    int bad = !received || reply.op != LMB_SEG_REGISTER_R || reply.pay_len ||
-              lmb_seg_registration_reply_decode(reply.body, reply.body_len,
-                                                 &owner);
-    lmb_msg_free(&reply);
-    if (bad) return -1;
+    if (reply->op != LMB_SEG_REGISTER_R || reply->pay_len ||
+        lmb_seg_registration_reply_decode(reply->body, reply->body_len, &owner))
+        return -1;
     pthread_mutex_lock(&r->lock);
     r->owner = owner;
     r->ready = 1;
     pthread_mutex_unlock(&r->lock);
     return 0;
+}
+
+static int segment_request_op(uint32_t op) {
+    return op == LMB_SEG_OPEN || op == LMB_SEG_RUN ||
+           op == LMB_SEG_SNAPSHOT || op == LMB_SEG_RESTORE ||
+           op == LMB_SEG_CLOSE || op == LMB_SEG_HEALTH;
+}
+
+static int handle_rseg_fwd(TrackerRegistration *r, int tracker_fd,
+                           const LmbMsg *forward) {
+    LmbCur cursor = { forward->body, forward->body_len, 0 };
+    uint32_t relay_id = 0, inner_op = 0, inner_body_len = 0;
+    if (lmb_cur_u32(&cursor, &relay_id) ||
+        lmb_cur_u32(&cursor, &inner_op) ||
+        lmb_cur_u32(&cursor, &inner_body_len) ||
+        !segment_request_op(inner_op) ||
+        inner_body_len != cursor.len - cursor.off ||
+        !lmb_frame_shape_ok(inner_op, inner_body_len, forward->pay_len))
+        return -1;
+
+    LmbMsg response = {0};
+    int local_fd = lmb_connect(r->local_addr);
+    int ok = local_fd >= 0 &&
+             !lmb_send(local_fd, inner_op, cursor.p + cursor.off,
+                       inner_body_len, forward->pay, forward->pay_len) &&
+             !lmb_recv(local_fd, &response) &&
+             response.op == inner_op + 1u &&
+             lmb_frame_shape_ok(response.op, response.body_len,
+                                response.pay_len);
+    if (local_fd >= 0) lmb_close(local_fd);
+    LmbBuf body = {0};
+    int bad = lmb_buf_u32(&body, relay_id) ||
+              lmb_buf_u32(&body, ok ? 1u : 0u) ||
+              lmb_buf_u32(&body, ok ? response.op : 0u) ||
+              lmb_buf_u32(&body, ok ? response.body_len : 0u) ||
+              (ok && lmb_buf_bytes(&body, response.body, response.body_len));
+    if (!bad)
+        bad = lmb_send(tracker_fd, LMB_RSEG_R, body.p, (uint32_t)body.len,
+                       ok ? response.pay : NULL,
+                       ok ? response.pay_len : 0u);
+    free(body.p);
+    lmb_msg_free(&response);
+    return bad;
 }
 
 static void *registration_worker(void *opaque) {
@@ -134,8 +191,47 @@ static void *registration_worker(void *opaque) {
             sleep(1);
             continue;
         }
-        while (!r->stop && !tracker_heartbeat(fd, nonce, r)) {
-            for (int i = 0; i < 20 && !r->stop; i++) usleep(100000);
+        /* Poll provides the short heartbeat cadence; once a frame starts,
+         * allow a slow WAN relay enough time to receive the complete bounded
+         * activation/snapshot instead of treating a 200 ms partial read as a
+         * broken control tunnel. */
+        struct timeval timeout = {60, 0};
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof timeout);
+        uint64_t last_heartbeat = now_ms();
+        if (tracker_register_send(fd, nonce, r)) {
+            lmb_close(fd); sleep(1); continue;
+        }
+        while (!r->stop) {
+            struct pollfd input = { .fd = fd, .events = POLLIN };
+            int ready = poll(&input, 1, 200);
+            if (ready < 0) {
+                if (errno == EINTR) continue;
+                break;
+            }
+            if (!ready) {
+                if (now_ms() - last_heartbeat >= 2000u) {
+                    if (tracker_register_send(fd, nonce, r)) break;
+                    last_heartbeat = now_ms();
+                }
+                continue;
+            }
+            if (input.revents & (POLLERR | POLLHUP | POLLNVAL)) break;
+            LmbMsg message = {0};
+            if (lmb_recv(fd, &message)) {
+                break;
+            }
+            int bad = 0;
+            if (message.op == LMB_SEG_REGISTER_R)
+                bad = tracker_registration_reply(r, &message);
+            else if (message.op == LMB_RSEG_FWD)
+                bad = handle_rseg_fwd(r, fd, &message);
+            else if (message.op == LMB_ERR) {
+                fprintf(stderr,
+                        "[segment-node] tracker rejected control message\n");
+                bad = 1;
+            }
+            lmb_msg_free(&message);
+            if (bad) break;
         }
         lmb_close(fd);
         pthread_mutex_lock(&r->lock);
@@ -180,6 +276,8 @@ static void session_release(Node *node, NodeSession *slot) {
     pthread_mutex_lock(&slot->lock);
     coli_segment_session_destroy(slot->session);
     free(slot->cached_output);
+    free(slot->snapshot);
+    free(slot->restore);
     pthread_mutex_unlock(&slot->lock);
     pthread_mutex_destroy(&slot->lock);
     memset(slot, 0, sizeof *slot);
@@ -193,6 +291,20 @@ static void *session_reaper(void *opaque) {
     Node *node = (Node *)opaque;
     while (!g_stop) {
         pthread_mutex_lock(&node->sessions_lock);
+        for (size_t i = 0; i < NODE_SESSIONS_MAX; i++) {
+            NodeSession *slot = &node->sessions[i];
+            if (!slot->used) continue;
+            pthread_mutex_lock(&slot->lock);
+            if (slot->restore_active &&
+                now_ms() - slot->restore_updated_ms >= 60000u) {
+                (void)lmb_seg_table_restore_finish(
+                    node->table, &slot->restore_transfer, 0, now_ms());
+                free(slot->restore); slot->restore = NULL;
+                slot->restore_bytes = slot->restore_received = 0;
+                slot->restore_active = 0;
+            }
+            pthread_mutex_unlock(&slot->lock);
+        }
         LmbSegId expired;
         while (lmb_seg_table_reap_expired(node->table, now_ms(), &expired)) {
             NodeSession *slot = session_find(node, &expired);
@@ -262,6 +374,58 @@ static int send_reply(int fd, uint32_t op, LmbSegReply *reply,
     int rc = lmb_send(fd, op, body, body_len, pay, (uint32_t)pay_len);
     free(body);
     return rc;
+}
+
+static int send_transfer_reply(int fd, uint32_t op,
+                               LmbSegTransferReply *reply,
+                               const void *pay, size_t pay_len) {
+    uint8_t *body = NULL;
+    uint32_t body_len = 0;
+    if (pay_len > UINT32_MAX ||
+        lmb_seg_transfer_reply_encode(reply, &body, &body_len)) return -1;
+    int rc = lmb_send(fd, op, body, body_len, pay, (uint32_t)pay_len);
+    free(body);
+    return rc;
+}
+
+typedef struct {
+    uint8_t *data;
+    size_t length;
+    size_t capacity;
+    size_t limit;
+} SnapshotBuffer;
+
+static int snapshot_write(void *opaque, const void *data, size_t size) {
+    SnapshotBuffer *buffer = opaque;
+    if (size > buffer->limit - buffer->length) return -1;
+    size_t needed = buffer->length + size;
+    if (needed > buffer->capacity) {
+        size_t capacity = buffer->capacity ? buffer->capacity : 4096u;
+        while (capacity < needed) {
+            if (capacity > buffer->limit / 2u) { capacity = buffer->limit; break; }
+            capacity *= 2u;
+        }
+        uint8_t *grown = realloc(buffer->data, capacity);
+        if (!grown) return -1;
+        buffer->data = grown; buffer->capacity = capacity;
+    }
+    if (size) memcpy(buffer->data + buffer->length, data, size);
+    buffer->length = needed;
+    return 0;
+}
+
+typedef struct {
+    const uint8_t *data;
+    size_t length;
+    size_t offset;
+} SnapshotReader;
+
+static int snapshot_read(void *opaque, void *data, size_t size) {
+    SnapshotReader *reader = opaque;
+    if (size > reader->length - reader->offset) return -1;
+    if (size) memcpy(data, reader->data + reader->offset, size);
+    reader->offset += size;
+    return 0;
 }
 
 static int handle_open(Node *node, int fd, const LmbMsg *msg) {
@@ -411,6 +575,9 @@ static int handle_run(Node *node, int fd, const LmbMsg *msg) {
                 slot->cached_output = output;
                 slot->cached_bytes = bytes;
                 slot->cached_request = run.request_id;
+                free(slot->snapshot);
+                slot->snapshot = NULL;
+                slot->snapshot_bytes = 0;
                 reply.status = status;
                 reply_state(node, &reply);
                 int rc = send_reply(fd, LMB_SEG_RUN_R, &reply, output, bytes);
@@ -426,6 +593,197 @@ static int handle_run(Node *node, int fd, const LmbMsg *msg) {
     reply_state(node, &reply);
     free(tokens);
     return send_reply(fd, LMB_SEG_RUN_R, &reply, NULL, 0);
+}
+
+static int handle_snapshot(Node *node, int fd, const LmbMsg *msg) {
+    LmbSegTransfer transfer;
+    if (msg->pay_len ||
+        lmb_seg_transfer_decode(msg->body, msg->body_len, &transfer)) return -1;
+    LmbSegStatus status = lmb_seg_table_snapshot_check(
+        node->table, &transfer, now_ms());
+    LmbSegTransferReply response;
+    memset(&response, 0, sizeof response);
+    response.reply = make_reply(&transfer.session_id, &transfer.request_id,
+                                &transfer.owner, status);
+    uint8_t *payload = NULL;
+    size_t payload_bytes = 0;
+    if (status == LMB_SEG_STATUS_OK) {
+        pthread_mutex_lock(&node->sessions_lock);
+        NodeSession *slot = session_find(node, &transfer.session_id);
+        if (slot) pthread_mutex_lock(&slot->lock);
+        pthread_mutex_unlock(&node->sessions_lock);
+        if (!slot) status = LMB_SEG_STATUS_NOT_FOUND;
+        else {
+            int initial = transfer.snapshot_size == 0 && transfer.offset == 0 &&
+                          transfer.chunk_len == 0;
+            if (initial) {
+                SnapshotBuffer writer = {
+                    .limit = (size_t)lmb_env_int(
+                        "LUMABRI_SEGMENT_MAX_SNAPSHOT_MB", 2048, 1, 32768) << 20,
+                };
+                char error[256] = {0};
+                if (coli_segment_snapshot(slot->session, snapshot_write, &writer,
+                                          error, sizeof error) ||
+                    !writer.length) {
+                    fprintf(stderr, "[segment-node] snapshot: %s\n",
+                            error[0] ? error : "empty or oversized snapshot");
+                    free(writer.data);
+                    status = LMB_SEG_STATUS_INTERNAL;
+                } else {
+                    free(slot->snapshot);
+                    slot->snapshot = writer.data;
+                    slot->snapshot_bytes = writer.length;
+                    slot->snapshot_sequence = transfer.sequence;
+                    slot->snapshot_position = transfer.position;
+                }
+            } else if (!slot->snapshot ||
+                       transfer.snapshot_size != slot->snapshot_bytes ||
+                       transfer.sequence != slot->snapshot_sequence ||
+                       transfer.position != slot->snapshot_position) {
+                status = LMB_SEG_STATUS_CONFLICT;
+            }
+            if (status == LMB_SEG_STATUS_OK) {
+                uint64_t offset = initial ? 0 : transfer.offset;
+                size_t requested = initial ? NODE_SNAPSHOT_CHUNK
+                                           : transfer.chunk_len;
+                if (!requested || offset > slot->snapshot_bytes) {
+                    status = LMB_SEG_STATUS_BAD_REQUEST;
+                } else {
+                    size_t remaining = slot->snapshot_bytes - (size_t)offset;
+                    payload_bytes = remaining < requested ? remaining : requested;
+                    payload = malloc(payload_bytes ? payload_bytes : 1u);
+                    if (!payload) {
+                        status = LMB_SEG_STATUS_INTERNAL;
+                        payload_bytes = 0;
+                    } else if (payload_bytes) {
+                        memcpy(payload, slot->snapshot + offset, payload_bytes);
+                    }
+                    response.snapshot_size = slot->snapshot_bytes;
+                    response.offset = offset;
+                    response.chunk_len = (uint32_t)payload_bytes;
+                    if (!offset) response.transfer_flags |= LMB_SEG_XFER_BEGIN;
+                    if (payload_bytes == remaining)
+                        response.transfer_flags |= LMB_SEG_XFER_END;
+                }
+            }
+            pthread_mutex_unlock(&slot->lock);
+        }
+    }
+    response.reply.status = status;
+    if (status == LMB_SEG_STATUS_OK) reply_state(node, &response.reply);
+    else {
+        response.snapshot_size = response.offset = 0;
+        response.chunk_len = response.transfer_flags = 0;
+        free(payload); payload = NULL; payload_bytes = 0;
+    }
+    int rc = send_transfer_reply(fd, LMB_SEG_SNAPSHOT_R, &response,
+                                 payload, payload_bytes);
+    free(payload);
+    return rc;
+}
+
+static int handle_restore(Node *node, int fd, const LmbMsg *msg) {
+    LmbSegTransfer transfer;
+    if (lmb_seg_transfer_decode(msg->body, msg->body_len, &transfer) ||
+        msg->pay_len != transfer.chunk_len) return -1;
+    LmbSegStatus status = LMB_SEG_STATUS_OK;
+    pthread_mutex_lock(&node->sessions_lock);
+    NodeSession *slot = session_find(node, &transfer.session_id);
+    if (slot) pthread_mutex_lock(&slot->lock);
+    pthread_mutex_unlock(&node->sessions_lock);
+    if (!slot) status = LMB_SEG_STATUS_NOT_FOUND;
+    else if (slot->restored_valid &&
+             lmb_seg_id_equal(&slot->restored_request, &transfer.request_id) &&
+             slot->restored_sequence == transfer.sequence &&
+             slot->restored_position == transfer.position) {
+        status = LMB_SEG_STATUS_DUPLICATE;
+    } else {
+        int same = slot->restore_active &&
+                   lmb_seg_id_equal(&slot->restore_transfer.request_id,
+                                    &transfer.request_id) &&
+                   slot->restore_transfer.snapshot_size == transfer.snapshot_size &&
+                   slot->restore_transfer.sequence == transfer.sequence &&
+                   slot->restore_transfer.position == transfer.position;
+        if (transfer.flags & LMB_SEG_XFER_BEGIN) {
+            if (!same) {
+                status = lmb_seg_table_restore_begin(
+                    node->table, &transfer, now_ms());
+                size_t limit = (size_t)lmb_env_int(
+                    "LUMABRI_SEGMENT_MAX_SNAPSHOT_MB", 2048, 1, 32768) << 20;
+                if (status == LMB_SEG_STATUS_OK &&
+                    transfer.snapshot_size > limit)
+                    status = LMB_SEG_STATUS_QUOTA;
+                if (status == LMB_SEG_STATUS_OK) {
+                    free(slot->restore);
+                    slot->restore = malloc((size_t)transfer.snapshot_size);
+                    if (!slot->restore) status = LMB_SEG_STATUS_INTERNAL;
+                }
+                if (status == LMB_SEG_STATUS_OK) {
+                    slot->restore_bytes = (size_t)transfer.snapshot_size;
+                    slot->restore_received = 0;
+                    slot->restore_transfer = transfer;
+                    slot->restore_active = 1;
+                } else if (status != LMB_SEG_STATUS_BUSY) {
+                    (void)lmb_seg_table_restore_finish(
+                        node->table, &transfer, 0, now_ms());
+                }
+            }
+        } else if (!same) {
+            status = LMB_SEG_STATUS_CONFLICT;
+        }
+        if (status == LMB_SEG_STATUS_OK && slot->restore_active) {
+            if (transfer.offset < slot->restore_received &&
+                transfer.chunk_len <= slot->restore_received - transfer.offset &&
+                !memcmp(slot->restore + transfer.offset,
+                        msg->pay, transfer.chunk_len)) {
+                status = LMB_SEG_STATUS_DUPLICATE;
+            } else if (transfer.offset != slot->restore_received ||
+                       transfer.chunk_len >
+                           slot->restore_bytes - slot->restore_received) {
+                status = LMB_SEG_STATUS_OUT_OF_ORDER;
+            } else {
+                if (transfer.chunk_len)
+                    memcpy(slot->restore + slot->restore_received,
+                           msg->pay, transfer.chunk_len);
+                slot->restore_received += transfer.chunk_len;
+                slot->restore_updated_ms = now_ms();
+                if (transfer.flags & LMB_SEG_XFER_END) {
+                    SnapshotReader reader = {
+                        slot->restore, slot->restore_bytes, 0
+                    };
+                    char error[256] = {0};
+                    int restored = slot->restore_received == slot->restore_bytes &&
+                        !coli_segment_restore(slot->session, snapshot_read,
+                                              &reader, error, sizeof error) &&
+                        reader.offset == reader.length;
+                    if (!restored)
+                        fprintf(stderr, "[segment-node] restore: %s\n",
+                                error[0] ? error : "truncated snapshot");
+                    status = lmb_seg_table_restore_finish(
+                        node->table, &transfer, restored, now_ms());
+                    if (!restored && status == LMB_SEG_STATUS_OK)
+                        status = LMB_SEG_STATUS_INTERNAL;
+                    if (restored && status == LMB_SEG_STATUS_OK) {
+                        slot->restored_request = transfer.request_id;
+                        slot->restored_sequence = transfer.sequence;
+                        slot->restored_position = transfer.position;
+                        slot->restored_valid = 1;
+                        free(slot->cached_output);
+                        slot->cached_output = NULL; slot->cached_bytes = 0;
+                    }
+                    free(slot->restore); slot->restore = NULL;
+                    slot->restore_bytes = slot->restore_received = 0;
+                    slot->restore_active = 0;
+                }
+            }
+        }
+    }
+    if (slot) pthread_mutex_unlock(&slot->lock);
+    LmbSegReply reply = make_reply(&transfer.session_id, &transfer.request_id,
+                                   &transfer.owner, status);
+    if (status == LMB_SEG_STATUS_OK || status == LMB_SEG_STATUS_DUPLICATE)
+        reply_state(node, &reply);
+    return send_reply(fd, LMB_SEG_RESTORE_R, &reply, NULL, 0);
 }
 
 static int handle_control(Node *node, int fd, const LmbMsg *msg) {
@@ -471,6 +829,8 @@ static void *connection_worker(void *opaque) {
         int rc;
         if (msg.op == LMB_SEG_OPEN) rc = handle_open(node, fd, &msg);
         else if (msg.op == LMB_SEG_RUN) rc = handle_run(node, fd, &msg);
+        else if (msg.op == LMB_SEG_SNAPSHOT) rc = handle_snapshot(node, fd, &msg);
+        else if (msg.op == LMB_SEG_RESTORE) rc = handle_restore(node, fd, &msg);
         else if (msg.op == LMB_SEG_CLOSE || msg.op == LMB_SEG_HEALTH)
             rc = handle_control(node, fd, &msg);
         else rc = lmb_send(fd, LMB_ERR, "unsupported Segment operation", 29,
@@ -489,7 +849,8 @@ static void usage(const char *program) {
         "(--range A:B | --auto-range) --port N --tracker HOST:PORT "
         "--advertise HOST:PORT --name PEER "
         "(--auto-identity | --model-root HEX64 --tokenizer-root HEX64) "
-        "[--fallback] [--context N] [--max-rows N] [--sessions N]\n",
+        "[--fallback] [--relay-only] [--context N] [--max-rows N] "
+        "[--sessions N]\n",
         program);
 }
 
@@ -549,6 +910,7 @@ int main(int argc, char **argv) {
     int auto_identity = has_arg(argc, argv, "--auto-identity");
     int auto_range = has_arg(argc, argv, "--auto-range");
     int fallback = has_arg(argc, argv, "--fallback");
+    int relay_only = has_arg(argc, argv, "--relay-only");
     if (!engine_id || !model_dir || !model || ((range != NULL) == auto_range) ||
         !port_text || !tracker ||
         !advertise || !name ||
@@ -692,9 +1054,8 @@ int main(int argc, char **argv) {
     a->state_dtype = node.cap.state_dtype; a->state_width = node.cap.state_width;
     a->max_sessions = max_sessions;
     if (fallback) a->flags |= LMB_SEG_ADVERT_FALLBACK;
+    if (relay_only) a->flags |= LMB_SEG_ADVERT_RELAY_ONLY;
     a->capabilities = node.cap.flags & LMB_SEG_CAP_KNOWN_MASK;
-    /* Snapshot/replay is intentionally not on the network data plane yet. */
-    a->capabilities &= ~LMB_SEG_CAP_SNAPSHOT;
     snprintf(a->engine_id, sizeof a->engine_id, "%s", node.cap.engine_id);
     snprintf(a->state_schema, sizeof a->state_schema, "%s", node.cap.state_schema);
     snprintf(a->numeric_class, sizeof a->numeric_class, "%s", node.cap.numeric_class);
@@ -706,6 +1067,8 @@ int main(int argc, char **argv) {
     TrackerRegistration *registration = &node.registration;
     pthread_mutex_init(&registration->lock, NULL);
     snprintf(registration->tracker, sizeof registration->tracker, "%s", tracker);
+    snprintf(registration->local_addr, sizeof registration->local_addr,
+             "127.0.0.1:%u", port);
     registration->advert = *a;
     char peer_key_path[512];
     if (lmb_peer_identity(lmb_peer_key_path(peer_key_path,

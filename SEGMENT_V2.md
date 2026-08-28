@@ -6,13 +6,14 @@ particular model's KV layout. Colibri owns the model math, weights, accelerator
 and opaque state; Lumabri owns transport, session identity, ordering, leases,
 fencing and route lifecycle.
 
-The wire/session contract, tracker discovery and opt-in direct executor are
-implemented. `segment_node` dispatches `SEG_OPEN`, `SEG_RUN`, `SEG_CLOSE` and
-`SEG_HEALTH` through Colibri's public ABI; `segment_chat` keeps Edge math local
-and freezes an immutable complete route before inference. The normal
-interactive CLI does not advertise Segment capability automatically yet.
-Snapshot/restore wire envelopes exist, but snapshot transport and replay are
-still deliberately unadvertised. See [SEGMENT_DIRECT.md](SEGMENT_DIRECT.md).
+The wire/session contract, tracker discovery, direct/relay executor and native
+interactive path are implemented. `segment_node` dispatches `SEG_OPEN`,
+`SEG_RUN`, `SEG_SNAPSHOT`, `SEG_RESTORE`, `SEG_CLOSE` and `SEG_HEALTH` through
+Colibri's public ABI; `segment_chat` keeps Edge math local and binds a complete
+route before inference. Snapshot bytes are chunked without a whole-checkpoint
+frame limit, and persistent chats restore a compatible chain plus replay token
+deltas after a selected peer fails. See
+[SEGMENT_DIRECT.md](SEGMENT_DIRECT.md).
 
 ## Tracker discovery
 
@@ -28,8 +29,9 @@ plus:
 
 - a random lease ID and monotonic fencing epoch per executor;
 - a monotonic route generation for the complete placement;
-- data-plane transport capability (`DIRECT` today; `RELAY` remains reserved
-  until Segment forwarding is implemented rather than inferred from SREG);
+- data-plane transport capability (`DIRECT`, `RELAY`, or both). Relay is
+  published only for a live signed SREG control tunnel; relay-only peers never
+  leak their loopback listener as a direct endpoint;
 - whether the returned ranges contain an exact executable chain. Interval
   union alone is insufficient because overlapping executors would run a layer
   twice; replicas may overlap, but the selected boundaries must join exactly.
@@ -119,10 +121,11 @@ outside the table lock, then calls `run_commit` or `run_abort`. Commit alone
 advances sequence and position.
 
 The table records the last 16 committed request identities and digests. A
-duplicate is never executed twice. The direct executor retains the most recent
+duplicate is never executed twice. The executor retains the most recent
 committed activation response for a safe immediate retry. An older recognized
-duplicate returns `NEEDS_RESTORE`; once replay lands, that status will restore
-from a checkpoint rather than ever calling the model twice.
+duplicate returns `NEEDS_RESTORE`; the gateway restores the common checkpoint
+and replays the missing token suffix rather than ever calling the model twice
+on ambiguous state.
 
 ## Fencing
 
@@ -162,6 +165,8 @@ The real-tracker discovery gate additionally covers signed registration,
 compatibility filtering, replicas, complete chains, telemetry stability,
 draining, lease rotation and asynchronous snapshots. These are protocol and
 control-plane fixtures. `segment_direct_test.sh` adds the real data plane: two
-peers per family, real prefill/decode, persistent sessions and three oracle
-tokens for all six models, plus overlapping real sessions, in plaintext and
-encrypted modes.
+peers per family, real prefill/decode, persistent sampled sessions and three
+greedy oracle tokens for all six models, plus overlapping real sessions. The
+relay gate forces every stateful operation through tracker tunnels; the
+failover gate kills a selected peer between turns and requires checkpoint
+restore plus replay before generation can continue.
