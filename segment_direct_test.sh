@@ -126,17 +126,20 @@ print(",".join(map(str,prompt))+"|"+",".join(map(str,full[len(prompt):len(prompt
     # SUBMIT/DATA/DONE gateway codec.  Exercise that persistent mode for every
     # family as well as the token-ID oracle above; a single text turn is enough
     # to prove tokenizer, framing, route/session lifecycle and clean EOF.
-    serve_output=$(printf 'SUBMIT 1 0 2 2 0.7 0.95\nhi\n' | \
+    serve_output="$TMP/$family-serve.out"
+    printf 'SUBMIT 1 0 2 2 0.7 0.95\nhi\n' | \
         "${run_env[@]}" "$SEGMENT_CHAT_BIN" --serve --engine "$family" \
         --model-dir "$model_dir" --model "$model" \
         --tracker 127.0.0.1:7868 --model-root "$model_root" \
-        --tokenizer-root "$tokenizer_root" --context 64 --max-rows 16)
-    if ! grep -q $'\001\001READY\001\001' <<<"$serve_output" ||
-       ! grep -q '^DATA 1 ' <<<"$serve_output" ||
-       ! grep -q '^DONE 1 STAT ' <<<"$serve_output"; then
-        printf '%s\n' "$serve_output"
+        --tokenizer-root "$tokenizer_root" --context 64 --max-rows 16 \
+        >"$serve_output"
+    if ! grep -aq $'\001\001READY\001\001' "$serve_output" ||
+       ! grep -aq '^DATA 1 ' "$serve_output" ||
+       [[ $(grep -ac '^DATA 1 ' "$serve_output") -lt 2 ]] ||
+       ! grep -aq '^DONE 1 STAT ' "$serve_output"; then
+        cat "$serve_output"
         cat "$TMP/$family-left.log" "$TMP/$family-right.log"
-        echo "SEGMENT DIRECT $family: serve-codec gate failed" >&2
+        echo "SEGMENT DIRECT $family: incremental serve-codec gate failed" >&2
         exit 1
     fi
     if [[ "$family" == olmoe ]]; then
@@ -171,15 +174,25 @@ def turn(request_id, prompt):
     process.stdin.flush()
     if line() != f"ACCEPT {request_id}\n".encode():
         raise RuntimeError("Segment request was not accepted")
-    data_header = line().split()
-    if data_header[:2] != [b"DATA", str(request_id).encode()]:
-        raise RuntimeError("Segment response has no DATA frame")
-    size = int(data_header[2])
-    data = process.stdout.read(size)
-    if len(data) != size or process.stdout.read(1) != b"\n":
-        raise RuntimeError("Segment DATA frame is truncated")
-    if not line().startswith(f"DONE {request_id} STAT ".encode()):
-        raise RuntimeError("Segment response has no DONE frame")
+    seen_data = seen_prefill = seen_decode = False
+    while True:
+        frame = line()
+        if frame.startswith(f"PROGRESS {request_id} PREFILL ".encode()):
+            seen_prefill = True
+        elif frame.startswith(f"PROGRESS {request_id} DECODE ".encode()):
+            seen_decode = True
+        elif frame.startswith(f"DATA {request_id} ".encode()):
+            size = int(frame.split()[2])
+            data = process.stdout.read(size)
+            if len(data) != size or process.stdout.read(1) != b"\n":
+                raise RuntimeError("Segment DATA frame is truncated")
+            seen_data = True
+        elif frame.startswith(f"DONE {request_id} STAT ".encode()):
+            break
+        elif not frame.startswith(f"PROGRESS {request_id} ".encode()):
+            raise RuntimeError("unexpected Segment frame: "+repr(frame))
+    if not (seen_data and seen_prefill and seen_decode):
+        raise RuntimeError("Segment response lacks streaming progress")
 
 turn(91, b"hi\n")
 turn(92, b"hi\nthere\n")

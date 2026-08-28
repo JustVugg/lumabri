@@ -14,6 +14,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 #define NODE_SESSIONS_MAX 256u
 #define NODE_CONNECTIONS_MAX 256u
@@ -61,10 +64,12 @@ typedef struct {
     LmbSegTable *table;
     NodeSession sessions[NODE_SESSIONS_MAX];
     pthread_mutex_t sessions_lock;
+    pthread_mutex_t run_lock;      /* one OpenMP team per slice, no oversubscription */
     pthread_mutex_t connections_lock;
     pthread_cond_t connections_drained;
     int connection_fds[NODE_CONNECTIONS_MAX];
     unsigned active_connections;
+    uint64_t ram_reserve_bytes;
     TrackerRegistration registration;
 } Node;
 
@@ -75,6 +80,17 @@ static uint64_t now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+static uint64_t available_memory_bytes(void) {
+    FILE *file = fopen("/proc/meminfo", "r");
+    if (!file) return UINT64_MAX; /* unknown must not make a healthy node lie */
+    char line[256];
+    unsigned long long kib = 0;
+    while (fgets(line, sizeof line, file))
+        if (sscanf(line, "MemAvailable: %llu kB", &kib) == 1) break;
+    fclose(file);
+    return kib ? (uint64_t)kib * 1024u : UINT64_MAX;
 }
 
 static void stop_handler(int sig) {
@@ -272,19 +288,57 @@ static NodeSession *session_empty(Node *node) {
     return NULL;
 }
 
-static void session_release(Node *node, NodeSession *slot) {
-    pthread_mutex_lock(&slot->lock);
+/* sessions_lock and slot->lock are both held. Keeping the slow wait for the
+ * slot out of sessions_lock is what lets unrelated OPEN/CLOSE calls proceed
+ * while a multi-GB restore is committing on one session. */
+static void session_release_locked(Node *node, NodeSession *slot) {
     coli_segment_session_destroy(slot->session);
     free(slot->cached_output);
     free(slot->snapshot);
     free(slot->restore);
+    slot->used = 0;
+    memset(&slot->id, 0, sizeof slot->id);
+    slot->session = NULL;
+    memset(&slot->cached_request, 0, sizeof slot->cached_request);
+    slot->cached_output = NULL;
+    slot->cached_bytes = 0;
+    slot->snapshot = NULL;
+    slot->snapshot_bytes = 0;
+    slot->snapshot_sequence = slot->snapshot_position = 0;
+    slot->restore = NULL;
+    slot->restore_bytes = slot->restore_received = 0;
+    memset(&slot->restore_transfer, 0, sizeof slot->restore_transfer);
+    slot->restore_updated_ms = 0;
+    slot->restore_active = 0;
+    memset(&slot->restored_request, 0, sizeof slot->restored_request);
+    slot->restored_sequence = slot->restored_position = 0;
+    slot->restored_valid = 0;
     pthread_mutex_unlock(&slot->lock);
-    pthread_mutex_destroy(&slot->lock);
-    memset(slot, 0, sizeof *slot);
     pthread_mutex_lock(&node->registration.lock);
     if (node->registration.advert.active_sessions)
         node->registration.advert.active_sessions--;
     pthread_mutex_unlock(&node->registration.lock);
+}
+
+static void session_release(Node *node, NodeSession *slot) {
+    pthread_mutex_lock(&slot->lock);
+    session_release_locked(node, slot);
+}
+
+/* Slot mutexes live for the whole node lifetime. Find under the table lock,
+ * then wait outside it and validate after taking the slot: a restore on one
+ * session can never stop OPEN/CLOSE/RUN on an unrelated session. */
+static NodeSession *session_lock_id(Node *node, const LmbSegId *id) {
+    pthread_mutex_lock(&node->sessions_lock);
+    NodeSession *slot = session_find(node, id);
+    pthread_mutex_unlock(&node->sessions_lock);
+    if (!slot) return NULL;
+    pthread_mutex_lock(&slot->lock);
+    if (!slot->used || !lmb_seg_id_equal(&slot->id, id)) {
+        pthread_mutex_unlock(&slot->lock);
+        return NULL;
+    }
+    return slot;
 }
 
 static void *session_reaper(void *opaque) {
@@ -294,7 +348,9 @@ static void *session_reaper(void *opaque) {
         for (size_t i = 0; i < NODE_SESSIONS_MAX; i++) {
             NodeSession *slot = &node->sessions[i];
             if (!slot->used) continue;
-            pthread_mutex_lock(&slot->lock);
+            /* Never wait for a restore while holding the node-wide table
+             * lock. The next pass will inspect a busy slot. */
+            if (pthread_mutex_trylock(&slot->lock)) continue;
             if (slot->restore_active &&
                 now_ms() - slot->restore_updated_ms >= 60000u) {
                 (void)lmb_seg_table_restore_finish(
@@ -305,12 +361,18 @@ static void *session_reaper(void *opaque) {
             }
             pthread_mutex_unlock(&slot->lock);
         }
+        pthread_mutex_unlock(&node->sessions_lock);
         LmbSegId expired;
         while (lmb_seg_table_reap_expired(node->table, now_ms(), &expired)) {
-            NodeSession *slot = session_find(node, &expired);
-            if (slot) session_release(node, slot);
+            NodeSession *slot = session_lock_id(node, &expired);
+            if (!slot) continue;
+            pthread_mutex_lock(&node->sessions_lock);
+            if (slot->used && lmb_seg_id_equal(&slot->id, &expired))
+                session_release_locked(node, slot);
+            else
+                pthread_mutex_unlock(&slot->lock);
+            pthread_mutex_unlock(&node->sessions_lock);
         }
-        pthread_mutex_unlock(&node->sessions_lock);
         for (int i = 0; i < 10 && !g_stop; i++) usleep(100000);
     }
     return NULL;
@@ -440,6 +502,8 @@ static int handle_open(Node *node, int fd, const LmbMsg *msg) {
             status = lmb_seg_table_open(node->table, &open, now_ms());
         } else if (!(slot = session_empty(node))) {
             status = LMB_SEG_STATUS_QUOTA;
+        } else if (available_memory_bytes() < node->ram_reserve_bytes) {
+            status = LMB_SEG_STATUS_QUOTA;
         } else {
             ColiSegmentSessionOptions options = {
                 .struct_size = sizeof options,
@@ -455,26 +519,14 @@ static int handle_open(Node *node, int fd, const LmbMsg *msg) {
             } else {
                 status = lmb_seg_table_open(node->table, &open, now_ms());
                 if (status == LMB_SEG_STATUS_OK) {
-                    memset(slot, 0, sizeof *slot);
-                    if (pthread_mutex_init(&slot->lock, NULL)) {
-                        (void)lmb_seg_table_close(node->table,
-                            &(LmbSegControl){ .session_id = open.session_id,
-                                .request_id = open.request_id,
-                                .owner = open.owner });
-                        coli_segment_session_destroy(session);
-                        status = LMB_SEG_STATUS_INTERNAL;
-                        pthread_mutex_unlock(&node->sessions_lock);
-                        LmbSegReply reply = make_reply(
-                            &open.session_id, &open.request_id,
-                            &open.owner, status);
-                        return send_reply(fd, LMB_SEG_OPEN_R, &reply, NULL, 0);
-                    }
+                    pthread_mutex_lock(&slot->lock);
                     slot->used = 1;
                     slot->id = open.session_id;
                     slot->session = session;
                     pthread_mutex_lock(&node->registration.lock);
                     node->registration.advert.active_sessions++;
                     pthread_mutex_unlock(&node->registration.lock);
+                    pthread_mutex_unlock(&slot->lock);
                 } else {
                     coli_segment_session_destroy(session);
                 }
@@ -503,10 +555,7 @@ static int handle_run(Node *node, int fd, const LmbMsg *msg) {
     LmbSegReply reply = make_reply(&run.session_id, &run.request_id,
                                    &run.owner, status);
     if (status == LMB_SEG_STATUS_DUPLICATE) {
-        pthread_mutex_lock(&node->sessions_lock);
-        NodeSession *slot = session_find(node, &run.session_id);
-        if (slot) pthread_mutex_lock(&slot->lock);
-        pthread_mutex_unlock(&node->sessions_lock);
+        NodeSession *slot = session_lock_id(node, &run.session_id);
         if (slot && lmb_seg_id_equal(&slot->cached_request, &run.request_id) &&
             slot->cached_output) {
             reply_state(node, &reply);
@@ -519,10 +568,8 @@ static int handle_run(Node *node, int fd, const LmbMsg *msg) {
         if (slot) pthread_mutex_unlock(&slot->lock);
         reply.status = LMB_SEG_STATUS_NEEDS_RESTORE;
     } else if (status == LMB_SEG_STATUS_OK) {
-        pthread_mutex_lock(&node->sessions_lock);
-        NodeSession *slot = session_find(node, &run.session_id);
+        NodeSession *slot = session_lock_id(node, &run.session_id);
         ColiSegmentSession *session = slot ? slot->session : NULL;
-        pthread_mutex_unlock(&node->sessions_lock);
         size_t bytes = lmb_state_bytes(run.rows, node->cap.state_width,
                                        node->cap.state_dtype);
         uint8_t *output = bytes ? malloc(bytes) : NULL;
@@ -530,6 +577,12 @@ static int handle_run(Node *node, int fd, const LmbMsg *msg) {
             status = LMB_SEG_STATUS_INTERNAL;
         } else {
             pthread_mutex_lock(&node->registration.lock);
+            node->registration.advert.queue_depth++;
+            pthread_mutex_unlock(&node->registration.lock);
+            pthread_mutex_lock(&node->run_lock);
+            pthread_mutex_lock(&node->registration.lock);
+            if (node->registration.advert.queue_depth)
+                node->registration.advert.queue_depth--;
             node->registration.advert.inflight++;
             pthread_mutex_unlock(&node->registration.lock);
             ColiSegmentRunRequest request = {
@@ -560,15 +613,13 @@ static int handle_run(Node *node, int fd, const LmbMsg *msg) {
             if (node->registration.advert.inflight)
                 node->registration.advert.inflight--;
             pthread_mutex_unlock(&node->registration.lock);
+            pthread_mutex_unlock(&node->run_lock);
         }
         if (status != LMB_SEG_STATUS_OK) {
             (void)lmb_seg_table_run_abort(node->table, &run);
             free(output);
+            if (slot) pthread_mutex_unlock(&slot->lock);
         } else {
-            pthread_mutex_lock(&node->sessions_lock);
-            slot = session_find(node, &run.session_id);
-            if (slot) pthread_mutex_lock(&slot->lock);
-            pthread_mutex_unlock(&node->sessions_lock);
             status = lmb_seg_table_run_commit(node->table, &run, now_ms());
             if (status == LMB_SEG_STATUS_OK && slot) {
                 free(slot->cached_output);
@@ -608,10 +659,7 @@ static int handle_snapshot(Node *node, int fd, const LmbMsg *msg) {
     uint8_t *payload = NULL;
     size_t payload_bytes = 0;
     if (status == LMB_SEG_STATUS_OK) {
-        pthread_mutex_lock(&node->sessions_lock);
-        NodeSession *slot = session_find(node, &transfer.session_id);
-        if (slot) pthread_mutex_lock(&slot->lock);
-        pthread_mutex_unlock(&node->sessions_lock);
+        NodeSession *slot = session_lock_id(node, &transfer.session_id);
         if (!slot) status = LMB_SEG_STATUS_NOT_FOUND;
         else {
             int initial = transfer.snapshot_size == 0 && transfer.offset == 0 &&
@@ -687,10 +735,7 @@ static int handle_restore(Node *node, int fd, const LmbMsg *msg) {
     if (lmb_seg_transfer_decode(msg->body, msg->body_len, &transfer) ||
         msg->pay_len != transfer.chunk_len) return -1;
     LmbSegStatus status = LMB_SEG_STATUS_OK;
-    pthread_mutex_lock(&node->sessions_lock);
-    NodeSession *slot = session_find(node, &transfer.session_id);
-    if (slot) pthread_mutex_lock(&slot->lock);
-    pthread_mutex_unlock(&node->sessions_lock);
+    NodeSession *slot = session_lock_id(node, &transfer.session_id);
     if (!slot) status = LMB_SEG_STATUS_NOT_FOUND;
     else if (slot->restored_valid &&
              lmb_seg_id_equal(&slot->restored_request, &transfer.request_id) &&
@@ -793,14 +838,21 @@ static int handle_control(Node *node, int fd, const LmbMsg *msg) {
     LmbSegStatus status;
     uint32_t response_op;
     if (msg->op == LMB_SEG_CLOSE) {
-        status = lmb_seg_table_close(node->table, &control);
         response_op = LMB_SEG_CLOSE_R;
-        if (status == LMB_SEG_STATUS_OK) {
-            pthread_mutex_lock(&node->sessions_lock);
-            NodeSession *slot = session_find(node, &control.session_id);
-            if (slot) session_release(node, slot);
-            pthread_mutex_unlock(&node->sessions_lock);
+        pthread_mutex_lock(&node->sessions_lock);
+        NodeSession *slot = session_find(node, &control.session_id);
+        if (slot && pthread_mutex_trylock(&slot->lock)) {
+            /* The client retries CLOSE; every other session remains free to
+             * open or close while this one finishes restore/run. */
+            status = LMB_SEG_STATUS_BUSY;
+        } else {
+            status = lmb_seg_table_close(node->table, &control);
+            if (status == LMB_SEG_STATUS_OK && slot)
+                session_release_locked(node, slot);
+            else if (slot)
+                pthread_mutex_unlock(&slot->lock);
         }
+        pthread_mutex_unlock(&node->sessions_lock);
     } else {
         uint64_t next_sequence = 0, next_position = 0;
         int needs_restore = 0;
@@ -850,7 +902,7 @@ static void usage(const char *program) {
         "--advertise HOST:PORT --name PEER "
         "(--auto-identity | --model-root HEX64 --tokenizer-root HEX64) "
         "[--fallback] [--relay-only] [--context N] [--max-rows N] "
-        "[--sessions N]\n",
+        "[--sessions N] [--threads N]\n",
         program);
 }
 
@@ -931,20 +983,35 @@ int main(int argc, char **argv) {
         lmb_parse_u32(port_text, 1, 65535, &port)) {
         usage(argv[0]); return 2;
     }
-    uint32_t context = 4096, max_rows = 256, max_sessions = 16;
+    uint32_t context = 4096, max_rows = 256, max_sessions = 16, threads = 0;
     const char *value;
     if (((value = arg_value(argc, argv, "--context")) &&
          lmb_parse_u32(value, 1, LMB_SEG_MAX_CONTEXT, &context)) ||
         ((value = arg_value(argc, argv, "--max-rows")) &&
          lmb_parse_u32(value, 1, LMB_SEG_MAX_ROWS, &max_rows)) ||
         ((value = arg_value(argc, argv, "--sessions")) &&
-         lmb_parse_u32(value, 1, NODE_SESSIONS_MAX, &max_sessions))) {
+         lmb_parse_u32(value, 1, NODE_SESSIONS_MAX, &max_sessions)) ||
+        ((value = arg_value(argc, argv, "--threads")) &&
+         lmb_parse_u32(value, 1, 256, &threads))) {
         usage(argv[0]); return 2;
     }
+#ifdef _OPENMP
+    if (threads) omp_set_num_threads((int)threads);
+#else
+    if (threads > 1) {
+        fprintf(stderr, "--threads needs an OpenMP build\n"); return 2;
+    }
+#endif
     if (lmb_secure_init()) return 1;
     signal(SIGINT, stop_handler); signal(SIGTERM, stop_handler);
     signal(SIGPIPE, SIG_IGN);
     if (fallback) (void)setpriority(PRIO_PROCESS, 0, 10);
+    if (threads)
+        fprintf(stderr, "[segment-node] governor: %u compute thread%s · "
+                        "%u session%s max%s\n", threads,
+                threads == 1 ? "" : "s", max_sessions,
+                max_sessions == 1 ? "" : "s",
+                (fallback || auto_range) ? " · low CPU priority" : "");
     if (lmb_colibri_register_all()) {
         fprintf(stderr, "cannot register all six Colibri adapters\n"); return 1;
     }
@@ -1013,8 +1080,15 @@ int main(int argc, char **argv) {
     memset(&node, 0, sizeof node);
     for (size_t i = 0; i < NODE_CONNECTIONS_MAX; i++) node.connection_fds[i] = -1;
     pthread_mutex_init(&node.sessions_lock, NULL);
+    pthread_mutex_init(&node.run_lock, NULL);
     pthread_mutex_init(&node.connections_lock, NULL);
     pthread_cond_init(&node.connections_drained, NULL);
+    for (size_t i = 0; i < NODE_SESSIONS_MAX; i++)
+        pthread_mutex_init(&node.sessions[i].lock, NULL);
+    node.ram_reserve_bytes = (uint64_t)lmb_env_int(
+        "LUMABRI_SEGMENT_RAM_RESERVE_MB", 4096, 256, 262144) << 20;
+    fprintf(stderr, "[segment-node] governor: %.1f GB RAM reserved for the "
+                    "machine\n", (double)node.ram_reserve_bytes / 1e9);
     ColiSegmentEngineOptions options = {
         .struct_size = sizeof options,
         .model_dir = model_dir,
@@ -1139,6 +1213,9 @@ int main(int argc, char **argv) {
     pthread_cond_destroy(&node.connections_drained);
     pthread_mutex_destroy(&node.connections_lock);
     pthread_mutex_destroy(&node.sessions_lock);
+    pthread_mutex_destroy(&node.run_lock);
+    for (size_t i = 0; i < NODE_SESSIONS_MAX; i++)
+        pthread_mutex_destroy(&node.sessions[i].lock);
     pthread_mutex_destroy(&registration->lock);
     return 0;
 }

@@ -5,6 +5,28 @@ a tag stay under Unreleased until a new tag is created.
 
 ## Unreleased
 
+- Streaming Segment replies with live routing/prefill/decode/checkpoint/failover
+  status, a fixed non-blocking input dock, slash-command autocomplete and menus
+  usable during inference.
+- Immediate live-turn interruption: `Ctrl-C`/`Ctrl-\\` stop the engine instead
+  of queueing an exit behind inference, `Ctrl-Z` restores and reconstructs the
+  dock across suspend/resume, and an exit guard restores termios after normal
+  shutdown signals. Terminal recovery happens before waiting on the engine; a
+  second shutdown signal provides an async-safe forced exit.
+- Clean Segment gateway EOF on ordinary `/quit`, so remote sessions are closed
+  instead of occupying executor slots until their lease expires; per-slice
+  session capacity also has a bounded operator override.
+- Stable machine names, named `/swarm`/`/hosts` topology, `/experts` call
+  counters and periodic server-side host/executor/session telemetry.
+- Per-source Segment-relay token bucket, concurrency cap and bounded serialized
+  executor queue while caller-signed `LMB_RSEG` identities remain future work.
+- Restore isolation: multi-GB restores no longer hold the node-wide session
+  lock, and same-session `CLOSE` returns busy without blocking other chats.
+- Automatic Segment resource governor: CPU teams are bounded per slice,
+  fallback work is low priority, relay-only origins have lower session caps,
+  new sessions preserve a RAM reserve and automatic startup requires spare RAM.
+  **Release note:** NAT servers now start Segment slices too; they therefore use
+  additional CPU/RAM unless `--no-exec` is passed.
 - Segment temperature/top-p sampling through Colibri Edge logits, while
   preserving the exact greedy path at temperature zero.
 - Stateful Segment relay over signed outbound tracker tunnels, including

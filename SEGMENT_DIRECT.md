@@ -172,8 +172,11 @@ session, checkpoint/replay after a killed executor, and ordinary
   is refused when its estimated range would consume the system reserve. Live
   pressure-triggered migration is still pending.
 - Relay is a reachability floor, not the fastest topology: it adds a tracker hop
-  and currently serializes requests per executor tunnel. Reachable peers should
-  publish direct P2P; decentralized relay/hole punching remains future work.
+  and currently serializes requests per executor tunnel. The queue wait is
+  bounded and unsigned callers are rate/concurrency limited per observed
+  source; this is abuse containment, not caller authentication. Reachable peers
+  should publish direct P2P; multiplexing and decentralized relay/hole punching
+  remain future work.
 - One chatter process hosts one active Edge model. This also respects Qwen's
   currently process-global tokenizer state.
 

@@ -9,8 +9,8 @@
  * first touch and stay in the local mirror), spawns the UNMODIFIED colibri
  * engine in its interactive CHAT mode, and wraps it in a terminal UI.
  *
- * In-chat commands: /swarm (anonymous network status), /model (list and
- * switch model, restarting the engine), /reset, /quit.
+ * In-chat commands: /swarm and /hosts (named live topology), /experts
+ * (executor use), /model, /debug, /storage, /reset, /help and /quit.
  *
  * The engines are taken exactly as they are, which means speaking both of
  * the protocols colibri ships: olmoe's line dialect (CHAT=1, a "> " prompt)
@@ -29,6 +29,7 @@
 #include <fcntl.h>
 #include <ifaddrs.h>
 #include <math.h>
+#include <poll.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -42,12 +43,19 @@
 #include <unistd.h>
 
 #include "lumabri_proto.h"
+#include "lumabri_segment_discovery.h"
 #include "lumabri_sign.h"
 #include "lumabri_secure.h"
 
 /* ---- terminal ----------------------------------------------------------- */
 
 static int g_tty = 0;
+/* Snapshot the shell's terminal state once, before either line editor can
+ * touch it.  Taking live_begin's "old" value from the current tty created a
+ * narrow hand-off race where it could inherit the previous editor's cbreak
+ * mode and then faithfully restore a non-canonical terminal on Ctrl-Z. */
+static struct termios g_chat_term;
+static int g_chat_term_valid;
 #define C_DIM   (g_tty ? "\x1b[2m"  : "")
 #define C_BOLD  (g_tty ? "\x1b[1m"  : "")
 #define C_GRN   (g_tty ? "\x1b[32m" : "")
@@ -66,6 +74,18 @@ static int term_w(void) {
     if (g_tty && ioctl(1, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 20) return ws.ws_col;
     return 80;
 }
+
+static int term_h(void) {
+    struct winsize ws;
+    if (g_tty && ioctl(1, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 7)
+        return ws.ws_row;
+    return 24;
+}
+
+static const char *const CHAT_COMMANDS[] = {
+    "/swarm", "/experts", "/hosts", "/model", "/debug", "/storage",
+    "/reset", "/help", "/quit",
+};
 
 static void exe_dir(char *dst, size_t cap) {
     ssize_t n = readlink("/proc/self/exe", dst, cap - 1);
@@ -249,14 +269,42 @@ static void spawn_tracked(char *const argv[], const char *what) {
 }
 
 static volatile sig_atomic_t g_stopping = 0;
+/* The chat engine is not one of the optional donor children above.  Publish
+ * it separately so a shutdown signal can break a blocked read immediately
+ * instead of waiting for a long inference to finish. */
+static volatile sig_atomic_t g_signal_engine_pid = 0;
 
 static void on_sigint(int sig) {
-    (void)sig;
+    if (g_stopping) {
+        /* A second shutdown signal is the escape hatch for an engine stuck in
+         * an uninterruptible path.  The live input thread restored termios
+         * before the first Ctrl-C; _exit is async-signal-safe and cannot
+         * deadlock on a stdio/pthread lock held by another thread. */
+        sig_atomic_t engine = g_signal_engine_pid;
+        if (engine > 0) kill((pid_t)engine, SIGKILL);
+        _exit(128 + (sig > 0 && sig < 128 ? sig : SIGTERM));
+    }
     g_stopping = 1;
+    sig_atomic_t engine = g_signal_engine_pid;
+    if (engine > 0) kill((pid_t)engine, SIGTERM);
     for (int i = 0; i < MAX_CHILDREN; i++) {
         sig_atomic_t p = g_signal_children[i];
         if (p > 0) kill((pid_t)p, SIGTERM);
     }
+}
+
+static void install_chat_signal_handlers(void) {
+    struct sigaction action;
+    memset(&action, 0, sizeof action);
+    action.sa_handler = on_sigint;
+    sigemptyset(&action.sa_mask);
+    /* Do not use SA_RESTART: a signal from another terminal must also wake a
+     * line-editor read.  During inference the engine termination closes the
+     * pipe and wakes every streaming dialect independently of EINTR. */
+    sigaction(SIGINT, &action, NULL);
+    sigaction(SIGTERM, &action, NULL);
+    sigaction(SIGHUP, &action, NULL);
+    sigaction(SIGQUIT, &action, NULL);
 }
 
 /* Which expert-node binary can execute this model's experts, or NULL when
@@ -383,6 +431,35 @@ static int machine_public_ipv4(char *out, size_t cap) {
     return found;
 }
 
+/* A readable, collision-resistant default for every role started by one
+ * `serve`.  The port distinguishes two swarms on the same machine; role
+ * suffixes distinguish storage, classic experts and Segment slices. */
+static int machine_host_base(const char *chosen, int port,
+                             char *out, size_t cap) {
+    char raw[64] = "";
+    if (chosen && chosen[0]) {
+        if (strlen(chosen) >= sizeof raw) return -1;
+        snprintf(raw, sizeof raw, "%s", chosen);
+    }
+    else if (gethostname(raw, sizeof raw - 1)) snprintf(raw, sizeof raw, "machine");
+    char clean[24];
+    size_t used = 0;
+    for (const char *p = raw; *p && used < sizeof clean - 1; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c >= 'A' && c <= 'Z') c = (unsigned char)(c - 'A' + 'a');
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')
+            clean[used++] = (char)c;
+        else if ((c == ' ' || c == '_' || c == '.') && used &&
+                 clean[used - 1] != '-')
+            clean[used++] = '-';
+    }
+    while (used && clean[used - 1] == '-') used--;
+    clean[used] = 0;
+    if (!used) snprintf(clean, sizeof clean, "machine");
+    if (chosen && chosen[0]) return checked_printf(out, cap, "%s", clean);
+    return checked_printf(out, cap, "host-%s-%d", clean, port);
+}
+
 static const char *model_name_for(const char *model_dir, const char *explicit,
                                   char *storage, size_t cap) {
     if (explicit && explicit[0]) return explicit;
@@ -405,9 +482,12 @@ static int parse_serve_port(const char *s, int *port) {
     return 0;
 }
 
+static void serve_watch_start(const char *tracker, const char *model);
+
 static int cmd_serve(int argc, char **argv) {
     const char *model = NULL, *join = NULL, *mname = NULL, *donate = NULL;
     const char *key = NULL, *pubkey = NULL, *advertise = NULL;
+    const char *host_name = NULL;
     int port = 7300, no_exec = 0, cache_slots = 128;
     for (int i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "--model") && i + 1 < argc) model = argv[++i];
@@ -423,11 +503,13 @@ static int cmd_serve(int argc, char **argv) {
         else if (!strcmp(argv[i], "--key") && i + 1 < argc) key = argv[++i];
         else if (!strcmp(argv[i], "--pubkey") && i + 1 < argc) pubkey = argv[++i];
         else if (!strcmp(argv[i], "--advertise") && i + 1 < argc) advertise = argv[++i];
+        else if (!strcmp(argv[i], "--host-name") && i + 1 < argc) host_name = argv[++i];
         else if (!strcmp(argv[i], "--no-exec")) no_exec = 1;
         else if (!strcmp(argv[i], "--exec-cache") && i + 1 < argc) cache_slots = atoi(argv[++i]);
         else { fprintf(stderr, "usage: lumabri serve --model DIR [--port N] "
                                "[--join TRACKER] [--model-name S] [--donate GB] "
                                "[--key FILE] [--pubkey FILE] [--advertise HOST] "
+                               "[--host-name NAME] "
                                "[--no-exec] [--exec-cache N]\n"); return 2; }
     }
     if (!model) { fprintf(stderr, "usage: lumabri serve --model DIR [--port N]\n"); return 2; }
@@ -446,6 +528,10 @@ static int cmd_serve(int argc, char **argv) {
         }
     }
     int disk_donor = donate != NULL;
+    char host_base[40];
+    if (machine_host_base(host_name, port, host_base, sizeof host_base)) {
+        fprintf(stderr, "--host-name is empty or too long\n"); return 2;
+    }
     struct stat st;
     if (stat(model, &st) && disk_donor) mkdir_p(model);  /* a donor starts empty */
     if (stat(model, &st) || !S_ISDIR(st.st_mode)) {
@@ -515,12 +601,16 @@ static int cmd_serve(int argc, char **argv) {
         spawn_tracked(targv, "il tracker");
         usleep(300 * 1000);
     }
-    char *margv[24];
+    char storage_name[64];
+    if (checked_printf(storage_name, sizeof storage_name, "%s-storage", host_base))
+        return 2;
+    char *margv[32];
     int a = 0;
     margv[a++] = maint_bin;
     margv[a++] = "--root"; margv[a++] = (char *)model;
     margv[a++] = "--port"; margv[a++] = mport;
     margv[a++] = "--tracker"; margv[a++] = taddr;
+    margv[a++] = "--name"; margv[a++] = storage_name;
     if (mname) { margv[a++] = "--model-name"; margv[a++] = (char *)mname; }
     if (donate) { margv[a++] = "--donate"; margv[a++] = (char *)donate; }
     if (key) { margv[a++] = "--key"; margv[a++] = (char *)key; }
@@ -555,10 +645,10 @@ static int cmd_serve(int argc, char **argv) {
         printf("  %s%s non è compilato: nessun esperto eseguito qui "
                "(make %s ENGINE=/path/to/colibri/c)%s\n", C_DIM, node, node, C_R);
     if (!no_exec && !disk_donor && node && access(exec_bin, X_OK) == 0) {
-        char eport[16], cachestr[16], ename[32];
+        char eport[16], cachestr[16], ename[64];
         snprintf(eport, sizeof eport, "%d", port + 2);
         snprintf(cachestr, sizeof cachestr, "%d", cache_slots);
-        snprintf(ename, sizeof ename, "exec-%d", port);
+        snprintf(ename, sizeof ename, "%s-experts", host_base);
         char *eargv[16];
         a = 0;
         eargv[a++] = exec_bin;
@@ -598,23 +688,39 @@ static int cmd_serve(int argc, char **argv) {
         model, mname, segment_model_storage, sizeof segment_model_storage);
     uint32_t segment_layers = 0;
     int with_segment = 0;
-    if (!disk_donor && !no_exec && segment_engine && segment_model &&
-        access(segment_bin, X_OK) == 0 &&
-        local_model_layers(model, &segment_layers) == 0) {
+    int segment_candidate = !disk_donor && !no_exec && segment_engine &&
+        segment_model && access(segment_bin, X_OK) == 0 &&
+        local_model_layers(model, &segment_layers) == 0;
+    uint64_t segment_available = machine_available_ram();
+    uint64_t segment_min_free = (uint64_t)lmb_env_int(
+        "LUMABRI_SEGMENT_MIN_FREE_MB", 8192, 1024, 262144) << 20;
+    if (segment_candidate && segment_available &&
+        segment_available < segment_min_free) {
+        printf("  %sSegment automatico non avviato: %.1f GB RAM disponibili, "
+               "il governor ne richiede %.1f. Storage ed expert restano "
+               "disponibili; regola LUMABRI_SEGMENT_MIN_FREE_MB solo se "
+               "conosci il carico della macchina.%s\n",
+               C_DIM, (double)segment_available / 1e9,
+               (double)segment_min_free / 1e9, C_R);
+        segment_candidate = 0;
+    }
+    if (segment_candidate) {
         long cores = sysconf(_SC_NPROCESSORS_ONLN);
         if (cores < 1) cores = 1;
         int chunks = lmb_env_int("LUMABRI_SEGMENT_CHUNKS", 4, 1, 7);
         if ((uint32_t)chunks > segment_layers) chunks = (int)segment_layers;
-        int sessions = (int)(cores / chunks);
-        if (sessions < 1) sessions = 1;
-        if (sessions > 8) sessions = 8;
+        int slice_threads = (int)(cores / chunks);
+        if (slice_threads < 1) slice_threads = 1;
+        int sessions = lmb_env_int("LUMABRI_SEGMENT_SESSIONS",
+                                   advertise ? 4 : 2, 1, 64);
         uint32_t segment_context = 4096, model_context = 0;
         if (!local_model_u32(model, "max_position_embeddings", &model_context) &&
             model_context < segment_context)
             segment_context = model_context;
-        char context[16], session_text[16];
+        char context[16], session_text[16], thread_text[16];
         snprintf(context, sizeof context, "%u", segment_context);
         snprintf(session_text, sizeof session_text, "%d", sessions);
+        snprintf(thread_text, sizeof thread_text, "%d", slice_threads);
 
         /* A few disjoint origin slices retain the single-copy weight total,
          * but give placement exact boundaries it can replace independently:
@@ -630,11 +736,11 @@ static int cmd_serve(int argc, char **argv) {
             char sport[16], range[40], sname[64], sadv[80];
             snprintf(sport, sizeof sport, "%d", port + 3 + chunk);
             snprintf(range, sizeof range, "%u:%u", begin, end);
-            snprintf(sname, sizeof sname, "segment-%s-%d-%d",
-                     join ? "peer" : "origin", port, chunk);
+            snprintf(sname, sizeof sname, "%s-segment-%d", host_base,
+                     chunk + 1);
             snprintf(sadv, sizeof sadv, "%s:%d",
                      advertise ? advertise : "127.0.0.1", port + 3 + chunk);
-            char *sargv[32];
+            char *sargv[36];
             a = 0;
             sargv[a++] = segment_bin;
             sargv[a++] = "--engine";       sargv[a++] = (char *)segment_engine;
@@ -650,6 +756,7 @@ static int cmd_serve(int argc, char **argv) {
             sargv[a++] = "--context";      sargv[a++] = context;
             sargv[a++] = "--max-rows";     sargv[a++] = "16";
             sargv[a++] = "--sessions";     sargv[a++] = session_text;
+            sargv[a++] = "--threads";      sargv[a++] = thread_text;
             sargv[a++] = "--advertise";    sargv[a++] = sadv;
             sargv[a] = NULL;
             char slog[1200];
@@ -658,13 +765,13 @@ static int cmd_serve(int argc, char **argv) {
                                  donor_log_path(sname, slog, sizeof slog));
             with_segment++;
         }
-        double ram_gb = (double)machine_available_ram() / 1e9;
+        double ram_gb = (double)segment_available / 1e9;
         const char *home = getenv("HOME") ? getenv("HOME") : ".";
         printf("  %sSegment prepara %d fette layer-aligned sulle porte %d-%d "
-               "(%ld CPU, %.1f GB RAM disponibili, %d sessioni/fetta). "
+               "(%ld CPU, %.1f GB RAM disponibili, %d thread e %d sessioni/fetta). "
                "%s%s%s\n",
                C_DIM, chunks, port + 3, port + 2 + chunks, cores, ram_gb,
-               sessions, join ? "Sono peer ordinari; " :
+               slice_threads, sessions, join ? "Sono peer ordinari; " :
                "Sono il fallback sostituibile; ",
                advertise ? "data plane diretto con relay di sicurezza. " :
                            "data plane relay (nessuna porta pubblica richiesta). ",
@@ -672,9 +779,9 @@ static int cmd_serve(int argc, char **argv) {
         /* Their diagnostics belong in one file per slice: N unbuffered
          * writers on one terminal shred each other's lines exactly when
          * something has gone wrong and the line matters most. */
-        printf("  %slog delle fette: %s/.lumabri/logs/segment-%s-%d-*.log · "
+        printf("  %slog delle fette: %s/.lumabri/logs/%s-segment-*.log · "
                "%s%s\n",
-               C_DIM, home, join ? "peer" : "origin", port,
+               C_DIM, home, host_base,
                advertise ? "apri le porte Segment sul firewall per il P2P diretto"
                          : "relay NAT attivo: non serve aprire le porte Segment",
                C_R);
@@ -682,7 +789,8 @@ static int cmd_serve(int argc, char **argv) {
     signal(SIGINT, on_sigint);
     signal(SIGTERM, on_sigint);
 
-    printf("\n%sserving%s %s %s(tracker %s%s)%s\n", C_GRN, C_R, model, C_DIM, taddr,
+    printf("\n%sserving%s %s %s(host %s · tracker %s%s)%s\n", C_GRN, C_R,
+           model, C_DIM, host_base, taddr,
            with_segment ? " · Segment origin attivo" :
            (with_exec ? " · executing experts for the swarm" : ""), C_R);
     /* Without --advertise every local peer uses its signed outbound tracker
@@ -698,6 +806,8 @@ static int cmd_serve(int argc, char **argv) {
     printf("%schat from this machine:   lumabri chat%s\n", C_DIM, C_R);
     printf("%schat from another one:    lumabri chat --tracker <this-ip>:%d%s\n\n",
            C_DIM, port, C_R);
+    serve_watch_start(taddr, segment_model ? segment_model :
+                      (mname && mname[0] ? mname : model));
     while (g_nchildren) {
         int status;
         pid_t p = wait(&status);
@@ -836,6 +946,130 @@ typedef struct {
     int have_stats;
 } ExecSwarmRow;
 
+typedef struct {
+    char name[64], model[64];
+    uint32_t roles, age_s;
+    uint64_t held_bytes, served_bytes, served_reads;
+    uint32_t nfiles, nexperts, have_exec_stats;
+    uint64_t exec_calls;
+    uint32_t exec_inflight;
+    uint32_t layer_begin, layer_end;
+    uint32_t active_sessions, max_sessions, segment_queue, segment_inflight;
+    uint32_t segment_flags;
+} SwarmDetailRow;
+
+static int swarm_detail(const char *tracker, SwarmDetailRow *rows, int cap) {
+    LmbMsg message = {0};
+    if (lmb_request(tracker, LMB_SWARM_DETAIL, NULL, 0, &message)) return -1;
+    if (message.op != LMB_SWARM_DETAIL_R || message.pay_len) {
+        lmb_msg_free(&message); return -2;
+    }
+    LmbCur cursor = { message.body, message.body_len, 0 };
+    uint32_t version = 0, count = 0;
+    if (lmb_cur_u32(&cursor, &version) ||
+        version != LMB_SWARM_DETAIL_VERSION ||
+        lmb_cur_u32(&cursor, &count) || count > 4096) {
+        lmb_msg_free(&message); return -2;
+    }
+    int out = 0;
+    for (uint32_t index = 0; index < count; index++) {
+        SwarmDetailRow row = {0};
+        int bad = lmb_cur_str(&cursor, row.name, sizeof row.name) ||
+                  lmb_cur_str(&cursor, row.model, sizeof row.model) ||
+                  lmb_cur_u32(&cursor, &row.roles) ||
+                  lmb_cur_u32(&cursor, &row.age_s) ||
+                  lmb_cur_u64(&cursor, &row.held_bytes) ||
+                  lmb_cur_u64(&cursor, &row.served_bytes) ||
+                  lmb_cur_u64(&cursor, &row.served_reads) ||
+                  lmb_cur_u32(&cursor, &row.nfiles) ||
+                  lmb_cur_u32(&cursor, &row.nexperts) ||
+                  lmb_cur_u32(&cursor, &row.have_exec_stats) ||
+                  lmb_cur_u64(&cursor, &row.exec_calls) ||
+                  lmb_cur_u32(&cursor, &row.exec_inflight) ||
+                  lmb_cur_u32(&cursor, &row.layer_begin) ||
+                  lmb_cur_u32(&cursor, &row.layer_end) ||
+                  lmb_cur_u32(&cursor, &row.active_sessions) ||
+                  lmb_cur_u32(&cursor, &row.max_sessions) ||
+                  lmb_cur_u32(&cursor, &row.segment_queue) ||
+                  lmb_cur_u32(&cursor, &row.segment_inflight) ||
+                  lmb_cur_u32(&cursor, &row.segment_flags);
+        if (bad || !row.name[0] || !row.model[0] ||
+            (row.roles & ~(LMB_SWARM_ROLE_STORAGE | LMB_SWARM_ROLE_EXPERT |
+                           LMB_SWARM_ROLE_SEGMENT)) ||
+            row.have_exec_stats > 1u) {
+            lmb_msg_free(&message); return -2;
+        }
+        if (out < cap) rows[out++] = row;
+    }
+    int malformed = cursor.off != cursor.len;
+    lmb_msg_free(&message);
+    return malformed ? -2 : out;
+}
+
+typedef struct { char tracker[80], model[64]; } ServeWatch;
+
+static void *serve_watch_thread(void *opaque) {
+    ServeWatch *watch = opaque;
+    int last_hosts = -1, last_storage = -1, last_experts = -1, last_segments = -1;
+    uint64_t last_calls = UINT64_MAX;
+    unsigned tick = 0;
+    while (!g_stopping) {
+        for (int part = 0; part < 10 && !g_stopping; part++) sleep(1);
+        if (g_stopping) break;
+        SwarmDetailRow rows[64];
+        int n = swarm_detail(watch->tracker, rows, 64);
+        if (n < 0) {
+            if ((tick++ % 3u) == 0)
+                printf("%s[swarm] tracker non raggiungibile; i nodi continuano "
+                       "a ritentare%s\n", C_DIM, C_R);
+            continue;
+        }
+        int hosts = 0, storage = 0, experts = 0, segments = 0;
+        uint32_t sessions = 0, segment_inflight = 0, expert_inflight = 0;
+        uint64_t calls = 0;
+        for (int i = 0; i < n; i++) {
+            if (watch->model[0] && strcmp(rows[i].model, watch->model)) continue;
+            hosts++;
+            storage += !!(rows[i].roles & LMB_SWARM_ROLE_STORAGE);
+            experts += !!(rows[i].roles & LMB_SWARM_ROLE_EXPERT);
+            segments += !!(rows[i].roles & LMB_SWARM_ROLE_SEGMENT);
+            calls += rows[i].have_exec_stats ? rows[i].exec_calls : 0;
+            expert_inflight += rows[i].exec_inflight;
+            sessions += rows[i].active_sessions;
+            segment_inflight += rows[i].segment_inflight;
+        }
+        int changed = hosts != last_hosts || storage != last_storage ||
+                      experts != last_experts || segments != last_segments ||
+                      calls != last_calls || expert_inflight || segment_inflight;
+        if (changed || (++tick % 6u) == 0) {
+            printf("%s[swarm]%s %d nodi collegati · %d storage · %d expert "
+                   "(%llu chiamate, %u attive) · %d Segment "
+                   "(%u sessioni, %u run attive)\n",
+                   C_CORAL, C_R, hosts, storage, experts,
+                   (unsigned long long)calls, expert_inflight, segments,
+                   sessions, segment_inflight);
+            fflush(stdout);
+        }
+        last_hosts = hosts; last_storage = storage; last_experts = experts;
+        last_segments = segments; last_calls = calls;
+    }
+    free(watch);
+    return NULL;
+}
+
+static void serve_watch_start(const char *tracker, const char *model) {
+    ServeWatch *watch = calloc(1, sizeof *watch);
+    if (!watch) return;
+    if (checked_printf(watch->tracker, sizeof watch->tracker, "%s", tracker) ||
+        checked_printf(watch->model, sizeof watch->model, "%s", model)) {
+        free(watch); return;
+    }
+    pthread_t thread;
+    if (!pthread_create(&thread, NULL, serve_watch_thread, watch))
+        pthread_detach(thread);
+    else free(watch);
+}
+
 static int swarm_stats(const char *tracker, SwarmRow *rows, int cap,
                        ExecSwarmRow *exec_rows, int exec_cap, int *exec_out) {
     LmbMsg m = {0};
@@ -890,8 +1124,56 @@ static int swarm_stats(const char *tracker, SwarmRow *rows, int cap,
     return malformed ? -2 : out;
 }
 
-/* /swarm: the network, anonymous. Peers are numbered, never named. */
+static void render_named_swarm(const SwarmDetailRow *rows, int n) {
+    int storage = 0, experts = 0, segments = 0;
+    for (int i = 0; i < n; i++) {
+        storage += !!(rows[i].roles & LMB_SWARM_ROLE_STORAGE);
+        experts += !!(rows[i].roles & LMB_SWARM_ROLE_EXPERT);
+        segments += !!(rows[i].roles & LMB_SWARM_ROLE_SEGMENT);
+    }
+    printf("\n  %s%ssciame live%s  %s%d nodi · %d storage · %d expert · "
+           "%d Segment%s\n", C_BOLD, C_CORAL, C_R, C_DIM, n, storage,
+           experts, segments, C_R);
+    for (int i = 0; i < n; i++) {
+        const SwarmDetailRow *row = &rows[i];
+        printf("  %s%-28.28s%s  %-16.16s  ", C_BOLD, row->name, C_R,
+               row->model);
+        int separator = 0;
+        if (row->roles & LMB_SWARM_ROLE_STORAGE) {
+            printf("storage %.1f GB · %.0f MB/%llu req",
+                   (double)row->held_bytes / 1e9,
+                   (double)row->served_bytes / 1e6,
+                   (unsigned long long)row->served_reads);
+            separator = 1;
+        }
+        if (row->roles & LMB_SWARM_ROLE_EXPERT) {
+            if (separator) printf(" | ");
+            printf("%u expert", row->nexperts);
+            if (row->have_exec_stats)
+                printf(" · %llu call · %u attive",
+                       (unsigned long long)row->exec_calls,
+                       row->exec_inflight);
+            separator = 1;
+        }
+        if (row->roles & LMB_SWARM_ROLE_SEGMENT) {
+            if (separator) printf(" | ");
+            printf("layer %u:%u · sessioni %u/%u · %u attive%s",
+                   row->layer_begin, row->layer_end,
+                   row->active_sessions, row->max_sessions,
+                   row->segment_inflight,
+                   row->segment_flags & LMB_SEG_ADVERT_RELAY_ONLY
+                       ? " · relay" : " · diretto");
+        }
+        printf(" %s· hb %us%s\n", C_DIM, row->age_s, C_R);
+    }
+}
+
+/* /swarm: prefer operator-chosen host names and real role/load counters.
+ * Fall back to the anonymous legacy view when talking to an older tracker. */
 static void render_swarm(const char *tracker) {
+    SwarmDetailRow detail[64];
+    int nd = swarm_detail(tracker, detail, 64);
+    if (nd >= 0) { render_named_swarm(detail, nd); return; }
     SwarmRow rows[64];
     ExecSwarmRow exec_rows[64];
     int ne = 0;
@@ -935,6 +1217,49 @@ static void render_swarm(const char *tracker) {
                pad > 0 ? pad : 0, "", C_GRAY, C_R);
     }
     hline("\xe2\x95\xb0", "\xe2\x95\xaf", w);
+}
+
+/* /experts is the compact answer to "are my donated experts actually being
+ * used?". Names are stable and human-readable, so a user can recognize this
+ * machine without exposing its address. Segment ranges are included because
+ * they execute the same MoE blocks without issuing classic EXEC calls. */
+static void render_experts(const char *tracker) {
+    SwarmDetailRow rows[64];
+    int n = swarm_detail(tracker, rows, 64);
+    if (n == -1) { printf("  %stracker irraggiungibile%s\n", C_RED, C_R); return; }
+    if (n < 0) {
+        printf("  %sil tracker non espone ancora i contatori nominativi%s\n",
+               C_DIM, C_R); return;
+    }
+    int shown = 0;
+    uint64_t calls = 0;
+    printf("\n  %s%suso degli executor%s\n", C_BOLD, C_CORAL, C_R);
+    for (int i = 0; i < n; i++) {
+        SwarmDetailRow *row = &rows[i];
+        if (!(row->roles & (LMB_SWARM_ROLE_EXPERT |
+                            LMB_SWARM_ROLE_SEGMENT))) continue;
+        shown++;
+        printf("  %s%-28.28s%s  ", C_BOLD, row->name, C_R);
+        if (row->roles & LMB_SWARM_ROLE_EXPERT) {
+            if (row->have_exec_stats) {
+                printf("%llu chiamate expert · %u in corso",
+                       (unsigned long long)row->exec_calls,
+                       row->exec_inflight);
+                calls += row->exec_calls;
+            } else printf("%u expert · contatore in attesa", row->nexperts);
+        }
+        if (row->roles & LMB_SWARM_ROLE_SEGMENT) {
+            if (row->roles & LMB_SWARM_ROLE_EXPERT) printf(" | ");
+            printf("Segment %u:%u · sessioni %u/%u · %u run in corso",
+                   row->layer_begin, row->layer_end,
+                   row->active_sessions, row->max_sessions,
+                   row->segment_inflight);
+        }
+        printf("\n");
+    }
+    if (!shown) printf("  %snessun executor collegato%s\n", C_DIM, C_R);
+    else printf("  %stotale classico: %llu chiamate expert completate%s\n",
+                C_DIM, (unsigned long long)calls, C_R);
 }
 
 /* distinct model names on the swarm; returns count */
@@ -1137,6 +1462,357 @@ static void render_debug(void) {
         printf("  %snessun donatore in questa sessione%s\n", C_DIM, C_R);
 }
 
+static void render_help(void) {
+    printf("\n  %s%scomandi%s\n", C_BOLD, C_CORAL, C_R);
+    printf("  %-12s stato nominativo di host, storage, expert e Segment\n", "/swarm");
+    printf("  %-12s chiamate degli expert e sessioni Segment\n", "/experts");
+    printf("  %-12s alias compatto di /swarm\n", "/hosts");
+    printf("  %-12s elenca o cambia il modello\n", "/model");
+    printf("  %-12s diagnostica del motore e dei donor\n", "/debug");
+    printf("  %-12s spazio occupato da mirror e CAS\n", "/storage");
+    printf("  %-12s nuova conversazione\n", "/reset");
+    printf("  %-12s chiude la chat\n", "/quit");
+    printf("  %sTab completa i comandi. Durante l'inferenza puoi aprire questi "
+           "pannelli o preparare il prompt successivo.%s\n", C_DIM, C_R);
+}
+
+static int le_prev(const char *s, int pos);
+static int le_next(const char *s, int len, int pos);
+
+/* During inference the response owns the scrolling part of the terminal and
+ * these three bottom rows remain stable: separator, live phase, next input.
+ * A tiny raw-input worker lets read-only menus open immediately and queues one
+ * next prompt without ever issuing two requests against the same KV session. */
+typedef struct {
+    pthread_mutex_t lock;
+    volatile int active;
+    int enabled, rows, cols, raw_set;
+    struct termios old_term, raw_term;
+    pthread_t thread;
+    char tracker[80], model[64], phase[160], notice[160];
+    char input[4096]; int input_len, input_pos;
+    char pending[4096]; int pending_ready;
+    char completion[64]; int completion_next;
+} LiveUi;
+
+static LiveUi g_live = { .lock = PTHREAD_MUTEX_INITIALIZER };
+static int g_live_atexit_registered;
+
+/* Best-effort last line of defence for normal exit() paths.  Fatal signals
+ * are routed through on_sigint(), which wakes the main loop and reaches
+ * live_end(); SIGKILL is intentionally not claimed because no process can
+ * run cleanup after it. */
+static void live_atexit_restore(void) {
+    if (g_live.raw_set)
+        (void)tcsetattr(STDIN_FILENO, TCSANOW, &g_live.old_term);
+    if (g_live.enabled) {
+        static const char reset_scroll[] = "\x1b[r";
+        ssize_t ignored = write(STDOUT_FILENO, reset_scroll,
+                                sizeof reset_scroll - 1);
+        (void)ignored;
+    }
+    g_live.raw_set = 0;
+}
+
+static void live_draw_locked(void) {
+    if (!g_live.enabled) return;
+    int width = g_live.cols > 20 ? g_live.cols : 80;
+    printf("\x1b" "7");
+    printf("\x1b[%d;1H\x1b[2K%s", g_live.rows - 2, C_GRAY);
+    for (int i = 0; i < width; i++) fputs("\xe2\x94\x80", stdout);
+    printf("%s", C_R);
+    printf("\x1b[%d;1H\x1b[2K %s\xe2\x9c\xa6%s %.*s", g_live.rows - 1,
+           C_CORAL, C_R, width > 8 ? width - 8 : 12,
+           g_live.phase[0] ? g_live.phase : "elaborazione");
+    if (g_live.notice[0])
+        printf(" %s\xc2\xb7 %.*s%s", C_DIM, width > 30 ? width / 2 : 12,
+               g_live.notice, C_R);
+    printf("\x1b[%d;1H\x1b[2K %s%s\xe2\x80\xba%s ", g_live.rows,
+           C_CORAL, C_BOLD, C_R);
+    int room = width - 5;
+    const char *shown = g_live.input;
+    int bytes = g_live.input_len;
+    if (bytes > room) { shown += bytes - room; bytes = room; }
+    if (bytes > 0) fwrite(shown, 1, (size_t)bytes, stdout);
+    printf("\x1b" "8");
+    fflush(stdout);
+}
+
+static void live_status(const char *fmt, ...) {
+    if (!g_live.enabled) return;
+    pthread_mutex_lock(&g_live.lock);
+    va_list ap; va_start(ap, fmt);
+    vsnprintf(g_live.phase, sizeof g_live.phase, fmt, ap);
+    va_end(ap);
+    live_draw_locked();
+    pthread_mutex_unlock(&g_live.lock);
+}
+
+static void live_write(const void *data, size_t bytes) {
+    if (!g_live.enabled) {
+        if (bytes) fwrite(data, 1, bytes, stdout);
+        fflush(stdout);
+        return;
+    }
+    pthread_mutex_lock(&g_live.lock);
+    if (bytes) fwrite(data, 1, bytes, stdout);
+    fflush(stdout);
+    pthread_mutex_unlock(&g_live.lock);
+}
+
+static void live_clear_input_locked(void) {
+    g_live.input[0] = 0; g_live.input_len = 0; g_live.input_pos = 0;
+    g_live.completion[0] = 0; g_live.completion_next = 0;
+}
+
+static void live_complete_locked(void) {
+    if (!g_live.input_len || g_live.input[0] != '/' ||
+        strchr(g_live.input, ' ')) return;
+    if (!g_live.completion[0])
+        snprintf(g_live.completion, sizeof g_live.completion, "%s", g_live.input);
+    int matches = 0;
+    size_t prefix = strlen(g_live.completion);
+    for (size_t i = 0; i < sizeof CHAT_COMMANDS / sizeof *CHAT_COMMANDS; i++)
+        if (!strncmp(CHAT_COMMANDS[i], g_live.completion, prefix)) matches++;
+    if (!matches) return;
+    int wanted = g_live.completion_next++ % matches;
+    for (size_t i = 0; i < sizeof CHAT_COMMANDS / sizeof *CHAT_COMMANDS; i++) {
+        if (strncmp(CHAT_COMMANDS[i], g_live.completion, prefix)) continue;
+        if (wanted--) continue;
+        snprintf(g_live.input, sizeof g_live.input, "%s", CHAT_COMMANDS[i]);
+        g_live.input_len = g_live.input_pos = (int)strlen(g_live.input);
+        break;
+    }
+}
+
+static int live_immediate_command_locked(const char *command) {
+    if (strcmp(command, "/swarm") && strcmp(command, "/hosts") &&
+        strcmp(command, "/experts") && strcmp(command, "/debug") &&
+        strcmp(command, "/storage") && strcmp(command, "/help")) return 0;
+    putchar('\n');
+    if (!strcmp(command, "/swarm") || !strcmp(command, "/hosts"))
+        render_swarm(g_live.tracker);
+    else if (!strcmp(command, "/experts")) render_experts(g_live.tracker);
+    else if (!strcmp(command, "/debug")) render_debug();
+    else if (!strcmp(command, "/storage")) render_storage();
+    else render_help();
+    live_clear_input_locked();
+    snprintf(g_live.notice, sizeof g_live.notice, "inferenza ancora attiva");
+    live_draw_locked();
+    return 1;
+}
+
+static void live_submit_input_locked(void) {
+    if (!g_live.input_len) return;
+    if (live_immediate_command_locked(g_live.input)) return;
+    if (!g_live.pending_ready) {
+        snprintf(g_live.pending, sizeof g_live.pending, "%s", g_live.input);
+        g_live.pending_ready = 1;
+        snprintf(g_live.notice, sizeof g_live.notice,
+                 g_live.input[0] == '/' ? "comando in coda" :
+                                          "prompt successivo pronto");
+    } else {
+        snprintf(g_live.notice, sizeof g_live.notice,
+                 "c'e' gia' un prompt in coda");
+    }
+    live_clear_input_locked();
+    live_draw_locked();
+}
+
+/* Called from the input worker before requesting shutdown.  The engine may be
+ * the very thing that is wedged, so terminal recovery cannot depend on the
+ * main thread first escaping its pipe read. */
+static void live_release_terminal_locked(void) {
+    if (g_live.enabled) {
+        printf("\x1b[r\x1b[%d;1H\x1b[2K\x1b[%d;1H\x1b[2K"
+               "\x1b[%d;1H\x1b[2K", g_live.rows - 2, g_live.rows - 1,
+               g_live.rows);
+        fflush(stdout);
+    }
+    if (g_live.raw_set)
+        (void)tcsetattr(STDIN_FILENO, TCSANOW, &g_live.old_term);
+    g_live.raw_set = 0;
+    g_live.enabled = 0;
+}
+
+/* Ctrl-Z is read as a byte while the dock owns raw input.  Restore canonical
+ * mode and the normal scrolling region before stopping, then reconstruct the
+ * dock after SIGCONT.  This is ordinary thread context, not a signal handler,
+ * so tcsetattr and stdio are safe here. */
+static void live_suspend_locked(void) {
+    if (g_live.enabled) {
+        printf("\x1b[r\x1b[%d;1H\x1b[2K\r\n", g_live.rows);
+        fflush(stdout);
+    }
+    if (g_live.raw_set) {
+        struct termios shell_term = g_live.old_term;
+        /* An interactive shell may hand a foreground job a cbreak-flavoured
+         * snapshot during the editor-to-dock transition.  Job control needs
+         * a genuinely usable terminal, not merely that snapshot: guarantee
+         * the conventional signal/canonical/echo controls while stopped. */
+        shell_term.c_lflag |= (tcflag_t)(ICANON | ECHO | ISIG | IEXTEN);
+        shell_term.c_iflag |= (tcflag_t)IXON;
+        shell_term.c_cc[VMIN] = 1; shell_term.c_cc[VTIME] = 0;
+        (void)tcsetattr(STDIN_FILENO, TCSANOW, &shell_term);
+    }
+    g_live.raw_set = 0;
+    raise(SIGTSTP);
+    if (!g_live.active || g_stopping) return;
+    if (tcsetattr(STDIN_FILENO, TCSANOW, &g_live.raw_term)) return;
+    g_live.raw_set = 1;
+    g_live.rows = term_h(); g_live.cols = term_w();
+    g_live.enabled = g_live.rows >= 8;
+    if (g_live.enabled)
+        printf("\x1b[1;%dr", g_live.rows - 3);
+    live_draw_locked();
+}
+
+static void *live_input_thread(void *unused) {
+    (void)unused;
+    while (g_live.active && !g_stopping) {
+        struct pollfd pollfd = { STDIN_FILENO, POLLIN, 0 };
+        int ready = poll(&pollfd, 1, 100);
+        if (ready <= 0 || !(pollfd.revents & POLLIN)) continue;
+        unsigned char c = 0;
+        if (read(STDIN_FILENO, &c, 1) != 1) continue;
+        pthread_mutex_lock(&g_live.lock);
+        if (c == '\r' || c == '\n') {
+            live_submit_input_locked();
+        } else if (c == '\t') {
+            live_complete_locked(); live_draw_locked();
+        } else if (c == 3) {
+            snprintf(g_live.notice, sizeof g_live.notice,
+                     "interrompo l'inferenza ed esco");
+            live_draw_locked();
+            live_release_terminal_locked();
+            on_sigint(SIGINT);
+        } else if (c == 26) {
+            live_suspend_locked();
+        } else if (c == 28) {
+            snprintf(g_live.notice, sizeof g_live.notice,
+                     "SIGQUIT: interrompo l'inferenza ed esco");
+            live_draw_locked();
+            live_release_terminal_locked();
+            /* ISIG is disabled only while this worker owns the terminal; emit
+             * the conventional signal explicitly instead of swallowing ^\ . */
+            raise(SIGQUIT);
+        } else if (c == 21) {
+            live_clear_input_locked(); live_draw_locked();
+        } else if (c == 127 || c == 8) {
+            if (g_live.input_pos > 0) {
+                int previous = le_prev(g_live.input, g_live.input_pos);
+                memmove(g_live.input + previous, g_live.input + g_live.input_pos,
+                        (size_t)(g_live.input_len - g_live.input_pos + 1));
+                g_live.input_len -= g_live.input_pos - previous;
+                g_live.input_pos = previous;
+            }
+            g_live.completion[0] = 0; live_draw_locked();
+        } else if (c == 27) {
+            unsigned char a = 0, b = 0;
+            ssize_t ar = read(STDIN_FILENO, &a, 1);
+            ssize_t br = ar == 1 ? read(STDIN_FILENO, &b, 1) : -1;
+            if (ar != 1 || br != 1) { pthread_mutex_unlock(&g_live.lock); continue; }
+            if ((a == '[' || a == 'O') && b == 'D' && g_live.input_pos > 0)
+                g_live.input_pos = le_prev(g_live.input, g_live.input_pos);
+            else if ((a == '[' || a == 'O') && b == 'C' &&
+                     g_live.input_pos < g_live.input_len)
+                g_live.input_pos = le_next(g_live.input, g_live.input_len,
+                                           g_live.input_pos);
+            live_draw_locked();
+        } else if (c >= 0x20 && g_live.input_len + 1 < (int)sizeof g_live.input) {
+            unsigned char bytes[4] = {c, 0, 0, 0};
+            int count = c >= 0xf0 ? 4 : c >= 0xe0 ? 3 : c >= 0xc0 ? 2 : 1;
+            for (int i = 1; i < count; i++)
+                if (read(STDIN_FILENO, &bytes[i], 1) != 1) { count = i; break; }
+            if (g_live.input_len + count < (int)sizeof g_live.input) {
+                memmove(g_live.input + g_live.input_pos + count,
+                        g_live.input + g_live.input_pos,
+                        (size_t)(g_live.input_len - g_live.input_pos + 1));
+                memcpy(g_live.input + g_live.input_pos, bytes, (size_t)count);
+                g_live.input_pos += count; g_live.input_len += count;
+                g_live.completion[0] = 0;
+            }
+            live_draw_locked();
+        }
+        pthread_mutex_unlock(&g_live.lock);
+    }
+    return NULL;
+}
+
+static int live_begin(const char *tracker, const char *model,
+                      const char *initial_phase) {
+    if (!g_tty || !isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) return 0;
+    struct termios raw;
+    if (g_chat_term_valid) g_live.old_term = g_chat_term;
+    else if (tcgetattr(STDIN_FILENO, &g_live.old_term)) return 0;
+    raw = g_live.old_term;
+    raw.c_lflag &= ~(tcflag_t)(ICANON | ECHO | ISIG | IEXTEN);
+    raw.c_iflag &= ~(tcflag_t)IXON;
+    raw.c_cc[VMIN] = 0; raw.c_cc[VTIME] = 1;
+    if (tcsetattr(STDIN_FILENO, TCSANOW, &raw)) return 0;
+    pthread_mutex_lock(&g_live.lock);
+    g_live.rows = term_h(); g_live.cols = term_w();
+    g_live.enabled = g_live.rows >= 8;
+    g_live.raw_term = raw;
+    g_live.raw_set = 1; g_live.active = 1;
+    snprintf(g_live.tracker, sizeof g_live.tracker, "%s", tracker);
+    snprintf(g_live.model, sizeof g_live.model, "%s", model);
+    snprintf(g_live.phase, sizeof g_live.phase, "%s", initial_phase);
+    g_live.notice[0] = 0;
+    live_clear_input_locked();
+    if (g_live.enabled) {
+        printf("\x1b[1;%dr\x1b[%d;1H\x1b[2K", g_live.rows - 3,
+               g_live.rows - 3);
+        live_draw_locked();
+    }
+    pthread_mutex_unlock(&g_live.lock);
+    if (!g_live_atexit_registered) {
+        if (atexit(live_atexit_restore) == 0) g_live_atexit_registered = 1;
+    }
+    if (pthread_create(&g_live.thread, NULL, live_input_thread, NULL)) {
+        if (g_live.enabled) {
+            static const char reset_scroll[] = "\x1b[r";
+            ssize_t ignored = write(STDOUT_FILENO, reset_scroll,
+                                    sizeof reset_scroll - 1);
+            (void)ignored;
+        }
+        g_live.active = 0; g_live.enabled = 0;
+        tcsetattr(STDIN_FILENO, TCSANOW, &g_live.old_term);
+        g_live.raw_set = 0;
+        return 0;
+    }
+    return 1;
+}
+
+static void live_end(void) {
+    if (!g_live.active && !g_live.raw_set) return;
+    g_live.active = 0;
+    pthread_join(g_live.thread, NULL);
+    pthread_mutex_lock(&g_live.lock);
+    if (g_live.enabled) {
+        printf("\x1b[r\x1b[%d;1H\x1b[2K\x1b[%d;1H\x1b[2K"
+               "\x1b[%d;1H\x1b[2K", g_live.rows - 2, g_live.rows - 1,
+               g_live.rows);
+        fflush(stdout);
+    }
+    g_live.enabled = 0;
+    pthread_mutex_unlock(&g_live.lock);
+    if (g_live.raw_set)
+        tcsetattr(STDIN_FILENO, TCSANOW, &g_live.old_term);
+    g_live.raw_set = 0;
+}
+
+static int live_take_pending(char *out, size_t cap) {
+    pthread_mutex_lock(&g_live.lock);
+    int have = g_live.pending_ready;
+    if (have) {
+        snprintf(out, cap, "%s", g_live.pending);
+        g_live.pending[0] = 0; g_live.pending_ready = 0;
+    }
+    pthread_mutex_unlock(&g_live.lock);
+    return have;
+}
+
 /* one line, rewritten in place: the star, what it is doing, how far along */
 static void *spinner_thread(void *arg) {
     const char *verb = arg ? (const char *)arg : "thinking";
@@ -1313,10 +1989,10 @@ static void emit_no_tel(const char *p, size_t n, TelFilter *t) {
     for (size_t i = 0; i < n; i++) {
         char c = p[i];
         if (t->mode == TF_DROP) { if (c == '\n') t->mode = TF_LINESTART; continue; }
-        if (t->mode == TF_MID) { putchar(c); if (c == '\n') t->mode = TF_LINESTART; continue; }
+        if (t->mode == TF_MID) { live_write(&c, 1); if (c == '\n') t->mode = TF_LINESTART; continue; }
         /* TF_LINESTART: buffer until we can classify the line */
         if (c == '\n') {                       /* short line, can't be a dashboard row */
-            fwrite(t->pfx, 1, (size_t)t->pfxn, stdout); putchar('\n');
+            live_write(t->pfx, (size_t)t->pfxn); live_write("\n", 1);
             t->pfxn = 0; continue;
         }
         if (t->pfxn < (int)sizeof t->pfx) t->pfx[t->pfxn++] = c;
@@ -1332,20 +2008,18 @@ static void emit_no_tel(const char *p, size_t n, TelFilter *t) {
         }
         if (is_tel) { t->pfxn = 0; t->mode = TF_DROP; }
         else if (!maybe || t->pfxn == (int)sizeof t->pfx) {   /* ruled out: it is text */
-            fwrite(t->pfx, 1, (size_t)t->pfxn, stdout);
+            live_write(t->pfx, (size_t)t->pfxn);
             t->pfxn = 0; t->mode = TF_MID;
         }
         /* else: keep buffering (a keyword prefix so far) */
     }
-    fflush(stdout);
 }
 
 static void le_flush_tel(TelFilter *t) {       /* trailing buffered text at stream end */
     if (t->mode == TF_LINESTART && t->pfxn > 0) {
-        fwrite(t->pfx, 1, (size_t)t->pfxn, stdout);
+        live_write(t->pfx, (size_t)t->pfxn);
         t->pfxn = 0;
     }
-    fflush(stdout);
 }
 
 static int stream_until_end(Engine *e, char *statline, size_t scap) {
@@ -1453,11 +2127,10 @@ static int sr_take(SReader *s, size_t n, int emit, Cap *cap) {   /* copy/discard
     while (n) {
         if (s->off >= s->len && sr_fill(s) <= 0) return -1;
         size_t avail = s->len - s->off, take = avail < n ? avail : n;
-        if (emit) fwrite(s->b + s->off, 1, take, stdout);
+        if (emit) live_write(s->b + s->off, take);
         if (cap && cap_add(cap, (char *)s->b + s->off, take)) return -1;
         s->off += take; n -= take;
     }
-    if (emit) fflush(stdout);
     return 0;
 }
 
@@ -1474,6 +2147,8 @@ static int stream_serve2(Engine *e, char *statline, size_t scap, char **captured
     for (;;) {
         if (sr_line(&s, line, sizeof line) < 0) { free(cap.p); return -1; }
         if (!strncmp(line, "DATA ", 5)) {
+            live_status("decode · %s", e->segment ? "Segment sullo sciame" :
+                                                "expert/engine");
             char *sp = strchr(line + 5, ' ');            /* DATA <id> <bytes> */
             size_t n = sp ? strtoull(sp + 1, NULL, 10) : 0;
             if (sr_take(&s, n, 1, captured ? &cap : NULL) < 0) { free(cap.p); return -1; }
@@ -1488,6 +2163,26 @@ static int stream_serve2(Engine *e, char *statline, size_t scap, char **captured
             printf("%s%s%s", C_RED, msg ? msg + 1 : line + 6, C_R);
             free(cap.p);
             return 0;
+        } else if (!strncmp(line, "PROGRESS ", 9)) {
+            unsigned id = 0;
+            char phase[24] = "";
+            size_t current = 0, total = 0, third = 0;
+            if (sscanf(line, "PROGRESS %u %23s %zu %zu %zu",
+                       &id, phase, &current, &total, &third) >= 2) {
+                if (!strcmp(phase, "ROUTE"))
+                    live_status("routing · %zu host · %zu segmenti · %s",
+                                current, total, third ? "relay" : "P2P diretto");
+                else if (!strcmp(phase, "PREFILL"))
+                    live_status("prefill · %zu/%zu token · Segment", current, total);
+                else if (!strcmp(phase, "DECODE"))
+                    live_status("decode · %zu token · Segment", current);
+                else if (!strcmp(phase, "FAILOVER")) {
+                    const char *peer = strstr(line, "FAILOVER ");
+                    live_status("failover · sostituisco %s",
+                                peer ? peer + strlen("FAILOVER ") : "peer");
+                } else if (!strcmp(phase, "CHECKPOINT"))
+                    live_status("checkpoint KV · %zu token protetti", current);
+            }
         }
         /* ACCEPT / EMAP / TIERS / HITS / HWINFO / PROF / other: skip */
     }
@@ -1500,10 +2195,9 @@ static int stream_serve2(Engine *e, char *statline, size_t scap, char **captured
  * user turn ending at the assistant-generation marker); the serve reuses the KV
  * prefix, so it stays a real multi-turn chat without reprocessing the history.
  *
- * Each marker set mirrors its engine's serve/CLI source. Only DeepSeek and olmoe
- * are exercised against a real model here; qwen36/inkling/kimi are transcribed
- * from colibri and unverified — see the PR notes. Keep them in step with colibri;
- * the ideal home is each engine's serve, as GLM already does.
+ * Each marker set mirrors its engine's serve/CLI source. The six-family tiny
+ * release gate exercises GLM, Inkling, Kimi, OLMoE, Qwen and DeepSeek through
+ * this exact codec and compares their generated token IDs with Colibri oracles.
  *
  * DeepSeek: ｜ is U+FF5C, ▁ is U+2581 — each its own literal so the next letter
  * is not eaten by the \x escape. </think> is the non-thinking "answer now" form. */
@@ -1696,6 +2390,7 @@ static int engine_spawn(const char *engine, const char *shim, const char *tracke
     }
     close(in_pipe[0]); close(out_pipe[1]); close(err_pipe[1]);
     e->pid = pid; e->to = in_pipe[1]; e->from = out_pipe[0];
+    g_signal_engine_pid = (sig_atomic_t)pid;
     e->proto = PROTO_UNKNOWN;
     e->kind = engine_kind_of(engine);
     e->segment = 0;
@@ -1759,6 +2454,7 @@ static int segment_engine_spawn(const char *engine, const char *shim,
     }
     close(in_pipe[0]); close(out_pipe[1]); close(err_pipe[1]);
     e->pid = pid; e->to = in_pipe[1]; e->from = out_pipe[0];
+    g_signal_engine_pid = (sig_atomic_t)pid;
     e->proto = PROTO_UNKNOWN;
     e->kind = engine_kind_of(model_type);
     e->segment = 1;
@@ -1773,6 +2469,8 @@ static int segment_engine_spawn(const char *engine, const char *shim,
 static void engine_diag(Engine *e, int booting) {
     int st = 0;
     if (e->pid > 0 && waitpid(e->pid, &st, WNOHANG) == e->pid) {
+        if (g_signal_engine_pid == (sig_atomic_t)e->pid)
+            g_signal_engine_pid = 0;
         e->pid = 0;
         if (WIFSIGNALED(st)) {
             int s = WTERMSIG(st);
@@ -1823,9 +2521,30 @@ static void engine_diag(Engine *e, int booting) {
 
 static void engine_stop(Engine *e) {
     if (e->pid <= 0) return;
-    close(e->to); close(e->from);
-    kill(e->pid, SIGTERM);
-    waitpid(e->pid, NULL, 0);
+    pid_t pid = e->pid;
+    if (g_signal_engine_pid == (sig_atomic_t)pid)
+        g_signal_engine_pid = 0;
+    /* EOF is the Segment gateway's clean shutdown protocol: it closes every
+     * remote session before exiting.  Killing it unconditionally made normal
+     * /quit leak hour-long session leases until an executor hit its quota.
+     * A signal-driven interruption has already asked it to stop and simply
+     * falls through to the bounded reap/kill path. */
+    close(e->to); e->to = -1;
+    if (e->segment && !g_stopping) {
+        for (int attempt = 0; attempt < 100; attempt++) {
+            pid_t done = waitpid(pid, NULL, WNOHANG);
+            if (done == pid || (done < 0 && errno == ECHILD)) {
+                close(e->from); e->from = -1; e->pid = 0;
+                return;
+            }
+            struct timespec pause = {0, 20 * 1000 * 1000};
+            while (nanosleep(&pause, &pause) && errno == EINTR && !g_stopping) { }
+            if (g_stopping) break;
+        }
+    }
+    close(e->from); e->from = -1;
+    kill(pid, SIGTERM);
+    waitpid(pid, NULL, 0);
     e->pid = 0;
 }
 
@@ -2070,7 +2789,8 @@ static void le_set(char *buf, size_t cap, int *len, int *pos, const char *text) 
 
 static int line_edit(char *buf, size_t cap) {
     struct termios old, raw;
-    if (tcgetattr(0, &old)) return -2;         /* not a real tty -> caller fgets */
+    if (g_chat_term_valid) old = g_chat_term;
+    else if (tcgetattr(0, &old)) return -2;    /* not a real tty -> caller fgets */
     raw = old;
     /* Clear ISIG/IEXTEN too, and IXON, so Ctrl-C / Ctrl-Z / Ctrl-S reach read()
      * as bytes instead of the tty acting on them behind our back — otherwise the
@@ -2085,6 +2805,8 @@ static int line_edit(char *buf, size_t cap) {
     int len = 0, pos = 0, rc = 0;
     int hidx = le_hist_n;                       /* == "the line being typed" */
     char *save = (char *)malloc(cap);           /* in-progress line, for down */
+    char completion[64] = "";
+    int completion_next = 0;
     if (!save) { tcsetattr(0, TCSANOW, &old); return -2; }   /* -> caller fgets */
     save[0] = 0;
     buf[0] = 0;
@@ -2092,7 +2814,10 @@ static int line_edit(char *buf, size_t cap) {
     for (;;) {
         unsigned char c;
         ssize_t rn = read(0, &c, 1);
-        if (rn < 0 && errno == EINTR) continue;  /* a signal, not end of input */
+        if (rn < 0 && errno == EINTR) {
+            if (g_stopping) { rc = -1; break; }
+            continue;
+        }
         if (rn <= 0) { rc = -1; break; }
 
         if (c == '\r' || c == '\n') { printf("\r\n"); break; }
@@ -2105,10 +2830,36 @@ static int line_edit(char *buf, size_t cap) {
         if (c == 26) {                           /* Ctrl-Z: suspend, terminal restored */
             tcsetattr(0, TCSANOW, &old);
             raise(SIGTSTP);
+            if (g_stopping) { rc = -1; len = 0; break; }
             tcsetattr(0, TCSANOW, &raw);         /* resumed: back to raw */
             continue;
         }
-        if (c == 4) {                            /* Ctrl-D: EOF on empty, else Delete */
+        if (c == 28) {                           /* Ctrl-\: conventional SIGQUIT */
+            tcsetattr(0, TCSANOW, &old);
+            printf("\r\n");
+            raise(SIGQUIT);
+            rc = -1; len = 0; break;
+        }
+        if (c != '\t') { completion[0] = 0; completion_next = 0; }
+        if (c == '\t') {                        /* cycle slash-command matches */
+            if (len && buf[0] == '/' && !strchr(buf, ' ')) {
+                if (!completion[0])
+                    snprintf(completion, sizeof completion, "%s", buf);
+                size_t prefix = strlen(completion);
+                int matches = 0;
+                for (size_t i = 0; i < sizeof CHAT_COMMANDS / sizeof *CHAT_COMMANDS; i++)
+                    if (!strncmp(CHAT_COMMANDS[i], completion, prefix)) matches++;
+                if (matches) {
+                    int wanted = completion_next++ % matches;
+                    for (size_t i = 0; i < sizeof CHAT_COMMANDS / sizeof *CHAT_COMMANDS; i++) {
+                        if (strncmp(CHAT_COMMANDS[i], completion, prefix)) continue;
+                        if (wanted--) continue;
+                        le_set(buf, cap, &len, &pos, CHAT_COMMANDS[i]);
+                        break;
+                    }
+                }
+            }
+        } else if (c == 4) {                    /* Ctrl-D: EOF on empty, else Delete */
             if (len == 0) { rc = -1; break; }
             if (pos < len) {
                 int nx = le_next(buf, len, pos);
@@ -2451,17 +3202,18 @@ static int role_start_segment(const Role *r, const char *tracker,
     int port = free_port(7801);
     if (!port) return 0;
     long cores = sysconf(_SC_NPROCESSORS_ONLN);
-    int sessions = cores > 1 ? (int)(cores / 2) : 1;
-    if (sessions > 4) sessions = 4;
-    char port_text[16], context_text[16], sessions_text[16];
+    int threads = cores > 1 ? (int)(cores / 2) : 1;
+    int sessions = 2;
+    char port_text[16], context_text[16], sessions_text[16], threads_text[16];
     char address[80], name[64], base[48];
     snprintf(port_text, sizeof port_text, "%d", port);
     snprintf(context_text, sizeof context_text, "%d", context);
     snprintf(sessions_text, sizeof sessions_text, "%d", sessions);
+    snprintf(threads_text, sizeof threads_text, "%d", threads);
     snprintf(address, sizeof address, "%s:%d", host, port);
     donor_base_name(r, base, sizeof base);
     snprintf(name, sizeof name, "%s-segment-%d", base, port);
-    char *argv[30];
+    char *argv[34];
     int a = 0;
     argv[a++] = bin;
     argv[a++] = "--engine";        argv[a++] = (char *)engine;
@@ -2477,6 +3229,7 @@ static int role_start_segment(const Role *r, const char *tracker,
     argv[a++] = "--context";       argv[a++] = context_text;
     argv[a++] = "--max-rows";      argv[a++] = "16";
     argv[a++] = "--sessions";      argv[a++] = sessions_text;
+    argv[a++] = "--threads";       argv[a++] = threads_text;
     argv[a] = NULL;
     if (g_nchildren >= MAX_CHILDREN) return 0;
     char logpath[1200];
@@ -2720,7 +3473,7 @@ static int model_boot(const char *tracker, const char *model, const char *shim,
                 if (!segment_ready) {
                     e->proto = PROTO_SERVE2;
                     printf("  %s\xe2\x9c\x93 %s pronto via Segment in %.1fs%s%s "
-                           "\xc2\xb7 Edge nel CAS \xc2\xb7 /swarm /model /debug "
+                           "\xc2\xb7 Edge nel CAS \xc2\xb7 /swarm /experts /model /debug "
                            "/storage /reset /quit%s\n",
                            C_GRN, model, nowd() - segment_started, C_R,
                            C_DIM, C_R);
@@ -2802,12 +3555,14 @@ static int model_boot(const char *tracker, const char *model, const char *shim,
         return -1;
     }
     printf("  %s\xe2\x9c\x93 %s pronto in %.1fs%s%s · net %.0f MB · "
-           "/swarm /model /debug /storage /reset /quit%s\n",
+           "/swarm /experts /model /debug /storage /reset /quit%s\n",
            C_GRN, model, nowd() - t0, C_R, C_DIM, g_eng.net_mb, C_R);
     return 0;
 }
 
 static int cmd_chat(int argc, char **argv) {
+    g_stopping = 0;
+    install_chat_signal_handlers();
     const char *tracker = NULL;
     const char *engine_path = NULL, *engines_dir = getenv("LUMABRI_ENGINES");
     const char *want_model = NULL, *local_dir = NULL;
@@ -2836,6 +3591,8 @@ static int cmd_chat(int argc, char **argv) {
                                "[--donate GB] [--model-dir DIR] [--donor-name S]\n");
                return 2; }
     }
+    g_chat_term_valid = g_tty && isatty(STDIN_FILENO) &&
+                        tcgetattr(STDIN_FILENO, &g_chat_term) == 0;
 
     /* The panel comes BEFORE anything is contacted: the wordmark, then what
      * is missing, then the role. A TUI user never sees a flag. */
@@ -2995,8 +3752,6 @@ static int cmd_chat(int argc, char **argv) {
                    ctx, max_new, cap_experts, &eng, &sw))
         return 1;
     if (role.disk || role.compute) {
-        signal(SIGINT, on_sigint);            /* the donors die with the chat */
-        signal(SIGTERM, on_sigint);
         role_start(&role, tracker, model, sw.model_type, eng.segment, ctx,
                    sw.total_bytes);
     }
@@ -3004,6 +3759,8 @@ static int cmd_chat(int argc, char **argv) {
     char *conv = calloc(1, 1);   /* serve-codec conversation history (after bos) */
     char line[4096];
     for (;;) {
+        if (g_stopping) break;
+        int queued = live_take_pending(line, sizeof line);
         int w = term_w() - 2;
         if (g_tty) {
             printf("\n");
@@ -3012,15 +3769,24 @@ static int cmd_chat(int argc, char **argv) {
         } else
             printf("\n> ");
         fflush(stdout);
-        int got = prompt_line(line, sizeof line) == 0;   /* line editor when a tty */
+        int got;
+        if (queued) {
+            printf("%s\r\n", line);
+            le_hist_push(line);
+            got = 1;
+        } else
+            got = prompt_line(line, sizeof line) == 0;   /* line editor when a tty */
         if (g_tty) hline("\xe2\x95\xb0", "\xe2\x95\xaf", w);
-        if (!got) break;
+        if (!got || g_stopping) break;
         size_t L = strlen(line);   /* prompt_line already stripped the newline */
         if (!L) continue;
         if (!strcmp(line, "/quit") || !strcmp(line, "/exit")) break;
         if (!strcmp(line, "/swarm")) { render_swarm(tracker); continue; }
+        if (!strcmp(line, "/hosts")) { render_swarm(tracker); continue; }
+        if (!strcmp(line, "/experts")) { render_experts(tracker); continue; }
         if (!strcmp(line, "/debug")) { render_debug(); continue; }
         if (!strcmp(line, "/storage")) { render_storage(); continue; }
+        if (!strcmp(line, "/help")) { render_help(); continue; }
         if (!strncmp(line, "/model", 6)) {
             const char *arg = line + 6;
             while (*arg == ' ') arg++;
@@ -3078,9 +3844,18 @@ static int cmd_chat(int argc, char **argv) {
         if (eng.proto == PROTO_SERVE2) {
             char *reply = NULL;
             printf("%s%s\xe2\x97\x86 %s%s\n  ", C_BOLD, C_CORAL, model, C_R);
+            live_begin(tracker, model,
+                       eng.segment ? "routing · cerco la catena Segment" :
+                                     "prefill · preparo il prompt");
             g_eng.streaming = 1;
             int dead = stream_serve2(&eng, stat, sizeof stat, &reply);
             g_eng.streaming = 0;
+            live_end();
+            if (g_stopping) {
+                free(reply);
+                printf("\n  %sinferenza interrotta%s\n", C_DIM, C_R);
+                break;
+            }
             if (dead) {
                 fprintf(stderr, "\n%sengine exited%s\n", C_RED, C_R);
                 engine_diag(&eng, 0);
@@ -3092,9 +3867,15 @@ static int cmd_chat(int argc, char **argv) {
             free(reply);
         } else if (eng.proto == PROTO_FRAMED) {
             if (!is_reset) printf("%s%s\xe2\x97\x86 %s%s\n  ", C_BOLD, C_CORAL, model, C_R);
+            live_begin(tracker, model, "prefill · motore sullo sciame");
             g_eng.streaming = 1;
             int dead = stream_until_end(&eng, stat, sizeof stat);
             g_eng.streaming = 0;
+            live_end();
+            if (g_stopping) {
+                printf("\n  %sinferenza interrotta%s\n", C_DIM, C_R);
+                break;
+            }
             if (dead) {
                 fprintf(stderr, "\n%sengine exited%s\n", C_RED, C_R);
                 engine_diag(&eng, 0);
@@ -3103,12 +3884,20 @@ static int cmd_chat(int argc, char **argv) {
             printf("\n");
             if (is_reset) { printf("  %s\xe2\x9c\xa6 nuova conversazione%s\n", C_DIM, C_R); continue; }
         } else {
-            g_eng.spinning = 1;
+            int live = live_begin(tracker, model,
+                                  "inferenza · motore locale/expert");
+            g_eng.spinning = !live;
             pthread_t tspin;
-            if (g_tty) pthread_create(&tspin, NULL, spinner_thread, NULL);
+            if (g_tty && !live) pthread_create(&tspin, NULL, spinner_thread, NULL);
             char *reply = read_until_prompt(eng.from);
             g_eng.spinning = 0;
-            if (g_tty) pthread_join(tspin, NULL);
+            if (live) live_end();
+            else if (g_tty) pthread_join(tspin, NULL);
+            if (g_stopping) {
+                free(reply);
+                printf("\n  %sinferenza interrotta%s\n", C_DIM, C_R);
+                break;
+            }
             if (!reply) {
                 fprintf(stderr, "%sengine exited%s\n", C_RED, C_R);
                 engine_diag(&eng, 0);

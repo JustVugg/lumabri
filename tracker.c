@@ -32,6 +32,7 @@
 #define MAX_FILES  4096
 #define STALE_S    30.0     /* silent this long → dropped from placements */
 #define RELAY_WAIT_S 60     /* chatter-side cap on one relayed read */
+#define RSEG_RATE_SLOTS 128
 
 typedef struct { char path[LMB_PATH_MAX]; uint64_t size; } PFile;
 
@@ -83,6 +84,15 @@ typedef struct {
 } Peer;
 
 static Peer g_peers[MAX_PEERS];
+typedef struct {
+    char source[64];
+    double tokens, updated;
+    uint32_t in_flight;
+} RsegRate;
+static RsegRate g_rseg_rates[RSEG_RATE_SLOTS];
+static pthread_mutex_t g_rseg_rate_lk = PTHREAD_MUTEX_INITIALIZER;
+static int g_rseg_rate_per_s = 2048, g_rseg_burst = 4096;
+static int g_rseg_source_concurrency = 32, g_rseg_queue_ms = 2000;
 static pthread_mutex_t g_lk = PTHREAD_MUTEX_INITIALIZER;
 static int g_known_logged[MAX_PEERS];
 static char g_token[LMB_TOKEN_MAX + 1]; /* --token: private swarm, invite required */
@@ -549,6 +559,62 @@ static void connection_source(int fd, char out[64]) {
     if (getpeername(fd, (struct sockaddr *)&ss, &sl)) return;
     if (getnameinfo((struct sockaddr *)&ss, sl, out, 64, NULL, 0,
                     NI_NUMERICHOST)) out[0] = 0;
+}
+
+/* RSEG callers do not yet carry a signed end-user identity. Bound both work
+ * rate and blocked relay threads by observed source address; private swarms
+ * additionally retain their existing tracker token. The bucket charges large
+ * activation/restore frames more than a control frame. */
+static int rseg_rate_enter(int fd, uint32_t pay_len, char source[64]) {
+    connection_source(fd, source);
+    if (!source[0]) snprintf(source, 64, "unknown");
+    double now = now_s();
+    double cost = 1.0 + (double)pay_len / (double)(1u << 20);
+    pthread_mutex_lock(&g_rseg_rate_lk);
+    RsegRate *slot = NULL, *reuse = NULL;
+    for (int i = 0; i < RSEG_RATE_SLOTS; i++) {
+        RsegRate *candidate = &g_rseg_rates[i];
+        if (!strcmp(candidate->source, source)) { slot = candidate; break; }
+        if (!candidate->source[0]) reuse = candidate;
+        else if (!candidate->in_flight &&
+                 (!reuse || candidate->updated < reuse->updated)) reuse = candidate;
+    }
+    if (!slot) {
+        slot = reuse;
+        if (slot) {
+            memset(slot, 0, sizeof *slot);
+            snprintf(slot->source, sizeof slot->source, "%s", source);
+            slot->tokens = g_rseg_burst;
+            slot->updated = now;
+        }
+    }
+    int allowed = 0;
+    if (slot) {
+        double elapsed = now - slot->updated;
+        if (elapsed > 0) {
+            slot->tokens += elapsed * g_rseg_rate_per_s;
+            if (slot->tokens > g_rseg_burst) slot->tokens = g_rseg_burst;
+            slot->updated = now;
+        }
+        if (slot->tokens >= cost &&
+            slot->in_flight < (uint32_t)g_rseg_source_concurrency) {
+            slot->tokens -= cost;
+            slot->in_flight++;
+            allowed = 1;
+        }
+    }
+    pthread_mutex_unlock(&g_rseg_rate_lk);
+    return allowed ? 0 : -1;
+}
+
+static void rseg_rate_leave(const char source[64]) {
+    pthread_mutex_lock(&g_rseg_rate_lk);
+    for (int i = 0; i < RSEG_RATE_SLOTS; i++)
+        if (!strcmp(g_rseg_rates[i].source, source)) {
+            if (g_rseg_rates[i].in_flight) g_rseg_rates[i].in_flight--;
+            break;
+        }
+    pthread_mutex_unlock(&g_rseg_rate_lk);
 }
 
 static Peer *handle_register(int fd, LmbMsg *m, const uint8_t *nonce) {
@@ -1586,6 +1652,68 @@ static int handle_swarm(int fd) {
     return rc;
 }
 
+/* Named, versioned status for humans.  The old LMB_SWARM reply stays
+ * anonymous and byte-compatible for scripts; this view is intentionally a
+ * separate opcode so adding a field can never make an old client misparse
+ * the storage prefix.  Addresses and keys are never included. */
+static int handle_swarm_detail(int fd) {
+    LmbBuf body = {0};
+    double now = now_s();
+    pthread_mutex_lock(&g_lk);
+    uint32_t count = 0;
+    for (int i = 0; i < MAX_PEERS; i++) {
+        Peer *p = &g_peers[i];
+        int storage = p->used && !p->is_expert && now - p->ts <= g_stale_s;
+        int expert = p->used && p->is_expert && p->has_expert &&
+                     now - p->expert_ts <= g_stale_s;
+        int segment = p->used && p->is_expert && p->has_segment &&
+                      p->segment_live && now - p->segment_ts <= g_stale_s;
+        if (storage || expert || segment) count++;
+    }
+    lmb_buf_u32(&body, LMB_SWARM_DETAIL_VERSION);
+    lmb_buf_u32(&body, count);
+    for (int i = 0; i < MAX_PEERS; i++) {
+        Peer *p = &g_peers[i];
+        int storage = p->used && !p->is_expert && now - p->ts <= g_stale_s;
+        int expert = p->used && p->is_expert && p->has_expert &&
+                     now - p->expert_ts <= g_stale_s;
+        int segment = p->used && p->is_expert && p->has_segment &&
+                      p->segment_live && now - p->segment_ts <= g_stale_s;
+        if (!storage && !expert && !segment) continue;
+        uint32_t roles = (storage ? LMB_SWARM_ROLE_STORAGE : 0u) |
+                         (expert ? LMB_SWARM_ROLE_EXPERT : 0u) |
+                         (segment ? LMB_SWARM_ROLE_SEGMENT : 0u);
+        double newest = storage ? p->ts : 0.0;
+        if (expert && p->expert_ts > newest) newest = p->expert_ts;
+        if (segment && p->segment_ts > newest) newest = p->segment_ts;
+        const char *model = segment ? p->segment.model : p->model;
+        lmb_buf_str(&body, p->name);
+        lmb_buf_str(&body, model);
+        lmb_buf_u32(&body, roles);
+        lmb_buf_u32(&body, (uint32_t)(now - newest));
+        lmb_buf_u64(&body, storage ? p->held_bytes : 0u);
+        lmb_buf_u64(&body, storage ? p->served_bytes : 0u);
+        lmb_buf_u64(&body, storage ? p->served_reads : 0u);
+        lmb_buf_u32(&body, storage ? p->nfiles : 0u);
+        lmb_buf_u32(&body, expert ? p->nexperts : 0u);
+        lmb_buf_u32(&body, expert && p->have_exec_stats ? 1u : 0u);
+        lmb_buf_u64(&body, expert && p->have_exec_stats ? p->exec_calls : 0u);
+        lmb_buf_u32(&body, expert && p->have_exec_stats ? p->exec_inflight : 0u);
+        lmb_buf_u32(&body, segment ? p->segment.layer_begin : 0u);
+        lmb_buf_u32(&body, segment ? p->segment.layer_end : 0u);
+        lmb_buf_u32(&body, segment ? p->segment.active_sessions : 0u);
+        lmb_buf_u32(&body, segment ? p->segment.max_sessions : 0u);
+        lmb_buf_u32(&body, segment ? p->segment.queue_depth : 0u);
+        lmb_buf_u32(&body, segment ? p->segment.inflight : 0u);
+        lmb_buf_u32(&body, segment ? p->segment.flags : 0u);
+    }
+    pthread_mutex_unlock(&g_lk);
+    int rc = lmb_send(fd, LMB_SWARM_DETAIL_R, body.p,
+                      (uint32_t)body.len, NULL, 0);
+    free(body.p);
+    return rc;
+}
+
 /* ---- EASSIGN: which experts should this node hold? ----------------------
  *
  * The disk side has had this since day one: a donor offers bytes, the tracker
@@ -1970,6 +2098,11 @@ static int handle_rseg(int fd, LmbMsg *m) {
         !lmb_frame_shape_ok(inner_op, inner_body_len, m->pay_len)) {
         send_err(fd, "bad Segment relay frame"); return -1;
     }
+    char rate_source[64];
+    if (rseg_rate_enter(fd, m->pay_len, rate_source)) {
+        send_err(fd, "Segment relay source rate/concurrency limit");
+        return 0;
+    }
 
     Peer *p = NULL;
     double now = now_s();
@@ -1983,20 +2116,42 @@ static int handle_rseg(int fd, LmbMsg *m) {
         p = q; p->refs++; break;
     }
     pthread_mutex_unlock(&g_lk);
-    if (!p) { send_err(fd, "Segment relay peer is unavailable"); return 0; }
+    if (!p) {
+        rseg_rate_leave(rate_source);
+        send_err(fd, "Segment relay peer is unavailable"); return 0;
+    }
 
     uint8_t *body = malloc(inner_body_len ? inner_body_len : 1u);
     uint8_t *pay = malloc(m->pay_len ? m->pay_len : 1u);
     if (!body || !pay) {
         free(body); free(pay);
         pthread_mutex_lock(&g_lk); if (p->refs) p->refs--; pthread_mutex_unlock(&g_lk);
+        rseg_rate_leave(rate_source);
         send_err(fd, "oom"); return -1;
     }
     if (inner_body_len) memcpy(body, c.p + c.off, inner_body_len);
     if (m->pay_len) memcpy(pay, m->pay, m->pay_len);
 
     pthread_mutex_lock(&p->rq_lk);
-    while (p->rq_busy) pthread_cond_wait(&p->rq_cv, &p->rq_lk);
+    struct timespec queue_deadline;
+    clock_gettime(CLOCK_REALTIME, &queue_deadline);
+    queue_deadline.tv_sec += g_rseg_queue_ms / 1000;
+    queue_deadline.tv_nsec += (long)(g_rseg_queue_ms % 1000) * 1000000L;
+    if (queue_deadline.tv_nsec >= 1000000000L) {
+        queue_deadline.tv_sec++;
+        queue_deadline.tv_nsec -= 1000000000L;
+    }
+    while (p->rq_busy)
+        if (pthread_cond_timedwait(&p->rq_cv, &p->rq_lk,
+                                   &queue_deadline) == ETIMEDOUT) break;
+    if (p->rq_busy) {
+        pthread_mutex_unlock(&p->rq_lk);
+        free(body); free(pay);
+        pthread_mutex_lock(&g_lk); if (p->refs) p->refs--; pthread_mutex_unlock(&g_lk);
+        rseg_rate_leave(rate_source);
+        send_err(fd, "Segment relay executor queue is busy");
+        return 0;
+    }
     p->rq_busy = 1; p->rq_sent = 0; p->rq_done = 0; p->rq_ok = 0;
     p->rq_id = ++p->rq_next; p->rq_op = LMB_RSEG_FWD;
     p->rq_inner_op = inner_op;
@@ -2042,6 +2197,7 @@ static int handle_rseg(int fd, LmbMsg *m) {
     }
     free(response_body); free(response_pay);
     pthread_mutex_lock(&g_lk); if (p->refs) p->refs--; pthread_mutex_unlock(&g_lk);
+    rseg_rate_leave(rate_source);
     return rc;
 }
 
@@ -2332,6 +2488,7 @@ static void *conn_thread(void *arg) {
         case LMB_MODEL_ID:  rc = handle_model_id(fd, &m); break;
         case LMB_PLACEMENT: rc = handle_placement(fd, &m); break;
         case LMB_SWARM:     rc = handle_swarm(fd); break;
+        case LMB_SWARM_DETAIL: rc = handle_swarm_detail(fd); break;
         case LMB_RREAD:     rc = handle_rread(fd, &m); break;
         case LMB_REXEC:     rc = handle_rexec(fd, &m); break;
         case LMB_RSEG:      rc = handle_rseg(fd, &m); break;
@@ -2383,6 +2540,11 @@ int main(int argc, char **argv) {
     g_stale_s = (double)lmb_env_int("LUMABRI_STALE_MS", (int)(STALE_S * 1000),
                                     100, 3600000) / 1000.0;
     g_max_names_per_source = lmb_env_int("LUMABRI_MAX_NAMES_PER_SOURCE", 16, 1, MAX_PEERS);
+    g_rseg_rate_per_s = lmb_env_int("LUMABRI_RSEG_RATE", 2048, 1, 1000000);
+    g_rseg_burst = lmb_env_int("LUMABRI_RSEG_BURST", 4096, 1, 1000000);
+    g_rseg_source_concurrency = lmb_env_int("LUMABRI_RSEG_SOURCE_CONCURRENCY",
+                                            32, 1, 256);
+    g_rseg_queue_ms = lmb_env_int("LUMABRI_RSEG_QUEUE_MS", 2000, 0, 60000);
     if (bindings_load()) {
         fprintf(stderr, "[tracker] cannot load trusted peer bindings from %s\n",
                 g_bindings_path[0] ? g_bindings_path : "the state directory");

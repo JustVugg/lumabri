@@ -358,8 +358,12 @@ unsigned. Without it the client still works, but it is trusting the server.
 With Segment, the first answer fetches only the local Edge working set
 (tokenizer, embedding, final transform/head) into `~/.lumabri`; layer weights
 and state remain on peers. If Segment is unavailable, the same TUI starts the
-classic expert/CAS path and its dense working set automatically. `/swarm`
-shows the network, `/model` switches model.
+classic expert/CAS path and its dense working set automatically. `/swarm` and
+`/hosts` show named machines and their live roles, `/experts` shows executor
+call counts and Segment activity, and `/model` switches model. Slash commands
+autocomplete with Tab. During generation the fixed input dock remains usable:
+status shows routing/prefill/decode/failover and read-only menus open without
+waiting for the answer to finish.
 
 Verified chunks are shared across models in `~/.lumabri/cas`; override it
 with `LUMABRI_CAS=/fast/local/path`. To enable the basic straggler hedge, set
@@ -441,6 +445,41 @@ journalctl -u lumabri -f
 rm -rf /home/lumabri/models/mymodel/.lumabri_hashes
 systemctl restart lumabri
 ```
+
+Use `--host-name NAME` on `lumabri serve` when the automatic hostname is not
+recognizable. The storage, expert and Segment children inherit that prefix,
+and the server prints a periodic aggregate whenever hosts, calls or active
+sessions change.
+
+The Segment relay is deliberately bounded even though its end-user `LMB_RSEG`
+request does not yet contain a caller signature. The tracker applies a token
+bucket and concurrency cap per observed source, and waits only a bounded time
+for the serialized executor tunnel. Defaults and overrides are:
+
+```sh
+LUMABRI_RSEG_RATE=2048                 # weighted requests/second/source
+LUMABRI_RSEG_BURST=4096
+LUMABRI_RSEG_SOURCE_CONCURRENCY=32
+LUMABRI_RSEG_QUEUE_MS=2000
+```
+
+Private swarms should still set `LUMABRI_TOKEN`; source rate limiting is abuse
+containment, not a cryptographic end-user identity. Direct Segment remains the
+preferred data plane.
+
+Resource defaults for automatic origin slices are conservative:
+
+```sh
+LUMABRI_SEGMENT_MIN_FREE_MB=8192       # do not auto-start below this
+LUMABRI_SEGMENT_RAM_RESERVE_MB=4096    # reject new sessions below this
+LUMABRI_SEGMENT_SESSIONS=2             # optional per-slice override (1..64)
+```
+
+Threads are divided across layer slices, only one OpenMP team runs per slice,
+and fallback/NAT executors are niced. Direct origins default to four sessions
+per slice and NAT/relay origins to two; the override above is bounded but can
+increase real KV RAM substantially. These ranges consume real RAM and CPU; use
+`--no-exec` when this server must provide storage only.
 
 Two things worth knowing:
 

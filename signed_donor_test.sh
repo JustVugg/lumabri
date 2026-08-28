@@ -86,16 +86,16 @@ done
 echo "   ✓ 3 files pulled, every chunk checked against the signed truth"
 
 echo "· 2) the tracker accepts what the donor announces"
-wait_for "$T/tracker.log" "+ peer-" 15 || { cat "$T/tracker.log"; exit 1; }
-if grep -q "REJECTED: peer-" "$T/tracker.log"; then
+wait_for "$T/tracker.log" "+ .*storage" 15 || { cat "$T/tracker.log"; exit 1; }
+if grep -q "REJECTED: .*storage" "$T/tracker.log"; then
     echo "   the donor announced bytes the tracker would not take:"
     grep "REJECTED" "$T/tracker.log"; exit 1
 fi
-NF=$(grep -o "+ peer-[0-9]* @ [^ ]* (fx, [0-9]* files)" "$T/tracker.log" |
+NF=$(grep -o "+ [^ ]*storage @ [^ ]* (fx, [0-9]* files)" "$T/tracker.log" |
      tail -1 | grep -o "[0-9]* files" | cut -d' ' -f1)
 [ "${NF:-0}" -ge 3 ] || {
     echo "   the donor registered with ${NF:-0} files — it donated nothing"
-    grep "peer-" "$T/tracker.log"; exit 1; }
+    grep "storage" "$T/tracker.log"; exit 1; }
 echo "   ✓ registered with $NF files: the origin's signature travelled with them"
 
 echo "· 3) the donated copy alone serves a chatter that checks the signature"
@@ -115,9 +115,9 @@ wait "$DONOR" 2>/dev/null || true
 : > "$T/tracker.log"
 ./lumabri serve --model "$T/donor" --join 127.0.0.1:7580 --model-name fx \
     --donate 1 --pubkey "$T/swarm.pub" --port 7584 > "$T/donor2.log" 2>&1 & PIDS+=($!)
-wait_for "$T/tracker.log" "+ peer-" 30 || { cat "$T/donor2.log"; exit 1; }
+wait_for "$T/tracker.log" "+ .*storage" 30 || { cat "$T/donor2.log"; exit 1; }
 sleep 1
-if grep -q "REJECTED: peer-" "$T/tracker.log"; then
+if grep -q "REJECTED: .*storage" "$T/tracker.log"; then
     echo "   after a restart the donor announced unsigned bytes:"
     grep "REJECTED" "$T/tracker.log"; exit 1
 fi
