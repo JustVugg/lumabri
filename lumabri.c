@@ -50,6 +50,12 @@
 /* ---- terminal ----------------------------------------------------------- */
 
 static int g_tty = 0;
+/* Snapshot the shell's terminal state once, before either line editor can
+ * touch it.  Taking live_begin's "old" value from the current tty created a
+ * narrow hand-off race where it could inherit the previous editor's cbreak
+ * mode and then faithfully restore a non-canonical terminal on Ctrl-Z. */
+static struct termios g_chat_term;
+static int g_chat_term_valid;
 #define C_DIM   (g_tty ? "\x1b[2m"  : "")
 #define C_BOLD  (g_tty ? "\x1b[1m"  : "")
 #define C_GRN   (g_tty ? "\x1b[32m" : "")
@@ -263,14 +269,42 @@ static void spawn_tracked(char *const argv[], const char *what) {
 }
 
 static volatile sig_atomic_t g_stopping = 0;
+/* The chat engine is not one of the optional donor children above.  Publish
+ * it separately so a shutdown signal can break a blocked read immediately
+ * instead of waiting for a long inference to finish. */
+static volatile sig_atomic_t g_signal_engine_pid = 0;
 
 static void on_sigint(int sig) {
-    (void)sig;
+    if (g_stopping) {
+        /* A second shutdown signal is the escape hatch for an engine stuck in
+         * an uninterruptible path.  The live input thread restored termios
+         * before the first Ctrl-C; _exit is async-signal-safe and cannot
+         * deadlock on a stdio/pthread lock held by another thread. */
+        sig_atomic_t engine = g_signal_engine_pid;
+        if (engine > 0) kill((pid_t)engine, SIGKILL);
+        _exit(128 + (sig > 0 && sig < 128 ? sig : SIGTERM));
+    }
     g_stopping = 1;
+    sig_atomic_t engine = g_signal_engine_pid;
+    if (engine > 0) kill((pid_t)engine, SIGTERM);
     for (int i = 0; i < MAX_CHILDREN; i++) {
         sig_atomic_t p = g_signal_children[i];
         if (p > 0) kill((pid_t)p, SIGTERM);
     }
+}
+
+static void install_chat_signal_handlers(void) {
+    struct sigaction action;
+    memset(&action, 0, sizeof action);
+    action.sa_handler = on_sigint;
+    sigemptyset(&action.sa_mask);
+    /* Do not use SA_RESTART: a signal from another terminal must also wake a
+     * line-editor read.  During inference the engine termination closes the
+     * pipe and wakes every streaming dialect independently of EINTR. */
+    sigaction(SIGINT, &action, NULL);
+    sigaction(SIGTERM, &action, NULL);
+    sigaction(SIGHUP, &action, NULL);
+    sigaction(SIGQUIT, &action, NULL);
 }
 
 /* Which expert-node binary can execute this model's experts, or NULL when
@@ -677,7 +711,8 @@ static int cmd_serve(int argc, char **argv) {
         if ((uint32_t)chunks > segment_layers) chunks = (int)segment_layers;
         int slice_threads = (int)(cores / chunks);
         if (slice_threads < 1) slice_threads = 1;
-        int sessions = advertise ? 4 : 2;
+        int sessions = lmb_env_int("LUMABRI_SEGMENT_SESSIONS",
+                                   advertise ? 4 : 2, 1, 64);
         uint32_t segment_context = 4096, model_context = 0;
         if (!local_model_u32(model, "max_position_embeddings", &model_context) &&
             model_context < segment_context)
@@ -1452,7 +1487,7 @@ typedef struct {
     pthread_mutex_t lock;
     volatile int active;
     int enabled, rows, cols, raw_set;
-    struct termios old_term;
+    struct termios old_term, raw_term;
     pthread_t thread;
     char tracker[80], model[64], phase[160], notice[160];
     char input[4096]; int input_len, input_pos;
@@ -1461,6 +1496,23 @@ typedef struct {
 } LiveUi;
 
 static LiveUi g_live = { .lock = PTHREAD_MUTEX_INITIALIZER };
+static int g_live_atexit_registered;
+
+/* Best-effort last line of defence for normal exit() paths.  Fatal signals
+ * are routed through on_sigint(), which wakes the main loop and reaches
+ * live_end(); SIGKILL is intentionally not claimed because no process can
+ * run cleanup after it. */
+static void live_atexit_restore(void) {
+    if (g_live.raw_set)
+        (void)tcsetattr(STDIN_FILENO, TCSANOW, &g_live.old_term);
+    if (g_live.enabled) {
+        static const char reset_scroll[] = "\x1b[r";
+        ssize_t ignored = write(STDOUT_FILENO, reset_scroll,
+                                sizeof reset_scroll - 1);
+        (void)ignored;
+    }
+    g_live.raw_set = 0;
+}
 
 static void live_draw_locked(void) {
     if (!g_live.enabled) return;
@@ -1567,9 +1619,57 @@ static void live_submit_input_locked(void) {
     live_draw_locked();
 }
 
+/* Called from the input worker before requesting shutdown.  The engine may be
+ * the very thing that is wedged, so terminal recovery cannot depend on the
+ * main thread first escaping its pipe read. */
+static void live_release_terminal_locked(void) {
+    if (g_live.enabled) {
+        printf("\x1b[r\x1b[%d;1H\x1b[2K\x1b[%d;1H\x1b[2K"
+               "\x1b[%d;1H\x1b[2K", g_live.rows - 2, g_live.rows - 1,
+               g_live.rows);
+        fflush(stdout);
+    }
+    if (g_live.raw_set)
+        (void)tcsetattr(STDIN_FILENO, TCSANOW, &g_live.old_term);
+    g_live.raw_set = 0;
+    g_live.enabled = 0;
+}
+
+/* Ctrl-Z is read as a byte while the dock owns raw input.  Restore canonical
+ * mode and the normal scrolling region before stopping, then reconstruct the
+ * dock after SIGCONT.  This is ordinary thread context, not a signal handler,
+ * so tcsetattr and stdio are safe here. */
+static void live_suspend_locked(void) {
+    if (g_live.enabled) {
+        printf("\x1b[r\x1b[%d;1H\x1b[2K\r\n", g_live.rows);
+        fflush(stdout);
+    }
+    if (g_live.raw_set) {
+        struct termios shell_term = g_live.old_term;
+        /* An interactive shell may hand a foreground job a cbreak-flavoured
+         * snapshot during the editor-to-dock transition.  Job control needs
+         * a genuinely usable terminal, not merely that snapshot: guarantee
+         * the conventional signal/canonical/echo controls while stopped. */
+        shell_term.c_lflag |= (tcflag_t)(ICANON | ECHO | ISIG | IEXTEN);
+        shell_term.c_iflag |= (tcflag_t)IXON;
+        shell_term.c_cc[VMIN] = 1; shell_term.c_cc[VTIME] = 0;
+        (void)tcsetattr(STDIN_FILENO, TCSANOW, &shell_term);
+    }
+    g_live.raw_set = 0;
+    raise(SIGTSTP);
+    if (!g_live.active || g_stopping) return;
+    if (tcsetattr(STDIN_FILENO, TCSANOW, &g_live.raw_term)) return;
+    g_live.raw_set = 1;
+    g_live.rows = term_h(); g_live.cols = term_w();
+    g_live.enabled = g_live.rows >= 8;
+    if (g_live.enabled)
+        printf("\x1b[1;%dr", g_live.rows - 3);
+    live_draw_locked();
+}
+
 static void *live_input_thread(void *unused) {
     (void)unused;
-    while (g_live.active) {
+    while (g_live.active && !g_stopping) {
         struct pollfd pollfd = { STDIN_FILENO, POLLIN, 0 };
         int ready = poll(&pollfd, 1, 100);
         if (ready <= 0 || !(pollfd.revents & POLLIN)) continue;
@@ -1581,13 +1681,21 @@ static void *live_input_thread(void *unused) {
         } else if (c == '\t') {
             live_complete_locked(); live_draw_locked();
         } else if (c == 3) {
-            if (!g_live.pending_ready) {
-                snprintf(g_live.pending, sizeof g_live.pending, "/quit");
-                g_live.pending_ready = 1;
-            }
             snprintf(g_live.notice, sizeof g_live.notice,
-                     "uscita dopo la risposta in corso");
+                     "interrompo l'inferenza ed esco");
             live_draw_locked();
+            live_release_terminal_locked();
+            on_sigint(SIGINT);
+        } else if (c == 26) {
+            live_suspend_locked();
+        } else if (c == 28) {
+            snprintf(g_live.notice, sizeof g_live.notice,
+                     "SIGQUIT: interrompo l'inferenza ed esco");
+            live_draw_locked();
+            live_release_terminal_locked();
+            /* ISIG is disabled only while this worker owns the terminal; emit
+             * the conventional signal explicitly instead of swallowing ^\ . */
+            raise(SIGQUIT);
         } else if (c == 21) {
             live_clear_input_locked(); live_draw_locked();
         } else if (c == 127 || c == 8) {
@@ -1635,7 +1743,8 @@ static int live_begin(const char *tracker, const char *model,
                       const char *initial_phase) {
     if (!g_tty || !isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) return 0;
     struct termios raw;
-    if (tcgetattr(STDIN_FILENO, &g_live.old_term)) return 0;
+    if (g_chat_term_valid) g_live.old_term = g_chat_term;
+    else if (tcgetattr(STDIN_FILENO, &g_live.old_term)) return 0;
     raw = g_live.old_term;
     raw.c_lflag &= ~(tcflag_t)(ICANON | ECHO | ISIG | IEXTEN);
     raw.c_iflag &= ~(tcflag_t)IXON;
@@ -1644,6 +1753,7 @@ static int live_begin(const char *tracker, const char *model,
     pthread_mutex_lock(&g_live.lock);
     g_live.rows = term_h(); g_live.cols = term_w();
     g_live.enabled = g_live.rows >= 8;
+    g_live.raw_term = raw;
     g_live.raw_set = 1; g_live.active = 1;
     snprintf(g_live.tracker, sizeof g_live.tracker, "%s", tracker);
     snprintf(g_live.model, sizeof g_live.model, "%s", model);
@@ -1656,7 +1766,16 @@ static int live_begin(const char *tracker, const char *model,
         live_draw_locked();
     }
     pthread_mutex_unlock(&g_live.lock);
+    if (!g_live_atexit_registered) {
+        if (atexit(live_atexit_restore) == 0) g_live_atexit_registered = 1;
+    }
     if (pthread_create(&g_live.thread, NULL, live_input_thread, NULL)) {
+        if (g_live.enabled) {
+            static const char reset_scroll[] = "\x1b[r";
+            ssize_t ignored = write(STDOUT_FILENO, reset_scroll,
+                                    sizeof reset_scroll - 1);
+            (void)ignored;
+        }
         g_live.active = 0; g_live.enabled = 0;
         tcsetattr(STDIN_FILENO, TCSANOW, &g_live.old_term);
         g_live.raw_set = 0;
@@ -2271,6 +2390,7 @@ static int engine_spawn(const char *engine, const char *shim, const char *tracke
     }
     close(in_pipe[0]); close(out_pipe[1]); close(err_pipe[1]);
     e->pid = pid; e->to = in_pipe[1]; e->from = out_pipe[0];
+    g_signal_engine_pid = (sig_atomic_t)pid;
     e->proto = PROTO_UNKNOWN;
     e->kind = engine_kind_of(engine);
     e->segment = 0;
@@ -2334,6 +2454,7 @@ static int segment_engine_spawn(const char *engine, const char *shim,
     }
     close(in_pipe[0]); close(out_pipe[1]); close(err_pipe[1]);
     e->pid = pid; e->to = in_pipe[1]; e->from = out_pipe[0];
+    g_signal_engine_pid = (sig_atomic_t)pid;
     e->proto = PROTO_UNKNOWN;
     e->kind = engine_kind_of(model_type);
     e->segment = 1;
@@ -2348,6 +2469,8 @@ static int segment_engine_spawn(const char *engine, const char *shim,
 static void engine_diag(Engine *e, int booting) {
     int st = 0;
     if (e->pid > 0 && waitpid(e->pid, &st, WNOHANG) == e->pid) {
+        if (g_signal_engine_pid == (sig_atomic_t)e->pid)
+            g_signal_engine_pid = 0;
         e->pid = 0;
         if (WIFSIGNALED(st)) {
             int s = WTERMSIG(st);
@@ -2398,9 +2521,30 @@ static void engine_diag(Engine *e, int booting) {
 
 static void engine_stop(Engine *e) {
     if (e->pid <= 0) return;
-    close(e->to); close(e->from);
-    kill(e->pid, SIGTERM);
-    waitpid(e->pid, NULL, 0);
+    pid_t pid = e->pid;
+    if (g_signal_engine_pid == (sig_atomic_t)pid)
+        g_signal_engine_pid = 0;
+    /* EOF is the Segment gateway's clean shutdown protocol: it closes every
+     * remote session before exiting.  Killing it unconditionally made normal
+     * /quit leak hour-long session leases until an executor hit its quota.
+     * A signal-driven interruption has already asked it to stop and simply
+     * falls through to the bounded reap/kill path. */
+    close(e->to); e->to = -1;
+    if (e->segment && !g_stopping) {
+        for (int attempt = 0; attempt < 100; attempt++) {
+            pid_t done = waitpid(pid, NULL, WNOHANG);
+            if (done == pid || (done < 0 && errno == ECHILD)) {
+                close(e->from); e->from = -1; e->pid = 0;
+                return;
+            }
+            struct timespec pause = {0, 20 * 1000 * 1000};
+            while (nanosleep(&pause, &pause) && errno == EINTR && !g_stopping) { }
+            if (g_stopping) break;
+        }
+    }
+    close(e->from); e->from = -1;
+    kill(pid, SIGTERM);
+    waitpid(pid, NULL, 0);
     e->pid = 0;
 }
 
@@ -2645,7 +2789,8 @@ static void le_set(char *buf, size_t cap, int *len, int *pos, const char *text) 
 
 static int line_edit(char *buf, size_t cap) {
     struct termios old, raw;
-    if (tcgetattr(0, &old)) return -2;         /* not a real tty -> caller fgets */
+    if (g_chat_term_valid) old = g_chat_term;
+    else if (tcgetattr(0, &old)) return -2;    /* not a real tty -> caller fgets */
     raw = old;
     /* Clear ISIG/IEXTEN too, and IXON, so Ctrl-C / Ctrl-Z / Ctrl-S reach read()
      * as bytes instead of the tty acting on them behind our back — otherwise the
@@ -2669,7 +2814,10 @@ static int line_edit(char *buf, size_t cap) {
     for (;;) {
         unsigned char c;
         ssize_t rn = read(0, &c, 1);
-        if (rn < 0 && errno == EINTR) continue;  /* a signal, not end of input */
+        if (rn < 0 && errno == EINTR) {
+            if (g_stopping) { rc = -1; break; }
+            continue;
+        }
         if (rn <= 0) { rc = -1; break; }
 
         if (c == '\r' || c == '\n') { printf("\r\n"); break; }
@@ -2682,8 +2830,15 @@ static int line_edit(char *buf, size_t cap) {
         if (c == 26) {                           /* Ctrl-Z: suspend, terminal restored */
             tcsetattr(0, TCSANOW, &old);
             raise(SIGTSTP);
+            if (g_stopping) { rc = -1; len = 0; break; }
             tcsetattr(0, TCSANOW, &raw);         /* resumed: back to raw */
             continue;
+        }
+        if (c == 28) {                           /* Ctrl-\: conventional SIGQUIT */
+            tcsetattr(0, TCSANOW, &old);
+            printf("\r\n");
+            raise(SIGQUIT);
+            rc = -1; len = 0; break;
         }
         if (c != '\t') { completion[0] = 0; completion_next = 0; }
         if (c == '\t') {                        /* cycle slash-command matches */
@@ -3406,6 +3561,8 @@ static int model_boot(const char *tracker, const char *model, const char *shim,
 }
 
 static int cmd_chat(int argc, char **argv) {
+    g_stopping = 0;
+    install_chat_signal_handlers();
     const char *tracker = NULL;
     const char *engine_path = NULL, *engines_dir = getenv("LUMABRI_ENGINES");
     const char *want_model = NULL, *local_dir = NULL;
@@ -3434,6 +3591,8 @@ static int cmd_chat(int argc, char **argv) {
                                "[--donate GB] [--model-dir DIR] [--donor-name S]\n");
                return 2; }
     }
+    g_chat_term_valid = g_tty && isatty(STDIN_FILENO) &&
+                        tcgetattr(STDIN_FILENO, &g_chat_term) == 0;
 
     /* The panel comes BEFORE anything is contacted: the wordmark, then what
      * is missing, then the role. A TUI user never sees a flag. */
@@ -3593,8 +3752,6 @@ static int cmd_chat(int argc, char **argv) {
                    ctx, max_new, cap_experts, &eng, &sw))
         return 1;
     if (role.disk || role.compute) {
-        signal(SIGINT, on_sigint);            /* the donors die with the chat */
-        signal(SIGTERM, on_sigint);
         role_start(&role, tracker, model, sw.model_type, eng.segment, ctx,
                    sw.total_bytes);
     }
@@ -3602,6 +3759,7 @@ static int cmd_chat(int argc, char **argv) {
     char *conv = calloc(1, 1);   /* serve-codec conversation history (after bos) */
     char line[4096];
     for (;;) {
+        if (g_stopping) break;
         int queued = live_take_pending(line, sizeof line);
         int w = term_w() - 2;
         if (g_tty) {
@@ -3619,7 +3777,7 @@ static int cmd_chat(int argc, char **argv) {
         } else
             got = prompt_line(line, sizeof line) == 0;   /* line editor when a tty */
         if (g_tty) hline("\xe2\x95\xb0", "\xe2\x95\xaf", w);
-        if (!got) break;
+        if (!got || g_stopping) break;
         size_t L = strlen(line);   /* prompt_line already stripped the newline */
         if (!L) continue;
         if (!strcmp(line, "/quit") || !strcmp(line, "/exit")) break;
@@ -3693,6 +3851,11 @@ static int cmd_chat(int argc, char **argv) {
             int dead = stream_serve2(&eng, stat, sizeof stat, &reply);
             g_eng.streaming = 0;
             live_end();
+            if (g_stopping) {
+                free(reply);
+                printf("\n  %sinferenza interrotta%s\n", C_DIM, C_R);
+                break;
+            }
             if (dead) {
                 fprintf(stderr, "\n%sengine exited%s\n", C_RED, C_R);
                 engine_diag(&eng, 0);
@@ -3709,6 +3872,10 @@ static int cmd_chat(int argc, char **argv) {
             int dead = stream_until_end(&eng, stat, sizeof stat);
             g_eng.streaming = 0;
             live_end();
+            if (g_stopping) {
+                printf("\n  %sinferenza interrotta%s\n", C_DIM, C_R);
+                break;
+            }
             if (dead) {
                 fprintf(stderr, "\n%sengine exited%s\n", C_RED, C_R);
                 engine_diag(&eng, 0);
@@ -3726,6 +3893,11 @@ static int cmd_chat(int argc, char **argv) {
             g_eng.spinning = 0;
             if (live) live_end();
             else if (g_tty) pthread_join(tspin, NULL);
+            if (g_stopping) {
+                free(reply);
+                printf("\n  %sinferenza interrotta%s\n", C_DIM, C_R);
+                break;
+            }
             if (!reply) {
                 fprintf(stderr, "%sengine exited%s\n", C_RED, C_R);
                 engine_diag(&eng, 0);

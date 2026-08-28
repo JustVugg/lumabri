@@ -74,7 +74,15 @@ Generation streams as soon as decoded text is stable. During inference a small
 dock remains fixed above the input and reports routing, prefill, decode,
 checkpoint or failover without splicing diagnostics into the answer. The input
 remains active: read-only menus open immediately and one next prompt or command
-can be prepared while the current KV transition finishes.
+can be prepared while the current KV transition finishes. `Ctrl-C` interrupts
+the active turn and exits immediately instead of waiting for it to finish;
+`Ctrl-Z` restores the terminal before suspending and rebuilds the dock after
+resume, while `Ctrl-\\` follows the same immediate shutdown path through
+`SIGQUIT`. Normal exit, `SIGINT`, `SIGTERM`, `SIGHUP` and `SIGQUIT` all restore
+the original terminal mode. If a child is genuinely uninterruptible, a second
+Ctrl-C forces the chatter out after the first has already restored the shell.
+As on every Unix program, `SIGKILL` cannot run cleanup; `reset` remains the
+recovery command after an external `kill -9`.
 
 ## How it works
 

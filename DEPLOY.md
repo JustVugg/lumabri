@@ -472,11 +472,14 @@ Resource defaults for automatic origin slices are conservative:
 ```sh
 LUMABRI_SEGMENT_MIN_FREE_MB=8192       # do not auto-start below this
 LUMABRI_SEGMENT_RAM_RESERVE_MB=4096    # reject new sessions below this
+LUMABRI_SEGMENT_SESSIONS=2             # optional per-slice override (1..64)
 ```
 
 Threads are divided across layer slices, only one OpenMP team runs per slice,
-and fallback/NAT executors are niced. These ranges consume real RAM and CPU;
-use `--no-exec` when this server must provide storage only.
+and fallback/NAT executors are niced. Direct origins default to four sessions
+per slice and NAT/relay origins to two; the override above is bounded but can
+increase real KV RAM substantially. These ranges consume real RAM and CPU; use
+`--no-exec` when this server must provide storage only.
 
 Two things worth knowing:
 

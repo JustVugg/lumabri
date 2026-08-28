@@ -8,6 +8,14 @@ a tag stay under Unreleased until a new tag is created.
 - Streaming Segment replies with live routing/prefill/decode/checkpoint/failover
   status, a fixed non-blocking input dock, slash-command autocomplete and menus
   usable during inference.
+- Immediate live-turn interruption: `Ctrl-C`/`Ctrl-\\` stop the engine instead
+  of queueing an exit behind inference, `Ctrl-Z` restores and reconstructs the
+  dock across suspend/resume, and an exit guard restores termios after normal
+  shutdown signals. Terminal recovery happens before waiting on the engine; a
+  second shutdown signal provides an async-safe forced exit.
+- Clean Segment gateway EOF on ordinary `/quit`, so remote sessions are closed
+  instead of occupying executor slots until their lease expires; per-slice
+  session capacity also has a bounded operator override.
 - Stable machine names, named `/swarm`/`/hosts` topology, `/experts` call
   counters and periodic server-side host/executor/session telemetry.
 - Per-source Segment-relay token bucket, concurrency cap and bounded serialized
