@@ -70,9 +70,18 @@ def turn(rid, prompt):
     p.stdin.write(f"SUBMIT {rid} 0 {len(prompt)} 1 0.7 0.95\n".encode()+prompt+b"\n")
     p.stdin.flush()
     if line() != f"ACCEPT {rid}\n".encode(): raise RuntimeError("not accepted")
-    head=line().split(); size=int(head[2]); p.stdout.read(size)
-    if p.stdout.read(1) != b"\n": raise RuntimeError("truncated data")
-    if not line().startswith(f"DONE {rid} STAT ".encode()): raise RuntimeError("no done")
+    seen_data = False
+    while True:
+        frame = line()
+        if frame.startswith(f"DATA {rid} ".encode()):
+            size=int(frame.split()[2]); p.stdout.read(size)
+            if p.stdout.read(1) != b"\n": raise RuntimeError("truncated data")
+            seen_data = True
+        elif frame.startswith(f"DONE {rid} STAT ".encode()):
+            break
+        elif not frame.startswith(f"PROGRESS {rid} ".encode()):
+            raise RuntimeError("unexpected frame: "+repr(frame))
+    if not seen_data: raise RuntimeError("no streamed data")
 turn(1, b"hi\n")
 os.kill(int(donor), 15)
 time.sleep(.3)

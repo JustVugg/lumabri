@@ -120,6 +120,12 @@ A successful `run_begin` reserves the next transition. The adapter executes
 outside the table lock, then calls `run_commit` or `run_abort`. Commit alone
 advances sequence and position.
 
+The executor keeps one permanent mutex per session slot. A multi-gigabyte
+adapter restore holds only that session mutex: lookup releases the node-wide
+session-table mutex before waiting, and `CLOSE` reports `BUSY` for the one slot
+instead of blocking unrelated `OPEN`, `CLOSE`, snapshot or run traffic. The
+same lock prevents a close from destroying adapter state during a run.
+
 The table records the last 16 committed request identities and digests. A
 duplicate is never executed twice. The executor retains the most recent
 committed activation response for a safe immediate retry. An older recognized

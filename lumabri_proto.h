@@ -101,6 +101,10 @@
 #define LMB_EREG_STATS_LENGTH    12u
 #define LMB_SWARM_EXEC_MAGIC     0x31585753u /* "SWX1" */
 #define LMB_SWARM_EXEC_VERSION   1u
+#define LMB_SWARM_DETAIL_VERSION 1u
+#define LMB_SWARM_ROLE_STORAGE   (1u << 0)
+#define LMB_SWARM_ROLE_EXPERT    (1u << 1)
+#define LMB_SWARM_ROLE_SEGMENT   (1u << 2)
 
 /* Both arguments must point at the fixed LMB_TOKEN_MAX+1 authentication
  * buffers used by the daemons.  Compare the complete buffers so a remote
@@ -238,6 +242,12 @@ enum {
      * that peer's signed outbound control connection; the executor remains
      * the sole authority for session, lease and request-id validation. */
     LMB_RSEG = 57, LMB_RSEG_FWD = 58, LMB_RSEG_R = 59,
+    /* Human-facing observability. Unlike the legacy anonymous SWARM reply,
+     * this endpoint returns the peer names chosen by their operators plus
+     * role/load counters. It deliberately omits network addresses and public
+     * keys: the TUI can explain who is doing work without leaking how to
+     * reach a private donor. The body is versioned independently. */
+    LMB_SWARM_DETAIL = 60, LMB_SWARM_DETAIL_R = 61,
 };
 
 /* REGISTER body: str name, str addr, str model, u64 held_bytes,
@@ -314,6 +324,7 @@ static void lmb_frame_caps(uint32_t op, uint32_t *body_cap, uint32_t *pay_cap) {
         break;
     case LMB_MANIFEST_R:
     case LMB_SWARM_R:
+    case LMB_SWARM_DETAIL_R:
     case LMB_EPEERS_R:
     case LMB_EMANIFEST_R:
     case LMB_EASSIGN_R:

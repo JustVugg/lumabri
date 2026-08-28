@@ -62,11 +62,19 @@ the finer-grained expert donor remains the lower-memory fallback.
 Both run at low priority and die with the TUI. Nothing to configure — Enter
 picks "just chat".
 
-Inside the chat, `/swarm` shows the network live and anonymous (peers are
-numbered, never named), and `/model` lists the models on the swarm and switches
-between them on the fly. The prompt is a real line editor — arrow keys, Home/End,
-word and line kill, and Up/Down through the session's history — so a typo is one
-keystroke back, not a retyped line.
+Inside the chat, `/swarm` (or `/hosts`) shows stable human-readable machine
+names, storage served, expert calls and live Segment ranges. `/experts` answers
+how often each executor has actually been used; `/model`, `/debug`, `/storage`
+and `/help` expose the other controls. Tab completes slash commands. The prompt
+is a real line editor — arrow keys, Home/End, word and line kill, and Up/Down
+through the session's history — so a typo is one keystroke back, not a retyped
+line.
+
+Generation streams as soon as decoded text is stable. During inference a small
+dock remains fixed above the input and reports routing, prefill, decode,
+checkpoint or failover without splicing diagnostics into the answer. The input
+remains active: read-only menus open immediately and one next prompt or command
+can be prepared while the current KV transition finishes.
 
 ## How it works
 
@@ -206,6 +214,17 @@ enables the fastest direct paths on 7301 onward; allow 7300:7309 when using up
 to seven public Segment ranges. Without a reachable address, Segment, READ and
 EXEC use signed outbound tracker tunnels, so no data port is required. Add
 `--key swarm.key` to sign the model.
+
+`serve` derives names such as `host-gpu-box-7300-storage`, `-experts` and
+`-segment-1`; use `--host-name gpu-box` for an operator-chosen prefix. Its live
+summary reports connected hosts, bytes served, expert calls and active Segment
+runs, so successful swarm work is visible on both sides.
+
+Automatic Segment is a real compute service. It starts only with at least 8 GiB
+available by default (`LUMABRI_SEGMENT_MIN_FREE_MB`), divides CPU threads among
+the slices, runs fallback work at low priority and keeps 4 GiB free before
+accepting a new session (`LUMABRI_SEGMENT_RAM_RESERVE_MB`). A relay-only/NAT
+origin defaults to two sessions per slice; a direct server defaults to four.
 
 On every other machine, pick a role:
 

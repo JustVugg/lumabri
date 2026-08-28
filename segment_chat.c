@@ -52,6 +52,18 @@ typedef struct {
     double elapsed_seconds;
 } GenerationResult;
 
+typedef enum {
+    GEN_EVENT_PREFILL,
+    GEN_EVENT_DECODE,
+    GEN_EVENT_DATA,
+    GEN_EVENT_FAILOVER,
+    GEN_EVENT_CHECKPOINT,
+} GenerationEventKind;
+
+typedef int (*GenerationEventFn)(void *opaque, GenerationEventKind kind,
+                                 size_t current, size_t total,
+                                 const void *data, size_t data_bytes);
+
 static int retry_first_run;
 static const char *segment_tracker;
 
@@ -941,6 +953,63 @@ static void generation_result_free(GenerationResult *result) {
     memset(result, 0, sizeof *result);
 }
 
+/* Detokenize the complete generated prefix and stream only bytes confirmed by
+ * two consecutive prefixes. This one-token look-behind handles byte fallback
+ * and tokenizers that rewrite their trailing whitespace: unstable tail bytes
+ * remain buffered, while already displayed text is never contradicted. */
+static int generation_stream_prefix(ColiEdgeEngine *edge,
+                                    const int32_t *tokens, size_t count,
+                                    int32_t eos_token,
+                                    int flush,
+                                    GenerationEventFn event, void *opaque,
+                                    char **previous, size_t *previous_bytes,
+                                    size_t *emitted_bytes,
+                                    char *error, size_t error_size) {
+    while (count && tokens[count - 1] == eos_token) count--;
+    size_t bytes = 0;
+    if (count && coli_edge_detokenize(edge, tokens, count, NULL, 0, &bytes,
+                                     error, error_size)) return -1;
+    char *text = malloc(bytes + 1u);
+    if (!text) { snprintf(error, error_size, "out of memory streaming token"); return -1; }
+    if (count && coli_edge_detokenize(edge, tokens, count, text, bytes + 1u,
+                                     &bytes, error, error_size)) {
+        free(text); return -1;
+    }
+    text[bytes] = 0;
+    if (*emitted_bytes > bytes ||
+        (*emitted_bytes && (!*previous ||
+         memcmp(*previous, text, *emitted_bytes)))) {
+        free(text);
+        snprintf(error, error_size,
+                 "tokenizer rewrote text that was already streamed");
+        return -1;
+    }
+    size_t stable = 0;
+    if (flush) stable = bytes;
+    else if (*previous) {
+        size_t common = *previous_bytes < bytes ? *previous_bytes : bytes;
+        while (stable < common && (*previous)[stable] == text[stable]) stable++;
+    }
+    if (stable < *emitted_bytes) {
+        free(text);
+        snprintf(error, error_size,
+                 "tokenizer changed an already streamed prefix");
+        return -1;
+    }
+    size_t delta = stable - *emitted_bytes;
+    if (delta && event && event(opaque, GEN_EVENT_DATA, count, 0,
+                                text + *emitted_bytes, delta)) {
+        free(text);
+        snprintf(error, error_size, "stream consumer closed during generation");
+        return -1;
+    }
+    free(*previous);
+    *previous = text;
+    *previous_bytes = bytes;
+    *emitted_bytes = stable;
+    return 0;
+}
+
 static int segment_generate(ColiEdgeEngine *edge,
                             const ColiEdgeCapabilities *cap,
                             RemoteSegment *chain, size_t chain_count,
@@ -955,6 +1024,7 @@ static int segment_generate(ColiEdgeEngine *edge,
                             SegmentConversation *conversation,
                             const LmbSegRouteSnapshot *route_snapshot,
                             uint64_t route_generation,
+                            GenerationEventFn event, void *event_opaque,
                             GenerationResult *result,
                             char *error, size_t error_size) {
     memset(result, 0, sizeof *result);
@@ -967,6 +1037,8 @@ static int segment_generate(ColiEdgeEngine *edge,
     int32_t *generated = NULL;
     uint8_t *buffer_a = NULL, *buffer_b = NULL;
     float *logits = NULL;
+    char *stream_text = NULL;
+    size_t stream_text_bytes = 0, stream_emitted_bytes = 0;
     RemoteSegment *active_chain = chain;
     size_t active_count = chain_count;
     size_t prefilled = 0;
@@ -1073,6 +1145,11 @@ static int segment_generate(ColiEdgeEngine *edge,
     }
     uint8_t *final_state = NULL;
     uint32_t final_rows = 0;
+    if (event && event(event_opaque, GEN_EVENT_PREFILL, prefilled,
+                       prompt_count, NULL, 0)) {
+        snprintf(error, error_size, "stream consumer closed before prefill");
+        goto cleanup;
+    }
     for (size_t offset = prefilled; offset < prompt_count; offset += max_rows) {
         uint32_t rows = (uint32_t)(prompt_count - offset);
         if (rows > max_rows) rows = max_rows;
@@ -1088,6 +1165,12 @@ static int segment_generate(ColiEdgeEngine *edge,
         int failed = chain_run(active_chain, active_count,
                                prompt_tokens + offset, rows,
                                &first, &second, bytes);
+        if (failed && event) {
+            size_t failed_index = (size_t)(-failed - 1);
+            const char *peer = active_chain[failed_index].route.advert.peer_name;
+            (void)event(event_opaque, GEN_EVENT_FAILOVER, failed_index,
+                        active_count, peer, strlen(peer));
+        }
         if (failed && (!conversation || !route_snapshot ||
             conversation_recover(conversation, route_snapshot,
                                  (size_t)(-failed - 1), edge, cap,
@@ -1108,6 +1191,11 @@ static int segment_generate(ColiEdgeEngine *edge,
         }
         final_state = first;
         final_rows = rows;
+        if (event && event(event_opaque, GEN_EVENT_PREFILL, offset + rows,
+                           prompt_count, NULL, 0)) {
+            snprintf(error, error_size, "stream consumer closed during prefill");
+            goto cleanup;
+        }
         if (first != buffer_a) {
             uint8_t *swap = buffer_a; buffer_a = buffer_b; buffer_b = swap;
         }
@@ -1135,6 +1223,14 @@ static int segment_generate(ColiEdgeEngine *edge,
         }
     } else if (coli_edge_select(edge, &select, error, error_size)) goto cleanup;
     size_t generated_count = 1;
+    if (event &&
+        (generation_stream_prefix(edge, generated, generated_count,
+                                  cap->eos_token_id, 0, event, event_opaque,
+                                  &stream_text, &stream_text_bytes,
+                                  &stream_emitted_bytes,
+                                  error, error_size) ||
+         event(event_opaque, GEN_EVENT_DECODE, generated_count,
+               wanted_tokens, NULL, 0))) goto cleanup;
     while (generated_count < wanted_tokens &&
            generated[generated_count - 1] != cap->eos_token_id) {
         int32_t token = generated[generated_count - 1];
@@ -1148,6 +1244,12 @@ static int segment_generate(ColiEdgeEngine *edge,
         uint8_t *first = buffer_a, *second = buffer_b;
         int failed = chain_run(active_chain, active_count, &token, 1,
                                &first, &second, bytes);
+        if (failed && event) {
+            size_t failed_index = (size_t)(-failed - 1);
+            const char *peer = active_chain[failed_index].route.advert.peer_name;
+            (void)event(event_opaque, GEN_EVENT_FAILOVER, failed_index,
+                        active_count, peer, strlen(peer));
+        }
         if (failed && (!conversation || !route_snapshot ||
             conversation_recover(conversation, route_snapshot,
                                  (size_t)(-failed - 1), edge, cap,
@@ -1180,6 +1282,14 @@ static int segment_generate(ColiEdgeEngine *edge,
         } else if (coli_edge_select(edge, &select, error, error_size))
             goto cleanup;
         generated_count++;
+        if (event &&
+            (generation_stream_prefix(edge, generated, generated_count,
+                                      cap->eos_token_id, 0, event, event_opaque,
+                                      &stream_text, &stream_text_bytes,
+                                      &stream_emitted_bytes,
+                                      error, error_size) ||
+             event(event_opaque, GEN_EVENT_DECODE, generated_count,
+                   wanted_tokens, NULL, 0))) goto cleanup;
     }
     /* The token that stopped generation is a control marker, not text. The
      * monolithic engines never put it in the reply and the TUI must not
@@ -1189,19 +1299,28 @@ static int segment_generate(ColiEdgeEngine *edge,
     size_t text_tokens = generated_count;
     while (text_tokens && generated[text_tokens - 1] == cap->eos_token_id)
         text_tokens--;
-    size_t text_bytes = 0;
-    if (text_tokens &&
-        coli_edge_detokenize(edge, generated, text_tokens, NULL, 0,
-                             &text_bytes, error, error_size)) goto cleanup;
-    char *text = malloc(text_bytes + 1);
-    if (!text || (text_tokens &&
-                  coli_edge_detokenize(edge, generated, text_tokens,
-                                       text, text_bytes + 1, &text_bytes,
-                                       error, error_size))) {
-        free(text);
-        goto cleanup;
+    if (event && generation_stream_prefix(
+            edge, generated, generated_count, cap->eos_token_id, 1,
+            event, event_opaque, &stream_text, &stream_text_bytes,
+            &stream_emitted_bytes,
+            error, error_size)) goto cleanup;
+    size_t text_bytes = stream_text_bytes;
+    char *text = stream_text;
+    if (!event) {
+        if (text_tokens &&
+            coli_edge_detokenize(edge, generated, text_tokens, NULL, 0,
+                                 &text_bytes, error, error_size)) goto cleanup;
+        text = malloc(text_bytes + 1);
+        if (!text || (text_tokens &&
+                      coli_edge_detokenize(edge, generated, text_tokens,
+                                           text, text_bytes + 1, &text_bytes,
+                                           error, error_size))) {
+            free(text);
+            goto cleanup;
+        }
+        text[text_bytes] = 0;
     }
-    text[text_bytes] = 0;
+    stream_text = NULL;
     if (conversation) {
         size_t generated_committed = generated_count ? generated_count - 1 : 0;
         size_t committed_count = prompt_count + generated_committed;
@@ -1211,6 +1330,10 @@ static int segment_generate(ColiEdgeEngine *edge,
             fprintf(stderr, "[lumabri] Segment checkpoint unavailable; "
                             "failover will replay from token %zu\n",
                     conversation->checkpoint_count);
+        else if (event && conversation->checkpoint_count)
+            (void)event(event_opaque, GEN_EVENT_CHECKPOINT,
+                        conversation->checkpoint_count,
+                        committed_count, NULL, 0);
         if (committed_count > SIZE_MAX / sizeof *prompt_tokens) {
             free(text); goto cleanup;
         }
@@ -1253,6 +1376,7 @@ cleanup:
     free(logits);
     free(buffer_a);
     free(buffer_b);
+    free(stream_text);
     return rc;
 }
 
@@ -1293,6 +1417,41 @@ static int read_exact_stdin(void *output, size_t bytes) {
         bytes -= got;
     }
     return 0;
+}
+
+typedef struct { unsigned request_id; size_t emitted_bytes; } ServeGeneration;
+
+static int serve_generation_event(void *opaque, GenerationEventKind kind,
+                                  size_t current, size_t total,
+                                  const void *data, size_t data_bytes) {
+    ServeGeneration *serve = opaque;
+    switch (kind) {
+    case GEN_EVENT_PREFILL:
+        printf("PROGRESS %u PREFILL %zu %zu\n", serve->request_id,
+               current, total);
+        break;
+    case GEN_EVENT_DECODE:
+        printf("PROGRESS %u DECODE %zu %zu\n", serve->request_id,
+               current, total);
+        break;
+    case GEN_EVENT_FAILOVER:
+        printf("PROGRESS %u FAILOVER %.*s\n", serve->request_id,
+               (int)data_bytes, data ? (const char *)data : "");
+        break;
+    case GEN_EVENT_CHECKPOINT:
+        printf("PROGRESS %u CHECKPOINT %zu %zu\n", serve->request_id,
+               current, total);
+        break;
+    case GEN_EVENT_DATA:
+        printf("DATA %u %zu\n", serve->request_id, data_bytes);
+        if (data_bytes && fwrite(data, 1, data_bytes, stdout) != data_bytes)
+            return -1;
+        fputc('\n', stdout);
+        serve->emitted_bytes += data_bytes;
+        break;
+    }
+    fflush(stdout);
+    return ferror(stdout) ? -1 : 0;
 }
 
 static int segment_serve_loop(ColiEdgeEngine *edge,
@@ -1350,18 +1509,38 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
             snprintf(error, sizeof error,
                      "no complete compatible Segment chain");
         if (!bad) {
+            size_t relay_count = 0, host_count = 0;
+            for (size_t i = 0; i < chain_count; i++) {
+                relay_count += !(chain[i].route.transport &
+                                 LMB_SEG_TRANSPORT_DIRECT) &&
+                               (chain[i].route.transport &
+                                LMB_SEG_TRANSPORT_RELAY);
+                int seen = 0;
+                for (size_t j = 0; j < i; j++)
+                    if (!strcmp(chain[j].route.advert.peer_name,
+                                chain[i].route.advert.peer_name)) seen = 1;
+                if (!seen) host_count++;
+            }
+            printf("PROGRESS %u ROUTE %zu %zu %zu\n", request_id,
+                   host_count, chain_count, relay_count);
+            fflush(stdout);
             if (conversation.active && conversation.route_generation !=
                                        snapshot.route_generation)
                 route_print(stderr, "[segment-route]", &snapshot,
                             chain, chain_count);
+            ServeGeneration stream = { .request_id = request_id };
             bad = segment_generate(edge, cap, chain, chain_count,
                                    model_root, tokenizer_root,
                                    context, max_rows, prompt, prompt_bytes,
                                    NULL, 0, max_tokens,
                                    temperature, top_p, &sampler, &conversation,
                                    &snapshot,
-                                   snapshot.route_generation, &result,
+                                   snapshot.route_generation,
+                                   serve_generation_event, &stream, &result,
                                    error, sizeof error);
+            if (!bad && !stream.emitted_bytes)
+                (void)serve_generation_event(&stream, GEN_EVENT_DATA,
+                                             0, 0, NULL, 0);
         }
         free(prompt);
         if (bad) {
@@ -1369,10 +1548,6 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
             fflush(stdout);
             continue;
         }
-        printf("DATA %u %zu\n", request_id, result.text_bytes);
-        if (result.text_bytes)
-            fwrite(result.text, 1, result.text_bytes, stdout);
-        fputc('\n', stdout);
         double rate = result.elapsed_seconds > 0.0
             ? (double)result.token_count / result.elapsed_seconds : 0.0;
         printf("DONE %u STAT %zu %.3f 0 0 %zu 0\n", request_id,
@@ -1588,7 +1763,7 @@ int main(int argc, char **argv) {
                                prompt, prompt ? strlen(prompt) : 0,
                                prompt_tokens, prompt_count, wanted_tokens,
                                temperature, top_p, &sampler, NULL, &snapshot, 0,
-                               &generated, error, sizeof error);
+                               NULL, NULL, &generated, error, sizeof error);
     free(prompt_tokens);
     if (bad) {
         fprintf(stderr, "%s\n", error[0] ? error : "Segment generation failed");

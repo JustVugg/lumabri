@@ -20,7 +20,7 @@ endif
 check-warnings:
 	$(MAKE) -B all test_relay_exec test_swarm_fed test_key_rotation \
 		test_hedge test_verify_failover test_segment_v2 \
-		test_segment_discovery \
+		test_segment_discovery test_swarm_detail test_relay_rate \
 		CFLAGS='$(CFLAGS) -Werror'
 
 SECURE_DEPS = lumabri_secure.h lumabri_crypto.h
@@ -394,6 +394,13 @@ test_segment_discovery: test_segment_discovery.c lumabri_segment_discovery.c \
 	$(CC) $(CFLAGS) -pthread test_segment_discovery.c \
 		lumabri_segment_discovery.c lumabri_segment.c -o $@
 
+test_swarm_detail: test_swarm_detail.c lumabri_proto.h
+	$(CC) $(CFLAGS) -pthread test_swarm_detail.c -o $@
+
+test_relay_rate: test_relay_rate.c lumabri_segment.c lumabri_segment.h \
+		lumabri_proto.h
+	$(CC) $(CFLAGS) -pthread test_relay_rate.c lumabri_segment.c -o $@
+
 # ---- Segment direct data plane (requires Colibri's additive Edge ABI) ---
 # `all` includes this only when both additive headers are present. A Lumabri
 # checkout pointed at an older/release Colibri therefore keeps building the
@@ -471,7 +478,7 @@ test-segment-discovery: tracker test_segment_discovery
 	bash ./segment_discovery_test.sh
 
 test: all test_key_rotation test_hedge test_verify_failover test_segment_v2 \
-		test_segment_discovery
+		test_segment_discovery test_swarm_detail test_relay_rate
 	./selftest.sh
 	./donate_test.sh
 	./signed_donor_test.sh
@@ -493,6 +500,8 @@ test: all test_key_rotation test_hedge test_verify_failover test_segment_v2 \
 	./test_hedge
 	./test_segment_v2
 	bash ./segment_discovery_test.sh
+	bash ./swarm_detail_test.sh
+	bash ./relay_rate_test.sh
 
 # ---- deploy -------------------------------------------------------------
 # make install                    → /usr/local (needs sudo)
@@ -517,6 +526,7 @@ clean:
 	rm -f tracker maintainer liblumabri.so test_shim lumabri \
 	      test_relay_exec test_swarm_fed test_key_rotation test_hedge \
 	      test_verify_failover test_segment_v2 test_segment_discovery test_sampling \
+	      test_swarm_detail test_relay_rate \
 	      test_segment_v2_tsan tracker_tsan \
 	      segment_node segment_chat segment_node_asan segment_chat_asan \
 	      segment_node_tsan segment_chat_tsan \
