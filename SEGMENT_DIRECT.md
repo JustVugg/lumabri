@@ -40,9 +40,11 @@ The model owner runs:
 lumabri serve --model /models/olmoe --advertise PUBLIC_IP
 ```
 
-Lumabri detects the family, layer/context shape, CPU/RAM and public IPv4, then
-starts four disjoint fallback executors. A public interface address removes the
-need for `--advertise`; private/NAT addresses are never guessed.
+Lumabri detects the family, layer/context shape, CPU/RAM and network capability,
+then starts four disjoint fallback executors. A public interface enables the
+preferred direct path. Behind NAT the same executors register as relay-only and
+remain reachable through their signed outbound tracker tunnels; Lumabri never
+publishes a guessed private address as direct.
 
 Every client runs the unchanged TUI:
 
@@ -57,7 +59,7 @@ user-facing model roots, tokenizer roots, ranges or `segment_chat` command.
 
 Choosing `compute` in the TUI asks the tracker for the least-replicated exact
 origin range. The node loads that slice from CAS at low priority if it fits
-after the machine reserve and has a reachable direct address; otherwise
+after the machine reserve, using direct P2P or automatic NAT relay. Otherwise
 Lumabri donates auto-sized experts over the relay-capable classic path.
 
 ## Low-level two-peer diagnostic
@@ -108,8 +110,31 @@ isolated fixtures and protocol diagnosis. A donor may use `--auto-range` in
 place of `--range`: the tracker keeps a short loading promise so concurrent
 donors do not all choose the same rare slice.
 
-Open the Segment port on each executor's firewall. The current transport is
-direct TCP, so an executor behind an unforwarded NAT is not reachable yet.
+Open the Segment port on each executor's firewall only when publishing a direct
+address. Without `--advertise`, `lumabri serve` and compute donors use the exact
+peer's outbound tracker connection for `OPEN`, `RUN`, `SNAPSHOT`, `RESTORE` and
+`CLOSE`; tracker TCP 7300 is the only required inbound port. Direct is preferred
+when both transports are available and a failed direct request is retried by
+relay with the same idempotent request ID.
+
+## Sampling and recovery
+
+Colibri Edge ABI v2 exposes the full logits for all six adapters. The ordinary
+TUI's temperature and top-p are therefore honored on the Segment path. A zero
+temperature calls Colibri's original greedy selector unchanged; a positive
+temperature uses deterministic-seedable nucleus sampling (`--seed` or
+`LUMABRI_SAMPLE_SEED` for diagnostics).
+
+Persistent chats with at least one compatible replica take a transactional
+opaque checkpoint of every selected range at a completed turn. Origin-only
+swarms avoid that copy because there is nowhere to restore it. When one peer
+fails, the gateway selects a compatible replica with exactly the same layer
+boundaries/schema/numeric class, creates a new fenced session across the whole
+chain, restores the common checkpoint,
+replays the token delta and retries the failed batch. No model-specific KV
+layout enters Lumabri. If any exact-range replica or checkpoint is unavailable,
+the error is explicit and the conversation is never continued from partial
+state.
 
 ## Encryption
 
@@ -134,26 +159,24 @@ make test-segment-direct-real ENGINE=/path/to/colibri/c \
 ```
 
 Run the same command with `LUMABRI_ENCRYPT=1` to gate encrypted control and
-data planes.
+data planes. The target also runs the sampler unit gate, a relay-only real
+session, checkpoint/replay after a killed executor, and ordinary
+`lumabri serve` + `lumabri chat` with context negotiation.
 
-## Deliberate current limits
+## Remaining operational scope
 
-- Edge v1 selects greedy tokens only. Temperature, top-p and top-k are not
-  silently approximated outside Colibri.
-- Segment relay and NAT hole punching are not implemented; only tracker
-  discovery and direct peer connections are used.
-- Snapshot bytes are not transported yet. If a selected peer dies, the chat
-  stops with an explicit checkpoint/replay error rather than producing a
-  divergent continuation.
 - The archive advertises CPU only. GPU Segment adapters must expose a real
   Colibri backend before Lumabri may publish CUDA/HIP/Metal/Vulkan capability.
 - The current governor is conservative rather than complete: CPU/RAM/context
   choose chunk/session limits, desktop donors are niced and Segment donation
   is refused when its estimated range would consume the system reserve. Live
-  pressure migration and state replay are still pending.
+  pressure-triggered migration is still pending.
+- Relay is a reachability floor, not the fastest topology: it adds a tracker hop
+  and currently serializes requests per executor tunnel. Reachable peers should
+  publish direct P2P; decentralized relay/hole punching remains future work.
 - One chatter process hosts one active Edge model. This also respects Qwen's
   currently process-global tokenizer state.
 
 These are roadmap items, not hidden fallbacks. The completed milestone proves
-one RTT per segment, exact multi-session state ownership and real token
-generation over the network for every current model family.
+one RTT per segment, sampled multi-session generation, NAT reachability and
+checkpoint/replay over the network for every current model family.

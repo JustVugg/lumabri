@@ -598,7 +598,7 @@ static int cmd_serve(int argc, char **argv) {
         model, mname, segment_model_storage, sizeof segment_model_storage);
     uint32_t segment_layers = 0;
     int with_segment = 0;
-    if (!disk_donor && !no_exec && advertise && segment_engine && segment_model &&
+    if (!disk_donor && !no_exec && segment_engine && segment_model &&
         access(segment_bin, X_OK) == 0 &&
         local_model_layers(model, &segment_layers) == 0) {
         long cores = sysconf(_SC_NPROCESSORS_ONLN);
@@ -646,6 +646,7 @@ static int cmd_serve(int argc, char **argv) {
             sargv[a++] = "--name";         sargv[a++] = sname;
             sargv[a++] = "--auto-identity";
             if (!join) sargv[a++] = "--fallback";
+            if (!advertise) sargv[a++] = "--relay-only";
             sargv[a++] = "--context";      sargv[a++] = context;
             sargv[a++] = "--max-rows";     sargv[a++] = "16";
             sargv[a++] = "--sessions";     sargv[a++] = session_text;
@@ -661,24 +662,22 @@ static int cmd_serve(int argc, char **argv) {
         const char *home = getenv("HOME") ? getenv("HOME") : ".";
         printf("  %sSegment prepara %d fette layer-aligned sulle porte %d-%d "
                "(%ld CPU, %.1f GB RAM disponibili, %d sessioni/fetta). "
-               "%s%s\n",
+               "%s%s%s\n",
                C_DIM, chunks, port + 3, port + 2 + chunks, cores, ram_gb,
                sessions, join ? "Sono peer ordinari; " :
-               "Sono il fallback sostituibile; ", C_R);
+               "Sono il fallback sostituibile; ",
+               advertise ? "data plane diretto con relay di sicurezza. " :
+                           "data plane relay (nessuna porta pubblica richiesta). ",
+               C_R);
         /* Their diagnostics belong in one file per slice: N unbuffered
          * writers on one terminal shred each other's lines exactly when
          * something has gone wrong and the line matters most. */
         printf("  %slog delle fette: %s/.lumabri/logs/segment-%s-%d-*.log · "
-               "apri le porte %d-%d sul firewall, altrimenti pubblichi una "
-               "catena che i chatter non riescono ad aprire%s\n",
+               "%s%s\n",
                C_DIM, home, join ? "peer" : "origin", port,
-               port + 3, port + 2 + chunks, C_R);
-    } else if (!disk_donor && !no_exec && !advertise && segment_engine &&
-               access(segment_bin, X_OK) == 0) {
-        printf("  %sSegment non viene pubblicato: questa macchina non espone "
-               "un IPv4 pubblico. READ/EXEC continuano via relay; usa "
-               "--advertise IP solo quando le porte sono raggiungibili.%s\n",
-               C_DIM, C_R);
+               advertise ? "apri le porte Segment sul firewall per il P2P diretto"
+                         : "relay NAT attivo: non serve aprire le porte Segment",
+               C_R);
     }
     signal(SIGINT, on_sigint);
     signal(SIGTERM, on_sigint);
@@ -686,14 +685,12 @@ static int cmd_serve(int argc, char **argv) {
     printf("\n%sserving%s %s %s(tracker %s%s)%s\n", C_GRN, C_R, model, C_DIM, taddr,
            with_segment ? " · Segment origin attivo" :
            (with_exec ? " · executing experts for the swarm" : ""), C_R);
-    /* Without --advertise every local peer registers as 127.0.0.1, and the
-     * tracker's correction cannot help because these registrations arrive
-     * over loopback. A remote chatter then uses the READ/EXEC tracker relay.
-     * That works through NAT but adds an extra hop and centralises traffic,
-     * so say plainly that --advertise is required for the direct P2P path. */
+    /* Without --advertise every local peer uses its signed outbound tracker
+     * tunnel for READ/EXEC/Segment. It works through NAT with no open data
+     * ports, while --advertise retains the lower-latency direct preference. */
     if (!advertise && !join)
         printf("%s⚠ nessun --advertise: i chatter remoti useranno il relay del "
-               "tracker per READ ed EXEC.%s\n"
+               "tracker per READ, EXEC e Segment.%s\n"
                "%s  Funziona anche dietro NAT, ma aggiunge un hop e carica il "
                "tracker; --advertise abilita il P2P diretto.%s\n"
                "%s  Per il percorso diretto: lumabri serve --model %s --advertise <ip-pubblico>%s\n",
@@ -2374,9 +2371,8 @@ static int free_port(int from) {
 }
 
 /* Prefer one tracker-assigned Segment slice when this chat is already using
- * Segment and the machine can publish a genuinely reachable address. Home
- * NAT peers keep donating through the mature EXEC relay instead of poisoning
- * discovery with an endpoint that only looks public from the tracker. */
+ * Segment. Public machines advertise direct TCP; NAT peers expose the same
+ * local listener only through their signed outbound tracker tunnel. */
 static int role_start_segment(const Role *r, const char *tracker,
                               const char *model, const char *model_type,
                               int context, uint64_t model_bytes) {
@@ -2391,6 +2387,7 @@ static int role_start_segment(const Role *r, const char *tracker,
         snprintf(shim, sizeof shim, "%s/../lib/lumabri/liblumabri.so", dir);
 
     char host[INET_ADDRSTRLEN] = "";
+    int relay_only = 0;
     const char *forced = getenv("LUMABRI_ADVERTISE");
     struct in_addr forced_address;
     if (forced && forced[0]) {
@@ -2402,8 +2399,10 @@ static int role_start_segment(const Role *r, const char *tracker,
     else if (!strncmp(tracker, "127.0.0.1:", 10) ||
              !strncmp(tracker, "localhost:", 10))
         snprintf(host, sizeof host, "127.0.0.1");
-    else if (machine_public_ipv4(host, sizeof host))
-        return 0;
+    else if (machine_public_ipv4(host, sizeof host)) {
+        snprintf(host, sizeof host, "127.0.0.1");
+        relay_only = 1;
+    }
 
     /* The origin's default four-way partition makes one slice roughly a
      * quarter of the checkpoint. Keep both a fixed OS reserve and 25% of the
@@ -2474,6 +2473,7 @@ static int role_start_segment(const Role *r, const char *tracker,
     argv[a++] = "--advertise";     argv[a++] = address;
     argv[a++] = "--name";          argv[a++] = name;
     argv[a++] = "--auto-identity";
+    if (relay_only) argv[a++] = "--relay-only";
     argv[a++] = "--context";       argv[a++] = context_text;
     argv[a++] = "--max-rows";      argv[a++] = "16";
     argv[a++] = "--sessions";      argv[a++] = sessions_text;
@@ -2486,8 +2486,10 @@ static int role_start_segment(const Role *r, const char *tracker,
     if (pid <= 0) return 0;
     child_publish(g_nchildren++, pid);
     printf("  %s\xe2\x9c\xa6 eseguo una fetta Segment assegnata dal tracker "
-           "per lo sciame%s %s(priorita' bassa, %d sessioni massime)%s\n",
-           C_GRN, C_R, C_DIM, sessions, C_R);
+           "per lo sciame%s %s(priorita' bassa, %d sessioni massime%s)%s\n",
+           C_GRN, C_R, C_DIM, sessions,
+           relay_only ? ", relay NAT automatico" : ", P2P diretto + relay",
+           C_R);
     return 1;
 }
 

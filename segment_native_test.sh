@@ -33,8 +33,8 @@ mkdir -p "$TMP/server-home" "$TMP/client-home"
 HOME="$TMP/server-home" ./lumabri key --out "$TMP/swarm" >/dev/null
 
 HOME="$TMP/server-home" LUMABRI_SEGMENT_CHUNKS=2 OMP_NUM_THREADS=2 \
-    ./lumabri serve --model "$OLMOE_EDGE_MODEL" --port 7880 \
-    --advertise 127.0.0.1 --key "$TMP/swarm.key" \
+    stdbuf -oL -eL ./lumabri serve --model "$OLMOE_EDGE_MODEL" --port 7880 \
+    --key "$TMP/swarm.key" \
     >"$TMP/server.log" 2>&1 &
 SERVER_PID=$!
 
@@ -53,6 +53,7 @@ status=$?
 set -e
 if (( status != 0 )) || ! grep -q 'pronto via Segment' "$TMP/chat.log" ||
    ! grep -q 'Segment context negotiated to' "$TMP/chat.log" ||
+   ! grep -q 'data plane relay (nessuna porta pubblica richiesta)' "$TMP/server.log" ||
    grep -q 'continuo con il percorso expert/CAS' "$TMP/chat.log" ||
    grep -q 'Segment route generation' "$TMP/chat.log"; then
     cat "$TMP/server.log" "$TMP/chat.log"
@@ -60,4 +61,4 @@ if (( status != 0 )) || ! grep -q 'pronto via Segment' "$TMP/chat.log" ||
     exit 1
 fi
 
-echo "SEGMENT NATIVE: PASS (serve + TUI chat, automatic context negotiation)"
+echo "SEGMENT NATIVE: PASS (serve + TUI chat, NAT relay + context negotiation)"

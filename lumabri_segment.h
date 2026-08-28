@@ -209,6 +209,16 @@ LmbSegStatus lmb_seg_table_snapshot_check(LmbSegTable *table,
 LmbSegStatus lmb_seg_table_restore_commit(LmbSegTable *table,
                                           const LmbSegTransfer *transfer,
                                           uint64_t now_ms);
+/* Multi-frame restore transaction. begin marks the session busy before any
+ * adapter state changes; finish either publishes the new sequence/position or
+ * releases the reservation. Unlike restore_commit, snapshot_size may exceed
+ * the size of one wire frame. */
+LmbSegStatus lmb_seg_table_restore_begin(LmbSegTable *table,
+                                         const LmbSegTransfer *transfer,
+                                         uint64_t now_ms);
+LmbSegStatus lmb_seg_table_restore_finish(LmbSegTable *table,
+                                          const LmbSegTransfer *transfer,
+                                          int commit, uint64_t now_ms);
 LmbSegStatus lmb_seg_table_fence(LmbSegTable *table,
                                  const LmbSegId *session_id,
                                  const LmbSegOwner *new_owner,

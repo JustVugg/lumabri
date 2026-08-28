@@ -56,8 +56,9 @@ them, so a script never inherits somebody's saved answers.
 When you join it also asks how you want to take part — just chat, or **lend your
 machine too**. `disk` receives complete rarest-first files up to the chosen GB
 budget (transferred and verified in MiB blocks). `compute` takes the rarest
-tracker-assigned Segment slice when a direct endpoint and enough spare RAM are
-available; otherwise it uses the finer-grained expert donor and its NAT relay.
+tracker-assigned Segment slice when enough spare RAM is available. It publishes
+direct P2P when reachable and otherwise uses the signed outbound Segment relay;
+the finer-grained expert donor remains the lower-memory fallback.
 Both run at low priority and die with the TUI. Nothing to configure — Enter
 picks "just chat".
 
@@ -104,9 +105,17 @@ kept in an isolated remote session.
 The local Edge opens through `liblumabri.so`, so a user supplies neither a model
 directory nor roots: the signed aggregate model identity comes from the tracker
 and only blocks actually read by tokenizer/embedding/head enter the CAS. Four
-origin ranges is the current latency/replacement compromise. Segment endpoints
-are direct TCP today; a server auto-publishes a real public IPv4, refuses to
-guess private/NAT addresses, and retains READ/EXEC relay fallback there.
+origin ranges is the current latency/replacement compromise. Segment prefers
+persistent direct TCP and falls back request-for-request to the exact peer's
+signed tracker tunnel. A machine behind NAT therefore contributes without
+publishing an unreachable address or opening a data port.
+
+The TUI's temperature and top-p are applied to logits returned by Colibri Edge;
+temperature zero retains the exact greedy selector. When a compatible replica
+exists, a completed turn checkpoints every opaque remote state. If a peer dies,
+it opens an exact-range compatible replica, restores the common checkpoint,
+replays only the token delta and retries the interrupted batch with the same
+conversation.
 
 **Experts run on peers.** For a mixture-of-experts model the chatter keeps only
 the dense weights, the router and the KV cache, and sends the 4 KB activation to
@@ -175,8 +184,8 @@ resident on peers, reducing the network boundary from one request per
 layer/expert to one request per segment. It is the preferred path of ordinary
 `lumabri chat` when the matching Colibri ABI and a complete compatible route
 exist. GLM, Inkling, Kimi K3, OLMoE, Qwen3.6 and DeepSeek V4 are all release
-gates; OLMoE is not a special-case definition of complete. Build details and
-the explicit greedy/direct/no-replay limitations are in
+gates; OLMoE is not a special-case definition of complete. Build details,
+relay/failover semantics and the remaining operational boundaries are in
 **[SEGMENT_DIRECT.md](SEGMENT_DIRECT.md)**.
 
 ## Running a swarm
@@ -191,12 +200,12 @@ sudo make install                                    # or PREFIX=$HOME/.local
 ```
 
 On the server, `lumabri serve --model /srv/model` starts tracker, maintainer,
-classic expert executor and the automatic Segment origin. With the default four
-ranges it opens TCP 7300 through 7306; allow 7300:7309 if deployments may use up
-to seven. A public IPv4 attached to the machine is detected automatically;
-otherwise add `--advertise <reachable-ip>` or Lumabri deliberately withholds
-Segment and uses the proven READ/EXEC relay. Add `--key swarm.key` to sign the
-model.
+classic expert executor and the automatic Segment origin. TCP 7300 must be
+reachable. A public IPv4 attached to the machine is detected automatically and
+enables the fastest direct paths on 7301 onward; allow 7300:7309 when using up
+to seven public Segment ranges. Without a reachable address, Segment, READ and
+EXEC use signed outbound tracker tunnels, so no data port is required. Add
+`--key swarm.key` to sign the model.
 
 On every other machine, pick a role:
 
@@ -209,25 +218,26 @@ On every other machine, pick a role:
 
 A disk donor is told which complete files to hold, rarest first, by the tracker;
 the GB budget is a hard placement input, not permission to fill the disk. A
-compute donor needs no model: when Segment is active, directly reachable and a
-quarter-range fits after the system reserve, it receives the least-replicated
-origin range. Otherwise `--hold auto` sizes an expert slice to free RAM and the
+compute donor needs no model: when Segment is active and a quarter-range fits
+after the system reserve, it receives the least-replicated origin range. Direct
+P2P is preferred; NAT donors use Segment relay automatically. If the range does
+not fit, `--hold auto` sizes an expert slice to free RAM and the
 tracker gives it what nobody else covers through direct EXEC or relay. Both
 load through the verified swarm mirror, so the whole model never lands on the
 donor.
 Donors register under `donor-<hostname>-…` (pick one with `--donor-name`);
 a name already owned by another peer key is retried with a numbered suffix
 instead of being silently rejected forever. So several
-compute donors **split the model into disjoint slices automatically**, and one
-token's experts then run across them in parallel: more machines, faster
-tokens. (`--hold N` sets the count by hand; `--stride 2:0` / `--stride 2:1` or
+compute donors **split the model into disjoint slices automatically**. (`--hold
+N` sets the count by hand; `--stride 2:0` / `--stride 2:1` or
 `--layers …` split it explicitly if you want to size each machine yourself.)
 When two donors happen to hold the *same* expert, add `LUMABRI_SPREAD=1` on the
 chatter to balance the load between them too. Neither donor needs to know the
-others exist. Expert requests can fail over to another replica. A selected
-stateful Segment dying mid-conversation is different: checkpoint/replay is not
-on the wire yet, so the run stops with that explicit error instead of silently
-restarting from divergent state.
+others exist. Expert requests can fail over to another replica. Stateful
+Segment sessions with compatible replicas checkpoint at turn boundaries; on
+failure the gateway restores an exact-range replica, replays tokens after the
+common checkpoint and retries the interrupted batch. If no compatible replica
+exists, it still fails loudly rather than inventing divergent state.
 
 For a manual signing-key rotation, distribute a keyring containing one public
 key per line. `--pubkey keyring` and `LUMABRI_PUBKEY=keyring` accept every key
@@ -314,8 +324,11 @@ have their own scripts (`assign_test.sh`, `concurrency_test.sh`,
 Segment discovery checks leases, route generations, replicas, draining,
 compatibility and the asynchronous snapshot. The direct gate runs all six tiny
 families through real TCP executors, matches independent Colibri token oracles,
-drives the persistent TUI codec, overlaps sessions, and proves rarest-first
-automatic range replacement. Relay EXEC needs
+drives sampled persistent TUI turns, overlaps sessions, and proves rarest-first
+automatic range replacement. The same target also forces Segment through a
+relay-only NAT topology, kills a selected executor to require checkpoint
+restore/replay, and launches the ordinary `serve` + `chat` UX without a public
+data address. Relay EXEC needs
 an OLMoE engine source under `ENGINE`; its script reports `SKIP` explicitly
 when that external checkout is absent. Every claim in this README has a script
 behind it.

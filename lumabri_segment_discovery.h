@@ -26,6 +26,10 @@ enum {
      * minute zero.  Placement prefers ordinary donated ranges and consumes a
      * fallback range only where no non-fallback exact chain is available. */
     LMB_SEG_ADVERT_FALLBACK = 1u << 1,
+    /* The listener is reachable locally by the node, but must not be offered
+     * as an Internet-routable endpoint. The signed tracker tunnel is its data
+     * plane until direct connectivity is available. */
+    LMB_SEG_ADVERT_RELAY_ONLY = 1u << 2,
 };
 
 enum {

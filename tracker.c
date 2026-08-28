@@ -72,12 +72,14 @@ typedef struct {
     pthread_mutex_t rq_lk;
     pthread_cond_t rq_cv;
     int rq_busy, rq_sent, rq_done, rq_ok;
-    uint32_t rq_id, rq_next, rq_op;
+    uint32_t rq_id, rq_next, rq_op, rq_inner_op;
     char rq_path[LMB_PATH_MAX];
     uint64_t rq_off; uint32_t rq_len;
     uint8_t *rq_body; uint32_t rq_body_len;
     uint8_t *rq_pay; uint32_t rq_pay_len;
     uint8_t *rq_resp; uint32_t rq_resp_len;
+    uint8_t *rq_resp_pay; uint32_t rq_resp_pay_len;
+    uint32_t rq_resp_op;
 } Peer;
 
 static Peer g_peers[MAX_PEERS];
@@ -464,7 +466,7 @@ static Peer *peer_slot_new(int is_expert, int *idx) {
     Peer *p = &g_peers[pick];
     if (p->used) {
         free(p->files); free(p->ebits); free(p->rq_body); free(p->rq_pay);
-        free(p->rq_resp);
+        free(p->rq_resp); free(p->rq_resp_pay);
         if (p->evfd >= 0) close(p->evfd);
         pthread_mutex_destroy(&p->rq_lk);
         pthread_cond_destroy(&p->rq_cv);
@@ -1184,11 +1186,11 @@ static int handle_segment_routes(int fd, LmbMsg *m) {
         entry->advert = p->segment;
         entry->owner = p->segment_owner;
         entry->owner.route_generation = snapshot.route_generation;
-        if (entry->advert.addr[0]) entry->transport |= LMB_SEG_TRANSPORT_DIRECT;
-        /* Do not infer Segment relay from the persistent SREG connection.
-         * This tracker can relay READ/EXEC today, but it does not forward the
-         * stateful Segment operations yet. The reserved bit is published only
-         * when that data-plane handler exists. */
+        if (entry->advert.addr[0] &&
+            !(entry->advert.flags & LMB_SEG_ADVERT_RELAY_ONLY))
+            entry->transport |= LMB_SEG_TRANSPORT_DIRECT;
+        if (p->ctrl_fd >= 0 && p->evfd >= 0)
+            entry->transport |= LMB_SEG_TRANSPORT_RELAY;
     }
     snapshot.complete = (uint32_t)lmb_seg_route_complete(&snapshot, &query);
     pthread_mutex_unlock(&g_lk);
@@ -1817,6 +1819,7 @@ static int handle_rread(int fd, LmbMsg *m) {
     free(p->rq_body); p->rq_body = NULL; p->rq_body_len = 0;
     free(p->rq_pay); p->rq_pay = NULL; p->rq_pay_len = 0;
     free(p->rq_resp); p->rq_resp = NULL; p->rq_resp_len = 0;
+    free(p->rq_resp_pay); p->rq_resp_pay = NULL; p->rq_resp_pay_len = 0;
     pthread_mutex_unlock(&p->rq_lk);
 
     uint64_t one = 1;
@@ -1916,6 +1919,7 @@ static int handle_rexec(int fd, LmbMsg *m) {
     free(p->rq_body); p->rq_body = body; p->rq_body_len = body_len;
     free(p->rq_pay); p->rq_pay = pay; p->rq_pay_len = m->pay_len;
     free(p->rq_resp); p->rq_resp = NULL; p->rq_resp_len = 0;
+    free(p->rq_resp_pay); p->rq_resp_pay = NULL; p->rq_resp_pay_len = 0;
     pthread_mutex_unlock(&p->rq_lk);
     uint64_t one = 1; if (write(p->evfd, &one, 8) != 8) {}
     if (getenv("LUMABRI_RELAY_TRACE"))
@@ -1941,6 +1945,102 @@ static int handle_rexec(int fd, LmbMsg *m) {
         rc = lmb_send(fd, LMB_REXEC_R, b.p, (uint32_t)b.len, resp, resp_len);
         free(b.p); free(resp);
     }
+    pthread_mutex_lock(&g_lk); if (p->refs) p->refs--; pthread_mutex_unlock(&g_lk);
+    return rc;
+}
+
+static int segment_request_op(uint32_t op) {
+    return op == LMB_SEG_OPEN || op == LMB_SEG_RUN ||
+           op == LMB_SEG_SNAPSHOT || op == LMB_SEG_RESTORE ||
+           op == LMB_SEG_CLOSE || op == LMB_SEG_HEALTH;
+}
+
+/* Relay one ordinary Segment frame to one exact signed Segment registrant.
+ * Selection is by peer identity, never "any peer with this range": stateful
+ * placement belongs to the session and failover is an explicit client act. */
+static int handle_rseg(int fd, LmbMsg *m) {
+    LmbCur c = { m->body, m->body_len, 0 };
+    char peer_name[LMB_SEG_PEER_NAME_MAX];
+    uint32_t inner_op = 0, inner_body_len = 0;
+    if (lmb_cur_str(&c, peer_name, sizeof peer_name) ||
+        lmb_cur_u32(&c, &inner_op) ||
+        lmb_cur_u32(&c, &inner_body_len) ||
+        !segment_request_op(inner_op) ||
+        inner_body_len != c.len - c.off ||
+        !lmb_frame_shape_ok(inner_op, inner_body_len, m->pay_len)) {
+        send_err(fd, "bad Segment relay frame"); return -1;
+    }
+
+    Peer *p = NULL;
+    double now = now_s();
+    pthread_mutex_lock(&g_lk);
+    for (int i = 0; i < MAX_PEERS; i++) {
+        Peer *q = &g_peers[i];
+        if (!q->used || !q->is_expert || !q->has_segment ||
+            !q->segment_live || now - q->segment_ts > g_stale_s ||
+            q->ctrl_fd < 0 || q->evfd < 0 ||
+            strcmp(q->segment.peer_name, peer_name)) continue;
+        p = q; p->refs++; break;
+    }
+    pthread_mutex_unlock(&g_lk);
+    if (!p) { send_err(fd, "Segment relay peer is unavailable"); return 0; }
+
+    uint8_t *body = malloc(inner_body_len ? inner_body_len : 1u);
+    uint8_t *pay = malloc(m->pay_len ? m->pay_len : 1u);
+    if (!body || !pay) {
+        free(body); free(pay);
+        pthread_mutex_lock(&g_lk); if (p->refs) p->refs--; pthread_mutex_unlock(&g_lk);
+        send_err(fd, "oom"); return -1;
+    }
+    if (inner_body_len) memcpy(body, c.p + c.off, inner_body_len);
+    if (m->pay_len) memcpy(pay, m->pay, m->pay_len);
+
+    pthread_mutex_lock(&p->rq_lk);
+    while (p->rq_busy) pthread_cond_wait(&p->rq_cv, &p->rq_lk);
+    p->rq_busy = 1; p->rq_sent = 0; p->rq_done = 0; p->rq_ok = 0;
+    p->rq_id = ++p->rq_next; p->rq_op = LMB_RSEG_FWD;
+    p->rq_inner_op = inner_op;
+    free(p->rq_body); p->rq_body = body; p->rq_body_len = inner_body_len;
+    free(p->rq_pay); p->rq_pay = pay; p->rq_pay_len = m->pay_len;
+    free(p->rq_resp); p->rq_resp = NULL; p->rq_resp_len = 0;
+    free(p->rq_resp_pay); p->rq_resp_pay = NULL; p->rq_resp_pay_len = 0;
+    p->rq_resp_op = 0;
+    pthread_mutex_unlock(&p->rq_lk);
+    uint64_t one = 1; if (write(p->evfd, &one, sizeof one) != sizeof one) {}
+
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline); deadline.tv_sec += RELAY_WAIT_S;
+    pthread_mutex_lock(&p->rq_lk);
+    while (!p->rq_done)
+        if (pthread_cond_timedwait(&p->rq_cv, &p->rq_lk, &deadline)) break;
+    int ok = p->rq_done && p->rq_ok;
+    uint32_t response_op = p->rq_resp_op;
+    uint8_t *response_body = p->rq_resp;
+    uint32_t response_body_len = p->rq_resp_len;
+    uint8_t *response_pay = p->rq_resp_pay;
+    uint32_t response_pay_len = p->rq_resp_pay_len;
+    p->rq_resp = NULL; p->rq_resp_len = 0;
+    p->rq_resp_pay = NULL; p->rq_resp_pay_len = 0;
+    free(p->rq_body); p->rq_body = NULL; p->rq_body_len = 0;
+    free(p->rq_pay); p->rq_pay = NULL; p->rq_pay_len = 0;
+    p->rq_busy = 0; pthread_cond_broadcast(&p->rq_cv);
+    pthread_mutex_unlock(&p->rq_lk);
+
+    int rc = 0;
+    if (!ok) {
+        send_err(fd, "Segment relay timeout or peer failure");
+    } else {
+        LmbBuf reply = {0};
+        if (lmb_buf_u32(&reply, response_op) ||
+            lmb_buf_u32(&reply, response_body_len) ||
+            lmb_buf_bytes(&reply, response_body, response_body_len))
+            rc = -1;
+        else
+            rc = lmb_send(fd, LMB_RSEG_R, reply.p, (uint32_t)reply.len,
+                          response_pay, response_pay_len);
+        free(reply.p);
+    }
+    free(response_body); free(response_pay);
     pthread_mutex_lock(&g_lk); if (p->refs) p->refs--; pthread_mutex_unlock(&g_lk);
     return rc;
 }
@@ -2034,11 +2134,32 @@ static void relay_complete(Peer *p, LmbMsg *m) {
         fprintf(stderr, "[tracker] relay complete op=%u id=%u ok=%u pay=%u\n",
                 m->op, id, ok, m->pay_len);
     pthread_mutex_lock(&p->rq_lk);
-    uint32_t expect = p->rq_op == LMB_RREAD_FWD ? LMB_RREAD_R : LMB_REXEC_R;
+    uint32_t expect = p->rq_op == LMB_RREAD_FWD ? LMB_RREAD_R :
+                      p->rq_op == LMB_REXEC_FWD ? LMB_REXEC_R : LMB_RSEG_R;
     if (p->rq_busy && p->rq_sent && id == p->rq_id && m->op == expect &&
         !p->rq_done) {
-        p->rq_ok = ok && m->pay_len > 0;
-        p->rq_resp = lmb_msg_take_pay(m); p->rq_resp_len = m->pay_len;
+        if (expect == LMB_RSEG_R) {
+            uint32_t response_op = 0, body_len = 0;
+            int valid = ok && !lmb_cur_u32(&c, &response_op) &&
+                        !lmb_cur_u32(&c, &body_len) &&
+                        body_len == c.len - c.off &&
+                        response_op == p->rq_inner_op + 1u &&
+                        lmb_frame_shape_ok(response_op, body_len, m->pay_len);
+            if (valid) {
+                p->rq_resp = malloc(body_len ? body_len : 1u);
+                if (p->rq_resp) {
+                    if (body_len) memcpy(p->rq_resp, c.p + c.off, body_len);
+                    p->rq_resp_len = body_len;
+                    p->rq_resp_pay = lmb_msg_take_pay(m);
+                    p->rq_resp_pay_len = m->pay_len;
+                    p->rq_resp_op = response_op;
+                    p->rq_ok = 1;
+                }
+            }
+        } else {
+            p->rq_ok = ok && m->pay_len > 0;
+            p->rq_resp = lmb_msg_take_pay(m); p->rq_resp_len = m->pay_len;
+        }
         p->rq_done = 1;
         pthread_cond_broadcast(&p->rq_cv);
     }
@@ -2090,6 +2211,19 @@ static void *conn_thread(void *arg) {
                         pay_len = ctrl->rq_pay_len;
                         if (pay_len) {
                             pay = (uint8_t *)malloc(pay_len);
+                            if (pay) memcpy(pay, ctrl->rq_pay, pay_len);
+                            else {
+                                have = 0; ctrl->rq_done = 1; ctrl->rq_ok = 0;
+                                pthread_cond_broadcast(&ctrl->rq_cv);
+                            }
+                        }
+                    } else if (op == LMB_RSEG_FWD) {
+                        lmb_buf_u32(&b, ctrl->rq_inner_op);
+                        lmb_buf_u32(&b, ctrl->rq_body_len);
+                        lmb_buf_bytes(&b, ctrl->rq_body, ctrl->rq_body_len);
+                        pay_len = ctrl->rq_pay_len;
+                        if (pay_len) {
+                            pay = malloc(pay_len);
                             if (pay) memcpy(pay, ctrl->rq_pay, pay_len);
                             else {
                                 have = 0; ctrl->rq_done = 1; ctrl->rq_ok = 0;
@@ -2154,7 +2288,8 @@ static void *conn_thread(void *arg) {
             break;
         }
         case LMB_RREAD_R:
-        case LMB_REXEC_R:   if (ctrl) relay_complete(ctrl, &m); break;
+        case LMB_REXEC_R:
+        case LMB_RSEG_R:    if (ctrl) relay_complete(ctrl, &m); break;
         case LMB_EREG: {
             Peer *p = handle_ereg(fd, &m, have_nonce ? nonce : NULL);
             if (p) {
@@ -2199,6 +2334,7 @@ static void *conn_thread(void *arg) {
         case LMB_SWARM:     rc = handle_swarm(fd); break;
         case LMB_RREAD:     rc = handle_rread(fd, &m); break;
         case LMB_REXEC:     rc = handle_rexec(fd, &m); break;
+        case LMB_RSEG:      rc = handle_rseg(fd, &m); break;
         case LMB_ASSIGN:    rc = handle_assign(fd, &m); break;
         default:            send_err(fd, "unknown op"); rc = -1; break;
         }
