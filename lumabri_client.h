@@ -38,12 +38,18 @@
 #define LUMI_MAX_K     64
 #define LUMI_MAX_REP   4      /* replicas remembered per expert */
 #define LUMI_WAIT_S    30     /* how long a vanished peer is given to come back */
+#define LUMI_RTT_REFRESH_S 30.0
+#define LUMI_RTT_SAMPLES   2
+#ifndef LUMI_RTT_PROBE_TIMEOUT_MS
+#define LUMI_RTT_PROBE_TIMEOUT_MS 2000
+#endif
 
 typedef struct {
     char addr[64];
     int socks[LUMI_MAX_K];
     int nsocks;
     long rtt_us;
+    double rtt_probe_at;     /* last initial or staggered RTT measurement attempt */
     int dead;
     double retry_at;          /* do not redial a relay-only/NAT address per layer */
     LmbLatencyPredictor latency;
@@ -65,6 +71,7 @@ static struct {
     LmbModelIdentity identity; int have_identity;
     LmbTrustKeys trust;
     double next_discover, discover_period_s;
+    double next_rtt_refresh;  /* one healthy pooled peer per slow cadence */
     int verify_pct;             /* LUMABRI_VERIFY: % of calls double-checked */
     int allow_codegen_skew;     /* LUMABRI_ALLOW_CODEGEN_SKEW: cc/isa -> warn, not refuse */
     int spread;                 /* LUMABRI_SPREAD: near-band replica spreading, not strict argmin */
@@ -137,21 +144,82 @@ static void lumi_put_sock(LumiPeer *p, int fd) {
     else close(fd);
 }
 
-static void lumi_probe(LumiPeer *p) {
-    p->rtt_us = LONG_MAX;
-    int fd = lumi_take_sock(p);
-    if (fd < 0) return;
-    for (int i = 0; i < 2; i++) {       /* the second ping rides warm; take min */
+/* Measure steady-state RTT on an already chosen socket. Both initial and
+ * maintenance probes use the minimum of two warm PINGs so one delayed reply
+ * cannot replace a useful distance estimate. The caller owns fd on failure. */
+static long lumi_measure_rtt(int fd) {
+    long best = LONG_MAX;
+    for (int i = 0; i < LUMI_RTT_SAMPLES; i++) {
         double a = lumi_now();
         LmbMsg m = {0};
-        if (lmb_send(fd, LMB_PING, NULL, 0, NULL, 0) || lmb_recv(fd, &m)) {
-            close(fd); lumi_peer_failed(p); return;
-        }
+        if (lmb_send(fd, LMB_PING, NULL, 0, NULL, 0) || lmb_recv(fd, &m))
+            return LONG_MAX;
+        int ok = m.op == LMB_OK && m.pay_len == 0;
         lmb_msg_free(&m);
+        if (!ok) return LONG_MAX;
         long us = (long)((lumi_now() - a) * 1e6);
-        if (us < p->rtt_us) p->rtt_us = us;
+        if (us < best) best = us;
     }
+    return best;
+}
+
+/* Maintenance runs synchronously at a layer boundary, so it must not inherit
+ * the five-minute bulk-EXEC timeout. Temporarily bound both directions, then
+ * restore the pooled socket exactly before it can carry real work again. */
+static long lumi_measure_rtt_bounded(int fd) {
+    struct timeval old_recv, old_send;
+    socklen_t recv_len = sizeof old_recv, send_len = sizeof old_send;
+    if (getsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &old_recv, &recv_len) ||
+        getsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &old_send, &send_len))
+        return LONG_MAX;
+    struct timeval probe = { LUMI_RTT_PROBE_TIMEOUT_MS / 1000,
+                             (LUMI_RTT_PROBE_TIMEOUT_MS % 1000) * 1000 };
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &probe, sizeof probe) ||
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &probe, sizeof probe)) {
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &old_recv, recv_len);
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &old_send, send_len);
+        return LONG_MAX;
+    }
+    long measured = lumi_measure_rtt(fd);
+    int restore_bad = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO,
+                                 &old_recv, recv_len);
+    restore_bad |= setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO,
+                              &old_send, send_len);
+    return restore_bad ? LONG_MAX : measured;
+}
+
+static void lumi_probe(LumiPeer *p) {
+    p->rtt_us = LONG_MAX;
+    p->rtt_probe_at = lumi_now();
+    int fd = lumi_take_sock(p);
+    if (fd < 0) return;
+    long measured = lumi_measure_rtt(fd);
+    if (measured == LONG_MAX) {
+        close(fd); lumi_peer_failed(p); return;
+    }
+    p->rtt_us = measured;
     lumi_put_sock(p, fd);
+}
+
+/* Refresh measurement only through an idle pooled connection. If every
+ * socket is serving EXEC work, defer instead of opening a new connection and
+ * accidentally measuring setup cost. A failed maintenance PING discards that
+ * socket but leaves health/failover decisions to the next real EXEC. */
+static int lumi_refresh_rtt(LumiPeer *p) {
+    if (p->dead || p->nsocks <= 0) return -1;
+    p->rtt_probe_at = lumi_now();
+    int fd = p->socks[--p->nsocks];
+    long measured = lumi_measure_rtt_bounded(fd);
+    if (measured == LONG_MAX) { close(fd); return -1; }
+    lumi_put_sock(p, fd);
+    if (p->rtt_us == LONG_MAX) p->rtt_us = measured;
+    else {
+        /* EWMA alpha=1/2. The overflow-safe rounded mean damps a transient
+         * queue delay while still adapting within one sweep when paths swap. */
+        p->rtt_us = p->rtt_us / 2 + measured / 2 +
+                    ((p->rtt_us & 1) && (measured & 1));
+    }
+    return 0;
 }
 
 static int lumi_index_ok(uint32_t layer, uint32_t eid) {
@@ -460,10 +528,27 @@ static void lumi_enable_if_complete(void) {
                 L.verify_pct ? " · spot-check verification on" : "");
 }
 
+/* Keep the chatter's distance map alive without turning inference into a
+ * synchronous all-peer probe. At most one healthy peer is measured per slow
+ * cadence, choosing the oldest previous attempt. */
+static void lumi_maybe_refresh_rtt(double now) {
+    if (now < L.next_rtt_refresh) return;
+    L.next_rtt_refresh = now + LUMI_RTT_REFRESH_S;
+    int oldest = -1;
+    for (int i = 0; i < L.npeers; i++) {
+        LumiPeer *p = &L.peers[i];
+        if (p->dead || p->nsocks <= 0 || p->rtt_us == LONG_MAX) continue;
+        if (oldest < 0 || p->rtt_probe_at < L.peers[oldest].rtt_probe_at)
+            oldest = i;
+    }
+    if (oldest >= 0) lumi_refresh_rtt(&L.peers[oldest]);
+}
+
 static void lumi_maybe_discover(void) {
-    if (!L.initialized || !L.discovery) return;
+    if (!L.initialized) return;
     double now = lumi_now();
-    if (now < L.next_discover) return;
+    lumi_maybe_refresh_rtt(now);
+    if (!L.discovery || now < L.next_discover) return;
     L.next_discover = now + L.discover_period_s;
     if (!L.have_identity) lumi_refresh_identity();
     int added = lumi_discover();
@@ -500,7 +585,8 @@ static void lumi_init_ex(int n_layers, int n_experts, int hidden,
     L.discovery = discovery;
     L.discover_period_s = (double)lmb_env_int("LUMABRI_DISCOVERY_MS", 5000,
                                               100, 600000) / 1000.0;
-    L.next_discover = lumi_now() + L.discover_period_s;
+    double initialized_at = lumi_now();
+    L.next_discover = initialized_at + L.discover_period_s;
     /* Segment engines are selected at runtime from one universal archive,
      * whereas the classic chatter binaries bake this value at compile time.
      * Keep one manifest contract for both: segment_node supplies the exact
@@ -573,6 +659,10 @@ static void lumi_init_ex(int n_layers, int n_experts, int hidden,
              tok = strtok_r(NULL, ",", &save))
             if (lumi_add_peer(tok)) lumi_die("configured expert peer failed");
     }
+
+    /* Bootstrap probes may themselves be slow; begin the maintenance cadence
+     * only after every initial peer has been discovered and measured. */
+    L.next_rtt_refresh = lumi_now() + LUMI_RTT_REFRESH_S;
 
     int missing = lumi_missing_experts();
     if (missing && !discovery) {
