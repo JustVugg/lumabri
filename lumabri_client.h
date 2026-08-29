@@ -58,7 +58,7 @@ static struct {
     int ok_layers, routed_layers, announced_ok;
     int n_layers, n_experts, hidden;
     int expected, expected_bits;
-    char expected_model[64], profile[LMB_BUILD_PROFILE_MAX];
+    char expected_model[64], engine_id[64], profile[LMB_BUILD_PROFILE_MAX];
     LmbModelIdentity identity; int have_identity;
     LmbTrustKeys trust;
     double next_discover, discover_period_s;
@@ -213,9 +213,9 @@ static int lumi_add_peer(const char *addr) {
         bad = 1;
     }
     if (!bad && !why[0]) {
-        if (strcmp(engine, LMBE_ENGINE_ID))
+        if (strcmp(engine, L.engine_id))
             snprintf(why, sizeof why, "engine: peer='%s' vs local='%s'",
-                     engine, LMBE_ENGINE_ID);
+                     engine, L.engine_id);
         else if (strcmp(profile, L.profile)) {
             /* Field-aware: shape/ABI (abi/engine/f32) always gates; a build
              * difference (src/math/cc/isa) is admitted by default with the
@@ -340,7 +340,7 @@ static int lumi_relay_coverage(void) {
     if (!tracker || !*tracker || !L.expected_model[0]) return 0;
     LmbBuf b = {0};
     lmb_buf_str(&b, L.expected_model);
-    lmb_buf_str(&b, LMBE_ENGINE_ID);
+    lmb_buf_str(&b, L.engine_id);
     lmb_buf_str(&b, L.profile);
     lmb_buf_u32(&b, (uint32_t)L.expected_bits);
     lmb_buf_u32(&b, (uint32_t)L.hidden);
@@ -466,7 +466,17 @@ static void lumi_init_ex(int n_layers, int n_experts, int hidden,
     L.discover_period_s = (double)lmb_env_int("LUMABRI_DISCOVERY_MS", 5000,
                                               100, 600000) / 1000.0;
     L.next_discover = lumi_now() + L.discover_period_s;
-    lmb_build_profile(L.profile, sizeof L.profile);
+    /* Segment engines are selected at runtime from one universal archive,
+     * whereas the classic chatter binaries bake this value at compile time.
+     * Keep one manifest contract for both: segment_node supplies the exact
+     * expert engine family through LUMABRI_ENGINE_ID. */
+    const char *runtime_engine = getenv("LUMABRI_ENGINE_ID");
+    snprintf(L.engine_id, sizeof L.engine_id, "%s",
+             runtime_engine && *runtime_engine ? runtime_engine : LMBE_ENGINE_ID);
+    snprintf(L.profile, sizeof L.profile,
+             "abi=2;engine=%s;src=%s;cc=%s;isa=%s;omp=%s;math=%s;f32=%zu",
+             L.engine_id, LMBE_SOURCE_ID, LMB_PROFILE_CC, LMB_PROFILE_ISA,
+             LMB_PROFILE_OMP, LMB_PROFILE_MATH, sizeof(float));
     L.expected_bits = lmb_env_int("LUMABRI_EXPERT_BITS", LMBE_EXPECT_BITS,
                                   0, 32);
     const char *model = getenv("LUMABRI_MODEL");
@@ -749,6 +759,16 @@ static float *lumi_exec_retry(int layer, int eid, const float *x, int D, int nr,
         if (r < 0) {
             float *relayed = lumi_exec_relay(layer, eid, x, D, nr, w);
             if (relayed) { if (tried_io) *tried_io = tried; return relayed; }
+            /* A Segment executor owns a complete local kernel for this
+             * layer. Its remote Expert provider is an acceleration, not a
+             * correctness dependency: hand control back immediately so the
+             * patched call site can discard partial remote output and run
+             * the unchanged local path. Ordinary expert-only chat keeps the
+             * historical wait/fail-closed policy. */
+            if (getenv("LUMABRI_EXEC_FALLBACK_LOCAL")) {
+                if (tried_io) *tried_io = tried;
+                return NULL;
+            }
             /* Every known replica is gone. Giving up here is correct in the
              * sense that inventing a result is never allowed — but it threw
              * away a whole generation for a peer that was rebooting, or a
@@ -857,7 +877,7 @@ static void lumi_maybe_spot_check(int layer, int eid, const float *x, int D,
 /* Run the K selected experts of one layer on their peers and accumulate into
  * `out` with the router weights. A peer failure costs a retry on the next
  * replica; only a replica-exhausted expert is fatal. */
-static LMB_MAYBE_UNUSED void lumi_moe_apply(int layer, const int *idx,
+static LMB_MAYBE_UNUSED int lumi_moe_apply(int layer, const int *idx,
                            const float *val, int K,
                            const float *x, int D, float *out) {
     if (K > LUMI_MAX_K) lumi_die("top-k larger than the client supports");
@@ -903,6 +923,11 @@ static LMB_MAYBE_UNUSED void lumi_moe_apply(int layer, const int *idx,
         }
         LumiPeer *rf = NULL;
         res[k] = lumi_exec_retry(layer, idx[k], x, D, 1, NULL, &tried[k], &rf);
+        if (!res[k]) {
+            for (int j = k + 1; j < K; j++) if (fds[j] >= 0) close(fds[j]);
+            for (int j = 0; j < K; j++) free(res[j]);
+            return 0;
+        }
         lumi_maybe_spot_check(layer, idx[k], x, D, 1, NULL, res[k], rf, tried[k]);
     }
     /* accumulate in the router's order, exactly as the local path does */
@@ -915,6 +940,7 @@ static LMB_MAYBE_UNUSED void lumi_moe_apply(int layer, const int *idx,
     L.wait_s += lumi_now() - t0;
     L.calls += (unsigned long long)K;
     L.layers_done++;
+    return 1;
 }
 
 /* ---- the batched form: one whole layer, every position at once -----------
@@ -937,7 +963,7 @@ static LMB_MAYBE_UNUSED void lumi_moe_apply(int layer, const int *idx,
  */
 #define LUMI_BLOCK 64
 
-static LMB_MAYBE_UNUSED void lumi_moe_apply_batch(int layer, const int *idxs,
+static LMB_MAYBE_UNUSED int lumi_moe_apply_batch(int layer, const int *idxs,
                                  const float *ws,
                                  const int *keff, int K, const float *x,
                                  int S, int D, float *out) {
@@ -946,7 +972,10 @@ static LMB_MAYBE_UNUSED void lumi_moe_apply_batch(int layer, const int *idxs,
     int *rows = (int *)malloc((size_t)S * LUMI_BLOCK * sizeof(int));
     float *rw  = (float *)malloc((size_t)S * LUMI_BLOCK * sizeof(float));
     float *xg  = (float *)malloc((size_t)S * LUMI_BLOCK * (size_t)D * sizeof(float));
-    if (!seen || !uniq || !rows || !rw || !xg) lumi_die("out of memory batching a layer");
+    float *saved = (float *)malloc((size_t)S * (size_t)D * sizeof(float));
+    if (!seen || !uniq || !rows || !rw || !xg || !saved)
+        lumi_die("out of memory batching a layer");
+    memcpy(saved, out, (size_t)S * (size_t)D * sizeof(float));
     int nu = 0;
     for (int s = 0; s < S; s++)
         for (int kk = 0; kk < keff[s]; kk++) {
@@ -1001,6 +1030,7 @@ static LMB_MAYBE_UNUSED void lumi_moe_apply_batch(int layer, const int *idxs,
                 LumiPeer *winner = NULL;
                 res = lumi_finish_exec(layer, eid, xj, D, nr, NULL,
                                        fds[j], ps[j], &tried[j], &winner);
+                fds[j] = -1;
                 if (res) {
                     lumi_maybe_spot_check(layer, eid, xj, D, nr, NULL, res,
                                           winner, tried[j]);
@@ -1012,6 +1042,13 @@ static LMB_MAYBE_UNUSED void lumi_moe_apply_batch(int layer, const int *idxs,
             if (!res) {
                 LumiPeer *rf = NULL;
                 res = lumi_exec_retry(layer, eid, xj, D, nr, NULL, &tried[j], &rf);
+                if (!res) {
+                    for (int q = j + 1; q < nb; q++)
+                        if (fds[q] >= 0) close(fds[q]);
+                    memcpy(out, saved, (size_t)S * (size_t)D * sizeof(float));
+                    free(seen); free(uniq); free(rows); free(rw); free(xg); free(saved);
+                    return 0;
+                }
                 lumi_maybe_spot_check(layer, eid, xj, D, nr, NULL, res, rf, tried[j]);
             }
             if (nr > 1) { L.batch_calls++; L.batch_rows += (unsigned long long)nr; }
@@ -1028,7 +1065,8 @@ static LMB_MAYBE_UNUSED void lumi_moe_apply_batch(int layer, const int *idxs,
     }
     L.wait_s += lumi_now() - t0;
     L.layers_done++;
-    free(seen); free(uniq); free(rows); free(rw); free(xg);
+    free(seen); free(uniq); free(rows); free(rw); free(xg); free(saved);
+    return 1;
 }
 
 /* The same batching, for an engine that has already built the union itself.
@@ -1038,16 +1076,23 @@ static LMB_MAYBE_UNUSED void lumi_moe_apply_batch(int layer, const int *idxs,
  * weights. It also runs its experts in the LATENT space, so `D` here is
  * c->latent, not hidden — the peer must agree, which is what the manifest's
  * dimension check enforces. */
-static LMB_MAYBE_UNUSED void lumi_moe_apply_union(int layer, int nu,
+static LMB_MAYBE_UNUSED int lumi_moe_apply_union(int layer, int nu,
                                  const int *uid,
                                  const int *pfirst, const int *pcnt,
                                  const int *poslist, const float *wlist,
                                  const float *Z, int D, float *U) {
-    if (nu <= 0) return;
+    if (nu <= 0) return 1;
     int maxrows = 0;
+    int positions = 0;
     for (int j = 0; j < nu; j++) if (pcnt[j] > maxrows) maxrows = pcnt[j];
+    for (int j = 0; j < nu; j++)
+        for (int r = 0; r < pcnt[j]; r++)
+            if (poslist[pfirst[j] + r] + 1 > positions)
+                positions = poslist[pfirst[j] + r] + 1;
     float *xg = (float *)malloc((size_t)maxrows * LUMI_BLOCK * (size_t)D * sizeof(float));
-    if (!xg) lumi_die("out of memory batching a layer");
+    float *saved = (float *)malloc((size_t)positions * (size_t)D * sizeof(float));
+    if (!xg || !saved) lumi_die("out of memory batching a layer");
+    memcpy(saved, U, (size_t)positions * (size_t)D * sizeof(float));
     double t0 = lumi_now();
     int fds[LUMI_BLOCK];
     uint32_t tried[LUMI_BLOCK];
@@ -1084,6 +1129,7 @@ static LMB_MAYBE_UNUSED void lumi_moe_apply_union(int layer, int nu,
                 LumiPeer *winner = NULL;
                 res = lumi_finish_exec(layer, eid, xj, D, nr, NULL,
                                        fds[j], ps[j], &tried[j], &winner);
+                fds[j] = -1;
                 if (res) {
                     lumi_maybe_spot_check(layer, eid, xj, D, nr, NULL, res,
                                           winner, tried[j]);
@@ -1095,6 +1141,13 @@ static LMB_MAYBE_UNUSED void lumi_moe_apply_union(int layer, int nu,
             if (!res) {
                 LumiPeer *rf = NULL;
                 res = lumi_exec_retry(layer, eid, xj, D, nr, NULL, &tried[j], &rf);
+                if (!res) {
+                    for (int q = j + 1; q < nb; q++)
+                        if (fds[q] >= 0) close(fds[q]);
+                    memcpy(U, saved, (size_t)positions * (size_t)D * sizeof(float));
+                    free(xg); free(saved);
+                    return 0;
+                }
                 lumi_maybe_spot_check(layer, eid, xj, D, nr, NULL, res, rf, tried[j]);
             }
             if (nr > 1) { L.batch_calls++; L.batch_rows += (unsigned long long)nr; }
@@ -1109,7 +1162,8 @@ static LMB_MAYBE_UNUSED void lumi_moe_apply_union(int layer, int nu,
     }
     L.wait_s += lumi_now() - t0;
     L.layers_done++;
-    free(xg);
+    free(xg); free(saved);
+    return 1;
 }
 
 /* ---- DeepSeek V4 -------------------------------------------------------
@@ -1126,7 +1180,7 @@ static LMB_MAYBE_UNUSED void lumi_moe_apply_union(int layer, int nu,
  * walks the batch in order. Both are copied here, because the order of a
  * float sum is part of the answer.
  */
-static LMB_MAYBE_UNUSED void lumi_moe_apply_v4(int layer, const int *indices,
+static LMB_MAYBE_UNUSED int lumi_moe_apply_v4(int layer, const int *indices,
                               const float *weights,
                               int topk, const float *x, int batch, int D,
                               float *out) {
@@ -1135,7 +1189,10 @@ static LMB_MAYBE_UNUSED void lumi_moe_apply_v4(int layer, const int *indices,
     int *rows = (int *)malloc((size_t)batch * LUMI_BLOCK * sizeof(int));
     float *rw = (float *)malloc((size_t)batch * LUMI_BLOCK * sizeof(float));
     float *xg = (float *)malloc((size_t)batch * LUMI_BLOCK * (size_t)D * sizeof(float));
-    if (!used || !uid || !rows || !rw || !xg) lumi_die("out of memory batching a layer");
+    float *saved = (float *)malloc((size_t)batch * (size_t)D * sizeof(float));
+    if (!used || !uid || !rows || !rw || !xg || !saved)
+        lumi_die("out of memory batching a layer");
+    memcpy(saved, out, (size_t)batch * (size_t)D * sizeof(float));
     for (int item = 0; item < batch; item++)
         for (int k = 0; k < topk; k++) {
             int e = indices[(size_t)item * topk + k];
@@ -1195,6 +1252,7 @@ static LMB_MAYBE_UNUSED void lumi_moe_apply_v4(int layer, const int *indices,
                 LumiPeer *winner = NULL;
                 res = lumi_finish_exec(layer, eid, xj, D, nr, wj,
                                        fds[j], ps[j], &tried[j], &winner);
+                fds[j] = -1;
                 if (res) {
                     lumi_maybe_spot_check(layer, eid, xj, D, nr, wj, res,
                                           winner, tried[j]);
@@ -1206,6 +1264,13 @@ static LMB_MAYBE_UNUSED void lumi_moe_apply_v4(int layer, const int *indices,
             if (!res) {
                 LumiPeer *rf = NULL;
                 res = lumi_exec_retry(layer, eid, xj, D, nr, wj, &tried[j], &rf);
+                if (!res) {
+                    for (int q = j + 1; q < nb; q++)
+                        if (fds[q] >= 0) close(fds[q]);
+                    memcpy(out, saved, (size_t)batch * (size_t)D * sizeof(float));
+                    free(used); free(uid); free(rows); free(rw); free(xg); free(saved);
+                    return 0;
+                }
                 lumi_maybe_spot_check(layer, eid, xj, D, nr, wj, res, rf, tried[j]);
             }
             if (nr > 1) { L.batch_calls++; L.batch_rows += (unsigned long long)nr; }
@@ -1220,7 +1285,8 @@ static LMB_MAYBE_UNUSED void lumi_moe_apply_v4(int layer, const int *indices,
     }
     L.wait_s += lumi_now() - t0;
     L.layers_done++;
-    free(used); free(uid); free(rows); free(rw); free(xg);
+    free(used); free(uid); free(rows); free(rw); free(xg); free(saved);
+    return 1;
 }
 
 static LMB_MAYBE_UNUSED void lumi_report(void) {

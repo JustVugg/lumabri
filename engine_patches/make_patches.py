@@ -58,8 +58,8 @@ OLMOE = [
 #endif
 """),
     hook("        const float *xs = x + (int64_t)s*D;\n", """#ifdef LUMIBRI_P2P
-        if (lumi_layer_on(layer)) {   /* the K experts run on peers; routing and the sum stay here */
-            lumi_moe_apply(layer, idx, val, K, xs, D, out + (int64_t)s*D);
+        if (lumi_layer_on(layer) &&
+            lumi_moe_apply(layer, idx, val, K, xs, D, out + (int64_t)s*D)) {
             continue;
         }
 #endif
@@ -99,8 +99,8 @@ COLIBRI = [
          * Routing (above), the weighted sum and FASE E's shared expert stay
          * here; emptying the union is what makes FASE C/D find nothing left
          * to resolve or compute. */
-        lumi_moe_apply_batch(layer, idxs, ws, keff, K, x, S, D, out);
-        nu=0;
+        if (lumi_moe_apply_batch(layer, idxs, ws, keff, K, x, S, D, out))
+            nu=0;
     }
 #endif
 """),
@@ -118,13 +118,23 @@ INKLING = [
      * so the cost is one round trip per layer and not per expert. The shared
      * experts below, the routing above and the weighted sum stay here. */
     int lumi_remote = lumi_layer_on(layer);
-    if (lumi_remote)
+    float *lumi_saved = NULL;
+    if (lumi_remote) {
+        lumi_saved = malloc((size_t)S*D*sizeof(float));
+        if (!lumi_saved) { fprintf(stderr,"lumabri: OOM saving local fallback\\n"); exit(1); }
+        memcpy(lumi_saved,out,(size_t)S*D*sizeof(float));
         for (int s = 0; s < S; s++)
-            lumi_moe_apply(layer, idx + (int64_t)s*K, wgt + (int64_t)s*(K+ns),
-                           keff[s], x + (int64_t)s*D, D, out + (int64_t)s*D);
+            if (!lumi_moe_apply(layer, idx + (int64_t)s*K,
+                                wgt + (int64_t)s*(K+ns), keff[s],
+                                x + (int64_t)s*D, D, out + (int64_t)s*D)) {
+                memcpy(out,lumi_saved,(size_t)S*D*sizeof(float));
+                lumi_remote=0; break;
+            }
+        free(lumi_saved);
+    }
 #endif
 """),
-    hook("    m->eusage = rt_counts_all();                  /* alias: the bump sites stay as they are */\n",
+    hook("        m->eusage = rt_counts_all();              /* alias: the bump sites stay as they are */\n",
          """#ifdef LUMIBRI_P2P
     {   /* dense layers hold no experts: without the mask their non-existent
          * ones count as missing and phase 2 never turns on */
@@ -171,8 +181,8 @@ KIMI = [
             /* the union the engine just built, executed on peers; the router
              * weights are applied at accumulation there exactly as
              * expert_apply does here */
-            lumi_moe_apply_union(li,nu,uid,pfirst,pcnt,poslist,wlist,z,LT,u);
-            nu=0;
+            if(lumi_moe_apply_union(li,nu,uid,pfirst,pcnt,poslist,wlist,z,LT,u))
+                nu=0;
         }
 #endif
 """, where="before"),
@@ -207,9 +217,9 @@ fail:
     for (int expert_id = 0; !result && expert_id < n; expert_id++) {
 """, """#ifdef LUMIBRI_P2P
     if (!result && lumi_layer_on(weights->plan.layer)) {
-        lumi_moe_apply_v4(weights->plan.layer, indices, route_weights, topk,
-                          input, 1, d, output);
-        n = 0;                        /* the loop below finds no expert left */
+        if (lumi_moe_apply_v4(weights->plan.layer, indices, route_weights, topk,
+                              input, 1, d, output))
+            n = 0;                    /* the loop below finds no expert left */
     }
 #endif
 """),
@@ -218,9 +228,9 @@ fail:
 #ifdef COLI_V4_EXPERIMENTAL_DUAL_EXPERT_LOADER
 """, """#ifdef LUMIBRI_P2P
     if (!result && lumi_layer_on(weights->plan.layer)) {
-        lumi_moe_apply_v4(weights->plan.layer, indices, route_weights, topk,
-                          input, 1, d, output);
-        selected = 0;                 /* both loader variants walk `selected` */
+        if (lumi_moe_apply_v4(weights->plan.layer, indices, route_weights, topk,
+                              input, 1, d, output))
+            selected = 0;             /* both loader variants walk `selected` */
     }
 #endif
 """),
@@ -228,9 +238,9 @@ fail:
         memset(outputs, 0, (size_t)batch * d * sizeof(*outputs));
 """, """#ifdef LUMIBRI_P2P
     if (!result && lumi_layer_on(weights->plan.layer)) {
-        lumi_moe_apply_v4(weights->plan.layer, indices, route_weights, topk,
-                          inputs, batch, d, outputs);
-        n = 0;                        /* key_count becomes 0: nothing to lease */
+        if (lumi_moe_apply_v4(weights->plan.layer, indices, route_weights, topk,
+                              inputs, batch, d, outputs))
+            n = 0;                    /* key_count becomes 0: nothing to lease */
     }
 #endif
 """),
@@ -255,12 +265,12 @@ QWEN36 = [
     atexit(lumi_report);
 #endif
 """),
-    hook("        int shared_done = 0;\n", """#ifdef LUMIBRI_P2P
-        if (lumi_layer_on(layer)) {   /* the K routed experts run on peers; routing, the sum and the shared expert stay here */
-            lumi_moe_apply(layer, idx, val, K, xs, D, out + (int64_t)s*D);
+    hook("        if (use_qt) {\n", """#ifdef LUMIBRI_P2P
+        if (lumi_layer_on(layer) &&   /* shared expert remains local */
+            lumi_moe_apply(layer, idx, val, K, xs, D, out + (int64_t)s*D)) {
         } else
 #endif
-"""),
+""", where="before"),
 ]
 
 ENGINES = {

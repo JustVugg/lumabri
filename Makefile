@@ -408,14 +408,44 @@ test_relay_rate: test_relay_rate.c lumabri_segment.c lumabri_segment.h \
 # `all` includes this only when both additive headers are present. A Lumabri
 # checkout pointed at an older/release Colibri therefore keeps building the
 # legacy product unchanged, while a matching dev checkout gets native UX.
-COLIBRI_SEGMENT_LIB = $(ENGINE)/build/segment/libcolibri_segment_edge.a
+HYBRID_ENGINE_DIR = build/segment-hybrid-colibri
+COLIBRI_SEGMENT_LIB = $(HYBRID_ENGINE_DIR)/build/segment/libcolibri_segment_edge.a
+HYBRID_ROOT = $(abspath .)
 SEGMENT_CFLAGS = $(CFLAGS) -I. -I$(ENGINE) -fopenmp
 SEGMENT_COMMON = segment_colibri.h lumabri_segment.c lumabri_segment.h \
 		lumabri_segment_discovery.c lumabri_segment_discovery.h \
 		lumabri_proto.h lumabri_sign.h lumabri_sha.h $(SECURE_DEPS)
 
-$(COLIBRI_SEGMENT_LIB):
-	env -u CFLAGS -u MAKEFLAGS $(MAKE) -C $(ENGINE) MAKEOVERRIDES= segment-edge-library
+HYBRID_PATCH_INPUTS = engine_patches/make_patches.py \
+	engine_patches/deepseek_v4_p2p.py $(wildcard engine_patches/*-p2p.diff) \
+	lumabri_client.h lumibri_client.h lumi_v4_ext.h lumi_v4_bridge.c \
+	lumabri_proto.h lumabri_sign.h lumabri_secure.h lumabri_crypto.h \
+	lumabri_sha.h
+
+$(HYBRID_ENGINE_DIR)/.prepared: $(HYBRID_PATCH_INPUTS) \
+		$(ENGINE)/colibri.c $(ENGINE)/inkling.c $(ENGINE)/kimi_k3.c \
+		$(ENGINE)/olmoe.c $(ENGINE)/qwen36.c $(ENGINE)/deepseek_v4.c
+	rm -rf $(HYBRID_ENGINE_DIR)
+	mkdir -p $(HYBRID_ENGINE_DIR)
+	cp -a $(ENGINE)/. $(HYBRID_ENGINE_DIR)/
+	rm -rf $(HYBRID_ENGINE_DIR)/build
+	python3 engine_patches/make_patches.py --engine-dir $(ENGINE) --apply-one colibri.c --out $(HYBRID_ENGINE_DIR)/colibri.c
+	python3 engine_patches/make_patches.py --engine-dir $(ENGINE) --apply-one inkling.c --out $(HYBRID_ENGINE_DIR)/inkling.c
+	python3 engine_patches/make_patches.py --engine-dir $(ENGINE) --apply-one kimi_k3.c --out $(HYBRID_ENGINE_DIR)/kimi_k3.c
+	python3 engine_patches/make_patches.py --engine-dir $(ENGINE) --apply-one olmoe.c --out $(HYBRID_ENGINE_DIR)/olmoe.c
+	python3 engine_patches/make_patches.py --engine-dir $(ENGINE) --apply-one qwen36.c --out $(HYBRID_ENGINE_DIR)/qwen36.c
+	python3 engine_patches/deepseek_v4_p2p.py $(ENGINE)/deepseek_v4.c $(HYBRID_ENGINE_DIR)/deepseek_v4.c
+	touch $@
+
+build/segment_hybrid_bridge.o: lumi_v4_bridge.c $(HYBRID_PATCH_INPUTS)
+	mkdir -p build
+	$(CC) $(CFLAGS) -fopenmp -pthread -I. -I$(ENGINE) -c lumi_v4_bridge.c -o $@
+
+$(COLIBRI_SEGMENT_LIB): $(HYBRID_ENGINE_DIR)/.prepared build/segment_hybrid_bridge.o
+	env -u MAKEFLAGS $(MAKE) -C $(HYBRID_ENGINE_DIR) MAKEOVERRIDES= \
+		CFLAGS='-O2 -fopenmp -pthread -I$(HYBRID_ROOT) -include $(HYBRID_ROOT)/lumi_v4_ext.h -DLUMABRI_P2P -DLUMIBRI_P2P' \
+		segment-edge-library
+	$(AR) rcs $@ build/segment_hybrid_bridge.o
 
 segment_node: segment_node.c $(SEGMENT_COMMON) $(COLIBRI_SEGMENT_LIB)
 	$(CC) $(SEGMENT_CFLAGS) -pthread segment_node.c lumabri_segment.c \
@@ -467,6 +497,12 @@ test-elastic: tracker expert_node fixture
 
 test-resident: tracker swarm_probe expert_node fixture
 	./resident_hold_test.sh
+
+# Segment keeps attention/state local while a complete MoE layer is served by
+# a strict-RAM Expert donor. The second run kills that donor and proves that
+# the unchanged local Colibri kernel takes over without losing the session.
+test-segment-hybrid: tracker swarm_probe expert_node segment_node segment_chat fixture
+	ENGINE=$(ENGINE) ./segment_hybrid_test.sh
 
 test-cas: tracker maintainer liblumabri.so test_shim
 	./cas_test.sh
@@ -550,4 +586,4 @@ clean:
         patches patches-check test-relay-exec test-swarm-fed test-assign-race test-partial-phase2 test-elastic \
         test-cas test-key-rotation test-hedge test-segment-v2 \
         test-segment-discovery segment-direct test-segment-direct-real \
-        test-segment-relay-real test-segment-failover-real
+        test-segment-relay-real test-segment-failover-real test-segment-hybrid
