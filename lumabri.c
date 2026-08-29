@@ -43,6 +43,7 @@
 #include <unistd.h>
 
 #include "lumabri_proto.h"
+#include "lumabri_machine.h"
 #include "lumabri_segment_discovery.h"
 #include "lumabri_sign.h"
 #include "lumabri_secure.h"
@@ -394,17 +395,6 @@ static int local_model_layers(const char *model_dir, uint32_t *layers) {
     return local_model_u32(model_dir, "num_hidden_layers", layers);
 }
 
-static uint64_t machine_available_ram(void) {
-    FILE *file = fopen("/proc/meminfo", "r");
-    if (!file) return 0;
-    char line[256];
-    unsigned long long kib = 0;
-    while (fgets(line, sizeof line, file))
-        if (sscanf(line, "MemAvailable: %llu kB", &kib) == 1) break;
-    fclose(file);
-    return (uint64_t)kib * 1024u;
-}
-
 /* A server with a real public IPv4 should need no networking flag. Private,
  * loopback, link-local and CGNAT addresses are deliberately not guessed:
  * publishing one to an Internet swarm would create a "complete" Segment
@@ -593,7 +583,9 @@ static int cmd_serve(int argc, char **argv) {
     const char *segment_model = model_name_for(
         model, mname, segment_model_storage, sizeof segment_model_storage);
     uint32_t segment_layers = 0;
-    uint64_t segment_available = machine_available_ram();
+    LmbMachineProfile serve_profile;
+    (void)lmb_machine_probe(&serve_profile, model, NULL);
+    uint64_t segment_available = serve_profile.ram_available_bytes;
     uint64_t segment_min_free = (uint64_t)lmb_env_int(
         "LUMABRI_SEGMENT_MIN_FREE_MB", 8192, 1024, 262144) << 20;
     int segment_candidate = !disk_donor && !no_exec && segment_engine &&
@@ -735,7 +727,7 @@ static int cmd_serve(int argc, char **argv) {
      * without it preserve the exact old serve topology. */
     int with_segment = 0;
     if (segment_candidate) {
-        long cores = sysconf(_SC_NPROCESSORS_ONLN);
+        long cores = serve_profile.physical_cores;
         if (cores < 1) cores = 1;
         /* Keep stable layer boundaries from minute zero. Donors take these
          * exact ranges one by one, so each new resident machine replaces a
@@ -811,6 +803,11 @@ static int cmd_serve(int argc, char **argv) {
         }
         double ram_gb = (double)segment_available / 1e9;
         const char *home = getenv("HOME") ? getenv("HOME") : ".";
+        printf("  %smachine %s · %ld physical cores · %s · %.1f/%.1f GB RAM"
+               " · %u GPU%s%s\n", C_DIM, serve_profile.hostname, cores,
+               serve_profile.isa, serve_profile.ram_available_bytes / 1e9,
+               serve_profile.ram_total_bytes / 1e9, serve_profile.gpu_count,
+               serve_profile.gpu_count ? " detected" : "", C_R);
         printf("  %sSegment prepara %d fette layer-aligned sulle porte %d-%d "
                "(%ld CPU, %.1f GB RAM disponibili, %d thread e %d sessioni/fetta). "
                "%s%s%s\n",
@@ -3226,10 +3223,14 @@ static int role_start_segment(const Role *r, const char *tracker,
      * This process therefore only publishes what the machine can donate;
      * segment_node compares it with the assigned range and releases the
      * promise immediately when it cannot fit. */
-    uint64_t available = machine_available_ram();
-    uint64_t reserve = available / 4;
-    if (reserve < 4ull * 1000 * 1000 * 1000)
-        reserve = 4ull * 1000 * 1000 * 1000;
+    LmbMachineProfile profile;
+    (void)lmb_machine_probe(&profile,
+                            r->model_dir[0] ? r->model_dir : ".", tracker);
+    uint64_t available = profile.ram_available_bytes;
+    uint64_t reserve = (uint64_t)lmb_env_int(
+        getenv("LUMABRI_SEGMENT_RAM_RESERVE_MB") ?
+        "LUMABRI_SEGMENT_RAM_RESERVE_MB" : "LUMABRI_RAM_RESERVE_MB",
+        4096, 256, 262144) << 20;
     if (!available || reserve >= available)
         return 0;
     uint64_t memory_budget = available - reserve;
@@ -3267,7 +3268,7 @@ static int role_start_segment(const Role *r, const char *tracker,
 
     int port = free_port(7801);
     if (!port) return 0;
-    long cores = sysconf(_SC_NPROCESSORS_ONLN);
+    long cores = profile.physical_cores;
     int threads = cores > 1 ? (int)(cores / 2) : 1;
     int sessions = 2;
     char port_text[16], context_text[16], sessions_text[16], threads_text[16];
@@ -4144,6 +4145,72 @@ static int cmd_peer_key(int argc, char **argv) {
     return 0;
 }
 
+static int cmd_machine(int argc, char **argv) {
+    int json = 0;
+    const char *tracker = NULL, *disk = ".";
+    for (int i = 0; i < argc; i++) {
+        if (!strcmp(argv[i], "--json")) json = 1;
+        else if (!strcmp(argv[i], "--tracker") && i + 1 < argc)
+            tracker = argv[++i];
+        else if (!strcmp(argv[i], "--disk") && i + 1 < argc)
+            disk = argv[++i];
+        else {
+            fprintf(stderr, "usage: lumabri machine [--json] [--tracker HOST:PORT] "
+                            "[--disk PATH]\n");
+            return 2;
+        }
+    }
+    LmbMachineProfile profile;
+    if (lmb_machine_probe(&profile, disk, tracker)) {
+        fprintf(stderr, "cannot profile this machine\n"); return 1;
+    }
+    lmb_machine_print(stdout, &profile, json);
+    if (!json) {
+        uint64_t reserve = (uint64_t)lmb_env_int(
+            "LUMABRI_RAM_RESERVE_MB", 4096, 256, 262144) << 20;
+        LmbGovernor governor;
+        lmb_governor_init(&governor, reserve);
+        printf("governor %s · %.1f GB system reserve\n",
+               lmb_governor_state_name(lmb_governor_poll(&governor)),
+               reserve / 1e9);
+    }
+    return 0;
+}
+
+static int cmd_limits(int argc, char **argv) {
+    (void)argv;
+    if (argc) { fprintf(stderr, "usage: lumabri limits\n"); return 2; }
+    uint64_t reserve = (uint64_t)lmb_env_int(
+        "LUMABRI_RAM_RESERVE_MB", 4096, 256, 262144) << 20;
+    LmbMachineProfile profile;
+    (void)lmb_machine_probe(&profile, ".", NULL);
+    uint64_t donate = profile.ram_available_bytes > reserve ?
+                      profile.ram_available_bytes - reserve : 0;
+    printf("system reserve     %.1f GB RAM\n", reserve / 1e9);
+    printf("currently donable  %.1f GB RAM\n", donate / 1e9);
+    printf("donor CPU team     %u physical cores (low priority)\n",
+           profile.physical_cores);
+    printf("manual state       %s\n",
+           lmb_governor_manual_paused() ? "PAUSED" : "ACTIVE");
+    printf("overrides          LUMABRI_RAM_RESERVE_MB, "
+           "LUMABRI_EXPERT_RAM_RESERVE_MB, LUMABRI_SEGMENT_RAM_RESERVE_MB\n");
+    return 0;
+}
+
+static int cmd_governor_manual(int argc, char **argv, int paused) {
+    (void)argv;
+    if (argc) {
+        fprintf(stderr, "usage: lumabri %s\n", paused ? "pause" : "resume");
+        return 2;
+    }
+    if (lmb_governor_set_manual(paused)) {
+        perror("cannot update governor state"); return 1;
+    }
+    printf("donation %s; running work will drain before the new state applies\n",
+           paused ? "paused" : "resumed");
+    return 0;
+}
+
 /* ---- main --------------------------------------------------------------- */
 
 int main(int argc, char **argv) {
@@ -4151,6 +4218,14 @@ int main(int argc, char **argv) {
     if (argc >= 2 && !strcmp(argv[1], "key")) return cmd_key(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "peer-key"))
         return cmd_peer_key(argc - 2, argv + 2);
+    if (argc >= 2 && (!strcmp(argv[1], "machine") || !strcmp(argv[1], "status")))
+        return cmd_machine(argc - 2, argv + 2);
+    if (argc >= 2 && !strcmp(argv[1], "limits"))
+        return cmd_limits(argc - 2, argv + 2);
+    if (argc >= 2 && !strcmp(argv[1], "pause"))
+        return cmd_governor_manual(argc - 2, argv + 2, 1);
+    if (argc >= 2 && !strcmp(argv[1], "resume"))
+        return cmd_governor_manual(argc - 2, argv + 2, 0);
     if (lmb_secure_init()) return 1; /* children inherit the same strict mode */
     const char *tok = getenv("LUMABRI_TOKEN");
     if (tok && strlen(tok) > LMB_TOKEN_MAX) {
@@ -4167,6 +4242,8 @@ int main(int argc, char **argv) {
     fprintf(stderr,
         "lumabri: run huge models from a swarm of peers\n\n"
         "  lumabri                                                    chat (asks what it needs)\n"
+        "  lumabri machine [--json] [--tracker HOST:PORT]             profile this machine\n"
+        "  lumabri status | limits | pause | resume                    resource governor\n"
         "  lumabri peer-key                                           print this machine's endpoint identity\n"
         "  lumabri serve --model DIR [--port 7300] [--join TRACKER]   share a model\n"
         "  lumabri chat  [--tracker HOST:7300] [--model NAME]         chat with it\n"

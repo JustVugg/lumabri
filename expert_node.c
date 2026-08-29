@@ -68,6 +68,7 @@
 #endif
 
 #include "lumabri_proto.h"
+#include "lumabri_machine.h"
 #include "lumabri_sign.h"
 #include "lumabri_secure.h"
 
@@ -126,8 +127,10 @@ static struct {
     uint8_t peer_sk[64], peer_pk[32];   /* identity to the tracker */
     int bits;
     int resident_mode;
-    uint32_t resident_state, resident_flags;
+    _Atomic uint32_t resident_state;
+    uint32_t resident_flags;
     uint64_t resident_bytes, resident_vram_bytes;
+    LmbGovernor governor;
     LmbModelIdentity identity; int have_identity;
     pthread_mutex_t identity_lk;
     _Atomic uint64_t calls, cold;
@@ -266,6 +269,7 @@ static void cache_release(CSlot *s) {
  * does not produce the same floats as nr calls of one row, and byte identity
  * with the local path is the entire claim of this project. */
 static int exec_compute(LmbMsg *m, float **outp, uint32_t *out_len) {
+    if (!lmb_governor_accepting(&g.governor)) return -2;
     LmbCur cur = { m->body, m->body_len, 0 };
     uint32_t layer, eid, dim, nrows = 1;
     if (lmb_cur_u32(&cur, &layer) || lmb_cur_u32(&cur, &eid) || lmb_cur_u32(&cur, &dim)) {
@@ -342,8 +346,10 @@ static int exec_compute(LmbMsg *m, float **outp, uint32_t *out_len) {
 
 static int handle_exec(int fd, LmbMsg *m) {
     float *out = NULL; uint32_t out_len = 0;
-    if (exec_compute(m, &out, &out_len)) {
-        send_err(fd, "bad exec request or expert not held");
+    int status = exec_compute(m, &out, &out_len);
+    if (status) {
+        send_err(fd, status == -2 ? "executor draining under machine pressure" :
+                                    "bad exec request or expert not held");
         return -1;
     }
     int rc = lmb_send(fd, LMB_EXEC_R, NULL, 0, out, out_len);
@@ -553,16 +559,17 @@ static void *rebalance_thread(void *arg) {
 
 static int send_ereg(int fd, const uint8_t nonce[32], int send_stats) {
     LmbBuf b = {0};
+    int publishing = lmb_governor_accepting(&g.governor);
     lmb_buf_str(&b, g.name);
     lmb_buf_str(&b, g.advertise);
     lmb_buf_str(&b, g.model);
-    lmb_buf_u32(&b, (uint32_t)g.nholds);
+    lmb_buf_u32(&b, publishing ? (uint32_t)g.nholds : 0u);
     size_t cells = (size_t)g.n_slots * g.n_experts;
     size_t nb = (cells + 7) / 8;
     uint8_t *bits = (uint8_t *)calloc(nb ? nb : 1, 1);
     if (!bits) { free(b.p); return -1; }
     for (size_t k = 0; k < cells; k++)
-        if (g.holds[k]) bits[k >> 3] |= (uint8_t)(1u << (k & 7));
+        if (publishing && g.holds[k]) bits[k >> 3] |= (uint8_t)(1u << (k & 7));
     lmb_buf_u32(&b, (uint32_t)nb);
     lmb_buf_bytes(&b, bits, nb);
     free(bits);
@@ -581,7 +588,7 @@ static int send_ereg(int fd, const uint8_t nonce[32], int send_stats) {
         lmb_buf_u32(&b, LMB_EREG_STATS_LENGTH);
         lmb_buf_u64(&b, atomic_load(&g.calls));
         lmb_buf_u32(&b, atomic_load(&g.in_flight));
-        lmb_buf_u32(&b, g.resident_state);
+        lmb_buf_u32(&b, atomic_load(&g.resident_state));
         lmb_buf_u32(&b, g.resident_flags);
         lmb_buf_u32(&b, g.resident_mode ? (uint32_t)g.nholds : 0u);
         lmb_buf_u64(&b, g.resident_bytes);
@@ -595,6 +602,26 @@ static int send_ereg(int fd, const uint8_t nonce[32], int send_stats) {
     int rc = lmb_send(fd, LMB_EREG, b.p, (uint32_t)b.len, NULL, 0);
     free(b.p);
     return rc;
+}
+
+static void *governor_thread(void *arg) {
+    (void)arg;
+    LmbGovernorState previous = lmb_governor_state(&g.governor);
+    for (;;) {
+        LmbGovernorState state = lmb_governor_poll(&g.governor);
+        atomic_store(&g.resident_state, state == LMB_GOV_ACTIVE ?
+                     LMB_EXPERT_STATE_ACTIVE : LMB_EXPERT_STATE_DRAINING);
+        if (state != previous) {
+            fprintf(stderr, "[%s] governor %s -> %s%s\n", g.name,
+                    lmb_governor_state_name(previous),
+                    lmb_governor_state_name(state),
+                    state == LMB_GOV_ACTIVE ? " · publishing resident experts" :
+                                             " · draining and advertising zero coverage");
+            previous = state;
+        }
+        sleep(1);
+    }
+    return NULL;
 }
 
 /* The tracker binds a name to the first peer key that registers it and
@@ -906,7 +933,15 @@ int main(int argc, char **argv) {
     }
     if (hold_auto) resident = 1;
     g.resident_mode = resident || cache == 0;
-    g.resident_state = LMB_EXPERT_STATE_ASSIGNED;
+    long governor_reserve_mb = 4096;
+    const char *global_reserve = getenv("LUMABRI_RAM_RESERVE_MB");
+    const char *expert_reserve = getenv("LUMABRI_EXPERT_RAM_RESERVE_MB");
+    if (global_reserve && atol(global_reserve) >= 256)
+        governor_reserve_mb = atol(global_reserve);
+    if (expert_reserve && atol(expert_reserve) >= 256)
+        governor_reserve_mb = atol(expert_reserve);
+    lmb_governor_init(&g.governor, (uint64_t)governor_reserve_mb << 20);
+    atomic_store(&g.resident_state, LMB_EXPERT_STATE_ASSIGNED);
     lmbe_open(dir, cache, bits);
     g.bits = lmbe_effective_bits(bits);
     lmb_build_profile(g.profile, sizeof g.profile);
@@ -920,9 +955,7 @@ int main(int argc, char **argv) {
          * slice, so several "donate compute" machines auto-spread into disjoint
          * shares instead of every one holding the whole model. */
         long avail_kb = meminfo_avail_kb();
-        long reserve_mb = 4096;
-        const char *reserve_env = getenv("LUMABRI_EXPERT_RAM_RESERVE_MB");
-        if (reserve_env && atol(reserve_env) >= 256) reserve_mb = atol(reserve_env);
+        long reserve_mb = governor_reserve_mb;
         double avail_b = avail_kb > reserve_mb * 1024L
             ? (double)(avail_kb - reserve_mb * 1024L) * 1024.0 : 0.0;
         double ebytes = 3.0 * g.inter * g.hidden;     /* same width the cache MB uses */
@@ -983,7 +1016,7 @@ int main(int argc, char **argv) {
                g.name, lmbe_engine_name(), dense, g.n_slots);
 
     double t0 = nowd();
-    g.resident_state = LMB_EXPERT_STATE_LOADING;
+    atomic_store(&g.resident_state, LMB_EXPERT_STATE_LOADING);
     if (cache > 0) {
         /* SSD residency: experts stay on disk, N slots of RAM catch the hot
          * ones. Nothing is preloaded — the first calls warm the cache, the
@@ -1033,7 +1066,9 @@ int main(int argc, char **argv) {
     } else {
         g.resident_flags = LMB_EXPERT_DISK_FALLBACK;
     }
-    g.resident_state = LMB_EXPERT_STATE_ACTIVE;
+    atomic_store(&g.resident_state,
+                 lmb_governor_accepting(&g.governor) ?
+                 LMB_EXPERT_STATE_ACTIVE : LMB_EXPERT_STATE_DRAINING);
     fflush(stdout);
 
     /* whatever the engine settled on during lmbe_open */
@@ -1068,6 +1103,7 @@ int main(int argc, char **argv) {
     pthread_t t;
     lmb_conn_gate_init(&g_conn_gate);
     if (lmb_secure_init()) return 1;
+    pthread_create(&t, NULL, governor_thread, NULL); pthread_detach(t);
     if (g.tracker[0]) { pthread_create(&t, NULL, control_thread, NULL); pthread_detach(t); }
     if (g.tracker[0] && g.want_hold > 0 && g.ncs > 0) {
         pthread_create(&t, NULL, rebalance_thread, NULL);

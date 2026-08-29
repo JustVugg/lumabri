@@ -4,6 +4,7 @@
 #include "lumabri_proto.h"
 #include "lumabri_segment.h"
 #include "lumabri_segment_discovery.h"
+#include "lumabri_machine.h"
 #include "lumabri_sign.h"
 #include "lumabri_secure.h"
 #include "segment_colibri.h"
@@ -72,6 +73,7 @@ typedef struct {
     uint64_t ram_reserve_bytes;
     uint64_t process_memory_limit_bytes;
     uint64_t session_memory_limit_bytes;
+    LmbGovernor governor;
     TrackerRegistration registration;
 } Node;
 
@@ -85,14 +87,8 @@ static uint64_t now_ms(void) {
 }
 
 static uint64_t available_memory_bytes(void) {
-    FILE *file = fopen("/proc/meminfo", "r");
-    if (!file) return UINT64_MAX; /* unknown must not make a healthy node lie */
-    char line[256];
-    unsigned long long kib = 0;
-    while (fgets(line, sizeof line, file))
-        if (sscanf(line, "MemAvailable: %llu kB", &kib) == 1) break;
-    fclose(file);
-    return kib ? (uint64_t)kib * 1024u : UINT64_MAX;
+    uint64_t available = lmb_machine_available_ram();
+    return available ? available : UINT64_MAX;
 }
 
 static uint64_t resident_memory_bytes(void) {
@@ -109,9 +105,36 @@ static uint64_t resident_memory_bytes(void) {
 static int memory_pressure(void *opaque) {
     Node *node = opaque;
     uint64_t rss = resident_memory_bytes();
-    return g_stop || available_memory_bytes() < node->ram_reserve_bytes ||
+    return g_stop || !lmb_governor_accepting(&node->governor) ||
+           available_memory_bytes() < node->ram_reserve_bytes ||
            (node->process_memory_limit_bytes && rss &&
             rss > node->process_memory_limit_bytes);
+}
+
+static void *governor_worker(void *opaque) {
+    Node *node = opaque;
+    LmbGovernorState previous = lmb_governor_state(&node->governor);
+    while (!g_stop && !node->registration.stop) {
+        LmbGovernorState state = lmb_governor_poll(&node->governor);
+        pthread_mutex_lock(&node->registration.lock);
+        if (state == LMB_GOV_ACTIVE)
+            node->registration.advert.flags &= ~LMB_SEG_ADVERT_DRAINING;
+        else
+            node->registration.advert.flags |= LMB_SEG_ADVERT_DRAINING;
+        pthread_mutex_unlock(&node->registration.lock);
+        if (state != previous) {
+            fprintf(stderr, "[segment-node %s] governor %s -> %s%s\n",
+                    node->advert.peer_name,
+                    lmb_governor_state_name(previous),
+                    lmb_governor_state_name(state),
+                    state == LMB_GOV_ACTIVE ? " · accepting sessions" :
+                                             " · draining and refusing new work");
+            previous = state;
+        }
+        for (int i = 0; i < 10 && !g_stop && !node->registration.stop; i++)
+            usleep(100000);
+    }
+    return NULL;
 }
 
 static void stop_handler(int sig) {
@@ -523,7 +546,8 @@ static int handle_open(Node *node, int fd, const LmbMsg *msg) {
             status = lmb_seg_table_open(node->table, &open, now_ms());
         } else if (!(slot = session_empty(node))) {
             status = LMB_SEG_STATUS_QUOTA;
-        } else if (available_memory_bytes() < node->ram_reserve_bytes) {
+        } else if (!lmb_governor_accepting(&node->governor) ||
+                   available_memory_bytes() < node->ram_reserve_bytes) {
             status = LMB_SEG_STATUS_QUOTA;
         } else {
             ColiSegmentSessionOptions options = {
@@ -1182,8 +1206,11 @@ int main(int argc, char **argv) {
     }
     uint64_t process_limit = (uint64_t)memory_limit_mb << 20;
     uint64_t available = available_memory_bytes();
+    const char *reserve_name = getenv("LUMABRI_SEGMENT_RAM_RESERVE_MB") ?
+                               "LUMABRI_SEGMENT_RAM_RESERVE_MB" :
+                               "LUMABRI_RAM_RESERVE_MB";
     uint64_t reserve = (uint64_t)lmb_env_int(
-        "LUMABRI_SEGMENT_RAM_RESERVE_MB", 4096, 256, 262144) << 20;
+        reserve_name, 4096, 256, 262144) << 20;
     if (!process_limit && available != UINT64_MAX && available > reserve)
         process_limit = available - reserve;
     if (process_limit && model_bytes && model_layers) {
@@ -1218,6 +1245,7 @@ int main(int argc, char **argv) {
     for (size_t i = 0; i < NODE_SESSIONS_MAX; i++)
         pthread_mutex_init(&node.sessions[i].lock, NULL);
     node.ram_reserve_bytes = reserve;
+    lmb_governor_init(&node.governor, reserve);
     node.process_memory_limit_bytes = process_limit;
     fprintf(stderr, "[segment-node] governor: %.1f GB RAM reserved for the "
                     "machine\n", (double)node.ram_reserve_bytes / 1e9);
@@ -1288,6 +1316,8 @@ int main(int argc, char **argv) {
     a->max_sessions = max_sessions;
     if (fallback) a->flags |= LMB_SEG_ADVERT_FALLBACK;
     if (relay_only) a->flags |= LMB_SEG_ADVERT_RELAY_ONLY;
+    if (!lmb_governor_accepting(&node.governor))
+        a->flags |= LMB_SEG_ADVERT_DRAINING;
     a->capabilities = node.cap.flags & LMB_SEG_CAP_KNOWN_MASK;
     /* Registration happens after engine_open, so this is measured resident
      * memory, not a model-size promise. A zero value remains valid on systems
@@ -1317,7 +1347,7 @@ int main(int argc, char **argv) {
     }
     g_listen_fd = lmb_listen((int)port);
     if (g_listen_fd < 0) { perror("segment listen"); return 1; }
-    pthread_t registration_thread, reaper_thread;
+    pthread_t registration_thread, reaper_thread, governor_thread;
     if (pthread_create(&registration_thread, NULL, registration_worker,
                        registration)) {
         fprintf(stderr, "cannot start tracker registration\n"); return 1;
@@ -1325,6 +1355,13 @@ int main(int argc, char **argv) {
     if (pthread_create(&reaper_thread, NULL, session_reaper, &node)) {
         fprintf(stderr, "cannot start session reaper\n");
         registration->stop = 1;
+        pthread_join(registration_thread, NULL);
+        return 1;
+    }
+    if (pthread_create(&governor_thread, NULL, governor_worker, &node)) {
+        fprintf(stderr, "cannot start resource governor\n");
+        g_stop = 1; registration->stop = 1;
+        pthread_join(reaper_thread, NULL);
         pthread_join(registration_thread, NULL);
         return 1;
     }
@@ -1351,6 +1388,7 @@ int main(int argc, char **argv) {
         pthread_detach(thread);
     }
     registration->stop = 1;
+    pthread_join(governor_thread, NULL);
     pthread_join(reaper_thread, NULL);
     pthread_join(registration_thread, NULL);
     pthread_mutex_lock(&node.connections_lock);

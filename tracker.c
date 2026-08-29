@@ -1070,11 +1070,15 @@ static int handle_epeers(int fd, LmbMsg *m) {
     uint32_t n = 0;
     for (int i = 0; i < MAX_PEERS; i++)
         if (g_peers[i].used && g_peers[i].is_expert && g_peers[i].has_expert &&
+            g_peers[i].nexperts > 0 &&
+            g_peers[i].expert_state != LMB_EXPERT_STATE_DRAINING &&
             now - g_peers[i].expert_ts <= g_stale_s &&
             (!want[0] || !strcmp(g_peers[i].model, want))) n++;
     lmb_buf_u32(&b, n);
     for (int i = 0; i < MAX_PEERS; i++)
         if (g_peers[i].used && g_peers[i].is_expert && g_peers[i].has_expert &&
+            g_peers[i].nexperts > 0 &&
+            g_peers[i].expert_state != LMB_EXPERT_STATE_DRAINING &&
             now - g_peers[i].expert_ts <= g_stale_s &&
             (!want[0] || !strcmp(g_peers[i].model, want)))
             lmb_buf_str(&b, g_peers[i].addr);

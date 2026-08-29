@@ -62,6 +62,12 @@ the finer-grained expert donor remains the lower-memory fallback.
 Both run at low priority and die with the TUI. Nothing to configure — Enter
 picks "just chat".
 
+`lumabri machine` shows the quick startup profile used for donation: CPU
+model/ISA, physical and logical cores, NUMA, RAM/swap, visible GPU/VRAM, disk,
+interfaces and optional tracker RTT. `--json` emits a stable schema for
+automation. `lumabri limits` shows the current donation budget; `lumabri pause`
+and `lumabri resume` control every local donor without killing the chat.
+
 Inside the chat, `/swarm` (or `/hosts`) shows stable human-readable machine
 names, storage served, expert calls and live Segment ranges. `/experts` answers
 how often each executor has actually been used; `/model`, `/debug`, `/storage`
@@ -229,10 +235,22 @@ summary reports connected hosts, bytes served, expert calls and active Segment
 runs, so successful swarm work is visible on both sides.
 
 Automatic Segment is a real compute service. It starts only with at least 8 GiB
-available by default (`LUMABRI_SEGMENT_MIN_FREE_MB`), divides CPU threads among
-the slices, runs fallback work at low priority and keeps 4 GiB free before
-accepting a new session (`LUMABRI_SEGMENT_RAM_RESERVE_MB`). A relay-only/NAT
+available by default (`LUMABRI_SEGMENT_MIN_FREE_MB`), gives each sequential
+slice a full physical-core team, runs fallback work at low priority and keeps
+4 GiB free before accepting a new session. `LUMABRI_RAM_RESERVE_MB` is the
+common limit; `LUMABRI_SEGMENT_RAM_RESERVE_MB` and
+`LUMABRI_EXPERT_RAM_RESERVE_MB` are per-role overrides. A relay-only/NAT
 origin defaults to two sessions per slice; a direct server defaults to four.
+
+Every executor runs the same hysteretic resource governor. `ACTIVE` publishes
+capacity; `PRESSURE` and `PAUSED` advertise Segment draining or zero Expert
+coverage and reject new work; `RECOVERY` waits three healthy samples before
+publishing again. In-flight Segment work sees the cancellation callback and is
+migrated through the existing checkpoint/replay path. Expert work already in
+flight drains, while new calls fall back to another replica or the Segment's
+local kernel. This pauses donor CPU and I/O immediately; resident RAM stays
+allocated inside the donor process, protected by the reserve chosen before
+loading, so recovery does not cold-load the model again.
 
 On every other machine, pick a role:
 
