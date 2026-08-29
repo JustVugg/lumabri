@@ -176,6 +176,37 @@ static int register_advert(const char *tracker, const LmbSegAdvert *a,
     return 0;
 }
 
+static void segment_assign_request(const char *tracker, const LmbSegAdvert *origin,
+                                   const char *name, uint32_t op,
+                                   uint32_t *begin, uint32_t *end,
+                                   uint32_t *layers) {
+    LmbBuf body = {0};
+    assert(!lmb_buf_u32(&body, LMB_SEG_ASSIGN_MAGIC));
+    assert(!lmb_buf_u32(&body, LMB_SEG_ASSIGN_VERSION));
+    assert(!lmb_buf_str(&body, origin->model));
+    assert(!lmb_buf_str(&body, name));
+    assert(!lmb_buf_str(&body, origin->engine_id));
+    assert(!lmb_buf_bytes(&body, origin->model_root, sizeof origin->model_root));
+    LmbMsg reply = {0};
+    assert(!lmb_request(tracker, op, body.p, (uint32_t)body.len, &reply));
+    free(body.p);
+    if (op == LMB_SEG_ASSIGN_RELEASE) {
+        assert(reply.op == LMB_OK && !reply.body_len && !reply.pay_len);
+    } else {
+        assert(reply.op == LMB_SEG_ASSIGN_R && !reply.pay_len);
+        LmbCur cursor = { reply.body, reply.body_len, 0 };
+        uint32_t magic = 0, version = 0;
+        assert(!lmb_cur_u32(&cursor, &magic));
+        assert(!lmb_cur_u32(&cursor, &version));
+        assert(!lmb_cur_u32(&cursor, begin));
+        assert(!lmb_cur_u32(&cursor, end));
+        assert(!lmb_cur_u32(&cursor, layers));
+        assert(cursor.off == cursor.len && magic == LMB_SEG_ASSIGN_MAGIC &&
+               version == LMB_SEG_ASSIGN_VERSION);
+    }
+    lmb_msg_free(&reply);
+}
+
 static void test_tracker(const char *tracker) {
     enum { NF = (int)(sizeof families / sizeof families[0]), NR = NF + 2 };
     Registration registrations[NR];
@@ -234,17 +265,38 @@ static void test_tracker(const char *tracker) {
      * second range and one replica: the returned list preserves replicas and
      * contains a complete exact-boundary chain. */
     adverts[0].layer_end = 2;
+    adverts[0].flags = LMB_SEG_ADVERT_FALLBACK;
     assert(!register_advert(tracker, &adverts[0], 20, &registrations[0]));
     assert(registrations[0].owner.route_generation > before.route_generation);
     assert(registrations[0].owner.fencing_epoch > before.fencing_epoch);
     assert(!lmb_seg_id_equal(&registrations[0].owner.lease_id, &before.lease_id));
     LmbSegAdvert upper = make_advert(0, 90, 2, 4);
     LmbSegAdvert replica = make_advert(0, 91, 2, 4);
+    upper.flags = LMB_SEG_ADVERT_FALLBACK;
     registrations[NF].fd = registrations[NF + 1].fd = -1;
     assert(!register_advert(tracker, &upper, 90, &registrations[NF]));
     assert(!register_advert(tracker, &replica, 91, &registrations[NF + 1]));
     assert(!lmb_seg_routes_fetch(tracker, &oq, &os));
     assert(os.complete && os.count == 3);
+
+    /* Promises spread concurrent donors across the exact fallback ranges.
+     * A capacity rejection releases its promise immediately: the next donor
+     * can take the rare range without waiting five minutes. The reply also
+     * carries total layers so a model-less donor can estimate its real slice. */
+    uint32_t first_begin = 99, first_end = 99, first_layers = 0;
+    uint32_t second_begin = 99, second_end = 99, second_layers = 0;
+    uint32_t third_begin = 99, third_end = 99, third_layers = 0;
+    segment_assign_request(tracker, &adverts[0], "capacity-a", LMB_SEG_ASSIGN,
+                           &first_begin, &first_end, &first_layers);
+    segment_assign_request(tracker, &adverts[0], "capacity-b", LMB_SEG_ASSIGN,
+                           &second_begin, &second_end, &second_layers);
+    assert(first_begin == 0 && first_end == 2 && first_layers == 4);
+    assert(second_begin == 2 && second_end == 4 && second_layers == 4);
+    segment_assign_request(tracker, &adverts[0], "capacity-a",
+                           LMB_SEG_ASSIGN_RELEASE, NULL, NULL, NULL);
+    segment_assign_request(tracker, &adverts[0], "capacity-c", LMB_SEG_ASSIGN,
+                           &third_begin, &third_end, &third_layers);
+    assert(third_begin == 0 && third_end == 2 && third_layers == 4);
 
     /* Draining removes a peer from new placements but does not mutate an old
      * snapshot already held by a running session. One replica remains. */

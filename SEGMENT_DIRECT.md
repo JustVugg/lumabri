@@ -41,7 +41,9 @@ lumabri serve --model /models/olmoe --advertise PUBLIC_IP
 ```
 
 Lumabri detects the family, layer/context shape, CPU/RAM and network capability,
-then starts four disjoint fallback executors. A public interface enables the
+then starts one full-core fallback executor. An explicit
+`LUMABRI_SEGMENT_CHUNKS=N` starts disjoint fallback executors for placement
+tests. A public interface enables the
 preferred direct path. Behind NAT the same executors register as relay-only and
 remain reachable through their signed outbound tracker tunnels; Lumabri never
 publishes a guessed private address as direct.

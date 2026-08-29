@@ -487,6 +487,7 @@ test: all test_key_rotation test_hedge test_verify_failover test_segment_v2 \
 	./signed_donor_test.sh
 	./hot_cache_integrity_test.sh
 	./role_test.sh
+	./serve_failfast_test.sh
 	./security_test.sh
 	./expert_input_test.sh
 	./prefetch_policy_test.sh

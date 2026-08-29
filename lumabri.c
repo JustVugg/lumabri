@@ -482,6 +482,13 @@ static int parse_serve_port(const char *s, int *port) {
     return 0;
 }
 
+static int serve_port_available(int port) {
+    int fd = lmb_listen(port);
+    if (fd < 0) return 0;
+    close(fd);
+    return 1;
+}
+
 static void serve_watch_start(const char *tracker, const char *model);
 
 static int cmd_serve(int argc, char **argv) {
@@ -573,6 +580,55 @@ static int cmd_serve(int argc, char **argv) {
     if (join) snprintf(taddr, sizeof taddr, "%s", join);
     else      snprintf(taddr, sizeof taddr, "127.0.0.1:%d", port);
 
+    /* Resolve the complete local topology before forking anything. Starting
+     * half a server and then discovering EADDRINUSE made the supervisor retry
+     * forever and produced a misleading apparently-live `serve`. */
+    char exec_bin[1200] = "", mtype[64] = "";
+    local_model_type(model, mtype, sizeof mtype);
+    const char *node = expert_node_for(mtype);
+    if (node) snprintf(exec_bin, sizeof exec_bin, "%s/%s", dir, node);
+    char segment_bin[1200], segment_model_storage[64];
+    snprintf(segment_bin, sizeof segment_bin, "%s/segment_node", dir);
+    const char *segment_engine = segment_engine_for(mtype);
+    const char *segment_model = model_name_for(
+        model, mname, segment_model_storage, sizeof segment_model_storage);
+    uint32_t segment_layers = 0;
+    uint64_t segment_available = machine_available_ram();
+    uint64_t segment_min_free = (uint64_t)lmb_env_int(
+        "LUMABRI_SEGMENT_MIN_FREE_MB", 8192, 1024, 262144) << 20;
+    int segment_candidate = !disk_donor && !no_exec && segment_engine &&
+        segment_model && access(segment_bin, X_OK) == 0 &&
+        local_model_layers(model, &segment_layers) == 0 &&
+        (!segment_available || segment_available >= segment_min_free);
+    if (!segment_candidate && !disk_donor && !no_exec && segment_engine &&
+        segment_model && access(segment_bin, X_OK) == 0 && segment_available &&
+        segment_available < segment_min_free)
+        printf("  %sSegment automatico non avviato: %.1f GB RAM disponibili, "
+               "il governor ne richiede %.1f. Storage ed expert restano "
+               "disponibili.%s\n", C_DIM,
+               (double)segment_available / 1e9,
+               (double)segment_min_free / 1e9, C_R);
+    int planned_chunks = segment_candidate
+        ? lmb_env_int("LUMABRI_SEGMENT_CHUNKS", 1, 1, 7) : 0;
+    if ((uint32_t)planned_chunks > segment_layers)
+        planned_chunks = (int)segment_layers;
+    int first_port = join ? port + 1 : port;
+    int last_port = port + 1;
+    if (!disk_donor && !no_exec && node && access(exec_bin, X_OK) == 0)
+        last_port = port + 2;
+    if (planned_chunks) last_port = port + 2 + planned_chunks;
+    for (int candidate_port = first_port; candidate_port <= last_port;
+         candidate_port++) {
+        if (candidate_port == port + 2 &&
+            (disk_donor || no_exec || !node || access(exec_bin, X_OK)))
+            continue;
+        if (!serve_port_available(candidate_port)) {
+            fprintf(stderr, "lumabri serve: port %d is already in use; "
+                    "nothing was started\n", candidate_port);
+            return 1;
+        }
+    }
+
     if (!join) {
         /* LUMABRI_TOKEN makes the whole serve private: the spawned tracker
          * requires it, the maintainer inherits it from the environment */
@@ -631,11 +687,7 @@ static int cmd_serve(int argc, char **argv) {
      * this server executing every expert. Donors that join later are
      * discovered by the chatters and win the calls they are nearest for;
      * this node stays the replica of last resort. */
-    char exec_bin[1200], mtype[64];
-    local_model_type(model, mtype, sizeof mtype);
     /* one node binary per engine family — they do not share an expert shape */
-    const char *node = expert_node_for(mtype);
-    if (node) snprintf(exec_bin, sizeof exec_bin, "%s/%s", dir, node);
     int with_exec = 0;
     if (!no_exec && !disk_donor && !node && mtype[0])
         printf("  %sfase 2 non disponibile per il motore %s: questo server "
@@ -681,33 +733,16 @@ static int cmd_serve(int argc, char **argv) {
      * addition to the expert executor.  This binary exists only in builds
      * made against Colibri's additive Edge/Segment archive; release builds
      * without it preserve the exact old serve topology. */
-    char segment_bin[1200], segment_model_storage[64];
-    snprintf(segment_bin, sizeof segment_bin, "%s/segment_node", dir);
-    const char *segment_engine = segment_engine_for(mtype);
-    const char *segment_model = model_name_for(
-        model, mname, segment_model_storage, sizeof segment_model_storage);
-    uint32_t segment_layers = 0;
     int with_segment = 0;
-    int segment_candidate = !disk_donor && !no_exec && segment_engine &&
-        segment_model && access(segment_bin, X_OK) == 0 &&
-        local_model_layers(model, &segment_layers) == 0;
-    uint64_t segment_available = machine_available_ram();
-    uint64_t segment_min_free = (uint64_t)lmb_env_int(
-        "LUMABRI_SEGMENT_MIN_FREE_MB", 8192, 1024, 262144) << 20;
-    if (segment_candidate && segment_available &&
-        segment_available < segment_min_free) {
-        printf("  %sSegment automatico non avviato: %.1f GB RAM disponibili, "
-               "il governor ne richiede %.1f. Storage ed expert restano "
-               "disponibili; regola LUMABRI_SEGMENT_MIN_FREE_MB solo se "
-               "conosci il carico della macchina.%s\n",
-               C_DIM, (double)segment_available / 1e9,
-               (double)segment_min_free / 1e9, C_R);
-        segment_candidate = 0;
-    }
     if (segment_candidate) {
         long cores = sysconf(_SC_NPROCESSORS_ONLN);
         if (cores < 1) cores = 1;
-        int chunks = lmb_env_int("LUMABRI_SEGMENT_CHUNKS", 4, 1, 7);
+        /* A chain of slices on one host is sequential: four processes used
+         * one quarter of the CPU at a time and added three loopback hops.
+         * One full-core fallback is the honest single-machine baseline.
+         * Explicit partitioning remains available for replacement tests;
+         * distributed sharding is selected from READY peers by the tracker. */
+        int chunks = lmb_env_int("LUMABRI_SEGMENT_CHUNKS", 1, 1, 7);
         if ((uint32_t)chunks > segment_layers) chunks = (int)segment_layers;
         int slice_threads = (int)(cores / chunks);
         if (slice_threads < 1) slice_threads = 1;
@@ -717,10 +752,16 @@ static int cmd_serve(int argc, char **argv) {
         if (!local_model_u32(model, "max_position_embeddings", &model_context) &&
             model_context < segment_context)
             segment_context = model_context;
-        char context[16], session_text[16], thread_text[16];
+        char context[16], session_text[16], thread_text[16], memory_text[32];
         snprintf(context, sizeof context, "%u", segment_context);
         snprintf(session_text, sizeof session_text, "%d", sessions);
         snprintf(thread_text, sizeof thread_text, "%d", slice_threads);
+        uint64_t total_budget = segment_available > segment_min_free
+                              ? segment_available - segment_min_free : 0;
+        uint64_t slice_budget_mb = (total_budget / (uint64_t)chunks) >> 20;
+        if (!slice_budget_mb) slice_budget_mb = 1;
+        snprintf(memory_text, sizeof memory_text, "%llu",
+                 (unsigned long long)slice_budget_mb);
 
         /* A few disjoint origin slices retain the single-copy weight total,
          * but give placement exact boundaries it can replace independently:
@@ -740,7 +781,7 @@ static int cmd_serve(int argc, char **argv) {
                      chunk + 1);
             snprintf(sadv, sizeof sadv, "%s:%d",
                      advertise ? advertise : "127.0.0.1", port + 3 + chunk);
-            char *sargv[36];
+            char *sargv[40];
             a = 0;
             sargv[a++] = segment_bin;
             sargv[a++] = "--engine";       sargv[a++] = (char *)segment_engine;
@@ -757,6 +798,7 @@ static int cmd_serve(int argc, char **argv) {
             sargv[a++] = "--max-rows";     sargv[a++] = "16";
             sargv[a++] = "--sessions";     sargv[a++] = session_text;
             sargv[a++] = "--threads";      sargv[a++] = thread_text;
+            sargv[a++] = "--memory-limit-mb"; sargv[a++] = memory_text;
             sargv[a++] = "--advertise";    sargv[a++] = sadv;
             sargv[a] = NULL;
             char slog[1200];
@@ -3155,18 +3197,17 @@ static int role_start_segment(const Role *r, const char *tracker,
         relay_only = 1;
     }
 
-    /* The origin's default four-way partition makes one slice roughly a
-     * quarter of the checkpoint. Keep both a fixed OS reserve and 25% of the
-     * currently available RAM; if it would not fit, the expert donor below
-     * is the finer-grained, auto-sized contribution. This is intentionally
-     * conservative: a donation must never win by pushing the desktop to swap. */
+    /* The executor receives its actual range before applying this budget.
+     * This process therefore only publishes what the machine can donate;
+     * segment_node compares it with the assigned range and releases the
+     * promise immediately when it cannot fit. */
     uint64_t available = machine_available_ram();
     uint64_t reserve = available / 4;
     if (reserve < 4ull * 1000 * 1000 * 1000)
         reserve = 4ull * 1000 * 1000 * 1000;
-    uint64_t estimated = model_bytes / 4 + model_bytes / 20;
-    if (!available || reserve >= available || estimated > available - reserve)
+    if (!available || reserve >= available)
         return 0;
+    uint64_t memory_budget = available - reserve;
 
     char probe[1100];
     snprintf(probe, sizeof probe, "%s/config.json", r->model_dir);
@@ -3205,15 +3246,28 @@ static int role_start_segment(const Role *r, const char *tracker,
     int threads = cores > 1 ? (int)(cores / 2) : 1;
     int sessions = 2;
     char port_text[16], context_text[16], sessions_text[16], threads_text[16];
+    char memory_text[32], model_bytes_text[32], preflight_text[32];
     char address[80], name[64], base[48];
     snprintf(port_text, sizeof port_text, "%d", port);
     snprintf(context_text, sizeof context_text, "%d", context);
     snprintf(sessions_text, sizeof sessions_text, "%d", sessions);
     snprintf(threads_text, sizeof threads_text, "%d", threads);
+    snprintf(memory_text, sizeof memory_text, "%llu",
+             (unsigned long long)(memory_budget >> 20));
+    snprintf(model_bytes_text, sizeof model_bytes_text, "%llu",
+             (unsigned long long)model_bytes);
     snprintf(address, sizeof address, "%s:%d", host, port);
     donor_base_name(r, base, sizeof base);
     snprintf(name, sizeof name, "%s-segment-%d", base, port);
-    char *argv[34];
+    int ready_pipe[2];
+    if (pipe2(ready_pipe, O_CLOEXEC)) return 0;
+    int fd_flags = fcntl(ready_pipe[1], F_GETFD);
+    if (fd_flags < 0 || fcntl(ready_pipe[1], F_SETFD,
+                              fd_flags & ~FD_CLOEXEC)) {
+        close(ready_pipe[0]); close(ready_pipe[1]); return 0;
+    }
+    snprintf(preflight_text, sizeof preflight_text, "%d", ready_pipe[1]);
+    char *argv[42];
     int a = 0;
     argv[a++] = bin;
     argv[a++] = "--engine";        argv[a++] = (char *)engine;
@@ -3230,13 +3284,36 @@ static int role_start_segment(const Role *r, const char *tracker,
     argv[a++] = "--max-rows";      argv[a++] = "16";
     argv[a++] = "--sessions";      argv[a++] = sessions_text;
     argv[a++] = "--threads";       argv[a++] = threads_text;
+    argv[a++] = "--memory-limit-mb"; argv[a++] = memory_text;
+    argv[a++] = "--model-bytes";   argv[a++] = model_bytes_text;
+    argv[a++] = "--preflight-fd";  argv[a++] = preflight_text;
     argv[a] = NULL;
-    if (g_nchildren >= MAX_CHILDREN) return 0;
+    if (g_nchildren >= MAX_CHILDREN) {
+        close(ready_pipe[0]); close(ready_pipe[1]); return 0;
+    }
     char logpath[1200];
     pid_t pid = spawn_argv_logged(argv, local ? NULL : envv,
                                   donor_log_path(name, logpath,
                                                  sizeof logpath));
-    if (pid <= 0) return 0;
+    close(ready_pipe[1]);
+    if (pid <= 0) { close(ready_pipe[0]); return 0; }
+    struct pollfd ready_poll = { .fd = ready_pipe[0], .events = POLLIN | POLLHUP };
+    char readiness = 0;
+    int polled;
+    do polled = poll(&ready_poll, 1, 10000); while (polled < 0 && errno == EINTR);
+    ssize_t readiness_bytes = polled > 0
+                            ? read(ready_pipe[0], &readiness, 1) : 0;
+    close(ready_pipe[0]);
+    if (readiness_bytes != 1 || readiness != 'P') {
+        int status = 0;
+        if (waitpid(pid, &status, WNOHANG) == 0) {
+            kill(pid, SIGTERM);
+            waitpid(pid, &status, 0);
+        }
+        printf("  %sla fetta Segment assegnata non entra nel budget RAM; "
+               "passo al donatore di esperti%s\n", C_DIM, C_R);
+        return 0;
+    }
     child_publish(g_nchildren++, pid);
     printf("  %s\xe2\x9c\xa6 eseguo una fetta Segment assegnata dal tracker "
            "per lo sciame%s %s(priorita' bassa, %d sessioni massime%s)%s\n",

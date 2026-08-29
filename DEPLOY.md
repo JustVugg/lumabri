@@ -46,7 +46,7 @@ adduser --disabled-password --gecos "" lumabri
 Open only what the swarm needs. **7300** is the required tracker/control port.
 The signed relay makes every data path work with only that inbound port. For
 the lower-latency direct path also open **7301** (bytes), **7302** (classic
-experts) and, by default, **7303-7306** (four Segment ranges). Allow through
+experts) and, by default, **7303** (one full-core Segment fallback). Allow through
 7309 only when intentionally using up to seven public ranges.
 
 ```sh
@@ -182,7 +182,8 @@ su - lumabri -c 'lumabri peer-key'
 ```
 
 Clients can preseed a strict pin file with that value for every server
-endpoint (the default four Segment ranges use ports 7303-7306):
+endpoint (the default Segment fallback uses port 7303; an explicit
+`LUMABRI_SEGMENT_CHUNKS=N` uses 7303 through `7302+N`):
 
 ```text
 YOUR_SERVER_IP:7300 64_HEX_ENDPOINT_KEY
@@ -480,6 +481,18 @@ and fallback/NAT executors are niced. Direct origins default to four sessions
 per slice and NAT/relay origins to two; the override above is bounded but can
 increase real KV RAM substantially. These ranges consume real RAM and CPU; use
 `--no-exec` when this server must provide storage only.
+
+`serve` gives every Segment child an explicit process budget computed as
+`(MemAvailable - LUMABRI_SEGMENT_MIN_FREE_MB) / slices`. The node forwards it
+to Colibri's engine options, divides the remaining post-engine RSS among its
+session slots, and cancels a run when RSS or the system reserve is crossed. A
+compute donor receives the total layer count with its tracker assignment and
+evaluates the assigned range—not a fixed quarter of the model. If it does not
+fit, the placement promise is released immediately and the chat starts the
+finer-grained Expert donor instead.
+
+Low-level operators may set `segment_node --memory-limit-mb N`; the ordinary
+`lumabri serve` and `lumabri chat` flows calculate it automatically.
 
 Two things worth knowing:
 

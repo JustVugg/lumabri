@@ -1295,7 +1295,7 @@ static int handle_segment_assign(int fd, LmbMsg *m) {
         send_err(fd, "incomplete segment assignment identity"); return -1;
     }
 
-    uint32_t chosen_begin = 0, chosen_end = 0;
+    uint32_t chosen_begin = 0, chosen_end = 0, chosen_model_layers = 0;
     uint32_t best_replicas = UINT32_MAX, best_load = UINT32_MAX;
     int retained = 0;
     double now = now_s();
@@ -1414,8 +1414,19 @@ static int handle_segment_assign(int fd, LmbMsg *m) {
             memcpy(slot->model_root, root, sizeof root);
         }
     }
+    for (int i = 0; i < MAX_PEERS; i++) {
+        Peer *origin = &g_peers[i];
+        if (origin->used && origin->has_segment && origin->segment_live &&
+            now - origin->segment_ts <= g_stale_s &&
+            (origin->segment.flags & LMB_SEG_ADVERT_FALLBACK) &&
+            !strcmp(origin->segment.model, model) &&
+            !strcmp(origin->segment.engine_id, engine) &&
+            !memcmp(origin->segment.model_root, root, sizeof root) &&
+            origin->segment.layer_end > chosen_model_layers)
+            chosen_model_layers = origin->segment.layer_end;
+    }
     pthread_mutex_unlock(&g_lk);
-    if (!chosen_end) {
+    if (!chosen_end || chosen_model_layers < chosen_end) {
         send_err(fd, "no compatible origin Segment slice"); return 0;
     }
     LmbBuf reply = {0};
@@ -1423,6 +1434,7 @@ static int handle_segment_assign(int fd, LmbMsg *m) {
     lmb_buf_u32(&reply, LMB_SEG_ASSIGN_VERSION);
     lmb_buf_u32(&reply, chosen_begin);
     lmb_buf_u32(&reply, chosen_end);
+    lmb_buf_u32(&reply, chosen_model_layers);
     int rc = lmb_send(fd, LMB_SEG_ASSIGN_R, reply.p,
                       (uint32_t)reply.len, NULL, 0);
     free(reply.p);
@@ -1435,6 +1447,39 @@ static int handle_segment_assign(int fd, LmbMsg *m) {
                best_replicas, best_replicas == 1 ? "" : "s");
     fflush(stdout);
     return rc;
+}
+
+static int handle_segment_assign_release(int fd, LmbMsg *m) {
+    LmbCur c = { m->body, m->body_len, 0 };
+    uint32_t magic = 0, version = 0;
+    char model[LMB_SEG_MODEL_MAX], name[LMB_SEG_PEER_NAME_MAX];
+    char engine[LMB_SEG_ENGINE_MAX];
+    uint8_t root[LMB_SEG_ROOT_BYTES];
+    if (m->pay_len || lmb_cur_u32(&c, &magic) ||
+        lmb_cur_u32(&c, &version) || magic != LMB_SEG_ASSIGN_MAGIC ||
+        version != LMB_SEG_ASSIGN_VERSION ||
+        lmb_cur_str(&c, model, sizeof model) ||
+        lmb_cur_str(&c, name, sizeof name) ||
+        lmb_cur_str(&c, engine, sizeof engine) ||
+        lmb_cur_bytes(&c, root, sizeof root) || c.off != c.len) {
+        send_err(fd, "bad segment assignment release"); return -1;
+    }
+    int released = 0;
+    pthread_mutex_lock(&g_lk);
+    for (int i = 0; i < MAX_SEGMENT_PROMISES; i++) {
+        SegmentPromise *promise = &g_segment_promises[i];
+        if (promise->used && !strcmp(promise->model, model) &&
+            !strcmp(promise->name, name) &&
+            !strcmp(promise->engine, engine) &&
+            !memcmp(promise->model_root, root, sizeof root)) {
+            memset(promise, 0, sizeof *promise);
+            released = 1;
+        }
+    }
+    pthread_mutex_unlock(&g_lk);
+    if (released)
+        printf("[tracker] Segment assign %s: released before READY\n", name);
+    return lmb_send(fd, LMB_OK, NULL, 0, NULL, 0);
 }
 
 static int handle_ecover(int fd, LmbMsg *m) {
@@ -2484,6 +2529,8 @@ static void *conn_thread(void *arg) {
         }
         case LMB_SEG_ROUTES: rc = handle_segment_routes(fd, &m); break;
         case LMB_SEG_ASSIGN: rc = handle_segment_assign(fd, &m); break;
+        case LMB_SEG_ASSIGN_RELEASE:
+            rc = handle_segment_assign_release(fd, &m); break;
         case LMB_HASHES:    rc = handle_hashes(fd, &m); break;
         case LMB_MODEL_ID:  rc = handle_model_id(fd, &m); break;
         case LMB_PLACEMENT: rc = handle_placement(fd, &m); break;

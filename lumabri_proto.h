@@ -87,7 +87,7 @@
 #define LMB_SEG_V2_MAGIC          0x32474553u /* "SEG2" */
 #define LMB_SEG_V2_VERSION        2u
 #define LMB_SEG_ASSIGN_MAGIC      0x31415347u /* "GSA1" */
-#define LMB_SEG_ASSIGN_VERSION    1u
+#define LMB_SEG_ASSIGN_VERSION    2u
 
 /* Optional executor telemetry is negotiated on the existing EREG LMB_OK.
  * Every extension has its own magic, version, and bounded payload length so
@@ -248,6 +248,10 @@ enum {
      * keys: the TUI can explain who is doing work without leaking how to
      * reach a private donor. The body is versioned independently. */
     LMB_SWARM_DETAIL = 60, LMB_SWARM_DETAIL_R = 61,
+    /* A donor that cannot fit its assigned range releases the short-lived
+     * placement promise immediately, so another READY-capable machine need
+     * not wait for its timeout. This grants no lease or execution authority. */
+    LMB_SEG_ASSIGN_RELEASE = 62,
 };
 
 /* REGISTER body: str name, str addr, str model, u64 held_bytes,

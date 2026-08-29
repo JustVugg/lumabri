@@ -48,6 +48,12 @@ a fixed-size immutable `LmbSegRouteSnapshot`. The inference thread copies that
 snapshot; it never asks the tracker. A session binds the selected generation
 at `SEG_OPEN`, so later discovery does not silently move a running chat.
 
+Automatic assignment uses the versioned `GSA1` v2 reply
+`{begin,end,total_layers}`. A model-less donor can therefore check its real
+range against its RAM budget before opening the engine. A rejected range is
+released with `SEG_ASSIGN_RELEASE`; this only removes the short placement
+promise and never grants or revokes a signed execution lease.
+
 ## Wire operations
 
 The shared frame opcodes are:
