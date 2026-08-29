@@ -465,6 +465,9 @@ test-partial-phase2: tracker phase2 fixture
 test-elastic: tracker expert_node fixture
 	./elastic_hold_test.sh
 
+test-resident: tracker swarm_probe expert_node fixture
+	./resident_hold_test.sh
+
 test-cas: tracker maintainer liblumabri.so test_shim
 	./cas_test.sh
 

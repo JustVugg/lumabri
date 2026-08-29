@@ -125,6 +125,9 @@ static struct {
     char profile[LMB_BUILD_PROFILE_MAX];
     uint8_t peer_sk[64], peer_pk[32];   /* identity to the tracker */
     int bits;
+    int resident_mode;
+    uint32_t resident_state, resident_flags;
+    uint64_t resident_bytes, resident_vram_bytes;
     LmbModelIdentity identity; int have_identity;
     pthread_mutex_t identity_lk;
     _Atomic uint64_t calls, cold;
@@ -578,6 +581,11 @@ static int send_ereg(int fd, const uint8_t nonce[32], int send_stats) {
         lmb_buf_u32(&b, LMB_EREG_STATS_LENGTH);
         lmb_buf_u64(&b, atomic_load(&g.calls));
         lmb_buf_u32(&b, atomic_load(&g.in_flight));
+        lmb_buf_u32(&b, g.resident_state);
+        lmb_buf_u32(&b, g.resident_flags);
+        lmb_buf_u32(&b, g.resident_mode ? (uint32_t)g.nholds : 0u);
+        lmb_buf_u64(&b, g.resident_bytes);
+        lmb_buf_u64(&b, g.resident_vram_bytes);
     }
     /* identity: sign the connection nonce with this machine's peer key */
     uint8_t msg[512], sig[64];
@@ -805,6 +813,7 @@ int main(int argc, char **argv) {
     runtime_prepare(argc, argv); /* must precede every other main-side action */
     const char *dir = NULL;
     int port = 7401, stride = 1, offset = 0, cache = 0, bits = 8, hold = 0, hold_auto = 0;
+    int resident = 0;
     int layers[512], nlayers = 0, parallel = 0;
     memcpy(g.name, "node", sizeof "node");
 
@@ -820,6 +829,7 @@ int main(int argc, char **argv) {
         } else if (!strcmp(argv[i], "--advertise") && i + 1 < argc) {
             if (node_arg_copy(g.advertise, sizeof g.advertise, argv[++i], "--advertise")) return 2;
         } else if (!strcmp(argv[i], "--cache") && i + 1 < argc) cache = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--resident")) resident = 1;
         else if (!strcmp(argv[i], "--bits") && i + 1 < argc) bits = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--hold") && i + 1 < argc) {
             if (!strcmp(argv[i + 1], "auto")) hold_auto = 1; else hold = atoi(argv[i + 1]);
@@ -835,7 +845,7 @@ int main(int argc, char **argv) {
         } else {
             fprintf(stderr, "usage: %s --model DIR [--port N] [--name S] "
                             "[--model-name S] [--tracker H:P] [--advertise H:P] "
-                            "[--cache N] [--bits N] [--hold N] [--parallel N] "
+                            "[--cache N | --resident] [--bits N] [--hold N] [--parallel N] "
                             "[--stride N:OFF] [--layers a,b,c]\n", argv[0]);
             return 2;
         }
@@ -890,6 +900,13 @@ int main(int argc, char **argv) {
         fprintf(stderr, "[OMP] lumabri: %d physical-core threads instead of %d logical\n",
                 runtime_phys, logical);
     }
+    if (resident && cache > 0) {
+        fprintf(stderr, "--resident and --cache are mutually exclusive\n");
+        return 2;
+    }
+    if (hold_auto) resident = 1;
+    g.resident_mode = resident || cache == 0;
+    g.resident_state = LMB_EXPERT_STATE_ASSIGNED;
     lmbe_open(dir, cache, bits);
     g.bits = lmbe_effective_bits(bits);
     lmb_build_profile(g.profile, sizeof g.profile);
@@ -903,18 +920,26 @@ int main(int argc, char **argv) {
          * slice, so several "donate compute" machines auto-spread into disjoint
          * shares instead of every one holding the whole model. */
         long avail_kb = meminfo_avail_kb();
-        double avail_b = (avail_kb > 0 ? (double)avail_kb * 1024.0 : 8e9) * 0.85;
+        long reserve_mb = 4096;
+        const char *reserve_env = getenv("LUMABRI_EXPERT_RAM_RESERVE_MB");
+        if (reserve_env && atol(reserve_env) >= 256) reserve_mb = atol(reserve_env);
+        double avail_b = avail_kb > reserve_mb * 1024L
+            ? (double)(avail_kb - reserve_mb * 1024L) * 1024.0 : 0.0;
         double ebytes = 3.0 * g.inter * g.hidden;     /* same width the cache MB uses */
         int total = 0;
         for (int l = 0; l < g.n_slots; l++) if (lmbe_routed(l)) total += g.n_experts;
         long n = ebytes > 0 ? (long)(avail_b / ebytes) : total;
-        if (n < 1) n = 1;
+        if (n < 1) {
+            fprintf(stderr, "[%s] RAM available is below the %ld MB system "
+                            "reserve; no expert is advertised\n", g.name, reserve_mb);
+            return 1;
+        }
         if (n > total) n = total;
         hold = (int)n;
-        if (cache <= 0) cache = hold;                 /* keep the whole share resident */
-        fprintf(stderr, "[%s] auto-hold: up to %d experts (~%.1f GB) fit in free RAM; "
-                        "the tracker assigns the least-covered slice\n",
-                g.name, hold, (double)hold * ebytes / 1e9);
+        fprintf(stderr, "[%s] auto-hold resident: up to %d experts (~%.1f GB), "
+                        "%ld MB reserved for the system; the tracker assigns "
+                        "the least-covered slice\n",
+                g.name, hold, (double)hold * ebytes / 1e9, reserve_mb);
     }
     int cells = g.n_slots * g.n_experts, dense = 0;
     g.holds = calloc((size_t)cells, 1);
@@ -958,6 +983,7 @@ int main(int argc, char **argv) {
                g.name, lmbe_engine_name(), dense, g.n_slots);
 
     double t0 = nowd();
+    g.resident_state = LMB_EXPERT_STATE_LOADING;
     if (cache > 0) {
         /* SSD residency: experts stay on disk, N slots of RAM catch the hot
          * ones. Nothing is preloaded — the first calls warm the cache, the
@@ -972,6 +998,13 @@ int main(int argc, char **argv) {
                "hidden=%d inter=%d\n",
                g.name, g.nholds, cache, mb, g.hidden, g.inter);
     } else {
+#ifdef LMBE_STORE_OWNS_RESIDENCY
+        if (lmbe_resident_prepare(g.holds, g.n_slots, g.n_experts, g.nholds)) {
+            fprintf(stderr, "[%s] assigned experts did not become resident; "
+                            "the peer will not be advertised\n", g.name);
+            return 1;
+        }
+#endif
         g.index = malloc((size_t)cells * sizeof(int));
         for (int i = 0; i < cells; i++) g.index[i] = -1;
         g.held = calloc((size_t)g.nholds, sizeof(Held));
@@ -990,6 +1023,17 @@ int main(int argc, char **argv) {
                "hidden=%d inter=%d\n",
                g.name, g.nheld, mb, nowd() - t0, g.hidden, g.inter);
     }
+    if (g.resident_mode) {
+        g.resident_bytes = (uint64_t)((double)g.nholds *
+                           (3.0 * g.inter * g.hidden));
+#ifdef LMBE_STORE_OWNS_RESIDENCY
+        g.resident_bytes = lmbe_resident_bytes();
+#endif
+        g.resident_flags = LMB_EXPERT_RESIDENT_RAM;
+    } else {
+        g.resident_flags = LMB_EXPERT_DISK_FALLBACK;
+    }
+    g.resident_state = LMB_EXPERT_STATE_ACTIVE;
     fflush(stdout);
 
     /* whatever the engine settled on during lmbe_open */

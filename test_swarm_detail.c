@@ -23,8 +23,9 @@ int main(int argc, char **argv) {
     for (uint32_t i = 0; i < count; i++) {
         char name[64], model[64];
         uint32_t roles, age, files, experts, have_stats, expert_inflight;
+        uint32_t estate, residency, resident_experts;
         uint32_t begin, end, active, maximum, queued, segment_inflight, flags;
-        uint64_t held, served, reads, calls;
+        uint64_t held, served, reads, calls, resident_ram, resident_vram;
         if (lmb_cur_str(&cursor, name, sizeof name) ||
             lmb_cur_str(&cursor, model, sizeof model) ||
             lmb_cur_u32(&cursor, &roles) || lmb_cur_u32(&cursor, &age) ||
@@ -34,6 +35,11 @@ int main(int argc, char **argv) {
             lmb_cur_u32(&cursor, &have_stats) ||
             lmb_cur_u64(&cursor, &calls) ||
             lmb_cur_u32(&cursor, &expert_inflight) ||
+            lmb_cur_u32(&cursor, &estate) ||
+            lmb_cur_u32(&cursor, &residency) ||
+            lmb_cur_u32(&cursor, &resident_experts) ||
+            lmb_cur_u64(&cursor, &resident_ram) ||
+            lmb_cur_u64(&cursor, &resident_vram) ||
             lmb_cur_u32(&cursor, &begin) || lmb_cur_u32(&cursor, &end) ||
             lmb_cur_u32(&cursor, &active) || lmb_cur_u32(&cursor, &maximum) ||
             lmb_cur_u32(&cursor, &queued) ||
@@ -41,6 +47,8 @@ int main(int argc, char **argv) {
             lmb_cur_u32(&cursor, &flags)) return 1;
         (void)age; (void)served; (void)reads; (void)experts;
         (void)have_stats; (void)calls; (void)expert_inflight;
+        (void)estate; (void)residency; (void)resident_experts;
+        (void)resident_ram; (void)resident_vram;
         (void)begin; (void)end; (void)active; (void)maximum;
         (void)queued; (void)segment_inflight; (void)flags;
         if (!strcmp(name, argv[2]) && !strcmp(model, argv[3]) &&
