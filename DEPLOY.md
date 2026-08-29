@@ -367,10 +367,13 @@ status shows routing/prefill/decode/failover and read-only menus open without
 waiting for the answer to finish.
 
 Verified chunks are shared across models in `~/.lumabri/cas`; override it
-with `LUMABRI_CAS=/fast/local/path`. To enable the basic straggler hedge, set
-for example `LUMABRI_HEDGE_MS=40`. Keep it disabled (`0`, the default) until
-there are at least two replicas per expert, otherwise there is nowhere to
-hedge. Prefill and speculative target verification are batched automatically.
+with `LUMABRI_CAS=/fast/local/path`. Expert routing learns an EWMA and slow-tail
+estimate per replica. It hedges automatically only after at least eight samples
+show a material p95 tail and another replica exists; set
+`LUMABRI_HEDGE_MS=40` to force a fixed policy, or leave the variable unset for
+the adaptive policy. Three consecutive failures open a short circuit instead
+of permanently deleting a valid manifest. Prefill and speculative target
+verification are batched automatically.
 
 The boot narrates itself, so you can see where the time goes:
 

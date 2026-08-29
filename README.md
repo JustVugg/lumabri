@@ -132,6 +132,16 @@ persistent direct TCP and falls back request-for-request to the exact peer's
 signed tracker tunnel. A machine behind NAT therefore contributes without
 publishing an unreachable address or opening a data port.
 
+Discovery probes Segment endpoints on its control thread and publishes an
+immutable completion estimate with each route. Selection minimizes the sum of
+EWMA latency and advertised queue/inflight cost for the complete chain; origin
+fallback status is only a tie-breaker. Adding a slower donor therefore does not
+replace a faster known route. Expert replicas use the same EWMA model, open a
+circuit only after repeated failures, and hedge automatically only after enough
+samples show a real p95 tail. `LUMABRI_HEDGE_MS` remains an explicit override.
+These are online estimates, not a speed claim: `swarm_bench.py` on distinct
+hosts remains the authority for single-chat and aggregate throughput.
+
 The TUI's temperature and top-p are applied to logits returned by Colibri Edge;
 temperature zero retains the exact greedy selector. When a compatible replica
 exists, a completed turn checkpoints every opaque remote state. If a peer dies,

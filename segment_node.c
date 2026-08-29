@@ -927,7 +927,11 @@ static void *connection_worker(void *opaque) {
         LmbMsg msg = {0};
         if (lmb_recv(fd, &msg)) break;
         int rc;
-        if (msg.op == LMB_SEG_OPEN) rc = handle_open(node, fd, &msg);
+        if (msg.op == LMB_PING) {
+            lmb_emu_delay();
+            rc = lmb_send(fd, LMB_OK, NULL, 0, NULL, 0);
+        }
+        else if (msg.op == LMB_SEG_OPEN) rc = handle_open(node, fd, &msg);
         else if (msg.op == LMB_SEG_RUN) rc = handle_run(node, fd, &msg);
         else if (msg.op == LMB_SEG_SNAPSHOT) rc = handle_snapshot(node, fd, &msg);
         else if (msg.op == LMB_SEG_RESTORE) rc = handle_restore(node, fd, &msg);

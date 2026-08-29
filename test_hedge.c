@@ -47,10 +47,12 @@ int main(void) {
     float x[12]; for (int i = 0; i < 12; i++) x[i] = (float)i / 7.0f;
     int fd = lumi_take_sock(&L.peers[0]);
     uint32_t tried = 1;
+    double started = lumi_now();
     int bad = fd < 0 || lumi_send_exec(fd, 0, 0, x, 4, 3, NULL);
     LumiPeer *from = NULL;
     float *out = bad ? NULL : lumi_finish_exec(0, 0, x, 4, 3, NULL, fd,
-                                                &L.peers[0], &tried, &from);
+                                                &L.peers[0], started,
+                                                &tried, &from);
     bad |= !out || memcmp(out, x, sizeof x) || from != &L.peers[1] ||
            L.hedges != 1 || L.hedge_wins != 1;
     free(out); free(L.own);
