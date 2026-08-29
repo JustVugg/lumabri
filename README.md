@@ -261,6 +261,12 @@ instead of being silently rejected forever. So several
 compute donors **split the model into disjoint slices automatically**. (`--hold
 N` sets the count by hand; `--stride 2:0` / `--stride 2:1` or
 `--layers …` split it explicitly if you want to size each machine yourself.)
+The origin publishes four stable, layer-aligned fallback ranges by default
+(`LUMABRI_SEGMENT_CHUNKS=1..7` overrides it). Each range uses the full local
+CPU team because decode traverses the chain serially. A resident Segment donor
+then replaces one exact range; it advertises measured RSS only after its engine
+has opened, and the server remains the fallback for every range not yet donated.
+`LUMABRI_SEGMENT_THREADS=N` is the explicit per-range CPU override.
 When two donors happen to hold the *same* expert, add `LUMABRI_SPREAD=1` on the
 chatter to balance the load between them too. Neither donor needs to know the
 others exist. Expert requests can fail over to another replica. Stateful

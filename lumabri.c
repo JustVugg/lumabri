@@ -609,7 +609,7 @@ static int cmd_serve(int argc, char **argv) {
                (double)segment_available / 1e9,
                (double)segment_min_free / 1e9, C_R);
     int planned_chunks = segment_candidate
-        ? lmb_env_int("LUMABRI_SEGMENT_CHUNKS", 1, 1, 7) : 0;
+        ? lmb_env_int("LUMABRI_SEGMENT_CHUNKS", 4, 1, 7) : 0;
     if ((uint32_t)planned_chunks > segment_layers)
         planned_chunks = (int)segment_layers;
     int first_port = join ? port + 1 : port;
@@ -737,14 +737,16 @@ static int cmd_serve(int argc, char **argv) {
     if (segment_candidate) {
         long cores = sysconf(_SC_NPROCESSORS_ONLN);
         if (cores < 1) cores = 1;
-        /* A chain of slices on one host is sequential: four processes used
-         * one quarter of the CPU at a time and added three loopback hops.
-         * One full-core fallback is the honest single-machine baseline.
-         * Explicit partitioning remains available for replacement tests;
-         * distributed sharding is selected from READY peers by the tracker. */
-        int chunks = lmb_env_int("LUMABRI_SEGMENT_CHUNKS", 1, 1, 7);
+        /* Keep stable layer boundaries from minute zero. Donors take these
+         * exact ranges one by one, so each new resident machine replaces a
+         * corresponding origin slice without migrating an active chat. The
+         * chain is sequential for decode: every local slice therefore gets
+         * the complete CPU team, rather than the old cores/chunks team that
+         * made four slices four times slower on one host. */
+        int chunks = lmb_env_int("LUMABRI_SEGMENT_CHUNKS", 4, 1, 7);
         if ((uint32_t)chunks > segment_layers) chunks = (int)segment_layers;
-        int slice_threads = (int)(cores / chunks);
+        int slice_threads = lmb_env_int("LUMABRI_SEGMENT_THREADS",
+                                        (int)cores, 1, 256);
         if (slice_threads < 1) slice_threads = 1;
         int sessions = lmb_env_int("LUMABRI_SEGMENT_SESSIONS",
                                    advertise ? 4 : 2, 1, 64);

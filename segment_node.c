@@ -1274,6 +1274,10 @@ int main(int argc, char **argv) {
     if (fallback) a->flags |= LMB_SEG_ADVERT_FALLBACK;
     if (relay_only) a->flags |= LMB_SEG_ADVERT_RELAY_ONLY;
     a->capabilities = node.cap.flags & LMB_SEG_CAP_KNOWN_MASK;
+    /* Registration happens after engine_open, so this is measured resident
+     * memory, not a model-size promise. A zero value remains valid on systems
+     * without an RSS counter, but the node is still READY only after open. */
+    a->resident_ram_bytes = engine_rss;
     snprintf(a->engine_id, sizeof a->engine_id, "%s", node.cap.engine_id);
     snprintf(a->state_schema, sizeof a->state_schema, "%s", node.cap.state_schema);
     snprintf(a->numeric_class, sizeof a->numeric_class, "%s", node.cap.numeric_class);
