@@ -742,14 +742,20 @@ static int cmd_serve(int argc, char **argv) {
         if (slice_threads < 1) slice_threads = 1;
         int sessions = lmb_env_int("LUMABRI_SEGMENT_SESSIONS",
                                    advertise ? 4 : 2, 1, 64);
+        int run_queue = lmb_env_int("LUMABRI_SEGMENT_RUN_QUEUE", 32, 0, 256);
+        int run_wait_ms = lmb_env_int("LUMABRI_SEGMENT_RUN_WAIT_MS",
+                                      30000, 50, 60000);
         uint32_t segment_context = 4096, model_context = 0;
         if (!local_model_u32(model, "max_position_embeddings", &model_context) &&
             model_context < segment_context)
             segment_context = model_context;
         char context[16], session_text[16], thread_text[16], memory_text[32];
+        char run_queue_text[16], run_wait_text[16];
         snprintf(context, sizeof context, "%u", segment_context);
         snprintf(session_text, sizeof session_text, "%d", sessions);
         snprintf(thread_text, sizeof thread_text, "%d", slice_threads);
+        snprintf(run_queue_text, sizeof run_queue_text, "%d", run_queue);
+        snprintf(run_wait_text, sizeof run_wait_text, "%d", run_wait_ms);
         uint64_t total_budget = segment_available > segment_min_free
                               ? segment_available - segment_min_free : 0;
         uint64_t slice_budget_mb = (total_budget / (uint64_t)chunks) >> 20;
@@ -792,6 +798,8 @@ static int cmd_serve(int argc, char **argv) {
             sargv[a++] = "--max-rows";     sargv[a++] = "16";
             sargv[a++] = "--sessions";     sargv[a++] = session_text;
             sargv[a++] = "--threads";      sargv[a++] = thread_text;
+            sargv[a++] = "--run-queue";    sargv[a++] = run_queue_text;
+            sargv[a++] = "--run-wait-ms";  sargv[a++] = run_wait_text;
             sargv[a++] = "--memory-limit-mb"; sargv[a++] = memory_text;
             sargv[a++] = "--advertise";    sargv[a++] = sadv;
             sargv[a] = NULL;
@@ -3271,13 +3279,19 @@ static int role_start_segment(const Role *r, const char *tracker,
     long cores = profile.physical_cores;
     int threads = cores > 1 ? (int)(cores / 2) : 1;
     int sessions = 2;
+    int run_queue = lmb_env_int("LUMABRI_SEGMENT_RUN_QUEUE", 32, 0, 256);
+    int run_wait_ms = lmb_env_int("LUMABRI_SEGMENT_RUN_WAIT_MS",
+                                  30000, 50, 60000);
     char port_text[16], context_text[16], sessions_text[16], threads_text[16];
+    char run_queue_text[16], run_wait_text[16];
     char memory_text[32], model_bytes_text[32], preflight_text[32];
     char address[80], name[64], base[48];
     snprintf(port_text, sizeof port_text, "%d", port);
     snprintf(context_text, sizeof context_text, "%d", context);
     snprintf(sessions_text, sizeof sessions_text, "%d", sessions);
     snprintf(threads_text, sizeof threads_text, "%d", threads);
+    snprintf(run_queue_text, sizeof run_queue_text, "%d", run_queue);
+    snprintf(run_wait_text, sizeof run_wait_text, "%d", run_wait_ms);
     snprintf(memory_text, sizeof memory_text, "%llu",
              (unsigned long long)(memory_budget >> 20));
     snprintf(model_bytes_text, sizeof model_bytes_text, "%llu",
@@ -3310,6 +3324,8 @@ static int role_start_segment(const Role *r, const char *tracker,
     argv[a++] = "--max-rows";      argv[a++] = "16";
     argv[a++] = "--sessions";      argv[a++] = sessions_text;
     argv[a++] = "--threads";       argv[a++] = threads_text;
+    argv[a++] = "--run-queue";     argv[a++] = run_queue_text;
+    argv[a++] = "--run-wait-ms";   argv[a++] = run_wait_text;
     argv[a++] = "--memory-limit-mb"; argv[a++] = memory_text;
     argv[a++] = "--model-bytes";   argv[a++] = model_bytes_text;
     argv[a++] = "--preflight-fd";  argv[a++] = preflight_text;

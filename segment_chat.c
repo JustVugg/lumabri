@@ -881,9 +881,12 @@ static int conversation_recover(
                     !route_same_range(candidate, current,
                                       context, max_rows)) continue;
                 if (!chosen ||
-                    ((candidate->transport & LMB_SEG_TRANSPORT_DIRECT) &&
+                    candidate->predicted_us < chosen->predicted_us ||
+                    (candidate->predicted_us == chosen->predicted_us &&
+                     (candidate->transport & LMB_SEG_TRANSPORT_DIRECT) &&
                      !(chosen->transport & LMB_SEG_TRANSPORT_DIRECT)) ||
-                    ((candidate->advert.flags & LMB_SEG_ADVERT_FALLBACK) == 0 &&
+                    (candidate->predicted_us == chosen->predicted_us &&
+                     (candidate->advert.flags & LMB_SEG_ADVERT_FALLBACK) == 0 &&
                      (chosen->advert.flags & LMB_SEG_ADVERT_FALLBACK)))
                     chosen = candidate;
             }

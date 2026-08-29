@@ -300,6 +300,16 @@ covered MoE layer to strict-RAM Expert donors. Selected experts are sent in
 parallel; incomplete layers and failed donor calls execute locally. Thus even a
 peer too small for a complete Segment range contributes useful resident expert
 work, while the server remains the correctness fallback.
+
+Concurrent chats are admitted FIFO at every Segment range. Queue depth and
+inflight work are published to the predictive scheduler, the queue is bounded,
+and a request that misses its admission deadline returns `BUSY` so an exact
+replica can take over instead of waiting behind a 300-second socket timeout.
+The four origin ranges form a pipeline, so different chats can occupy different
+ranges concurrently. Lumabri deliberately does not fuse rows from unrelated
+sessions: current Colibri adapters own opaque per-session state and can round a
+cross-session batch differently. Calling that continuous batching before an
+engine-neutral multi-session batch ABI exists would break the token oracle.
 When two donors happen to hold the *same* expert, add `LUMABRI_SPREAD=1` on the
 chatter to balance the load between them too. Neither donor needs to know the
 others exist. Expert requests can fail over to another replica. Stateful

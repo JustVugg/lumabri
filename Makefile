@@ -21,7 +21,7 @@ check-warnings:
 	$(MAKE) -B all test_relay_exec test_swarm_fed test_key_rotation \
 		test_hedge test_verify_failover test_segment_v2 \
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
-		test_scheduler \
+		test_scheduler test_run_gate \
 		CFLAGS='$(CFLAGS) -Werror'
 
 SECURE_DEPS = lumabri_secure.h lumabri_crypto.h
@@ -413,6 +413,9 @@ test_machine: test_machine.c $(MACHINE_DEPS) lumabri_proto.h
 test_scheduler: test_scheduler.c lumabri_scheduler.h
 	$(CC) $(CFLAGS) test_scheduler.c -o $@
 
+test_run_gate: test_run_gate.c lumabri_run_gate.c lumabri_run_gate.h
+	$(CC) $(CFLAGS) -pthread test_run_gate.c lumabri_run_gate.c -o $@
+
 test-machine-governor: lumabri tracker swarm_probe expert_node segment_node fixture test_machine
 	ENGINE=$(ENGINE) bash ./machine_governor_test.sh
 
@@ -459,9 +462,11 @@ $(COLIBRI_SEGMENT_LIB): $(HYBRID_ENGINE_DIR)/.prepared build/segment_hybrid_brid
 		segment-edge-library
 	$(AR) rcs $@ build/segment_hybrid_bridge.o
 
-segment_node: segment_node.c $(SEGMENT_COMMON) $(COLIBRI_SEGMENT_LIB) $(MACHINE_DEPS)
+segment_node: segment_node.c $(SEGMENT_COMMON) $(COLIBRI_SEGMENT_LIB) $(MACHINE_DEPS) \
+		lumabri_run_gate.c lumabri_run_gate.h
 	$(CC) $(SEGMENT_CFLAGS) -pthread segment_node.c lumabri_segment.c \
-		lumabri_segment_discovery.c $(MACHINE_SRC) $(COLIBRI_SEGMENT_LIB) -o $@ -lm
+		lumabri_segment_discovery.c $(MACHINE_SRC) lumabri_run_gate.c \
+		$(COLIBRI_SEGMENT_LIB) -o $@ -lm
 
 segment_chat: segment_chat.c lumabri_sampling.c lumabri_sampling.h \
 		$(SEGMENT_COMMON) $(COLIBRI_SEGMENT_LIB)
@@ -533,7 +538,7 @@ test-segment-discovery: tracker test_segment_discovery
 
 test: all test_key_rotation test_hedge test_verify_failover test_segment_v2 \
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
-		test_scheduler
+		test_scheduler test_run_gate
 	./selftest.sh
 	./donate_test.sh
 	./signed_donor_test.sh
@@ -556,6 +561,7 @@ test: all test_key_rotation test_hedge test_verify_failover test_segment_v2 \
 	./test_hedge
 	./test_segment_v2
 	./test_scheduler
+	./test_run_gate
 	python3 ./test_swarm_bench.py
 	bash ./segment_discovery_test.sh
 	bash ./swarm_detail_test.sh
@@ -585,7 +591,7 @@ clean:
 	rm -f tracker maintainer liblumabri.so test_shim swarm_probe lumabri \
 	      test_relay_exec test_swarm_fed test_key_rotation test_hedge \
 	      test_verify_failover test_segment_v2 test_segment_discovery test_sampling \
-	      test_swarm_detail test_relay_rate test_machine test_scheduler \
+	      test_swarm_detail test_relay_rate test_machine test_scheduler test_run_gate \
 	      test_segment_v2_tsan tracker_tsan \
 	      segment_node segment_chat segment_node_asan segment_chat_asan \
 	      segment_node_tsan segment_chat_tsan \

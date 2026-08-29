@@ -375,6 +375,14 @@ the adaptive policy. Three consecutive failures open a short circuit instead
 of permanently deleting a valid manifest. Prefill and speculative target
 verification are batched automatically.
 
+Segment compute has a FIFO admission queue (`LUMABRI_SEGMENT_RUN_QUEUE`, default
+32) and a real deadline (`LUMABRI_SEGMENT_RUN_WAIT_MS`, default 30000). Queue and
+inflight counts are advertised to new placements. Keep the queue bounded: it is
+backpressure, not extra capacity. Current Colibri adapters serialize calls to
+one engine instance for numeric/state safety; aggregate concurrency comes from
+the layer pipeline and compatible replicas, while Expert executors continue to
+run their safe per-machine parallel gate.
+
 The boot narrates itself, so you can see where the time goes:
 
 ```

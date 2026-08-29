@@ -5,6 +5,7 @@
 #include "lumabri_segment.h"
 #include "lumabri_segment_discovery.h"
 #include "lumabri_machine.h"
+#include "lumabri_run_gate.h"
 #include "lumabri_sign.h"
 #include "lumabri_secure.h"
 #include "segment_colibri.h"
@@ -54,6 +55,7 @@ typedef struct {
     LmbSegAdvert advert;
     uint8_t pk[32], sk[64];
     LmbSegOwner owner;
+    LmbRunGate *run_gate;
     int ready;
     volatile sig_atomic_t stop;
 } TrackerRegistration;
@@ -65,7 +67,8 @@ typedef struct {
     LmbSegTable *table;
     NodeSession sessions[NODE_SESSIONS_MAX];
     pthread_mutex_t sessions_lock;
-    pthread_mutex_t run_lock;      /* one OpenMP team per slice, no oversubscription */
+    LmbRunGate run_gate;
+    uint32_t run_wait_ms;
     pthread_mutex_t connections_lock;
     pthread_cond_t connections_drained;
     int connection_fds[NODE_CONNECTIONS_MAX];
@@ -167,6 +170,10 @@ static int tracker_register_send(int fd, const uint8_t nonce[32],
     pthread_mutex_lock(&r->lock);
     advert = r->advert;
     pthread_mutex_unlock(&r->lock);
+    if (r->run_gate) {
+        advert.queue_depth = lmb_run_gate_queued(r->run_gate);
+        advert.inflight = lmb_run_gate_inflight(r->run_gate);
+    }
     uint8_t *wire = NULL;
     uint32_t wire_len = 0;
     if (lmb_seg_advert_encode(&advert, &wire, &wire_len)) return -1;
@@ -622,15 +629,13 @@ static int handle_run(Node *node, int fd, const LmbMsg *msg) {
         if (!session || !output || bytes != msg->pay_len) {
             status = LMB_SEG_STATUS_INTERNAL;
         } else {
-            pthread_mutex_lock(&node->registration.lock);
-            node->registration.advert.queue_depth++;
-            pthread_mutex_unlock(&node->registration.lock);
-            pthread_mutex_lock(&node->run_lock);
-            pthread_mutex_lock(&node->registration.lock);
-            if (node->registration.advert.queue_depth)
-                node->registration.advert.queue_depth--;
-            node->registration.advert.inflight++;
-            pthread_mutex_unlock(&node->registration.lock);
+            int admitted = lmb_run_gate_enter(&node->run_gate,
+                                               node->run_wait_ms,
+                                               memory_pressure, node);
+            if (admitted != 1) {
+                status = admitted < 0 ? LMB_SEG_STATUS_QUOTA :
+                                        LMB_SEG_STATUS_BUSY;
+            }
             ColiSegmentRunRequest request = {
                 .struct_size = sizeof request,
                 .rows = run.rows,
@@ -645,7 +650,8 @@ static int handle_run(Node *node, int fd, const LmbMsg *msg) {
                 .cancel_user_data = node,
             };
             char error[256] = "";
-            if (coli_segment_run(session, &request, error, sizeof error)) {
+            if (admitted == 1 &&
+                coli_segment_run(session, &request, error, sizeof error)) {
                 /* Name the slice: an origin runs several of these at once and
                  * an unlabelled line cannot be attributed to a layer range. */
                 fprintf(stderr, "[segment-node %s %u:%u] run failed on %u row%s "
@@ -657,11 +663,7 @@ static int handle_run(Node *node, int fd, const LmbMsg *msg) {
                         engine_error(error));
                 status = LMB_SEG_STATUS_INTERNAL;
             }
-            pthread_mutex_lock(&node->registration.lock);
-            if (node->registration.advert.inflight)
-                node->registration.advert.inflight--;
-            pthread_mutex_unlock(&node->registration.lock);
-            pthread_mutex_unlock(&node->run_lock);
+            if (admitted == 1) lmb_run_gate_leave(&node->run_gate);
         }
         if (status != LMB_SEG_STATUS_OK) {
             (void)lmb_seg_table_run_abort(node->table, &run);
@@ -954,7 +956,8 @@ static void usage(const char *program) {
         "--advertise HOST:PORT --name PEER "
         "(--auto-identity | --model-root HEX64 --tokenizer-root HEX64) "
         "[--fallback] [--relay-only] [--context N] [--max-rows N] "
-        "[--sessions N] [--threads N] [--memory-limit-mb N] "
+        "[--sessions N] [--threads N] [--run-queue N] [--run-wait-ms N] "
+        "[--memory-limit-mb N] "
         "[--model-bytes N --model-layers N] [--preflight-fd N]\n",
         program);
 }
@@ -1076,6 +1079,7 @@ int main(int argc, char **argv) {
         usage(argv[0]); return 2;
     }
     uint32_t context = 4096, max_rows = 256, max_sessions = 16, threads = 0;
+    uint32_t run_queue = 32, run_wait_ms = 30000;
     uint32_t memory_limit_mb = 0, model_layers = 0, preflight_fd_u32 = 0;
     uint64_t model_bytes = 0;
     int preflight_fd = -1;
@@ -1088,6 +1092,10 @@ int main(int argc, char **argv) {
          lmb_parse_u32(value, 1, NODE_SESSIONS_MAX, &max_sessions)) ||
         ((value = arg_value(argc, argv, "--threads")) &&
          lmb_parse_u32(value, 1, 256, &threads)) ||
+        ((value = arg_value(argc, argv, "--run-queue")) &&
+         lmb_parse_u32(value, 0, NODE_SESSIONS_MAX, &run_queue)) ||
+        ((value = arg_value(argc, argv, "--run-wait-ms")) &&
+         lmb_parse_u32(value, 50, 60000, &run_wait_ms)) ||
         ((value = arg_value(argc, argv, "--memory-limit-mb")) &&
          lmb_parse_u32(value, 1, 1048576, &memory_limit_mb)) ||
         ((value = arg_value(argc, argv, "--model-bytes")) &&
@@ -1243,7 +1251,11 @@ int main(int argc, char **argv) {
     memset(&node, 0, sizeof node);
     for (size_t i = 0; i < NODE_CONNECTIONS_MAX; i++) node.connection_fds[i] = -1;
     pthread_mutex_init(&node.sessions_lock, NULL);
-    pthread_mutex_init(&node.run_lock, NULL);
+    if (lmb_run_gate_init(&node.run_gate, 1, run_queue)) {
+        fprintf(stderr, "cannot initialize Segment admission gate\n");
+        return 1;
+    }
+    node.run_wait_ms = run_wait_ms;
     pthread_mutex_init(&node.connections_lock, NULL);
     pthread_cond_init(&node.connections_drained, NULL);
     for (size_t i = 0; i < NODE_SESSIONS_MAX; i++)
@@ -1253,6 +1265,8 @@ int main(int argc, char **argv) {
     node.process_memory_limit_bytes = process_limit;
     fprintf(stderr, "[segment-node] governor: %.1f GB RAM reserved for the "
                     "machine\n", (double)node.ram_reserve_bytes / 1e9);
+    fprintf(stderr, "[segment-node] admission: one engine team · FIFO queue "
+                    "%u · %u ms deadline\n", run_queue, run_wait_ms);
     ColiSegmentEngineOptions options = {
         .struct_size = sizeof options,
         .model_dir = model_dir,
@@ -1336,6 +1350,7 @@ int main(int argc, char **argv) {
     node.table = lmb_seg_table_create(max_sessions);
     if (!node.table) { fprintf(stderr, "cannot create session table\n"); return 1; }
     TrackerRegistration *registration = &node.registration;
+    registration->run_gate = &node.run_gate;
     pthread_mutex_init(&registration->lock, NULL);
     snprintf(registration->tracker, sizeof registration->tracker, "%s", tracker);
     snprintf(registration->local_addr, sizeof registration->local_addr,
@@ -1418,7 +1433,7 @@ int main(int argc, char **argv) {
     pthread_cond_destroy(&node.connections_drained);
     pthread_mutex_destroy(&node.connections_lock);
     pthread_mutex_destroy(&node.sessions_lock);
-    pthread_mutex_destroy(&node.run_lock);
+    lmb_run_gate_destroy(&node.run_gate);
     for (size_t i = 0; i < NODE_SESSIONS_MAX; i++)
         pthread_mutex_destroy(&node.sessions[i].lock);
     pthread_mutex_destroy(&registration->lock);
