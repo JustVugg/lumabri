@@ -25,4 +25,4 @@ LUMABRI_PEER_BINDINGS="$T/bindings" "$TRACKER_BIN" --port 8093 \
 PIDS+=("$!")
 wait_port 8093
 "$TEST_BIN" 127.0.0.1:8093
-echo 'RTT REFRESH TEST: PASS (stale selection corrected, named attribution preserved)'
+echo 'RTT REFRESH TEST: PASS (parked peer baseline refreshed, named attribution preserved)'

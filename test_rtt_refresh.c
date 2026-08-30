@@ -40,6 +40,9 @@ static void *node_server(void *arg) {
         if (fds[0].revents & POLLIN) {
             int fd = accept(fds[0].fd, NULL, NULL);
             if (fd >= 0) {
+                int one = 1;
+                setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+                lmb_set_io_timeout(fd, LMB_DEFAULT_IO_TIMEOUT_MS);
                 atomic_fetch_add(&node->accepts, 1);
                 for (size_t i = 1; i < sizeof fds / sizeof fds[0]; i++)
                     if (fds[i].fd < 0) { fds[i].fd = fd; fds[i].events = POLLIN; fd = -1; break; }
@@ -216,20 +219,22 @@ int main(int argc, char **argv) {
     }
     g_tracker = argv[1];
     TestNode nodes[2] = {
-        { .name = "rtt-node-a", .port = 8094, .ctrl_fd = -1, .delay_ms = 2 },
-        { .name = "rtt-node-b", .port = 8095, .ctrl_fd = -1, .delay_ms = 20 }
+        { .name = "rtt-node-a", .port = 8094, .ctrl_fd = -1, .delay_ms = 5 },
+        { .name = "rtt-node-b", .port = 8095, .ctrl_fd = -1, .delay_ms = 30 }
     };
     for (int i = 0; i < 2; i++) pthread_create(&nodes[i].thread, NULL, node_server, &nodes[i]);
     for (int tries = 0; tries < 100; tries++) {
         if (atomic_load(&nodes[0].ready) && atomic_load(&nodes[1].ready)) break;
         usleep(10000);
     }
+    const char *stage = "setup";
     int bad = atomic_load(&nodes[0].ready) != 1 || atomic_load(&nodes[1].ready) != 1;
     for (int i = 0; !bad && i < 2; i++) bad = node_register(&nodes[i]) != 0;
     L.n_layers = 1; L.n_experts = 1; L.hidden = 4; L.npeers = 2;
     L.initialized = 1; L.discovery = 0; L.hedge_ms = 0; L.verify_pct = 0;
     L.own = (int *)malloc(LUMI_MAX_REP * sizeof(int));
     if (!L.own) bad = 1;
+    if (!bad) stage = "initial probes";
     if (!bad) {
         for (int i = 0; i < LUMI_MAX_REP; i++) L.own[i] = -1;
         L.own[0] = 0; L.own[1] = 1;
@@ -237,70 +242,182 @@ int main(int argc, char **argv) {
             snprintf(L.peers[i].addr, sizeof L.peers[i].addr,
                      "127.0.0.1:%d", nodes[i].port);
             lumi_probe(&L.peers[i]);
+            lmb_predict_init(&L.peers[i].latency, 1000);
+            lmb_predict_observe(&L.peers[i].latency,
+                                (uint64_t)L.peers[i].rtt_us);
+            L.peers[i].exec_observations = 0;
+            L.peers[i].exec_observations_at_probe = 0;
         }
         bad = L.peers[0].rtt_us >= L.peers[1].rtt_us ||
               atomic_load(&nodes[0].accepts) != 1 ||
               atomic_load(&nodes[1].accepts) != 1;
     }
 
-    long initial_a = L.peers[0].rtt_us, initial_b = L.peers[1].rtt_us;
-    atomic_store(&nodes[0].delay_ms, 40);
+    long initial_b = L.peers[1].rtt_us;
     atomic_store(&nodes[1].delay_ms, 1);
+    if (!bad) stage = "parked routing";
     if (!bad) bad = run_exec_calls(8) != 0;
+    if (!bad) bad = L.peers[0].exec_observations != 8 ||
+                    L.peers[1].exec_observations != 0;
+    if (!bad) stage = "parked telemetry";
     if (!bad) bad = node_send_ereg(&nodes[0], 1) || node_send_ereg(&nodes[1], 1);
     uint64_t calls_a = 0, calls_b = 0;
     if (!bad) bad = read_named_calls(&calls_a, &calls_b) || calls_a != 8 || calls_b != 0;
 
+    if (!bad) stage = "active peer refresh";
     if (!bad) {
         double due = 1000.0;
         long before_b = L.peers[1].rtt_us;
+        uint32_t active_failures = L.peers[0].latency.consecutive_failures;
+        uint64_t active_circuit = L.peers[0].latency.circuit_until_ms;
+        L.peers[0].latency.consecutive_failures = 3;
+        L.peers[0].latency.circuit_until_ms = 9876543210ull;
+        LmbLatencyPredictor active_before = L.peers[0].latency;
         L.next_rtt_refresh = due;
-        lumi_maybe_refresh_rtt(due);      /* oldest measurement: node A */
+        lumi_maybe_refresh_rtt(due);      /* oldest measurement: active node A */
         bad = atomic_load(&nodes[0].pings) != 4 ||
               atomic_load(&nodes[1].pings) != 2 ||
-              L.peers[0].rtt_us <= initial_a || L.peers[1].rtt_us != before_b;
+              L.peers[1].rtt_us != before_b ||
+              L.peers[0].latency.ewma_us != active_before.ewma_us ||
+              L.peers[0].latency.p95_us != active_before.p95_us ||
+              L.peers[0].latency.samples != active_before.samples ||
+              L.peers[0].latency.consecutive_failures !=
+                  active_before.consecutive_failures ||
+              L.peers[0].latency.circuit_until_ms != active_before.circuit_until_ms ||
+              L.peers[0].exec_observations_at_probe != 8;
+        L.peers[0].latency.consecutive_failures = active_failures;
+        L.peers[0].latency.circuit_until_ms = active_circuit;
         lumi_maybe_refresh_rtt(due + 1.0); /* cadence gate: no second peer yet */
         bad |= atomic_load(&nodes[0].pings) != 4 ||
                atomic_load(&nodes[1].pings) != 2;
-        lumi_maybe_refresh_rtt(due + LUMI_RTT_REFRESH_S); /* then node B */
-        bad |= L.peers[1].rtt_us >= L.peers[0].rtt_us ||
-               L.peers[1].rtt_us >= initial_b ||
-               atomic_load(&nodes[0].pings) != 4 ||
-               atomic_load(&nodes[1].pings) != 4 ||
-               atomic_load(&nodes[0].accepts) != 1 ||
-               atomic_load(&nodes[1].accepts) != 1;
+
+        if (!bad) stage = "parked peer refresh";
+        LumiPeer *idle = &L.peers[1];
+        LmbLatencyPredictor idle_before = idle->latency;
+        struct timeval recv_before = {0}, send_before = {0};
+        struct timeval recv_after = {0}, send_after = {0};
+        socklen_t recv_len = sizeof recv_before, send_len = sizeof send_before;
+        int sockopts_bad = idle->nsocks <= 0;
+        int probe_fd = sockopts_bad ? -1 : idle->socks[idle->nsocks - 1];
+        if (!sockopts_bad)
+            sockopts_bad = getsockopt(probe_fd, SOL_SOCKET, SO_RCVTIMEO,
+                                      &recv_before, &recv_len) ||
+                           getsockopt(probe_fd, SOL_SOCKET, SO_SNDTIMEO,
+                                      &send_before, &send_len);
+        if (!bad && !sockopts_bad)
+            lumi_maybe_refresh_rtt(due + LUMI_RTT_REFRESH_S); /* then parked node B */
+        recv_len = sizeof recv_after;
+        send_len = sizeof send_after;
+        if (!bad && !sockopts_bad)
+            sockopts_bad = idle->nsocks <= 0 || idle->socks[idle->nsocks - 1] != probe_fd ||
+                           getsockopt(probe_fd, SOL_SOCKET, SO_RCVTIMEO,
+                                      &recv_after, &recv_len) ||
+                           getsockopt(probe_fd, SOL_SOCKET, SO_SNDTIMEO,
+                                      &send_after, &send_len) ||
+                           recv_before.tv_sec != recv_after.tv_sec ||
+                           recv_before.tv_usec != recv_after.tv_usec ||
+                           send_before.tv_sec != send_after.tv_sec ||
+                           send_before.tv_usec != send_after.tv_usec;
+        if (!bad) bad = sockopts_bad || idle->rtt_us >= initial_b ||
+                        idle->latency.ewma_us >= idle_before.ewma_us ||
+                        idle->latency.p95_us != idle_before.p95_us ||
+                        idle->latency.samples != idle_before.samples ||
+                        idle->latency.consecutive_failures !=
+                            idle_before.consecutive_failures ||
+                        idle->latency.circuit_until_ms !=
+                            idle_before.circuit_until_ms ||
+                        idle->exec_observations_at_probe != 0 ||
+                        lmb_predict_score(&idle->latency, 0) >=
+                            lmb_predict_score(&L.peers[0].latency, 0) ||
+                        atomic_load(&nodes[0].pings) != 4 ||
+                        atomic_load(&nodes[1].pings) != 4 ||
+                        atomic_load(&nodes[0].accepts) != 1 ||
+                        atomic_load(&nodes[1].accepts) != 1;
     }
-    /* A successful maintenance probe must restore the normal EXEC timeout. */
-    if (!bad) {
-        atomic_store(&nodes[1].delay_ms, 150);
-        bad = run_exec_calls(1) != 0;
-        atomic_store(&nodes[1].delay_ms, 1);
-    }
-    if (!bad) bad = run_exec_calls(7) != 0;
+
+    if (!bad) stage = "refreshed routing";
+    if (!bad) bad = run_exec_calls(8) != 0;
+    if (!bad) bad = L.peers[0].exec_observations != 8 ||
+                    L.peers[1].exec_observations != 8;
+    if (!bad) stage = "refreshed telemetry";
     if (!bad) bad = node_send_ereg(&nodes[0], 1) || node_send_ereg(&nodes[1], 1);
     if (!bad) bad = read_named_calls(&calls_a, &calls_b) || calls_a != 8 || calls_b != 8;
 
-    /* A maintenance PING timeout is bounded and does not change health or the
-     * previous estimate; the broken pooled socket is simply discarded. */
+    /* A successful maintenance probe must restore the pooled socket's normal
+     * timeout. Exercise it directly so this check cannot alter the predictor. */
+    if (!bad) stage = "restored socket timeout";
     if (!bad) {
-        long saved = L.peers[0].rtt_us;
+        LumiPeer *peer = &L.peers[1];
+        float input[4] = {0.25f, -0.5f, 0.75f, 1.0f};
+        int fd = peer->nsocks > 0 ? peer->socks[--peer->nsocks] : -1;
+        LmbMsg reply = {0};
+        int direct_bad = fd < 0;
+        atomic_store(&nodes[1].delay_ms, 150);
+        double started = lumi_now();
+        if (!direct_bad)
+            direct_bad = lumi_send_exec(fd, 0, 0, input, 4, 1, NULL) ||
+                         lmb_recv(fd, &reply);
+        double elapsed = lumi_now() - started;
+        if (!direct_bad)
+            direct_bad = reply.op != LMB_EXEC_R || reply.pay_len != sizeof input ||
+                         memcmp(reply.pay, input, sizeof input);
+        lmb_msg_free(&reply);
+        atomic_store(&nodes[1].delay_ms, 1);
+        if (fd >= 0) {
+            if (direct_bad) close(fd);
+            else lumi_put_sock(peer, fd);
+        }
+        bad = direct_bad || elapsed < 0.12 || elapsed > 1.0 ||
+              peer->exec_observations != 8;
+    }
+
+    /* A maintenance PING timeout is bounded and preserves health, the prior
+     * RTT, predictor state, and successful-observation snapshot. */
+    if (!bad) stage = "failed maintenance probe";
+    if (!bad) {
+        LumiPeer *peer = &L.peers[0];
+        peer->latency.consecutive_failures = 4;
+        peer->latency.circuit_until_ms = 1234567890ull;
+        long saved_rtt = peer->rtt_us;
+        int saved_pings = atomic_load(&nodes[0].pings);
+        int saved_nsocks = peer->nsocks;
+        uint64_t saved_snapshot = peer->exec_observations_at_probe;
+        uint64_t saved_observations = peer->exec_observations;
+        LmbLatencyPredictor saved_predictor = peer->latency;
         double started = lumi_now();
         atomic_store(&nodes[0].drop_pings, 1);
-        bad = lumi_refresh_rtt(&L.peers[0]) != -1 ||
-              lumi_now() - started > 1.0 || L.peers[0].dead ||
-              L.peers[0].rtt_us != saved;
+        int refresh_bad = saved_nsocks <= 0;
+        if (!refresh_bad) refresh_bad = lumi_refresh_rtt(peer) != -1;
+        bad = refresh_bad || lumi_now() - started > 1.0 || peer->dead ||
+              atomic_load(&nodes[0].pings) != saved_pings + 1 ||
+              peer->nsocks != saved_nsocks - 1 ||
+              peer->rtt_us != saved_rtt ||
+              peer->exec_observations != saved_observations ||
+              peer->exec_observations_at_probe != saved_snapshot ||
+              peer->latency.ewma_us != saved_predictor.ewma_us ||
+              peer->latency.p95_us != saved_predictor.p95_us ||
+              peer->latency.samples != saved_predictor.samples ||
+              peer->latency.consecutive_failures !=
+                  saved_predictor.consecutive_failures ||
+              peer->latency.circuit_until_ms != saved_predictor.circuit_until_ms;
     }
 
     long final_a = L.peers[0].rtt_us, final_b = L.peers[1].rtt_us;
     test_cleanup(nodes);
     if (bad) {
-        fprintf(stderr, "staggered RTT refresh regression failed "
-                        "(named calls A/B=%llu/%llu, RTT A/B=%ld/%ld us)\n",
-                (unsigned long long)calls_a, (unsigned long long)calls_b,
+        fprintf(stderr, "staggered RTT refresh regression failed at %s "
+                        "(named A/B=%llu/%llu, raw A/B=%d/%d, "
+                        "pings A/B=%d/%d, observations A/B=%llu/%llu, "
+                        "RTT A/B=%ld/%ld us)\n",
+                stage, (unsigned long long)calls_a, (unsigned long long)calls_b,
+                atomic_load(&nodes[0].calls), atomic_load(&nodes[1].calls),
+                atomic_load(&nodes[0].pings), atomic_load(&nodes[1].pings),
+                (unsigned long long)L.peers[0].exec_observations,
+                (unsigned long long)L.peers[1].exec_observations,
                 final_a, final_b);
         return 1;
     }
     printf("STAGGERED RTT REFRESH: PASS "
-           "(named calls stale 8/0, refreshed 8/8; two PINGs, pooled accepts 1/1)\n");
+           "(named calls parked 8/0, refreshed 8/8; two PINGs, pooled accepts 1/1)\n");
     return 0;
 }

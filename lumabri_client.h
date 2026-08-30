@@ -54,6 +54,7 @@ typedef struct {
     double retry_at;          /* do not redial a relay-only/NAT address per layer */
     LmbLatencyPredictor latency;
     uint32_t inflight;
+    uint64_t exec_observations, exec_observations_at_probe;
 } LumiPeer;
 
 static struct {
@@ -117,6 +118,7 @@ static void lumi_peer_failed(LumiPeer *peer) {
 static void lumi_peer_observed(LumiPeer *peer, double started) {
     uint64_t elapsed = (uint64_t)((lumi_now() - started) * 1e6);
     lmb_predict_observe(&peer->latency, elapsed ? elapsed : 1);
+    peer->exec_observations++;
 }
 
 static void lumi_peer_sent(LumiPeer *peer) { peer->inflight++; }
@@ -163,9 +165,9 @@ static long lumi_measure_rtt(int fd) {
     return best;
 }
 
-/* Maintenance runs synchronously at a layer boundary, so it must not inherit
- * the five-minute bulk-EXEC timeout. Temporarily bound both directions, then
- * restore the pooled socket exactly before it can carry real work again. */
+/* Maintenance runs synchronously at a layer boundary, so it uses a tighter
+ * timeout than the bounded EXEC wait on the normal bulk path. Temporarily
+ * bound both directions, then restore the pooled socket before real work. */
 static long lumi_measure_rtt_bounded(int fd) {
     struct timeval old_recv, old_send;
     socklen_t recv_len = sizeof old_recv, send_len = sizeof old_send;
@@ -207,6 +209,8 @@ static void lumi_probe(LumiPeer *p) {
  * socket but leaves health/failover decisions to the next real EXEC. */
 static int lumi_refresh_rtt(LumiPeer *p) {
     if (p->dead || p->nsocks <= 0) return -1;
+    int idle_epoch = !p->inflight &&
+                     p->exec_observations == p->exec_observations_at_probe;
     p->rtt_probe_at = lumi_now();
     int fd = p->socks[--p->nsocks];
     long measured = lumi_measure_rtt_bounded(fd);
@@ -219,6 +223,14 @@ static int lumi_refresh_rtt(LumiPeer *p) {
         p->rtt_us = p->rtt_us / 2 + measured / 2 +
                     ((p->rtt_us & 1) && (measured & 1));
     }
+    if (idle_epoch) {
+        /* An active peer's EXEC samples are authoritative. Only an idle peer
+         * needs the fresh transport baseline folded into scheduler scoring. */
+        uint64_t sample = (uint64_t)measured;
+        p->latency.ewma_us = p->latency.ewma_us / 2 + sample / 2 +
+                             ((p->latency.ewma_us & 1) && (sample & 1));
+    }
+    p->exec_observations_at_probe = p->exec_observations;
     return 0;
 }
 
@@ -404,6 +416,7 @@ static int lumi_add_peer(const char *addr) {
         return -1;
     }
     lmb_predict_observe(&p->latency, (uint64_t)p->rtt_us);
+    p->exec_observations_at_probe = p->exec_observations;
     fprintf(stderr, "[lumabri] peer %s: %u experts (%d first-holder) · rtt %.2f ms\n",
             p->addr, n, claimed, (double)p->rtt_us / 1000.0);
     if (reprobe < 0) L.npeers++;
