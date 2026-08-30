@@ -2,7 +2,7 @@ CC      ?= cc
 CFLAGS  ?= -O2 -Wall -Wextra
 ENGINE  ?= ../colibri/c
 
-all: tracker maintainer liblumabri.so test_shim lumabri
+all: tracker maintainer liblumabri.so test_shim swarm_probe lumabri
 
 # A checkout with Colibri's additive ABI gets the transparent Segment path
 # from the ordinary `make`; older/release Colibri trees keep the exact legacy
@@ -397,6 +397,9 @@ test_segment_discovery: test_segment_discovery.c lumabri_segment_discovery.c \
 test_swarm_detail: test_swarm_detail.c lumabri_proto.h
 	$(CC) $(CFLAGS) -pthread test_swarm_detail.c -o $@
 
+swarm_probe: swarm_probe.c lumabri_proto.h lumabri_sign.h $(SECURE_DEPS)
+	$(CC) $(CFLAGS) -pthread swarm_probe.c -o $@
+
 test_relay_rate: test_relay_rate.c lumabri_segment.c lumabri_segment.h \
 		lumabri_proto.h
 	$(CC) $(CFLAGS) -pthread test_relay_rate.c lumabri_segment.c -o $@
@@ -499,6 +502,7 @@ test: all test_key_rotation test_hedge test_verify_failover test_segment_v2 \
 	./test_key_rotation
 	./test_hedge
 	./test_segment_v2
+	python3 ./test_swarm_bench.py
 	bash ./segment_discovery_test.sh
 	bash ./swarm_detail_test.sh
 	bash ./relay_rate_test.sh
@@ -513,7 +517,7 @@ PREFIX ?= /usr/local
 
 install: all
 	install -d $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(PREFIX)/lib/lumabri
-	install -m 755 lumabri tracker maintainer $(DESTDIR)$(PREFIX)/bin/
+	install -m 755 lumabri tracker maintainer swarm_probe $(DESTDIR)$(PREFIX)/bin/
 	install -m 644 liblumabri.so $(DESTDIR)$(PREFIX)/lib/lumabri/
 	@for b in expert_node expert_node_glm expert_node_inkling expert_node_kimi \
 	         expert_node_deepseek expert_node_qwen36 \
@@ -523,7 +527,7 @@ install: all
 	@echo "installed under $(DESTDIR)$(PREFIX)"
 
 clean:
-	rm -f tracker maintainer liblumabri.so test_shim lumabri \
+	rm -f tracker maintainer liblumabri.so test_shim swarm_probe lumabri \
 	      test_relay_exec test_swarm_fed test_key_rotation test_hedge \
 	      test_verify_failover test_segment_v2 test_segment_discovery test_sampling \
 	      test_swarm_detail test_relay_rate \

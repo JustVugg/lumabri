@@ -1,0 +1,27 @@
+{
+  "model": "DeepSeek-V4-Flash",
+  "family": "deepseek_v4",
+  "prompt": "Write exactly one short greeting.",
+  "oracle_token_ids": [123, 456],
+  "chatter": {
+    "host": "chatter.example.net",
+    "command": [
+      "/opt/lumabri/bin/segment_chat",
+      "--engine", "deepseek_v4",
+      "--model-dir", "/home/bench/.lumabri/DeepSeek-V4-Flash/vroot",
+      "--tracker", "148.251.4.122:7300",
+      "--model", "{model}",
+      "--prompt", "{prompt}",
+      "--tokens", "{max_tokens}",
+      "--json"
+    ]
+  },
+  "probe": {
+    "host": "chatter.example.net",
+    "command": [
+      "/opt/lumabri/bin/swarm_probe",
+      "--tracker", "148.251.4.122:7300",
+      "--model", "DeepSeek-V4-Flash"
+    ]
+  }
+}

@@ -50,6 +50,7 @@ typedef struct {
     size_t token_count;
     size_t prompt_count;
     double elapsed_seconds;
+    double decode_seconds;
 } GenerationResult;
 
 typedef enum {
@@ -66,6 +67,7 @@ typedef int (*GenerationEventFn)(void *opaque, GenerationEventKind kind,
 
 static int retry_first_run;
 static const char *segment_tracker;
+static uint64_t segment_wire_bytes;
 
 #define SEGMENT_FRAME_READY "\x01\x01" "READY" "\x01\x01"
 #define REMOTE_SNAPSHOT_CHUNK (1u << 20)
@@ -93,7 +95,7 @@ static void usage(const char *program) {
         "((--prompt TEXT | --prompt-ids CSV) | --serve) "
         "[--expect-ids CSV] [--tokens N] [--context N] [--max-rows N] "
         "[--temperature F --top-p F --seed N] "
-        "[--discovery-timeout-ms N] [--retry-first-run]\n",
+        "[--discovery-timeout-ms N] [--retry-first-run] [--json]\n",
         program);
 }
 
@@ -380,6 +382,7 @@ static int remote_request(RemoteSegment *remote, uint32_t op,
                           const void *body, uint32_t body_len,
                           const void *pay, uint32_t pay_len,
                           LmbMsg *response) {
+    uint64_t sent_bytes = 16u + (uint64_t)body_len + pay_len;
     if (!remote->direct_failed &&
         (remote->route.transport & LMB_SEG_TRANSPORT_DIRECT)) {
         remote->transport_error[0] = 0;
@@ -405,7 +408,11 @@ static int remote_request(RemoteSegment *remote, uint32_t op,
                          "%s at %s sent no reply to op %u",
                          remote->route.advert.peer_name,
                          remote->route.advert.addr, op);
-            else return 0;
+            else {
+                segment_wire_bytes += sent_bytes + 16u + response->body_len +
+                                      response->pay_len;
+                return 0;
+            }
         }
         lmb_msg_free(response);
         if (remote->fd >= 0) lmb_close(remote->fd);
@@ -414,7 +421,11 @@ static int remote_request(RemoteSegment *remote, uint32_t op,
     }
     if (!(remote->route.transport & LMB_SEG_TRANSPORT_RELAY)) return -1;
     if (!remote_relay_request(remote, op, body, body_len,
-                              pay, pay_len, response)) return 0;
+                              pay, pay_len, response)) {
+        segment_wire_bytes += sent_bytes + 16u + response->body_len +
+                              response->pay_len;
+        return 0;
+    }
     size_t used = strlen(remote->transport_error);
     snprintf(remote->transport_error + used,
              sizeof remote->transport_error - used,
@@ -1200,6 +1211,10 @@ static int segment_generate(ColiEdgeEngine *edge,
             uint8_t *swap = buffer_a; buffer_a = buffer_b; buffer_b = swap;
         }
     }
+    /* Decode timing starts after the complete prompt has traversed the
+     * chain. Keep it separate from TTFT so metric A is not prompt-length
+     * dependent. */
+    double decode_started = monotonic_seconds();
     size_t element = cap->state_dtype == COLI_EDGE_DTYPE_F32 ? 4u : 2u;
     const uint8_t *last = final_state +
         (size_t)(final_rows - 1) * cap->state_width * element;
@@ -1358,6 +1373,7 @@ static int segment_generate(ColiEdgeEngine *edge,
     result->token_count = generated_count;
     result->prompt_count = prompt_count;
     result->elapsed_seconds = monotonic_seconds() - started;
+    result->decode_seconds = monotonic_seconds() - decode_started;
     generated = NULL;
     rc = 0;
 
@@ -1573,11 +1589,12 @@ int main(int argc, char **argv) {
     const char *prompt_ids_text = arg_value(argc, argv, "--prompt-ids");
     const char *expect_ids_text = arg_value(argc, argv, "--expect-ids");
     int serve_mode = has_arg(argc, argv, "--serve");
+    int json_output = has_arg(argc, argv, "--json");
     segment_tracker = tracker;
     for (int i = 1; i < argc; i++)
         if (!strcmp(argv[i], "--retry-first-run")) retry_first_run = 1;
     if (!engine_id || !model_dir || !model || !tracker ||
-        (serve_mode ? (prompt || prompt_ids_text || expect_ids_text)
+        (serve_mode ? (prompt || prompt_ids_text || expect_ids_text || json_output)
                     : (!!prompt == !!prompt_ids_text))) {
         usage(argv[0]); return 2;
     }
@@ -1772,11 +1789,13 @@ int main(int argc, char **argv) {
         free(expected);
         return 1;
     }
-    printf("%s\n", generated.text);
-    printf("[lumabri] token-ids:");
-    for (size_t i = 0; i < generated.token_count; i++)
-        printf("%s%d", i ? "," : " ", generated.tokens[i]);
-    printf("\n");
+    if (!json_output) {
+        printf("%s\n", generated.text);
+        printf("[lumabri] token-ids:");
+        for (size_t i = 0; i < generated.token_count; i++)
+            printf("%s%d", i ? "," : " ", generated.tokens[i]);
+        printf("\n");
+    }
     if (expected && (generated.token_count != expected_count ||
         memcmp(generated.tokens, expected,
                expected_count * sizeof *expected))) {
@@ -1786,6 +1805,17 @@ int main(int argc, char **argv) {
         coli_edge_engine_close(edge);
         free(expected);
         return 1;
+    }
+    if (json_output) {
+        printf("{\"token_ids\":[");
+        for (size_t i = 0; i < generated.token_count; i++)
+            printf("%s%d", i ? "," : "", generated.tokens[i]);
+        printf("],\"decode_tokens\":%zu,\"decode_seconds\":%.9f,"
+               "\"prefill_decode_seconds\":%.9f,"
+               "\"bytes\":{\"segment\":%llu}}\n",
+               generated.token_count, generated.decode_seconds,
+               generated.elapsed_seconds,
+               (unsigned long long)segment_wire_bytes);
     }
     generation_result_free(&generated);
     lmb_seg_discovery_stop(discovery);
