@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <ifaddrs.h>
+#include <limits.h>
 #include <net/if.h>
 #include <netinet/in.h>
 #include <stdlib.h>
@@ -28,24 +29,65 @@ static int read_u64_file(const char *path, uint64_t *value) {
     return 0;
 }
 
+static uint64_t kib_to_bytes(unsigned long long kib) {
+    if (kib > (unsigned long long)(UINT64_MAX >> 10)) return UINT64_MAX;
+    return (uint64_t)kib << 10;
+}
+
+static unsigned long long add_kib(unsigned long long left,
+                                  unsigned long long right) {
+    return ULLONG_MAX - left < right ? ULLONG_MAX : left + right;
+}
+
+int lmb_machine_read_meminfo(FILE *file, uint64_t *total,
+                             uint64_t *available, uint64_t *swap_total,
+                             uint64_t *swap_free) {
+    if (!file) return -1;
+    char line[256];
+    unsigned long long mt = 0, ma = 0, mf = 0, buffers = 0;
+    unsigned long long cached = 0, reclaimable = 0, shmem = 0;
+    unsigned long long st = 0, sf = 0;
+    int have_available = 0;
+    while (fgets(line, sizeof line, file)) {
+        (void)sscanf(line, "MemTotal: %llu kB", &mt);
+        if (sscanf(line, "MemAvailable: %llu kB", &ma) == 1)
+            have_available = 1;
+        (void)sscanf(line, "MemFree: %llu kB", &mf);
+        (void)sscanf(line, "Buffers: %llu kB", &buffers);
+        (void)sscanf(line, "Cached: %llu kB", &cached);
+        (void)sscanf(line, "SReclaimable: %llu kB", &reclaimable);
+        (void)sscanf(line, "Shmem: %llu kB", &shmem);
+        (void)sscanf(line, "SwapTotal: %llu kB", &st);
+        (void)sscanf(line, "SwapFree: %llu kB", &sf);
+    }
+    if (!have_available) {
+        /* Linux added MemAvailable in 3.14, but WSL1's 4.4 compatibility
+         * procfs omits it. Match the conservative procps fallback: genuinely
+         * free pages plus reclaimable buffer/page/slab cache, excluding
+         * shared-memory pages. Never claim more than MemTotal. */
+        unsigned long long cache = add_kib(cached, reclaimable);
+        cache = cache > shmem ? cache - shmem : 0;
+        ma = add_kib(add_kib(mf, buffers), cache);
+        if (mt && ma > mt) ma = mt;
+    }
+    if (total) *total = kib_to_bytes(mt);
+    if (available) *available = kib_to_bytes(ma);
+    if (swap_total) *swap_total = kib_to_bytes(st);
+    if (swap_free) *swap_free = kib_to_bytes(sf);
+    return mt ? 0 : -1;
+}
+
 static void meminfo(uint64_t *total, uint64_t *available,
                     uint64_t *swap_total, uint64_t *swap_free) {
     FILE *file = fopen("/proc/meminfo", "r");
-    char line[256];
-    unsigned long long mt = 0, ma = 0, st = 0, sf = 0;
-    if (file) {
-        while (fgets(line, sizeof line, file)) {
-            (void)sscanf(line, "MemTotal: %llu kB", &mt);
-            (void)sscanf(line, "MemAvailable: %llu kB", &ma);
-            (void)sscanf(line, "SwapTotal: %llu kB", &st);
-            (void)sscanf(line, "SwapFree: %llu kB", &sf);
-        }
-        fclose(file);
+    if (!file || lmb_machine_read_meminfo(file, total, available,
+                                          swap_total, swap_free)) {
+        if (total) *total = 0;
+        if (available) *available = 0;
+        if (swap_total) *swap_total = 0;
+        if (swap_free) *swap_free = 0;
     }
-    if (total) *total = (uint64_t)mt << 10;
-    if (available) *available = (uint64_t)ma << 10;
-    if (swap_total) *swap_total = (uint64_t)st << 10;
-    if (swap_free) *swap_free = (uint64_t)sf << 10;
+    if (file) fclose(file);
 }
 
 uint64_t lmb_machine_available_ram(void) {

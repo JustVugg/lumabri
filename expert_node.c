@@ -73,6 +73,7 @@
 #include "lumabri_secure.h"
 
 #include <omp.h>
+#include <limits.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdatomic.h>
@@ -823,17 +824,13 @@ static void runtime_prepare(int argc, char **argv) {
 #endif
 }
 
-/* Free RAM in KB (MemAvailable), or -1 if it cannot be read. Used by --hold auto
- * to size how many experts this donor should carry. */
+/* Use the same modern-Linux/legacy-WSL calculation as machine, doctor,
+ * Segment and the governor. A second /proc parser here used to leave WSL1
+ * Expert donors at zero even after the machine profile was corrected. */
 static long meminfo_avail_kb(void) {
-    FILE *f = fopen("/proc/meminfo", "r");
-    if (!f) return -1;
-    char line[256];
-    long kb = -1;
-    while (fgets(line, sizeof line, f))
-        if (sscanf(line, "MemAvailable: %ld kB", &kb) == 1) break;
-    fclose(f);
-    return kb;
+    uint64_t kb = lmb_machine_available_ram() >> 10;
+    if (!kb) return -1;
+    return kb > (uint64_t)LONG_MAX ? LONG_MAX : (long)kb;
 }
 
 int main(int argc, char **argv) {

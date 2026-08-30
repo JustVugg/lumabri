@@ -5,6 +5,10 @@ a tag stay under Unreleased until a new tag is created.
 
 ## Unreleased
 
+- WSL1 memory compatibility: when `/proc/meminfo` omits `MemAvailable`,
+  machine profiling, doctor, governor, Segment and resident Expert sizing now
+  share a conservative reclaimable-cache fallback; native Linux values remain
+  authoritative when present.
 - Streaming Segment replies with live routing/prefill/decode/checkpoint/failover
   status, a fixed non-blocking input dock, slash-command autocomplete and menus
   usable during inference.
