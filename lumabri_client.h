@@ -69,6 +69,12 @@ static struct {
     int allow_codegen_skew;     /* LUMABRI_ALLOW_CODEGEN_SKEW: cc/isa -> warn, not refuse */
     int spread;                 /* LUMABRI_SPREAD: near-band replica spreading, not strict argmin */
     int hedge_ms;               /* 0 disables; base policy, fixed delay */
+    /* How long one EXEC reply may take before the replica is treated as
+     * failed. A dead peer resets its socket and fails instantly; a peer that
+     * is merely wedged — swapping, saturated, or behind a black hole — never
+     * answers and never errors, so only this bound turns it into a failover
+     * instead of a stall. LUMABRI_EXEC_WAIT_MS raises it for slow links. */
+    int exec_wait_ms;
     unsigned long long calls, layers_done, failovers, verified, relays;
     unsigned long long hedges, hedge_wins, batch_calls, batch_rows;
     double wait_s;
@@ -539,6 +545,7 @@ static void lumi_init_ex(int n_layers, int n_experts, int hidden,
     }
     L.spread = getenv("LUMABRI_SPREAD") && atoi(getenv("LUMABRI_SPREAD")) != 0;
     L.hedge_ms = lmb_env_int("LUMABRI_HEDGE_MS", 0, 0, 60000);
+    L.exec_wait_ms = lmb_env_int("LUMABRI_EXEC_WAIT_MS", 30000, 100, 3600000);
     L.initialized = 1;
 
     if (discovery) {
@@ -711,8 +718,13 @@ static float *lumi_finish_exec(int layer, int eid, const float *x, int D, int nr
             map[np++] = i;
         }
         int pr;
-        do pr = poll(pf, np, LMB_DEFAULT_IO_TIMEOUT_MS); while (pr < 0 && errno == EINTR);
-        if (pr <= 0) break;
+        /* Zero means "unset": a caller that fills the table by hand instead of
+         * calling lumi_init_ex keeps the previous behaviour rather than
+         * silently turning this poll into a non-blocking one. */
+        int wait_ms = L.exec_wait_ms > 0 ? L.exec_wait_ms
+                                         : LMB_DEFAULT_IO_TIMEOUT_MS;
+        do pr = poll(pf, np, wait_ms); while (pr < 0 && errno == EINTR);
+        if (pr <= 0) break;   /* timeout falls through to peer_failed + failover */
         for (int q = 0; q < np; q++) if (pf[q].revents) {
             int i = map[q];
             LmbMsg m = {0};
