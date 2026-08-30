@@ -419,6 +419,30 @@ test_run_gate: test_run_gate.c lumabri_run_gate.c lumabri_run_gate.h
 test-machine-governor: lumabri tracker swarm_probe expert_node segment_node fixture test_machine
 	ENGINE=$(ENGINE) bash ./machine_governor_test.sh
 
+test-doctor: all
+	bash ./doctor_test.sh
+
+SANITIZE_FLAGS = -O1 -g -Wall -Wextra -fno-omit-frame-pointer -fsanitize=address,undefined
+test-sanitize:
+	mkdir -p build/sanitize
+	$(CC) $(SANITIZE_FLAGS) -pthread test_segment_v2.c lumabri_segment.c -o build/sanitize/test_segment_v2
+	$(CC) $(SANITIZE_FLAGS) -pthread test_segment_discovery.c lumabri_segment_discovery.c lumabri_segment.c -o build/sanitize/test_segment_discovery
+	$(CC) $(SANITIZE_FLAGS) -pthread test_run_gate.c lumabri_run_gate.c -o build/sanitize/test_run_gate
+	$(CC) $(SANITIZE_FLAGS) test_scheduler.c -o build/sanitize/test_scheduler
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_segment_v2
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_segment_discovery
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_run_gate
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_scheduler
+
+test-thread-sanitize:
+	mkdir -p build/sanitize
+	$(CC) -O1 -g -Wall -Wextra -fno-omit-frame-pointer -fsanitize=thread \
+		-pthread test_run_gate.c lumabri_run_gate.c -o build/sanitize/test_run_gate_tsan
+	TSAN_OPTIONS=halt_on_error=1 build/sanitize/test_run_gate_tsan
+
+production-gate:
+	bash ./production_gate.sh --engine $(ENGINE)
+
 # ---- Segment direct data plane (requires Colibri's additive Edge ABI) ---
 # `all` includes this only when both additive headers are present. A Lumabri
 # checkout pointed at an older/release Colibri therefore keeps building the
@@ -563,10 +587,14 @@ test: all test_key_rotation test_hedge test_verify_failover test_segment_v2 \
 	./test_scheduler
 	./test_run_gate
 	python3 ./test_swarm_bench.py
+	python3 ./test_production_check.py
+	python3 ./test_swarm_soak.py
+	bash ./production_gate_test.sh
 	bash ./segment_discovery_test.sh
 	bash ./swarm_detail_test.sh
 	bash ./relay_rate_test.sh
 	bash ./machine_governor_test.sh
+	bash ./doctor_test.sh
 
 # ---- deploy -------------------------------------------------------------
 # make install                    → /usr/local (needs sudo)
@@ -608,4 +636,5 @@ clean:
         test-cas test-key-rotation test-hedge test-segment-v2 \
         test-segment-discovery segment-direct test-segment-direct-real \
         test-segment-relay-real test-segment-failover-real test-segment-hybrid \
-        test-machine-governor
+        test-machine-governor test-doctor test-sanitize test-thread-sanitize \
+        production-gate

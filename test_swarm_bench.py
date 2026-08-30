@@ -33,6 +33,16 @@ class SwarmBenchTest(unittest.TestCase):
             got = BENCH.run_json("local", ["python3", str(script)], {}, 5)
             self.assertEqual(got, {"ok": True})
 
+    def test_environment_is_explicit_and_rendered(self):
+        got = BENCH.run_json(
+            "local",
+            ["python3", "-c",
+             "import json,os; print(json.dumps(dict(v=os.environ['LMB_BENCH_VALUE'])))"],
+            {"client": 7}, 5, {"LMB_BENCH_VALUE": "peer-{client}"})
+        self.assertEqual(got, {"v": "peer-7"})
+        with self.assertRaisesRegex(ValueError, "invalid environment"):
+            BENCH.run_json("local", ["true"], {}, 5, {"BAD-NAME": "x"})
+
 
 if __name__ == "__main__":
     unittest.main()

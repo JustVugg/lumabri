@@ -19,7 +19,9 @@ contract for `baseline-local`. Its final stdout
 line must be a JSON object with `token_ids`, `decode_tokens`,
 `decode_seconds`, and optional CAS/Expert/Segment byte counters. The example
 spec shows the contract. Commands run locally when `host` is `local`, and via
-non-interactive SSH otherwise. Lumabri does not install keys or open hosts.
+non-interactive SSH otherwise. An optional `chatter.env` object is applied to
+the local process or through `env` after SSH; its values accept the same
+placeholders as the command. Lumabri does not install keys or open hosts.
 
 Example:
 

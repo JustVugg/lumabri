@@ -9,6 +9,11 @@ most of it waiting for the model to upload.
 Everything below assumes Ubuntu 24.04 on Hetzner Cloud, but nothing is
 Hetzner-specific except the firewall section.
 
+Before starting a host, run `lumabri doctor --tracker HOST:7300 --model
+/srv/model --serve-port 7300` (or add `--json` for automation). It distinguishes
+required failures from resource and optional-Segment warnings. The complete
+release evidence and soak procedure are in [PRODUCTION.md](PRODUCTION.md).
+
 ---
 
 ## 0. What to rent

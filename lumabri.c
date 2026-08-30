@@ -4227,6 +4227,177 @@ static int cmd_governor_manual(int argc, char **argv, int paused) {
     return 0;
 }
 
+typedef struct {
+    char name[64];
+    int ok;
+    int required;
+    char detail[192];
+} DoctorCheck;
+
+static void doctor_json_string(const char *value) {
+    fputc('"', stdout);
+    for (; value && *value; value++) {
+        unsigned char c = (unsigned char)*value;
+        if (c == '"' || c == '\\') printf("\\%c", c);
+        else if (c == '\n') fputs("\\n", stdout);
+        else if (c == '\r') fputs("\\r", stdout);
+        else if (c == '\t') fputs("\\t", stdout);
+        else if (c < 0x20) printf("\\u%04x", c);
+        else fputc(c, stdout);
+    }
+    fputc('"', stdout);
+}
+
+static void doctor_add(DoctorCheck *checks, size_t *count, const char *name,
+                       int ok, int required, const char *detail) {
+    if (*count >= 64) return;
+    DoctorCheck *check = &checks[(*count)++];
+    snprintf(check->name, sizeof check->name, "%s", name);
+    check->ok = ok; check->required = required;
+    snprintf(check->detail, sizeof check->detail, "%s", detail ? detail : "");
+}
+
+static int cmd_doctor(int argc, char **argv) {
+    int json = 0, serve_port = 0;
+    const char *tracker = NULL, *model = NULL;
+    for (int i = 0; i < argc; i++) {
+        if (!strcmp(argv[i], "--json")) json = 1;
+        else if (!strcmp(argv[i], "--tracker") && i + 1 < argc)
+            tracker = argv[++i];
+        else if (!strcmp(argv[i], "--model") && i + 1 < argc)
+            model = argv[++i];
+        else if (!strcmp(argv[i], "--serve-port") && i + 1 < argc) {
+            if (parse_serve_port(argv[++i], &serve_port)) {
+                fprintf(stderr, "--serve-port must be an integer from 1 to 65525\n");
+                return 2;
+            }
+        } else {
+            fprintf(stderr, "usage: lumabri doctor [--json] [--tracker HOST:PORT] "
+                            "[--model DIR] [--serve-port N]\n");
+            return 2;
+        }
+    }
+
+    DoctorCheck checks[64]; size_t count = 0;
+    LmbMachineProfile profile;
+    int machine_ok = lmb_machine_probe(&profile, model ? model : ".", tracker) == 0;
+    doctor_add(checks, &count, "machine-profile", machine_ok, 1,
+               machine_ok ? "CPU, RAM, GPU, disk and network probed" :
+                            "machine probe failed");
+    if (machine_ok) {
+        uint64_t reserve = (uint64_t)lmb_env_int(
+            "LUMABRI_RAM_RESERVE_MB", 4096, 256, 262144) << 20;
+        doctor_add(checks, &count, "ram-reserve",
+                   profile.ram_available_bytes > reserve, 0,
+                   profile.ram_available_bytes > reserve ?
+                   "donation has RAM above the system reserve" :
+                   "chat works, but donation should remain paused at current RAM");
+        doctor_add(checks, &count, "swap-pressure",
+                   !profile.swap_total_bytes ||
+                   profile.swap_free_bytes >= profile.swap_total_bytes / 20u,
+                   0, "at least 5% swap remains free");
+        doctor_add(checks, &count, "disk-space",
+                   profile.disk_available_bytes >= (1ull << 30), 0,
+                   "at least 1 GiB is available at the selected path");
+    }
+
+    const char *home = getenv("HOME");
+    struct stat state_stat;
+    char state_dir[1200] = "";
+    int state_ok = home && home[0] && access(home, W_OK) == 0;
+    if (home && home[0]) {
+        snprintf(state_dir, sizeof state_dir, "%s/.lumabri", home);
+        if (!stat(state_dir, &state_stat))
+            state_ok = S_ISDIR(state_stat.st_mode) && access(state_dir, W_OK) == 0;
+        else if (errno != ENOENT) state_ok = 0;
+    }
+    doctor_add(checks, &count, "state-directory", state_ok, 1,
+               state_ok ? "HOME/.lumabri is writable or can be created" :
+                          "HOME/.lumabri is not writable");
+
+    char directory[1024];
+    exe_dir(directory, sizeof directory);
+    const char *required_bins[] = {"tracker", "maintainer", "swarm_probe"};
+    for (size_t i = 0; i < sizeof required_bins / sizeof required_bins[0]; i++) {
+        char path[1200];
+        snprintf(path, sizeof path, "%s/%s", directory, required_bins[i]);
+        char name[64]; snprintf(name, sizeof name, "binary-%s", required_bins[i]);
+        doctor_add(checks, &count, name, access(path, X_OK) == 0, 1,
+                   access(path, X_OK) == 0 ? "executable found" :
+                                            "run make all or reinstall Lumabri");
+    }
+    char shim[1200];
+    snprintf(shim, sizeof shim, "%s/liblumabri.so", directory);
+    if (access(shim, R_OK))
+        snprintf(shim, sizeof shim, "%s/../lib/lumabri/liblumabri.so", directory);
+    doctor_add(checks, &count, "library-liblumabri", access(shim, R_OK) == 0, 1,
+               access(shim, R_OK) == 0 ? "CAS interposer found" :
+                                        "liblumabri.so is missing");
+    const char *segment_bins[] = {"segment_node", "segment_chat"};
+    for (size_t i = 0; i < sizeof segment_bins / sizeof segment_bins[0]; i++) {
+        char path[1200], name[64];
+        snprintf(path, sizeof path, "%s/%s", directory, segment_bins[i]);
+        snprintf(name, sizeof name, "optional-%s", segment_bins[i]);
+        doctor_add(checks, &count, name, access(path, X_OK) == 0, 0,
+                   access(path, X_OK) == 0 ? "Segment runtime available" :
+                   "classic Expert/CAS remains available; build against Colibri dev for Segment");
+    }
+
+    if (model) {
+        char config[1200];
+        snprintf(config, sizeof config, "%s/config.json", model);
+        doctor_add(checks, &count, "model-config", access(config, R_OK) == 0, 1,
+                   access(config, R_OK) == 0 ? "config.json is readable" :
+                                              "model directory has no readable config.json");
+    }
+    if (tracker)
+        doctor_add(checks, &count, "tracker", machine_ok &&
+                   profile.tracker_rtt_ms >= 0.0, 1,
+                   machine_ok && profile.tracker_rtt_ms >= 0.0 ?
+                   "tracker TCP endpoint is reachable" : "tracker is unreachable");
+    if (serve_port) {
+        int topology_ok = 1, failed_port = 0;
+        for (int offset = 0; offset < 10; offset++)
+            if (!serve_port_available(serve_port + offset)) {
+                topology_ok = 0; failed_port = serve_port + offset; break;
+            }
+        char detail[96];
+        if (topology_ok) snprintf(detail, sizeof detail,
+                                  "ports %d-%d are available", serve_port,
+                                  serve_port + 9);
+        else snprintf(detail, sizeof detail, "port %d is already in use",
+                      failed_port);
+        doctor_add(checks, &count, "serve-ports", topology_ok, 1, detail);
+    }
+
+    int ok = 1, warnings = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (!checks[i].ok && checks[i].required) ok = 0;
+        if (!checks[i].ok && !checks[i].required) warnings++;
+    }
+    if (json) {
+        printf("{\"schema\":1,\"ok\":%s,\"warnings\":%d,\"checks\":[",
+               ok ? "true" : "false", warnings);
+        for (size_t i = 0; i < count; i++) {
+            if (i) fputc(',', stdout);
+            fputs("{\"name\":", stdout); doctor_json_string(checks[i].name);
+            printf(",\"ok\":%s,\"required\":%s,\"detail\":",
+                   checks[i].ok ? "true" : "false",
+                   checks[i].required ? "true" : "false");
+            doctor_json_string(checks[i].detail); fputc('}', stdout);
+        }
+        fputs("]}\n", stdout);
+    } else {
+        printf("Lumabri doctor: %s (%d warning%s)\n", ok ? "READY" : "NOT READY",
+               warnings, warnings == 1 ? "" : "s");
+        for (size_t i = 0; i < count; i++)
+            printf("  %s %-24s %s\n", checks[i].ok ? "ok" :
+                   (checks[i].required ? "FAIL" : "warn"), checks[i].name,
+                   checks[i].detail);
+    }
+    return ok ? 0 : 1;
+}
+
 /* ---- main --------------------------------------------------------------- */
 
 int main(int argc, char **argv) {
@@ -4249,6 +4420,8 @@ int main(int argc, char **argv) {
                 (unsigned)LMB_TOKEN_MAX);
         return 2;
     }
+    if (argc >= 2 && !strcmp(argv[1], "doctor"))
+        return cmd_doctor(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "serve")) return cmd_serve(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "chat"))  return cmd_chat(argc - 2, argv + 2);
     /* No arguments and a terminal: this is a person, not a script. Chat is
@@ -4260,6 +4433,7 @@ int main(int argc, char **argv) {
         "  lumabri                                                    chat (asks what it needs)\n"
         "  lumabri machine [--json] [--tracker HOST:PORT]             profile this machine\n"
         "  lumabri status | limits | pause | resume                    resource governor\n"
+        "  lumabri doctor [--json] [--tracker H:P] [--model DIR]      deployment preflight\n"
         "  lumabri peer-key                                           print this machine's endpoint identity\n"
         "  lumabri serve --model DIR [--port 7300] [--join TRACKER]   share a model\n"
         "  lumabri chat  [--tracker HOST:7300] [--model NAME]         chat with it\n"

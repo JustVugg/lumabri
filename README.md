@@ -67,6 +67,10 @@ model/ISA, physical and logical cores, NUMA, RAM/swap, visible GPU/VRAM, disk,
 interfaces and optional tracker RTT. `--json` emits a stable schema for
 automation. `lumabri limits` shows the current donation budget; `lumabri pause`
 and `lumabri resume` control every local donor without killing the chat.
+`lumabri doctor --json` is the versioned deployment preflight for required
+binaries, CAS state, model readability, tracker reachability and the complete
+serving port block. The reproducible local, sanitizer, multi-host and soak
+release gates are documented in **[PRODUCTION.md](PRODUCTION.md)**.
 
 Inside the chat, `/swarm` (or `/hosts`) shows stable human-readable machine
 names, storage served, expert calls and live Segment ranges. `/experts` answers

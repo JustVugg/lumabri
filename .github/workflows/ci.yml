@@ -1,0 +1,37 @@
+name: Lumabri CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout Lumabri
+        uses: actions/checkout@v4
+        with:
+          path: lumabri
+      - name: Checkout Colibri dev
+        uses: actions/checkout@v4
+        with:
+          repository: JustVugg/colibri
+          ref: dev
+          path: colibri
+      - name: Warning gate
+        working-directory: lumabri
+        run: make check-warnings ENGINE=../colibri/c
+      - name: Unit and integration gates
+        working-directory: lumabri
+        run: make test ENGINE=../colibri/c
+      - name: Sanitizers
+        working-directory: lumabri
+        run: make test-sanitize
+      - name: Resident Segment Hybrid gate
+        working-directory: lumabri
+        run: make test-segment-hybrid ENGINE=../colibri/c
