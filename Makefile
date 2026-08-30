@@ -327,24 +327,24 @@ tiny_olmoe/config.json: make_tiny_olmoe.py
 fixture: tiny_olmoe/config.json
 
 test-phase2: phase2 fixture
-	./phase2_test.sh
+	bash ./phase2_test.sh
 
 test-phase2-glm: phase2-glm
-	./phase2_glm_test.sh
+	bash ./phase2_glm_test.sh
 
 test-phase2-inkling: expert_node_inkling
-	./phase2_inkling_test.sh
+	bash ./phase2_inkling_test.sh
 
 test-phase2-kimi: expert_node_kimi
-	./phase2_kimi_test.sh
+	bash ./phase2_kimi_test.sh
 
 # needs a real DeepSeek V4 model: MODEL=<dir> (no synthetic fixture, see the
 # script's header for why)
 test-phase2-deepseek: expert_node_deepseek
-	./phase2_deepseek_test.sh
+	bash ./phase2_deepseek_test.sh
 
 test-phase2-qwen36: expert_node_qwen36
-	./phase2_qwen36_test.sh
+	bash ./phase2_qwen36_test.sh
 
 # Every engine's byte-identity proof, one after the other. DeepSeek V4 has no
 # synthetic fixture (see phase2_deepseek_test.sh), so it runs only when a real
@@ -519,34 +519,34 @@ test-segment-failover-real: tracker segment-direct
 	bash ./segment_failover_test.sh
 
 test-relay-exec: tracker expert_node test_relay_exec fixture
-	./relay_exec_test.sh
+	bash ./relay_exec_test.sh
 
 test_swarm_fed: test_swarm_fed.c lumabri_proto.h
 	$(CC) $(CFLAGS) -pthread test_swarm_fed.c -o $@
 
 test-swarm-fed: tracker maintainer liblumabri.so expert_node test_swarm_fed fixture
-	./swarm_fed_exec_test.sh
+	bash ./swarm_fed_exec_test.sh
 
 test-assign-race: tracker
-	./assign_race_test.sh
+	bash ./assign_race_test.sh
 
 test-partial-phase2: tracker phase2 fixture
-	./partial_phase2_test.sh
+	bash ./partial_phase2_test.sh
 
 test-elastic: tracker expert_node fixture
-	./elastic_hold_test.sh
+	bash ./elastic_hold_test.sh
 
 test-resident: tracker swarm_probe expert_node fixture
-	./resident_hold_test.sh
+	bash ./resident_hold_test.sh
 
 # Segment keeps attention/state local while a complete MoE layer is served by
 # a strict-RAM Expert donor. The second run kills that donor and proves that
 # the unchanged local Colibri kernel takes over without losing the session.
 test-segment-hybrid: tracker swarm_probe expert_node segment_node segment_chat fixture
-	ENGINE=$(ENGINE) ./segment_hybrid_test.sh
+	ENGINE=$(ENGINE) bash ./segment_hybrid_test.sh
 
 test-cas: tracker maintainer liblumabri.so test_shim
-	./cas_test.sh
+	bash ./cas_test.sh
 
 test-key-rotation: test_key_rotation
 	./test_key_rotation
@@ -563,24 +563,24 @@ test-segment-discovery: tracker test_segment_discovery
 test: all test_key_rotation test_hedge test_verify_failover test_segment_v2 \
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
 		test_scheduler test_run_gate
-	./selftest.sh
-	./donate_test.sh
-	./signed_donor_test.sh
-	./hot_cache_integrity_test.sh
-	./role_test.sh
-	./serve_failfast_test.sh
-	./security_test.sh
-	./expert_input_test.sh
-	./prefetch_policy_test.sh
-	./cas_test.sh
-	./relay_exec_test.sh
-	./peer_identity_test.sh
-	./key_test.sh
-	./sign_test.sh
-	./crypto_test.sh
-	./secure_test.sh
-	./encrypted_transport_test.sh
-	./verify_failover_test.sh
+	bash ./selftest.sh
+	bash ./donate_test.sh
+	bash ./signed_donor_test.sh
+	bash ./hot_cache_integrity_test.sh
+	bash ./role_test.sh
+	bash ./serve_failfast_test.sh
+	bash ./security_test.sh
+	bash ./expert_input_test.sh
+	bash ./prefetch_policy_test.sh
+	bash ./cas_test.sh
+	bash ./relay_exec_test.sh
+	bash ./peer_identity_test.sh
+	bash ./key_test.sh
+	bash ./sign_test.sh
+	bash ./crypto_test.sh
+	bash ./secure_test.sh
+	bash ./encrypted_transport_test.sh
+	bash ./verify_failover_test.sh
 	./test_key_rotation
 	./test_hedge
 	./test_segment_v2
