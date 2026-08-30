@@ -44,6 +44,11 @@ typedef struct {
 
 int lmb_machine_probe(LmbMachineProfile *profile, const char *disk_path,
                       const char *tracker);
+/* Parse Linux /proc/meminfo. Exposed so compatibility fixtures can exercise
+ * kernels that predate MemAvailable without replacing the process procfs. */
+int lmb_machine_read_meminfo(FILE *stream, uint64_t *total,
+                             uint64_t *available, uint64_t *swap_total,
+                             uint64_t *swap_free);
 void lmb_machine_print(FILE *out, const LmbMachineProfile *profile, int json);
 uint64_t lmb_machine_available_ram(void);
 uint64_t lmb_machine_total_ram(void);

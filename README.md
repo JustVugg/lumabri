@@ -67,6 +67,9 @@ model/ISA, physical and logical cores, NUMA, RAM/swap, visible GPU/VRAM, disk,
 interfaces and optional tracker RTT. `--json` emits a stable schema for
 automation. `lumabri limits` shows the current donation budget; `lumabri pause`
 and `lumabri resume` control every local donor without killing the chat.
+On kernels without `/proc/meminfo`'s `MemAvailable` (notably WSL1), the same
+conservative reclaimable-cache fallback is shared by doctor, Segment, Expert
+and the governor; modern Linux continues to use its native value unchanged.
 `lumabri doctor --json` is the versioned deployment preflight for required
 binaries, CAS state, model readability, tracker reachability and the complete
 serving port block. The reproducible local, sanitizer, multi-host and soak
