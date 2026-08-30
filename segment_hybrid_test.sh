@@ -20,6 +20,8 @@ failed() {
     return "$status"
 }
 cleanup() {
+    # A stopped child ignores SIGTERM until it runs again, so continue first.
+    kill -CONT "${PIDS[@]}" 2>/dev/null || true
     kill "${PIDS[@]}" 2>/dev/null || true
     wait "${PIDS[@]}" 2>/dev/null || true
     rm -rf "$TMP"
@@ -54,7 +56,7 @@ LUMABRI_KNOWN_HOSTS="$TMP/tracker.known_hosts" \
 wait_port "$PORT"
 
 LUMABRI_PEER_KEY="$TMP/segment.key" LUMABRI_KNOWN_HOSTS="$TMP/segment.hosts" \
-LUMABRI_VERIFY=0 OMP_NUM_THREADS=2 ./segment_node --engine olmoe \
+LUMABRI_VERIFY=0 LUMABRI_EXEC_WAIT_MS=2000 OMP_NUM_THREADS=2 ./segment_node --engine olmoe \
     --model-dir tiny_olmoe --model tiny-olmoe --range 0:16 \
     --port "$((PORT+2))" --tracker "127.0.0.1:$PORT" \
     --advertise "127.0.0.1:$((PORT+2))" --name hybrid-segment \
@@ -126,12 +128,17 @@ assert e['resident_count']==8 and e['calls']>0, e
 print('SEGMENT HYBRID: resident donor executed', e['calls'], 'calls')
 PY
 
-# A dead accelerator may add one failed attempt, never break generation. The
+# A wedged accelerator may add one failed attempt, never break generation. The
 # patched callsite rolls back any partial remote accumulation and executes the
 # original local kernel for the whole layer.
-kill "$DONOR_PID"
-wait "$DONOR_PID" 2>/dev/null || true
-DONOR_PID=""
+#
+# SIGSTOP, not SIGKILL: a killed donor resets its socket, so whether the node
+# even attempts a call before noticing the loss is a race, and on a slow runner
+# the failover line never appears. A stopped donor stays registered with its
+# connection open and simply never answers, so the attempt and its bounded
+# timeout are guaranteed — and it exercises the more dangerous failure, a peer
+# that is wedged rather than gone.
+kill -STOP "$DONOR_PID"
 OMP_NUM_THREADS=2 ./segment_chat --engine olmoe --model-dir tiny_olmoe \
     --model tiny-olmoe --tracker "127.0.0.1:$PORT" \
     --model-root "$model_root" --tokenizer-root "$tokenizer_root" \
