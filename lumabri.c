@@ -995,6 +995,8 @@ typedef struct {
     uint32_t nfiles, nexperts, have_exec_stats;
     uint64_t exec_calls;
     uint32_t exec_inflight;
+    uint32_t expert_state, expert_resident_flags, resident_experts;
+    uint64_t expert_resident_bytes, expert_vram_bytes;
     uint32_t layer_begin, layer_end;
     uint32_t active_sessions, max_sessions, segment_queue, segment_inflight;
     uint32_t segment_flags;
@@ -1028,6 +1030,11 @@ static int swarm_detail(const char *tracker, SwarmDetailRow *rows, int cap) {
                   lmb_cur_u32(&cursor, &row.have_exec_stats) ||
                   lmb_cur_u64(&cursor, &row.exec_calls) ||
                   lmb_cur_u32(&cursor, &row.exec_inflight) ||
+                  lmb_cur_u32(&cursor, &row.expert_state) ||
+                  lmb_cur_u32(&cursor, &row.expert_resident_flags) ||
+                  lmb_cur_u32(&cursor, &row.resident_experts) ||
+                  lmb_cur_u64(&cursor, &row.expert_resident_bytes) ||
+                  lmb_cur_u64(&cursor, &row.expert_vram_bytes) ||
                   lmb_cur_u32(&cursor, &row.layer_begin) ||
                   lmb_cur_u32(&cursor, &row.layer_end) ||
                   lmb_cur_u32(&cursor, &row.active_sessions) ||
@@ -1191,6 +1198,14 @@ static void render_named_swarm(const SwarmDetailRow *rows, int n) {
         if (row->roles & LMB_SWARM_ROLE_EXPERT) {
             if (separator) printf(" | ");
             printf("%u expert", row->nexperts);
+            if (row->expert_resident_flags & LMB_EXPERT_RESIDENT_RAM)
+                printf(" · %u RAM-ready (%.1f GB)", row->resident_experts,
+                       (double)row->expert_resident_bytes / 1e9);
+            else if (row->expert_resident_flags & LMB_EXPERT_RESIDENT_VRAM)
+                printf(" · %u VRAM-ready (%.1f GB)", row->resident_experts,
+                       (double)row->expert_vram_bytes / 1e9);
+            else if (row->expert_resident_flags & LMB_EXPERT_DISK_FALLBACK)
+                printf(" · fallback disco");
             if (row->have_exec_stats)
                 printf(" · %llu call · %u attive",
                        (unsigned long long)row->exec_calls,
@@ -1289,6 +1304,14 @@ static void render_experts(const char *tracker) {
                        row->exec_inflight);
                 calls += row->exec_calls;
             } else printf("%u expert · contatore in attesa", row->nexperts);
+            if (row->expert_resident_flags & LMB_EXPERT_RESIDENT_RAM)
+                printf(" · %u residenti RAM (%.1f GB)", row->resident_experts,
+                       (double)row->expert_resident_bytes / 1e9);
+            else if (row->expert_resident_flags & LMB_EXPERT_RESIDENT_VRAM)
+                printf(" · %u residenti VRAM (%.1f GB)", row->resident_experts,
+                       (double)row->expert_vram_bytes / 1e9);
+            else if (row->expert_resident_flags & LMB_EXPERT_DISK_FALLBACK)
+                printf(" · fallback disco");
         }
         if (row->roles & LMB_SWARM_ROLE_SEGMENT) {
             if (row->roles & LMB_SWARM_ROLE_EXPERT) printf(" | ");

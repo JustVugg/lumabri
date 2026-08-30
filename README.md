@@ -248,8 +248,11 @@ the GB budget is a hard placement input, not permission to fill the disk. A
 compute donor needs no model: when Segment is active and a quarter-range fits
 after the system reserve, it receives the least-replicated origin range. Direct
 P2P is preferred; NAT donors use Segment relay automatically. If the range does
-not fit, `--hold auto` sizes an expert slice to free RAM and the
-tracker gives it what nobody else covers through direct EXEC or relay. Both
+not fit, `--hold auto` sizes a strictly resident expert slice after preserving
+the system RAM reserve (`LUMABRI_EXPERT_RAM_RESERVE_MB`, 4096 by default).
+The tracker gives it what nobody else covers through direct EXEC or relay and
+does not see the donor until every assigned weight is RAM-ready. The origin's
+explicit `--cache` executor remains the labelled disk fallback. Both
 load through the verified swarm mirror, so the whole model never lands on the
 donor.
 Donors register under `donor-<hostname>-…` (pick one with `--donor-name`);

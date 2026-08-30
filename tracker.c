@@ -44,6 +44,8 @@ typedef struct {
     uint64_t exec_calls;
     uint32_t exec_inflight;
     int have_exec_stats;
+    uint32_t expert_state, expert_resident_flags, resident_experts;
+    uint64_t expert_resident_bytes, expert_vram_bytes;
     double expert_ts;
     PFile *files; uint32_t nfiles;
     double ts;
@@ -913,7 +915,9 @@ static Peer *handle_ereg(int fd, LmbMsg *m, const uint8_t *nonce) {
     } else bl = 0;
     uint32_t meta = 0, qbits = 0, hidden = 0, slots = 0, total_experts = 0;
     uint64_t exec_calls = 0;
-    uint32_t exec_inflight = 0;
+    uint32_t exec_inflight = 0, expert_state = 0, resident_flags = 0;
+    uint32_t resident_experts = 0;
+    uint64_t resident_bytes = 0, resident_vram = 0;
     int have_exec_stats = 0, bad_meta = 0;
     char engine[64] = "", profile[LMB_BUILD_PROFILE_MAX] = "";
     if (c.off < c.len) {
@@ -934,10 +938,22 @@ static Peer *handle_ereg(int fd, LmbMsg *m, const uint8_t *nonce) {
             bad_meta = 1;
         } else {
             LmbCur stats = { c.p + c.off, slen, 0 };
-            if (sversion == LMB_EREG_STATS_VERSION) {
-                if (slen != LMB_EREG_STATS_LENGTH ||
+            if (sversion == 1u) {
+                if (slen != LMB_EREG_STATS_LENGTH_V1 ||
                     lmb_cur_u64(&stats, &exec_calls) ||
                     lmb_cur_u32(&stats, &exec_inflight) || stats.off != stats.len)
+                    bad_meta = 1;
+                else
+                    have_exec_stats = 1;
+            } else if (sversion == LMB_EREG_STATS_VERSION) {
+                if (slen != LMB_EREG_STATS_LENGTH ||
+                    lmb_cur_u64(&stats, &exec_calls) ||
+                    lmb_cur_u32(&stats, &exec_inflight) ||
+                    lmb_cur_u32(&stats, &expert_state) ||
+                    lmb_cur_u32(&stats, &resident_flags) ||
+                    lmb_cur_u32(&stats, &resident_experts) ||
+                    lmb_cur_u64(&stats, &resident_bytes) ||
+                    lmb_cur_u64(&stats, &resident_vram) || stats.off != stats.len)
                     bad_meta = 1;
                 else
                     have_exec_stats = 1;
@@ -1008,6 +1024,11 @@ static Peer *handle_ereg(int fd, LmbMsg *m, const uint8_t *nonce) {
         slot->exec_calls = exec_calls;
         slot->exec_inflight = exec_inflight;
         slot->have_exec_stats = have_exec_stats;
+        slot->expert_state = expert_state;
+        slot->expert_resident_flags = resident_flags;
+        slot->resident_experts = resident_experts;
+        slot->expert_resident_bytes = resident_bytes;
+        slot->expert_vram_bytes = resident_vram;
         if (bl) {
             uint8_t *nb = (uint8_t *)realloc(slot->ebits, bl);
             if (nb) { slot->ebits = nb; memcpy(slot->ebits, bits, bl);
@@ -1744,6 +1765,11 @@ static int handle_swarm_detail(int fd) {
         lmb_buf_u32(&body, expert && p->have_exec_stats ? 1u : 0u);
         lmb_buf_u64(&body, expert && p->have_exec_stats ? p->exec_calls : 0u);
         lmb_buf_u32(&body, expert && p->have_exec_stats ? p->exec_inflight : 0u);
+        lmb_buf_u32(&body, expert ? p->expert_state : 0u);
+        lmb_buf_u32(&body, expert ? p->expert_resident_flags : 0u);
+        lmb_buf_u32(&body, expert ? p->resident_experts : 0u);
+        lmb_buf_u64(&body, expert ? p->expert_resident_bytes : 0u);
+        lmb_buf_u64(&body, expert ? p->expert_vram_bytes : 0u);
         lmb_buf_u32(&body, segment ? p->segment.layer_begin : 0u);
         lmb_buf_u32(&body, segment ? p->segment.layer_end : 0u);
         lmb_buf_u32(&body, segment ? p->segment.active_sessions : 0u);
