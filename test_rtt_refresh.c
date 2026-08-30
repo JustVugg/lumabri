@@ -95,6 +95,15 @@ static int node_send_ereg(TestNode *node, int with_stats) {
         lmb_buf_u32(&body, LMB_EREG_STATS_LENGTH);
         lmb_buf_u64(&body, (uint64_t)atomic_load(&node->calls));
         lmb_buf_u32(&body, 0);
+        /* v2 appends residency after the v1 call counters. This executor is a
+         * protocol stand-in with no expert weights, so it reports none — but
+         * it must still send the fields, or the tracker rejects the whole
+         * extension and the named counters read as zero. */
+        lmb_buf_u32(&body, 0);
+        lmb_buf_u32(&body, 0);
+        lmb_buf_u32(&body, 0);
+        lmb_buf_u64(&body, 0);
+        lmb_buf_u64(&body, 0);
     }
     uint8_t signed_body[512], signature[64];
     size_t signed_len = lmb_peer_auth_msg(node->nonce, node->name,
@@ -139,8 +148,11 @@ static int read_named_calls(uint64_t *calls_a, uint64_t *calls_b) {
     for (uint32_t i = 0; !bad && i < count; i++) {
         char name[64], model[64];
         uint32_t roles, age, files, experts, have_stats, inflight;
+        /* SWARM_DETAIL v2 inserted residency between the expert counters and
+         * the Segment block; read it so the fields after it stay aligned. */
+        uint32_t state, residency_flags, resident_count;
         uint32_t begin, end, active, maximum, queued, segment_inflight, flags;
-        uint64_t held, served, reads, calls;
+        uint64_t held, served, reads, calls, resident_ram, resident_vram;
         bad = lmb_cur_str(&cursor, name, sizeof name) ||
               lmb_cur_str(&cursor, model, sizeof model) ||
               lmb_cur_u32(&cursor, &roles) || lmb_cur_u32(&cursor, &age) ||
@@ -148,12 +160,19 @@ static int read_named_calls(uint64_t *calls_a, uint64_t *calls_b) {
               lmb_cur_u64(&cursor, &reads) || lmb_cur_u32(&cursor, &files) ||
               lmb_cur_u32(&cursor, &experts) || lmb_cur_u32(&cursor, &have_stats) ||
               lmb_cur_u64(&cursor, &calls) || lmb_cur_u32(&cursor, &inflight) ||
+              lmb_cur_u32(&cursor, &state) ||
+              lmb_cur_u32(&cursor, &residency_flags) ||
+              lmb_cur_u32(&cursor, &resident_count) ||
+              lmb_cur_u64(&cursor, &resident_ram) ||
+              lmb_cur_u64(&cursor, &resident_vram) ||
               lmb_cur_u32(&cursor, &begin) || lmb_cur_u32(&cursor, &end) ||
               lmb_cur_u32(&cursor, &active) || lmb_cur_u32(&cursor, &maximum) ||
               lmb_cur_u32(&cursor, &queued) || lmb_cur_u32(&cursor, &segment_inflight) ||
               lmb_cur_u32(&cursor, &flags);
         (void)age; (void)held; (void)served; (void)reads; (void)files;
         (void)experts; (void)inflight; (void)begin; (void)end; (void)active;
+        (void)state; (void)residency_flags; (void)resident_count;
+        (void)resident_ram; (void)resident_vram;
         (void)maximum; (void)queued; (void)segment_inflight; (void)flags;
         if (!bad && !strcmp(model, "rtt-refresh-model") &&
             (roles & LMB_SWARM_ROLE_EXPERT) && have_stats) {
