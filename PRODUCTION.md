@@ -30,7 +30,8 @@ This runs exact patch anchors, Werror, the full integration suite,
 ASan/UBSan, and Segment Hybrid when the selected Colibri checkout exposes the
 additive ABI. Every step has a separate log and the final decision is written
 to `production-gate.json`. Colibri is copied only below `build/`; the selected
-checkout is never modified.
+checkout is never modified. Fixture generation requires the versioned Python
+packages in `requirements-test.txt`.
 
 ThreadSanitizer is available separately because some container runtimes cannot
 map its shadow memory:
