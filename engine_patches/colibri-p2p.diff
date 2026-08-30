@@ -15,9 +15,9 @@ diff --git a/c/colibri.c b/c/colibri.c
  #include "kv_fp8.h"                               /* KV8=1: cache latente in fp8 e4m3 + scala per-riga */
  #include "kv_tq.h"                                /* KV_TQ=3|4: cache latente PolarQuant (rot+polare) */
  #ifdef _OPENMP
-@@ -2417,6 +2424,19 @@
-     for(int i=0;i<c->n_layers;i++) if(!m->L[i].sparse) rt_drop_row(i);
-     if(!m->has_mtp) rt_drop_row(c->n_layers);
+@@ -2464,6 +2471,19 @@
+         if(!m->has_mtp) rt_drop_row(c->n_layers);
+     }
      m->resident_bytes=rb;
 +#ifdef LUMIBRI_P2P
 +    {   /* which slots route: dense layers hold no experts, and the MTP row
@@ -34,8 +34,8 @@ diff --git a/c/colibri.c b/c/colibri.c
 +#endif
  }
  
- /* embed: dequantizza la riga del token (scala per-riga) in x[hidden] */
-@@ -5089,6 +5109,17 @@
+ static void model_init(Model *m, const char *snap, int cap,
+@@ -5339,6 +5359,17 @@
          int e=idxs[(int64_t)s*K+kk];
          if(!seen[e]){ seen[e]=1; uniq[nu++]=e; }
      }
@@ -46,8 +46,8 @@ diff --git a/c/colibri.c b/c/colibri.c
 +         * Routing (above), the weighted sum and FASE E's shared expert stay
 +         * here; emptying the union is what makes FASE C/D find nothing left
 +         * to resolve or compute. */
-+        lumi_moe_apply_batch(layer, idxs, ws, keff, K, x, S, D, out);
-+        nu=0;
++        if (lumi_moe_apply_batch(layer, idxs, ws, keff, K, x, S, D, out))
++            nu=0;
 +    }
 +#endif
      /* EXPERT_BUDGET: cap distinct experts per layer to reduce disk I/O on cold/low-RAM

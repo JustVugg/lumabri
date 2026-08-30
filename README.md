@@ -267,6 +267,11 @@ CPU team because decode traverses the chain serially. A resident Segment donor
 then replaces one exact range; it advertises measured RSS only after its engine
 has opened, and the server remains the fallback for every range not yet donated.
 `LUMABRI_SEGMENT_THREADS=N` is the explicit per-range CPU override.
+Within either origin or donor ranges, Segment Hybrid also delegates any fully
+covered MoE layer to strict-RAM Expert donors. Selected experts are sent in
+parallel; incomplete layers and failed donor calls execute locally. Thus even a
+peer too small for a complete Segment range contributes useful resident expert
+work, while the server remains the correctness fallback.
 When two donors happen to hold the *same* expert, add `LUMABRI_SPREAD=1` on the
 chatter to balance the load between them too. Neither donor needs to know the
 others exist. Expert requests can fail over to another replica. Stateful

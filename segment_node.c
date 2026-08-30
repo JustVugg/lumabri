@@ -1083,6 +1083,21 @@ int main(int argc, char **argv) {
     if (lmb_secure_init()) return 1;
     signal(SIGINT, stop_handler); signal(SIGTERM, stop_handler);
     signal(SIGPIPE, SIG_IGN);
+    /* The hybrid engine is a Lumabri-only build copy. Its transport client
+     * discovers resident Expert peers from this node's own control-plane
+     * identity; Colibri sources and ordinary Colibri binaries stay untouched. */
+    setenv("LUMABRI_TRACKER", tracker, 1);
+    setenv("LUMABRI_MODEL", model, 1);
+    setenv("LUMABRI_EXEC_FALLBACK_LOCAL", "1", 1);
+    /* The GLM Segment adapter is named "glm" while its long-standing Expert
+     * wire family is "colibri". Every other adapter shares the same name.
+     * Bits describe expert storage, not the activation/state representation. */
+    const char *expert_engine_id = !strcmp(engine_id, "glm") ?
+                                   "colibri" : engine_id;
+    setenv("LUMABRI_ENGINE_ID", expert_engine_id, 1);
+    setenv("LUMABRI_EXPERT_BITS",
+           (!strcmp(expert_engine_id, "colibri") ||
+            !strcmp(expert_engine_id, "inkling")) ? "8" : "0", 1);
     if (fallback) (void)setpriority(PRIO_PROCESS, 0, 10);
     if (threads)
         fprintf(stderr, "[segment-node] governor: %u compute thread%s · "
