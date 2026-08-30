@@ -44,6 +44,8 @@ typedef struct {
     uint64_t exec_calls;
     uint32_t exec_inflight;
     int have_exec_stats;
+    uint32_t expert_state, expert_resident_flags, resident_experts;
+    uint64_t expert_resident_bytes, expert_vram_bytes;
     double expert_ts;
     PFile *files; uint32_t nfiles;
     double ts;
@@ -913,7 +915,9 @@ static Peer *handle_ereg(int fd, LmbMsg *m, const uint8_t *nonce) {
     } else bl = 0;
     uint32_t meta = 0, qbits = 0, hidden = 0, slots = 0, total_experts = 0;
     uint64_t exec_calls = 0;
-    uint32_t exec_inflight = 0;
+    uint32_t exec_inflight = 0, expert_state = 0, resident_flags = 0;
+    uint32_t resident_experts = 0;
+    uint64_t resident_bytes = 0, resident_vram = 0;
     int have_exec_stats = 0, bad_meta = 0;
     char engine[64] = "", profile[LMB_BUILD_PROFILE_MAX] = "";
     if (c.off < c.len) {
@@ -934,10 +938,22 @@ static Peer *handle_ereg(int fd, LmbMsg *m, const uint8_t *nonce) {
             bad_meta = 1;
         } else {
             LmbCur stats = { c.p + c.off, slen, 0 };
-            if (sversion == LMB_EREG_STATS_VERSION) {
-                if (slen != LMB_EREG_STATS_LENGTH ||
+            if (sversion == 1u) {
+                if (slen != LMB_EREG_STATS_LENGTH_V1 ||
                     lmb_cur_u64(&stats, &exec_calls) ||
                     lmb_cur_u32(&stats, &exec_inflight) || stats.off != stats.len)
+                    bad_meta = 1;
+                else
+                    have_exec_stats = 1;
+            } else if (sversion == LMB_EREG_STATS_VERSION) {
+                if (slen != LMB_EREG_STATS_LENGTH ||
+                    lmb_cur_u64(&stats, &exec_calls) ||
+                    lmb_cur_u32(&stats, &exec_inflight) ||
+                    lmb_cur_u32(&stats, &expert_state) ||
+                    lmb_cur_u32(&stats, &resident_flags) ||
+                    lmb_cur_u32(&stats, &resident_experts) ||
+                    lmb_cur_u64(&stats, &resident_bytes) ||
+                    lmb_cur_u64(&stats, &resident_vram) || stats.off != stats.len)
                     bad_meta = 1;
                 else
                     have_exec_stats = 1;
@@ -1008,6 +1024,11 @@ static Peer *handle_ereg(int fd, LmbMsg *m, const uint8_t *nonce) {
         slot->exec_calls = exec_calls;
         slot->exec_inflight = exec_inflight;
         slot->have_exec_stats = have_exec_stats;
+        slot->expert_state = expert_state;
+        slot->expert_resident_flags = resident_flags;
+        slot->resident_experts = resident_experts;
+        slot->expert_resident_bytes = resident_bytes;
+        slot->expert_vram_bytes = resident_vram;
         if (bl) {
             uint8_t *nb = (uint8_t *)realloc(slot->ebits, bl);
             if (nb) { slot->ebits = nb; memcpy(slot->ebits, bits, bl);
@@ -1049,11 +1070,15 @@ static int handle_epeers(int fd, LmbMsg *m) {
     uint32_t n = 0;
     for (int i = 0; i < MAX_PEERS; i++)
         if (g_peers[i].used && g_peers[i].is_expert && g_peers[i].has_expert &&
+            g_peers[i].nexperts > 0 &&
+            g_peers[i].expert_state != LMB_EXPERT_STATE_DRAINING &&
             now - g_peers[i].expert_ts <= g_stale_s &&
             (!want[0] || !strcmp(g_peers[i].model, want))) n++;
     lmb_buf_u32(&b, n);
     for (int i = 0; i < MAX_PEERS; i++)
         if (g_peers[i].used && g_peers[i].is_expert && g_peers[i].has_expert &&
+            g_peers[i].nexperts > 0 &&
+            g_peers[i].expert_state != LMB_EXPERT_STATE_DRAINING &&
             now - g_peers[i].expert_ts <= g_stale_s &&
             (!want[0] || !strcmp(g_peers[i].model, want)))
             lmb_buf_str(&b, g_peers[i].addr);
@@ -1295,7 +1320,7 @@ static int handle_segment_assign(int fd, LmbMsg *m) {
         send_err(fd, "incomplete segment assignment identity"); return -1;
     }
 
-    uint32_t chosen_begin = 0, chosen_end = 0;
+    uint32_t chosen_begin = 0, chosen_end = 0, chosen_model_layers = 0;
     uint32_t best_replicas = UINT32_MAX, best_load = UINT32_MAX;
     int retained = 0;
     double now = now_s();
@@ -1414,8 +1439,19 @@ static int handle_segment_assign(int fd, LmbMsg *m) {
             memcpy(slot->model_root, root, sizeof root);
         }
     }
+    for (int i = 0; i < MAX_PEERS; i++) {
+        Peer *origin = &g_peers[i];
+        if (origin->used && origin->has_segment && origin->segment_live &&
+            now - origin->segment_ts <= g_stale_s &&
+            (origin->segment.flags & LMB_SEG_ADVERT_FALLBACK) &&
+            !strcmp(origin->segment.model, model) &&
+            !strcmp(origin->segment.engine_id, engine) &&
+            !memcmp(origin->segment.model_root, root, sizeof root) &&
+            origin->segment.layer_end > chosen_model_layers)
+            chosen_model_layers = origin->segment.layer_end;
+    }
     pthread_mutex_unlock(&g_lk);
-    if (!chosen_end) {
+    if (!chosen_end || chosen_model_layers < chosen_end) {
         send_err(fd, "no compatible origin Segment slice"); return 0;
     }
     LmbBuf reply = {0};
@@ -1423,6 +1459,7 @@ static int handle_segment_assign(int fd, LmbMsg *m) {
     lmb_buf_u32(&reply, LMB_SEG_ASSIGN_VERSION);
     lmb_buf_u32(&reply, chosen_begin);
     lmb_buf_u32(&reply, chosen_end);
+    lmb_buf_u32(&reply, chosen_model_layers);
     int rc = lmb_send(fd, LMB_SEG_ASSIGN_R, reply.p,
                       (uint32_t)reply.len, NULL, 0);
     free(reply.p);
@@ -1435,6 +1472,39 @@ static int handle_segment_assign(int fd, LmbMsg *m) {
                best_replicas, best_replicas == 1 ? "" : "s");
     fflush(stdout);
     return rc;
+}
+
+static int handle_segment_assign_release(int fd, LmbMsg *m) {
+    LmbCur c = { m->body, m->body_len, 0 };
+    uint32_t magic = 0, version = 0;
+    char model[LMB_SEG_MODEL_MAX], name[LMB_SEG_PEER_NAME_MAX];
+    char engine[LMB_SEG_ENGINE_MAX];
+    uint8_t root[LMB_SEG_ROOT_BYTES];
+    if (m->pay_len || lmb_cur_u32(&c, &magic) ||
+        lmb_cur_u32(&c, &version) || magic != LMB_SEG_ASSIGN_MAGIC ||
+        version != LMB_SEG_ASSIGN_VERSION ||
+        lmb_cur_str(&c, model, sizeof model) ||
+        lmb_cur_str(&c, name, sizeof name) ||
+        lmb_cur_str(&c, engine, sizeof engine) ||
+        lmb_cur_bytes(&c, root, sizeof root) || c.off != c.len) {
+        send_err(fd, "bad segment assignment release"); return -1;
+    }
+    int released = 0;
+    pthread_mutex_lock(&g_lk);
+    for (int i = 0; i < MAX_SEGMENT_PROMISES; i++) {
+        SegmentPromise *promise = &g_segment_promises[i];
+        if (promise->used && !strcmp(promise->model, model) &&
+            !strcmp(promise->name, name) &&
+            !strcmp(promise->engine, engine) &&
+            !memcmp(promise->model_root, root, sizeof root)) {
+            memset(promise, 0, sizeof *promise);
+            released = 1;
+        }
+    }
+    pthread_mutex_unlock(&g_lk);
+    if (released)
+        printf("[tracker] Segment assign %s: released before READY\n", name);
+    return lmb_send(fd, LMB_OK, NULL, 0, NULL, 0);
 }
 
 static int handle_ecover(int fd, LmbMsg *m) {
@@ -1699,6 +1769,11 @@ static int handle_swarm_detail(int fd) {
         lmb_buf_u32(&body, expert && p->have_exec_stats ? 1u : 0u);
         lmb_buf_u64(&body, expert && p->have_exec_stats ? p->exec_calls : 0u);
         lmb_buf_u32(&body, expert && p->have_exec_stats ? p->exec_inflight : 0u);
+        lmb_buf_u32(&body, expert ? p->expert_state : 0u);
+        lmb_buf_u32(&body, expert ? p->expert_resident_flags : 0u);
+        lmb_buf_u32(&body, expert ? p->resident_experts : 0u);
+        lmb_buf_u64(&body, expert ? p->expert_resident_bytes : 0u);
+        lmb_buf_u64(&body, expert ? p->expert_vram_bytes : 0u);
         lmb_buf_u32(&body, segment ? p->segment.layer_begin : 0u);
         lmb_buf_u32(&body, segment ? p->segment.layer_end : 0u);
         lmb_buf_u32(&body, segment ? p->segment.active_sessions : 0u);
@@ -2484,6 +2559,8 @@ static void *conn_thread(void *arg) {
         }
         case LMB_SEG_ROUTES: rc = handle_segment_routes(fd, &m); break;
         case LMB_SEG_ASSIGN: rc = handle_segment_assign(fd, &m); break;
+        case LMB_SEG_ASSIGN_RELEASE:
+            rc = handle_segment_assign_release(fd, &m); break;
         case LMB_HASHES:    rc = handle_hashes(fd, &m); break;
         case LMB_MODEL_ID:  rc = handle_model_id(fd, &m); break;
         case LMB_PLACEMENT: rc = handle_placement(fd, &m); break;

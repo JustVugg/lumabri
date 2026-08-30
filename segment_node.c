@@ -4,6 +4,8 @@
 #include "lumabri_proto.h"
 #include "lumabri_segment.h"
 #include "lumabri_segment_discovery.h"
+#include "lumabri_machine.h"
+#include "lumabri_run_gate.h"
 #include "lumabri_sign.h"
 #include "lumabri_secure.h"
 #include "segment_colibri.h"
@@ -53,6 +55,7 @@ typedef struct {
     LmbSegAdvert advert;
     uint8_t pk[32], sk[64];
     LmbSegOwner owner;
+    LmbRunGate *run_gate;
     int ready;
     volatile sig_atomic_t stop;
 } TrackerRegistration;
@@ -64,12 +67,16 @@ typedef struct {
     LmbSegTable *table;
     NodeSession sessions[NODE_SESSIONS_MAX];
     pthread_mutex_t sessions_lock;
-    pthread_mutex_t run_lock;      /* one OpenMP team per slice, no oversubscription */
+    LmbRunGate run_gate;
+    uint32_t run_wait_ms;
     pthread_mutex_t connections_lock;
     pthread_cond_t connections_drained;
     int connection_fds[NODE_CONNECTIONS_MAX];
     unsigned active_connections;
     uint64_t ram_reserve_bytes;
+    uint64_t process_memory_limit_bytes;
+    uint64_t session_memory_limit_bytes;
+    LmbGovernor governor;
     TrackerRegistration registration;
 } Node;
 
@@ -83,14 +90,54 @@ static uint64_t now_ms(void) {
 }
 
 static uint64_t available_memory_bytes(void) {
-    FILE *file = fopen("/proc/meminfo", "r");
-    if (!file) return UINT64_MAX; /* unknown must not make a healthy node lie */
-    char line[256];
-    unsigned long long kib = 0;
-    while (fgets(line, sizeof line, file))
-        if (sscanf(line, "MemAvailable: %llu kB", &kib) == 1) break;
+    uint64_t available = lmb_machine_available_ram();
+    return available ? available : UINT64_MAX;
+}
+
+static uint64_t resident_memory_bytes(void) {
+    FILE *file = fopen("/proc/self/statm", "r");
+    unsigned long long pages = 0, resident = 0;
+    if (!file) return 0;
+    int ok = fscanf(file, "%llu %llu", &pages, &resident) == 2;
     fclose(file);
-    return kib ? (uint64_t)kib * 1024u : UINT64_MAX;
+    long page = sysconf(_SC_PAGESIZE);
+    if (!ok || page <= 0 || resident > UINT64_MAX / (uint64_t)page) return 0;
+    return resident * (uint64_t)page;
+}
+
+static int memory_pressure(void *opaque) {
+    Node *node = opaque;
+    uint64_t rss = resident_memory_bytes();
+    return g_stop || !lmb_governor_accepting(&node->governor) ||
+           available_memory_bytes() < node->ram_reserve_bytes ||
+           (node->process_memory_limit_bytes && rss &&
+            rss > node->process_memory_limit_bytes);
+}
+
+static void *governor_worker(void *opaque) {
+    Node *node = opaque;
+    LmbGovernorState previous = lmb_governor_state(&node->governor);
+    while (!g_stop && !node->registration.stop) {
+        LmbGovernorState state = lmb_governor_poll(&node->governor);
+        pthread_mutex_lock(&node->registration.lock);
+        if (state == LMB_GOV_ACTIVE)
+            node->registration.advert.flags &= ~LMB_SEG_ADVERT_DRAINING;
+        else
+            node->registration.advert.flags |= LMB_SEG_ADVERT_DRAINING;
+        pthread_mutex_unlock(&node->registration.lock);
+        if (state != previous) {
+            fprintf(stderr, "[segment-node %s] governor %s -> %s%s\n",
+                    node->advert.peer_name,
+                    lmb_governor_state_name(previous),
+                    lmb_governor_state_name(state),
+                    state == LMB_GOV_ACTIVE ? " · accepting sessions" :
+                                             " · draining and refusing new work");
+            previous = state;
+        }
+        for (int i = 0; i < 10 && !g_stop && !node->registration.stop; i++)
+            usleep(100000);
+    }
+    return NULL;
 }
 
 static void stop_handler(int sig) {
@@ -123,6 +170,10 @@ static int tracker_register_send(int fd, const uint8_t nonce[32],
     pthread_mutex_lock(&r->lock);
     advert = r->advert;
     pthread_mutex_unlock(&r->lock);
+    if (r->run_gate) {
+        advert.queue_depth = lmb_run_gate_queued(r->run_gate);
+        advert.inflight = lmb_run_gate_inflight(r->run_gate);
+    }
     uint8_t *wire = NULL;
     uint32_t wire_len = 0;
     if (lmb_seg_advert_encode(&advert, &wire, &wire_len)) return -1;
@@ -502,12 +553,14 @@ static int handle_open(Node *node, int fd, const LmbMsg *msg) {
             status = lmb_seg_table_open(node->table, &open, now_ms());
         } else if (!(slot = session_empty(node))) {
             status = LMB_SEG_STATUS_QUOTA;
-        } else if (available_memory_bytes() < node->ram_reserve_bytes) {
+        } else if (!lmb_governor_accepting(&node->governor) ||
+                   available_memory_bytes() < node->ram_reserve_bytes) {
             status = LMB_SEG_STATUS_QUOTA;
         } else {
             ColiSegmentSessionOptions options = {
                 .struct_size = sizeof options,
                 .context_tokens = open.context_tokens,
+                .memory_limit_bytes = node->session_memory_limit_bytes,
             };
             ColiSegmentSession *session = NULL;
             char error[256] = "";
@@ -576,15 +629,13 @@ static int handle_run(Node *node, int fd, const LmbMsg *msg) {
         if (!session || !output || bytes != msg->pay_len) {
             status = LMB_SEG_STATUS_INTERNAL;
         } else {
-            pthread_mutex_lock(&node->registration.lock);
-            node->registration.advert.queue_depth++;
-            pthread_mutex_unlock(&node->registration.lock);
-            pthread_mutex_lock(&node->run_lock);
-            pthread_mutex_lock(&node->registration.lock);
-            if (node->registration.advert.queue_depth)
-                node->registration.advert.queue_depth--;
-            node->registration.advert.inflight++;
-            pthread_mutex_unlock(&node->registration.lock);
+            int admitted = lmb_run_gate_enter(&node->run_gate,
+                                               node->run_wait_ms,
+                                               memory_pressure, node);
+            if (admitted != 1) {
+                status = admitted < 0 ? LMB_SEG_STATUS_QUOTA :
+                                        LMB_SEG_STATUS_BUSY;
+            }
             ColiSegmentRunRequest request = {
                 .struct_size = sizeof request,
                 .rows = run.rows,
@@ -595,9 +646,12 @@ static int handle_run(Node *node, int fd, const LmbMsg *msg) {
                 .input_bytes = msg->pay_len,
                 .output = output,
                 .output_bytes = bytes,
+                .should_cancel = memory_pressure,
+                .cancel_user_data = node,
             };
             char error[256] = "";
-            if (coli_segment_run(session, &request, error, sizeof error)) {
+            if (admitted == 1 &&
+                coli_segment_run(session, &request, error, sizeof error)) {
                 /* Name the slice: an origin runs several of these at once and
                  * an unlabelled line cannot be attributed to a layer range. */
                 fprintf(stderr, "[segment-node %s %u:%u] run failed on %u row%s "
@@ -609,11 +663,7 @@ static int handle_run(Node *node, int fd, const LmbMsg *msg) {
                         engine_error(error));
                 status = LMB_SEG_STATUS_INTERNAL;
             }
-            pthread_mutex_lock(&node->registration.lock);
-            if (node->registration.advert.inflight)
-                node->registration.advert.inflight--;
-            pthread_mutex_unlock(&node->registration.lock);
-            pthread_mutex_unlock(&node->run_lock);
+            if (admitted == 1) lmb_run_gate_leave(&node->run_gate);
         }
         if (status != LMB_SEG_STATUS_OK) {
             (void)lmb_seg_table_run_abort(node->table, &run);
@@ -879,7 +929,11 @@ static void *connection_worker(void *opaque) {
         LmbMsg msg = {0};
         if (lmb_recv(fd, &msg)) break;
         int rc;
-        if (msg.op == LMB_SEG_OPEN) rc = handle_open(node, fd, &msg);
+        if (msg.op == LMB_PING) {
+            lmb_emu_delay();
+            rc = lmb_send(fd, LMB_OK, NULL, 0, NULL, 0);
+        }
+        else if (msg.op == LMB_SEG_OPEN) rc = handle_open(node, fd, &msg);
         else if (msg.op == LMB_SEG_RUN) rc = handle_run(node, fd, &msg);
         else if (msg.op == LMB_SEG_SNAPSHOT) rc = handle_snapshot(node, fd, &msg);
         else if (msg.op == LMB_SEG_RESTORE) rc = handle_restore(node, fd, &msg);
@@ -902,7 +956,9 @@ static void usage(const char *program) {
         "--advertise HOST:PORT --name PEER "
         "(--auto-identity | --model-root HEX64 --tokenizer-root HEX64) "
         "[--fallback] [--relay-only] [--context N] [--max-rows N] "
-        "[--sessions N] [--threads N]\n",
+        "[--sessions N] [--threads N] [--run-queue N] [--run-wait-ms N] "
+        "[--memory-limit-mb N] "
+        "[--model-bytes N --model-layers N] [--preflight-fd N]\n",
         program);
 }
 
@@ -919,7 +975,8 @@ static int has_arg(int argc, char **argv, const char *name) {
 static int auto_range_get(const char *tracker, const char *model,
                           const char *name, const char *engine_id,
                           const uint8_t model_root[LMB_SEG_ROOT_BYTES],
-                          unsigned *begin, unsigned *end) {
+                          unsigned *begin, unsigned *end,
+                          unsigned *model_layers) {
     LmbBuf body = {0};
     if (lmb_buf_u32(&body, LMB_SEG_ASSIGN_MAGIC) ||
         lmb_buf_u32(&body, LMB_SEG_ASSIGN_VERSION) ||
@@ -936,16 +993,54 @@ static int auto_range_get(const char *tracker, const char *model,
         lmb_msg_free(&reply); return -1;
     }
     LmbCur cursor = { reply.body, reply.body_len, 0 };
-    uint32_t magic = 0, version = 0, first = 0, last = 0;
+    uint32_t magic = 0, version = 0, first = 0, last = 0, total = 0;
     rc = lmb_cur_u32(&cursor, &magic) ||
          lmb_cur_u32(&cursor, &version) ||
          lmb_cur_u32(&cursor, &first) || lmb_cur_u32(&cursor, &last) ||
+         lmb_cur_u32(&cursor, &total) ||
          cursor.off != cursor.len || magic != LMB_SEG_ASSIGN_MAGIC ||
-         version != LMB_SEG_ASSIGN_VERSION || first >= last;
+         version != LMB_SEG_ASSIGN_VERSION || first >= last || last > total;
     lmb_msg_free(&reply);
     if (rc) return -1;
-    *begin = first; *end = last;
+    *begin = first; *end = last; *model_layers = total;
     return 0;
+}
+
+static int parse_u64_decimal(const char *text, uint64_t *out) {
+    if (!text || !*text || text[0] == '-') return -1;
+    errno = 0;
+    char *end = NULL;
+    unsigned long long value = strtoull(text, &end, 10);
+    if (errno || end == text || *end) return -1;
+    *out = (uint64_t)value;
+    return 0;
+}
+
+static int auto_range_release(const char *tracker, const char *model,
+                              const char *name, const char *engine_id,
+                              const uint8_t model_root[LMB_SEG_ROOT_BYTES]) {
+    LmbBuf body = {0};
+    if (lmb_buf_u32(&body, LMB_SEG_ASSIGN_MAGIC) ||
+        lmb_buf_u32(&body, LMB_SEG_ASSIGN_VERSION) ||
+        lmb_buf_str(&body, model) || lmb_buf_str(&body, name) ||
+        lmb_buf_str(&body, engine_id) ||
+        lmb_buf_bytes(&body, model_root, LMB_SEG_ROOT_BYTES)) {
+        free(body.p); return -1;
+    }
+    LmbMsg reply = {0};
+    int rc = lmb_request(tracker, LMB_SEG_ASSIGN_RELEASE, body.p,
+                         (uint32_t)body.len, &reply);
+    free(body.p);
+    int bad = rc || reply.op != LMB_OK || reply.body_len || reply.pay_len;
+    lmb_msg_free(&reply);
+    return bad ? -1 : 0;
+}
+
+static void preflight_signal(int *fd, char status) {
+    if (!fd || *fd < 0) return;
+    while (write(*fd, &status, 1) < 0 && errno == EINTR) { }
+    close(*fd);
+    *fd = -1;
 }
 
 int main(int argc, char **argv) {
@@ -984,6 +1079,10 @@ int main(int argc, char **argv) {
         usage(argv[0]); return 2;
     }
     uint32_t context = 4096, max_rows = 256, max_sessions = 16, threads = 0;
+    uint32_t run_queue = 32, run_wait_ms = 30000;
+    uint32_t memory_limit_mb = 0, model_layers = 0, preflight_fd_u32 = 0;
+    uint64_t model_bytes = 0;
+    int preflight_fd = -1;
     const char *value;
     if (((value = arg_value(argc, argv, "--context")) &&
          lmb_parse_u32(value, 1, LMB_SEG_MAX_CONTEXT, &context)) ||
@@ -992,9 +1091,24 @@ int main(int argc, char **argv) {
         ((value = arg_value(argc, argv, "--sessions")) &&
          lmb_parse_u32(value, 1, NODE_SESSIONS_MAX, &max_sessions)) ||
         ((value = arg_value(argc, argv, "--threads")) &&
-         lmb_parse_u32(value, 1, 256, &threads))) {
+         lmb_parse_u32(value, 1, 256, &threads)) ||
+        ((value = arg_value(argc, argv, "--run-queue")) &&
+         lmb_parse_u32(value, 0, NODE_SESSIONS_MAX, &run_queue)) ||
+        ((value = arg_value(argc, argv, "--run-wait-ms")) &&
+         lmb_parse_u32(value, 50, 60000, &run_wait_ms)) ||
+        ((value = arg_value(argc, argv, "--memory-limit-mb")) &&
+         lmb_parse_u32(value, 1, 1048576, &memory_limit_mb)) ||
+        ((value = arg_value(argc, argv, "--model-bytes")) &&
+         parse_u64_decimal(value, &model_bytes)) ||
+        ((value = arg_value(argc, argv, "--model-layers")) &&
+         lmb_parse_u32(value, 1, 1048576, &model_layers)) ||
+        ((value = arg_value(argc, argv, "--preflight-fd")) &&
+         lmb_parse_u32(value, 0, 1048576, &preflight_fd_u32)) ||
+        (range && model_bytes && !model_layers)) {
         usage(argv[0]); return 2;
     }
+    if (arg_value(argc, argv, "--preflight-fd"))
+        preflight_fd = (int)preflight_fd_u32;
 #ifdef _OPENMP
     if (threads) omp_set_num_threads((int)threads);
 #else
@@ -1005,6 +1119,21 @@ int main(int argc, char **argv) {
     if (lmb_secure_init()) return 1;
     signal(SIGINT, stop_handler); signal(SIGTERM, stop_handler);
     signal(SIGPIPE, SIG_IGN);
+    /* The hybrid engine is a Lumabri-only build copy. Its transport client
+     * discovers resident Expert peers from this node's own control-plane
+     * identity; Colibri sources and ordinary Colibri binaries stay untouched. */
+    setenv("LUMABRI_TRACKER", tracker, 1);
+    setenv("LUMABRI_MODEL", model, 1);
+    setenv("LUMABRI_EXEC_FALLBACK_LOCAL", "1", 1);
+    /* The GLM Segment adapter is named "glm" while its long-standing Expert
+     * wire family is "colibri". Every other adapter shares the same name.
+     * Bits describe expert storage, not the activation/state representation. */
+    const char *expert_engine_id = !strcmp(engine_id, "glm") ?
+                                   "colibri" : engine_id;
+    setenv("LUMABRI_ENGINE_ID", expert_engine_id, 1);
+    setenv("LUMABRI_EXPERT_BITS",
+           (!strcmp(expert_engine_id, "colibri") ||
+            !strcmp(expert_engine_id, "inkling")) ? "8" : "0", 1);
     if (fallback) (void)setpriority(PRIO_PROCESS, 0, 10);
     if (threads)
         fprintf(stderr, "[segment-node] governor: %u compute thread%s · "
@@ -1012,6 +1141,16 @@ int main(int argc, char **argv) {
                 threads == 1 ? "" : "s", max_sessions,
                 max_sessions == 1 ? "" : "s",
                 (fallback || auto_range) ? " · low CPU priority" : "");
+    /* The upstream batched expert union currently rejects the V4 Flash
+     * checkpoint used by Segment. Disable it before adapter registration in
+     * this dedicated process: ordinary Colibri and expert_node keep their
+     * own environment and their normal code path. Retrying after a failed
+     * RUN is unsafe because recurrent/attention state may already have moved. */
+    if (!strcmp(engine_id, "deepseek_v4") && !getenv("V4_EXPERT_UNION")) {
+        setenv("V4_EXPERT_UNION", "0", 0);
+        fprintf(stderr, "[segment-node] DeepSeek V4 batched expert union "
+                        "disabled for Segment safety\n");
+    }
     if (lmb_colibri_register_all()) {
         fprintf(stderr, "cannot register all six Colibri adapters\n"); return 1;
     }
@@ -1059,7 +1198,8 @@ int main(int argc, char **argv) {
     if (auto_range) {
         int announced = 0;
         while (!g_stop && auto_range_get(tracker, model, name, engine_id,
-                                         resolved_model_root, &begin, &end)) {
+                                         resolved_model_root, &begin, &end,
+                                         &model_layers)) {
             if (!announced) {
                 fprintf(stderr, "[segment-node] waiting for an automatic "
                         "range assignment for %s\n", model);
@@ -1076,31 +1216,73 @@ int main(int argc, char **argv) {
          * applies the same priority; explicit low-level nodes remain neutral. */
         (void)setpriority(PRIO_PROCESS, 0, 10);
     }
+    uint64_t process_limit = (uint64_t)memory_limit_mb << 20;
+    uint64_t available = available_memory_bytes();
+    const char *reserve_name = getenv("LUMABRI_SEGMENT_RAM_RESERVE_MB") ?
+                               "LUMABRI_SEGMENT_RAM_RESERVE_MB" :
+                               "LUMABRI_RAM_RESERVE_MB";
+    uint64_t reserve = (uint64_t)lmb_env_int(
+        reserve_name, 4096, 256, 262144) << 20;
+    if (!process_limit && available != UINT64_MAX && available > reserve)
+        process_limit = available - reserve;
+    if (process_limit && model_bytes && model_layers) {
+        uint64_t range_layers = end - begin;
+        uint64_t proportional = model_bytes / model_layers * range_layers;
+        uint64_t remainder = model_bytes % model_layers * range_layers /
+                             model_layers;
+        uint64_t overhead = model_bytes / 20u;
+        uint64_t estimated = proportional + remainder;
+        if (estimated <= UINT64_MAX - overhead) estimated += overhead;
+        else estimated = UINT64_MAX;
+        if (estimated > process_limit) {
+            fprintf(stderr, "[segment-node] assigned range %u:%u needs about "
+                    "%.1f GB but the donor budget is %.1f GB; releasing it "
+                    "before loading weights\n", begin, end,
+                    (double)estimated / 1e9, (double)process_limit / 1e9);
+            if (auto_range)
+                (void)auto_range_release(tracker, model, name, engine_id,
+                                         resolved_model_root);
+            preflight_signal(&preflight_fd, 'F');
+            return 3;
+        }
+    }
+    preflight_signal(&preflight_fd, 'P');
     Node node;
     memset(&node, 0, sizeof node);
     for (size_t i = 0; i < NODE_CONNECTIONS_MAX; i++) node.connection_fds[i] = -1;
     pthread_mutex_init(&node.sessions_lock, NULL);
-    pthread_mutex_init(&node.run_lock, NULL);
+    if (lmb_run_gate_init(&node.run_gate, 1, run_queue)) {
+        fprintf(stderr, "cannot initialize Segment admission gate\n");
+        return 1;
+    }
+    node.run_wait_ms = run_wait_ms;
     pthread_mutex_init(&node.connections_lock, NULL);
     pthread_cond_init(&node.connections_drained, NULL);
     for (size_t i = 0; i < NODE_SESSIONS_MAX; i++)
         pthread_mutex_init(&node.sessions[i].lock, NULL);
-    node.ram_reserve_bytes = (uint64_t)lmb_env_int(
-        "LUMABRI_SEGMENT_RAM_RESERVE_MB", 4096, 256, 262144) << 20;
+    node.ram_reserve_bytes = reserve;
+    lmb_governor_init(&node.governor, reserve);
+    node.process_memory_limit_bytes = process_limit;
     fprintf(stderr, "[segment-node] governor: %.1f GB RAM reserved for the "
                     "machine\n", (double)node.ram_reserve_bytes / 1e9);
+    fprintf(stderr, "[segment-node] admission: one engine team · FIFO queue "
+                    "%u · %u ms deadline\n", run_queue, run_wait_ms);
     ColiSegmentEngineOptions options = {
         .struct_size = sizeof options,
         .model_dir = model_dir,
         .layer_begin = begin,
         .layer_end = end,
         .context_tokens = context,
+        .memory_limit_bytes = process_limit,
     };
     char error[256] = "";
     if (coli_segment_engine_open(engine_id, &options, &node.engine,
                                  error, sizeof error)) {
         fprintf(stderr, "cannot open Colibri Segment engine: %s\n",
                 engine_error(error));
+        if (auto_range)
+            (void)auto_range_release(tracker, model, name, engine_id,
+                                     resolved_model_root);
         return 1;
     }
     node.cap.struct_size = sizeof node.cap;
@@ -1109,11 +1291,34 @@ int main(int argc, char **argv) {
                                          error, sizeof error)) {
         fprintf(stderr, "cannot read Segment capabilities: %s\n",
                 engine_error(error));
+        if (auto_range)
+            (void)auto_range_release(tracker, model, name, engine_id,
+                                     resolved_model_root);
         return 1;
     }
+    uint64_t engine_rss = resident_memory_bytes();
+    if (process_limit && engine_rss && engine_rss >= process_limit) {
+        fprintf(stderr, "[segment-node] engine RSS %.1f GB exhausted the "
+                        "%.1f GB process budget before opening sessions\n",
+                (double)engine_rss / 1e9, (double)process_limit / 1e9);
+        if (auto_range)
+            (void)auto_range_release(tracker, model, name, engine_id,
+                                     resolved_model_root);
+        return 1;
+    }
+    if (process_limit && process_limit > engine_rss)
+        node.session_memory_limit_bytes =
+            (process_limit - engine_rss) / max_sessions;
+    fprintf(stderr, "[segment-node] governor: %.1f GB process budget · "
+                    "%.1f MB per session\n",
+            (double)process_limit / 1e9,
+            (double)node.session_memory_limit_bytes / 1e6);
     if (end > node.cap.num_layers || context > node.cap.max_context_tokens ||
         max_rows > node.cap.max_batch_rows) {
         fprintf(stderr, "requested range/context/rows exceed model capabilities\n");
+        if (auto_range)
+            (void)auto_range_release(tracker, model, name, engine_id,
+                                     resolved_model_root);
         return 1;
     }
     LmbSegAdvert *a = &node.advert;
@@ -1129,7 +1334,13 @@ int main(int argc, char **argv) {
     a->max_sessions = max_sessions;
     if (fallback) a->flags |= LMB_SEG_ADVERT_FALLBACK;
     if (relay_only) a->flags |= LMB_SEG_ADVERT_RELAY_ONLY;
+    if (!lmb_governor_accepting(&node.governor))
+        a->flags |= LMB_SEG_ADVERT_DRAINING;
     a->capabilities = node.cap.flags & LMB_SEG_CAP_KNOWN_MASK;
+    /* Registration happens after engine_open, so this is measured resident
+     * memory, not a model-size promise. A zero value remains valid on systems
+     * without an RSS counter, but the node is still READY only after open. */
+    a->resident_ram_bytes = engine_rss;
     snprintf(a->engine_id, sizeof a->engine_id, "%s", node.cap.engine_id);
     snprintf(a->state_schema, sizeof a->state_schema, "%s", node.cap.state_schema);
     snprintf(a->numeric_class, sizeof a->numeric_class, "%s", node.cap.numeric_class);
@@ -1139,6 +1350,7 @@ int main(int argc, char **argv) {
     node.table = lmb_seg_table_create(max_sessions);
     if (!node.table) { fprintf(stderr, "cannot create session table\n"); return 1; }
     TrackerRegistration *registration = &node.registration;
+    registration->run_gate = &node.run_gate;
     pthread_mutex_init(&registration->lock, NULL);
     snprintf(registration->tracker, sizeof registration->tracker, "%s", tracker);
     snprintf(registration->local_addr, sizeof registration->local_addr,
@@ -1154,7 +1366,7 @@ int main(int argc, char **argv) {
     }
     g_listen_fd = lmb_listen((int)port);
     if (g_listen_fd < 0) { perror("segment listen"); return 1; }
-    pthread_t registration_thread, reaper_thread;
+    pthread_t registration_thread, reaper_thread, governor_thread;
     if (pthread_create(&registration_thread, NULL, registration_worker,
                        registration)) {
         fprintf(stderr, "cannot start tracker registration\n"); return 1;
@@ -1162,6 +1374,13 @@ int main(int argc, char **argv) {
     if (pthread_create(&reaper_thread, NULL, session_reaper, &node)) {
         fprintf(stderr, "cannot start session reaper\n");
         registration->stop = 1;
+        pthread_join(registration_thread, NULL);
+        return 1;
+    }
+    if (pthread_create(&governor_thread, NULL, governor_worker, &node)) {
+        fprintf(stderr, "cannot start resource governor\n");
+        g_stop = 1; registration->stop = 1;
+        pthread_join(reaper_thread, NULL);
         pthread_join(registration_thread, NULL);
         return 1;
     }
@@ -1188,6 +1407,7 @@ int main(int argc, char **argv) {
         pthread_detach(thread);
     }
     registration->stop = 1;
+    pthread_join(governor_thread, NULL);
     pthread_join(reaper_thread, NULL);
     pthread_join(registration_thread, NULL);
     pthread_mutex_lock(&node.connections_lock);
@@ -1213,7 +1433,7 @@ int main(int argc, char **argv) {
     pthread_cond_destroy(&node.connections_drained);
     pthread_mutex_destroy(&node.connections_lock);
     pthread_mutex_destroy(&node.sessions_lock);
-    pthread_mutex_destroy(&node.run_lock);
+    lmb_run_gate_destroy(&node.run_gate);
     for (size_t i = 0; i < NODE_SESSIONS_MAX; i++)
         pthread_mutex_destroy(&node.sessions[i].lock);
     pthread_mutex_destroy(&registration->lock);

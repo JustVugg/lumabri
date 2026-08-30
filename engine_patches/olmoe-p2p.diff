@@ -13,9 +13,9 @@ diff --git a/c/olmoe.c b/c/olmoe.c
 +#include "lumibri_client.h"
 +#endif
  #include "serve_codec.h"
- 
- #ifdef _WIN32
-@@ -392,6 +399,10 @@
+ #ifdef COLI_SEGMENT_ADAPTER
+ #include "segment_runtime.h"
+@@ -471,6 +478,10 @@
      if (cl < 0.1f) cl = 0.1f; if (cl > 1.0f) cl = 1.0f;
      m->pilot_conf_limit = cl;
      m->dense_load_s = now_s() - t0;
@@ -24,15 +24,15 @@ diff --git a/c/olmoe.c b/c/olmoe.c
 +    atexit(lumi_report);
 +#endif
  
-     // Persistent Hot Pinning: try to load hot_pinned.bin
-     char pinpath[512];
-@@ -730,6 +741,12 @@
+     /* Persistent hot pinning belongs to the standalone runtime. A Segment
+      * range must never enqueue expert reads for layers it does not own. */
+@@ -813,6 +824,12 @@
              if (freq_l) for (int kk = 0; kk < K; kk++) if (idx[kk] >= 0) freq_l[idx[kk]]++;
          }
          const float *xs = x + (int64_t)s*D;
 +#ifdef LUMIBRI_P2P
-+        if (lumi_layer_on(layer)) {   /* the K experts run on peers; routing and the sum stay here */
-+            lumi_moe_apply(layer, idx, val, K, xs, D, out + (int64_t)s*D);
++        if (lumi_layer_on(layer) &&
++            lumi_moe_apply(layer, idx, val, K, xs, D, out + (int64_t)s*D)) {
 +            continue;
 +        }
 +#endif

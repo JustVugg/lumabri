@@ -41,10 +41,28 @@ def render(value: str, fields: dict[str, Any]) -> str:
     return value.format_map({key: str(val) for key, val in fields.items()})
 
 
-def run_json(host: str, command: list[str], fields: dict[str, Any], timeout: float) -> dict:
-    argv = remote_command(host, [render(part, fields) for part in command])
+def run_json(host: str, command: list[str], fields: dict[str, Any], timeout: float,
+             environment: dict[str, Any] | None = None) -> dict:
+    rendered = [render(part, fields) for part in command]
+    values = {str(key): render(str(value), fields)
+              for key, value in (environment or {}).items()}
+    for key in values:
+        if (not key or not key.isascii() or
+                not (key[0].isalpha() or key[0] == "_") or
+                any(not (char.isalnum() or char == "_") for char in key)):
+            raise ValueError(f"invalid environment variable name: {key!r}")
+    local = host in ("", "local", "localhost")
+    if not local and values:
+        rendered = ["env", *(f"{key}={value}" for key, value in values.items()),
+                    *rendered]
+    argv = remote_command(host, rendered)
+    process_environment = None
+    if local and values:
+        process_environment = os.environ.copy()
+        process_environment.update(values)
     proc = subprocess.run(argv, text=True, stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE, timeout=timeout, check=False)
+                          stderr=subprocess.PIPE, timeout=timeout, check=False,
+                          env=process_environment)
     if proc.returncode:
         raise RuntimeError(f"command failed ({proc.returncode}): {shlex.join(argv)}\n{proc.stderr[-2000:]}")
     for line in reversed(proc.stdout.splitlines()):
@@ -90,7 +108,8 @@ def peer_counters(spec: dict, timeout: float) -> dict:
 
 def one_sample(spec: dict, fields: dict[str, Any], oracle: list[int], timeout: float) -> dict:
     chatter = spec["chatter"]
-    raw = run_json(chatter.get("host", "local"), chatter["command"], fields, timeout)
+    raw = run_json(chatter.get("host", "local"), chatter["command"], fields,
+                   timeout, chatter.get("env"))
     return validate_sample(raw, oracle)
 
 

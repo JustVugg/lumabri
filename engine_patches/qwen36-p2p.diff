@@ -12,10 +12,10 @@ diff --git a/c/qwen36.c b/c/qwen36.c
 + * at runtime unless the swarm can cover every expert. */
 +#include "lumibri_client.h"
 +#endif
- 
- #ifdef _WIN32
- #include <windows.h>
-@@ -1180,6 +1187,10 @@
+ #ifdef COLI_SEGMENT_ADAPTER
+ #include "segment_runtime.h"
+ #include "segment_adapters.h"
+@@ -1346,6 +1353,10 @@
      if (cl < 0.1f) cl = 0.1f; if (cl > 1.0f) cl = 1.0f;
      m->pilot_conf_limit = cl;
      m->dense_load_s = now_s() - t0;
@@ -25,16 +25,16 @@ diff --git a/c/qwen36.c b/c/qwen36.c
 +#endif
  }
  
- /* scale counts per expert matrix: per-row (gs=0) or grouped along input dim */
-@@ -1619,6 +1630,11 @@
+ static void model_init(Model *m, const char *snap, int cap, int bits) {
+@@ -1851,6 +1862,11 @@
+             for (int kk = 0; kk < K; kk++) if (idx[kk] >= 0) freq_l[idx[kk]]++;
          }
          const float *xs = x + (int64_t)s*D;
-         int shared_done = 0;
 +#ifdef LUMIBRI_P2P
-+        if (lumi_layer_on(layer)) {   /* the K routed experts run on peers; routing, the sum and the shared expert stay here */
-+            lumi_moe_apply(layer, idx, val, K, xs, D, out + (int64_t)s*D);
++        if (lumi_layer_on(layer) &&   /* shared expert remains local */
++            lumi_moe_apply(layer, idx, val, K, xs, D, out + (int64_t)s*D)) {
 +        } else
 +#endif
-         if (qt_ready()) {
+         if (use_qt) {
              /* CUDA expert tier: run the resident experts as async groups on
               * all devices, compute the misses on the CPU (overlapped), then

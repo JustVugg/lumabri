@@ -22,6 +22,7 @@
  */
 #ifndef LMBE_DEEPSEEK_H
 #define LMBE_DEEPSEEK_H
+#define LMBE_STORE_OWNS_RESIDENCY 1
 
 /* Two colibri layouts, one glue:
  *
@@ -45,6 +46,8 @@ typedef struct { int layer, eid; } LmbeSlot;
 
 static ColiDeepSeekV4Config lmbe_cfg;
 static ColiExpertStore *lmbe_store;
+static char lmbe_model_dir[4096];
+static uint64_t lmbe_resident_nbytes;
 
 static const char *lmbe_engine_name(void) { return "deepseek_v4"; }
 static int lmbe_effective_bits(int bits) { (void)bits; return 0; }
@@ -60,6 +63,8 @@ static void lmbe_open(const char *dir, int cap, int bits) {
         fprintf(stderr, "[lumabri] %s\n", err[0] ? err : "cannot read the V4 config");
         exit(1);
     }
+    if (dir != lmbe_model_dir)
+        snprintf(lmbe_model_dir, sizeof lmbe_model_dir, "%s", dir);
     /* One fp4 expert is three matrices of moe_intermediate × hidden at half a
      * byte, plus the block scales — a fifth over is enough headroom, and the
      * store refuses anything under six live experts per layer (top-k), so
@@ -83,6 +88,40 @@ static void lmbe_open(const char *dir, int cap, int bits) {
         exit(1);
     }
 }
+
+/* READY means every assigned key already has a RAM slot. Re-open Colibri's
+ * native store with enough slots for the busiest assigned layer, then warm
+ * every key through its public lease contract before EREG can be sent. */
+static int lmbe_resident_prepare(const uint8_t *holds, int layers,
+                                 int experts, int nholds) {
+    int max_per_layer = 0;
+    for (int l = 0; l < layers; l++) {
+        int n = 0;
+        for (int e = 0; e < experts; e++) n += holds[l * experts + e] != 0;
+        if (n > max_per_layer) max_per_layer = n;
+    }
+    if (max_per_layer < lmbe_cfg.num_experts_per_tok)
+        max_per_layer = lmbe_cfg.num_experts_per_tok;
+    if (lmbe_store && lmbe_store->ops && lmbe_store->ops->destroy)
+        lmbe_store->ops->destroy(lmbe_store);
+    lmbe_store = NULL;
+    lmbe_open(lmbe_model_dir, max_per_layer, 0);
+    for (int l = 0; l < layers; l++)
+        for (int e = 0; e < experts; e++) {
+            if (!holds[l * experts + e]) continue;
+            ColiExpertView view = {0};
+            if (coli_expert_lookup(lmbe_store, (ColiExpertKey){l, e}, &view))
+                return -1;
+            coli_expert_release(lmbe_store, &view);
+        }
+    ColiExpertStoreStats stats = {0};
+    if (lmbe_store->ops && lmbe_store->ops->stats)
+        lmbe_store->ops->stats(lmbe_store, &stats);
+    lmbe_resident_nbytes = stats.resident_bytes;
+    return nholds > 0 && stats.resident_bytes > 0 ? 0 : -1;
+}
+
+static uint64_t lmbe_resident_bytes(void) { return lmbe_resident_nbytes; }
 
 static int lmbe_n_slots(void)   { return lmbe_cfg.num_hidden_layers; }
 static int lmbe_n_experts(void) { return lmbe_cfg.n_routed_experts; }

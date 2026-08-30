@@ -20,13 +20,16 @@ endif
 check-warnings:
 	$(MAKE) -B all test_relay_exec test_swarm_fed test_key_rotation \
 		test_hedge test_verify_failover test_segment_v2 \
-		test_segment_discovery test_swarm_detail test_relay_rate \
+		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
+		test_scheduler test_run_gate \
 		CFLAGS='$(CFLAGS) -Werror'
 
 SECURE_DEPS = lumabri_secure.h lumabri_crypto.h
+MACHINE_SRC = lumabri_machine.c
+MACHINE_DEPS = lumabri_machine.h $(MACHINE_SRC)
 
-lumabri: lumabri.c lumabri_proto.h lumabri_sign.h $(SECURE_DEPS)
-	$(CC) $(CFLAGS) -pthread lumabri.c -o $@
+lumabri: lumabri.c lumabri_proto.h lumabri_sign.h $(SECURE_DEPS) $(MACHINE_DEPS)
+	$(CC) $(CFLAGS) -pthread lumabri.c $(MACHINE_SRC) -o $@
 
 # ---- phase 2: peers execute experts ------------------------------------
 # Both sides are built from the engine's own source so the expert math cannot
@@ -129,26 +132,26 @@ phase2-all: engines chatters
 # One expert-node binary per engine. The body is the same file; everything
 # engine-shaped lives in expert_engines/<name>.h, which pulls in the engine's
 # own source so remote and local run the same kernels on the same weights.
-EXPERT_DEPS = expert_node.c lumabri_proto.h lumabri_sign.h $(SECURE_DEPS)
+EXPERT_DEPS = expert_node.c lumabri_proto.h lumabri_sign.h $(SECURE_DEPS) $(MACHINE_DEPS)
 
 expert_node: $(EXPERT_DEPS) expert_engines/olmoe.h $(ENGINE)/olmoe.c \
              engine_patches/olmoe-p2p.diff $(ENGINE_PROFILE_DEPS)
-	$(CC) $(P2P_CFLAGS) $(PROFILE_olmoe) expert_node.c -o $@ -lm -lpthread
+	$(CC) $(P2P_CFLAGS) $(PROFILE_olmoe) expert_node.c $(MACHINE_SRC) -o $@ -lm -lpthread
 
 expert_node_glm: $(EXPERT_DEPS) expert_engines/colibri.h $(ENGINE)/colibri.c \
                  engine_patches/colibri-p2p.diff $(ENGINE_PROFILE_DEPS)
 	$(CC) $(P2P_CFLAGS) $(PROFILE_colibri) -DLMBE_ENGINE_HEADER='"expert_engines/colibri.h"' \
-	      expert_node.c -o $@ -lm -lpthread
+	      expert_node.c $(MACHINE_SRC) -o $@ -lm -lpthread
 
 expert_node_inkling: $(EXPERT_DEPS) expert_engines/inkling.h $(ENGINE)/inkling.c \
                      engine_patches/inkling-p2p.diff $(ENGINE_PROFILE_DEPS)
 	$(CC) $(P2P_CFLAGS) $(PROFILE_inkling) -DLMBE_ENGINE_HEADER='"expert_engines/inkling.h"' \
-	      expert_node.c -o $@ -lm -lpthread
+	      expert_node.c $(MACHINE_SRC) -o $@ -lm -lpthread
 
 expert_node_kimi: $(EXPERT_DEPS) expert_engines/kimi_k3.h $(ENGINE)/kimi_k3.c \
                   engine_patches/kimi_k3-p2p.diff $(ENGINE_PROFILE_DEPS)
 	$(CC) $(P2P_CFLAGS) $(PROFILE_kimi_k3) $(K3_ZQ_FLAG) -DLMBE_ENGINE_HEADER='"expert_engines/kimi_k3.h"' \
-	      expert_node.c -o $@ -lm -lpthread
+	      expert_node.c $(MACHINE_SRC) -o $@ -lm -lpthread
 
 # qwen36 (Qwen3.6): olmoe dialect, experts group-scaled and int4/int8, one row
 # at a time. The CUDA VRAM tier is compiled out on CPU (qwen36_tier.h supplies
@@ -156,7 +159,7 @@ expert_node_kimi: $(EXPERT_DEPS) expert_engines/kimi_k3.h $(ENGINE)/kimi_k3.c \
 expert_node_qwen36: $(EXPERT_DEPS) expert_engines/qwen36.h $(ENGINE)/qwen36.c \
                     engine_patches/qwen36-p2p.diff $(ENGINE_PROFILE_DEPS)
 	$(CC) $(P2P_CFLAGS) $(PROFILE_qwen36) -DLMBE_ENGINE_HEADER='"expert_engines/qwen36.h"' \
-	      expert_node.c -o $@ -lm -lpthread
+	      expert_node.c $(MACHINE_SRC) -o $@ -lm -lpthread
 
 # DeepSeek V4 needs two extra things at build time.
 #
@@ -219,7 +222,7 @@ build/ds_%.o: build/deepseek_v4_noentry.c $(DS_HDRS)
 expert_node_deepseek: $(EXPERT_DEPS) expert_engines/deepseek.h $(DS_OBJS) $(DS_SIBLING_OBJS) $(ENGINE_PROFILE_DEPS)
 	$(CC) $(P2P_CFLAGS) $(PROFILE_deepseek) $(DS_CFLAGS) -DLMBE_DS_MULTIFILE -I$(ENGINE) \
 	      -DLMBE_ENGINE_HEADER='"expert_engines/deepseek.h"' \
-	      expert_node.c $(DS_OBJS) $(DS_SIBLING_OBJS) -o $@ -lm -lpthread
+	      expert_node.c $(MACHINE_SRC) $(DS_OBJS) $(DS_SIBLING_OBJS) -o $@ -lm -lpthread
 
 # The chatter: the same units WITH main (it is the CLI), patched at the three
 # expert-apply sites to delegate routed experts to peers. The lumabri client
@@ -260,7 +263,7 @@ expert_node_deepseek: $(EXPERT_DEPS) expert_engines/deepseek.h build/deepseek_no
                       engine_patches/deepseek-p2p.diff $(ENGINE_PROFILE_DEPS)
 	$(CC) $(P2P_CFLAGS) $(PROFILE_deepseek) $(DS_CFLAGS) -Ibuild \
 	      -DLMBE_ENGINE_HEADER='"expert_engines/deepseek.h"' \
-	      expert_node.c -o $@ -lm -lpthread
+	      expert_node.c $(MACHINE_SRC) -o $@ -lm -lpthread
 endif
 
 # Regenerate the engine patches from a colibri checkout (never modifies it)
@@ -324,24 +327,24 @@ tiny_olmoe/config.json: make_tiny_olmoe.py
 fixture: tiny_olmoe/config.json
 
 test-phase2: phase2 fixture
-	./phase2_test.sh
+	bash ./phase2_test.sh
 
 test-phase2-glm: phase2-glm
-	./phase2_glm_test.sh
+	bash ./phase2_glm_test.sh
 
 test-phase2-inkling: expert_node_inkling
-	./phase2_inkling_test.sh
+	bash ./phase2_inkling_test.sh
 
 test-phase2-kimi: expert_node_kimi
-	./phase2_kimi_test.sh
+	bash ./phase2_kimi_test.sh
 
 # needs a real DeepSeek V4 model: MODEL=<dir> (no synthetic fixture, see the
 # script's header for why)
 test-phase2-deepseek: expert_node_deepseek
-	./phase2_deepseek_test.sh
+	bash ./phase2_deepseek_test.sh
 
 test-phase2-qwen36: expert_node_qwen36
-	./phase2_qwen36_test.sh
+	bash ./phase2_qwen36_test.sh
 
 # Every engine's byte-identity proof, one after the other. DeepSeek V4 has no
 # synthetic fixture (see phase2_deepseek_test.sh), so it runs only when a real
@@ -404,22 +407,90 @@ test_relay_rate: test_relay_rate.c lumabri_segment.c lumabri_segment.h \
 		lumabri_proto.h
 	$(CC) $(CFLAGS) -pthread test_relay_rate.c lumabri_segment.c -o $@
 
+test_machine: test_machine.c $(MACHINE_DEPS) lumabri_proto.h
+	$(CC) $(CFLAGS) -pthread test_machine.c $(MACHINE_SRC) -o $@
+
+test_scheduler: test_scheduler.c lumabri_scheduler.h
+	$(CC) $(CFLAGS) test_scheduler.c -o $@
+
+test_run_gate: test_run_gate.c lumabri_run_gate.c lumabri_run_gate.h
+	$(CC) $(CFLAGS) -pthread test_run_gate.c lumabri_run_gate.c -o $@
+
+test-machine-governor: lumabri tracker swarm_probe expert_node segment_node fixture test_machine
+	ENGINE=$(ENGINE) bash ./machine_governor_test.sh
+
+test-doctor: all
+	bash ./doctor_test.sh
+
+SANITIZE_FLAGS = -O1 -g -Wall -Wextra -fno-omit-frame-pointer -fsanitize=address,undefined
+test-sanitize:
+	mkdir -p build/sanitize
+	$(CC) $(SANITIZE_FLAGS) -pthread test_segment_v2.c lumabri_segment.c -o build/sanitize/test_segment_v2
+	$(CC) $(SANITIZE_FLAGS) -pthread test_segment_discovery.c lumabri_segment_discovery.c lumabri_segment.c -o build/sanitize/test_segment_discovery
+	$(CC) $(SANITIZE_FLAGS) -pthread test_run_gate.c lumabri_run_gate.c -o build/sanitize/test_run_gate
+	$(CC) $(SANITIZE_FLAGS) test_scheduler.c -o build/sanitize/test_scheduler
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_segment_v2
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_segment_discovery
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_run_gate
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_scheduler
+
+test-thread-sanitize:
+	mkdir -p build/sanitize
+	$(CC) -O1 -g -Wall -Wextra -fno-omit-frame-pointer -fsanitize=thread \
+		-pthread test_run_gate.c lumabri_run_gate.c -o build/sanitize/test_run_gate_tsan
+	TSAN_OPTIONS=halt_on_error=1 build/sanitize/test_run_gate_tsan
+
+production-gate:
+	bash ./production_gate.sh --engine $(ENGINE)
+
 # ---- Segment direct data plane (requires Colibri's additive Edge ABI) ---
 # `all` includes this only when both additive headers are present. A Lumabri
 # checkout pointed at an older/release Colibri therefore keeps building the
 # legacy product unchanged, while a matching dev checkout gets native UX.
-COLIBRI_SEGMENT_LIB = $(ENGINE)/build/segment/libcolibri_segment_edge.a
+HYBRID_ENGINE_DIR = build/segment-hybrid-colibri
+COLIBRI_SEGMENT_LIB = $(HYBRID_ENGINE_DIR)/build/segment/libcolibri_segment_edge.a
+HYBRID_ROOT = $(abspath .)
 SEGMENT_CFLAGS = $(CFLAGS) -I. -I$(ENGINE) -fopenmp
 SEGMENT_COMMON = segment_colibri.h lumabri_segment.c lumabri_segment.h \
 		lumabri_segment_discovery.c lumabri_segment_discovery.h \
 		lumabri_proto.h lumabri_sign.h lumabri_sha.h $(SECURE_DEPS)
 
-$(COLIBRI_SEGMENT_LIB):
-	env -u CFLAGS -u MAKEFLAGS $(MAKE) -C $(ENGINE) MAKEOVERRIDES= segment-edge-library
+HYBRID_PATCH_INPUTS = engine_patches/make_patches.py \
+	engine_patches/deepseek_v4_p2p.py $(wildcard engine_patches/*-p2p.diff) \
+	lumabri_client.h lumibri_client.h lumi_v4_ext.h lumi_v4_bridge.c \
+	lumabri_proto.h lumabri_sign.h lumabri_secure.h lumabri_crypto.h \
+	lumabri_sha.h
 
-segment_node: segment_node.c $(SEGMENT_COMMON) $(COLIBRI_SEGMENT_LIB)
+$(HYBRID_ENGINE_DIR)/.prepared: $(HYBRID_PATCH_INPUTS) \
+		$(ENGINE)/colibri.c $(ENGINE)/inkling.c $(ENGINE)/kimi_k3.c \
+		$(ENGINE)/olmoe.c $(ENGINE)/qwen36.c $(ENGINE)/deepseek_v4.c
+	rm -rf $(HYBRID_ENGINE_DIR)
+	mkdir -p $(HYBRID_ENGINE_DIR)
+	cp -a $(ENGINE)/. $(HYBRID_ENGINE_DIR)/
+	rm -rf $(HYBRID_ENGINE_DIR)/build
+	python3 engine_patches/make_patches.py --engine-dir $(ENGINE) --apply-one colibri.c --out $(HYBRID_ENGINE_DIR)/colibri.c
+	python3 engine_patches/make_patches.py --engine-dir $(ENGINE) --apply-one inkling.c --out $(HYBRID_ENGINE_DIR)/inkling.c
+	python3 engine_patches/make_patches.py --engine-dir $(ENGINE) --apply-one kimi_k3.c --out $(HYBRID_ENGINE_DIR)/kimi_k3.c
+	python3 engine_patches/make_patches.py --engine-dir $(ENGINE) --apply-one olmoe.c --out $(HYBRID_ENGINE_DIR)/olmoe.c
+	python3 engine_patches/make_patches.py --engine-dir $(ENGINE) --apply-one qwen36.c --out $(HYBRID_ENGINE_DIR)/qwen36.c
+	python3 engine_patches/deepseek_v4_p2p.py $(ENGINE)/deepseek_v4.c $(HYBRID_ENGINE_DIR)/deepseek_v4.c
+	touch $@
+
+build/segment_hybrid_bridge.o: lumi_v4_bridge.c $(HYBRID_PATCH_INPUTS)
+	mkdir -p build
+	$(CC) $(CFLAGS) -fopenmp -pthread -I. -I$(ENGINE) -c lumi_v4_bridge.c -o $@
+
+$(COLIBRI_SEGMENT_LIB): $(HYBRID_ENGINE_DIR)/.prepared build/segment_hybrid_bridge.o
+	env -u MAKEFLAGS $(MAKE) -C $(HYBRID_ENGINE_DIR) MAKEOVERRIDES= \
+		CFLAGS='-O2 -fopenmp -pthread -I$(HYBRID_ROOT) -include $(HYBRID_ROOT)/lumi_v4_ext.h -DLUMABRI_P2P -DLUMIBRI_P2P' \
+		segment-edge-library
+	$(AR) rcs $@ build/segment_hybrid_bridge.o
+
+segment_node: segment_node.c $(SEGMENT_COMMON) $(COLIBRI_SEGMENT_LIB) $(MACHINE_DEPS) \
+		lumabri_run_gate.c lumabri_run_gate.h
 	$(CC) $(SEGMENT_CFLAGS) -pthread segment_node.c lumabri_segment.c \
-		lumabri_segment_discovery.c $(COLIBRI_SEGMENT_LIB) -o $@ -lm
+		lumabri_segment_discovery.c $(MACHINE_SRC) lumabri_run_gate.c \
+		$(COLIBRI_SEGMENT_LIB) -o $@ -lm
 
 segment_chat: segment_chat.c lumabri_sampling.c lumabri_sampling.h \
 		$(SEGMENT_COMMON) $(COLIBRI_SEGMENT_LIB)
@@ -448,25 +519,34 @@ test-segment-failover-real: tracker segment-direct
 	bash ./segment_failover_test.sh
 
 test-relay-exec: tracker expert_node test_relay_exec fixture
-	./relay_exec_test.sh
+	bash ./relay_exec_test.sh
 
 test_swarm_fed: test_swarm_fed.c lumabri_proto.h
 	$(CC) $(CFLAGS) -pthread test_swarm_fed.c -o $@
 
 test-swarm-fed: tracker maintainer liblumabri.so expert_node test_swarm_fed fixture
-	./swarm_fed_exec_test.sh
+	bash ./swarm_fed_exec_test.sh
 
 test-assign-race: tracker
-	./assign_race_test.sh
+	bash ./assign_race_test.sh
 
 test-partial-phase2: tracker phase2 fixture
-	./partial_phase2_test.sh
+	bash ./partial_phase2_test.sh
 
 test-elastic: tracker expert_node fixture
-	./elastic_hold_test.sh
+	bash ./elastic_hold_test.sh
+
+test-resident: tracker swarm_probe expert_node fixture
+	bash ./resident_hold_test.sh
+
+# Segment keeps attention/state local while a complete MoE layer is served by
+# a strict-RAM Expert donor. The second run kills that donor and proves that
+# the unchanged local Colibri kernel takes over without losing the session.
+test-segment-hybrid: tracker swarm_probe expert_node segment_node segment_chat fixture
+	ENGINE=$(ENGINE) bash ./segment_hybrid_test.sh
 
 test-cas: tracker maintainer liblumabri.so test_shim
-	./cas_test.sh
+	bash ./cas_test.sh
 
 test-key-rotation: test_key_rotation
 	./test_key_rotation
@@ -481,31 +561,40 @@ test-segment-discovery: tracker test_segment_discovery
 	bash ./segment_discovery_test.sh
 
 test: all test_key_rotation test_hedge test_verify_failover test_segment_v2 \
-		test_segment_discovery test_swarm_detail test_relay_rate
-	./selftest.sh
-	./donate_test.sh
-	./signed_donor_test.sh
-	./hot_cache_integrity_test.sh
-	./role_test.sh
-	./security_test.sh
-	./expert_input_test.sh
-	./prefetch_policy_test.sh
-	./cas_test.sh
-	./relay_exec_test.sh
-	./peer_identity_test.sh
-	./key_test.sh
-	./sign_test.sh
-	./crypto_test.sh
-	./secure_test.sh
-	./encrypted_transport_test.sh
-	./verify_failover_test.sh
+		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
+		test_scheduler test_run_gate
+	bash ./selftest.sh
+	bash ./donate_test.sh
+	bash ./signed_donor_test.sh
+	bash ./hot_cache_integrity_test.sh
+	bash ./role_test.sh
+	bash ./serve_failfast_test.sh
+	bash ./security_test.sh
+	bash ./expert_input_test.sh
+	bash ./prefetch_policy_test.sh
+	bash ./cas_test.sh
+	bash ./relay_exec_test.sh
+	bash ./peer_identity_test.sh
+	bash ./key_test.sh
+	bash ./sign_test.sh
+	bash ./crypto_test.sh
+	bash ./secure_test.sh
+	bash ./encrypted_transport_test.sh
+	bash ./verify_failover_test.sh
 	./test_key_rotation
 	./test_hedge
 	./test_segment_v2
+	./test_scheduler
+	./test_run_gate
 	python3 ./test_swarm_bench.py
+	python3 ./test_production_check.py
+	python3 ./test_swarm_soak.py
+	bash ./production_gate_test.sh
 	bash ./segment_discovery_test.sh
 	bash ./swarm_detail_test.sh
 	bash ./relay_rate_test.sh
+	bash ./machine_governor_test.sh
+	bash ./doctor_test.sh
 
 # ---- deploy -------------------------------------------------------------
 # make install                    → /usr/local (needs sudo)
@@ -530,7 +619,7 @@ clean:
 	rm -f tracker maintainer liblumabri.so test_shim swarm_probe lumabri \
 	      test_relay_exec test_swarm_fed test_key_rotation test_hedge \
 	      test_verify_failover test_segment_v2 test_segment_discovery test_sampling \
-	      test_swarm_detail test_relay_rate \
+	      test_swarm_detail test_relay_rate test_machine test_scheduler test_run_gate \
 	      test_segment_v2_tsan tracker_tsan \
 	      segment_node segment_chat segment_node_asan segment_chat_asan \
 	      segment_node_tsan segment_chat_tsan \
@@ -546,4 +635,6 @@ clean:
         patches patches-check test-relay-exec test-swarm-fed test-assign-race test-partial-phase2 test-elastic \
         test-cas test-key-rotation test-hedge test-segment-v2 \
         test-segment-discovery segment-direct test-segment-direct-real \
-        test-segment-relay-real test-segment-failover-real
+        test-segment-relay-real test-segment-failover-real test-segment-hybrid \
+        test-machine-governor test-doctor test-sanitize test-thread-sanitize \
+        production-gate

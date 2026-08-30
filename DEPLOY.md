@@ -9,6 +9,11 @@ most of it waiting for the model to upload.
 Everything below assumes Ubuntu 24.04 on Hetzner Cloud, but nothing is
 Hetzner-specific except the firewall section.
 
+Before starting a host, run `lumabri doctor --tracker HOST:7300 --model
+/srv/model --serve-port 7300` (or add `--json` for automation). It distinguishes
+required failures from resource and optional-Segment warnings. The complete
+release evidence and soak procedure are in [PRODUCTION.md](PRODUCTION.md).
+
 ---
 
 ## 0. What to rent
@@ -46,7 +51,7 @@ adduser --disabled-password --gecos "" lumabri
 Open only what the swarm needs. **7300** is the required tracker/control port.
 The signed relay makes every data path work with only that inbound port. For
 the lower-latency direct path also open **7301** (bytes), **7302** (classic
-experts) and, by default, **7303-7306** (four Segment ranges). Allow through
+experts) and, by default, **7303** (one full-core Segment fallback). Allow through
 7309 only when intentionally using up to seven public ranges.
 
 ```sh
@@ -182,7 +187,8 @@ su - lumabri -c 'lumabri peer-key'
 ```
 
 Clients can preseed a strict pin file with that value for every server
-endpoint (the default four Segment ranges use ports 7303-7306):
+endpoint (the default Segment fallback uses port 7303; an explicit
+`LUMABRI_SEGMENT_CHUNKS=N` uses 7303 through `7302+N`):
 
 ```text
 YOUR_SERVER_IP:7300 64_HEX_ENDPOINT_KEY
@@ -366,10 +372,21 @@ status shows routing/prefill/decode/failover and read-only menus open without
 waiting for the answer to finish.
 
 Verified chunks are shared across models in `~/.lumabri/cas`; override it
-with `LUMABRI_CAS=/fast/local/path`. To enable the basic straggler hedge, set
-for example `LUMABRI_HEDGE_MS=40`. Keep it disabled (`0`, the default) until
-there are at least two replicas per expert, otherwise there is nowhere to
-hedge. Prefill and speculative target verification are batched automatically.
+with `LUMABRI_CAS=/fast/local/path`. Expert routing learns an EWMA and slow-tail
+estimate per replica. It hedges automatically only after at least eight samples
+show a material p95 tail and another replica exists; set
+`LUMABRI_HEDGE_MS=40` to force a fixed policy, or leave the variable unset for
+the adaptive policy. Three consecutive failures open a short circuit instead
+of permanently deleting a valid manifest. Prefill and speculative target
+verification are batched automatically.
+
+Segment compute has a FIFO admission queue (`LUMABRI_SEGMENT_RUN_QUEUE`, default
+32) and a real deadline (`LUMABRI_SEGMENT_RUN_WAIT_MS`, default 30000). Queue and
+inflight counts are advertised to new placements. Keep the queue bounded: it is
+backpressure, not extra capacity. Current Colibri adapters serialize calls to
+one engine instance for numeric/state safety; aggregate concurrency comes from
+the layer pipeline and compatible replicas, while Expert executors continue to
+run their safe per-machine parallel gate.
 
 The boot narrates itself, so you can see where the time goes:
 
@@ -480,6 +497,18 @@ and fallback/NAT executors are niced. Direct origins default to four sessions
 per slice and NAT/relay origins to two; the override above is bounded but can
 increase real KV RAM substantially. These ranges consume real RAM and CPU; use
 `--no-exec` when this server must provide storage only.
+
+`serve` gives every Segment child an explicit process budget computed as
+`(MemAvailable - LUMABRI_SEGMENT_MIN_FREE_MB) / slices`. The node forwards it
+to Colibri's engine options, divides the remaining post-engine RSS among its
+session slots, and cancels a run when RSS or the system reserve is crossed. A
+compute donor receives the total layer count with its tracker assignment and
+evaluates the assigned range—not a fixed quarter of the model. If it does not
+fit, the placement promise is released immediately and the chat starts the
+finer-grained Expert donor instead.
+
+Low-level operators may set `segment_node --memory-limit-mb N`; the ordinary
+`lumabri serve` and `lumabri chat` flows calculate it automatically.
 
 Two things worth knowing:
 

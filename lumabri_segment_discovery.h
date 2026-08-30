@@ -9,6 +9,7 @@
 #define LUMABRI_SEGMENT_DISCOVERY_H
 
 #include "lumabri_segment.h"
+#include "lumabri_scheduler.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -84,6 +85,12 @@ typedef struct {
     LmbSegAdvert advert;
     LmbSegOwner owner;
     uint32_t transport;
+    /* Runtime-only control-plane observations. They are deliberately not
+     * part of the v1 wire encoding: an immutable snapshot carries them from
+     * discovery to inference without changing tracker compatibility. */
+    LmbLatencyPredictor latency;
+    uint64_t predicted_us;
+    uint64_t last_probe_ms;
 } LmbSegRouteEntry;
 
 /* Fixed-size by design: copying this value produces an immutable routing

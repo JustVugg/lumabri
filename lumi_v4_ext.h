@@ -7,7 +7,7 @@
 #ifdef LUMABRI_P2P
 extern void lumi_v4_bridge_init(int n_layers, int n_experts, int hidden);
 extern int  lumi_v4_bridge_on(int layer);
-extern void lumi_v4_bridge_apply(int layer, const int *indices,
+extern int  lumi_v4_bridge_apply(int layer, const int *indices,
         const float *weights, int topk, const float *x, int batch,
         int D, float *out);
 extern void lumi_v4_bridge_report(void);

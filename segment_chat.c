@@ -187,6 +187,7 @@ static int parse_ids(const char *text, int32_t **ids, size_t *count) {
 static int select_chain(const LmbSegRouteSnapshot *snapshot, uint32_t layers,
                         uint32_t required_context, uint32_t required_rows,
                         RemoteSegment *chain, size_t *chain_count) {
+    uint64_t completion_us[LMB_SEG_ROUTE_MAX] = {0};
     uint64_t fallback_layers[LMB_SEG_ROUTE_MAX] = {0};
     uint64_t load_cost[LMB_SEG_ROUTE_MAX] = {0};
     uint32_t hops[LMB_SEG_ROUTE_MAX] = {0};
@@ -206,12 +207,20 @@ static int select_chain(const LmbSegRouteSnapshot *snapshot, uint32_t layers,
                     ? entry->advert.layer_end - entry->advert.layer_begin : 0;
             uint64_t own_load = (uint64_t)entry->advert.queue_depth +
                                 entry->advert.inflight;
+            uint64_t own_completion = entry->predicted_us ? entry->predicted_us :
+                (entry->transport & LMB_SEG_TRANSPORT_DIRECT ? 50000u : 120000u) *
+                (own_load + 1u);
             if (entry->advert.layer_end == layers) {
-                if (!viable[i] || own_fallback < fallback_layers[i] ||
-                    (own_fallback == fallback_layers[i] && 1 < hops[i]) ||
-                    (own_fallback == fallback_layers[i] && hops[i] == 1 &&
+                if (!viable[i] || own_completion < completion_us[i] ||
+                    (own_completion == completion_us[i] &&
+                     own_fallback < fallback_layers[i]) ||
+                    (own_completion == completion_us[i] &&
+                     own_fallback == fallback_layers[i] && 1 < hops[i]) ||
+                    (own_completion == completion_us[i] &&
+                     own_fallback == fallback_layers[i] && hops[i] == 1 &&
                      own_load < load_cost[i])) {
                     viable[i] = 1;
+                    completion_us[i] = own_completion;
                     fallback_layers[i] = own_fallback;
                     load_cost[i] = own_load;
                     hops[i] = 1;
@@ -220,6 +229,7 @@ static int select_chain(const LmbSegRouteSnapshot *snapshot, uint32_t layers,
                 continue;
             }
             int found = 0;
+            uint64_t best_completion = UINT64_MAX;
             uint64_t best_fallback = UINT64_MAX, best_load = UINT64_MAX;
             uint32_t best_hops = UINT32_MAX;
             for (uint32_t j = 0; j < snapshot->count; j++) {
@@ -227,26 +237,39 @@ static int select_chain(const LmbSegRouteSnapshot *snapshot, uint32_t layers,
                                   entry->advert.layer_end) continue;
                 uint64_t candidate_fallback = own_fallback + fallback_layers[j];
                 uint64_t candidate_load = own_load + load_cost[j];
+                uint64_t candidate_completion = completion_us[j] >
+                    UINT64_MAX - own_completion ? UINT64_MAX :
+                    own_completion + completion_us[j];
                 uint32_t candidate_hops = 1 + hops[j];
-                if (!found || candidate_fallback < best_fallback ||
-                    (candidate_fallback == best_fallback &&
+                if (!found || candidate_completion < best_completion ||
+                    (candidate_completion == best_completion &&
+                     candidate_fallback < best_fallback) ||
+                    (candidate_completion == best_completion &&
+                     candidate_fallback == best_fallback &&
                      candidate_hops < best_hops) ||
-                    (candidate_fallback == best_fallback &&
+                    (candidate_completion == best_completion &&
+                     candidate_fallback == best_fallback &&
                      candidate_hops == best_hops &&
                      candidate_load < best_load)) {
                     found = 1;
+                    best_completion = candidate_completion;
                     best_fallback = candidate_fallback;
                     best_hops = candidate_hops;
                     best_load = candidate_load;
                 }
             }
             if (found) {
-                if (!viable[i] || best_fallback < fallback_layers[i] ||
-                    (best_fallback == fallback_layers[i] &&
+                if (!viable[i] || best_completion < completion_us[i] ||
+                    (best_completion == completion_us[i] &&
+                     best_fallback < fallback_layers[i]) ||
+                    (best_completion == completion_us[i] &&
+                     best_fallback == fallback_layers[i] &&
                      best_hops < hops[i]) ||
-                    (best_fallback == fallback_layers[i] &&
+                    (best_completion == completion_us[i] &&
+                     best_fallback == fallback_layers[i] &&
                      best_hops == hops[i] && best_load < load_cost[i])) {
                     viable[i] = 1;
+                    completion_us[i] = best_completion;
                     fallback_layers[i] = best_fallback;
                     hops[i] = best_hops;
                     load_cost[i] = best_load;
@@ -267,18 +290,24 @@ static int select_chain(const LmbSegRouteSnapshot *snapshot, uint32_t layers,
                 candidate->advert.layer_end > layers) continue;
             if (!best) { best = candidate; continue; }
             uint32_t best_index = (uint32_t)(best - snapshot->entries);
-            if (fallback_layers[i] < fallback_layers[best_index] ||
-                (fallback_layers[i] == fallback_layers[best_index] &&
+            if (completion_us[i] < completion_us[best_index] ||
+                (completion_us[i] == completion_us[best_index] &&
+                 fallback_layers[i] < fallback_layers[best_index]) ||
+                (completion_us[i] == completion_us[best_index] &&
+                 fallback_layers[i] == fallback_layers[best_index] &&
                  hops[i] < hops[best_index]) ||
-                (fallback_layers[i] == fallback_layers[best_index] &&
+                (completion_us[i] == completion_us[best_index] &&
+                 fallback_layers[i] == fallback_layers[best_index] &&
                  hops[i] == hops[best_index] &&
                  load_cost[i] < load_cost[best_index]) ||
-                (fallback_layers[i] == fallback_layers[best_index] &&
+                (completion_us[i] == completion_us[best_index] &&
+                 fallback_layers[i] == fallback_layers[best_index] &&
                  hops[i] == hops[best_index] &&
                  load_cost[i] == load_cost[best_index] &&
                  (candidate->transport & LMB_SEG_TRANSPORT_DIRECT) &&
                  !(best->transport & LMB_SEG_TRANSPORT_DIRECT)) ||
-                (fallback_layers[i] == fallback_layers[best_index] &&
+                (completion_us[i] == completion_us[best_index] &&
+                 fallback_layers[i] == fallback_layers[best_index] &&
                  hops[i] == hops[best_index] &&
                  load_cost[i] == load_cost[best_index] &&
                  !!(candidate->transport & LMB_SEG_TRANSPORT_DIRECT) ==
@@ -852,9 +881,12 @@ static int conversation_recover(
                     !route_same_range(candidate, current,
                                       context, max_rows)) continue;
                 if (!chosen ||
-                    ((candidate->transport & LMB_SEG_TRANSPORT_DIRECT) &&
+                    candidate->predicted_us < chosen->predicted_us ||
+                    (candidate->predicted_us == chosen->predicted_us &&
+                     (candidate->transport & LMB_SEG_TRANSPORT_DIRECT) &&
                      !(chosen->transport & LMB_SEG_TRANSPORT_DIRECT)) ||
-                    ((candidate->advert.flags & LMB_SEG_ADVERT_FALLBACK) == 0 &&
+                    (candidate->predicted_us == chosen->predicted_us &&
+                     (candidate->advert.flags & LMB_SEG_ADVERT_FALLBACK) == 0 &&
                      (chosen->advert.flags & LMB_SEG_ADVERT_FALLBACK)))
                     chosen = candidate;
             }
@@ -1414,12 +1446,14 @@ static void route_print(FILE *stream, const char *prefix,
             const LmbSegRouteEntry *entry = &snapshot->entries[index];
             fprintf(stream, "[lumabri] Segment candidate %s[%u:%u] "
                     "flags=%u load=%u/%u transport=%u context=%u rows=%u "
-                    "numeric=%s\n",
+                    "predicted=%.2fms numeric=%s\n",
                     entry->advert.peer_name, entry->advert.layer_begin,
                     entry->advert.layer_end, entry->advert.flags,
                     entry->advert.queue_depth, entry->advert.inflight,
                     entry->transport, entry->advert.max_context,
-                    entry->advert.max_rows, entry->advert.numeric_class);
+                    entry->advert.max_rows,
+                    (double)entry->predicted_us / 1000.0,
+                    entry->advert.numeric_class);
         }
     fflush(stream);
 }

@@ -1,7 +1,7 @@
 diff --git a/c/kimi_k3.c b/c/kimi_k3.c
 --- a/c/kimi_k3.c
 +++ b/c/kimi_k3.c
-@@ -265,6 +265,13 @@
+@@ -298,6 +298,13 @@
      return fcalloc(n);
  #endif
  }
@@ -15,7 +15,7 @@ diff --git a/c/kimi_k3.c b/c/kimi_k3.c
  static inline float sigmoidf_(float x){ return 1.f/(1.f+expf(-x)); }
  static inline float siluf_(float x){ return x/(1.f+expf(-x)); }
  static void softmax_(float *x, int n){ float m=x[0]; for(int i=1;i<n;i++) if(x[i]>m)m=x[i];
-@@ -1030,6 +1037,16 @@
+@@ -1124,6 +1131,16 @@
      }
      fprintf(stderr,"[K3] init done in %.1fs | %d layers | expert cache %d/layer (%.1f MB/slot) | RSS %.1f GB\n",
              now_s()-t0,c->n_layers,cap,m->e_slot/1e6,rss_gb());
@@ -29,10 +29,10 @@ diff --git a/c/kimi_k3.c b/c/kimi_k3.c
 +        atexit(lumi_report);
 +    }
 +#endif
-     /* Phase 9: layer validation init */
-     { const char *vl=getenv("K3_VALIDATE_LAYER");
-       const char *vt=getenv("K3_VALIDATE_TOKEN");
-@@ -1873,6 +1890,15 @@
+     if(g_k3_ckpt_slots>0)
+         fprintf(stderr,"[K3-CKPT] enabled: %d recurrent-state slots (%.1f MB each, %s)\n",
+                 g_k3_ckpt_slots,k3_ckpt_blob_floats(m)*sizeof(float)/1048576.0,
+@@ -2016,6 +2033,15 @@
              nu=keep;
          }
  #endif
@@ -41,8 +41,8 @@ diff --git a/c/kimi_k3.c b/c/kimi_k3.c
 +            /* the union the engine just built, executed on peers; the router
 +             * weights are applied at accumulation there exactly as
 +             * expert_apply does here */
-+            lumi_moe_apply_union(li,nu,uid,pfirst,pcnt,poslist,wlist,z,LT,u);
-+            nu=0;
++            if(lumi_moe_apply_union(li,nu,uid,pfirst,pcnt,poslist,wlist,z,LT,u))
++                nu=0;
 +        }
 +#endif
          experts_apply_union(m,li,nu,uid,pfirst,pcnt,poslist,wlist,z,LT,u,gate,up,hz);

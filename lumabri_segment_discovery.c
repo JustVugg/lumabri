@@ -410,13 +410,86 @@ struct LmbSegDiscovery {
     char tracker[256];
     LmbSegQuery query;
     LmbSegRouteSnapshot snapshot;
+    uint32_t probe_cursor;
 };
+
+static int disc_same_route(const LmbSegRouteEntry *a,
+                           const LmbSegRouteEntry *b) {
+    return !strcmp(a->advert.peer_name, b->advert.peer_name) &&
+           !strcmp(a->advert.addr, b->advert.addr) &&
+           a->advert.layer_begin == b->advert.layer_begin &&
+           a->advert.layer_end == b->advert.layer_end;
+}
+
+static uint64_t disc_probe_us(const char *addr) {
+    uint64_t before = disc_now_ms();
+    int fd = lmb_connect_ms(addr, 250);
+    if (fd < 0) return 0;
+    LmbMsg reply = {0};
+    int bad = lmb_send(fd, LMB_PING, NULL, 0, NULL, 0) ||
+              lmb_recv(fd, &reply) || reply.op != LMB_OK;
+    lmb_msg_free(&reply);
+    lmb_close(fd);
+    if (bad) return 0;
+    uint64_t elapsed = (disc_now_ms() - before) * 1000u;
+    return elapsed ? elapsed : 1u;
+}
+
+static void disc_enrich_routes(LmbSegDiscovery *d,
+                               LmbSegRouteSnapshot *next,
+                               const LmbSegRouteSnapshot *previous,
+                               int have_previous) {
+    uint64_t now = disc_now_ms();
+    uint32_t probe_budget = next->count < 8u ? next->count : 8u;
+    for (uint32_t i = 0; i < next->count; i++) {
+        LmbSegRouteEntry *entry = &next->entries[i];
+        const LmbSegRouteEntry *old = NULL;
+        if (have_previous)
+            for (uint32_t j = 0; j < previous->count; j++)
+                if (disc_same_route(entry, &previous->entries[j])) {
+                    old = &previous->entries[j]; break;
+                }
+        if (old) {
+            entry->latency = old->latency;
+            entry->last_probe_ms = old->last_probe_ms;
+        } else {
+            lmb_predict_init(&entry->latency,
+                entry->transport & LMB_SEG_TRANSPORT_DIRECT ? 50000u : 120000u);
+        }
+    }
+    for (uint32_t n = 0; n < probe_budget && next->count; n++) {
+        uint32_t i = d->probe_cursor++ % next->count;
+        LmbSegRouteEntry *entry = &next->entries[i];
+        if (!(entry->transport & LMB_SEG_TRANSPORT_DIRECT)) continue;
+        uint64_t sample = disc_probe_us(entry->advert.addr);
+        if (sample) {
+            lmb_predict_observe(&entry->latency, sample);
+            entry->last_probe_ms = now;
+        } else {
+            lmb_predict_failure(&entry->latency, now);
+        }
+    }
+    for (uint32_t i = 0; i < next->count; i++) {
+        LmbSegRouteEntry *entry = &next->entries[i];
+        uint32_t queue = entry->advert.queue_depth + entry->advert.inflight;
+        entry->predicted_us = lmb_predict_score(&entry->latency, queue);
+        if (!lmb_predict_available(&entry->latency, now))
+            entry->predicted_us = UINT64_MAX / 4u;
+    }
+}
 
 static void *disc_worker(void *arg) {
     LmbSegDiscovery *d = (LmbSegDiscovery *)arg;
     for (;;) {
         LmbSegRouteSnapshot next;
         if (!lmb_seg_routes_fetch(d->tracker, &d->query, &next)) {
+            LmbSegRouteSnapshot previous;
+            int have_previous;
+            pthread_mutex_lock(&d->lock);
+            previous = d->snapshot;
+            have_previous = d->have_snapshot;
+            pthread_mutex_unlock(&d->lock);
+            disc_enrich_routes(d, &next, &previous, have_previous);
             pthread_mutex_lock(&d->lock);
             /* Generations fence placements. Equal generations still replace
              * telemetry; a lower generation can only be a stale tracker. */

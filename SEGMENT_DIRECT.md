@@ -19,6 +19,20 @@ the runtime, identity or a complete compatible route is absent, startup falls
 back automatically to the existing expert/CAS Colibri path. Colibri's ordinary
 executables remain unchanged.
 
+Each Segment executor can also use the classic Expert swarm inside its range.
+Attention, recurrent state and dense blocks stay resident in the Segment;
+when the tracker has complete resident coverage for one MoE layer, all of that
+layer's selected experts are issued in parallel to the donor peers before any
+reply is collected. Other layers remain local. A dead donor rolls back partial
+accumulation and runs the unchanged local kernel, so Expert donation is an
+optional accelerator rather than a new failure dependency.
+
+This integration does not patch a Colibri checkout. Lumabri copies the engine
+tree to `build/segment-hybrid-colibri`, applies exact-count hooks there and
+links only `segment_node` against that private archive. A missing or changed
+anchor fails the Lumabri build. Ordinary Colibri builds and binaries are never
+modified.
+
 ## Build
 
 Use a Colibri checkout containing the additive Edge runtime:
@@ -41,7 +55,10 @@ lumabri serve --model /models/olmoe --advertise PUBLIC_IP
 ```
 
 Lumabri detects the family, layer/context shape, CPU/RAM and network capability,
-then starts four disjoint fallback executors. A public interface enables the
+then starts four stable layer-aligned fallback executors by default. Every
+sequential slice receives the full CPU team; `LUMABRI_SEGMENT_CHUNKS=N`
+overrides the split and `LUMABRI_SEGMENT_THREADS=N` overrides its CPU team.
+A public interface enables the
 preferred direct path. Behind NAT the same executors register as relay-only and
 remain reachable through their signed outbound tracker tunnels; Lumabri never
 publishes a guessed private address as direct.
@@ -162,6 +179,12 @@ Run the same command with `LUMABRI_ENCRYPT=1` to gate encrypted control and
 data planes. The target also runs the sampler unit gate, a relay-only real
 session, checkpoint/replay after a killed executor, and ordinary
 `lumabri serve` + `lumabri chat` with context negotiation.
+
+`make test-segment-hybrid ENGINE=/path/to/colibri/c` is the focused hybrid
+gate. It establishes an oracle with a local OLMoE Segment, joins a strict-RAM
+donor holding one complete layer, requires non-zero donor EXEC calls and the
+same tokens, then kills the donor and requires the local fallback to produce
+the oracle again.
 
 ## Remaining operational scope
 

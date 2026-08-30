@@ -13,8 +13,8 @@ void lumi_v4_bridge_init(int n_layers, int n_experts, int hidden) {
     lumi_init_ex(n_layers, n_experts, hidden, NULL);   /* every V4 layer routes */
 }
 int lumi_v4_bridge_on(int layer) { return lumi_layer_on(layer); }
-void lumi_v4_bridge_apply(int layer, const int *indices, const float *weights,
-                          int topk, const float *x, int batch, int D, float *out) {
-    lumi_moe_apply_v4(layer, indices, weights, topk, x, batch, D, out);
+int lumi_v4_bridge_apply(int layer, const int *indices, const float *weights,
+                         int topk, const float *x, int batch, int D, float *out) {
+    return lumi_moe_apply_v4(layer, indices, weights, topk, x, batch, D, out);
 }
 void lumi_v4_bridge_report(void) { lumi_report(); }

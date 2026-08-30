@@ -43,6 +43,7 @@
 #include <unistd.h>
 
 #include "lumabri_proto.h"
+#include "lumabri_machine.h"
 #include "lumabri_segment_discovery.h"
 #include "lumabri_sign.h"
 #include "lumabri_secure.h"
@@ -394,17 +395,6 @@ static int local_model_layers(const char *model_dir, uint32_t *layers) {
     return local_model_u32(model_dir, "num_hidden_layers", layers);
 }
 
-static uint64_t machine_available_ram(void) {
-    FILE *file = fopen("/proc/meminfo", "r");
-    if (!file) return 0;
-    char line[256];
-    unsigned long long kib = 0;
-    while (fgets(line, sizeof line, file))
-        if (sscanf(line, "MemAvailable: %llu kB", &kib) == 1) break;
-    fclose(file);
-    return (uint64_t)kib * 1024u;
-}
-
 /* A server with a real public IPv4 should need no networking flag. Private,
  * loopback, link-local and CGNAT addresses are deliberately not guessed:
  * publishing one to an Internet swarm would create a "complete" Segment
@@ -480,6 +470,13 @@ static int parse_serve_port(const char *s, int *port) {
         v < 1 || v > 65525) return -1;
     *port = (int)v;
     return 0;
+}
+
+static int serve_port_available(int port) {
+    int fd = lmb_listen(port);
+    if (fd < 0) return 0;
+    close(fd);
+    return 1;
 }
 
 static void serve_watch_start(const char *tracker, const char *model);
@@ -573,6 +570,57 @@ static int cmd_serve(int argc, char **argv) {
     if (join) snprintf(taddr, sizeof taddr, "%s", join);
     else      snprintf(taddr, sizeof taddr, "127.0.0.1:%d", port);
 
+    /* Resolve the complete local topology before forking anything. Starting
+     * half a server and then discovering EADDRINUSE made the supervisor retry
+     * forever and produced a misleading apparently-live `serve`. */
+    char exec_bin[1200] = "", mtype[64] = "";
+    local_model_type(model, mtype, sizeof mtype);
+    const char *node = expert_node_for(mtype);
+    if (node) snprintf(exec_bin, sizeof exec_bin, "%s/%s", dir, node);
+    char segment_bin[1200], segment_model_storage[64];
+    snprintf(segment_bin, sizeof segment_bin, "%s/segment_node", dir);
+    const char *segment_engine = segment_engine_for(mtype);
+    const char *segment_model = model_name_for(
+        model, mname, segment_model_storage, sizeof segment_model_storage);
+    uint32_t segment_layers = 0;
+    LmbMachineProfile serve_profile;
+    (void)lmb_machine_probe(&serve_profile, model, NULL);
+    uint64_t segment_available = serve_profile.ram_available_bytes;
+    uint64_t segment_min_free = (uint64_t)lmb_env_int(
+        "LUMABRI_SEGMENT_MIN_FREE_MB", 8192, 1024, 262144) << 20;
+    int segment_candidate = !disk_donor && !no_exec && segment_engine &&
+        segment_model && access(segment_bin, X_OK) == 0 &&
+        local_model_layers(model, &segment_layers) == 0 &&
+        (!segment_available || segment_available >= segment_min_free);
+    if (!segment_candidate && !disk_donor && !no_exec && segment_engine &&
+        segment_model && access(segment_bin, X_OK) == 0 && segment_available &&
+        segment_available < segment_min_free)
+        printf("  %sSegment automatico non avviato: %.1f GB RAM disponibili, "
+               "il governor ne richiede %.1f. Storage ed expert restano "
+               "disponibili.%s\n", C_DIM,
+               (double)segment_available / 1e9,
+               (double)segment_min_free / 1e9, C_R);
+    int planned_chunks = segment_candidate
+        ? lmb_env_int("LUMABRI_SEGMENT_CHUNKS", 4, 1, 7) : 0;
+    if ((uint32_t)planned_chunks > segment_layers)
+        planned_chunks = (int)segment_layers;
+    int first_port = join ? port + 1 : port;
+    int last_port = port + 1;
+    if (!disk_donor && !no_exec && node && access(exec_bin, X_OK) == 0)
+        last_port = port + 2;
+    if (planned_chunks) last_port = port + 2 + planned_chunks;
+    for (int candidate_port = first_port; candidate_port <= last_port;
+         candidate_port++) {
+        if (candidate_port == port + 2 &&
+            (disk_donor || no_exec || !node || access(exec_bin, X_OK)))
+            continue;
+        if (!serve_port_available(candidate_port)) {
+            fprintf(stderr, "lumabri serve: port %d is already in use; "
+                    "nothing was started\n", candidate_port);
+            return 1;
+        }
+    }
+
     if (!join) {
         /* LUMABRI_TOKEN makes the whole serve private: the spawned tracker
          * requires it, the maintainer inherits it from the environment */
@@ -631,11 +679,7 @@ static int cmd_serve(int argc, char **argv) {
      * this server executing every expert. Donors that join later are
      * discovered by the chatters and win the calls they are nearest for;
      * this node stays the replica of last resort. */
-    char exec_bin[1200], mtype[64];
-    local_model_type(model, mtype, sizeof mtype);
     /* one node binary per engine family — they do not share an expert shape */
-    const char *node = expert_node_for(mtype);
-    if (node) snprintf(exec_bin, sizeof exec_bin, "%s/%s", dir, node);
     int with_exec = 0;
     if (!no_exec && !disk_donor && !node && mtype[0])
         printf("  %sfase 2 non disponibile per il motore %s: questo server "
@@ -681,46 +725,43 @@ static int cmd_serve(int argc, char **argv) {
      * addition to the expert executor.  This binary exists only in builds
      * made against Colibri's additive Edge/Segment archive; release builds
      * without it preserve the exact old serve topology. */
-    char segment_bin[1200], segment_model_storage[64];
-    snprintf(segment_bin, sizeof segment_bin, "%s/segment_node", dir);
-    const char *segment_engine = segment_engine_for(mtype);
-    const char *segment_model = model_name_for(
-        model, mname, segment_model_storage, sizeof segment_model_storage);
-    uint32_t segment_layers = 0;
     int with_segment = 0;
-    int segment_candidate = !disk_donor && !no_exec && segment_engine &&
-        segment_model && access(segment_bin, X_OK) == 0 &&
-        local_model_layers(model, &segment_layers) == 0;
-    uint64_t segment_available = machine_available_ram();
-    uint64_t segment_min_free = (uint64_t)lmb_env_int(
-        "LUMABRI_SEGMENT_MIN_FREE_MB", 8192, 1024, 262144) << 20;
-    if (segment_candidate && segment_available &&
-        segment_available < segment_min_free) {
-        printf("  %sSegment automatico non avviato: %.1f GB RAM disponibili, "
-               "il governor ne richiede %.1f. Storage ed expert restano "
-               "disponibili; regola LUMABRI_SEGMENT_MIN_FREE_MB solo se "
-               "conosci il carico della macchina.%s\n",
-               C_DIM, (double)segment_available / 1e9,
-               (double)segment_min_free / 1e9, C_R);
-        segment_candidate = 0;
-    }
     if (segment_candidate) {
-        long cores = sysconf(_SC_NPROCESSORS_ONLN);
+        long cores = serve_profile.physical_cores;
         if (cores < 1) cores = 1;
+        /* Keep stable layer boundaries from minute zero. Donors take these
+         * exact ranges one by one, so each new resident machine replaces a
+         * corresponding origin slice without migrating an active chat. The
+         * chain is sequential for decode: every local slice therefore gets
+         * the complete CPU team, rather than the old cores/chunks team that
+         * made four slices four times slower on one host. */
         int chunks = lmb_env_int("LUMABRI_SEGMENT_CHUNKS", 4, 1, 7);
         if ((uint32_t)chunks > segment_layers) chunks = (int)segment_layers;
-        int slice_threads = (int)(cores / chunks);
+        int slice_threads = lmb_env_int("LUMABRI_SEGMENT_THREADS",
+                                        (int)cores, 1, 256);
         if (slice_threads < 1) slice_threads = 1;
         int sessions = lmb_env_int("LUMABRI_SEGMENT_SESSIONS",
                                    advertise ? 4 : 2, 1, 64);
+        int run_queue = lmb_env_int("LUMABRI_SEGMENT_RUN_QUEUE", 32, 0, 256);
+        int run_wait_ms = lmb_env_int("LUMABRI_SEGMENT_RUN_WAIT_MS",
+                                      30000, 50, 60000);
         uint32_t segment_context = 4096, model_context = 0;
         if (!local_model_u32(model, "max_position_embeddings", &model_context) &&
             model_context < segment_context)
             segment_context = model_context;
-        char context[16], session_text[16], thread_text[16];
+        char context[16], session_text[16], thread_text[16], memory_text[32];
+        char run_queue_text[16], run_wait_text[16];
         snprintf(context, sizeof context, "%u", segment_context);
         snprintf(session_text, sizeof session_text, "%d", sessions);
         snprintf(thread_text, sizeof thread_text, "%d", slice_threads);
+        snprintf(run_queue_text, sizeof run_queue_text, "%d", run_queue);
+        snprintf(run_wait_text, sizeof run_wait_text, "%d", run_wait_ms);
+        uint64_t total_budget = segment_available > segment_min_free
+                              ? segment_available - segment_min_free : 0;
+        uint64_t slice_budget_mb = (total_budget / (uint64_t)chunks) >> 20;
+        if (!slice_budget_mb) slice_budget_mb = 1;
+        snprintf(memory_text, sizeof memory_text, "%llu",
+                 (unsigned long long)slice_budget_mb);
 
         /* A few disjoint origin slices retain the single-copy weight total,
          * but give placement exact boundaries it can replace independently:
@@ -740,7 +781,7 @@ static int cmd_serve(int argc, char **argv) {
                      chunk + 1);
             snprintf(sadv, sizeof sadv, "%s:%d",
                      advertise ? advertise : "127.0.0.1", port + 3 + chunk);
-            char *sargv[36];
+            char *sargv[40];
             a = 0;
             sargv[a++] = segment_bin;
             sargv[a++] = "--engine";       sargv[a++] = (char *)segment_engine;
@@ -757,6 +798,9 @@ static int cmd_serve(int argc, char **argv) {
             sargv[a++] = "--max-rows";     sargv[a++] = "16";
             sargv[a++] = "--sessions";     sargv[a++] = session_text;
             sargv[a++] = "--threads";      sargv[a++] = thread_text;
+            sargv[a++] = "--run-queue";    sargv[a++] = run_queue_text;
+            sargv[a++] = "--run-wait-ms";  sargv[a++] = run_wait_text;
+            sargv[a++] = "--memory-limit-mb"; sargv[a++] = memory_text;
             sargv[a++] = "--advertise";    sargv[a++] = sadv;
             sargv[a] = NULL;
             char slog[1200];
@@ -767,6 +811,11 @@ static int cmd_serve(int argc, char **argv) {
         }
         double ram_gb = (double)segment_available / 1e9;
         const char *home = getenv("HOME") ? getenv("HOME") : ".";
+        printf("  %smachine %s · %ld physical cores · %s · %.1f/%.1f GB RAM"
+               " · %u GPU%s%s\n", C_DIM, serve_profile.hostname, cores,
+               serve_profile.isa, serve_profile.ram_available_bytes / 1e9,
+               serve_profile.ram_total_bytes / 1e9, serve_profile.gpu_count,
+               serve_profile.gpu_count ? " detected" : "", C_R);
         printf("  %sSegment prepara %d fette layer-aligned sulle porte %d-%d "
                "(%ld CPU, %.1f GB RAM disponibili, %d thread e %d sessioni/fetta). "
                "%s%s%s\n",
@@ -953,6 +1002,8 @@ typedef struct {
     uint32_t nfiles, nexperts, have_exec_stats;
     uint64_t exec_calls;
     uint32_t exec_inflight;
+    uint32_t expert_state, expert_resident_flags, resident_experts;
+    uint64_t expert_resident_bytes, expert_vram_bytes;
     uint32_t layer_begin, layer_end;
     uint32_t active_sessions, max_sessions, segment_queue, segment_inflight;
     uint32_t segment_flags;
@@ -986,6 +1037,11 @@ static int swarm_detail(const char *tracker, SwarmDetailRow *rows, int cap) {
                   lmb_cur_u32(&cursor, &row.have_exec_stats) ||
                   lmb_cur_u64(&cursor, &row.exec_calls) ||
                   lmb_cur_u32(&cursor, &row.exec_inflight) ||
+                  lmb_cur_u32(&cursor, &row.expert_state) ||
+                  lmb_cur_u32(&cursor, &row.expert_resident_flags) ||
+                  lmb_cur_u32(&cursor, &row.resident_experts) ||
+                  lmb_cur_u64(&cursor, &row.expert_resident_bytes) ||
+                  lmb_cur_u64(&cursor, &row.expert_vram_bytes) ||
                   lmb_cur_u32(&cursor, &row.layer_begin) ||
                   lmb_cur_u32(&cursor, &row.layer_end) ||
                   lmb_cur_u32(&cursor, &row.active_sessions) ||
@@ -1149,6 +1205,14 @@ static void render_named_swarm(const SwarmDetailRow *rows, int n) {
         if (row->roles & LMB_SWARM_ROLE_EXPERT) {
             if (separator) printf(" | ");
             printf("%u expert", row->nexperts);
+            if (row->expert_resident_flags & LMB_EXPERT_RESIDENT_RAM)
+                printf(" · %u RAM-ready (%.1f GB)", row->resident_experts,
+                       (double)row->expert_resident_bytes / 1e9);
+            else if (row->expert_resident_flags & LMB_EXPERT_RESIDENT_VRAM)
+                printf(" · %u VRAM-ready (%.1f GB)", row->resident_experts,
+                       (double)row->expert_vram_bytes / 1e9);
+            else if (row->expert_resident_flags & LMB_EXPERT_DISK_FALLBACK)
+                printf(" · fallback disco");
             if (row->have_exec_stats)
                 printf(" · %llu call · %u attive",
                        (unsigned long long)row->exec_calls,
@@ -1247,6 +1311,14 @@ static void render_experts(const char *tracker) {
                        row->exec_inflight);
                 calls += row->exec_calls;
             } else printf("%u expert · contatore in attesa", row->nexperts);
+            if (row->expert_resident_flags & LMB_EXPERT_RESIDENT_RAM)
+                printf(" · %u residenti RAM (%.1f GB)", row->resident_experts,
+                       (double)row->expert_resident_bytes / 1e9);
+            else if (row->expert_resident_flags & LMB_EXPERT_RESIDENT_VRAM)
+                printf(" · %u residenti VRAM (%.1f GB)", row->resident_experts,
+                       (double)row->expert_vram_bytes / 1e9);
+            else if (row->expert_resident_flags & LMB_EXPERT_DISK_FALLBACK)
+                printf(" · fallback disco");
         }
         if (row->roles & LMB_SWARM_ROLE_SEGMENT) {
             if (row->roles & LMB_SWARM_ROLE_EXPERT) printf(" | ");
@@ -3155,18 +3227,21 @@ static int role_start_segment(const Role *r, const char *tracker,
         relay_only = 1;
     }
 
-    /* The origin's default four-way partition makes one slice roughly a
-     * quarter of the checkpoint. Keep both a fixed OS reserve and 25% of the
-     * currently available RAM; if it would not fit, the expert donor below
-     * is the finer-grained, auto-sized contribution. This is intentionally
-     * conservative: a donation must never win by pushing the desktop to swap. */
-    uint64_t available = machine_available_ram();
-    uint64_t reserve = available / 4;
-    if (reserve < 4ull * 1000 * 1000 * 1000)
-        reserve = 4ull * 1000 * 1000 * 1000;
-    uint64_t estimated = model_bytes / 4 + model_bytes / 20;
-    if (!available || reserve >= available || estimated > available - reserve)
+    /* The executor receives its actual range before applying this budget.
+     * This process therefore only publishes what the machine can donate;
+     * segment_node compares it with the assigned range and releases the
+     * promise immediately when it cannot fit. */
+    LmbMachineProfile profile;
+    (void)lmb_machine_probe(&profile,
+                            r->model_dir[0] ? r->model_dir : ".", tracker);
+    uint64_t available = profile.ram_available_bytes;
+    uint64_t reserve = (uint64_t)lmb_env_int(
+        getenv("LUMABRI_SEGMENT_RAM_RESERVE_MB") ?
+        "LUMABRI_SEGMENT_RAM_RESERVE_MB" : "LUMABRI_RAM_RESERVE_MB",
+        4096, 256, 262144) << 20;
+    if (!available || reserve >= available)
         return 0;
+    uint64_t memory_budget = available - reserve;
 
     char probe[1100];
     snprintf(probe, sizeof probe, "%s/config.json", r->model_dir);
@@ -3201,19 +3276,38 @@ static int role_start_segment(const Role *r, const char *tracker,
 
     int port = free_port(7801);
     if (!port) return 0;
-    long cores = sysconf(_SC_NPROCESSORS_ONLN);
+    long cores = profile.physical_cores;
     int threads = cores > 1 ? (int)(cores / 2) : 1;
     int sessions = 2;
+    int run_queue = lmb_env_int("LUMABRI_SEGMENT_RUN_QUEUE", 32, 0, 256);
+    int run_wait_ms = lmb_env_int("LUMABRI_SEGMENT_RUN_WAIT_MS",
+                                  30000, 50, 60000);
     char port_text[16], context_text[16], sessions_text[16], threads_text[16];
+    char run_queue_text[16], run_wait_text[16];
+    char memory_text[32], model_bytes_text[32], preflight_text[32];
     char address[80], name[64], base[48];
     snprintf(port_text, sizeof port_text, "%d", port);
     snprintf(context_text, sizeof context_text, "%d", context);
     snprintf(sessions_text, sizeof sessions_text, "%d", sessions);
     snprintf(threads_text, sizeof threads_text, "%d", threads);
+    snprintf(run_queue_text, sizeof run_queue_text, "%d", run_queue);
+    snprintf(run_wait_text, sizeof run_wait_text, "%d", run_wait_ms);
+    snprintf(memory_text, sizeof memory_text, "%llu",
+             (unsigned long long)(memory_budget >> 20));
+    snprintf(model_bytes_text, sizeof model_bytes_text, "%llu",
+             (unsigned long long)model_bytes);
     snprintf(address, sizeof address, "%s:%d", host, port);
     donor_base_name(r, base, sizeof base);
     snprintf(name, sizeof name, "%s-segment-%d", base, port);
-    char *argv[34];
+    int ready_pipe[2];
+    if (pipe2(ready_pipe, O_CLOEXEC)) return 0;
+    int fd_flags = fcntl(ready_pipe[1], F_GETFD);
+    if (fd_flags < 0 || fcntl(ready_pipe[1], F_SETFD,
+                              fd_flags & ~FD_CLOEXEC)) {
+        close(ready_pipe[0]); close(ready_pipe[1]); return 0;
+    }
+    snprintf(preflight_text, sizeof preflight_text, "%d", ready_pipe[1]);
+    char *argv[42];
     int a = 0;
     argv[a++] = bin;
     argv[a++] = "--engine";        argv[a++] = (char *)engine;
@@ -3230,13 +3324,38 @@ static int role_start_segment(const Role *r, const char *tracker,
     argv[a++] = "--max-rows";      argv[a++] = "16";
     argv[a++] = "--sessions";      argv[a++] = sessions_text;
     argv[a++] = "--threads";       argv[a++] = threads_text;
+    argv[a++] = "--run-queue";     argv[a++] = run_queue_text;
+    argv[a++] = "--run-wait-ms";   argv[a++] = run_wait_text;
+    argv[a++] = "--memory-limit-mb"; argv[a++] = memory_text;
+    argv[a++] = "--model-bytes";   argv[a++] = model_bytes_text;
+    argv[a++] = "--preflight-fd";  argv[a++] = preflight_text;
     argv[a] = NULL;
-    if (g_nchildren >= MAX_CHILDREN) return 0;
+    if (g_nchildren >= MAX_CHILDREN) {
+        close(ready_pipe[0]); close(ready_pipe[1]); return 0;
+    }
     char logpath[1200];
     pid_t pid = spawn_argv_logged(argv, local ? NULL : envv,
                                   donor_log_path(name, logpath,
                                                  sizeof logpath));
-    if (pid <= 0) return 0;
+    close(ready_pipe[1]);
+    if (pid <= 0) { close(ready_pipe[0]); return 0; }
+    struct pollfd ready_poll = { .fd = ready_pipe[0], .events = POLLIN | POLLHUP };
+    char readiness = 0;
+    int polled;
+    do polled = poll(&ready_poll, 1, 10000); while (polled < 0 && errno == EINTR);
+    ssize_t readiness_bytes = polled > 0
+                            ? read(ready_pipe[0], &readiness, 1) : 0;
+    close(ready_pipe[0]);
+    if (readiness_bytes != 1 || readiness != 'P') {
+        int status = 0;
+        if (waitpid(pid, &status, WNOHANG) == 0) {
+            kill(pid, SIGTERM);
+            waitpid(pid, &status, 0);
+        }
+        printf("  %sla fetta Segment assegnata non entra nel budget RAM; "
+               "passo al donatore di esperti%s\n", C_DIM, C_R);
+        return 0;
+    }
     child_publish(g_nchildren++, pid);
     printf("  %s\xe2\x9c\xa6 eseguo una fetta Segment assegnata dal tracker "
            "per lo sciame%s %s(priorita' bassa, %d sessioni massime%s)%s\n",
@@ -4042,6 +4161,243 @@ static int cmd_peer_key(int argc, char **argv) {
     return 0;
 }
 
+static int cmd_machine(int argc, char **argv) {
+    int json = 0;
+    const char *tracker = NULL, *disk = ".";
+    for (int i = 0; i < argc; i++) {
+        if (!strcmp(argv[i], "--json")) json = 1;
+        else if (!strcmp(argv[i], "--tracker") && i + 1 < argc)
+            tracker = argv[++i];
+        else if (!strcmp(argv[i], "--disk") && i + 1 < argc)
+            disk = argv[++i];
+        else {
+            fprintf(stderr, "usage: lumabri machine [--json] [--tracker HOST:PORT] "
+                            "[--disk PATH]\n");
+            return 2;
+        }
+    }
+    LmbMachineProfile profile;
+    if (lmb_machine_probe(&profile, disk, tracker)) {
+        fprintf(stderr, "cannot profile this machine\n"); return 1;
+    }
+    lmb_machine_print(stdout, &profile, json);
+    if (!json) {
+        uint64_t reserve = (uint64_t)lmb_env_int(
+            "LUMABRI_RAM_RESERVE_MB", 4096, 256, 262144) << 20;
+        LmbGovernor governor;
+        lmb_governor_init(&governor, reserve);
+        printf("governor %s · %.1f GB system reserve\n",
+               lmb_governor_state_name(lmb_governor_poll(&governor)),
+               reserve / 1e9);
+    }
+    return 0;
+}
+
+static int cmd_limits(int argc, char **argv) {
+    (void)argv;
+    if (argc) { fprintf(stderr, "usage: lumabri limits\n"); return 2; }
+    uint64_t reserve = (uint64_t)lmb_env_int(
+        "LUMABRI_RAM_RESERVE_MB", 4096, 256, 262144) << 20;
+    LmbMachineProfile profile;
+    (void)lmb_machine_probe(&profile, ".", NULL);
+    uint64_t donate = profile.ram_available_bytes > reserve ?
+                      profile.ram_available_bytes - reserve : 0;
+    printf("system reserve     %.1f GB RAM\n", reserve / 1e9);
+    printf("currently donable  %.1f GB RAM\n", donate / 1e9);
+    printf("donor CPU team     %u physical cores (low priority)\n",
+           profile.physical_cores);
+    printf("manual state       %s\n",
+           lmb_governor_manual_paused() ? "PAUSED" : "ACTIVE");
+    printf("overrides          LUMABRI_RAM_RESERVE_MB, "
+           "LUMABRI_EXPERT_RAM_RESERVE_MB, LUMABRI_SEGMENT_RAM_RESERVE_MB\n");
+    return 0;
+}
+
+static int cmd_governor_manual(int argc, char **argv, int paused) {
+    (void)argv;
+    if (argc) {
+        fprintf(stderr, "usage: lumabri %s\n", paused ? "pause" : "resume");
+        return 2;
+    }
+    if (lmb_governor_set_manual(paused)) {
+        perror("cannot update governor state"); return 1;
+    }
+    printf("donation %s; running work will drain before the new state applies\n",
+           paused ? "paused" : "resumed");
+    return 0;
+}
+
+typedef struct {
+    char name[64];
+    int ok;
+    int required;
+    char detail[192];
+} DoctorCheck;
+
+static void doctor_json_string(const char *value) {
+    fputc('"', stdout);
+    for (; value && *value; value++) {
+        unsigned char c = (unsigned char)*value;
+        if (c == '"' || c == '\\') printf("\\%c", c);
+        else if (c == '\n') fputs("\\n", stdout);
+        else if (c == '\r') fputs("\\r", stdout);
+        else if (c == '\t') fputs("\\t", stdout);
+        else if (c < 0x20) printf("\\u%04x", c);
+        else fputc(c, stdout);
+    }
+    fputc('"', stdout);
+}
+
+static void doctor_add(DoctorCheck *checks, size_t *count, const char *name,
+                       int ok, int required, const char *detail) {
+    if (*count >= 64) return;
+    DoctorCheck *check = &checks[(*count)++];
+    snprintf(check->name, sizeof check->name, "%s", name);
+    check->ok = ok; check->required = required;
+    snprintf(check->detail, sizeof check->detail, "%s", detail ? detail : "");
+}
+
+static int cmd_doctor(int argc, char **argv) {
+    int json = 0, serve_port = 0;
+    const char *tracker = NULL, *model = NULL;
+    for (int i = 0; i < argc; i++) {
+        if (!strcmp(argv[i], "--json")) json = 1;
+        else if (!strcmp(argv[i], "--tracker") && i + 1 < argc)
+            tracker = argv[++i];
+        else if (!strcmp(argv[i], "--model") && i + 1 < argc)
+            model = argv[++i];
+        else if (!strcmp(argv[i], "--serve-port") && i + 1 < argc) {
+            if (parse_serve_port(argv[++i], &serve_port)) {
+                fprintf(stderr, "--serve-port must be an integer from 1 to 65525\n");
+                return 2;
+            }
+        } else {
+            fprintf(stderr, "usage: lumabri doctor [--json] [--tracker HOST:PORT] "
+                            "[--model DIR] [--serve-port N]\n");
+            return 2;
+        }
+    }
+
+    DoctorCheck checks[64]; size_t count = 0;
+    LmbMachineProfile profile;
+    int machine_ok = lmb_machine_probe(&profile, model ? model : ".", tracker) == 0;
+    doctor_add(checks, &count, "machine-profile", machine_ok, 1,
+               machine_ok ? "CPU, RAM, GPU, disk and network probed" :
+                            "machine probe failed");
+    if (machine_ok) {
+        uint64_t reserve = (uint64_t)lmb_env_int(
+            "LUMABRI_RAM_RESERVE_MB", 4096, 256, 262144) << 20;
+        doctor_add(checks, &count, "ram-reserve",
+                   profile.ram_available_bytes > reserve, 0,
+                   profile.ram_available_bytes > reserve ?
+                   "donation has RAM above the system reserve" :
+                   "chat works, but donation should remain paused at current RAM");
+        doctor_add(checks, &count, "swap-pressure",
+                   !profile.swap_total_bytes ||
+                   profile.swap_free_bytes >= profile.swap_total_bytes / 20u,
+                   0, "at least 5% swap remains free");
+        doctor_add(checks, &count, "disk-space",
+                   profile.disk_available_bytes >= (1ull << 30), 0,
+                   "at least 1 GiB is available at the selected path");
+    }
+
+    const char *home = getenv("HOME");
+    struct stat state_stat;
+    char state_dir[1200] = "";
+    int state_ok = home && home[0] && access(home, W_OK) == 0;
+    if (home && home[0]) {
+        snprintf(state_dir, sizeof state_dir, "%s/.lumabri", home);
+        if (!stat(state_dir, &state_stat))
+            state_ok = S_ISDIR(state_stat.st_mode) && access(state_dir, W_OK) == 0;
+        else if (errno != ENOENT) state_ok = 0;
+    }
+    doctor_add(checks, &count, "state-directory", state_ok, 1,
+               state_ok ? "HOME/.lumabri is writable or can be created" :
+                          "HOME/.lumabri is not writable");
+
+    char directory[1024];
+    exe_dir(directory, sizeof directory);
+    const char *required_bins[] = {"tracker", "maintainer", "swarm_probe"};
+    for (size_t i = 0; i < sizeof required_bins / sizeof required_bins[0]; i++) {
+        char path[1200];
+        snprintf(path, sizeof path, "%s/%s", directory, required_bins[i]);
+        char name[64]; snprintf(name, sizeof name, "binary-%s", required_bins[i]);
+        doctor_add(checks, &count, name, access(path, X_OK) == 0, 1,
+                   access(path, X_OK) == 0 ? "executable found" :
+                                            "run make all or reinstall Lumabri");
+    }
+    char shim[1200];
+    snprintf(shim, sizeof shim, "%s/liblumabri.so", directory);
+    if (access(shim, R_OK))
+        snprintf(shim, sizeof shim, "%s/../lib/lumabri/liblumabri.so", directory);
+    doctor_add(checks, &count, "library-liblumabri", access(shim, R_OK) == 0, 1,
+               access(shim, R_OK) == 0 ? "CAS interposer found" :
+                                        "liblumabri.so is missing");
+    const char *segment_bins[] = {"segment_node", "segment_chat"};
+    for (size_t i = 0; i < sizeof segment_bins / sizeof segment_bins[0]; i++) {
+        char path[1200], name[64];
+        snprintf(path, sizeof path, "%s/%s", directory, segment_bins[i]);
+        snprintf(name, sizeof name, "optional-%s", segment_bins[i]);
+        doctor_add(checks, &count, name, access(path, X_OK) == 0, 0,
+                   access(path, X_OK) == 0 ? "Segment runtime available" :
+                   "classic Expert/CAS remains available; build against Colibri dev for Segment");
+    }
+
+    if (model) {
+        char config[1200];
+        snprintf(config, sizeof config, "%s/config.json", model);
+        doctor_add(checks, &count, "model-config", access(config, R_OK) == 0, 1,
+                   access(config, R_OK) == 0 ? "config.json is readable" :
+                                              "model directory has no readable config.json");
+    }
+    if (tracker)
+        doctor_add(checks, &count, "tracker", machine_ok &&
+                   profile.tracker_rtt_ms >= 0.0, 1,
+                   machine_ok && profile.tracker_rtt_ms >= 0.0 ?
+                   "tracker TCP endpoint is reachable" : "tracker is unreachable");
+    if (serve_port) {
+        int topology_ok = 1, failed_port = 0;
+        for (int offset = 0; offset < 10; offset++)
+            if (!serve_port_available(serve_port + offset)) {
+                topology_ok = 0; failed_port = serve_port + offset; break;
+            }
+        char detail[96];
+        if (topology_ok) snprintf(detail, sizeof detail,
+                                  "ports %d-%d are available", serve_port,
+                                  serve_port + 9);
+        else snprintf(detail, sizeof detail, "port %d is already in use",
+                      failed_port);
+        doctor_add(checks, &count, "serve-ports", topology_ok, 1, detail);
+    }
+
+    int ok = 1, warnings = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (!checks[i].ok && checks[i].required) ok = 0;
+        if (!checks[i].ok && !checks[i].required) warnings++;
+    }
+    if (json) {
+        printf("{\"schema\":1,\"ok\":%s,\"warnings\":%d,\"checks\":[",
+               ok ? "true" : "false", warnings);
+        for (size_t i = 0; i < count; i++) {
+            if (i) fputc(',', stdout);
+            fputs("{\"name\":", stdout); doctor_json_string(checks[i].name);
+            printf(",\"ok\":%s,\"required\":%s,\"detail\":",
+                   checks[i].ok ? "true" : "false",
+                   checks[i].required ? "true" : "false");
+            doctor_json_string(checks[i].detail); fputc('}', stdout);
+        }
+        fputs("]}\n", stdout);
+    } else {
+        printf("Lumabri doctor: %s (%d warning%s)\n", ok ? "READY" : "NOT READY",
+               warnings, warnings == 1 ? "" : "s");
+        for (size_t i = 0; i < count; i++)
+            printf("  %s %-24s %s\n", checks[i].ok ? "ok" :
+                   (checks[i].required ? "FAIL" : "warn"), checks[i].name,
+                   checks[i].detail);
+    }
+    return ok ? 0 : 1;
+}
+
 /* ---- main --------------------------------------------------------------- */
 
 int main(int argc, char **argv) {
@@ -4049,6 +4405,14 @@ int main(int argc, char **argv) {
     if (argc >= 2 && !strcmp(argv[1], "key")) return cmd_key(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "peer-key"))
         return cmd_peer_key(argc - 2, argv + 2);
+    if (argc >= 2 && (!strcmp(argv[1], "machine") || !strcmp(argv[1], "status")))
+        return cmd_machine(argc - 2, argv + 2);
+    if (argc >= 2 && !strcmp(argv[1], "limits"))
+        return cmd_limits(argc - 2, argv + 2);
+    if (argc >= 2 && !strcmp(argv[1], "pause"))
+        return cmd_governor_manual(argc - 2, argv + 2, 1);
+    if (argc >= 2 && !strcmp(argv[1], "resume"))
+        return cmd_governor_manual(argc - 2, argv + 2, 0);
     if (lmb_secure_init()) return 1; /* children inherit the same strict mode */
     const char *tok = getenv("LUMABRI_TOKEN");
     if (tok && strlen(tok) > LMB_TOKEN_MAX) {
@@ -4056,6 +4420,8 @@ int main(int argc, char **argv) {
                 (unsigned)LMB_TOKEN_MAX);
         return 2;
     }
+    if (argc >= 2 && !strcmp(argv[1], "doctor"))
+        return cmd_doctor(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "serve")) return cmd_serve(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "chat"))  return cmd_chat(argc - 2, argv + 2);
     /* No arguments and a terminal: this is a person, not a script. Chat is
@@ -4065,6 +4431,9 @@ int main(int argc, char **argv) {
     fprintf(stderr,
         "lumabri: run huge models from a swarm of peers\n\n"
         "  lumabri                                                    chat (asks what it needs)\n"
+        "  lumabri machine [--json] [--tracker HOST:PORT]             profile this machine\n"
+        "  lumabri status | limits | pause | resume                    resource governor\n"
+        "  lumabri doctor [--json] [--tracker H:P] [--model DIR]      deployment preflight\n"
         "  lumabri peer-key                                           print this machine's endpoint identity\n"
         "  lumabri serve --model DIR [--port 7300] [--join TRACKER]   share a model\n"
         "  lumabri chat  [--tracker HOST:7300] [--model NAME]         chat with it\n"

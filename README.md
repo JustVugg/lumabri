@@ -62,6 +62,16 @@ the finer-grained expert donor remains the lower-memory fallback.
 Both run at low priority and die with the TUI. Nothing to configure — Enter
 picks "just chat".
 
+`lumabri machine` shows the quick startup profile used for donation: CPU
+model/ISA, physical and logical cores, NUMA, RAM/swap, visible GPU/VRAM, disk,
+interfaces and optional tracker RTT. `--json` emits a stable schema for
+automation. `lumabri limits` shows the current donation budget; `lumabri pause`
+and `lumabri resume` control every local donor without killing the chat.
+`lumabri doctor --json` is the versioned deployment preflight for required
+binaries, CAS state, model readability, tracker reachability and the complete
+serving port block. The reproducible local, sanitizer, multi-host and soak
+release gates are documented in **[PRODUCTION.md](PRODUCTION.md)**.
+
 Inside the chat, `/swarm` (or `/hosts`) shows stable human-readable machine
 names, storage served, expert calls and live Segment ranges. `/experts` answers
 how often each executor has actually been used; `/model`, `/debug`, `/storage`
@@ -125,6 +135,16 @@ origin ranges is the current latency/replacement compromise. Segment prefers
 persistent direct TCP and falls back request-for-request to the exact peer's
 signed tracker tunnel. A machine behind NAT therefore contributes without
 publishing an unreachable address or opening a data port.
+
+Discovery probes Segment endpoints on its control thread and publishes an
+immutable completion estimate with each route. Selection minimizes the sum of
+EWMA latency and advertised queue/inflight cost for the complete chain; origin
+fallback status is only a tie-breaker. Adding a slower donor therefore does not
+replace a faster known route. Expert replicas use the same EWMA model, open a
+circuit only after repeated failures, and hedge automatically only after enough
+samples show a real p95 tail. `LUMABRI_HEDGE_MS` remains an explicit override.
+These are online estimates, not a speed claim: `swarm_bench.py` on distinct
+hosts remains the authority for single-chat and aggregate throughput.
 
 The TUI's temperature and top-p are applied to logits returned by Colibri Edge;
 temperature zero retains the exact greedy selector. When a compatible replica
@@ -229,10 +249,22 @@ summary reports connected hosts, bytes served, expert calls and active Segment
 runs, so successful swarm work is visible on both sides.
 
 Automatic Segment is a real compute service. It starts only with at least 8 GiB
-available by default (`LUMABRI_SEGMENT_MIN_FREE_MB`), divides CPU threads among
-the slices, runs fallback work at low priority and keeps 4 GiB free before
-accepting a new session (`LUMABRI_SEGMENT_RAM_RESERVE_MB`). A relay-only/NAT
+available by default (`LUMABRI_SEGMENT_MIN_FREE_MB`), gives each sequential
+slice a full physical-core team, runs fallback work at low priority and keeps
+4 GiB free before accepting a new session. `LUMABRI_RAM_RESERVE_MB` is the
+common limit; `LUMABRI_SEGMENT_RAM_RESERVE_MB` and
+`LUMABRI_EXPERT_RAM_RESERVE_MB` are per-role overrides. A relay-only/NAT
 origin defaults to two sessions per slice; a direct server defaults to four.
+
+Every executor runs the same hysteretic resource governor. `ACTIVE` publishes
+capacity; `PRESSURE` and `PAUSED` advertise Segment draining or zero Expert
+coverage and reject new work; `RECOVERY` waits three healthy samples before
+publishing again. In-flight Segment work sees the cancellation callback and is
+migrated through the existing checkpoint/replay path. Expert work already in
+flight drains, while new calls fall back to another replica or the Segment's
+local kernel. This pauses donor CPU and I/O immediately; resident RAM stays
+allocated inside the donor process, protected by the reserve chosen before
+loading, so recovery does not cold-load the model again.
 
 On every other machine, pick a role:
 
@@ -248,8 +280,11 @@ the GB budget is a hard placement input, not permission to fill the disk. A
 compute donor needs no model: when Segment is active and a quarter-range fits
 after the system reserve, it receives the least-replicated origin range. Direct
 P2P is preferred; NAT donors use Segment relay automatically. If the range does
-not fit, `--hold auto` sizes an expert slice to free RAM and the
-tracker gives it what nobody else covers through direct EXEC or relay. Both
+not fit, `--hold auto` sizes a strictly resident expert slice after preserving
+the system RAM reserve (`LUMABRI_EXPERT_RAM_RESERVE_MB`, 4096 by default).
+The tracker gives it what nobody else covers through direct EXEC or relay and
+does not see the donor until every assigned weight is RAM-ready. The origin's
+explicit `--cache` executor remains the labelled disk fallback. Both
 load through the verified swarm mirror, so the whole model never lands on the
 donor.
 Donors register under `donor-<hostname>-…` (pick one with `--donor-name`);
@@ -258,6 +293,27 @@ instead of being silently rejected forever. So several
 compute donors **split the model into disjoint slices automatically**. (`--hold
 N` sets the count by hand; `--stride 2:0` / `--stride 2:1` or
 `--layers …` split it explicitly if you want to size each machine yourself.)
+The origin publishes four stable, layer-aligned fallback ranges by default
+(`LUMABRI_SEGMENT_CHUNKS=1..7` overrides it). Each range uses the full local
+CPU team because decode traverses the chain serially. A resident Segment donor
+then replaces one exact range; it advertises measured RSS only after its engine
+has opened, and the server remains the fallback for every range not yet donated.
+`LUMABRI_SEGMENT_THREADS=N` is the explicit per-range CPU override.
+Within either origin or donor ranges, Segment Hybrid also delegates any fully
+covered MoE layer to strict-RAM Expert donors. Selected experts are sent in
+parallel; incomplete layers and failed donor calls execute locally. Thus even a
+peer too small for a complete Segment range contributes useful resident expert
+work, while the server remains the correctness fallback.
+
+Concurrent chats are admitted FIFO at every Segment range. Queue depth and
+inflight work are published to the predictive scheduler, the queue is bounded,
+and a request that misses its admission deadline returns `BUSY` so an exact
+replica can take over instead of waiting behind a 300-second socket timeout.
+The four origin ranges form a pipeline, so different chats can occupy different
+ranges concurrently. Lumabri deliberately does not fuse rows from unrelated
+sessions: current Colibri adapters own opaque per-session state and can round a
+cross-session batch differently. Calling that continuous batching before an
+engine-neutral multi-session batch ABI exists would break the token oracle.
 When two donors happen to hold the *same* expert, add `LUMABRI_SPREAD=1` on the
 chatter to balance the load between them too. Neither donor needs to know the
 others exist. Expert requests can fail over to another replica. Stateful

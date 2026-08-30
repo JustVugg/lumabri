@@ -55,6 +55,7 @@ EOF
 SAN="-fsanitize=address,undefined -fno-omit-frame-pointer"
 cc -O1 -g $SAN -fopenmp -pthread -I"$T" -I. \
     -DLMBE_ENGINE_HEADER='"test_engine.h"' expert_node.c \
+    lumabri_machine.c \
     -o "$T/expert_node" -lm
 
 # One helper can impersonate a peer or tracker and can inspect a real node.
