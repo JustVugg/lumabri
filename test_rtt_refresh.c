@@ -192,8 +192,22 @@ static int run_exec_calls(int count) {
     float input[4] = {0.25f, -0.5f, 0.75f, 1.0f};
     for (int i = 0; i < count; i++) {
         uint32_t tried = 0;
+        int replica = lumi_pick(0, tried);
+        if (replica < 0) return -1;
+        tried |= 1u << replica;
+        LumiPeer *primary = &L.peers[L.own[replica]];
+        int fd = lumi_take_sock(primary);
+        if (fd < 0) return -1;
+        double started = lumi_now();
+        if (lumi_send_exec(fd, 0, 0, input, 4, 1, NULL)) {
+            close(fd);
+            lumi_peer_failed(primary);
+            return -1;
+        }
+        lumi_peer_sent(primary);
         LumiPeer *from = NULL;
-        float *output = lumi_exec_retry(0, 0, input, 4, 1, NULL, &tried, &from);
+        float *output = lumi_finish_exec(0, 0, input, 4, 1, NULL, fd, primary,
+                                         started, &tried, &from);
         int bad = !output || !from || memcmp(output, input, sizeof input);
         free(output);
         if (bad) return -1;
@@ -231,7 +245,7 @@ int main(int argc, char **argv) {
     int bad = atomic_load(&nodes[0].ready) != 1 || atomic_load(&nodes[1].ready) != 1;
     for (int i = 0; !bad && i < 2; i++) bad = node_register(&nodes[i]) != 0;
     L.n_layers = 1; L.n_experts = 1; L.hidden = 4; L.npeers = 2;
-    L.initialized = 1; L.discovery = 0; L.hedge_ms = 0; L.verify_pct = 0;
+    L.initialized = 1; L.discovery = 0; L.hedge_ms = -1; L.verify_pct = 0;
     L.own = (int *)malloc(LUMI_MAX_REP * sizeof(int));
     if (!L.own) bad = 1;
     if (!bad) stage = "initial probes";
@@ -253,12 +267,53 @@ int main(int argc, char **argv) {
               atomic_load(&nodes[1].accepts) != 1;
     }
 
+    /* Arm the automatic policy before relying on the explicit off switch.
+     * Eight ordinary samples, one tail spike, then fast replies exercise the
+     * predictor through its public observation path instead of forging its
+     * internal fields. A deliberately slow one-call probe then gives a broken
+     * off switch ample time to issue a hedge. Its state is restored before the
+     * measured 8/0 parked phase so attribution remains exact. */
+    if (!bad) stage = "explicit hedge off";
+    if (!bad) {
+        LumiPeer *primary = &L.peers[0];
+        lmb_predict_init(&primary->latency, 1000);
+        for (int i = 0; i < 8; i++)
+            lmb_predict_observe(&primary->latency, 1000);
+        lmb_predict_observe(&primary->latency, 40000);
+        for (int i = 0; i < 10; i++)
+            lmb_predict_observe(&primary->latency, 1000);
+        uint32_t automatic_ms = lmb_predict_hedge_ms(&primary->latency);
+        const int off_probe_delay_ms = 250;
+        bad = automatic_ms == 0 || automatic_ms >= (uint32_t)off_probe_delay_ms;
+        if (!bad) {
+            LmbLatencyPredictor saved_latency[2] = {
+                L.peers[0].latency, L.peers[1].latency
+            };
+            uint64_t saved_observations[2] = {
+                L.peers[0].exec_observations, L.peers[1].exec_observations
+            };
+            int saved_calls[2] = {
+                atomic_load(&nodes[0].calls), atomic_load(&nodes[1].calls)
+            };
+            atomic_store(&nodes[0].delay_ms, off_probe_delay_ms);
+            bad = run_exec_calls(1) != 0 || L.hedges != 0 ||
+                  L.peers[0].exec_observations != saved_observations[0] + 1 ||
+                  L.peers[1].exec_observations != saved_observations[1];
+            atomic_store(&nodes[0].delay_ms, 5);
+            for (int i = 0; i < 2; i++) {
+                L.peers[i].latency = saved_latency[i];
+                L.peers[i].exec_observations = saved_observations[i];
+                atomic_store(&nodes[i].calls, saved_calls[i]);
+            }
+        }
+    }
+
     long initial_b = L.peers[1].rtt_us;
     atomic_store(&nodes[1].delay_ms, 1);
     if (!bad) stage = "parked routing";
     if (!bad) bad = run_exec_calls(8) != 0;
     if (!bad) bad = L.peers[0].exec_observations != 8 ||
-                    L.peers[1].exec_observations != 0;
+                    L.peers[1].exec_observations != 0 || L.hedges != 0;
     if (!bad) stage = "parked telemetry";
     if (!bad) bad = node_send_ereg(&nodes[0], 1) || node_send_ereg(&nodes[1], 1);
     uint64_t calls_a = 0, calls_b = 0;
@@ -338,7 +393,7 @@ int main(int argc, char **argv) {
     if (!bad) stage = "refreshed routing";
     if (!bad) bad = run_exec_calls(8) != 0;
     if (!bad) bad = L.peers[0].exec_observations != 8 ||
-                    L.peers[1].exec_observations != 8;
+                    L.peers[1].exec_observations != 8 || L.hedges != 0;
     if (!bad) stage = "refreshed telemetry";
     if (!bad) bad = node_send_ereg(&nodes[0], 1) || node_send_ereg(&nodes[1], 1);
     if (!bad) bad = read_named_calls(&calls_a, &calls_b) || calls_a != 8 || calls_b != 8;
