@@ -268,6 +268,9 @@ flight drains, while new calls fall back to another replica or the Segment's
 local kernel. This pauses donor CPU and I/O immediately; resident RAM stays
 allocated inside the donor process, protected by the reserve chosen before
 loading, so recovery does not cold-load the model again.
+Every transition names its cause and prints available RAM, the configured
+reserve and process residency; a `draining` advert is therefore diagnosable
+from the executor log instead of being a bare state bit.
 
 On every other machine, pick a role:
 
@@ -290,6 +293,12 @@ does not see the donor until every assigned weight is RAM-ready. The origin's
 explicit `--cache` executor remains the labelled disk fallback. Both
 load through the verified swarm mirror, so the whole model never lands on the
 donor.
+Automatic compute donation has one machine/user lease shared by `chat` and
+`serve --join`. Opening the menu repeatedly therefore cannot start several
+executors that each size themselves from the same available-RAM snapshot. A
+second process prints the PID/model/tracker of the active owner and may still
+donate storage. Stop the owning chat or joined server before replacing it; on
+Linux, its executors also receive `SIGTERM` if their parent is killed.
 Donors register under `donor-<hostname>-…` (pick one with `--donor-name`);
 a name already owned by another peer key is retried with a numbered suffix
 instead of being silently rejected forever. So several
@@ -307,6 +316,11 @@ covered MoE layer to strict-RAM Expert donors. Selected experts are sent in
 parallel; incomplete layers and failed donor calls execute locally. Thus even a
 peer too small for a complete Segment range contributes useful resident expert
 work, while the server remains the correctness fallback.
+
+Files written by the running engine are deliberately not model content.
+Lumabri excludes `.coli_*` state such as `.coli_usage`, KV/checkpoint state and
+SSD metadata from storage manifests. These files remain local and mutable;
+only checkpoint/model payloads enter signed CAS identity.
 
 Concurrent chats are admitted FIFO at every Segment range. Queue depth and
 inflight work are published to the predictive scheduler, the queue is bounded,

@@ -36,10 +36,20 @@ typedef enum {
     LMB_GOV_RECOVERY = 3,
 } LmbGovernorState;
 
+typedef enum {
+    LMB_GOV_REASON_NONE = 0,
+    LMB_GOV_REASON_MANUAL,
+    LMB_GOV_REASON_RAM_PRESSURE,
+    LMB_GOV_REASON_RAM_CRITICAL,
+    LMB_GOV_REASON_SWAP_CRITICAL,
+    LMB_GOV_REASON_RECOVERY,
+} LmbGovernorReason;
+
 typedef struct {
     uint64_t ram_reserve_bytes;
     unsigned recovery_ticks;
     _Atomic int state;
+    _Atomic int reason;
 } LmbGovernor;
 
 int lmb_machine_probe(LmbMachineProfile *profile, const char *disk_path,
@@ -52,10 +62,16 @@ int lmb_machine_read_meminfo(FILE *stream, uint64_t *total,
 void lmb_machine_print(FILE *out, const LmbMachineProfile *profile, int json);
 uint64_t lmb_machine_available_ram(void);
 uint64_t lmb_machine_total_ram(void);
+/* One automatic compute donor owns the machine's donable RAM. The returned
+ * descriptor is the lease and must stay open for the donation lifetime. */
+int lmb_machine_compute_lease_acquire(const char *model, const char *tracker,
+                                      char *owner, size_t owner_size);
 const char *lmb_governor_state_name(LmbGovernorState state);
+const char *lmb_governor_reason_name(LmbGovernorReason reason);
 void lmb_governor_init(LmbGovernor *governor, uint64_t ram_reserve_bytes);
 LmbGovernorState lmb_governor_poll(LmbGovernor *governor);
 LmbGovernorState lmb_governor_state(const LmbGovernor *governor);
+LmbGovernorReason lmb_governor_reason(const LmbGovernor *governor);
 int lmb_governor_accepting(const LmbGovernor *governor);
 int lmb_governor_set_manual(int paused);
 int lmb_governor_manual_paused(void);

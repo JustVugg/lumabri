@@ -608,16 +608,30 @@ static int send_ereg(int fd, const uint8_t nonce[32], int send_stats) {
 static void *governor_thread(void *arg) {
     (void)arg;
     LmbGovernorState previous = lmb_governor_state(&g.governor);
+    int first = 1;
     for (;;) {
         LmbGovernorState state = lmb_governor_poll(&g.governor);
         atomic_store(&g.resident_state, state == LMB_GOV_ACTIVE ?
                      LMB_EXPERT_STATE_ACTIVE : LMB_EXPERT_STATE_DRAINING);
-        if (state != previous) {
-            fprintf(stderr, "[%s] governor %s -> %s%s\n", g.name,
-                    lmb_governor_state_name(previous),
+        if (first || state != previous) {
+            uint64_t available = lmb_machine_available_ram();
+            fprintf(stderr, "[%s] governor ", g.name);
+            if (!first) fprintf(stderr, "%s -> ",
+                                lmb_governor_state_name(previous));
+            fprintf(stderr, "%s · %s",
                     lmb_governor_state_name(state),
-                    state == LMB_GOV_ACTIVE ? " · publishing resident experts" :
-                                             " · draining and advertising zero coverage");
+                    state == LMB_GOV_ACTIVE ? "publishing resident experts" :
+                                             "draining and advertising zero coverage");
+            if (state != LMB_GOV_ACTIVE)
+                fprintf(stderr, " · reason: %s",
+                        lmb_governor_reason_name(
+                            lmb_governor_reason(&g.governor)));
+            fprintf(stderr, " · available %.1f GB / reserve %.1f GB · "
+                    "resident weights %.1f GB\n",
+                    (double)available / 1e9,
+                    (double)g.governor.ram_reserve_bytes / 1e9,
+                    (double)g.resident_bytes / 1e9);
+            first = 0;
             previous = state;
         }
         sleep(1);

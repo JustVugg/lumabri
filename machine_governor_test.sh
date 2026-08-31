@@ -4,7 +4,17 @@ cd "$(dirname "$0")"
 PORT=${PORT:-7900}
 TMP=$(mktemp -d /tmp/lumabri-governor.XXXXXX)
 PIDS=()
-cleanup() { kill "${PIDS[@]}" 2>/dev/null || true; wait "${PIDS[@]}" 2>/dev/null || true; rm -rf "$TMP"; }
+cleanup() {
+    local status=$?
+    if [ "$status" -ne 0 ]; then
+        for log in "$TMP"/*.log; do
+            [ -f "$log" ] && { echo "--- $log" >&2; tail -80 "$log" >&2; }
+        done
+    fi
+    kill "${PIDS[@]}" 2>/dev/null || true
+    wait "${PIDS[@]}" 2>/dev/null || true
+    rm -rf "$TMP"
+}
 trap cleanup EXIT
 wait_port() {
     for _ in $(seq 1 240); do
@@ -90,9 +100,13 @@ wait_segment_flag 1
 wait_state 5 8
 wait_segment_flag 0
 grep -q 'governor ACTIVE -> PAUSED' "$TMP/expert.log"
+grep -q 'reason: manual pause' "$TMP/expert.log"
+grep -q 'available .* / reserve .*resident weights' "$TMP/expert.log"
 grep -q 'governor PAUSED -> RECOVERY' "$TMP/expert.log"
 grep -q 'governor RECOVERY -> ACTIVE' "$TMP/expert.log"
 grep -q 'governor ACTIVE -> PAUSED' "$TMP/segment.log"
+grep -q 'reason: manual pause' "$TMP/segment.log"
+grep -q 'available .* / reserve .*RSS .* / budget' "$TMP/segment.log"
 grep -q 'governor PAUSED -> RECOVERY' "$TMP/segment.log"
 grep -q 'governor RECOVERY -> ACTIVE' "$TMP/segment.log"
 echo 'MACHINE GOVERNOR TEST: PASS (profile, Expert zero coverage, Segment drain, recovery)'

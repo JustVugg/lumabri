@@ -21,7 +21,8 @@ check-warnings:
 	$(MAKE) -B all test_relay_exec test_swarm_fed test_key_rotation \
 		test_hedge test_verify_failover test_segment_v2 \
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
-		test_meminfo test_scheduler test_run_gate \
+		test_meminfo test_compute_lease test_content_filter \
+		test_scheduler test_run_gate \
 		CFLAGS='$(CFLAGS) -Werror'
 
 SECURE_DEPS = lumabri_secure.h lumabri_crypto.h
@@ -364,7 +365,8 @@ tracker: tracker.c lumabri_segment_discovery.c lumabri_segment_discovery.h \
 	$(CC) $(CFLAGS) -pthread tracker.c lumabri_segment_discovery.c \
 		lumabri_segment.c -o $@
 
-maintainer: maintainer.c lumabri_proto.h lumabri_sha.h lumabri_sign.h $(SECURE_DEPS)
+maintainer: maintainer.c lumabri_content.h lumabri_proto.h lumabri_sha.h \
+		lumabri_sign.h $(SECURE_DEPS)
 	$(CC) $(CFLAGS) -pthread maintainer.c -o $@
 
 # The shim interposes libc symbols, so it must not itself be interposable
@@ -372,7 +374,7 @@ maintainer: maintainer.c lumabri_proto.h lumabri_sha.h lumabri_sign.h $(SECURE_D
 liblumabri.so: lumashim.c lumabri_proto.h lumabri_sha.h lumabri_sign.h $(SECURE_DEPS)
 	$(CC) $(CFLAGS) -shared -fPIC -pthread lumashim.c -o $@ -ldl
 
-test_shim: test_shim.c
+test_shim: test_shim.c lumabri_content.h
 	$(CC) $(CFLAGS) test_shim.c -o $@
 
 test_relay_exec: test_relay_exec.c lumabri_proto.h
@@ -413,6 +415,12 @@ test_machine: test_machine.c $(MACHINE_DEPS) lumabri_proto.h
 test_meminfo: test_meminfo.c $(MACHINE_DEPS) lumabri_proto.h
 	$(CC) $(CFLAGS) -pthread test_meminfo.c $(MACHINE_SRC) -o $@
 
+test_compute_lease: test_compute_lease.c $(MACHINE_DEPS) lumabri_proto.h
+	$(CC) $(CFLAGS) -pthread test_compute_lease.c $(MACHINE_SRC) -o $@
+
+test_content_filter: test_content_filter.c lumabri_content.h
+	$(CC) $(CFLAGS) test_content_filter.c -o $@
+
 test_scheduler: test_scheduler.c lumabri_scheduler.h
 	$(CC) $(CFLAGS) test_scheduler.c -o $@
 
@@ -432,11 +440,15 @@ test-sanitize:
 	$(CC) $(SANITIZE_FLAGS) -pthread test_segment_discovery.c lumabri_segment_discovery.c lumabri_segment.c -o build/sanitize/test_segment_discovery
 	$(CC) $(SANITIZE_FLAGS) -pthread test_run_gate.c lumabri_run_gate.c -o build/sanitize/test_run_gate
 	$(CC) $(SANITIZE_FLAGS) -pthread test_meminfo.c $(MACHINE_SRC) -o build/sanitize/test_meminfo
+	$(CC) $(SANITIZE_FLAGS) -pthread test_compute_lease.c $(MACHINE_SRC) -o build/sanitize/test_compute_lease
+	$(CC) $(SANITIZE_FLAGS) test_content_filter.c -o build/sanitize/test_content_filter
 	$(CC) $(SANITIZE_FLAGS) test_scheduler.c -o build/sanitize/test_scheduler
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_segment_v2
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_segment_discovery
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_run_gate
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_meminfo
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_compute_lease
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_content_filter
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_scheduler
 
 test-thread-sanitize:
@@ -567,7 +579,8 @@ test-segment-discovery: tracker test_segment_discovery
 
 test: all test_key_rotation test_hedge test_verify_failover test_segment_v2 \
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
-		test_meminfo test_scheduler test_run_gate
+		test_meminfo test_compute_lease test_content_filter \
+		test_scheduler test_run_gate
 	bash ./selftest.sh
 	bash ./donate_test.sh
 	bash ./signed_donor_test.sh
@@ -590,6 +603,8 @@ test: all test_key_rotation test_hedge test_verify_failover test_segment_v2 \
 	./test_hedge
 	./test_segment_v2
 	./test_meminfo
+	./test_compute_lease
+	./test_content_filter
 	./test_scheduler
 	./test_run_gate
 	python3 ./test_swarm_bench.py
@@ -625,7 +640,8 @@ clean:
 	rm -f tracker maintainer liblumabri.so test_shim swarm_probe lumabri \
 	      test_relay_exec test_swarm_fed test_key_rotation test_hedge \
 	      test_verify_failover test_segment_v2 test_segment_discovery test_sampling \
-	      test_swarm_detail test_relay_rate test_machine test_meminfo test_scheduler test_run_gate \
+	      test_swarm_detail test_relay_rate test_machine test_meminfo \
+	      test_compute_lease test_content_filter test_scheduler test_run_gate \
 	      test_segment_v2_tsan tracker_tsan \
 	      segment_node segment_chat segment_node_asan segment_chat_asan \
 	      segment_node_tsan segment_chat_tsan \

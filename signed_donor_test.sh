@@ -60,6 +60,11 @@ mkdir -p "$T/src/sub"
 head -c $((3 * 1024 * 1024 + 77)) /dev/urandom > "$T/src/w.bin"
 head -c 4096 /dev/urandom > "$T/src/sub/tok.bin"
 printf '{"model_type":"olmoe"}\n' > "$T/src/config.json"
+# A real model directory is not immutable while Colibri runs. These files are
+# machine-local telemetry/state and must never become signed swarm content.
+printf 'runtime telemetry\n' > "$T/src/.coli_usage"
+mkdir -p "$T/src/.coli_ckpt"
+printf 'local checkpoint\n' > "$T/src/.coli_ckpt/session-1"
 
 ./lumabri key --out "$T/swarm" > /dev/null
 ./lumabri key --out "$T/other" > /dev/null      # a different operator entirely
@@ -71,6 +76,13 @@ wait_port 7580
              --model-name fx --key "$T/swarm.key" > "$T/origin.log" 2>&1 & ORIGIN=$!; PIDS+=($!)
 wait_port 7581
 wait_for "$T/tracker.log" "+ origin" 15 || { cat "$T/tracker.log"; exit 1; }
+grep -q '+ origin .* (fx, 3 files)' "$T/tracker.log" || {
+    echo "   runtime-local .coli_* files entered the origin manifest"
+    cat "$T/tracker.log"; exit 1; }
+if grep -q 'REJECTED: .*\.coli_' "$T/tracker.log"; then
+    echo "   tracker saw runtime-local Colibri state"
+    grep 'REJECTED' "$T/tracker.log"; exit 1
+fi
 
 echo "· 1) the donor verifies what it pulls"
 ./lumabri serve --model "$T/donor" --join 127.0.0.1:7580 --model-name fx \
