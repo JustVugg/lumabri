@@ -9,22 +9,27 @@ cd "$(dirname "$0")"
 
 make -s test_verify_failover
 
-echo "· a lying replica reached through failover is caught"
+echo "· a lying replica reached through failover is caught — and survived"
 set +e
-OUT=$(./test_verify_failover liar 2>&1)
+OUT=$(env LUMABRI_PEER_WAIT_S=2 ./test_verify_failover liar 2>&1)
 RC=$?
 set -e
-if [ "$RC" -eq 0 ]; then
-    echo "   the corrupted failover answer was accepted"
+if [ "$RC" -ne 0 ]; then
+    echo "   the liar case failed (a dead engine is the old, wrong outcome)"
     echo "$OUT"
     exit 1
 fi
 grep -q "INTEGRITY FAILURE" <<<"$OUT" || {
-    echo "   the run stopped, but not with the integrity error"
+    echo "   the lie was never reported as an integrity error"
     echo "$OUT"
     exit 1
 }
-echo "   ✓ INTEGRITY FAILURE, and the bytes never reached the model"
+grep -q "quarantined" <<<"$OUT" || {
+    echo "   the disagreeing replicas were not quarantined"
+    echo "$OUT"
+    exit 1
+}
+echo "   ✓ INTEGRITY FAILURE, bytes refused, both suspects quarantined, run alive"
 
 echo "· an honest failover is checked and not mistaken for an attack"
 ./test_verify_failover honest
