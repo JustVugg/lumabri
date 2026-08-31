@@ -883,7 +883,11 @@ static float *lumi_exec_retry(int layer, int eid, const float *x, int D, int nr,
              * A swarm with one holder per expert has no redundancy to fall
              * back on, so the only honest thing left is patience: ask the
              * tracker again, and wait, saying so. */
-            int wait_limit = L.initialized ? L.peer_wait_s
+            /* peer_wait_s == 0 means "never read": a harness that fills L
+             * by hand (initialized or not) must keep the environment-driven
+             * default rather than silently losing all patience. An explicit
+             * LUMABRI_PEER_WAIT_S=0 still yields zero via the re-read. */
+            int wait_limit = L.peer_wait_s > 0 ? L.peer_wait_s
                 : lmb_env_int("LUMABRI_PEER_WAIT_S", LUMI_WAIT_S, 0, 600);
             if (lumi_now() < L.swarm_sick_until) wait_limit = 0;
             if (waited < wait_limit) {
