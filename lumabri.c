@@ -3557,7 +3557,7 @@ static void role_start(const Role *r, const char *tracker, const char *model,
             argv[a++] = "--tracker";    argv[a++] = (char *)tracker;
             argv[a++] = "--name";       argv[a++] = name;
             argv[a++] = "--model-name"; argv[a++] = (char *)model;
-            argv[a++] = "--hold";       argv[a++] = "auto";   /* the tracker hands us a disjoint slice; the node sizes it to free RAM */
+            argv[a++] = "--hold";       argv[a++] = "auto";   /* the tracker completes the least-covered layers first, then grows replicas (keep limit 2); the node sizes the slice to free RAM */
             argv[a] = NULL;
             { char lp[1200];
               pid_t np = spawn_argv_logged(argv, local ? NULL : envv,
@@ -4427,11 +4427,42 @@ static int cmd_doctor(int argc, char **argv) {
                    access(config, R_OK) == 0 ? "config.json is readable" :
                                               "model directory has no readable config.json");
     }
-    if (tracker)
+    if (tracker) {
         doctor_add(checks, &count, "tracker", machine_ok &&
                    profile.tracker_rtt_ms >= 0.0, 1,
                    machine_ok && profile.tracker_rtt_ms >= 0.0 ?
                    "tracker TCP endpoint is reachable" : "tracker is unreachable");
+        /* Which side of the NAT am I on? Bind an ephemeral port, ask the
+         * tracker to dial it back. Purely informational: a relay-only donor
+         * is a full member of the swarm, it just rides the tunnel. */
+        static char nat_note[160];
+        snprintf(nat_note, sizeof nat_note,
+                 "tracker too old for the reach probe — assume relay");
+        int lfd = lmb_listen(0);
+        if (lfd >= 0) {
+            struct sockaddr_in me; socklen_t ml = sizeof me;
+            if (getsockname(lfd, (struct sockaddr *)&me, &ml) == 0) {
+                LmbBuf b = {0};
+                lmb_buf_u32(&b, (uint32_t)ntohs(me.sin_port));
+                LmbMsg reply = {0};
+                if (!lmb_request(tracker, LMB_REACH, b.p, (uint32_t)b.len,
+                                 &reply) && reply.op == LMB_REACH_R) {
+                    LmbCur c = { reply.body, reply.body_len, 0 };
+                    uint32_t direct = 0; char observed[96] = "";
+                    if (!lmb_cur_u32(&c, &direct) &&
+                        !lmb_cur_str(&c, observed, sizeof observed))
+                        snprintf(nat_note, sizeof nat_note, direct ?
+                                 "directly dialable at %s" :
+                                 "behind NAT/firewall (%s): the tracker "
+                                 "relay will carry this peer", observed);
+                }
+                lmb_msg_free(&reply);
+                free(b.p);
+            }
+            close(lfd);
+        }
+        doctor_add(checks, &count, "nat-reachability", 1, 0, nat_note);
+    }
     if (serve_port) {
         int topology_ok = 1, failed_port = 0;
         for (int offset = 0; offset < 10; offset++)
