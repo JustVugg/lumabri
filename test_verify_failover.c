@@ -10,7 +10,9 @@
  * double-checked, whichever path produced it. So:
  *
  *   liar    the failover answer disagrees with replica 3 → the client must
- *           print INTEGRITY FAILURE and exit 1, never return the bytes
+ *           print INTEGRITY FAILURE, quarantine both suspects, refuse the
+ *           bytes — and SURVIVE: the apply reports failure so the engine's
+ *           local path recomputes the layer from the mirror
  *   honest  the failover answer agrees → the run completes, and the check
  *           must have actually run (L.verified > 0), so a spot-check that
  *           silently did nothing cannot pass as a success
@@ -22,6 +24,7 @@
 #define LMBE_SOURCE_ID "test"
 #define LMBE_EXPECT_BITS 0
 #include <pthread.h>
+#include <stdatomic.h>
 #include "lumabri_client.h"
 
 typedef struct {
@@ -33,10 +36,13 @@ typedef struct {
 
 /* An honest expert here echoes the activation back unchanged: deterministic,
  * so two honest nodes always agree and any disagreement is the lie. */
+static _Atomic int g_listening;
+
 static void *node_thread(void *arg) {
     Node *n = (Node *)arg;
     int lfd = lmb_listen(n->port);
     if (lfd < 0) return (void *)1;
+    atomic_fetch_add(&g_listening, 1);
     for (;;) {
         int fd = accept(lfd, NULL, NULL);
         if (fd < 0) break;
@@ -70,7 +76,13 @@ int main(int argc, char **argv) {
     pthread_create(&t[0], NULL, node_thread, &refuse);
     pthread_create(&t[1], NULL, node_thread, &second);
     pthread_create(&t[2], NULL, node_thread, &third);
-    usleep(200000);
+    /* a fixed sleep loses on a loaded box: wait for the actual binds */
+    for (int spins = 0; atomic_load(&g_listening) < 3 && spins < 500; spins++)
+        usleep(10000);
+    if (atomic_load(&g_listening) < 3) {
+        printf("FAIL: the three fake replicas never came up\n");
+        return 1;
+    }
 
     L.n_layers = 1; L.n_experts = 1; L.hidden = 4;
     L.npeers = 3;
@@ -88,13 +100,28 @@ int main(int argc, char **argv) {
     int idx[1] = { 0 };
     float val[1] = { 1.0f };
 
-    /* In the liar case the client detects the disagreement inside this call
-     * and exits(1); nothing below runs. */
-    lumi_moe_apply(0, idx, val, 1, x, 4, out);
+    int used = lumi_moe_apply(0, idx, val, 1, x, 4, out);
 
     if (lie) {
-        printf("FAIL: the corrupted failover answer was accepted "
-               "(checker served %d call(s))\n", third.served);
+        if (used) {
+            printf("FAIL: the corrupted failover answer was accepted "
+                   "(checker served %d call(s))\n", third.served);
+            return 1;
+        }
+        if (!L.integrity_fails) {
+            printf("FAIL: the disagreement was refused but never counted\n");
+            return 1;
+        }
+        if (!L.peers[1].dead || !L.peers[2].dead) {
+            printf("FAIL: the two disagreeing replicas were not quarantined\n");
+            return 1;
+        }
+        printf("VERIFIED FAILOVER: PASS (lie caught, both suspects "
+               "quarantined, the run survives to recompute locally)\n");
+        return 0;
+    }
+    if (!used) {
+        printf("FAIL: the honest failover run reported failure\n");
         return 1;
     }
     if (!L.verified) {

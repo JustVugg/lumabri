@@ -90,6 +90,21 @@ static struct {
      * answers and never errors, so only this bound turns it into a failover
      * instead of a stall. LUMABRI_EXEC_WAIT_MS raises it for slow links. */
     int exec_wait_ms;
+    /* Survival policy. A chatter with a mirror must never die because the
+     * swarm did: when every replica of an expert is gone and the tracker
+     * relay cannot serve it either, the layer is DEMOTED — lumi_layer_on()
+     * answers 0 for demote_s seconds, the engine's own local path computes
+     * the layer from the mirror, and the swarm is retried when the window
+     * expires. peer_wait_s is the old patience for a rebooting peer, now
+     * tunable; one expired wait marks the whole swarm sick, so the next
+     * failing layer demotes immediately instead of stalling the generation
+     * for another full wait. */
+    int peer_wait_s;            /* LUMABRI_PEER_WAIT_S, seconds */
+    int demote_s;               /* LUMABRI_DEMOTE_S, seconds */
+    double *demote_until;       /* [n_layers] monotonic deadline; 0 = active */
+    double swarm_sick_until;
+    int swarm_disabled;         /* model identity changed mid-run: local only */
+    unsigned long long demotions, integrity_fails;
     unsigned long long calls, layers_done, failovers, verified, relays;
     unsigned long long hedges, hedge_wins, batch_calls, batch_rows;
     double wait_s;
@@ -265,9 +280,17 @@ static int lumi_refresh_identity(void) {
     if (lmb_model_identity_get(tracker, L.expected_model, &id) ||
         !lumi_identity_valid(L.expected_model, &id)) return 0;
     if (L.have_identity && memcmp(L.identity.root, id.root, 32)) {
-        fprintf(stderr, "[lumabri] model identity changed during this process — "
-                        "refusing to mix checkpoints\n");
-        exit(1);
+        /* Refusing to mix checkpoints is right; killing the engine over it
+         * is not. The mirror still holds the checkpoint this process
+         * started with, so stop trusting peers and finish the run local. */
+        if (!L.swarm_disabled)
+            fprintf(stderr, "[lumabri] model identity changed during this "
+                            "process — refusing to mix checkpoints: swarm "
+                            "off, experts run locally from the mirror for "
+                            "the rest of this run\n");
+        L.swarm_disabled = 1;
+        L.on = 0;
+        return 0;
     }
     L.identity = id; L.have_identity = 1;
     return 1;
@@ -514,6 +537,7 @@ static int lumi_missing_experts(void) {
 }
 
 static void lumi_enable_if_complete(void) {
+    if (L.swarm_disabled) { L.on = 0; return; }
     int missing = lumi_missing_experts();
     L.on = L.ok_layers > 0;
     if (!L.on || L.ok_layers == L.announced_ok) return;
@@ -649,9 +673,19 @@ static void lumi_init_ex(int n_layers, int n_experts, int hidden,
          * unless the operator set LUMABRI_VERIFY themselves. */
         if (!v && L.verify_pct == 0) L.verify_pct = 5;
     }
-    L.spread = getenv("LUMABRI_SPREAD") && atoi(getenv("LUMABRI_SPREAD")) != 0;
+    /* Spreading is the default. Strict argmin sent every call of every
+     * chatter to the single nearest replica — usually the always-on origin
+     * server — so a donor with the same experts resident in RAM received
+     * exactly zero traffic until that origin failed. The canonical-order
+     * band spread keeps cache locality per expert while letting every
+     * near-equal replica carry a share. LUMABRI_SPREAD=0 restores argmin. */
+    const char *spread_env = getenv("LUMABRI_SPREAD");
+    L.spread = spread_env ? atoi(spread_env) != 0 : 1;
     L.hedge_ms = lmb_env_int("LUMABRI_HEDGE_MS", 0, -1, 60000);
     L.exec_wait_ms = lmb_env_int("LUMABRI_EXEC_WAIT_MS", 30000, 100, 3600000);
+    L.peer_wait_s = lmb_env_int("LUMABRI_PEER_WAIT_S", LUMI_WAIT_S, 0, 600);
+    L.demote_s = lmb_env_int("LUMABRI_DEMOTE_S", 120, 1, 3600);
+    L.demote_until = (double *)calloc((size_t)n_layers, sizeof(double));
     L.initialized = 1;
 
     if (discovery) {
@@ -700,8 +734,9 @@ static LMB_MAYBE_UNUSED void lumi_init(int n_layers, int n_experts, int hidden) 
  * before handing a layer over, so an unrouted slot is never a wire error. */
 static LMB_MAYBE_UNUSED int lumi_layer_on(int layer) {
     lumi_maybe_discover();
-    if (!L.on || layer < 0 || layer >= L.n_layers) return 0;
+    if (!L.on || L.swarm_disabled || layer < 0 || layer >= L.n_layers) return 0;
     if (L.routed && !L.routed[layer]) return 0;
+    if (L.demote_until && L.demote_until[layer] > lumi_now()) return 0;
     return !L.layer_ok || L.layer_ok[layer];
 }
 
@@ -897,6 +932,22 @@ static float *lumi_exec_relay(int layer, int eid, const float *x, int D, int nr,
     return out;
 }
 
+/* Every replica of this layer's expert is gone and the relay cannot serve
+ * it. Retire the layer to the engine's own local path for demote_s seconds
+ * and mark the swarm sick, so the next failing layer skips the patience
+ * wait instead of stalling the generation all over again. */
+static void lumi_demote_layer(int layer, int waited) {
+    double now = lumi_now();
+    if (L.demote_until && layer >= 0 && layer < L.n_layers)
+        L.demote_until[layer] = now + (double)(L.demote_s > 0 ? L.demote_s : 120);
+    L.swarm_sick_until = now + (double)(L.demote_s > 0 ? L.demote_s : 120);
+    L.demotions++;
+    fprintf(stderr, "[lumabri] layer %d: nessuna replica viva dopo %d s — "
+                    "eseguo questo layer in locale dal mirror per %d s, poi "
+                    "ritento lo sciame\n",
+            layer, waited, L.demote_s > 0 ? L.demote_s : 120);
+}
+
 /* the failover path: run one expert synchronously on the next replicas.
  * Costs a full extra round trip — it is the price of a peer dying, paid
  * once, instead of the generation dying with it.
@@ -935,11 +986,14 @@ static float *lumi_exec_retry(int layer, int eid, const float *x, int D, int nr,
              * A swarm with one holder per expert has no redundancy to fall
              * back on, so the only honest thing left is patience: ask the
              * tracker again, and wait, saying so. */
-            if (waited < LUMI_WAIT_S) {
+            int wait_limit = L.initialized ? L.peer_wait_s
+                : lmb_env_int("LUMABRI_PEER_WAIT_S", LUMI_WAIT_S, 0, 600);
+            if (lumi_now() < L.swarm_sick_until) wait_limit = 0;
+            if (waited < wait_limit) {
                 if (!waited)
                     fprintf(stderr, "[lumabri] layer %d expert %d: nessuna replica "
                             "viva — aspetto che torni (fino a %d s)\n",
-                            layer, eid, LUMI_WAIT_S);
+                            layer, eid, wait_limit);
                 tried = 0;                    /* a returning peer deserves a retry */
                 sleep(2);
                 waited += 2;
@@ -952,11 +1006,9 @@ static float *lumi_exec_retry(int layer, int eid, const float *x, int D, int nr,
                     }
                 continue;
             }
-            fprintf(stderr, "[lumabri] layer %d expert %d: nessuna replica viva "
-                    "dopo %d s. Con un solo detentore per esperto qualunque "
-                    "interruzione e' definitiva: serve un secondo peer.\n",
-                    layer, eid, waited);
-            exit(1);
+            lumi_demote_layer(layer, waited);
+            if (tried_io) *tried_io = tried;
+            return NULL;
         }
         tried |= 1u << r;
         LumiPeer *p = &L.peers[L.own[(size_t)gid * LUMI_MAX_REP + r]];
@@ -992,34 +1044,45 @@ static float *lumi_exec_retry(int layer, int eid, const float *x, int D, int nr,
  * disagree, so a disagreement IS an attack (or broken hardware) — either
  * way the answer cannot be trusted, and the run stops loudly rather than
  * emit a token nobody can vouch for. */
-static void lumi_spot_check(int layer, int eid, const float *x, int D, int nr,
-                            const float *w, const float *got, LumiPeer *from,
-                            uint32_t tried) {
+static int lumi_spot_check(int layer, int eid, const float *x, int D, int nr,
+                           const float *w, const float *got, LumiPeer *from,
+                           uint32_t tried) {
     int gid = layer * L.n_experts + eid;
     int r2 = lumi_pick(gid, tried);
-    if (r2 < 0) return;                       /* no second replica to ask */
+    if (r2 < 0) return 0;                     /* no second replica to ask */
     LumiPeer *p = &L.peers[L.own[(size_t)gid * LUMI_MAX_REP + r2]];
     int fd = lumi_take_sock(p);
-    if (fd < 0) return;
+    if (fd < 0) return 0;
     uint32_t want = (uint32_t)((size_t)nr * D * sizeof(float));
     LmbMsg m = {0};
     if (lumi_send_exec(fd, layer, eid, x, D, nr, w) || lmb_recv(fd, &m) ||
         m.op != LMB_EXEC_R || m.pay_len != want) {
         close(fd);
         lmb_msg_free(&m);
-        return;                               /* checker down ≠ answer wrong */
+        return 0;                             /* checker down ≠ answer wrong */
     }
     L.verified++;
     int same = memcmp(got, m.pay, (size_t)want) == 0;
     lmb_msg_free(&m);
     lumi_put_sock(p, fd);
     if (!same) {
+        /* Two replicas disagreed and there is no majority: neither can be
+         * trusted. Killing the engine punished the victim; quarantine both
+         * suspects instead, discard the answer, and let the caller recompute
+         * on an untainted replica — or on the local mirror, whose bytes are
+         * hash-verified and cannot lie. */
         fprintf(stderr, "[lumabri] INTEGRITY FAILURE on layer %d expert %d: "
                 "%s and %s returned different bytes for the same activation. "
-                "One of them is lying or broken; refusing to continue.\n",
+                "One of them is lying or broken; quarantining both and "
+                "recomputing elsewhere.\n",
                 layer, eid, from ? from->addr : "the tracker relay", p->addr);
-        exit(1);
+        double until = lumi_now() + 600.0;
+        p->dead = 1; p->retry_at = until;
+        if (from) { from->dead = 1; from->retry_at = until; }
+        L.integrity_fails++;
+        return -1;
     }
+    return 0;
 }
 
 /* The sampling gate in front of it. Every answer this client is willing to
@@ -1030,13 +1093,14 @@ static void lumi_spot_check(int layer, int eid, const float *x, int D, int nr,
  * check, which compares it against any replica that is reachable and is a
  * no-op when none is. */
 static unsigned lumi_vseed = 0x9e3779b9u;
-static void lumi_maybe_spot_check(int layer, int eid, const float *x, int D,
-                                  int nr, const float *w, const float *got,
-                                  LumiPeer *from, uint32_t tried) {
-    if (!L.verify_pct || !got) return;
+static int lumi_maybe_spot_check(int layer, int eid, const float *x, int D,
+                                 int nr, const float *w, const float *got,
+                                 LumiPeer *from, uint32_t tried) {
+    if (!L.verify_pct || !got) return 0;
     lumi_vseed = lumi_vseed * 1664525u + 1013904223u;
     if ((int)(lumi_vseed % 100u) < L.verify_pct)
-        lumi_spot_check(layer, eid, x, D, nr, w, got, from, tried);
+        return lumi_spot_check(layer, eid, x, D, nr, w, got, from, tried);
+    return 0;
 }
 
 /* Run the K selected experts of one layer on their peers and accumulate into
@@ -1081,16 +1145,22 @@ static LMB_MAYBE_UNUSED int lumi_moe_apply(int layer, const int *idx,
             LumiPeer *winner = NULL;
             res[k] = lumi_finish_exec(layer, idx[k], x, D, 1, NULL,
                                       fds[k], ps[k], sent[k], &tried[k], &winner);
-            if (res[k]) {
+            if (res[k] &&
                 lumi_maybe_spot_check(layer, idx[k], x, D, 1, NULL, res[k],
-                                      winner, tried[k]);
-                continue;
-            }
-            fprintf(stderr, "[lumabri] peer %s failed on layer %d expert %d — "
-                            "trying next replica\n", ps[k]->addr, layer, idx[k]);
+                                      winner, tried[k])) {
+                free(res[k]); res[k] = NULL;  /* mismatch: recompute elsewhere */
+            } else if (!res[k])
+                fprintf(stderr, "[lumabri] peer %s failed on layer %d expert %d — "
+                                "trying next replica\n", ps[k]->addr, layer, idx[k]);
+            if (res[k]) continue;
         }
         LumiPeer *rf = NULL;
         res[k] = lumi_exec_retry(layer, idx[k], x, D, 1, NULL, &tried[k], &rf);
+        if (res[k] &&
+            lumi_maybe_spot_check(layer, idx[k], x, D, 1, NULL, res[k], rf,
+                                  tried[k])) {
+            free(res[k]); res[k] = NULL;  /* second disagreement: go local */
+        }
         if (!res[k]) {
             for (int j = k + 1; j < K; j++) if (fds[j] >= 0) {
                 close(fds[j]); lumi_peer_done(ps[j]);
@@ -1098,7 +1168,6 @@ static LMB_MAYBE_UNUSED int lumi_moe_apply(int layer, const int *idx,
             for (int j = 0; j < K; j++) free(res[j]);
             return 0;
         }
-        lumi_maybe_spot_check(layer, idx[k], x, D, 1, NULL, res[k], rf, tried[k]);
     }
     /* accumulate in the router's order, exactly as the local path does */
     for (int k = 0; k < K; k++) {
@@ -1204,10 +1273,11 @@ static LMB_MAYBE_UNUSED int lumi_moe_apply_batch(int layer, const int *idxs,
                 res = lumi_finish_exec(layer, eid, xj, D, nr, NULL,
                                        fds[j], ps[j], sent[j], &tried[j], &winner);
                 fds[j] = -1;
-                if (res) {
+                if (res &&
                     lumi_maybe_spot_check(layer, eid, xj, D, nr, NULL, res,
-                                          winner, tried[j]);
-                } else {
+                                          winner, tried[j])) {
+                    free(res); res = NULL;  /* mismatch: recompute elsewhere */
+                } else if (!res) {
                     fprintf(stderr, "[lumabri] peer %s failed on layer %d expert %d — "
                                     "trying next replica\n", ps[j]->addr, layer, eid);
                 }
@@ -1215,6 +1285,11 @@ static LMB_MAYBE_UNUSED int lumi_moe_apply_batch(int layer, const int *idxs,
             if (!res) {
                 LumiPeer *rf = NULL;
                 res = lumi_exec_retry(layer, eid, xj, D, nr, NULL, &tried[j], &rf);
+                if (res &&
+                    lumi_maybe_spot_check(layer, eid, xj, D, nr, NULL, res, rf,
+                                          tried[j])) {
+                    free(res); res = NULL;  /* second disagreement: go local */
+                }
                 if (!res) {
                     for (int q = j + 1; q < nb; q++)
                         if (fds[q] >= 0) {
@@ -1224,7 +1299,6 @@ static LMB_MAYBE_UNUSED int lumi_moe_apply_batch(int layer, const int *idxs,
                     free(seen); free(uniq); free(rows); free(rw); free(xg); free(saved);
                     return 0;
                 }
-                lumi_maybe_spot_check(layer, eid, xj, D, nr, NULL, res, rf, tried[j]);
             }
             if (nr > 1) { L.batch_calls++; L.batch_rows += (unsigned long long)nr; }
             int *rj = rows + (size_t)j * S;
@@ -1308,10 +1382,11 @@ static LMB_MAYBE_UNUSED int lumi_moe_apply_union(int layer, int nu,
                 res = lumi_finish_exec(layer, eid, xj, D, nr, NULL,
                                        fds[j], ps[j], sent[j], &tried[j], &winner);
                 fds[j] = -1;
-                if (res) {
+                if (res &&
                     lumi_maybe_spot_check(layer, eid, xj, D, nr, NULL, res,
-                                          winner, tried[j]);
-                } else {
+                                          winner, tried[j])) {
+                    free(res); res = NULL;  /* mismatch: recompute elsewhere */
+                } else if (!res) {
                     fprintf(stderr, "[lumabri] peer %s failed on layer %d expert %d — "
                                     "trying next replica\n", ps[j]->addr, layer, eid);
                 }
@@ -1319,6 +1394,11 @@ static LMB_MAYBE_UNUSED int lumi_moe_apply_union(int layer, int nu,
             if (!res) {
                 LumiPeer *rf = NULL;
                 res = lumi_exec_retry(layer, eid, xj, D, nr, NULL, &tried[j], &rf);
+                if (res &&
+                    lumi_maybe_spot_check(layer, eid, xj, D, nr, NULL, res, rf,
+                                          tried[j])) {
+                    free(res); res = NULL;  /* second disagreement: go local */
+                }
                 if (!res) {
                     for (int q = j + 1; q < nb; q++)
                         if (fds[q] >= 0) {
@@ -1328,7 +1408,6 @@ static LMB_MAYBE_UNUSED int lumi_moe_apply_union(int layer, int nu,
                     free(xg); free(saved);
                     return 0;
                 }
-                lumi_maybe_spot_check(layer, eid, xj, D, nr, NULL, res, rf, tried[j]);
             }
             if (nr > 1) { L.batch_calls++; L.batch_rows += (unsigned long long)nr; }
             for (int r = 0; r < nr; r++) {
@@ -1436,10 +1515,11 @@ static LMB_MAYBE_UNUSED int lumi_moe_apply_v4(int layer, const int *indices,
                 res = lumi_finish_exec(layer, eid, xj, D, nr, wj,
                                        fds[j], ps[j], sent[j], &tried[j], &winner);
                 fds[j] = -1;
-                if (res) {
+                if (res &&
                     lumi_maybe_spot_check(layer, eid, xj, D, nr, wj, res,
-                                          winner, tried[j]);
-                } else {
+                                          winner, tried[j])) {
+                    free(res); res = NULL;  /* mismatch: recompute elsewhere */
+                } else if (!res) {
                     fprintf(stderr, "[lumabri] peer %s failed on layer %d expert %d — "
                                     "trying next replica\n", ps[j]->addr, layer, eid);
                 }
@@ -1447,6 +1527,11 @@ static LMB_MAYBE_UNUSED int lumi_moe_apply_v4(int layer, const int *indices,
             if (!res) {
                 LumiPeer *rf = NULL;
                 res = lumi_exec_retry(layer, eid, xj, D, nr, wj, &tried[j], &rf);
+                if (res &&
+                    lumi_maybe_spot_check(layer, eid, xj, D, nr, wj, res, rf,
+                                          tried[j])) {
+                    free(res); res = NULL;  /* second disagreement: go local */
+                }
                 if (!res) {
                     for (int q = j + 1; q < nb; q++)
                         if (fds[q] >= 0) {
@@ -1456,7 +1541,6 @@ static LMB_MAYBE_UNUSED int lumi_moe_apply_v4(int layer, const int *indices,
                     free(used); free(uid); free(rows); free(rw); free(xg); free(saved);
                     return 0;
                 }
-                lumi_maybe_spot_check(layer, eid, xj, D, nr, wj, res, rf, tried[j]);
             }
             if (nr > 1) { L.batch_calls++; L.batch_rows += (unsigned long long)nr; }
             for (int r = 0; r < nr; r++) {       /* already weighted by the peer */
@@ -1475,16 +1559,21 @@ static LMB_MAYBE_UNUSED int lumi_moe_apply_v4(int layer, const int *indices,
 }
 
 static LMB_MAYBE_UNUSED void lumi_report(void) {
-    if (!L.on) return;
+    if (!L.on && !L.calls) return;
     fprintf(stderr, "[lumabri] %llu remote expert calls in %llu layer rounds · "
                     "%.2fs waiting on peers (%.2f ms per layer round) · "
                     "%llu batched call(s)/%llu rows · %llu hedge(s), %llu won · "
                     "%llu failover(s) · %llu tracker relay call(s) · "
-                    "%llu spot-check(s), all agreed\n",
+                    "%llu spot-check(s)%s\n",
             L.calls, L.layers_done, L.wait_s,
             L.layers_done ? 1000.0 * L.wait_s / (double)L.layers_done : 0.0,
             L.batch_calls, L.batch_rows, L.hedges, L.hedge_wins,
-            L.failovers, L.relays, L.verified);
+            L.failovers, L.relays, L.verified,
+            L.integrity_fails ? "" : ", all agreed");
+    if (L.demotions || L.integrity_fails)
+        fprintf(stderr, "[lumabri] %llu layer demotion(s) to the local mirror"
+                        " · %llu integrity quarantine(s)\n",
+                L.demotions, L.integrity_fails);
 }
 
 #endif /* LUMABRI_CLIENT_H */

@@ -2,14 +2,18 @@
 #define LMBE_SOURCE_ID "test"
 #define LMBE_EXPECT_BITS 0
 #include <pthread.h>
+#include <stdatomic.h>
 #include "lumabri_client.h"
 
 typedef struct { int port, delay_ms; } Echo;
+
+static _Atomic int g_listening;
 
 static void *echo_server(void *arg) {
     Echo *e = (Echo *)arg;
     int lfd = lmb_listen(e->port);
     if (lfd < 0) return (void *)1;
+    atomic_fetch_add(&g_listening, 1);
     int fd = accept(lfd, NULL, NULL);
     LmbMsg m = {0};
     int bad = fd < 0 || lmb_recv(fd, &m) || m.op != LMB_EXEC || m.body_len < 16;
@@ -33,7 +37,9 @@ int main(void) {
     pthread_t a, b;
     pthread_create(&a, NULL, echo_server, &slow);
     pthread_create(&b, NULL, echo_server, &fast);
-    usleep(100000);
+    /* a fixed sleep loses on a loaded box: wait for the actual binds */
+    for (int spins = 0; atomic_load(&g_listening) < 2 && spins < 500; spins++)
+        usleep(10000);
 
     L.n_layers = 1; L.n_experts = 1; L.hidden = 4; L.npeers = 2;
     L.hedge_ms = 20;
@@ -67,7 +73,8 @@ int main(void) {
     pthread_t c, d;
     pthread_create(&c, NULL, echo_server, &slow_off);
     pthread_create(&d, NULL, echo_server, &fast_off);
-    usleep(100000);
+    for (int spins = 0; atomic_load(&g_listening) < 4 && spins < 500; spins++)
+        usleep(10000);
     for (int i = 0; i < 2; i++)
         while (L.peers[i].nsocks > 0) close(L.peers[i].socks[--L.peers[i].nsocks]);
     snprintf(L.peers[0].addr, sizeof L.peers[0].addr,

@@ -372,6 +372,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--engine-dir", default=os.environ.get("ENGINE", "../moe-stream/c"))
     ap.add_argument("--check", action="store_true")
+    ap.add_argument("--check-anchors", action="store_true",
+                    help="verify every engine's hooks still apply to the "
+                         "checkout; unlike --check this does not require the "
+                         "committed diffs to be regenerated for every "
+                         "upstream line shift")
     ap.add_argument("--apply-one", metavar="ENGINE.c",
                     help="apply this engine's hooks and write the patched source to --out")
     ap.add_argument("--out", help="output path for --apply-one")
@@ -396,6 +401,20 @@ def main():
         with open(a.out, "w", encoding="utf-8", errors="surrogateescape") as f:
             f.write(out)
         return
+    if a.check_anchors:
+        bad = 0
+        for fname, hooks in sorted(ENGINES.items()):
+            src = pristine(a.engine_dir, fname)
+            if src is None:
+                print("  skip %s (not in %s)" % (fname, a.engine_dir))
+                continue
+            try:
+                apply_hooks(src, hooks, fname)
+                print("  %s: %d hook(s) anchor cleanly" % (fname, len(hooks)))
+            except SystemExit as e:
+                print(e.code)
+                bad = 1
+        sys.exit(bad)
     if a.check:
         tmp = tempfile.mkdtemp()
         try:

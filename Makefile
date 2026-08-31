@@ -19,7 +19,7 @@ endif
 # regressions would make this gate depend on whichever checkout ENGINE names.
 check-warnings:
 	$(MAKE) -B all test_relay_exec test_swarm_fed test_key_rotation \
-		test_hedge test_verify_failover test_rtt_refresh test_segment_v2 \
+		test_hedge test_local_fallback test_verify_failover test_rtt_refresh test_segment_v2 \
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
 		test_meminfo test_compute_lease test_content_filter \
 		test_scheduler test_run_gate \
@@ -386,8 +386,10 @@ test_key_rotation: test_key_rotation.c lumabri_sign.h
 test_hedge: test_hedge.c lumabri_client.h lumabri_proto.h lumabri_sign.h $(SECURE_DEPS)
 	$(CC) $(CFLAGS) -pthread test_hedge.c -o $@
 
-test_rtt_refresh: test_rtt_refresh.c lumabri_client.h lumabri_proto.h \
-		lumabri_sign.h $(SECURE_DEPS)
+test_local_fallback: test_local_fallback.c lumabri_client.h lumabri_proto.h lumabri_sign.h $(SECURE_DEPS)
+	$(CC) $(CFLAGS) -pthread test_local_fallback.c -o $@
+
+test_rtt_refresh: test_rtt_refresh.c lumabri_client.h lumabri_proto.h lumabri_sign.h $(SECURE_DEPS)
 	$(CC) $(CFLAGS) -pthread test_rtt_refresh.c -o $@
 
 test_verify_failover: test_verify_failover.c lumabri_client.h lumabri_proto.h lumabri_sign.h
@@ -575,16 +577,13 @@ test-key-rotation: test_key_rotation
 test-hedge: test_hedge
 	./test_hedge
 
-test-rtt-refresh: tracker test_rtt_refresh
-	bash ./rtt_refresh_test.sh
-
 test-segment-v2: test_segment_v2
 	./test_segment_v2
 
 test-segment-discovery: tracker test_segment_discovery
 	bash ./segment_discovery_test.sh
 
-test: all test_key_rotation test_hedge test_verify_failover test_rtt_refresh test_segment_v2 \
+test: all test_key_rotation test_hedge test_local_fallback test_verify_failover test_rtt_refresh test_segment_v2 \
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
 		test_meminfo test_compute_lease test_content_filter \
 		test_scheduler test_run_gate
@@ -608,6 +607,7 @@ test: all test_key_rotation test_hedge test_verify_failover test_rtt_refresh tes
 	bash ./verify_failover_test.sh
 	./test_key_rotation
 	./test_hedge
+	./test_local_fallback
 	bash ./rtt_refresh_test.sh
 	./test_segment_v2
 	./test_meminfo
@@ -647,7 +647,8 @@ install: all
 clean:
 	rm -f tracker maintainer liblumabri.so test_shim swarm_probe lumabri \
 	      test_relay_exec test_swarm_fed test_key_rotation test_hedge \
-	      test_verify_failover test_rtt_refresh test_segment_v2 test_segment_discovery test_sampling \
+	      test_local_fallback test_rtt_refresh \
+	      test_verify_failover test_segment_v2 test_segment_discovery test_sampling \
 	      test_swarm_detail test_relay_rate test_machine test_meminfo \
 	      test_compute_lease test_content_filter test_scheduler test_run_gate \
 	      test_segment_v2_tsan tracker_tsan \
@@ -664,7 +665,7 @@ clean:
         test-phase2-deepseek test-engines \
         patches patches-check test-relay-exec test-swarm-fed test-assign-race test-partial-phase2 test-elastic \
         test-cas test-key-rotation test-hedge test-segment-v2 \
-        test-segment-discovery test-rtt-refresh segment-direct test-segment-direct-real \
+        test-segment-discovery segment-direct test-segment-direct-real \
         test-segment-relay-real test-segment-failover-real test-segment-hybrid \
         test-machine-governor test-doctor test-sanitize test-thread-sanitize \
         production-gate

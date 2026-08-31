@@ -334,9 +334,9 @@ ranges concurrently. Lumabri deliberately does not fuse rows from unrelated
 sessions: current Colibri adapters own opaque per-session state and can round a
 cross-session batch differently. Calling that continuous batching before an
 engine-neutral multi-session batch ABI exists would break the token oracle.
-When two donors happen to hold the *same* expert, add `LUMABRI_SPREAD=1` on the
-chatter to balance the load between them too. Neither donor needs to know the
-others exist. Expert requests can fail over to another replica. Stateful
+When two donors hold the *same* expert, the chatter spreads the load between
+them by default (set `LUMABRI_SPREAD=0` for strict nearest-replica routing).
+Neither donor needs to know the others exist. Expert requests can fail over to another replica. Stateful
 Segment sessions with compatible replicas checkpoint at turn boundaries; on
 failure the gateway restores an exact-range replica, replays tokens after the
 common checkpoint and retries the interrupted batch. If no compatible replica
@@ -360,7 +360,7 @@ the command, e.g. `LUMABRI_SPREAD=1 lumabri chat …`.
 
 | set | to |
 |---|---|
-| `LUMABRI_SPREAD=1` | spread the load across peers that hold the *same* expert (default: the nearest one wins) |
+| `LUMABRI_SPREAD=0` | strict nearest-replica routing (default: spread the load across peers that hold the *same* expert) |
 | `LUMABRI_VERIFY=N` | re-run N% of expert calls on a second peer and demand the same answer — a lie stops the run |
 | `LUMABRI_HEDGE_MS=N` | after N ms with no reply, ask a second peer too and take whichever comes first |
 | `LUMABRI_HEDGE_MS=-1` | never ask a second peer — the only way to get one request per call, which attribution and benchmarking need |
