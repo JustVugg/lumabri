@@ -50,6 +50,8 @@ jobs:
       - name: Segment failover gate (fresh fencing, checkpoint replay)
         working-directory: colibri/c
         run: |
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          python -m pip install safetensors huggingface_hub
           make segment-edge-library -j"$(nproc)"
           python3 tools/make_olmoe_tiny.py --output olmoe_tiny_src --force
           python3 tools/make_edge_tiny_tokenizer.py olmoe_tiny_src --vocab-size 128
