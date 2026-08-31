@@ -548,6 +548,48 @@ int lmb_seg_discovery_snapshot(LmbSegDiscovery *d,
     return have;
 }
 
+int lmb_seg_discovery_refresh_now(LmbSegDiscovery *d,
+                                  LmbSegRouteSnapshot *snapshot) {
+    if (!d || !snapshot) return -1;
+    LmbSegRouteSnapshot next;
+    if (lmb_seg_routes_fetch(d->tracker, &d->query, &next)) return -1;
+
+    /* A failover must not wait for direct-connect probes. Preserve observations
+     * for routes already known by the worker and initialize new ones with the
+     * transport prior; the next background pass resumes normal probing. */
+    pthread_mutex_lock(&d->lock);
+    uint64_t now = disc_now_ms();
+    for (uint32_t i = 0; i < next.count; i++) {
+        LmbSegRouteEntry *entry = &next.entries[i];
+        const LmbSegRouteEntry *old = NULL;
+        if (d->have_snapshot)
+            for (uint32_t j = 0; j < d->snapshot.count; j++)
+                if (disc_same_route(entry, &d->snapshot.entries[j])) {
+                    old = &d->snapshot.entries[j];
+                    break;
+                }
+        if (old) {
+            entry->latency = old->latency;
+            entry->last_probe_ms = old->last_probe_ms;
+        } else {
+            lmb_predict_init(&entry->latency,
+                entry->transport & LMB_SEG_TRANSPORT_DIRECT ? 50000u : 120000u);
+        }
+        uint32_t queue = entry->advert.queue_depth + entry->advert.inflight;
+        entry->predicted_us = lmb_predict_score(&entry->latency, queue);
+        if (!lmb_predict_available(&entry->latency, now))
+            entry->predicted_us = UINT64_MAX / 4u;
+    }
+    if (!d->have_snapshot ||
+        next.route_generation >= d->snapshot.route_generation) {
+        d->snapshot = next;
+        d->have_snapshot = 1;
+    }
+    *snapshot = d->snapshot;
+    pthread_mutex_unlock(&d->lock);
+    return 1;
+}
+
 void lmb_seg_discovery_stop(LmbSegDiscovery *d) {
     if (!d) return;
     pthread_mutex_lock(&d->lock);
