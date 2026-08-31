@@ -35,7 +35,7 @@ diff --git a/c/colibri.c b/c/colibri.c
  }
  
  static void model_init(Model *m, const char *snap, int cap,
-@@ -5339,6 +5359,17 @@
+@@ -5391,6 +5411,17 @@
          int e=idxs[(int64_t)s*K+kk];
          if(!seen[e]){ seen[e]=1; uniq[nu++]=e; }
      }
