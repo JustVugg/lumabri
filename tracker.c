@@ -32,6 +32,21 @@
 #define MAX_FILES  4096
 #define STALE_S    30.0     /* silent this long → dropped from placements */
 #define RELAY_WAIT_S 60     /* chatter-side cap on one relayed read */
+#define REXEC_INFLIGHT 8    /* pending relayed EXECs per expert peer */
+#define REXEC_COOLDOWN_S 20 /* skip a failing relay peer this long */
+
+/* A fully built control-channel frame, queued for the peer's conn thread. */
+typedef struct OutFrame {
+    uint8_t *body; uint32_t body_len;
+    uint8_t *pay; uint32_t pay_len;
+    struct OutFrame *next;
+} OutFrame;
+
+typedef struct {
+    int used, done, ok;
+    uint32_t id;
+    uint8_t *resp; uint32_t resp_len;
+} RexecPending;
 #define RSEG_RATE_SLOTS 128
 
 typedef struct { char path[LMB_PATH_MAX]; uint64_t size; } PFile;
@@ -66,6 +81,16 @@ typedef struct {
     LmbSegOwner segment_owner;
     double segment_ts;
     int segment_live;
+
+    /* EXEC relay, multi-inflight: each chatter thread takes one pending
+     * slot, appends a fully built forward frame to the outbound queue, and
+     * waits on rq_cv for its correlation id to complete. The node processes
+     * ids independently (new nodes in parallel, old nodes in order), so a
+     * cold expert no longer blocks every other relayed call behind it. */
+    OutFrame *outq_head, *outq_tail;
+    RexecPending rex[REXEC_INFLIGHT];
+    int rexec_fails;            /* consecutive relay failures on this peer */
+    double rexec_fail_at;
 
     /* relay mailbox: one in-flight request per peer, serialized. The
      * chatter thread queues it and waits; the peer's control thread
@@ -479,6 +504,11 @@ static Peer *peer_slot_new(int is_expert, int *idx) {
     if (p->used) {
         free(p->files); free(p->ebits); free(p->rq_body); free(p->rq_pay);
         free(p->rq_resp); free(p->rq_resp_pay);
+        while (p->outq_head) {
+            OutFrame *f = p->outq_head; p->outq_head = f->next;
+            free(f->body); free(f->pay); free(f);
+        }
+        for (int r = 0; r < REXEC_INFLIGHT; r++) free(p->rex[r].resp);
         if (p->evfd >= 0) close(p->evfd);
         pthread_mutex_destroy(&p->rq_lk);
         pthread_cond_destroy(&p->rq_cv);
@@ -2056,6 +2086,64 @@ static int handle_rread(int fd, LmbMsg *m) {
     return rc;
 }
 
+/* Forward one EXEC to one expert peer over its control tunnel and wait for
+ * the correlated reply. Returns 1 with the caller owning *resp. Each call
+ * takes one of the peer's REXEC_INFLIGHT slots, so several chatters (and
+ * several experts of one layer) ride the tunnel concurrently; a timed-out
+ * slot is abandoned in place and a late reply for it is dropped by id. */
+static int rexec_forward(Peer *p, const uint8_t *body, uint32_t body_len,
+                         const uint8_t *pay, uint32_t pay_len, int wait_s,
+                         uint8_t **resp, uint32_t *resp_len) {
+    *resp = NULL; *resp_len = 0;
+    OutFrame *f = (OutFrame *)calloc(1, sizeof *f);
+    uint8_t *pcopy = pay_len ? (uint8_t *)malloc(pay_len) : NULL;
+    LmbBuf b = {0};
+    if (!f || (pay_len && !pcopy)) { free(f); free(pcopy); return 0; }
+
+    struct timespec dl;
+    clock_gettime(CLOCK_REALTIME, &dl); dl.tv_sec += wait_s;
+    pthread_mutex_lock(&p->rq_lk);
+    int slot = -1;
+    for (;;) {
+        for (int r = 0; r < REXEC_INFLIGHT && slot < 0; r++)
+            if (!p->rex[r].used) slot = r;
+        if (slot >= 0) break;
+        if (pthread_cond_timedwait(&p->rq_cv, &p->rq_lk, &dl) != 0) {
+            pthread_mutex_unlock(&p->rq_lk);
+            free(f); free(pcopy);
+            return 0;                    /* saturated for the whole window */
+        }
+    }
+    uint32_t id = ++p->rq_next;
+    p->rex[slot].used = 1; p->rex[slot].done = 0; p->rex[slot].ok = 0;
+    p->rex[slot].id = id;
+    free(p->rex[slot].resp); p->rex[slot].resp = NULL; p->rex[slot].resp_len = 0;
+    lmb_buf_u32(&b, id);
+    lmb_buf_bytes(&b, body, body_len);
+    f->body = b.p; f->body_len = (uint32_t)b.len;
+    if (pay_len) memcpy(pcopy, pay, pay_len);
+    f->pay = pcopy; f->pay_len = pay_len;
+    if (p->outq_tail) p->outq_tail->next = f; else p->outq_head = f;
+    p->outq_tail = f;
+    pthread_mutex_unlock(&p->rq_lk);
+    uint64_t one = 1; if (write(p->evfd, &one, 8) != 8) {}
+
+    pthread_mutex_lock(&p->rq_lk);
+    while (!p->rex[slot].done && p->rex[slot].id == id)
+        if (pthread_cond_timedwait(&p->rq_cv, &p->rq_lk, &dl) != 0) break;
+    int ok = 0;
+    if (p->rex[slot].id == id) {
+        ok = p->rex[slot].done && p->rex[slot].ok;
+        if (ok) { *resp = p->rex[slot].resp; *resp_len = p->rex[slot].resp_len; }
+        else free(p->rex[slot].resp);
+        p->rex[slot].resp = NULL; p->rex[slot].resp_len = 0;
+        p->rex[slot].used = 0;
+        pthread_cond_broadcast(&p->rq_cv);
+    }
+    pthread_mutex_unlock(&p->rq_lk);
+    return ok;
+}
+
 /* EXEC relay: same one-request mailbox as byte relay, but the expert node's
  * EREG connection is the outbound tunnel.  The tracker validates enough of
  * the shape to select a real holder and bound memory; the expert validates
@@ -2086,60 +2174,67 @@ static int handle_rexec(int fd, LmbMsg *m) {
     uint64_t gid64 = (uint64_t)layer * nexp + eid;
     if (gid64 > UINT32_MAX) { send_err(fd, "bad rexec expert id"); return -1; }
 
-    Peer *p = NULL;
+    /* Every fresh holder is a candidate, healthy ones first. The old code
+     * took the FIRST match and gave up when it timed out — with the origin
+     * wedged, every relayed call burned the full wait against the one bad
+     * peer while a live donor with the same expert sat idle in this array. */
+    Peer *cand[8];
+    int ncand = 0;
     double now = now_s();
     pthread_mutex_lock(&g_lk);
-    for (int i = 0; i < MAX_PEERS && !p; i++) {
+    for (int i = 0; i < MAX_PEERS && ncand < 8; i++) {
         Peer *q = &g_peers[i];
         uint32_t gid = (uint32_t)gid64;
         if (!q->used || !q->is_expert || !q->has_expert ||
             now - q->expert_ts > g_stale_s ||
             q->ctrl_fd < 0 || q->evfd < 0 || strcmp(q->model, model) || gid >= q->enbits ||
             !(q->ebits[gid >> 3] & (uint8_t)(1u << (gid & 7)))) continue;
-        p = q; p->refs++;
+        q->refs++;
+        cand[ncand++] = q;
     }
     pthread_mutex_unlock(&g_lk);
-    if (!p) { send_err(fd, "no relay-capable expert holds it"); return 0; }
-    if (getenv("LUMABRI_RELAY_TRACE"))
-        fprintf(stderr, "[tracker] rexec selected %s ctrl=%d gid=%llu\n",
-                p->name, p->ctrl_fd, (unsigned long long)gid64);
-
+    if (!ncand) { send_err(fd, "no relay-capable expert holds it"); return 0; }
+    /* Stable ordering, worst last: peers inside their failure cooldown are
+     * tried after everyone else, and among the healthy a resident holder
+     * (RAM/VRAM) is tried before one that would stream the expert from
+     * disk. The heartbeat already carries both facts; using them here is
+     * what makes donated RAM actually answer relayed calls. */
+    for (int i = 1; i < ncand; i++)
+        for (int j = i; j > 0; j--) {
+            Peer *a = cand[j-1], *b = cand[j];
+            int cool_a = a->rexec_fails >= 2 &&
+                         now - a->rexec_fail_at < REXEC_COOLDOWN_S;
+            int cool_b = b->rexec_fails >= 2 &&
+                         now - b->rexec_fail_at < REXEC_COOLDOWN_S;
+            int res_a = (a->expert_resident_flags &
+                         (LMB_EXPERT_RESIDENT_RAM | LMB_EXPERT_RESIDENT_VRAM)) != 0;
+            int res_b = (b->expert_resident_flags &
+                         (LMB_EXPERT_RESIDENT_RAM | LMB_EXPERT_RESIDENT_VRAM)) != 0;
+            int worse_a = cool_a * 2 + (cool_a == cool_b ? !res_a : 0);
+            int worse_b = cool_b * 2 + (cool_a == cool_b ? !res_b : 0);
+            if (worse_a > worse_b) {
+                cand[j] = a; cand[j-1] = b;
+            } else break;
+        }
     uint32_t body_len = m->body_len - (uint32_t)exec_at;
-    uint8_t *body = (uint8_t *)malloc(body_len ? body_len : 1);
-    uint8_t *pay = (uint8_t *)malloc(m->pay_len ? m->pay_len : 1);
-    if (!body || !pay) {
-        free(body); free(pay);
-        pthread_mutex_lock(&g_lk); if (p->refs) p->refs--; pthread_mutex_unlock(&g_lk);
-        send_err(fd, "oom"); return -1;
+    int try_s = lmb_env_int("LUMABRI_RELAY_TRY_S", 25, 1, RELAY_WAIT_S);
+    uint8_t *resp = NULL; uint32_t resp_len = 0;
+    int ok = 0;
+    for (int ci = 0; ci < ncand && !ok; ci++) {
+        Peer *p = cand[ci];
+        if (getenv("LUMABRI_RELAY_TRACE"))
+            fprintf(stderr, "[tracker] rexec try %d/%d %s gid=%llu\n",
+                    ci + 1, ncand, p->name, (unsigned long long)gid64);
+        ok = rexec_forward(p, m->body + exec_at, body_len, m->pay, m->pay_len,
+                           ncand > 1 ? try_s : RELAY_WAIT_S,
+                           &resp, &resp_len);
+        if (ok) {
+            p->rexec_fails = 0;
+        } else {
+            if (p->rexec_fails < 1000) p->rexec_fails++;
+            p->rexec_fail_at = now_s();
+        }
     }
-    memcpy(body, m->body + exec_at, body_len);
-    memcpy(pay, m->pay, m->pay_len);
-
-    pthread_mutex_lock(&p->rq_lk);
-    while (p->rq_busy) pthread_cond_wait(&p->rq_cv, &p->rq_lk);
-    p->rq_busy = 1; p->rq_sent = 0; p->rq_done = 0; p->rq_ok = 0;
-    p->rq_id = ++p->rq_next; p->rq_op = LMB_REXEC_FWD;
-    free(p->rq_body); p->rq_body = body; p->rq_body_len = body_len;
-    free(p->rq_pay); p->rq_pay = pay; p->rq_pay_len = m->pay_len;
-    free(p->rq_resp); p->rq_resp = NULL; p->rq_resp_len = 0;
-    free(p->rq_resp_pay); p->rq_resp_pay = NULL; p->rq_resp_pay_len = 0;
-    pthread_mutex_unlock(&p->rq_lk);
-    uint64_t one = 1; if (write(p->evfd, &one, 8) != 8) {}
-    if (getenv("LUMABRI_RELAY_TRACE"))
-        fprintf(stderr, "[tracker] rexec queued id=%u evfd=%d\n", p->rq_id, p->evfd);
-
-    struct timespec dl;
-    clock_gettime(CLOCK_REALTIME, &dl); dl.tv_sec += RELAY_WAIT_S;
-    pthread_mutex_lock(&p->rq_lk);
-    while (!p->rq_done)
-        if (pthread_cond_timedwait(&p->rq_cv, &p->rq_lk, &dl) != 0) break;
-    int ok = p->rq_done && p->rq_ok;
-    uint8_t *resp = p->rq_resp; uint32_t resp_len = p->rq_resp_len;
-    p->rq_resp = NULL; p->rq_resp_len = 0;
-    free(p->rq_body); p->rq_body = NULL; p->rq_body_len = 0;
-    free(p->rq_pay); p->rq_pay = NULL; p->rq_pay_len = 0;
-    p->rq_busy = 0; pthread_cond_broadcast(&p->rq_cv);
-    pthread_mutex_unlock(&p->rq_lk);
 
     int rc;
     if (!ok) { free(resp); send_err(fd, "exec relay timeout or peer failure"); rc = 0; }
@@ -2148,7 +2243,10 @@ static int handle_rexec(int fd, LmbMsg *m) {
         rc = lmb_send(fd, LMB_REXEC_R, b.p, (uint32_t)b.len, resp, resp_len);
         free(b.p); free(resp);
     }
-    pthread_mutex_lock(&g_lk); if (p->refs) p->refs--; pthread_mutex_unlock(&g_lk);
+    pthread_mutex_lock(&g_lk);
+    for (int ci = 0; ci < ncand; ci++)
+        if (cand[ci]->refs) cand[ci]->refs--;
+    pthread_mutex_unlock(&g_lk);
     return rc;
 }
 
@@ -2365,6 +2463,18 @@ static void relay_complete(Peer *p, LmbMsg *m) {
         fprintf(stderr, "[tracker] relay complete op=%u id=%u ok=%u pay=%u\n",
                 m->op, id, ok, m->pay_len);
     pthread_mutex_lock(&p->rq_lk);
+    if (m->op == LMB_REXEC_R) {
+        for (int r = 0; r < REXEC_INFLIGHT; r++)
+            if (p->rex[r].used && !p->rex[r].done && p->rex[r].id == id) {
+                p->rex[r].ok = ok && m->pay_len > 0;
+                p->rex[r].resp = lmb_msg_take_pay(m);
+                p->rex[r].resp_len = m->pay_len;
+                p->rex[r].done = 1;
+                pthread_cond_broadcast(&p->rq_cv);
+                pthread_mutex_unlock(&p->rq_lk);
+                return;
+            }
+    }
     uint32_t expect = p->rq_op == LMB_RREAD_FWD ? LMB_RREAD_R :
                       p->rq_op == LMB_REXEC_FWD ? LMB_REXEC_R : LMB_RSEG_R;
     if (p->rq_busy && p->rq_sent && id == p->rq_id && m->op == expect &&
@@ -2402,7 +2512,17 @@ static void ctrl_teardown(Peer *p, int fd) {
     if (p->ctrl_fd == fd) p->ctrl_fd = -1;
     pthread_mutex_unlock(&g_lk);
     pthread_mutex_lock(&p->rq_lk);
-    if (p->rq_busy && !p->rq_done) { p->rq_done = 1; p->rq_ok = 0; pthread_cond_broadcast(&p->rq_cv); }
+    if (p->rq_busy && !p->rq_done) { p->rq_done = 1; p->rq_ok = 0; }
+    for (int r = 0; r < REXEC_INFLIGHT; r++)
+        if (p->rex[r].used && !p->rex[r].done) {
+            p->rex[r].done = 1; p->rex[r].ok = 0;
+        }
+    while (p->outq_head) {
+        OutFrame *frame = p->outq_head; p->outq_head = frame->next;
+        free(frame->body); free(frame->pay); free(frame);
+    }
+    p->outq_tail = NULL;
+    pthread_cond_broadcast(&p->rq_cv);
     pthread_mutex_unlock(&p->rq_lk);
     pthread_mutex_lock(&g_lk);
     if (p->refs) p->refs--;
@@ -2472,6 +2592,23 @@ static void *conn_thread(void *arg) {
                     free(b.p); free(pay);
                     if (rc) break;
                 } else { free(b.p); free(pay); }
+                /* multi-inflight EXEC forwards: drain the whole queue */
+                int send_bad = 0;
+                for (;;) {
+                    pthread_mutex_lock(&ctrl->rq_lk);
+                    OutFrame *frame = ctrl->outq_head;
+                    if (frame) {
+                        ctrl->outq_head = frame->next;
+                        if (!ctrl->outq_head) ctrl->outq_tail = NULL;
+                    }
+                    pthread_mutex_unlock(&ctrl->rq_lk);
+                    if (!frame) break;
+                    int rc = lmb_send(fd, LMB_REXEC_FWD, frame->body,
+                                      frame->body_len, frame->pay, frame->pay_len);
+                    free(frame->body); free(frame->pay); free(frame);
+                    if (rc) { send_bad = 1; break; }
+                }
+                if (send_bad) break;
             }
             if (!(pf[0].revents & POLLIN)) continue;
         }
