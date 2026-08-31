@@ -338,7 +338,7 @@ static void *registration_worker(void *opaque) {
     return NULL;
 }
 
-static int open_matches_node(Node *node, const LmbSegOpen *open) {
+static int open_contract_matches_node(Node *node, const LmbSegOpen *open) {
     const LmbSegAdvert *a = &node->advert;
     return !memcmp(open->model_root, a->model_root, sizeof a->model_root) &&
            !memcmp(open->tokenizer_root, a->tokenizer_root,
@@ -352,8 +352,7 @@ static int open_matches_node(Node *node, const LmbSegOpen *open) {
            (open->capabilities & a->capabilities) == open->capabilities &&
            !strcmp(open->engine_id, a->engine_id) &&
            !strcmp(open->state_schema, a->state_schema) &&
-           !strcmp(open->numeric_class, a->numeric_class) &&
-           registration_owner(&node->registration, &open->owner);
+           !strcmp(open->numeric_class, a->numeric_class);
 }
 
 static NodeSession *session_find(Node *node, const LmbSegId *id) {
@@ -576,7 +575,11 @@ static int handle_open(Node *node, int fd, const LmbMsg *msg) {
     if (msg->pay_len || lmb_seg_open_decode(msg->body, msg->body_len, &open))
         return -1;
     LmbSegStatus status = LMB_SEG_STATUS_BAD_REQUEST;
-    if (open_matches_node(node, &open)) {
+    int contract_matches = open_contract_matches_node(node, &open);
+    if (contract_matches &&
+        !registration_owner(&node->registration, &open.owner)) {
+        status = LMB_SEG_STATUS_STALE_OWNER;
+    } else if (contract_matches) {
         pthread_mutex_lock(&node->sessions_lock);
         NodeSession *slot = session_find(node, &open.session_id);
         if (slot) {
@@ -666,6 +669,18 @@ static int handle_run(Node *node, int fd, const LmbMsg *msg) {
             if (admitted != 1) {
                 status = admitted < 0 ? LMB_SEG_STATUS_QUOTA :
                                         LMB_SEG_STATUS_BUSY;
+                if (admitted < 0)
+                    fprintf(stderr, "[segment-node %s %u:%u] RUN admission "
+                                    "cancelled: %s%s (available %.1f GB / "
+                                    "reserve %.1f GB)\n",
+                            node->advert.peer_name, node->advert.layer_begin,
+                            node->advert.layer_end,
+                            g_stop ? "process stopping" :
+                                lmb_governor_reason_name(
+                                    lmb_governor_reason(&node->governor)),
+                            g_stop ? "" : " reached the in-flight safety floor",
+                            (double)available_memory_bytes() / 1e9,
+                            (double)node->ram_reserve_bytes / 1e9);
             }
             ColiSegmentRunRequest request = {
                 .struct_size = sizeof request,

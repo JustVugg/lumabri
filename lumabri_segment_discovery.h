@@ -143,6 +143,12 @@ LmbSegDiscovery *lmb_seg_discovery_start(const char *tracker,
  * published, 0 before the first successful tracker response, or -1. */
 int lmb_seg_discovery_snapshot(LmbSegDiscovery *discovery,
                                LmbSegRouteSnapshot *snapshot);
+/* Recovery is the one exceptional data-path operation allowed to contact the
+ * tracker. It publishes and returns a freshly fetched generation so every
+ * member of a reopened stateful chain carries the same current fencing owner.
+ * Returns 1 on success or -1 when the tracker cannot be reached. */
+int lmb_seg_discovery_refresh_now(LmbSegDiscovery *discovery,
+                                  LmbSegRouteSnapshot *snapshot);
 void lmb_seg_discovery_stop(LmbSegDiscovery *discovery);
 
 #endif /* LUMABRI_SEGMENT_DISCOVERY_H */
