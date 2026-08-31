@@ -1,0 +1,35 @@
+# Lumabri donor as a system service: survives reboots, crashes and closed
+# laptops-turned-servers. Install:
+#
+#   sudo cp deploy/lumabri-donor.service /etc/systemd/system/
+#   sudo systemctl edit lumabri-donor      # set the four variables below
+#   sudo systemctl enable --now lumabri-donor
+#
+# The unit runs `lumabri serve --join`, the donor form that outlives a chat
+# session. RAM/CPU pressure is governed by lumabri itself (the machine
+# governor pauses donation before the box starts swapping), so the unit sets
+# no MemoryMax: a hard systemd kill is exactly the ungraceful death the
+# governor exists to prevent.
+[Unit]
+Description=Lumabri swarm donor (disk/compute)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Override these four in `systemctl edit`:
+Environment=LUMABRI_DIR=/opt/lumabri
+Environment=LUMABRI_TRACKER=203.0.113.1:7300
+Environment=LUMABRI_MODEL_NAME=DeepSeek-V4-Flash
+# Empty LUMABRI_DONATE_GB donates COMPUTE (the node holds a slice of experts
+# resident in RAM and executes them); a number donates that many GB of DISK.
+Environment=LUMABRI_DONATE_GB=
+ExecStart=/bin/sh -c 'exec "$LUMABRI_DIR/lumabri" serve --model "$LUMABRI_DIR/donated" --model-name "$LUMABRI_MODEL_NAME" --join "$LUMABRI_TRACKER" ${LUMABRI_DONATE_GB:+--donate "$LUMABRI_DONATE_GB"}'
+Restart=on-failure
+RestartSec=10
+# A donor is a guest on this machine: lowest scheduling priority.
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target
