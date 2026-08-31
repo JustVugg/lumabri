@@ -28,7 +28,7 @@ The hooks themselves are four, and the same four everywhere:
 Everything is inert without -DLUMIBRI_P2P, and inert at runtime unless a
 tracker or LUMABRI_EXPERTS says otherwise.
 """
-import argparse, difflib, os, shutil, subprocess, sys, tempfile
+import argparse, difflib, os, re, shutil, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -283,18 +283,35 @@ ENGINES = {
 }
 
 
+def find_anchor(text, anchor):
+    """Occurrences of `anchor`, tolerating horizontal-whitespace drift.
+
+    Upstream re-aligning a trailing comment (14 spaces one release, 18 the
+    next) must not break every downstream build: the code is the anchor, the
+    column it sits in is not. Newlines still match exactly — only runs of
+    spaces/tabs are flexible — so anything that moves or edits actual source
+    still fails loudly exactly as before. Returns the literal texts matched,
+    in order, so the caller can splice around what the file really contains."""
+    if text.count(anchor):
+        return [anchor] * text.count(anchor)
+    parts = re.split(r"[ \t]+", anchor)
+    pattern = r"[ \t]+".join(re.escape(part) for part in parts)
+    return [m.group(0) for m in re.finditer(pattern, text)]
+
+
 def apply_hooks(src, hooks, name):
     out = src
     for h in hooks:
-        n = out.count(h["anchor"])
-        if n != h["count"]:
+        found = find_anchor(out, h["anchor"])
+        if len(found) != h["count"]:
             raise SystemExit(
                 "%s: anchor found %d times, expected %d — upstream moved:\n%s"
-                % (name, n, h["count"], h["anchor"][:120]))
+                % (name, len(found), h["count"], h["anchor"][:120]))
+        literal = found[0]
         if h["where"] == "after":
-            out = out.replace(h["anchor"], h["anchor"] + h["add"], 1)
+            out = out.replace(literal, literal + h["add"], 1)
         else:
-            out = out.replace(h["anchor"], h["add"] + h["anchor"], 1)
+            out = out.replace(literal, h["add"] + literal, 1)
     return out
 
 

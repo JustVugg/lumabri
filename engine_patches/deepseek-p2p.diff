@@ -21,9 +21,9 @@ diff --git a/c/deepseek.c b/c/deepseek.c
      for (int expert_id = 0; !result && expert_id < n; expert_id++) {
 +#ifdef LUMIBRI_P2P
 +    if (!result && lumi_layer_on(weights->plan.layer)) {
-+        lumi_moe_apply_v4(weights->plan.layer, indices, route_weights, topk,
-+                          input, 1, d, output);
-+        n = 0;                        /* the loop below finds no expert left */
++        if (lumi_moe_apply_v4(weights->plan.layer, indices, route_weights,
++                              topk, input, 1, d, output))
++            n = 0;                    /* the loop below finds no expert left */
 +    }
 +#endif
          int rank = -1;
@@ -35,9 +35,9 @@ diff --git a/c/deepseek.c b/c/deepseek.c
  #ifdef COLI_V4_EXPERIMENTAL_DUAL_EXPERT_LOADER
 +#ifdef LUMIBRI_P2P
 +    if (!result && lumi_layer_on(weights->plan.layer)) {
-+        lumi_moe_apply_v4(weights->plan.layer, indices, route_weights, topk,
-+                          input, 1, d, output);
-+        selected = 0;                 /* both loader variants walk `selected` */
++        if (lumi_moe_apply_v4(weights->plan.layer, indices, route_weights,
++                              topk, input, 1, d, output))
++            selected = 0;             /* both loader variants walk `selected` */
 +    }
 +#endif
      for (int current = 0; !result && current < selected; current++) {
@@ -49,9 +49,9 @@ diff --git a/c/deepseek.c b/c/deepseek.c
          memset(outputs, 0, (size_t)batch * d * sizeof(*outputs));
 +#ifdef LUMIBRI_P2P
 +    if (!result && lumi_layer_on(weights->plan.layer)) {
-+        lumi_moe_apply_v4(weights->plan.layer, indices, route_weights, topk,
-+                          inputs, batch, d, outputs);
-+        n = 0;                        /* key_count becomes 0: nothing to lease */
++        if (lumi_moe_apply_v4(weights->plan.layer, indices, route_weights,
++                              topk, inputs, batch, d, outputs))
++            n = 0;                    /* key_count becomes 0: nothing to lease */
 +    }
 +#endif
  
