@@ -117,6 +117,7 @@ static int memory_pressure(void *opaque) {
 static void *governor_worker(void *opaque) {
     Node *node = opaque;
     LmbGovernorState previous = lmb_governor_state(&node->governor);
+    int first = 1;
     while (!g_stop && !node->registration.stop) {
         LmbGovernorState state = lmb_governor_poll(&node->governor);
         pthread_mutex_lock(&node->registration.lock);
@@ -125,13 +126,28 @@ static void *governor_worker(void *opaque) {
         else
             node->registration.advert.flags |= LMB_SEG_ADVERT_DRAINING;
         pthread_mutex_unlock(&node->registration.lock);
-        if (state != previous) {
-            fprintf(stderr, "[segment-node %s] governor %s -> %s%s\n",
-                    node->advert.peer_name,
-                    lmb_governor_state_name(previous),
+        if (first || state != previous) {
+            uint64_t available = lmb_machine_available_ram();
+            uint64_t rss = resident_memory_bytes();
+            fprintf(stderr, "[segment-node %s] governor ",
+                    node->advert.peer_name);
+            if (!first) fprintf(stderr, "%s -> ",
+                                lmb_governor_state_name(previous));
+            fprintf(stderr, "%s · %s",
                     lmb_governor_state_name(state),
-                    state == LMB_GOV_ACTIVE ? " · accepting sessions" :
-                                             " · draining and refusing new work");
+                    state == LMB_GOV_ACTIVE ? "accepting sessions" :
+                                             "draining and refusing new work");
+            if (state != LMB_GOV_ACTIVE)
+                fprintf(stderr, " · reason: %s",
+                        lmb_governor_reason_name(
+                            lmb_governor_reason(&node->governor)));
+            fprintf(stderr, " · available %.1f GB / reserve %.1f GB · "
+                    "RSS %.1f GB / budget %.1f GB\n",
+                    (double)available / 1e9,
+                    (double)node->ram_reserve_bytes / 1e9,
+                    (double)rss / 1e9,
+                    (double)node->process_memory_limit_bytes / 1e9);
+            first = 0;
             previous = state;
         }
         for (int i = 0; i < 10 && !g_stop && !node->registration.stop; i++)

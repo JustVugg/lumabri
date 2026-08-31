@@ -5,6 +5,15 @@ a tag stay under Unreleased until a new tag is created.
 
 ## Unreleased
 
+- Donor runtime coordination: one automatic RAM-sized compute donation per
+  machine/user now covers both chat roles and `serve --join`; duplicate starts
+  remain useful as storage-only peers and identify the current lease owner.
+  Linux children also terminate with their parent instead of leaving resident
+  Expert/Segment executors behind after a killed TUI.
+- Colibri's mutable local `.coli_*` runtime state (including `.coli_usage`) is
+  excluded from storage manifests, so it can no longer generate repeated
+  unsigned-content rejections. Governor transitions now report the exact
+  pressure reason, available/reserved RAM and resident RSS/weights.
 - WSL1 memory compatibility: when `/proc/meminfo` omits `MemAvailable`,
   machine profiling, doctor, governor, Segment and resident Expert sizing now
   share a conservative reclaimable-cache fallback; native Linux values remain

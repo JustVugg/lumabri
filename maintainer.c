@@ -23,6 +23,7 @@
 #include <sys/stat.h>
 
 #include "lumabri_proto.h"
+#include "lumabri_content.h"
 #include "lumabri_sha.h"
 #include "lumabri_sign.h"
 #include "lumabri_secure.h"
@@ -69,7 +70,7 @@ static void scan_dir(const char *dir) {
     struct dirent *e;
     while ((e = readdir(d))) {
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-        if (!strcmp(e->d_name, ".lumabri_hashes")) continue;   /* our sidecars */
+        if (lmb_content_runtime_local_name(e->d_name)) continue;
         snprintf(full, sizeof full, "%s/%s", dir, e->d_name);
         struct stat st;
         if (stat(full, &st)) continue;

@@ -21,6 +21,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "lumabri_content.h"
+
 #define CHUNK (1u << 20)
 
 static const char *g_vroot, *g_src;
@@ -142,6 +144,7 @@ int main(int argc, char **argv) {
     DIR *d = opendir(g_src);
     struct dirent *e;
     while (d && (e = readdir(d))) {
+        if (lmb_content_runtime_local_name(e->d_name)) continue;
         char p[1024];
         struct stat st;
         join_path(p, sizeof p, g_src, e->d_name);

@@ -44,6 +44,10 @@
 
 #include "lumabri_proto.h"
 #include "lumabri_machine.h"
+
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 #include "lumabri_segment_discovery.h"
 #include "lumabri_sign.h"
 #include "lumabri_secure.h"
@@ -172,9 +176,24 @@ static void panel_row(int w, const char *left, const char *right) {
 
 /* ---- serve -------------------------------------------------------------- */
 
+static int child_follow_parent(pid_t parent) {
+#ifdef __linux__
+    /* Close fork-to-prctl: the parent may have died before the child armed
+     * its signal. This also keeps a 30 GB executor from surviving its TUI. */
+    return prctl(PR_SET_PDEATHSIG, SIGTERM) || getppid() != parent;
+#else
+    (void)parent;
+    return 0;
+#endif
+}
+
 static pid_t spawn_argv(char *const argv[]) {
+    pid_t parent = getpid();
     pid_t pid = fork();
-    if (pid == 0) { execv(argv[0], argv); perror(argv[0]); _exit(127); }
+    if (pid == 0) {
+        if (child_follow_parent(parent)) _exit(125);
+        execv(argv[0], argv); perror(argv[0]); _exit(127);
+    }
     return pid;
 }
 
@@ -203,8 +222,10 @@ static const char *donor_log_path(const char *name, char *buf, size_t cap) {
 
 static pid_t spawn_argv_logged(char *const argv[], char *const envv[],
                                const char *logpath) {
+    pid_t parent = getpid();
     pid_t pid = fork();
     if (pid == 0) {
+        if (child_follow_parent(parent)) _exit(125);
         for (int i = 0; envv && envv[i]; i++) putenv(envv[i]);
         int lfd = open(logpath, O_WRONLY | O_CREAT | O_APPEND, 0644);
         if (lfd >= 0) { dup2(lfd, 1); dup2(lfd, 2); close(lfd); }
@@ -218,6 +239,9 @@ static pid_t spawn_argv_logged(char *const argv[], char *const envv[],
 #define MAX_CHILDREN 16
 static pid_t g_children[MAX_CHILDREN];
 static int g_nchildren = 0;
+/* Held by the parent and inherited by its compute child. It serializes
+ * automatic RAM-sized donation across chat/serve processes on one machine. */
+static int g_compute_lease_fd = -1;
 /* The async handler never reads the mutable table/count.  Each fixed slot is
  * one sig_atomic_t publication, so delivery on any worker thread cannot see a
  * compacted/torn child table. */
@@ -600,6 +624,32 @@ static int cmd_serve(int argc, char **argv) {
                "disponibili.%s\n", C_DIM,
                (double)segment_available / 1e9,
                (double)segment_min_free / 1e9, C_R);
+
+    /* A joined host donates one RAM-sized compute role, regardless of how
+     * many `chat` or `serve --join` commands its user happens to open. The
+     * origin is intentionally exempt: it is the swarm's fallback server. */
+    int has_expert_runtime = node && access(exec_bin, X_OK) == 0;
+    if (join && !disk_donor && !no_exec &&
+        (segment_candidate || has_expert_runtime)) {
+        char lease_owner[256] = "";
+        g_compute_lease_fd = lmb_machine_compute_lease_acquire(
+            segment_model ? segment_model : model, taddr,
+            lease_owner, sizeof lease_owner);
+        if (g_compute_lease_fd < 0) {
+            if (errno == EWOULDBLOCK || errno == EAGAIN)
+                printf("  %sdono calcolo gia' attivo su questa macchina%s%s%s; "
+                       "questo processo offre soltanto storage%s\n", C_DIM,
+                       lease_owner[0] ? " (" : "",
+                       lease_owner[0] ? lease_owner : "",
+                       lease_owner[0] ? ")" : "", C_R);
+            else
+                printf("  %slease RAM del donor non disponibile: %s; "
+                       "questo processo offre soltanto storage%s\n",
+                       C_DIM, strerror(errno), C_R);
+            no_exec = 1;
+            segment_candidate = 0;
+        }
+    }
     int planned_chunks = segment_candidate
         ? lmb_env_int("LUMABRI_SEGMENT_CHUNKS", 4, 1, 7) : 0;
     if ((uint32_t)planned_chunks > segment_layers)
@@ -3404,7 +3454,7 @@ static void role_start(const Role *r, const char *tracker, const char *model,
             { char lp[1200];
               pid_t np = spawn_argv_logged(argv, NULL,
                                            donor_log_path(name, lp, sizeof lp));
-              child_publish(g_nchildren++, np); }
+              if (np > 0) child_publish(g_nchildren++, np); }
             printf("  %s\xe2\x9c\xa6 dono %.0f GB di %s%s%s%s: il tracker mi assegna "
                    "i file piu\xcc\x80 rari%s\n",
                    C_GRN, r->gb, C_R, C_BOLD, model, C_DIM, C_R);
@@ -3412,14 +3462,32 @@ static void role_start(const Role *r, const char *tracker, const char *model,
     }
 
     if (r->compute) {
-        int segment_started = segment_active &&
-            role_start_segment(r, tracker, model, model_type, context,
-                               model_bytes);
-        if (!segment_started) {
-        const char *node = expert_node_for(model_type ? model_type : "");
-        char bin[1200];
-        snprintf(bin, sizeof bin, "%s/%s", dir, node ? node : "expert_node");
-        int port = free_port(7701);
+        int compute_children_before = g_nchildren;
+        char lease_owner[256] = "";
+        int lease = lmb_machine_compute_lease_acquire(
+            model, tracker, lease_owner, sizeof lease_owner);
+        if (lease < 0) {
+            if (errno == EWOULDBLOCK || errno == EAGAIN)
+                printf("  %sdono calcolo gia' attivo su questa macchina%s%s%s; "
+                       "non avvio un secondo executor che prenoterebbe la "
+                       "stessa RAM%s\n", C_DIM,
+                       lease_owner[0] ? " (" : "",
+                       lease_owner[0] ? lease_owner : "",
+                       lease_owner[0] ? ")" : "", C_R);
+            else
+                printf("  %snon posso acquisire la lease RAM del donor: %s; "
+                       "dono calcolo saltato%s\n", C_DIM, strerror(errno), C_R);
+        } else {
+            g_compute_lease_fd = lease;
+            int segment_started = segment_active &&
+                role_start_segment(r, tracker, model, model_type, context,
+                                   model_bytes);
+            if (!segment_started) {
+                const char *node = expert_node_for(model_type ? model_type : "");
+                char bin[1200];
+                snprintf(bin, sizeof bin, "%s/%s", dir,
+                         node ? node : "expert_node");
+                int port = free_port(7701);
         /* Which container does the node read? The user's local copy when
          * there is one. Otherwise the model's vroot behind the shim: every
          * loader read becomes a verified block fetch from the swarm, so the
@@ -3494,7 +3562,7 @@ static void role_start(const Role *r, const char *tracker, const char *model,
             { char lp[1200];
               pid_t np = spawn_argv_logged(argv, local ? NULL : envv,
                                            donor_log_path(name, lp, sizeof lp));
-              child_publish(g_nchildren++, np); }
+              if (np > 0) child_publish(g_nchildren++, np); }
             if (local)
                 printf("  %s\xe2\x9c\xa6 eseguo esperti per lo sciame%s %s(%s · "
                        "log in ~/.lumabri/logs, /debug per vederli)%s\n",
@@ -3503,7 +3571,12 @@ static void role_start(const Role *r, const char *tracker, const char *model,
                 printf("  %s\xe2\x9c\xa6 eseguo esperti per lo sciame%s %s(%s, "
                        "la fetta assegnata arriva dallo sciame · /debug per i log)%s\n",
                        C_GRN, C_R, C_DIM, node, C_R);
-        }
+            }
+            }
+            if (g_nchildren == compute_children_before) {
+                close(g_compute_lease_fd);
+                g_compute_lease_fd = -1;
+            }
         }
     }
     if (r->disk || r->compute)
@@ -4060,6 +4133,10 @@ static int cmd_chat(int argc, char **argv) {
         child_unpublish(i);
         kill(p, SIGTERM);
         waitpid(p, NULL, 0);
+    }
+    if (g_compute_lease_fd >= 0) {
+        close(g_compute_lease_fd);
+        g_compute_lease_fd = -1;
     }
     if (g_nchildren) printf("  %sdonazione chiusa%s\n", C_DIM, C_R);
     printf("\n");

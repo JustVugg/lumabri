@@ -14,6 +14,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <sys/file.h>
 #include <sys/utsname.h>
 #include <time.h>
 #include <unistd.h>
@@ -100,6 +101,61 @@ uint64_t lmb_machine_total_ram(void) {
     uint64_t value = 0;
     meminfo(&value, NULL, NULL, NULL);
     return value;
+}
+
+int lmb_machine_compute_lease_acquire(const char *model, const char *tracker,
+                                      char *owner, size_t owner_size) {
+    if (owner && owner_size) owner[0] = 0;
+    const char *home = getenv("HOME");
+    if (!home || !home[0]) { errno = ENOENT; return -1; }
+    char directory[1200], path[1280];
+    int n = snprintf(directory, sizeof directory, "%s/.lumabri", home);
+    if (n < 0 || (size_t)n >= sizeof directory) {
+        errno = ENAMETOOLONG; return -1;
+    }
+    if (mkdir(directory, 0700) && errno != EEXIST) return -1;
+    struct stat st;
+    if (stat(directory, &st) || !S_ISDIR(st.st_mode)) {
+        errno = ENOTDIR; return -1;
+    }
+    n = snprintf(path, sizeof path, "%s/compute-donor.lock", directory);
+    if (n < 0 || (size_t)n >= sizeof path) {
+        errno = ENAMETOOLONG; return -1;
+    }
+    int flags = O_RDWR | O_CREAT;
+#ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+#endif
+    /* Intentionally not O_CLOEXEC: the compute child retains the lease if
+     * its TUI parent is killed, so a surviving orphan cannot be joined by a
+     * second RAM-sized donor. Normal shutdown kills the child first. */
+    int fd = open(path, flags, 0600);
+    if (fd < 0) return -1;
+    if (flock(fd, LOCK_EX | LOCK_NB)) {
+        int saved = errno;
+        if (owner && owner_size) {
+            if (lseek(fd, 0, SEEK_SET) >= 0) {
+                ssize_t got = read(fd, owner, owner_size - 1);
+                if (got > 0) {
+                    owner[got] = 0;
+                    owner[strcspn(owner, "\r\n")] = 0;
+                }
+            }
+        }
+        close(fd);
+        errno = saved;
+        return -1;
+    }
+    if (ftruncate(fd, 0) || lseek(fd, 0, SEEK_SET) < 0 ||
+        dprintf(fd, "pid=%ld model=%s tracker=%s\n", (long)getpid(),
+                model && model[0] ? model : "?",
+                tracker && tracker[0] ? tracker : "?") < 0 || fsync(fd)) {
+        int saved = errno;
+        close(fd);
+        errno = saved;
+        return -1;
+    }
+    return fd;
 }
 
 static void cpu_profile(LmbMachineProfile *profile) {
@@ -366,11 +422,25 @@ const char *lmb_governor_state_name(LmbGovernorState state) {
     return "UNKNOWN";
 }
 
+const char *lmb_governor_reason_name(LmbGovernorReason reason) {
+    switch (reason) {
+        case LMB_GOV_REASON_NONE: return "none";
+        case LMB_GOV_REASON_MANUAL: return "manual pause";
+        case LMB_GOV_REASON_RAM_PRESSURE: return "RAM below reserve";
+        case LMB_GOV_REASON_RAM_CRITICAL: return "RAM below half reserve";
+        case LMB_GOV_REASON_SWAP_CRITICAL: return "swap pressure";
+        case LMB_GOV_REASON_RECOVERY: return "recovery hysteresis";
+    }
+    return "unknown";
+}
+
 void lmb_governor_init(LmbGovernor *governor, uint64_t reserve) {
     memset(governor, 0, sizeof *governor);
     governor->ram_reserve_bytes = reserve;
     atomic_store(&governor->state,
                  lmb_governor_manual_paused() ? LMB_GOV_PAUSED : LMB_GOV_ACTIVE);
+    atomic_store(&governor->reason, lmb_governor_manual_paused() ?
+                 LMB_GOV_REASON_MANUAL : LMB_GOV_REASON_NONE);
 }
 
 LmbGovernorState lmb_governor_state(const LmbGovernor *governor) {
@@ -381,30 +451,43 @@ int lmb_governor_accepting(const LmbGovernor *governor) {
     return lmb_governor_state(governor) == LMB_GOV_ACTIVE;
 }
 
+LmbGovernorReason lmb_governor_reason(const LmbGovernor *governor) {
+    return (LmbGovernorReason)atomic_load(&governor->reason);
+}
+
 LmbGovernorState lmb_governor_poll(LmbGovernor *governor) {
     LmbGovernorState previous = lmb_governor_state(governor), next;
+    LmbGovernorReason reason = LMB_GOV_REASON_NONE;
     if (lmb_governor_manual_paused()) {
         next = LMB_GOV_PAUSED;
+        reason = LMB_GOV_REASON_MANUAL;
         governor->recovery_ticks = 0;
     } else {
         uint64_t available = 0, swap_total = 0, swap_free = 0;
         meminfo(NULL, &available, &swap_total, &swap_free);
-        int critical = available && available < governor->ram_reserve_bytes / 2;
-        if (swap_total && swap_free < swap_total / 20 &&
-            available < governor->ram_reserve_bytes) critical = 1;
-        if (critical) {
+        int ram_critical = available &&
+            available < governor->ram_reserve_bytes / 2;
+        int swap_critical = swap_total && swap_free < swap_total / 20 &&
+            available < governor->ram_reserve_bytes;
+        if (ram_critical || swap_critical) {
             next = LMB_GOV_PAUSED;
+            reason = swap_critical ? LMB_GOV_REASON_SWAP_CRITICAL :
+                                     LMB_GOV_REASON_RAM_CRITICAL;
             governor->recovery_ticks = 0;
         } else if (available && available < governor->ram_reserve_bytes) {
             next = LMB_GOV_PRESSURE;
+            reason = LMB_GOV_REASON_RAM_PRESSURE;
             governor->recovery_ticks = 0;
         } else if (previous != LMB_GOV_ACTIVE) {
             next = ++governor->recovery_ticks >= 3 ?
                    LMB_GOV_ACTIVE : LMB_GOV_RECOVERY;
+            reason = next == LMB_GOV_ACTIVE ? LMB_GOV_REASON_NONE :
+                                              LMB_GOV_REASON_RECOVERY;
         } else {
             next = LMB_GOV_ACTIVE;
         }
     }
+    atomic_store(&governor->reason, reason);
     atomic_store(&governor->state, next);
     return next;
 }

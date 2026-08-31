@@ -345,6 +345,14 @@ On first launch the chat asks what you are bringing — Enter for chat only,
 donors live as long as the chat does. `--role chat|disk|compute|all` skips
 the question for scripts and services.
 
+Only one automatic compute role is admitted per machine/user across both chat
+and `serve --join`. If another process already owns the donable RAM, Lumabri
+prints its PID/model/tracker and leaves the second process storage-only. This is
+intentional: one resident executor receives the complete disjoint assignment;
+four independently auto-sized executors would all reserve the same RAM. Stop
+old Lumabri parents before retesting a new build. On Linux, executors spawned by
+the new build terminate automatically when their parent dies.
+
 **Chat** — this is the whole point:
 
 ```sh
@@ -518,6 +526,11 @@ Two things worth knowing:
   does not reopen names for takeover.
 - **A client with a warm mirror keeps working with the server off.** That
   is the design, and `selftest.sh` pass 3 tests exactly it.
+- **`.coli_*` files never leave their machine.** They are mutable Colibri
+  runtime telemetry/cache state, not signed model bytes. If a tracker still
+  prints `REJECTED ... unsigned .../.coli_usage`, restart that donor with the
+  same current Lumabri build; an older maintainer process is still announcing
+  its startup manifest.
 
 ---
 
