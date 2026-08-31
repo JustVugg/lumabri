@@ -27,6 +27,13 @@ int main(void) {
     assert(lmb_governor_poll(&governor) == LMB_GOV_PAUSED);
     assert(lmb_governor_reason(&governor) == LMB_GOV_REASON_MANUAL);
     assert(!lmb_governor_accepting(&governor));
+    assert(!lmb_governor_abort_inflight(&governor));
+    atomic_store(&governor.reason, LMB_GOV_REASON_RAM_CRITICAL);
+    assert(lmb_governor_abort_inflight(&governor));
+    atomic_store(&governor.reason, LMB_GOV_REASON_SWAP_CRITICAL);
+    assert(lmb_governor_abort_inflight(&governor));
+    atomic_store(&governor.state, LMB_GOV_PRESSURE);
+    assert(!lmb_governor_abort_inflight(&governor));
     assert(lmb_governor_set_manual(0) == 0);
     assert(lmb_governor_poll(&governor) == LMB_GOV_RECOVERY);
     assert(lmb_governor_reason(&governor) == LMB_GOV_REASON_RECOVERY);
@@ -40,6 +47,6 @@ int main(void) {
     assert(unlink(state_file) == 0);
     assert(rmdir(state_dir) == 0);
     assert(rmdir(home) == 0);
-    puts("MACHINE GOVERNOR UNIT: PASS (pause, hysteresis, recovery)");
+    puts("MACHINE GOVERNOR UNIT: PASS (pause, drain, critical abort, recovery)");
     return 0;
 }

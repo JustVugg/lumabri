@@ -11,6 +11,12 @@ TRACKER_BIN=${TRACKER_BIN:-./tracker}
 TMP=$(mktemp -d /tmp/lumabri-segment-failover.XXXXXX)
 PIDS=()
 cleanup() {
+    local status=$?
+    if [ "$status" -ne 0 ]; then
+        for log in "$TMP"/*.log; do
+            [ -f "$log" ] && { echo "--- $log" >&2; tail -80 "$log" >&2; }
+        done
+    fi
     for pid in "${PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
     for pid in "${PIDS[@]}"; do wait "$pid" 2>/dev/null || true; done
     rm -rf "$TMP"
@@ -35,7 +41,12 @@ common=(env OMP_NUM_THREADS=2 LUMABRI_PEER_KEY="$TMP/node.key"
         LUMABRI_KNOWN_HOSTS="$TMP/known")
 start_node() {
     local range=$1 port=$2 name=$3 fallback=$4
-    "${common[@]}" "$SEGMENT_NODE_BIN" --engine olmoe \
+    local latency=()
+    # The predictive scheduler correctly prefers measured completion time over
+    # the fallback bit. Make the intended donor selection deterministic instead
+    # of depending on sub-millisecond loopback probe noise.
+    [ -n "$fallback" ] && latency=(LUMABRI_RTT_US=20000)
+    "${common[@]}" "${latency[@]}" "$SEGMENT_NODE_BIN" --engine olmoe \
         --model-dir "$OLMOE_EDGE_MODEL" --model tiny-failover \
         --range "$range" --port "$port" --tracker 127.0.0.1:8068 \
         --advertise "127.0.0.1:$port" --name "$name" \
@@ -51,6 +62,7 @@ sleep 1
 
 env OMP_NUM_THREADS=2 LUMABRI_PEER_KEY="$TMP/client.key" \
     LUMABRI_KNOWN_HOSTS="$TMP/known" LUMABRI_SAMPLE_SEED=11 \
+    LUMABRI_SEGMENT_DISCOVERY_MS=60000 \
     python3 - "$DONOR_PID" "$SEGMENT_CHAT_BIN" "$OLMOE_EDGE_MODEL" "$root" "$tok" <<'PY'
 import os, subprocess, sys, time
 donor, binary, model_dir, root, tok = sys.argv[1:]
@@ -66,10 +78,15 @@ def line():
     return value
 if b"READY" not in line() or not line().startswith(b"STAT "):
     raise RuntimeError("gateway not ready")
-def turn(rid, prompt):
+def turn(rid, prompt, kill_after_accept=None):
     p.stdin.write(f"SUBMIT {rid} 0 {len(prompt)} 1 0.7 0.95\n".encode()+prompt+b"\n")
     p.stdin.flush()
     if line() != f"ACCEPT {rid}\n".encode(): raise RuntimeError("not accepted")
+    # ACCEPT is emitted before the immutable route snapshot is consumed by the
+    # generation. Kill here so the turn exercises recovery of that selected
+    # route, rather than the discovery thread cleanly choosing the origin first.
+    if kill_after_accept is not None:
+        os.kill(int(kill_after_accept), 9)
     seen_data = False
     while True:
         frame = line()
@@ -83,13 +100,12 @@ def turn(rid, prompt):
             raise RuntimeError("unexpected frame: "+repr(frame))
     if not seen_data: raise RuntimeError("no streamed data")
 turn(1, b"hi\n")
-os.kill(int(donor), 15)
-time.sleep(.3)
-turn(2, b"hi\nthere\n")
+turn(2, b"hi\nthere\n", donor)
 p.stdin.close()
 if p.wait(timeout=30): raise RuntimeError("gateway failed")
 diagnostics=p.stderr.read().decode("utf-8", "replace")
-if "Segment failover: restored checkpoint" not in diagnostics:
+if ("Segment failover: recovered through origin-left; restored checkpoint"
+        not in diagnostics):
     raise RuntimeError("checkpoint failover did not run:\n"+diagnostics)
 PY
 echo "SEGMENT FAILOVER: PASS (checkpoint restore + replay after peer death)"

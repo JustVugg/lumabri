@@ -20,7 +20,9 @@ typedef struct {
     int fd;
     int direct_failed;
     int opened;
+    int failure_transport;
     char transport_error[256];
+    char operation_error[320];
     LmbSegOpen open;
     uint64_t sequence;
     uint64_t position;
@@ -412,9 +414,9 @@ static int remote_request(RemoteSegment *remote, uint32_t op,
                           const void *pay, uint32_t pay_len,
                           LmbMsg *response) {
     uint64_t sent_bytes = 16u + (uint64_t)body_len + pay_len;
+    remote->transport_error[0] = 0;
     if (!remote->direct_failed &&
         (remote->route.transport & LMB_SEG_TRANSPORT_DIRECT)) {
-        remote->transport_error[0] = 0;
         if (remote->fd < 0) {
             remote->fd = lmb_connect(remote->route.advert.addr);
             if (remote->fd < 0)
@@ -562,15 +564,58 @@ static int remote_run(RemoteSegment *remote, const int32_t *tokens,
         return -1;
     LmbMsg msg = {0};
     LmbSegReply reply;
+    memset(&reply, 0, sizeof reply);
+    remote->operation_error[0] = 0;
+    remote->failure_transport = 0;
     int bad = remote_request(remote, LMB_SEG_RUN, body, body_len,
-                             input, (uint32_t)bytes, &msg) ||
-          reply_ok(&msg, LMB_SEG_RUN_R, &run.session_id, &run.request_id,
-                   run.owner.route_generation, &reply) ||
-          msg.pay_len != bytes;
+                             input, (uint32_t)bytes, &msg);
+    if (bad) {
+        remote->failure_transport = 1;
+        snprintf(remote->operation_error, sizeof remote->operation_error,
+                 "%s", remote->transport_error[0] ? remote->transport_error :
+                 "no usable Segment transport");
+    } else if (msg.op == LMB_ERR) {
+        snprintf(remote->operation_error, sizeof remote->operation_error,
+                 "%s refused RUN: %.*s", remote->route.advert.peer_name,
+                 (int)msg.body_len, msg.body ? (const char *)msg.body : "");
+        bad = 1;
+    } else if (msg.op != LMB_SEG_RUN_R ||
+               lmb_seg_reply_decode(msg.body, msg.body_len, &reply)) {
+        snprintf(remote->operation_error, sizeof remote->operation_error,
+                 "%s answered RUN with an unreadable message (op %u)",
+                 remote->route.advert.peer_name, msg.op);
+        bad = 1;
+    } else if (!lmb_seg_id_equal(&reply.session_id, &run.session_id) ||
+               !lmb_seg_id_equal(&reply.request_id, &run.request_id) ||
+               reply.route_generation != run.owner.route_generation) {
+        snprintf(remote->operation_error, sizeof remote->operation_error,
+                 "%s answered RUN for a different session or route generation",
+                 remote->route.advert.peer_name);
+        bad = 1;
+    } else if (reply.status != LMB_SEG_STATUS_OK &&
+               reply.status != LMB_SEG_STATUS_DUPLICATE) {
+        snprintf(remote->operation_error, sizeof remote->operation_error,
+                 "%s rejected RUN [%u:%u]: %s",
+                 remote->route.advert.peer_name,
+                 remote->route.advert.layer_begin,
+                 remote->route.advert.layer_end,
+                 segment_status_name(reply.status));
+        bad = 1;
+    } else if (msg.pay_len != bytes) {
+        snprintf(remote->operation_error, sizeof remote->operation_error,
+                 "%s returned %u activation bytes, expected %zu",
+                 remote->route.advert.peer_name, msg.pay_len, bytes);
+        bad = 1;
+    }
     if (!bad) {
         memcpy(output, msg.pay, bytes);
         if (reply.next_sequence != run.sequence + 1 ||
-            reply.next_position != run.position + rows) bad = 1;
+            reply.next_position != run.position + rows) {
+            snprintf(remote->operation_error, sizeof remote->operation_error,
+                     "%s advanced RUN to an invalid sequence/position",
+                     remote->route.advert.peer_name);
+            bad = 1;
+        }
         else {
             remote->sequence = reply.next_sequence;
             remote->position = reply.next_position;
@@ -582,6 +627,7 @@ static int remote_run(RemoteSegment *remote, const int32_t *tokens,
         memset(&msg, 0, sizeof msg);
         bad = remote_request(remote, LMB_SEG_RUN, body, body_len,
                              input, (uint32_t)bytes, &msg);
+        if (bad) remote->failure_transport = 1;
         LmbSegReply duplicate;
         if (!bad) bad =
             reply_ok(&msg, LMB_SEG_RUN_R, &run.session_id, &run.request_id,
@@ -590,6 +636,10 @@ static int remote_run(RemoteSegment *remote, const int32_t *tokens,
             duplicate.next_sequence != remote->sequence ||
             duplicate.next_position != remote->position ||
             msg.pay_len != bytes || memcmp(msg.pay, output, bytes);
+        if (bad && !remote->operation_error[0])
+            snprintf(remote->operation_error, sizeof remote->operation_error,
+                     "%s failed the idempotent RUN retry",
+                     remote->route.advert.peer_name);
         lmb_msg_free(&msg);
     }
     free(body);
@@ -855,9 +905,31 @@ static int conversation_has_replica(
     return 0;
 }
 
-static int conversation_recover(
-    SegmentConversation *conversation,
-    const LmbSegRouteSnapshot *snapshot, size_t failed_index,
+static int recovery_route_better(const LmbSegRouteEntry *candidate,
+                                 const LmbSegRouteEntry *best,
+                                 const LmbSegRouteEntry *current,
+                                 int prefer_same) {
+    if (!best) return 1;
+    int candidate_same = !strcmp(candidate->advert.peer_name,
+                                 current->advert.peer_name);
+    int best_same = !strcmp(best->advert.peer_name,
+                            current->advert.peer_name);
+    if (candidate_same != best_same)
+        return prefer_same ? candidate_same : !candidate_same;
+    if (candidate->predicted_us != best->predicted_us)
+        return candidate->predicted_us < best->predicted_us;
+    int candidate_direct = !!(candidate->transport & LMB_SEG_TRANSPORT_DIRECT);
+    int best_direct = !!(best->transport & LMB_SEG_TRANSPORT_DIRECT);
+    if (candidate_direct != best_direct) return candidate_direct;
+    int candidate_fallback =
+        !!(candidate->advert.flags & LMB_SEG_ADVERT_FALLBACK);
+    int best_fallback = !!(best->advert.flags & LMB_SEG_ADVERT_FALLBACK);
+    return candidate_fallback < best_fallback;
+}
+
+static int conversation_recover_attempt(
+    SegmentConversation *conversation, size_t failed_index,
+    const LmbSegRouteEntry *candidate,
     ColiEdgeEngine *edge, const ColiEdgeCapabilities *cap,
     const uint8_t model_root[32], const uint8_t tokenizer_root[32],
     uint32_t context, uint32_t max_rows,
@@ -865,38 +937,11 @@ static int conversation_recover(
     const int32_t *generated, size_t generated_replayed,
     uint8_t *buffer_a, uint8_t *buffer_b,
     char *error, size_t error_size) {
-    if (!conversation || !conversation->active || !snapshot ||
-        failed_index >= conversation->chain_count) return -1;
     RemoteSegment replacement[LMB_SEG_ROUTE_MAX];
     memset(replacement, 0, sizeof replacement);
     for (size_t i = 0; i < conversation->chain_count; i++) {
-        const LmbSegRouteEntry *current = &conversation->chain[i].route;
-        const LmbSegRouteEntry *chosen = current;
-        if (i == failed_index) {
-            chosen = NULL;
-            for (uint32_t j = 0; j < snapshot->count; j++) {
-                const LmbSegRouteEntry *candidate = &snapshot->entries[j];
-                if (!strcmp(candidate->advert.peer_name,
-                            current->advert.peer_name) ||
-                    !route_same_range(candidate, current,
-                                      context, max_rows)) continue;
-                if (!chosen ||
-                    candidate->predicted_us < chosen->predicted_us ||
-                    (candidate->predicted_us == chosen->predicted_us &&
-                     (candidate->transport & LMB_SEG_TRANSPORT_DIRECT) &&
-                     !(chosen->transport & LMB_SEG_TRANSPORT_DIRECT)) ||
-                    (candidate->predicted_us == chosen->predicted_us &&
-                     (candidate->advert.flags & LMB_SEG_ADVERT_FALLBACK) == 0 &&
-                     (chosen->advert.flags & LMB_SEG_ADVERT_FALLBACK)))
-                    chosen = candidate;
-            }
-            if (!chosen) {
-                snprintf(error, error_size,
-                         "Segment peer failed and no compatible replica exists");
-                return -1;
-            }
-        }
-        replacement[i].route = *chosen;
+        replacement[i].route = i == failed_index
+            ? *candidate : conversation->chain[i].route;
         replacement[i].fd = -1;
     }
 
@@ -915,27 +960,38 @@ static int conversation_recover(
             };
             if (!checkpoint.data ||
                 checkpoint.position != conversation->checkpoint_count ||
-                remote_restore(&replacement[opened], &checkpoint)) break;
+                remote_restore(&replacement[opened], &checkpoint)) {
+                snprintf(error, error_size,
+                         "%.120s could not restore the checkpoint",
+                         replacement[opened].route.advert.peer_name);
+                break;
+            }
         }
     }
     if (opened != conversation->chain_count) {
         for (size_t i = 0; i <= opened && i < conversation->chain_count; i++)
             remote_dispose(&replacement[i]);
-        snprintf(error, error_size,
-                 "Segment replica could not restore the last checkpoint");
+        if (!error[0])
+            snprintf(error, error_size,
+                     "Segment recovery OPEN/restore was rejected");
         return -1;
     }
 
     size_t total = prompt_replayed + generated_replayed;
     int32_t *history = total ? malloc(total * sizeof *history) : NULL;
-    if (total && !history) goto recovery_failed;
+    if (total && !history) {
+        snprintf(error, error_size, "out of memory replaying Segment history");
+        goto recovery_failed;
+    }
     if (prompt_replayed)
         memcpy(history, prompt_tokens, prompt_replayed * sizeof *history);
     if (generated_replayed)
         memcpy(history + prompt_replayed, generated,
                generated_replayed * sizeof *history);
     if (conversation->checkpoint_count > total) {
-        free(history); goto recovery_failed;
+        free(history);
+        snprintf(error, error_size, "Segment checkpoint is ahead of token history");
+        goto recovery_failed;
     }
     for (size_t offset = conversation->checkpoint_count;
          offset < total; offset += max_rows) {
@@ -951,8 +1007,15 @@ static int conversation_recover(
             free(history); goto recovery_failed;
         }
         uint8_t *first = buffer_a, *second = buffer_b;
-        if (chain_run(replacement, conversation->chain_count,
-                      history + offset, rows, &first, &second, bytes)) {
+        int failed = chain_run(replacement, conversation->chain_count,
+                               history + offset, rows,
+                               &first, &second, bytes);
+        if (failed) {
+            size_t index = (size_t)(-failed - 1);
+            snprintf(error, error_size, "%.240s",
+                     replacement[index].operation_error[0]
+                         ? replacement[index].operation_error
+                         : "Segment recovery replay RUN failed");
             free(history); goto recovery_failed;
         }
     }
@@ -964,12 +1027,20 @@ static int conversation_recover(
         replacement[i].snapshot_sequence = old->snapshot_sequence;
         replacement[i].snapshot_position = old->snapshot_position;
         old->snapshot = NULL; old->snapshot_bytes = 0;
+        /* RUN already exhausted direct and relay. Do not spend another relay
+         * timeout sending CLOSE to the dead transport after recovery succeeded;
+         * the abandoned session is fenced and expires by TTL. */
+        if (i == failed_index && old->failure_transport) {
+            if (old->fd >= 0) lmb_close(old->fd);
+            old->fd = -1;
+            old->opened = 0;
+        }
         remote_dispose(old);
         *old = replacement[i];
     }
-    conversation->route_generation = snapshot->route_generation;
-    fprintf(stderr, "[lumabri] Segment failover: restored checkpoint at token "
-                    "%zu and replayed %zu token%s\n",
+    fprintf(stderr, "[lumabri] Segment failover: recovered through %s; restored "
+                    "checkpoint at token %zu and replayed %zu token%s\n",
+            candidate->advert.peer_name,
             conversation->checkpoint_count,
             total - conversation->checkpoint_count,
             total - conversation->checkpoint_count == 1 ? "" : "s");
@@ -978,8 +1049,72 @@ static int conversation_recover(
 recovery_failed:
     for (size_t i = 0; i < conversation->chain_count; i++)
         remote_dispose(&replacement[i]);
-    snprintf(error, error_size,
-             "Segment checkpoint replay failed on the replacement chain");
+    if (!error[0])
+        snprintf(error, error_size,
+                 "Segment recovery replay failed on the reopened chain");
+    return -1;
+}
+
+static int conversation_recover(
+    SegmentConversation *conversation,
+    const LmbSegRouteSnapshot *snapshot, size_t failed_index,
+    ColiEdgeEngine *edge, const ColiEdgeCapabilities *cap,
+    const uint8_t model_root[32], const uint8_t tokenizer_root[32],
+    uint32_t context, uint32_t max_rows,
+    const int32_t *prompt_tokens, size_t prompt_replayed,
+    const int32_t *generated, size_t generated_replayed,
+    uint8_t *buffer_a, uint8_t *buffer_b,
+    char *error, size_t error_size) {
+    if (!conversation || !conversation->active || !snapshot ||
+        failed_index >= conversation->chain_count) return -1;
+    char initial_failure[320], last_failure[256] = "";
+    snprintf(initial_failure, sizeof initial_failure, "%s",
+             conversation->chain[failed_index].operation_error[0]
+                 ? conversation->chain[failed_index].operation_error
+                 : "Segment RUN failed");
+    const LmbSegRouteEntry *current = &conversation->chain[failed_index].route;
+    int prefer_same = !conversation->chain[failed_index].failure_transport;
+    uint8_t attempted[LMB_SEG_ROUTE_MAX] = {0};
+    size_t attempts = 0;
+    for (;;) {
+        uint32_t chosen_index = UINT32_MAX;
+        const LmbSegRouteEntry *chosen = NULL;
+        for (uint32_t j = 0; j < snapshot->count; j++) {
+            const LmbSegRouteEntry *candidate = &snapshot->entries[j];
+            /* An executor which returned a status gets one clean-session retry;
+             * a transport failure already exhausted direct and relay, so exact-
+             * range replicas come first. Every candidate remains a final tier. */
+            if (attempted[j] ||
+                !route_same_range(candidate, current, context, max_rows))
+                continue;
+            if (recovery_route_better(candidate, chosen, current, prefer_same)) {
+                chosen = candidate;
+                chosen_index = j;
+            }
+        }
+        if (!chosen) break;
+        attempted[chosen_index] = 1;
+        attempts++;
+        error[0] = 0;
+        if (!conversation_recover_attempt(
+                conversation, failed_index, chosen, edge, cap,
+                model_root, tokenizer_root, context, max_rows,
+                prompt_tokens, prompt_replayed, generated, generated_replayed,
+                buffer_a, buffer_b, error, error_size)) {
+            conversation->route_generation = snapshot->route_generation;
+            return 0;
+        }
+        snprintf(last_failure, sizeof last_failure, "%s",
+                 error[0] ? error : "recovery route failed");
+    }
+    if (!attempts)
+        snprintf(error, error_size,
+                 "%.180s; no compatible Segment recovery route exists",
+                 initial_failure);
+    else
+        snprintf(error, error_size,
+                 "%.96s; all Segment recovery routes failed: %.96s",
+                 initial_failure, last_failure);
     return -1;
 }
 
@@ -1725,7 +1860,10 @@ int main(int argc, char **argv) {
     snprintf(query.engine_id, sizeof query.engine_id, "%s", cap.engine_id);
     snprintf(query.state_schema, sizeof query.state_schema, "%s", cap.state_schema);
     snprintf(query.numeric_class, sizeof query.numeric_class, "%s", cap.numeric_class);
-    LmbSegDiscovery *discovery = lmb_seg_discovery_start(tracker, &query, 250);
+    uint32_t discovery_refresh_ms = (uint32_t)lmb_env_int(
+        "LUMABRI_SEGMENT_DISCOVERY_MS", 250, 50, 3600000);
+    LmbSegDiscovery *discovery = lmb_seg_discovery_start(
+        tracker, &query, discovery_refresh_ms);
     if (!discovery) { fprintf(stderr, "cannot start Segment discovery\n"); return 1; }
     LmbSegRouteSnapshot snapshot;
     memset(&snapshot, 0, sizeof snapshot);
