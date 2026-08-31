@@ -145,7 +145,8 @@ EWMA latency and advertised queue/inflight cost for the complete chain; origin
 fallback status is only a tie-breaker. Adding a slower donor therefore does not
 replace a faster known route. Expert replicas use the same EWMA model, open a
 circuit only after repeated failures, and hedge automatically only after enough
-samples show a real p95 tail. `LUMABRI_HEDGE_MS` remains an explicit override.
+samples show a real p95 tail. `LUMABRI_HEDGE_MS` remains an explicit
+override: a positive value is the fixed delay, and `-1` turns hedging off.
 These are online estimates, not a speed claim: `swarm_bench.py` on distinct
 hosts remains the authority for single-chat and aggregate throughput.
 
@@ -360,6 +361,7 @@ the command, e.g. `LUMABRI_SPREAD=1 lumabri chat …`.
 | `LUMABRI_SPREAD=1` | spread the load across peers that hold the *same* expert (default: the nearest one wins) |
 | `LUMABRI_VERIFY=N` | re-run N% of expert calls on a second peer and demand the same answer — a lie stops the run |
 | `LUMABRI_HEDGE_MS=N` | after N ms with no reply, ask a second peer too and take whichever comes first |
+| `LUMABRI_HEDGE_MS=-1` | never ask a second peer — the only way to get one request per call, which attribution and benchmarking need |
 | `LUMABRI_ALLOW_CODEGEN_SKEW=1` | let peers built with a different compiler or CPU join (results are then verified, not bit-identical) |
 | `LUMABRI_ENCRYPT=1` | encrypt the transport (see below) |
 | `RAM_GB=N` | tell a `--local` run how much RAM it may use to keep experts resident |
