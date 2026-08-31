@@ -60,6 +60,9 @@ test_segment_discovery
 test_swarm_detail
 test_relay_rate
 test_machine
+test_meminfo
+test_compute_lease
+test_content_filter
 test_scheduler
 test_run_gate
 expert_node_*

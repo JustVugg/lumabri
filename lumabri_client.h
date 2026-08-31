@@ -68,7 +68,14 @@ static struct {
     int verify_pct;             /* LUMABRI_VERIFY: % of calls double-checked */
     int allow_codegen_skew;     /* LUMABRI_ALLOW_CODEGEN_SKEW: cc/isa -> warn, not refuse */
     int spread;                 /* LUMABRI_SPREAD: near-band replica spreading, not strict argmin */
-    int hedge_ms;               /* 0 disables; base policy, fixed delay */
+    /* Hedging policy, from LUMABRI_HEDGE_MS:
+     *   < 0  off — no second replica is ever issued
+     *     0  automatic (default): the predictor hedges only once a peer has
+     *        enough samples and a genuinely heavy tail
+     *   > 0  fixed delay in milliseconds, the original base policy
+     * Off matters to anyone who needs deterministic attribution — a
+     * measurement harness cannot tell a chosen replica from a hedge copy. */
+    int hedge_ms;
     /* How long one EXEC reply may take before the replica is treated as
      * failed. A dead peer resets its socket and fails instantly; a peer that
      * is merely wedged — swapping, saturated, or behind a black hole — never
@@ -544,7 +551,7 @@ static void lumi_init_ex(int n_layers, int n_experts, int hidden,
         if (!v && L.verify_pct == 0) L.verify_pct = 5;
     }
     L.spread = getenv("LUMABRI_SPREAD") && atoi(getenv("LUMABRI_SPREAD")) != 0;
-    L.hedge_ms = lmb_env_int("LUMABRI_HEDGE_MS", 0, 0, 60000);
+    L.hedge_ms = lmb_env_int("LUMABRI_HEDGE_MS", 0, -1, 60000);
     L.exec_wait_ms = lmb_env_int("LUMABRI_EXEC_WAIT_MS", 30000, 100, 3600000);
     L.initialized = 1;
 
@@ -689,7 +696,8 @@ static float *lumi_finish_exec(int layer, int eid, const float *x, int D, int nr
     LumiPeer *p[2] = { primary, NULL };
     uint32_t want = (uint32_t)((size_t)nr * D * sizeof(float));
     double started[2] = { primary_started, 0.0 };
-    uint32_t hedge_ms = L.hedge_ms > 0 ? (uint32_t)L.hedge_ms :
+    uint32_t hedge_ms = L.hedge_ms < 0 ? 0u :
+                        L.hedge_ms > 0 ? (uint32_t)L.hedge_ms :
                         lmb_predict_hedge_ms(&primary->latency);
     if (hedge_ms > 0) {
         struct pollfd one = { fd[0], POLLIN, 0 };
