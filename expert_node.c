@@ -1027,9 +1027,11 @@ int main(int argc, char **argv) {
     g.inter     = lmbe_inter();
     if (hold_auto) {
         /* Hold as many experts as this machine's free RAM can keep resident, and
-         * ask the tracker for exactly that many: it hands back the least-covered
-         * slice, so several "donate compute" machines auto-spread into disjoint
-         * shares instead of every one holding the whole model. */
+         * ask the tracker for exactly that many: it completes the least-covered
+         * layers first and then grows second replicas (keep limit 2), so
+         * several "donate compute" machines spread across the model AND give
+         * every expert a failover copy, instead of every one holding the
+         * whole model or none overlapping. */
         long avail_kb = meminfo_avail_kb();
         long reserve_mb = governor_reserve_mb;
         double avail_b = avail_kb > reserve_mb * 1024L

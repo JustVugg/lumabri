@@ -3557,7 +3557,7 @@ static void role_start(const Role *r, const char *tracker, const char *model,
             argv[a++] = "--tracker";    argv[a++] = (char *)tracker;
             argv[a++] = "--name";       argv[a++] = name;
             argv[a++] = "--model-name"; argv[a++] = (char *)model;
-            argv[a++] = "--hold";       argv[a++] = "auto";   /* the tracker hands us a disjoint slice; the node sizes it to free RAM */
+            argv[a++] = "--hold";       argv[a++] = "auto";   /* the tracker completes the least-covered layers first, then grows replicas (keep limit 2); the node sizes the slice to free RAM */
             argv[a] = NULL;
             { char lp[1200];
               pid_t np = spawn_argv_logged(argv, local ? NULL : envv,
