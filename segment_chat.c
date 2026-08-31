@@ -357,8 +357,8 @@ static const char *segment_status_name(uint32_t status) {
     case LMB_SEG_STATUS_EXPIRED:       return "expired";
     case LMB_SEG_STATUS_BUSY:          return "busy";
     case LMB_SEG_STATUS_UNSUPPORTED:   return "unsupported";
-    case LMB_SEG_STATUS_QUOTA:         return "quota — the executor has no "
-        "free session slot";
+    case LMB_SEG_STATUS_QUOTA:         return "quota — the executor resource "
+        "governor or admission limit refused the request";
     case LMB_SEG_STATUS_NEEDS_RESTORE: return "needs restore";
     case LMB_SEG_STATUS_INTERNAL:      return "internal executor failure — "
         "look at that peer's log";
@@ -930,6 +930,7 @@ static int recovery_route_better(const LmbSegRouteEntry *candidate,
 static int conversation_recover_attempt(
     SegmentConversation *conversation, size_t failed_index,
     const LmbSegRouteEntry *candidate,
+    const LmbSegRouteSnapshot *snapshot,
     ColiEdgeEngine *edge, const ColiEdgeCapabilities *cap,
     const uint8_t model_root[32], const uint8_t tokenizer_root[32],
     uint32_t context, uint32_t max_rows,
@@ -940,8 +941,25 @@ static int conversation_recover_attempt(
     RemoteSegment replacement[LMB_SEG_ROUTE_MAX];
     memset(replacement, 0, sizeof replacement);
     for (size_t i = 0; i < conversation->chain_count; i++) {
-        replacement[i].route = i == failed_index
-            ? *candidate : conversation->chain[i].route;
+        const LmbSegRouteEntry *route = candidate;
+        if (i != failed_index) {
+            route = NULL;
+            const LmbSegRouteEntry *current = &conversation->chain[i].route;
+            for (uint32_t j = 0; j < snapshot->count; j++) {
+                const LmbSegRouteEntry *available = &snapshot->entries[j];
+                if (route_same_range(available, current, context, max_rows) &&
+                    recovery_route_better(available, route, current, 1))
+                    route = available;
+            }
+        }
+        if (!route) {
+            snprintf(error, error_size,
+                     "no current Segment recovery route for layers %u:%u",
+                     conversation->chain[i].route.advert.layer_begin,
+                     conversation->chain[i].route.advert.layer_end);
+            return -1;
+        }
+        replacement[i].route = *route;
         replacement[i].fd = -1;
     }
 
@@ -1057,7 +1075,8 @@ recovery_failed:
 
 static int conversation_recover(
     SegmentConversation *conversation,
-    const LmbSegRouteSnapshot *snapshot, size_t failed_index,
+    LmbSegDiscovery *discovery,
+    const LmbSegRouteSnapshot *turn_snapshot, size_t failed_index,
     ColiEdgeEngine *edge, const ColiEdgeCapabilities *cap,
     const uint8_t model_root[32], const uint8_t tokenizer_root[32],
     uint32_t context, uint32_t max_rows,
@@ -1065,8 +1084,19 @@ static int conversation_recover(
     const int32_t *generated, size_t generated_replayed,
     uint8_t *buffer_a, uint8_t *buffer_b,
     char *error, size_t error_size) {
-    if (!conversation || !conversation->active || !snapshot ||
+    if (!conversation || !conversation->active || !turn_snapshot ||
         failed_index >= conversation->chain_count) return -1;
+    LmbSegRouteSnapshot refreshed;
+    const LmbSegRouteSnapshot *snapshot = turn_snapshot;
+    if (discovery &&
+        lmb_seg_discovery_refresh_now(discovery, &refreshed) > 0) {
+        snapshot = &refreshed;
+        if (snapshot->route_generation != turn_snapshot->route_generation)
+            fprintf(stderr, "[lumabri] Segment recovery route generation "
+                            "%llu -> %llu\n",
+                    (unsigned long long)turn_snapshot->route_generation,
+                    (unsigned long long)snapshot->route_generation);
+    }
     char initial_failure[320], last_failure[256] = "";
     snprintf(initial_failure, sizeof initial_failure, "%s",
              conversation->chain[failed_index].operation_error[0]
@@ -1097,7 +1127,7 @@ static int conversation_recover(
         attempts++;
         error[0] = 0;
         if (!conversation_recover_attempt(
-                conversation, failed_index, chosen, edge, cap,
+                conversation, failed_index, chosen, snapshot, edge, cap,
                 model_root, tokenizer_root, context, max_rows,
                 prompt_tokens, prompt_replayed, generated, generated_replayed,
                 buffer_a, buffer_b, error, error_size)) {
@@ -1200,6 +1230,7 @@ static int segment_generate(ColiEdgeEngine *edge,
                             double temperature, double top_p,
                             LmbSampler *sampler,
                             SegmentConversation *conversation,
+                            LmbSegDiscovery *discovery,
                             const LmbSegRouteSnapshot *route_snapshot,
                             uint64_t route_generation,
                             GenerationEventFn event, void *event_opaque,
@@ -1350,7 +1381,7 @@ static int segment_generate(ColiEdgeEngine *edge,
                         active_count, peer, strlen(peer));
         }
         if (failed && (!conversation || !route_snapshot ||
-            conversation_recover(conversation, route_snapshot,
+            conversation_recover(conversation, discovery, route_snapshot,
                                  (size_t)(-failed - 1), edge, cap,
                                  model_root, tokenizer_root, context, max_rows,
                                  prompt_tokens, offset, NULL, 0,
@@ -1433,7 +1464,7 @@ static int segment_generate(ColiEdgeEngine *edge,
                         active_count, peer, strlen(peer));
         }
         if (failed && (!conversation || !route_snapshot ||
-            conversation_recover(conversation, route_snapshot,
+            conversation_recover(conversation, discovery, route_snapshot,
                                  (size_t)(-failed - 1), edge, cap,
                                  model_root, tokenizer_root, context, max_rows,
                                  prompt_tokens, prompt_count,
@@ -1719,6 +1750,7 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
                                    context, max_rows, prompt, prompt_bytes,
                                    NULL, 0, max_tokens,
                                    temperature, top_p, &sampler, &conversation,
+                                   discovery,
                                    &snapshot,
                                    snapshot.route_generation,
                                    serve_generation_event, &stream, &result,
@@ -1951,7 +1983,8 @@ int main(int argc, char **argv) {
                                context, max_rows,
                                prompt, prompt ? strlen(prompt) : 0,
                                prompt_tokens, prompt_count, wanted_tokens,
-                               temperature, top_p, &sampler, NULL, &snapshot, 0,
+                               temperature, top_p, &sampler, NULL, discovery,
+                               &snapshot, 0,
                                NULL, NULL, &generated, error, sizeof error);
     free(prompt_tokens);
     if (bad) {
