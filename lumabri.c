@@ -2300,7 +2300,7 @@ static int stream_serve2(Engine *e, char *statline, size_t scap, char **captured
                     live_status("decode · %zu token · Segment", current);
                 else if (!strcmp(phase, "FAILOVER")) {
                     const char *peer = strstr(line, "FAILOVER ");
-                    live_status("failover · sostituisco %s",
+                    live_status("ripristino Segment · riapro %s",
                                 peer ? peer + strlen("FAILOVER ") : "peer");
                 } else if (!strcmp(phase, "CHECKPOINT"))
                     live_status("checkpoint KV · %zu token protetti", current);

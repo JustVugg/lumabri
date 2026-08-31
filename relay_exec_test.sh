@@ -10,7 +10,16 @@ fi
 make -s ENGINE="$ENGINE_DIR" tracker expert_node test_relay_exec fixture
 T=$(mktemp -d /tmp/lumabri-relay-exec.XXXXXX)
 PIDS=()
-cleanup() { kill "${PIDS[@]}" 2>/dev/null || true; rm -rf "$T"; }
+cleanup() {
+    local status=$?
+    if [ "$status" -ne 0 ]; then
+        for log in "$T"/*.log; do
+            [ -f "$log" ] && { echo "--- $log" >&2; tail -80 "$log" >&2; }
+        done
+    fi
+    kill "${PIDS[@]}" 2>/dev/null || true
+    rm -rf "$T"
+}
 trap cleanup EXIT
 export LUMABRI_PEER_BINDINGS="$T/peer-bindings"
 
@@ -20,7 +29,7 @@ OMP_NUM_THREADS=2 COLI_NO_OMP_TUNE=1 ./expert_node \
     --tracker 127.0.0.1:7560 --advertise 127.0.0.1:1 \
     >"$T/node.log" 2>&1 & PIDS+=($!)
 
-for _ in $(seq 1 200); do
+for _ in $(seq 1 600); do
     grep -q "expert nat-expert" "$T/tracker.log" && break
     sleep .1
 done

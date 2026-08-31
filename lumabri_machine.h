@@ -73,6 +73,9 @@ LmbGovernorState lmb_governor_poll(LmbGovernor *governor);
 LmbGovernorState lmb_governor_state(const LmbGovernor *governor);
 LmbGovernorReason lmb_governor_reason(const LmbGovernor *governor);
 int lmb_governor_accepting(const LmbGovernor *governor);
+/* Existing work drains through ordinary pressure and an operator pause.  Only
+ * a genuinely critical RAM/swap condition may abort an in-flight kernel. */
+int lmb_governor_abort_inflight(const LmbGovernor *governor);
 int lmb_governor_set_manual(int paused);
 int lmb_governor_manual_paused(void);
 

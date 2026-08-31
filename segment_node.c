@@ -105,28 +105,39 @@ static uint64_t resident_memory_bytes(void) {
     return resident * (uint64_t)page;
 }
 
-static int memory_pressure(void *opaque) {
-    Node *node = opaque;
+static int process_budget_exhausted(Node *node) {
     uint64_t rss = resident_memory_bytes();
-    return g_stop || !lmb_governor_accepting(&node->governor) ||
-           available_memory_bytes() < node->ram_reserve_bytes ||
-           (node->process_memory_limit_bytes && rss &&
-            rss > node->process_memory_limit_bytes);
+    return node->process_memory_limit_bytes && rss &&
+           rss >= node->process_memory_limit_bytes;
+}
+
+/* OPEN and route publication stop at the reserve.  A RUN which already owns a
+ * session is different: aborting it throws away the conversation state and
+ * turns a harmless pressure transition into a fake peer failure.  Let active
+ * work drain through PRESSURE/RECOVERY and operator pause; only shutdown or the
+ * governor's critical RAM/swap floor may interrupt a Colibri kernel. */
+static int run_should_cancel(void *opaque) {
+    Node *node = opaque;
+    return g_stop || lmb_governor_abort_inflight(&node->governor);
 }
 
 static void *governor_worker(void *opaque) {
     Node *node = opaque;
     LmbGovernorState previous = lmb_governor_state(&node->governor);
+    int previous_accepting = lmb_governor_accepting(&node->governor) &&
+                             !process_budget_exhausted(node);
     int first = 1;
     while (!g_stop && !node->registration.stop) {
         LmbGovernorState state = lmb_governor_poll(&node->governor);
+        int process_limited = process_budget_exhausted(node);
+        int accepting = state == LMB_GOV_ACTIVE && !process_limited;
         pthread_mutex_lock(&node->registration.lock);
-        if (state == LMB_GOV_ACTIVE)
+        if (accepting)
             node->registration.advert.flags &= ~LMB_SEG_ADVERT_DRAINING;
         else
             node->registration.advert.flags |= LMB_SEG_ADVERT_DRAINING;
         pthread_mutex_unlock(&node->registration.lock);
-        if (first || state != previous) {
+        if (first || state != previous || accepting != previous_accepting) {
             uint64_t available = lmb_machine_available_ram();
             uint64_t rss = resident_memory_bytes();
             fprintf(stderr, "[segment-node %s] governor ",
@@ -135,9 +146,11 @@ static void *governor_worker(void *opaque) {
                                 lmb_governor_state_name(previous));
             fprintf(stderr, "%s · %s",
                     lmb_governor_state_name(state),
-                    state == LMB_GOV_ACTIVE ? "accepting sessions" :
-                                             "draining and refusing new work");
-            if (state != LMB_GOV_ACTIVE)
+                    accepting ? "accepting sessions" :
+                                "draining and refusing new work");
+            if (process_limited)
+                fprintf(stderr, " · reason: process memory budget reached");
+            else if (state != LMB_GOV_ACTIVE)
                 fprintf(stderr, " · reason: %s",
                         lmb_governor_reason_name(
                             lmb_governor_reason(&node->governor)));
@@ -149,6 +162,7 @@ static void *governor_worker(void *opaque) {
                     (double)node->process_memory_limit_bytes / 1e9);
             first = 0;
             previous = state;
+            previous_accepting = accepting;
         }
         for (int i = 0; i < 10 && !g_stop && !node->registration.stop; i++)
             usleep(100000);
@@ -570,7 +584,8 @@ static int handle_open(Node *node, int fd, const LmbMsg *msg) {
         } else if (!(slot = session_empty(node))) {
             status = LMB_SEG_STATUS_QUOTA;
         } else if (!lmb_governor_accepting(&node->governor) ||
-                   available_memory_bytes() < node->ram_reserve_bytes) {
+                   available_memory_bytes() < node->ram_reserve_bytes ||
+                   process_budget_exhausted(node)) {
             status = LMB_SEG_STATUS_QUOTA;
         } else {
             ColiSegmentSessionOptions options = {
@@ -647,7 +662,7 @@ static int handle_run(Node *node, int fd, const LmbMsg *msg) {
         } else {
             int admitted = lmb_run_gate_enter(&node->run_gate,
                                                node->run_wait_ms,
-                                               memory_pressure, node);
+                                               run_should_cancel, node);
             if (admitted != 1) {
                 status = admitted < 0 ? LMB_SEG_STATUS_QUOTA :
                                         LMB_SEG_STATUS_BUSY;
@@ -662,7 +677,7 @@ static int handle_run(Node *node, int fd, const LmbMsg *msg) {
                 .input_bytes = msg->pay_len,
                 .output = output,
                 .output_bytes = bytes,
-                .should_cancel = memory_pressure,
+                .should_cancel = run_should_cancel,
                 .cancel_user_data = node,
             };
             char error[256] = "";
@@ -677,7 +692,18 @@ static int handle_run(Node *node, int fd, const LmbMsg *msg) {
                         run.rows == 1 ? "" : "s",
                         (unsigned long long)run.position,
                         engine_error(error));
-                status = LMB_SEG_STATUS_INTERNAL;
+                if (lmb_governor_abort_inflight(&node->governor)) {
+                    fprintf(stderr, "[segment-node %s] in-flight emergency: %s "
+                                    "(available %.1f GB / reserve %.1f GB)\n",
+                            node->advert.peer_name,
+                            lmb_governor_reason_name(
+                                lmb_governor_reason(&node->governor)),
+                            (double)available_memory_bytes() / 1e9,
+                            (double)node->ram_reserve_bytes / 1e9);
+                    status = LMB_SEG_STATUS_QUOTA;
+                } else {
+                    status = LMB_SEG_STATUS_INTERNAL;
+                }
             }
             if (admitted == 1) lmb_run_gate_leave(&node->run_gate);
         }

@@ -144,14 +144,14 @@ temperature uses deterministic-seedable nucleus sampling (`--seed` or
 
 Persistent chats with at least one compatible replica take a transactional
 opaque checkpoint of every selected range at a completed turn. Origin-only
-swarms avoid that copy because there is nowhere to restore it. When one peer
-fails, the gateway selects a compatible replica with exactly the same layer
-boundaries/schema/numeric class, creates a new fenced session across the whole
-chain, restores the common checkpoint,
-replays the token delta and retries the failed batch. No model-specific KV
-layout enters Lumabri. If any exact-range replica or checkpoint is unavailable,
-the error is explicit and the conversation is never continued from partial
-state.
+swarms avoid that copy. On a failed RUN, the gateway may open a clean session
+on the same executor (including through its relay), or select a compatible
+replica with exactly the same layer boundaries/schema/numeric class. It then
+restores the common checkpoint when present, otherwise replays from token zero,
+and retries the failed batch. No model-specific KV layout enters Lumabri and a
+possibly partial session is never reused. If no exact-range recovery route can
+be opened, the error includes the executor status instead of presenting every
+engine rejection as a dead peer.
 
 ## Encryption
 

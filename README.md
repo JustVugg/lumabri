@@ -262,10 +262,12 @@ origin defaults to two sessions per slice; a direct server defaults to four.
 Every executor runs the same hysteretic resource governor. `ACTIVE` publishes
 capacity; `PRESSURE` and `PAUSED` advertise Segment draining or zero Expert
 coverage and reject new work; `RECOVERY` waits three healthy samples before
-publishing again. In-flight Segment work sees the cancellation callback and is
-migrated through the existing checkpoint/replay path. Expert work already in
-flight drains, while new calls fall back to another replica or the Segment's
-local kernel. This pauses donor CPU and I/O immediately; resident RAM stays
+publishing again. Segment sessions already executing drain through ordinary
+pressure, recovery and an operator pause: those transitions must not be
+reported to the chatter as a dead peer. Only the critical RAM/swap floor can
+cancel an in-flight kernel, after which checkpoint/replay recovery runs.
+Expert work already in flight drains, while new calls fall back to another
+replica or the Segment's local kernel. Resident RAM stays
 allocated inside the donor process, protected by the reserve chosen before
 loading, so recovery does not cold-load the model again.
 Every transition names its cause and prints available RAM, the configured

@@ -451,6 +451,14 @@ int lmb_governor_accepting(const LmbGovernor *governor) {
     return lmb_governor_state(governor) == LMB_GOV_ACTIVE;
 }
 
+int lmb_governor_abort_inflight(const LmbGovernor *governor) {
+    if (!governor || lmb_governor_state(governor) != LMB_GOV_PAUSED)
+        return 0;
+    LmbGovernorReason reason = lmb_governor_reason(governor);
+    return reason == LMB_GOV_REASON_RAM_CRITICAL ||
+           reason == LMB_GOV_REASON_SWAP_CRITICAL;
+}
+
 LmbGovernorReason lmb_governor_reason(const LmbGovernor *governor) {
     return (LmbGovernorReason)atomic_load(&governor->reason);
 }

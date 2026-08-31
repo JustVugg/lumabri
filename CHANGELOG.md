@@ -5,6 +5,12 @@ a tag stay under Unreleased until a new tag is created.
 
 ## Unreleased
 
+- Segment pressure recovery now drains in-flight sessions through ordinary RAM
+  pressure, recovery hysteresis and manual pause; only the critical RAM/swap
+  floor aborts a kernel. A failed RUN can reopen the same exact-range executor
+  (direct or relay) with clean-state replay, and client errors preserve the
+  actual executor/transport status instead of claiming that every failure is a
+  missing replica.
 - Donor runtime coordination: one automatic RAM-sized compute donation per
   machine/user now covers both chat roles and `serve --join`; duplicate starts
   remain useful as storage-only peers and identify the current lease owner.
