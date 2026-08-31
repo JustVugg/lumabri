@@ -15,7 +15,7 @@ diff --git a/c/qwen36.c b/c/qwen36.c
  #ifdef COLI_SEGMENT_ADAPTER
  #include "segment_runtime.h"
  #include "segment_adapters.h"
-@@ -1346,6 +1353,10 @@
+@@ -1363,6 +1370,10 @@
      if (cl < 0.1f) cl = 0.1f; if (cl > 1.0f) cl = 1.0f;
      m->pilot_conf_limit = cl;
      m->dense_load_s = now_s() - t0;
@@ -26,7 +26,7 @@ diff --git a/c/qwen36.c b/c/qwen36.c
  }
  
  static void model_init(Model *m, const char *snap, int cap, int bits) {
-@@ -1851,6 +1862,11 @@
+@@ -1921,6 +1932,11 @@
              for (int kk = 0; kk < K; kk++) if (idx[kk] >= 0) freq_l[idx[kk]]++;
          }
          const float *xs = x + (int64_t)s*D;
