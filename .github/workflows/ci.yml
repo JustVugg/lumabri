@@ -32,6 +32,9 @@ jobs:
       - name: Install test dependencies
         working-directory: lumabri
         run: python -m pip install --requirement requirements-test.txt
+      - name: Engine hook anchors still match upstream
+        working-directory: lumabri
+        run: python3 engine_patches/make_patches.py --engine-dir ../colibri/c --check-anchors
       - name: Warning gate
         working-directory: lumabri
         run: make check-warnings ENGINE=../colibri/c
@@ -44,3 +47,19 @@ jobs:
       - name: Resident Segment Hybrid gate
         working-directory: lumabri
         run: make test-segment-hybrid ENGINE=../colibri/c
+      - name: Segment failover gate (fresh fencing, checkpoint replay)
+        working-directory: colibri/c
+        run: |
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          python -m pip install safetensors huggingface_hub transformers
+          make segment-edge-library -j"$(nproc)"
+          python3 tools/make_olmoe_tiny.py --output olmoe_tiny_src --force
+          python3 tools/make_edge_tiny_tokenizer.py olmoe_tiny_src --vocab-size 128
+          python3 tools/convert_olmoe_merged.py --model olmoe_tiny_src --out olmoe_tiny_merged --min-free-gb 0
+      - name: Segment failover gate — run
+        working-directory: lumabri
+        run: |
+          make tracker segment_node segment_chat ENGINE=../colibri/c -j"$(nproc)"
+          OLMOE_EDGE_MODEL=../colibri/c/olmoe_tiny_merged \
+          SEGMENT_NODE_BIN=./segment_node SEGMENT_CHAT_BIN=./segment_chat \
+            bash ./segment_failover_test.sh
