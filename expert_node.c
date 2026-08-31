@@ -76,6 +76,7 @@
 #include <limits.h>
 #include <pthread.h>
 #include <sched.h>
+#include <semaphore.h>
 #include <stdatomic.h>
 #include <sys/prctl.h>
 
@@ -271,6 +272,12 @@ static void cache_release(CSlot *s) {
  * with the local path is the entire claim of this project. */
 static int exec_compute(LmbMsg *m, float **outp, uint32_t *out_len) {
     if (!lmb_governor_accepting(&g.governor)) return -2;
+    /* Test aid, in the spirit of LUMABRI_RTT_US: a deliberate compute delay
+     * lets the relay tests prove concurrency and heartbeat liveness without
+     * needing a model slow enough to exhibit them. */
+    static int delay_ms = -1;
+    if (delay_ms < 0) delay_ms = lmb_env_int("LUMABRI_EXEC_DELAY_MS", 0, 0, 60000);
+    if (delay_ms > 0) usleep((useconds_t)delay_ms * 1000u);
     LmbCur cur = { m->body, m->body_len, 0 };
     uint32_t layer, eid, dim, nrows = 1;
     if (lmb_cur_u32(&cur, &layer) || lmb_cur_u32(&cur, &eid) || lmb_cur_u32(&cur, &dim)) {
@@ -358,6 +365,17 @@ static int handle_exec(int fd, LmbMsg *m) {
     return rc;
 }
 
+/* Relayed compute must not ride the heartbeat thread. One cold expert
+ * slower than the tracker's stale window used to knock this node out of
+ * coverage MID-COMPUTE: the control loop was busy inside exec_compute, sent
+ * no heartbeat, and the tracker dropped the registration while the answer
+ * was still being produced. Workers carry the compute; the control loop
+ * keeps beating. A bounded ticket count keeps a burst of forwards from
+ * oversubscribing the OpenMP pool — when every ticket is taken the forward
+ * runs inline, which is the old behaviour and honest backpressure. */
+static pthread_mutex_t g_ctrl_wr = PTHREAD_MUTEX_INITIALIZER;
+static sem_t g_relay_tickets;
+
 /* The tracker prepends only its correlation id; the remaining body and pay
  * are byte-for-byte the ordinary EXEC request, so direct and relayed compute
  * necessarily enter the same validation and numeric path. */
@@ -377,10 +395,53 @@ static int handle_rexec_fwd(int fd, LmbMsg *m) {
                 g.name, id, ok ? "ok" : "refused", out_len);
     LmbBuf b = {0};
     lmb_buf_u32(&b, id); lmb_buf_u32(&b, ok ? 1u : 0u);
+    pthread_mutex_lock(&g_ctrl_wr);
     int rc = lmb_send(fd, LMB_REXEC_R, b.p, (uint32_t)b.len,
                       out, ok ? out_len : 0);
+    pthread_mutex_unlock(&g_ctrl_wr);
     free(b.p); free(out);
     return rc;
+}
+
+typedef struct { int fd; LmbMsg m; } RelayJob;
+
+static void *relay_worker(void *arg) {
+    RelayJob *job = (RelayJob *)arg;
+    handle_rexec_fwd(job->fd, &job->m);
+    close(job->fd);
+    lmb_msg_free(&job->m);
+    free(job);
+    sem_post(&g_relay_tickets);
+    return NULL;
+}
+
+/* Move the message into a worker when a ticket is free; run inline when the
+ * pool is saturated. Returns what the control loop needs: 0 to keep going. */
+static int dispatch_rexec_fwd(int fd, LmbMsg *m) {
+    if (sem_trywait(&g_relay_tickets) == 0) {
+        RelayJob *job = (RelayJob *)malloc(sizeof *job);
+        /* The worker gets its own descriptor to the same socket: the control
+         * loop may close and redial while the compute is still running, and
+         * a recycled fd NUMBER must never receive a stale reply meant for
+         * the old connection. dup() pins the socket itself. */
+        if (job) job->fd = dup(fd);
+        if (job && job->fd >= 0) {
+            job->m = *m;
+            memset(m, 0, sizeof *m);   /* ownership moved: loop frees a husk */
+            pthread_t worker;
+            if (!pthread_create(&worker, NULL, relay_worker, job)) {
+                pthread_detach(worker);
+                return 0;
+            }
+            *m = job->m;               /* thread failed: fall back inline */
+            close(job->fd);
+            free(job);
+        } else if (job) {
+            free(job);
+        }
+        sem_post(&g_relay_tickets);
+    }
+    return handle_rexec_fwd(fd, m);
 }
 
 static void node_refresh_identity(void) {
@@ -600,7 +661,9 @@ static int send_ereg(int fd, const uint8_t nonce[32], int send_stats) {
     size_t ml = lmb_peer_auth_msg(nonce, g.name, g.model, g.advertise, msg, sizeof msg);
     lmb_sign(sig, msg, ml, g.peer_sk);
     lmb_buf_peer_auth(&b, g.peer_pk, sig);
+    pthread_mutex_lock(&g_ctrl_wr);
     int rc = lmb_send(fd, LMB_EREG, b.p, (uint32_t)b.len, NULL, 0);
+    pthread_mutex_unlock(&g_ctrl_wr);
     free(b.p);
     return rc;
 }
@@ -700,7 +763,7 @@ static void *control_thread(void *arg) {
                 break;
             }
             int rc = 0;
-            if (m.op == LMB_REXEC_FWD) rc = handle_rexec_fwd(fd, &m);
+            if (m.op == LMB_REXEC_FWD) rc = dispatch_rexec_fwd(fd, &m);
             else if (m.op == LMB_ERR) {
                 LmbCur ec = { m.body, m.body_len, 0 };
                 char why[128] = "";
@@ -849,6 +912,8 @@ static long meminfo_avail_kb(void) {
 
 int main(int argc, char **argv) {
     runtime_prepare(argc, argv); /* must precede every other main-side action */
+    sem_init(&g_relay_tickets, 0,
+             (unsigned)lmb_env_int("LUMABRI_RELAY_WORKERS", 8, 1, 64));
     const char *dir = NULL;
     int port = 7401, stride = 1, offset = 0, cache = 0, bits = 8, hold = 0, hold_auto = 0;
     int resident = 0;
