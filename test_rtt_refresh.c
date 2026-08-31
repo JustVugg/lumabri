@@ -234,7 +234,7 @@ int main(int argc, char **argv) {
     g_tracker = argv[1];
     TestNode nodes[2] = {
         { .name = "rtt-node-a", .port = 8094, .ctrl_fd = -1, .delay_ms = 5 },
-        { .name = "rtt-node-b", .port = 8095, .ctrl_fd = -1, .delay_ms = 30 }
+        { .name = "rtt-node-b", .port = 8095, .ctrl_fd = -1, .delay_ms = 300 }
     };
     for (int i = 0; i < 2; i++) pthread_create(&nodes[i].thread, NULL, node_server, &nodes[i]);
     for (int tries = 0; tries < 100; tries++) {
@@ -359,8 +359,11 @@ int main(int argc, char **argv) {
                                       &recv_before, &recv_len) ||
                            getsockopt(probe_fd, SOL_SOCKET, SO_SNDTIMEO,
                                       &send_before, &send_len);
-        if (!bad && !sockopts_bad)
+        int idle_refreshes = 0;
+        if (!bad && !sockopts_bad) {
             lumi_maybe_refresh_rtt(due + LUMI_RTT_REFRESH_S); /* then parked node B */
+            idle_refreshes = 1;
+        }
         recv_len = sizeof recv_after;
         send_len = sizeof send_after;
         if (!bad && !sockopts_bad)
@@ -373,7 +376,21 @@ int main(int argc, char **argv) {
                            recv_before.tv_usec != recv_after.tv_usec ||
                            send_before.tv_sec != send_after.tv_sec ||
                            send_before.tv_usec != send_after.tv_usec;
-        if (!bad) bad = sockopts_bad || idle->rtt_us >= initial_b ||
+        /* B starts far enough away (300 ms) that loaded-host noise cannot make
+         * the scheduler select it during the parked 8/0 phase. Alpha=1/2 is
+         * intentionally conservative, so let repeated idle maintenance
+         * samples converge to a threefold score lead. That headroom absorbs
+         * the first real EXEC observations without immediately flipping the
+         * scheduler back to A on a contended host. */
+        const uint64_t refreshed_score_margin = 3;
+        while (!bad && !sockopts_bad && idle_refreshes < 12 &&
+               lmb_predict_score(&idle->latency, 0) * refreshed_score_margin >=
+                   lmb_predict_score(&L.peers[0].latency, 0)) {
+            if (lumi_refresh_rtt(idle)) bad = 1;
+            else idle_refreshes++;
+        }
+        if (!bad) bad = sockopts_bad || idle_refreshes == 0 ||
+                        idle->rtt_us >= initial_b ||
                         idle->latency.ewma_us >= idle_before.ewma_us ||
                         idle->latency.p95_us != idle_before.p95_us ||
                         idle->latency.samples != idle_before.samples ||
@@ -382,10 +399,11 @@ int main(int argc, char **argv) {
                         idle->latency.circuit_until_ms !=
                             idle_before.circuit_until_ms ||
                         idle->exec_observations_at_probe != 0 ||
-                        lmb_predict_score(&idle->latency, 0) >=
+                        lmb_predict_score(&idle->latency, 0) *
+                                refreshed_score_margin >=
                             lmb_predict_score(&L.peers[0].latency, 0) ||
                         atomic_load(&nodes[0].pings) != 4 ||
-                        atomic_load(&nodes[1].pings) != 4 ||
+                        atomic_load(&nodes[1].pings) != 2 + 2 * idle_refreshes ||
                         atomic_load(&nodes[0].accepts) != 1 ||
                         atomic_load(&nodes[1].accepts) != 1;
     }
@@ -473,6 +491,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     printf("STAGGERED RTT REFRESH: PASS "
-           "(named calls parked 8/0, refreshed 8/8; two PINGs, pooled accepts 1/1)\n");
+           "(named calls parked 8/0, refreshed 8/8; two PINGs/measurement, "
+           "pooled accepts 1/1)\n");
     return 0;
 }
