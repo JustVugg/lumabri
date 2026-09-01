@@ -199,7 +199,7 @@ static int run_exec_calls(int count) {
         int fd = lumi_take_sock(primary);
         if (fd < 0) return -1;
         double started = lumi_now();
-        if (lumi_send_exec(fd, 0, 0, input, 4, 1, NULL)) {
+        if (lumi_send_exec(primary, fd, 0, 0, input, 4, 1, NULL)) {
             close(fd);
             lumi_peer_failed(primary);
             return -1;
@@ -463,7 +463,7 @@ int main(int argc, char **argv) {
         atomic_store(&nodes[1].delay_ms, 150);
         double started = lumi_now();
         if (!direct_bad)
-            direct_bad = lumi_send_exec(fd, 0, 0, input, 4, 1, NULL) ||
+            direct_bad = lumi_send_exec(peer, fd, 0, 0, input, 4, 1, NULL) ||
                          lmb_recv(fd, &reply);
         double elapsed = lumi_now() - started;
         if (!direct_bad)
