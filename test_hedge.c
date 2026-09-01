@@ -54,7 +54,7 @@ int main(void) {
     int fd = lumi_take_sock(&L.peers[0]);
     uint32_t tried = 1;
     double started = lumi_now();
-    int bad = fd < 0 || lumi_send_exec(fd, 0, 0, x, 4, 3, NULL);
+    int bad = fd < 0 || lumi_send_exec(&L.peers[0], fd, 0, 0, x, 4, 3, NULL);
     LumiPeer *from = NULL;
     float *out = bad ? NULL : lumi_finish_exec(0, 0, x, 4, 3, NULL, fd,
                                                 &L.peers[0], started,
@@ -100,7 +100,7 @@ int main(void) {
     int off_fd = lumi_take_sock(&L.peers[0]);
     uint32_t off_tried = 1;
     double off_started = lumi_now();
-    bad |= off_fd < 0 || lumi_send_exec(off_fd, 0, 0, x, 4, 3, NULL);
+    bad |= off_fd < 0 || lumi_send_exec(&L.peers[0], off_fd, 0, 0, x, 4, 3, NULL);
     LumiPeer *off_from = NULL;
     float *off_out = bad ? NULL
                          : lumi_finish_exec(0, 0, x, 4, 3, NULL, off_fd,

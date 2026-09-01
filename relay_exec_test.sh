@@ -39,7 +39,7 @@ grep -q "expert nat-expert" "$T/tracker.log" || {
     cat "$T/tracker.log" "$T/node.log"; exit 1;
 }
 
-./test_relay_exec 127.0.0.1:7560 127.0.0.1:7561 tiny_olmoe 8 1024 0
+./test_relay_exec 127.0.0.1:7560 127.0.0.1:7561 tiny_olmoe 8 1024 0 127.0.0.1:1
 
 echo "· concurrency: four relayed calls to one delayed node finish together"
 # a fresh tracker: the delayed node is its only holder, no staleness dance
