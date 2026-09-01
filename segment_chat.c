@@ -1794,6 +1794,15 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
             if (!bad && !stream.emitted_bytes)
                 (void)serve_generation_event(&stream, GEN_EVENT_DATA,
                                              0, 0, NULL, 0);
+            /* Who actually served this turn — printed EVERY turn, from the
+             * conversation's live chain (recovery may have moved it mid-
+             * generation). Users kept having to play detective across
+             * /swarm and node logs to learn where their tokens went; the
+             * answer belongs in the engine tail, one line per turn. */
+            if (!bad && conversation.active)
+                route_print(stderr, "[segment-route] turn served by",
+                            &snapshot, conversation.chain,
+                            conversation.chain_count);
         }
         free(prompt);
         if (bad) {
