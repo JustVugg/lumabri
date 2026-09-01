@@ -258,6 +258,9 @@ enum {
      * keys: the TUI can explain who is doing work without leaking how to
      * reach a private donor. The body is versioned independently. */
     LMB_SWARM_DETAIL = 60, LMB_SWARM_DETAIL_R = 61,
+    /* NAT probe: "dial me back at this port". The tracker connects to the
+     * requester's OBSERVED address, so a caller can only ever probe itself. */
+    LMB_REACH = 64, LMB_REACH_R = 65,
     /* A donor that cannot fit its assigned range releases the short-lived
      * placement promise immediately, so another READY-capable machine need
      * not wait for its timeout. This grants no lease or execution authority. */

@@ -2019,6 +2019,33 @@ static int handle_eassign(int fd, LmbMsg *m) {
     return rc;
 }
 
+/* Answers "can the swarm dial me back?" for lumabri doctor. The tracker
+ * connects to the requester's observed source address at the port it names:
+ * TCP means the caller provably owns that address, the port floor and the
+ * two-second bound keep this from being anyone's port scanner. */
+static int handle_reach(int fd, LmbMsg *m) {
+    LmbCur c = { m->body, m->body_len, 0 };
+    uint32_t port = 0;
+    if (m->pay_len || lmb_cur_u32(&c, &port) || c.off != c.len ||
+        port < 1024 || port > 65535) {
+        send_err(fd, "bad reach probe"); return -1;
+    }
+    struct sockaddr_in sin; socklen_t sl = sizeof sin;
+    char addr[80] = ""; uint32_t reachable = 0;
+    if (getpeername(fd, (struct sockaddr *)&sin, &sl) == 0 &&
+        sin.sin_family == AF_INET) {
+        snprintf(addr, sizeof addr, "%s:%u", inet_ntoa(sin.sin_addr), port);
+        int probe = lmb_connect_ms(addr, 2000);
+        if (probe >= 0) { reachable = 1; close(probe); }
+    }
+    LmbBuf b = {0};
+    lmb_buf_u32(&b, reachable);
+    lmb_buf_str(&b, addr);
+    int rc = lmb_send(fd, LMB_REACH_R, b.p, (uint32_t)b.len, NULL, 0);
+    free(b.p);
+    return rc;
+}
+
 /* ---- RREAD: the relay --------------------------------------------------- */
 
 static int handle_rread(int fd, LmbMsg *m) {
@@ -2702,6 +2729,7 @@ static void *conn_thread(void *arg) {
         case LMB_MODEL_ID:  rc = handle_model_id(fd, &m); break;
         case LMB_PLACEMENT: rc = handle_placement(fd, &m); break;
         case LMB_SWARM:     rc = handle_swarm(fd); break;
+        case LMB_REACH:     rc = handle_reach(fd, &m); break;
         case LMB_SWARM_DETAIL: rc = handle_swarm_detail(fd); break;
         case LMB_RREAD:     rc = handle_rread(fd, &m); break;
         case LMB_REXEC:     rc = handle_rexec(fd, &m); break;
