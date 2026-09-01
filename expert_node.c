@@ -454,7 +454,7 @@ static void node_refresh_identity(void) {
     pthread_mutex_unlock(&g.identity_lk);
 }
 
-static int handle_emanifest(int fd) {
+static void manifest_build(LmbBuf *b) {
     LmbModelIdentity id = {0};
     pthread_mutex_lock(&g.identity_lk);
     int have_id = g.have_identity;
@@ -464,26 +464,30 @@ static int handle_emanifest(int fd) {
     have_id = g.have_identity;
     if (have_id) id = g.identity;
     pthread_mutex_unlock(&g.identity_lk);
-    LmbBuf b = {0};
-    lmb_buf_u32(&b, LMB_EXPERT_MANIFEST_MAGIC);
-    lmb_buf_str(&b, lmbe_engine_name());
-    lmb_buf_str(&b, g.profile);
-    lmb_buf_str(&b, g.model);
-    lmb_buf_u32(&b, (uint32_t)g.bits);
-    lmb_buf_u32(&b, have_id ? 1u : 0u);
+    lmb_buf_u32(b, LMB_EXPERT_MANIFEST_MAGIC);
+    lmb_buf_str(b, lmbe_engine_name());
+    lmb_buf_str(b, g.profile);
+    lmb_buf_str(b, g.model);
+    lmb_buf_u32(b, (uint32_t)g.bits);
+    lmb_buf_u32(b, have_id ? 1u : 0u);
     if (have_id) {
-        lmb_buf_bytes(&b, id.root, sizeof id.root);
-        lmb_buf_u32(&b, id.has_sig ? 1u : 0u);
-        if (id.has_sig) lmb_buf_bytes(&b, id.sig, sizeof id.sig);
+        lmb_buf_bytes(b, id.root, sizeof id.root);
+        lmb_buf_u32(b, id.has_sig ? 1u : 0u);
+        if (id.has_sig) lmb_buf_bytes(b, id.sig, sizeof id.sig);
     }
-    lmb_buf_u32(&b, (uint32_t)g.nholds);
+    lmb_buf_u32(b, (uint32_t)g.nholds);
     for (int l = 0; l < g.n_slots; l++)
         for (int e = 0; e < g.n_experts; e++)
             if (g.holds[l * g.n_experts + e]) {
-                lmb_buf_u32(&b, (uint32_t)l);
-                lmb_buf_u32(&b, (uint32_t)e);
+                lmb_buf_u32(b, (uint32_t)l);
+                lmb_buf_u32(b, (uint32_t)e);
             }
-    lmb_buf_u32(&b, (uint32_t)g.hidden);
+    lmb_buf_u32(b, (uint32_t)g.hidden);
+}
+
+static int handle_emanifest(int fd) {
+    LmbBuf b = {0};
+    manifest_build(&b);
     int rc = lmb_send(fd, LMB_EMANIFEST_R, b.p, (uint32_t)b.len, NULL, 0);
     free(b.p);
     return rc;
@@ -763,7 +767,24 @@ static void *control_thread(void *arg) {
                 break;
             }
             int rc = 0;
+            if (getenv("LUMABRI_RELAY_TRACE"))
+                fprintf(stderr, "[%s] ctrl frame op=%u body=%u\n",
+                        g.name, m.op, m.body_len);
             if (m.op == LMB_REXEC_FWD) rc = dispatch_rexec_fwd(fd, &m);
+            else if (m.op == LMB_TMAN_FWD && m.body_len >= 4) {
+                /* the manifest through the tunnel: what makes a NAT-only
+                 * donor a first-class replica instead of a bitmap of last
+                 * resort */
+                uint32_t id = lmb_get32(m.body);
+                LmbBuf mb = {0}, hb = {0};
+                manifest_build(&mb);
+                lmb_buf_u32(&hb, id); lmb_buf_u32(&hb, 1u);
+                pthread_mutex_lock(&g_ctrl_wr);
+                rc = lmb_send(fd, LMB_TMAN_R, hb.p, (uint32_t)hb.len,
+                              mb.p, (uint32_t)mb.len);
+                pthread_mutex_unlock(&g_ctrl_wr);
+                free(hb.p); free(mb.p);
+            }
             else if (m.op == LMB_ERR) {
                 LmbCur ec = { m.body, m.body_len, 0 };
                 char why[128] = "";

@@ -37,6 +37,7 @@
 
 /* A fully built control-channel frame, queued for the peer's conn thread. */
 typedef struct OutFrame {
+    uint32_t op;
     uint8_t *body; uint32_t body_len;
     uint8_t *pay; uint32_t pay_len;
     struct OutFrame *next;
@@ -2118,7 +2119,8 @@ static int handle_rread(int fd, LmbMsg *m) {
  * takes one of the peer's REXEC_INFLIGHT slots, so several chatters (and
  * several experts of one layer) ride the tunnel concurrently; a timed-out
  * slot is abandoned in place and a late reply for it is dropped by id. */
-static int rexec_forward(Peer *p, const uint8_t *body, uint32_t body_len,
+static int relay_forward(Peer *p, uint32_t fwd_op,
+                         const uint8_t *body, uint32_t body_len,
                          const uint8_t *pay, uint32_t pay_len, int wait_s,
                          uint8_t **resp, uint32_t *resp_len) {
     *resp = NULL; *resp_len = 0;
@@ -2150,6 +2152,7 @@ static int rexec_forward(Peer *p, const uint8_t *body, uint32_t body_len,
     f->body = b.p; f->body_len = (uint32_t)b.len;
     if (pay_len) memcpy(pcopy, pay, pay_len);
     f->pay = pcopy; f->pay_len = pay_len;
+    f->op = fwd_op;
     if (p->outq_tail) p->outq_tail->next = f; else p->outq_head = f;
     p->outq_tail = f;
     pthread_mutex_unlock(&p->rq_lk);
@@ -2169,6 +2172,102 @@ static int rexec_forward(Peer *p, const uint8_t *body, uint32_t body_len,
     }
     pthread_mutex_unlock(&p->rq_lk);
     return ok;
+}
+
+/* Find one fresh expert registrant by its advertised address. The address
+ * is identity here, not a route: for a NAT-only peer nobody can dial it,
+ * but every EREG carries it and the chatter names it to mean THAT peer. */
+static Peer *expert_by_addr(const char *addr) {
+    double now = now_s();
+    Peer *p = NULL;
+    pthread_mutex_lock(&g_lk);
+    for (int i = 0; i < MAX_PEERS && !p; i++) {
+        Peer *q = &g_peers[i];
+        if (getenv("LUMABRI_RELAY_TRACE") && q->used)
+            fprintf(stderr, "[tracker] by_addr? used=%d is_e=%d has_e=%d stale=%.1f ctrl=%d ev=%d addr='%s' want='%s'\n",
+                    q->used, q->is_expert, q->has_expert, now - q->expert_ts,
+                    q->ctrl_fd, q->evfd, q->addr, addr);
+        if (!q->used || !q->is_expert || !q->has_expert ||
+            now - q->expert_ts > g_stale_s ||
+            q->ctrl_fd < 0 || q->evfd < 0 || strcmp(q->addr, addr)) continue;
+        p = q; p->refs++;
+    }
+    pthread_mutex_unlock(&g_lk);
+    return p;
+}
+
+static void peer_unref(Peer *p) {
+    pthread_mutex_lock(&g_lk);
+    if (p->refs) p->refs--;
+    pthread_mutex_unlock(&g_lk);
+}
+
+/* Targeted EXEC through the tunnel. Unlike REXEC this does NOT fail over:
+ * the chatter chose this replica exactly as it chooses a direct one, and
+ * failover is the chatter's own job — it owns the tried-set, the
+ * predictors and the spot-check. The reply is a plain LMB_EXEC_R, so the
+ * chatter's receive path cannot tell this peer from a dialable one. */
+static int handle_texec(int fd, LmbMsg *m) {
+    LmbCur c = { m->body, m->body_len, 0 };
+    char target[64];
+    uint32_t layer = 0, eid = 0, dim = 0, nrows = 0;
+    if (lmb_cur_str(&c, target, sizeof target) ||
+        lmb_cur_u32(&c, &layer) || lmb_cur_u32(&c, &eid) ||
+        lmb_cur_u32(&c, &dim) || lmb_cur_u32(&c, &nrows)) {
+        send_err(fd, "malformed texec header"); return -1;
+    }
+    size_t exec_at = c.off - 16;
+    if (!dim || nrows < 1 || nrows > LMB_MAX_EXEC_ROWS ||
+        (m->body_len - c.off != 0 && m->body_len - c.off != (uint64_t)nrows * 4) ||
+        (uint64_t)nrows * dim * 4 != m->pay_len) {
+        send_err(fd, "bad texec shape"); return -1;
+    }
+    Peer *p = expert_by_addr(target);
+    if (!p) { send_err(fd, "no such expert peer"); return 0; }
+    uint8_t *resp = NULL; uint32_t resp_len = 0;
+    int ok = relay_forward(p, LMB_REXEC_FWD, m->body + exec_at,
+                           m->body_len - (uint32_t)exec_at, m->pay, m->pay_len,
+                           lmb_env_int("LUMABRI_RELAY_TRY_S", 25, 1, RELAY_WAIT_S),
+                           &resp, &resp_len);
+    if (ok) {
+        p->rexec_fails = 0;
+    } else {
+        /* the anonymous-relay candidate ordering learns from this too */
+        if (p->rexec_fails < 1000) p->rexec_fails++;
+        p->rexec_fail_at = now_s();
+    }
+    int rc;
+    if (!ok) { free(resp); send_err(fd, "targeted exec failed"); rc = 0; }
+    else {
+        rc = lmb_send(fd, LMB_EXEC_R, NULL, 0, resp, resp_len);
+        free(resp);
+    }
+    peer_unref(p);
+    return rc;
+}
+
+/* Targeted manifest through the tunnel: what makes a NAT-only donor a
+ * first-class replica in the chatter's table instead of an anonymous
+ * coverage bit of last resort. */
+static int handle_tman(int fd, LmbMsg *m) {
+    LmbCur c = { m->body, m->body_len, 0 };
+    char target[64];
+    if (m->pay_len || lmb_cur_str(&c, target, sizeof target) || c.off != c.len) {
+        send_err(fd, "bad tman"); return -1;
+    }
+    Peer *p = expert_by_addr(target);
+    if (!p) { send_err(fd, "no such expert peer"); return 0; }
+    uint8_t *resp = NULL; uint32_t resp_len = 0;
+    int ok = relay_forward(p, LMB_TMAN_FWD, NULL, 0, NULL, 0, 10,
+                           &resp, &resp_len);
+    int rc;
+    if (!ok || !resp_len) { free(resp); send_err(fd, "manifest relay failed"); rc = 0; }
+    else {
+        rc = lmb_send(fd, LMB_EMANIFEST_R, resp, resp_len, NULL, 0);
+        free(resp);
+    }
+    peer_unref(p);
+    return rc;
 }
 
 /* EXEC relay: same one-request mailbox as byte relay, but the expert node's
@@ -2252,7 +2351,8 @@ static int handle_rexec(int fd, LmbMsg *m) {
         if (getenv("LUMABRI_RELAY_TRACE"))
             fprintf(stderr, "[tracker] rexec try %d/%d %s gid=%llu\n",
                     ci + 1, ncand, p->name, (unsigned long long)gid64);
-        ok = rexec_forward(p, m->body + exec_at, body_len, m->pay, m->pay_len,
+        ok = relay_forward(p, LMB_REXEC_FWD, m->body + exec_at, body_len,
+                           m->pay, m->pay_len,
                            ncand > 1 ? try_s : RELAY_WAIT_S,
                            &resp, &resp_len);
         if (ok) {
@@ -2490,7 +2590,7 @@ static void relay_complete(Peer *p, LmbMsg *m) {
         fprintf(stderr, "[tracker] relay complete op=%u id=%u ok=%u pay=%u\n",
                 m->op, id, ok, m->pay_len);
     pthread_mutex_lock(&p->rq_lk);
-    if (m->op == LMB_REXEC_R) {
+    if (m->op == LMB_REXEC_R || m->op == LMB_TMAN_R) {
         for (int r = 0; r < REXEC_INFLIGHT; r++)
             if (p->rex[r].used && !p->rex[r].done && p->rex[r].id == id) {
                 p->rex[r].ok = ok && m->pay_len > 0;
@@ -2630,7 +2730,7 @@ static void *conn_thread(void *arg) {
                     }
                     pthread_mutex_unlock(&ctrl->rq_lk);
                     if (!frame) break;
-                    int rc = lmb_send(fd, LMB_REXEC_FWD, frame->body,
+                    int rc = lmb_send(fd, frame->op, frame->body,
                                       frame->body_len, frame->pay, frame->pay_len);
                     free(frame->body); free(frame->pay); free(frame);
                     if (rc) { send_bad = 1; break; }
@@ -2684,6 +2784,7 @@ static void *conn_thread(void *arg) {
         }
         case LMB_RREAD_R:
         case LMB_REXEC_R:
+        case LMB_TMAN_R:
         case LMB_RSEG_R:    if (ctrl) relay_complete(ctrl, &m); break;
         case LMB_EREG: {
             Peer *p = handle_ereg(fd, &m, have_nonce ? nonce : NULL);
@@ -2733,6 +2834,8 @@ static void *conn_thread(void *arg) {
         case LMB_SWARM_DETAIL: rc = handle_swarm_detail(fd); break;
         case LMB_RREAD:     rc = handle_rread(fd, &m); break;
         case LMB_REXEC:     rc = handle_rexec(fd, &m); break;
+        case LMB_TEXEC:     rc = handle_texec(fd, &m); break;
+        case LMB_TMAN:      rc = handle_tman(fd, &m); break;
         case LMB_RSEG:      rc = handle_rseg(fd, &m); break;
         case LMB_ASSIGN:    rc = handle_assign(fd, &m); break;
         default:            send_err(fd, "unknown op"); rc = -1; break;

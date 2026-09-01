@@ -19,7 +19,7 @@ endif
 # regressions would make this gate depend on whichever checkout ENGINE names.
 check-warnings:
 	$(MAKE) -B all test_relay_exec test_swarm_fed test_key_rotation \
-		test_hedge test_local_fallback test_verify_failover test_segment_v2 \
+		test_hedge test_local_fallback test_nat_adopt test_verify_failover test_segment_v2 \
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
 		test_meminfo test_compute_lease test_content_filter \
 		test_scheduler test_run_gate \
@@ -389,6 +389,9 @@ test_hedge: test_hedge.c lumabri_client.h lumabri_proto.h lumabri_sign.h $(SECUR
 test_local_fallback: test_local_fallback.c lumabri_client.h lumabri_proto.h lumabri_sign.h $(SECURE_DEPS)
 	$(CC) $(CFLAGS) -pthread test_local_fallback.c -o $@
 
+test_nat_adopt: test_nat_adopt.c lumabri_client.h lumabri_proto.h lumabri_sign.h $(SECURE_DEPS)
+	$(CC) $(CFLAGS) -pthread test_nat_adopt.c -o $@
+
 test_verify_failover: test_verify_failover.c lumabri_client.h lumabri_proto.h lumabri_sign.h
 	$(CC) $(CFLAGS) -pthread test_verify_failover.c -o $@
 
@@ -580,7 +583,7 @@ test-segment-v2: test_segment_v2
 test-segment-discovery: tracker test_segment_discovery
 	bash ./segment_discovery_test.sh
 
-test: all test_key_rotation test_hedge test_local_fallback test_verify_failover test_segment_v2 \
+test: all test_key_rotation test_hedge test_local_fallback test_nat_adopt test_verify_failover test_segment_v2 \
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
 		test_meminfo test_compute_lease test_content_filter \
 		test_scheduler test_run_gate
@@ -605,6 +608,7 @@ test: all test_key_rotation test_hedge test_local_fallback test_verify_failover 
 	./test_key_rotation
 	./test_hedge
 	./test_local_fallback
+	./test_nat_adopt
 	./test_segment_v2
 	./test_meminfo
 	./test_compute_lease
@@ -643,7 +647,7 @@ install: all
 clean:
 	rm -f tracker maintainer liblumabri.so test_shim swarm_probe lumabri \
 	      test_relay_exec test_swarm_fed test_key_rotation test_hedge \
-	      test_local_fallback \
+	      test_local_fallback test_nat_adopt \
 	      test_verify_failover test_segment_v2 test_segment_discovery test_sampling \
 	      test_swarm_detail test_relay_rate test_machine test_meminfo \
 	      test_compute_lease test_content_filter test_scheduler test_run_gate \

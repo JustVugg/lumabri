@@ -37,11 +37,12 @@ deepseek_p2p
 build/
 artifacts/
 
-# compiled unit-test binaries
-test_hedge
-test_key_rotation
-test_relay_exec
-test_verify_failover
+# compiled unit-test binaries — the glob, because listing them one by one is
+# exactly how test_local_fallback and test_nat_adopt slipped into a commit
+test_*
+!test_*.c
+!test_*.py
+!test_*.sh
 
 # Build outputs. These were tracked by accident in 67e0b73 (#88): `git add -A`
 # in a built tree picked up every binary the Makefile had just produced.
