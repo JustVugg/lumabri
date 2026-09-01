@@ -265,6 +265,14 @@ enum {
      * placement promise immediately, so another READY-capable machine need
      * not wait for its timeout. This grants no lease or execution authority. */
     LMB_SEG_ASSIGN_RELEASE = 62,
+    /* Targeted tunnel dialects, for peers that only the tracker can reach.
+     * TEXEC carries one ordinary EXEC to ONE named holder and answers with
+     * a plain LMB_EXEC_R, so a chatter can treat "peer behind the tracker"
+     * exactly like any other replica: same sockets, same predictors, same
+     * hedging, same spot-check. TMAN fetches that peer's expert manifest
+     * the same way. */
+    LMB_TEXEC = 66,
+    LMB_TMAN = 67, LMB_TMAN_FWD = 68, LMB_TMAN_R = 69,
 };
 
 /* REGISTER body: str name, str addr, str model, u64 held_bytes,
@@ -356,6 +364,8 @@ static void lmb_frame_caps(uint32_t op, uint32_t *body_cap, uint32_t *pay_cap) {
     case LMB_HASHES_R:
     case LMB_EXEC_R:
     case LMB_REXEC_R:
+    case LMB_TEXEC:
+    case LMB_TMAN_R:
     case LMB_SEG_RUN:
     case LMB_SEG_RUN_R:
     case LMB_SEG_SNAPSHOT_R:

@@ -46,6 +46,12 @@
 
 typedef struct {
     char addr[64];
+    /* Non-empty: this peer cannot be dialed at addr (NAT); every socket for
+     * it goes to the TRACKER instead and each EXEC travels as a targeted
+     * LMB_TEXEC naming addr. The reply is a plain LMB_EXEC_R, so above the
+     * socket layer this peer is indistinguishable from a dialable one:
+     * same predictors, same spreading, same hedging, same spot-check. */
+    char relay_target[64];
     int socks[LUMI_MAX_K];
     int nsocks;
     long rtt_us;
@@ -147,7 +153,12 @@ static void lumi_peer_done(LumiPeer *peer) {
  * manifest permanently. */
 static int lumi_take_sock(LumiPeer *p) {
     if (p->nsocks) return p->socks[--p->nsocks];
-    int fd = lmb_connect(p->addr);
+    const char *dial = p->addr;
+    if (p->relay_target[0]) {
+        dial = getenv("LUMABRI_TRACKER");
+        if (!dial || !dial[0]) { lumi_peer_failed(p); return -1; }
+    }
+    int fd = lmb_connect(dial);
     if (fd >= 0 && lmb_auth(fd)) { close(fd); fd = -1; }
     if (fd < 0) {
         fprintf(stderr, "[lumabri] peer %s unreachable — circuit failure\n", p->addr);
@@ -316,12 +327,34 @@ static int lumi_add_peer(const char *addr) {
     p->nsocks = 0;
 
     LmbMsg m = {0};
+    p->relay_target[0] = 0;
     if (lmb_request(p->addr, LMB_EMANIFEST, NULL, 0, &m) || m.op != LMB_EMANIFEST_R) {
-        fprintf(stderr, "[lumabri] no expert manifest from %s — skipped\n", p->addr);
+        /* Not dialable — the normal case for a donor behind a home router.
+         * Ask the tracker for the same manifest through the peer's own
+         * tunnel; if it answers, this peer joins the table as a replica
+         * whose route happens to run through the tracker. */
         lmb_msg_free(&m);
-        p->dead = 1; p->retry_at = lumi_now() + 30.0;
-        if (reprobe < 0) L.npeers++;       /* remember NAT-only addresses */
-        return -1;
+        memset(&m, 0, sizeof m);
+        const char *tracker = getenv("LUMABRI_TRACKER");
+        int relayed = 0;
+        if (tracker && tracker[0]) {
+            LmbBuf tb = {0};
+            lmb_buf_str(&tb, p->addr);
+            relayed = !lmb_request(tracker, LMB_TMAN, tb.p, (uint32_t)tb.len,
+                                   &m) && m.op == LMB_EMANIFEST_R;
+            free(tb.p);
+        }
+        if (!relayed) {
+            fprintf(stderr, "[lumabri] no expert manifest from %s — skipped\n",
+                    p->addr);
+            lmb_msg_free(&m);
+            p->dead = 1; p->retry_at = lumi_now() + 30.0;
+            if (reprobe < 0) L.npeers++;   /* remember NAT-only addresses */
+            return -1;
+        }
+        snprintf(p->relay_target, sizeof p->relay_target, "%s", p->addr);
+        fprintf(stderr, "[lumabri] peer %s is not directly dialable — "
+                        "adopting it through the tracker tunnel\n", p->addr);
     }
     LmbCur c = { m.body, m.body_len, 0 };
     uint32_t magic = 0, bits = 0, have_id = 0, has_sig = 0;
@@ -807,15 +840,18 @@ static int lumi_pick(int gid, uint32_t tried) {
  * before the down projection and rounds the result to bf16, so it is not a
  * scale at all and a chatter-side multiply would quietly differ. The body
  * says which: 16 bytes = no weights, 16 + nr*4 = weights follow. */
-static int lumi_send_exec(int fd, int layer, int eid, const float *x, int D, int nr,
-                          const float *w) {
+static int lumi_send_exec(LumiPeer *p, int fd, int layer, int eid,
+                          const float *x, int D, int nr, const float *w) {
     LmbBuf b = {0};
+    int targeted = p && p->relay_target[0];
+    if (targeted) lmb_buf_str(&b, p->relay_target);
     lmb_buf_u32(&b, (uint32_t)layer);
     lmb_buf_u32(&b, (uint32_t)eid);
     lmb_buf_u32(&b, (uint32_t)D);
     lmb_buf_u32(&b, (uint32_t)nr);
     if (w) lmb_buf_bytes(&b, w, (size_t)nr * sizeof(float));
-    int rc = lmb_send(fd, LMB_EXEC, b.p, (uint32_t)b.len,
+    int rc = lmb_send(fd, targeted ? LMB_TEXEC : LMB_EXEC, b.p,
+                      (uint32_t)b.len,
                       x, (uint32_t)((size_t)nr * D * sizeof(float)));
     free(b.p);
     return rc;
@@ -849,7 +885,7 @@ static float *lumi_finish_exec(int layer, int eid, const float *x, int D, int nr
                 p[1] = &L.peers[L.own[(size_t)gid * LUMI_MAX_REP + r]];
                 fd[1] = lumi_take_sock(p[1]);
                 started[1] = lumi_now();
-                if (fd[1] >= 0 && lumi_send_exec(fd[1], layer, eid, x, D, nr, w)) {
+                if (fd[1] >= 0 && lumi_send_exec(p[1], fd[1], layer, eid, x, D, nr, w)) {
                     close(fd[1]); lumi_peer_failed(p[1]); fd[1] = -1;
                 }
                 if (fd[1] >= 0) { lumi_peer_sent(p[1]); L.hedges++; }
@@ -1020,7 +1056,7 @@ static float *lumi_exec_retry(int layer, int eid, const float *x, int D, int nr,
         if (fd < 0) continue;
         double started = lumi_now();
         LmbMsg m = {0};
-        int send_bad = lumi_send_exec(fd, layer, eid, x, D, nr, w);
+        int send_bad = lumi_send_exec(p, fd, layer, eid, x, D, nr, w);
         if (!send_bad) lumi_peer_sent(p);
         if (send_bad || lmb_recv(fd, &m) ||
             m.op != LMB_EXEC_R || m.pay_len != want) {
@@ -1059,7 +1095,7 @@ static int lumi_spot_check(int layer, int eid, const float *x, int D, int nr,
     if (fd < 0) return 0;
     uint32_t want = (uint32_t)((size_t)nr * D * sizeof(float));
     LmbMsg m = {0};
-    if (lumi_send_exec(fd, layer, eid, x, D, nr, w) || lmb_recv(fd, &m) ||
+    if (lumi_send_exec(p, fd, layer, eid, x, D, nr, w) || lmb_recv(fd, &m) ||
         m.op != LMB_EXEC_R || m.pay_len != want) {
         close(fd);
         lmb_msg_free(&m);
@@ -1133,7 +1169,7 @@ static LMB_MAYBE_UNUSED int lumi_moe_apply(int layer, const int *idx,
             int fd = lumi_take_sock(p);
             if (fd < 0) continue;
             sent[k] = lumi_now();
-            if (lumi_send_exec(fd, layer, idx[k], x, D, 1, NULL)) {
+            if (lumi_send_exec(p, fd, layer, idx[k], x, D, 1, NULL)) {
                 close(fd);
                 lumi_peer_failed(p);
                 continue;
@@ -1261,7 +1297,7 @@ static LMB_MAYBE_UNUSED int lumi_moe_apply_batch(int layer, const int *idxs,
                 int fd = lumi_take_sock(p);
                 if (fd < 0) continue;
                 sent[j] = lumi_now();
-                if (lumi_send_exec(fd, layer, eid, xj, D, nr, NULL)) {
+                if (lumi_send_exec(p, fd, layer, eid, xj, D, nr, NULL)) {
                     close(fd); lumi_peer_failed(p); continue;
                 }
                 lumi_peer_sent(p);
@@ -1370,7 +1406,7 @@ static LMB_MAYBE_UNUSED int lumi_moe_apply_union(int layer, int nu,
                 int fd = lumi_take_sock(p);
                 if (fd < 0) continue;
                 sent[j] = lumi_now();
-                if (lumi_send_exec(fd, layer, eid, xj, D, nr, NULL)) {
+                if (lumi_send_exec(p, fd, layer, eid, xj, D, nr, NULL)) {
                     close(fd); lumi_peer_failed(p); continue;
                 }
                 lumi_peer_sent(p);
@@ -1501,7 +1537,7 @@ static LMB_MAYBE_UNUSED int lumi_moe_apply_v4(int layer, const int *indices,
                 int fd = lumi_take_sock(p);
                 if (fd < 0) continue;
                 sent[j] = lumi_now();
-                if (lumi_send_exec(fd, layer, eid, xj, D, nr, wj)) {
+                if (lumi_send_exec(p, fd, layer, eid, xj, D, nr, wj)) {
                     close(fd); lumi_peer_failed(p); continue;
                 }
                 lumi_peer_sent(p);

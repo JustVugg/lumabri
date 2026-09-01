@@ -1106,6 +1106,7 @@ static int conversation_recover(
     int prefer_same = !conversation->chain[failed_index].failure_transport;
     uint8_t attempted[LMB_SEG_ROUTE_MAX] = {0};
     size_t attempts = 0;
+    int stale_refreshes = 0;
     for (;;) {
         uint32_t chosen_index = UINT32_MAX;
         const LmbSegRouteEntry *chosen = NULL;
@@ -1136,6 +1137,24 @@ static int conversation_recover(
         }
         snprintf(last_failure, sizeof last_failure, "%s",
                  error[0] ? error : "recovery route failed");
+        /* The tracker can move again BETWEEN our refresh and the OPENs — a
+         * peer dies or joins, every executor heartbeat accepts the newer
+         * generation, and a healthy range answers STALE_OWNER to fencing we
+         * fetched milliseconds ago. One refresh per rejection, bounded: the
+         * race window is heartbeat-sized, not unbounded. */
+        if (discovery && stale_refreshes < 2 &&
+            strstr(last_failure, "stale owner") &&
+            lmb_seg_discovery_refresh_now(discovery, &refreshed) > 0) {
+            stale_refreshes++;
+            fprintf(stderr, "[lumabri] Segment recovery route generation "
+                            "%llu -> %llu (stale-owner retry %d)\n",
+                    (unsigned long long)snapshot->route_generation,
+                    (unsigned long long)refreshed.route_generation,
+                    stale_refreshes);
+            snapshot = &refreshed;
+            memset(attempted, 0, sizeof attempted);
+            attempts = 0;
+        }
     }
     if (!attempts)
         snprintf(error, error_size,
