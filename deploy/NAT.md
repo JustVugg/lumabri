@@ -12,6 +12,9 @@ What changes behind NAT:
 
 - chatters cannot dial you directly, so your answers ride the tracker relay:
   one extra hop of latency, same bytes, same verification;
+- your OWN chat is the exception: a donor node running next to the chat is
+  recognized on loopback and its resident experts are dialed at RAM
+  distance, never through the tracker;
 - `lumabri doctor --tracker HOST:7300` tells you which side you are on:
   `direct-reachable` (others dial you straight) or `relay-only` (the tunnel
   carries you). Both are full members of the swarm.
