@@ -12,9 +12,9 @@ What changes behind NAT:
 
 - chatters cannot dial you directly, so your answers ride the tracker relay:
   one extra hop of latency, same bytes, same verification;
-- your OWN chat is the exception: a donor node running next to the chat is
-  recognized on loopback and its resident experts are dialed at RAM
-  distance, never through the tracker;
+- your OWN chat is the exception: a donor running next to the chat is
+  recognized on loopback — resident experts are dialed at RAM distance and
+  donated blocks are read at disk distance, never through the tracker;
 - `lumabri doctor --tracker HOST:7300` tells you which side you are on:
   `direct-reachable` (others dial you straight) or `relay-only` (the tunnel
   carries you). Both are full members of the swarm.
@@ -28,6 +28,16 @@ What changes behind NAT:
 
 Or as a system service that survives reboots: see `lumabri-donor.service`
 in this directory.
+
+## If you control every machine: a mesh VPN is a valid turbo
+
+Lumabri needs nothing beyond outbound TCP. But when the same person owns
+all the machines (a home lab, a small team), putting them in one WireGuard
+or Tailscale network makes every peer directly dialable at its mesh
+address — the tracker relay stops carrying any bytes and each pair of
+machines talks at its own bandwidth. Point `--advertise` and `--tracker`
+at the mesh IPs and everything else is unchanged. For strangers on the
+open swarm, the relay remains the zero-configuration path.
 
 ## What to expect in the logs
 
