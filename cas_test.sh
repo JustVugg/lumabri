@@ -38,3 +38,26 @@ env "${COMMON[@]}" LUMABRI_STATS=1 LUMABRI_VROOT="$T/vroot-b" \
     LUMABRI_CACHE="$T/cache-b" ./test_shim "$T/vroot-b" "$T/src" \
     >/dev/null 2>"$T/cas.err"
 echo "LOCAL CAS: PASS (fresh mirror rebuilt with origin offline)"
+
+# Hairpin: a donor on THIS machine, advertised at an address the outside
+# world would use but we cannot dial (the broadcast address refuses
+# instantly everywhere). The shim must knock on loopback, adopt it, and pull
+# every byte directly — chat+donor on one box reads its own disk at disk
+# speed, never through the tracker relay.
+mkdir -p "$T/cache-c" "$T/cas-c"
+./maintainer --root "$T/src" --port 7564 --tracker 127.0.0.1:7562 \
+    --name cas-hairpin --model-name cas-test \
+    --advertise 255.255.255.255:7564 >"$T/hairpin.log" 2>&1 & PIDS+=($!)
+for _ in $(seq 1 200); do
+    (exec 3<>/dev/tcp/127.0.0.1/7564) 2>/dev/null && { exec 3<&-; break; }
+    sleep .1
+done
+sleep .3
+env "${COMMON[@]/LUMABRI_CAS=*/LUMABRI_CAS=$T/cas-c}" \
+    LUMABRI_VROOT="$T/vroot-c" LUMABRI_CACHE="$T/cache-c" \
+    ./test_shim "$T/vroot-c" "$T/src" >/dev/null 2>"$T/hairpin.err"
+grep -q "this machine — reading its blocks on loopback" "$T/hairpin.err" || {
+    echo "the hairpinned donor was not adopted on loopback"
+    cat "$T/hairpin.err"; exit 1;
+}
+echo "HAIRPIN CAS: PASS (own donor read on loopback, no relay)"

@@ -110,6 +110,12 @@ __attribute__((constructor)) static void shim_ctor(void) {
 
 typedef struct {
     char addr[64];
+    /* Non-empty: the advertised address is this very machine seen from the
+     * outside (a maintainer donated next to this chat, advertised at the
+     * public IP the tracker observed — a NAT rarely hairpins). Sockets dial
+     * this; addr stays the identity. Every fetched block is hash-verified
+     * downstream, so a wrong local service can only fail, never lie. */
+    char dial[64];
     int idle[POOL_SOCKS]; int nidle;
     long rtt_us;          /* measured at init; LONG_MAX = unreachable then */
     pthread_mutex_t lk;
@@ -470,6 +476,7 @@ static int peer_add(const char *addr) {
     if (g.npeers == MAX_RPEERS) return -1;
     RPeer *p = &g.peers[g.npeers];
     snprintf(p->addr, sizeof p->addr, "%s", addr);
+    p->dial[0] = 0;
     p->nidle = 0;
     p->rtt_us = 0;        /* all-equal until probed: FNV spreading as before */
     pthread_mutex_init(&p->lk, NULL);
@@ -734,7 +741,21 @@ static void *probe_thread(void *arg) {
     RPeer *p = (RPeer *)arg;
     p->rtt_us = LONG_MAX;
     int fd = lmb_connect_ms(p->addr, 2000);
-    if (fd < 0) return NULL;
+    if (fd < 0) {
+        /* Hairpin: a donor on THIS machine is advertised at a public IP we
+         * cannot dial from inside the NAT. Its port answers on loopback —
+         * knock there, bounded, before writing the peer off as relay-only.
+         * (chat+donor on one box: the bytes it donated should arrive at
+         * disk speed, not by a round trip through the tracker.) */
+        const char *port_part = strrchr(p->addr, ':');
+        if (port_part && strncmp(p->addr, "127.", 4) != 0) {
+            char here[64];
+            snprintf(here, sizeof here, "127.0.0.1%s", port_part);
+            fd = lmb_connect_ms(here, 500);
+            if (fd >= 0) snprintf(p->dial, sizeof p->dial, "%s", here);
+        }
+        if (fd < 0) return NULL;
+    }
     if (lmb_auth(fd)) { lmb_close(fd); return NULL; }
     for (int i = 0; i < 2; i++) {
         struct timespec a, b;
@@ -1186,6 +1207,10 @@ static void shim_init_impl(void) {
         if (g.peers[i].rtt_us == LONG_MAX)
             fprintf(stderr, "[lumabri] peer %s: unreachable directly (relay or failover)\n",
                     g.peers[i].addr);
+        else if (g.peers[i].dial[0])
+            fprintf(stderr, "[lumabri] peer %s: this machine — reading its "
+                            "blocks on loopback (rtt %.2f ms)\n",
+                    g.peers[i].addr, (double)g.peers[i].rtt_us / 1000.0);
         else
             fprintf(stderr, "[lumabri] peer %s: rtt %.2f ms\n",
                     g.peers[i].addr, (double)g.peers[i].rtt_us / 1000.0);
@@ -1237,7 +1262,7 @@ static uint8_t *peer_fetch(RPeer *p, const char *rel, uint64_t off, uint32_t len
         int fd = p->nidle ? p->idle[--p->nidle] : -1;
         pthread_mutex_unlock(&p->lk);
         if (fd < 0) {
-            fd = lmb_connect_ms(p->addr, 2500);
+            fd = lmb_connect_ms(p->dial[0] ? p->dial : p->addr, 2500);
             if (fd < 0) return NULL;             /* unreachable: relay decides */
             if (lmb_auth(fd)) { lmb_close(fd); return NULL; }
         }
