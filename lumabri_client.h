@@ -52,6 +52,14 @@ typedef struct {
      * socket layer this peer is indistinguishable from a dialable one:
      * same predictors, same spreading, same hedging, same spot-check. */
     char relay_target[64];
+    /* Non-empty: the advertised address is this very machine seen from the
+     * outside. A donor node spawned next to the chat is advertised at the
+     * public IP the tracker observed, and a NAT rarely lets its own WAN
+     * address be dialed from inside (no hairpin) — so without this, a chat
+     * would reach the experts sitting in its OWN RAM by a round trip
+     * through the tracker. Sockets dial this instead; identity, canonical
+     * ordering and telemetry keep using addr. */
+    char loopback[64];
     int socks[LUMI_MAX_K];
     int nsocks;
     long rtt_us;
@@ -153,7 +161,7 @@ static void lumi_peer_done(LumiPeer *peer) {
  * manifest permanently. */
 static int lumi_take_sock(LumiPeer *p) {
     if (p->nsocks) return p->socks[--p->nsocks];
-    const char *dial = p->addr;
+    const char *dial = p->loopback[0] ? p->loopback : p->addr;
     if (p->relay_target[0]) {
         dial = getenv("LUMABRI_TRACKER");
         if (!dial || !dial[0]) { lumi_peer_failed(p); return -1; }
@@ -328,6 +336,7 @@ static int lumi_add_peer(const char *addr) {
 
     LmbMsg m = {0};
     p->relay_target[0] = 0;
+    p->loopback[0] = 0;
     if (lmb_request(p->addr, LMB_EMANIFEST, NULL, 0, &m) || m.op != LMB_EMANIFEST_R) {
         /* Not dialable — the normal case for a donor behind a home router.
          * Ask the tracker for the same manifest through the peer's own
@@ -335,16 +344,40 @@ static int lumi_add_peer(const char *addr) {
          * whose route happens to run through the tracker. */
         lmb_msg_free(&m);
         memset(&m, 0, sizeof m);
+        /* Hairpin check first: if the unreachable peer is a node on THIS
+         * machine, its port answers on loopback with the same manifest the
+         * advertised address refused — adopt it at RAM distance instead of
+         * tunnel distance. Bounded to 500 ms because a loopback that exists
+         * answers instantly and one that does not must not stall discovery
+         * (some hosts drop instead of refusing). */
+        const char *port_part = strrchr(p->addr, ':');
+        int local = 0;
+        if (port_part && strncmp(p->addr, "127.", 4) != 0) {
+            char here[64];
+            snprintf(here, sizeof here, "127.0.0.1%s", port_part);
+            int fd = lmb_connect_ms(here, 500);
+            if (fd >= 0 && !lmb_auth(fd) &&
+                !lmb_send(fd, LMB_EMANIFEST, NULL, 0, NULL, 0) &&
+                !lmb_recv(fd, &m) && m.op == LMB_EMANIFEST_R) {
+                snprintf(p->loopback, sizeof p->loopback, "%s", here);
+                local = 1;
+            }
+            if (fd >= 0) close(fd);
+            if (!local) { lmb_msg_free(&m); memset(&m, 0, sizeof m); }
+        }
+        if (local)
+            fprintf(stderr, "[lumabri] peer %s is this machine — dialing its "
+                            "experts on loopback\n", p->addr);
         const char *tracker = getenv("LUMABRI_TRACKER");
         int relayed = 0;
-        if (tracker && tracker[0]) {
+        if (!local && tracker && tracker[0]) {
             LmbBuf tb = {0};
             lmb_buf_str(&tb, p->addr);
             relayed = !lmb_request(tracker, LMB_TMAN, tb.p, (uint32_t)tb.len,
                                    &m) && m.op == LMB_EMANIFEST_R;
             free(tb.p);
         }
-        if (!relayed) {
+        if (!local && !relayed) {
             fprintf(stderr, "[lumabri] no expert manifest from %s — skipped\n",
                     p->addr);
             lmb_msg_free(&m);
@@ -352,9 +385,11 @@ static int lumi_add_peer(const char *addr) {
             if (reprobe < 0) L.npeers++;   /* remember NAT-only addresses */
             return -1;
         }
-        snprintf(p->relay_target, sizeof p->relay_target, "%s", p->addr);
-        fprintf(stderr, "[lumabri] peer %s is not directly dialable — "
-                        "adopting it through the tracker tunnel\n", p->addr);
+        if (!local) {
+            snprintf(p->relay_target, sizeof p->relay_target, "%s", p->addr);
+            fprintf(stderr, "[lumabri] peer %s is not directly dialable — "
+                            "adopting it through the tracker tunnel\n", p->addr);
+        }
     }
     LmbCur c = { m.body, m.body_len, 0 };
     uint32_t magic = 0, bits = 0, have_id = 0, has_sig = 0;

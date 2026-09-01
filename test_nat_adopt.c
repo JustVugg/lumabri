@@ -33,6 +33,44 @@ static void *dead_server(void *arg) {
     return NULL;
 }
 
+/* a local donor node: EMANIFEST + EXEC echo on loopback, the shape of the
+ * hairpin case — the advertised address is unreachable, the port is ours */
+static void *local_node(void *arg) {
+    int lfd = lmb_listen((int)(intptr_t)arg);
+    if (lfd < 0) return (void *)1;
+    atomic_fetch_add(&g_listening, 1);
+    for (;;) {
+        int fd = accept(lfd, NULL, NULL);
+        if (fd < 0) continue;
+        LmbMsg m = {0};
+        while (lmb_recv(fd, &m) == 0) {
+            if (m.op == LMB_EMANIFEST) {
+                LmbBuf b = {0};
+                lmb_buf_u32(&b, LMB_EXPERT_MANIFEST_MAGIC);
+                lmb_buf_str(&b, L.engine_id);
+                lmb_buf_str(&b, L.profile);
+                lmb_buf_str(&b, "tiny");
+                lmb_buf_u32(&b, 0);
+                lmb_buf_u32(&b, 0);
+                lmb_buf_u32(&b, 1);      /* one expert: (0,0) */
+                lmb_buf_u32(&b, 0);
+                lmb_buf_u32(&b, 0);
+                lmb_buf_u32(&b, (uint32_t)L.hidden);
+                lmb_send(fd, LMB_EMANIFEST_R, b.p, (uint32_t)b.len, NULL, 0);
+                free(b.p);
+            } else if (m.op == LMB_EXEC) {
+                lmb_send(fd, LMB_EXEC_R, NULL, 0, m.pay, m.pay_len);
+            } else if (m.op == LMB_PING) {
+                lmb_send(fd, LMB_OK, NULL, 0, NULL, 0);
+            } else break;
+            lmb_msg_free(&m);
+        }
+        lmb_msg_free(&m);
+        close(fd);
+    }
+    return NULL;
+}
+
 /* the tracker: manifest over TMAN, compute over TEXEC */
 static void *tracker_server(void *arg) {
     int lfd = lmb_listen((int)(intptr_t)arg);
@@ -126,7 +164,45 @@ int main(void) {
         if (out[d] != 2.0f * x[d])
             return fail("the tunnelled answer was not accumulated like a direct one");
 
-    printf("nat adopt tests: ok (tunnel manifest, targeted exec, %d TEXEC frame(s))\n",
-           atomic_load(&g_texec_seen));
+    /* --- 3. hairpin: our own node, advertised at an unreachable name ----- */
+    pthread_t ln;
+    pthread_create(&ln, NULL, local_node, (void *)(intptr_t)7593);
+    pthread_detach(ln);
+    for (int spins = 0; atomic_load(&g_listening) < 3 && spins < 500; spins++)
+        usleep(10000);
+    if (atomic_load(&g_listening) < 3)
+        return fail("the local node never came up");
+    int texec_before = atomic_load(&g_texec_seen);
+    /* the broadcast address refuses a connect instantly on every platform:
+     * the advertised address fails, the port answers on loopback — the
+     * shape of chat+donor behind one NAT */
+    if (lumi_add_peer("255.255.255.255:7593"))
+        return fail("the local peer was skipped although loopback answers");
+    LumiPeer *self = NULL;
+    for (int i = 0; i < L.npeers; i++)
+        if (!strcmp(L.peers[i].addr, "255.255.255.255:7593")) self = &L.peers[i];
+    if (!self) return fail("the local peer is not in the table");
+    if (!self->loopback[0])
+        return fail("the local peer was not adopted on loopback");
+    if (self->relay_target[0])
+        return fail("the local peer went through the tunnel instead of loopback");
+
+    /* its expert must run over loopback with a plain EXEC, not a TEXEC */
+    L.own[0] = (int)(self - L.peers);
+    L.own[1] = -1;
+    if (L.demote_until) L.demote_until[0] = 0;
+    L.swarm_sick_until = 0;
+    L.verify_pct = 0;
+    memset(out, 0, sizeof out);
+    if (!lumi_moe_apply(0, idx, val, 1, x, 4, out))
+        return fail("apply failed on the loopback-adopted peer");
+    if (atomic_load(&g_texec_seen) != texec_before)
+        return fail("the loopback peer was reached through the tracker");
+    for (int d = 0; d < 4; d++)
+        if (out[d] != 2.0f * x[d])
+            return fail("the loopback answer was not accumulated correctly");
+
+    printf("nat adopt tests: ok (tunnel manifest, targeted exec, %d TEXEC "
+           "frame(s), hairpin on loopback)\n", atomic_load(&g_texec_seen));
     return 0;
 }
