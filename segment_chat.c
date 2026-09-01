@@ -204,8 +204,18 @@ static int select_chain(const LmbSegRouteSnapshot *snapshot, uint32_t layers,
                 entry->advert.layer_end > layers ||
                 entry->advert.max_context < required_context ||
                 entry->advert.max_rows < required_rows) continue;
-            uint64_t own_fallback =
-                entry->advert.flags & LMB_SEG_ADVERT_FALLBACK
+            /* --fallback means "my compute streams from disk: use me only
+             * when nothing resident covers these layers". predicted_us
+             * measures the NETWORK, not the compute — ranking by it first
+             * meant a probed disk-streaming origin beat a resident donor
+             * whose relay route keeps an unprobed prior forever, and the
+             * donor never played (observed in the field). Fallback layers
+             * now outrank latency; an unreachable donor (circuit open,
+             * sentinel prediction) counts as fallback so a dead replica
+             * cannot outrank a healthy origin. */
+            int degraded = (entry->advert.flags & LMB_SEG_ADVERT_FALLBACK) ||
+                           entry->predicted_us >= UINT64_MAX / 4u;
+            uint64_t own_fallback = degraded
                     ? entry->advert.layer_end - entry->advert.layer_begin : 0;
             uint64_t own_load = (uint64_t)entry->advert.queue_depth +
                                 entry->advert.inflight;
@@ -213,13 +223,13 @@ static int select_chain(const LmbSegRouteSnapshot *snapshot, uint32_t layers,
                 (entry->transport & LMB_SEG_TRANSPORT_DIRECT ? 50000u : 120000u) *
                 (own_load + 1u);
             if (entry->advert.layer_end == layers) {
-                if (!viable[i] || own_completion < completion_us[i] ||
-                    (own_completion == completion_us[i] &&
-                     own_fallback < fallback_layers[i]) ||
-                    (own_completion == completion_us[i] &&
-                     own_fallback == fallback_layers[i] && 1 < hops[i]) ||
-                    (own_completion == completion_us[i] &&
-                     own_fallback == fallback_layers[i] && hops[i] == 1 &&
+                if (!viable[i] || own_fallback < fallback_layers[i] ||
+                    (own_fallback == fallback_layers[i] &&
+                     own_completion < completion_us[i]) ||
+                    (own_fallback == fallback_layers[i] &&
+                     own_completion == completion_us[i] && 1 < hops[i]) ||
+                    (own_fallback == fallback_layers[i] &&
+                     own_completion == completion_us[i] && hops[i] == 1 &&
                      own_load < load_cost[i])) {
                     viable[i] = 1;
                     completion_us[i] = own_completion;
@@ -243,14 +253,14 @@ static int select_chain(const LmbSegRouteSnapshot *snapshot, uint32_t layers,
                     UINT64_MAX - own_completion ? UINT64_MAX :
                     own_completion + completion_us[j];
                 uint32_t candidate_hops = 1 + hops[j];
-                if (!found || candidate_completion < best_completion ||
-                    (candidate_completion == best_completion &&
-                     candidate_fallback < best_fallback) ||
-                    (candidate_completion == best_completion &&
-                     candidate_fallback == best_fallback &&
+                if (!found || candidate_fallback < best_fallback ||
+                    (candidate_fallback == best_fallback &&
+                     candidate_completion < best_completion) ||
+                    (candidate_fallback == best_fallback &&
+                     candidate_completion == best_completion &&
                      candidate_hops < best_hops) ||
-                    (candidate_completion == best_completion &&
-                     candidate_fallback == best_fallback &&
+                    (candidate_fallback == best_fallback &&
+                     candidate_completion == best_completion &&
                      candidate_hops == best_hops &&
                      candidate_load < best_load)) {
                     found = 1;
@@ -261,14 +271,14 @@ static int select_chain(const LmbSegRouteSnapshot *snapshot, uint32_t layers,
                 }
             }
             if (found) {
-                if (!viable[i] || best_completion < completion_us[i] ||
-                    (best_completion == completion_us[i] &&
-                     best_fallback < fallback_layers[i]) ||
-                    (best_completion == completion_us[i] &&
-                     best_fallback == fallback_layers[i] &&
+                if (!viable[i] || best_fallback < fallback_layers[i] ||
+                    (best_fallback == fallback_layers[i] &&
+                     best_completion < completion_us[i]) ||
+                    (best_fallback == fallback_layers[i] &&
+                     best_completion == completion_us[i] &&
                      best_hops < hops[i]) ||
-                    (best_completion == completion_us[i] &&
-                     best_fallback == fallback_layers[i] &&
+                    (best_fallback == fallback_layers[i] &&
+                     best_completion == completion_us[i] &&
                      best_hops == hops[i] && best_load < load_cost[i])) {
                     viable[i] = 1;
                     completion_us[i] = best_completion;
@@ -292,24 +302,24 @@ static int select_chain(const LmbSegRouteSnapshot *snapshot, uint32_t layers,
                 candidate->advert.layer_end > layers) continue;
             if (!best) { best = candidate; continue; }
             uint32_t best_index = (uint32_t)(best - snapshot->entries);
-            if (completion_us[i] < completion_us[best_index] ||
-                (completion_us[i] == completion_us[best_index] &&
-                 fallback_layers[i] < fallback_layers[best_index]) ||
-                (completion_us[i] == completion_us[best_index] &&
-                 fallback_layers[i] == fallback_layers[best_index] &&
+            if (fallback_layers[i] < fallback_layers[best_index] ||
+                (fallback_layers[i] == fallback_layers[best_index] &&
+                 completion_us[i] < completion_us[best_index]) ||
+                (fallback_layers[i] == fallback_layers[best_index] &&
+                 completion_us[i] == completion_us[best_index] &&
                  hops[i] < hops[best_index]) ||
-                (completion_us[i] == completion_us[best_index] &&
-                 fallback_layers[i] == fallback_layers[best_index] &&
+                (fallback_layers[i] == fallback_layers[best_index] &&
+                 completion_us[i] == completion_us[best_index] &&
                  hops[i] == hops[best_index] &&
                  load_cost[i] < load_cost[best_index]) ||
-                (completion_us[i] == completion_us[best_index] &&
-                 fallback_layers[i] == fallback_layers[best_index] &&
+                (fallback_layers[i] == fallback_layers[best_index] &&
+                 completion_us[i] == completion_us[best_index] &&
                  hops[i] == hops[best_index] &&
                  load_cost[i] == load_cost[best_index] &&
                  (candidate->transport & LMB_SEG_TRANSPORT_DIRECT) &&
                  !(best->transport & LMB_SEG_TRANSPORT_DIRECT)) ||
-                (completion_us[i] == completion_us[best_index] &&
-                 fallback_layers[i] == fallback_layers[best_index] &&
+                (fallback_layers[i] == fallback_layers[best_index] &&
+                 completion_us[i] == completion_us[best_index] &&
                  hops[i] == hops[best_index] &&
                  load_cost[i] == load_cost[best_index] &&
                  !!(candidate->transport & LMB_SEG_TRANSPORT_DIRECT) ==
@@ -916,15 +926,22 @@ static int recovery_route_better(const LmbSegRouteEntry *candidate,
                             current->advert.peer_name);
     if (candidate_same != best_same)
         return prefer_same ? candidate_same : !candidate_same;
+    /* Fallback rank above latency, same reasoning as select_chain: the
+     * flag describes the COMPUTE (streams from disk), predicted_us only
+     * the network. An unreachable candidate ranks as fallback so a dead
+     * resident replica cannot outrank a live origin. */
+    int candidate_fallback =
+        !!(candidate->advert.flags & LMB_SEG_ADVERT_FALLBACK) ||
+        candidate->predicted_us >= UINT64_MAX / 4u;
+    int best_fallback = !!(best->advert.flags & LMB_SEG_ADVERT_FALLBACK) ||
+        best->predicted_us >= UINT64_MAX / 4u;
+    if (candidate_fallback != best_fallback)
+        return candidate_fallback < best_fallback;
     if (candidate->predicted_us != best->predicted_us)
         return candidate->predicted_us < best->predicted_us;
     int candidate_direct = !!(candidate->transport & LMB_SEG_TRANSPORT_DIRECT);
     int best_direct = !!(best->transport & LMB_SEG_TRANSPORT_DIRECT);
-    if (candidate_direct != best_direct) return candidate_direct;
-    int candidate_fallback =
-        !!(candidate->advert.flags & LMB_SEG_ADVERT_FALLBACK);
-    int best_fallback = !!(best->advert.flags & LMB_SEG_ADVERT_FALLBACK);
-    return candidate_fallback < best_fallback;
+    return candidate_direct > best_direct;
 }
 
 static int conversation_recover_attempt(

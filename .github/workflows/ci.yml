@@ -63,3 +63,6 @@ jobs:
           OLMOE_EDGE_MODEL=../colibri/c/olmoe_tiny_merged \
           SEGMENT_NODE_BIN=./segment_node SEGMENT_CHAT_BIN=./segment_chat \
             bash ./segment_failover_test.sh
+          OLMOE_EDGE_MODEL=../colibri/c/olmoe_tiny_merged \
+          SEGMENT_NODE_BIN=./segment_node SEGMENT_CHAT_BIN=./segment_chat \
+            bash ./segment_priority_test.sh

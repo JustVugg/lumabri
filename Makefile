@@ -544,6 +544,9 @@ test-segment-relay-real: tracker segment-direct
 test-segment-failover-real: tracker segment-direct
 	bash ./segment_failover_test.sh
 
+test-segment-priority-real: tracker segment-direct
+	bash ./segment_priority_test.sh
+
 test-relay-exec: tracker expert_node test_relay_exec fixture
 	bash ./relay_exec_test.sh
 
