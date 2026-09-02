@@ -78,6 +78,7 @@ typedef struct {
      * that crossed the wire each way — the report divides them by rounds */
     unsigned long long ok_calls, bytes_out, bytes_in;
     double lat_s;
+    uint32_t caps;              /* LMB_CAP_* the executor advertised (ERES) */
 } LumiPeer;
 
 static struct {
@@ -551,9 +552,11 @@ static int lumi_add_peer(const char *addr) {
         const char *dial = p->loopback[0] ? p->loopback : p->addr;
         if (!lmb_request(dial, LMB_ERES, NULL, 0, &rm) && rm.op == LMB_ERES_R) {
             LmbCur rc = { rm.body, rm.body_len, 0 };
-            uint32_t flags = 0;
+            uint32_t flags = 0, state = 0, caps = 0;
             if (!lmb_cur_u32(&rc, &flags))
                 p->resident = (flags & LMB_EXPERT_DISK_FALLBACK) ? 0 : 1;
+            if (!lmb_cur_u32(&rc, &state) && !lmb_cur_u32(&rc, &caps))
+                p->caps = caps;               /* absent on older nodes: plain EXEC */
         }
         lmb_msg_free(&rm);
     }
@@ -982,18 +985,56 @@ static int lumi_send_exec(LumiPeer *p, int fd, int layer, int eid,
                           const float *x, int D, int nr, const float *w) {
     LmbBuf b = {0};
     int targeted = p && p->relay_target[0];
+    /* EXEC2 to a node that speaks it, directly: the activation goes as
+     * bf16 when every value already is one (DeepSeek rounds its MoE input
+     * to bf16, so always there; other engines when it happens), which is
+     * half the bytes on the uplink that sets a home chatter's tok/s, with
+     * the arithmetic untouched. The tunnel keeps the plain dialect. */
+    int exec2 = p && !targeted && (p->caps & LMB_CAP_EXEC2);
+    size_t n = (size_t)nr * D;
+    int bf16 = exec2 && lmb_bf16_exact(x, n);
     if (targeted) lmb_buf_str(&b, p->relay_target);
     lmb_buf_u32(&b, (uint32_t)layer);
     lmb_buf_u32(&b, (uint32_t)eid);
     lmb_buf_u32(&b, (uint32_t)D);
     lmb_buf_u32(&b, (uint32_t)nr);
+    if (exec2) lmb_buf_u32(&b, bf16 ? LMB_ENC_BF16 : LMB_ENC_F32);
     if (w) lmb_buf_bytes(&b, w, (size_t)nr * sizeof(float));
-    int rc = lmb_send(fd, targeted ? LMB_TEXEC : LMB_EXEC, b.p,
-                      (uint32_t)b.len,
-                      x, (uint32_t)((size_t)nr * D * sizeof(float)));
-    if (!rc && p) p->bytes_out += 16 + b.len + (size_t)nr * D * sizeof(float);
+    const void *pay = x;
+    uint32_t pay_len = (uint32_t)(n * sizeof(float));
+    uint16_t *packed = NULL;
+    if (bf16) {
+        packed = (uint16_t *)malloc(n * sizeof *packed);
+        if (packed) { lmb_bf16_pack(packed, x, n); pay = packed; pay_len = (uint32_t)(n * 2); }
+        else { bf16 = 0; b.p[b.len - (w ? nr * 4 : 0) - 4] = LMB_ENC_F32; }
+    }
+    int rc = lmb_send(fd, targeted ? LMB_TEXEC : exec2 ? LMB_EXEC2 : LMB_EXEC,
+                      b.p, (uint32_t)b.len, pay, pay_len);
+    if (!rc && p) p->bytes_out += 16 + b.len + pay_len;
+    free(packed);
     free(b.p);
     return rc;
+}
+
+/* The reply of EXEC or EXEC2 as the floats the engine expects, or NULL
+ * when it is not one. A bf16 reply is widened here; it was exact. */
+static float *lumi_exec_take(LmbMsg *m, int nr, int D) {
+    size_t n = (size_t)nr * D;
+    if (m->op == LMB_EXEC_R) {
+        if (m->pay_len != n * sizeof(float)) return NULL;
+        return (float *)lmb_msg_take_pay(m);
+    }
+    if (m->op != LMB_EXEC2_R || m->body_len < 4) return NULL;
+    uint32_t enc = lmb_get32(m->body);
+    if (enc == LMB_ENC_F32 && m->pay_len == n * sizeof(float))
+        return (float *)lmb_msg_take_pay(m);
+    if (enc == LMB_ENC_BF16 && m->pay_len == n * 2) {
+        float *res = (float *)malloc(n * sizeof(float));
+        if (!res) return NULL;
+        lmb_bf16_unpack(res, (const uint16_t *)m->pay, n);
+        return res;
+    }
+    return NULL;
 }
 
 /* Adaptive p95 hedging, with LUMABRI_HEDGE_MS as an explicit fixed override.
@@ -1007,7 +1048,6 @@ static float *lumi_finish_exec(int layer, int eid, const float *x, int D, int nr
     if (primary_fd < 0 || !primary) return NULL;
     int fd[2] = { primary_fd, -1 };
     LumiPeer *p[2] = { primary, NULL };
-    uint32_t want = (uint32_t)((size_t)nr * D * sizeof(float));
     double started[2] = { primary_started, 0.0 };
     uint32_t hedge_ms = L.hedge_ms < 0 ? 0u :
                         L.hedge_ms > 0 ? (uint32_t)L.hedge_ms :
@@ -1049,12 +1089,13 @@ static float *lumi_finish_exec(int layer, int eid, const float *x, int D, int nr
         for (int q = 0; q < np; q++) if (pf[q].revents) {
             int i = map[q];
             LmbMsg m = {0};
-            if (lmb_recv(fd[i], &m) == 0 && m.op == LMB_EXEC_R && m.pay_len == want) {
-                float *res = (float *)lmb_msg_take_pay(&m); lmb_msg_free(&m);
+            float *res = lmb_recv(fd[i], &m) == 0 ? lumi_exec_take(&m, nr, D) : NULL;
+            if (res) {
+                uint32_t got = m.pay_len; lmb_msg_free(&m);
                 lumi_peer_done(p[i]);
                 lumi_put_sock(p[i], fd[i]); fd[i] = -1;
                 if (i == 1) L.hedge_wins++;
-                p[i]->bytes_in += 16 + want;
+                p[i]->bytes_in += 16 + got;
                 lumi_peer_observed(p[i], started[i]);
                 for (int j = 0; j < 2; j++) if (fd[j] >= 0) {
                     close(fd[j]); lumi_peer_done(p[j]);
@@ -1136,7 +1177,6 @@ static void lumi_demote_layer(int layer, int waited) {
 static float *lumi_exec_retry(int layer, int eid, const float *x, int D, int nr,
                               const float *w, uint32_t *tried_io, LumiPeer **from) {
     int gid = layer * L.n_experts + eid;
-    uint32_t want = (uint32_t)((size_t)nr * D * sizeof(float));
     uint32_t tried = tried_io ? *tried_io : 0;
     int waited = 0;
     if (from) *from = NULL;
@@ -1215,8 +1255,8 @@ static float *lumi_exec_retry(int layer, int eid, const float *x, int D, int nr,
         LmbMsg m = {0};
         int send_bad = lumi_send_exec(p, fd, layer, eid, x, D, nr, w);
         if (!send_bad) lumi_peer_sent(p);
-        if (send_bad || lmb_recv(fd, &m) ||
-            m.op != LMB_EXEC_R || m.pay_len != want) {
+        float *res = (!send_bad && lmb_recv(fd, &m) == 0) ? lumi_exec_take(&m, nr, D) : NULL;
+        if (!res) {
             close(fd);
             if (!send_bad) lumi_peer_done(p);
             lumi_peer_failed(p);
@@ -1224,7 +1264,7 @@ static float *lumi_exec_retry(int layer, int eid, const float *x, int D, int nr,
             fprintf(stderr, "[lumabri] peer %s failed — trying next replica\n", p->addr);
             continue;
         }
-        float *res = (float *)lmb_msg_take_pay(&m);
+        p->bytes_in += 16 + m.pay_len;
         lmb_msg_free(&m);
         lumi_peer_done(p);
         lumi_put_sock(p, fd);

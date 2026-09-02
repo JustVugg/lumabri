@@ -279,7 +279,42 @@ enum {
      * simply treated as "unknown". Additive: the manifest itself is
      * unchanged, so old chatters keep admitting new nodes. */
     LMB_ERES = 70, LMB_ERES_R = 71,
+    /* EXEC with an explicit encoding. Body: u32 layer, eid, D, nrows,
+     * enc_in, then the router weights when the engine wants them applied
+     * remotely (body_len == 20 + nrows*4); pay is nrows*D floats when
+     * enc_in == 0, nrows*D bf16 halves when enc_in == 1. Reply body: u32
+     * enc_out; pay likewise. A value travels as bf16 only when it IS a
+     * bf16 (low 16 bits zero), so the arithmetic is unchanged: engines that
+     * round their MoE input and expert output to bf16 (DeepSeek V4 does)
+     * pay half the bytes, others keep floats, and nothing is approximated.
+     * Advertised by an executor as bit 0 of the caps word ERES_R carries
+     * after residency and state; an older node never receives EXEC2. */
+    LMB_EXEC2 = 72, LMB_EXEC2_R = 73,
 };
+#define LMB_CAP_EXEC2 (1u << 0)
+#define LMB_ENC_F32  0u
+#define LMB_ENC_BF16 1u
+
+/* bf16 on the wire, exact or not at all */
+static LMB_MAYBE_UNUSED int lmb_bf16_exact(const float *v, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        uint32_t bits; memcpy(&bits, &v[i], 4);
+        if (bits & 0xFFFFu) return 0;
+    }
+    return 1;
+}
+static LMB_MAYBE_UNUSED void lmb_bf16_pack(uint16_t *dst, const float *src, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        uint32_t bits; memcpy(&bits, &src[i], 4);
+        dst[i] = (uint16_t)(bits >> 16);
+    }
+}
+static LMB_MAYBE_UNUSED void lmb_bf16_unpack(float *dst, const uint16_t *src, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        uint32_t bits = (uint32_t)src[i] << 16;
+        memcpy(&dst[i], &bits, 4);
+    }
+}
 
 /* REGISTER body: str name, str addr, str model, u64 held_bytes,
  *                u64 served_bytes, u64 served_reads, u32 n { str path, u64 size }
@@ -369,6 +404,7 @@ static void lmb_frame_caps(uint32_t op, uint32_t *body_cap, uint32_t *pay_cap) {
     case LMB_RREAD_R:
     case LMB_HASHES_R:
     case LMB_EXEC_R:
+    case LMB_EXEC2_R:
     case LMB_REXEC_R:
     case LMB_TEXEC:
     case LMB_TMAN_R:
@@ -385,6 +421,7 @@ static void lmb_frame_caps(uint32_t op, uint32_t *body_cap, uint32_t *pay_cap) {
         break;
     case LMB_RREAD_FWD:
     case LMB_EXEC:
+    case LMB_EXEC2:
     case LMB_REXEC:
     case LMB_REXEC_FWD:
         *body_cap = LMB_MAX_CONTROL_BODY;
