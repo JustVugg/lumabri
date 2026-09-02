@@ -39,6 +39,9 @@
 #define LUMI_MAX_K     64
 #define LUMI_MAX_REP   4      /* replicas remembered per expert */
 #define LUMI_WAIT_S    30     /* how long a vanished peer is given to come back */
+/* what a tracker tunnel costs beyond the probe that stops at the tracker:
+ * the tracker's hop to the peer and back, home-line grade */
+#define LUMI_TUNNEL_PENALTY_US 60000u
 #define LUMI_RTT_REFRESH_S 30.0
 #define LUMI_RTT_SAMPLES   2
 #ifndef LUMI_RTT_PROBE_TIMEOUT_MS
@@ -270,6 +273,13 @@ static void lumi_probe(LumiPeer *p) {
         close(fd); lumi_peer_failed(p); return;
     }
     p->rtt_us = measured;
+    /* A peer adopted through the tracker tunnel is probed at the tracker,
+     * not at the peer: on the origin host that read 0.13 ms for a donor two
+     * countries away, made it the "nearest" replica, and sent 95% of the
+     * calls into a tunnel that then hung. The tunnel is at least the
+     * tracker's own hop to the peer plus the return: charge it. */
+    if (p->relay_target[0] && p->rtt_us != LONG_MAX)
+        p->rtt_us += LUMI_TUNNEL_PENALTY_US;
     lumi_put_sock(p, fd);
 }
 
@@ -920,11 +930,12 @@ static void lumi_round_done(double t0) {
 /* A replica that streams its experts from disk costs a disk read per call
  * that no RTT estimate sees until it has happened, and it is usually the
  * origin: the one machine with the lowest RTT and the least spare RAM. Rank
- * it behind every replica that holds the expert in RAM, however far; this
- * is what makes a joining donor actually receive the calls for the experts
- * it loaded. The penalty is a score offset in microseconds, so an unusable
- * RAM replica (dead, circuit open) still loses to a live disk one. */
-#define LUMI_DISK_PENALTY_US 250000u
+ * it behind a RAM replica at similar distance — the penalty is one cold
+ * NVMe read of an expert, not a sentence: a RAM donor reached through a
+ * hanging tunnel must still lose to a healthy disk replica 25 ms away. The
+ * offset is in microseconds of score, so an unusable RAM replica (dead,
+ * circuit open) always loses to a live disk one. */
+#define LUMI_DISK_PENALTY_US 40000u
 
 static uint64_t lumi_replica_score(const LumiPeer *p) {
     uint64_t score = lmb_predict_score(&p->latency, p->inflight);
