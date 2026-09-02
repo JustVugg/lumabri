@@ -1610,7 +1610,12 @@ static void tail_file(const char *path, int max) {
 static uint64_t du_bytes(const char *path, int depth) {
     if (depth > 6) return 0;
     struct stat st;
-    if (lstat(path, &st)) return 0;
+    /* stat, not lstat: a checkpoint fetched with huggingface_hub is a
+     * directory of symlinks into its blob cache, and counting the links
+     * made a 167 GB model weigh 0 bytes — which silently disabled the
+     * "does this Segment range fit" check on the origin. The depth cap
+     * above still bounds a symlink loop. */
+    if (stat(path, &st)) return 0;
     if (S_ISREG(st.st_mode)) return (uint64_t)st.st_size;
     if (!S_ISDIR(st.st_mode)) return 0;
     DIR *d = opendir(path);
