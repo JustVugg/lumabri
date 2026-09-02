@@ -151,11 +151,22 @@ static const char *WORDMARK[6] = {
 };
 static const int WORD_TINT[6] = { 203, 209, 209, 215, 216, 223 };
 
+static int vis_len(const char *s);
 static void hline(const char *l, const char *r, int w) {
     printf("%s%s", C_GRAY, l);
     for (int i = 0; i < w - 2; i++) printf("\xe2\x94\x80");
     printf("%s%s\n", r, C_R);
 }
+
+/* the same frame edge carrying a short text: "╭─ text ──────╮" */
+static void hline_text(const char *l, const char *r, int w, const char *text) {
+    int tw = text && text[0] ? vis_len(text) + 2 : 0;
+    printf("%s%s", C_GRAY, l);
+    if (tw) { printf("\xe2\x94\x80 %s%s%s ", C_DIM, text, C_GRAY); tw += 1; }
+    for (int i = 0; i < w - 2 - tw; i++) printf("\xe2\x94\x80");
+    printf("%s%s", r, C_R);
+}
+
 
 /* visible width of a string carrying ANSI escapes and UTF-8 */
 static int vis_len(const char *s) {
@@ -1495,6 +1506,8 @@ static struct {
     volatile double rate_mbs;
     volatile double total_gb;        /* the whole model, from the shim */
     volatile double local_gb;        /* already in the mirror when we started */
+    volatile double dense_mb, dense_total_mb, dense_rate; /* the dense warm-up */
+    volatile int    dense_ready;     /* 1 ready · 2 incomplete (engine will retry) */
     volatile int    spinning;
     volatile int    booting;
     volatile int    streaming;       /* a reply is being echoed token by token */
@@ -1527,11 +1540,15 @@ static void tail_dump(int max) {
 static void *stderr_thread(void *arg) {
     FILE *f = fdopen((int)(intptr_t)arg, "r");
     if (!f) return NULL;
+    /* LUMABRI_ENGINE_LOG=path keeps every engine line, not just the tail
+     * /debug shows: the only way to read a slow reply after the fact. */
+    FILE *keep = getenv("LUMABRI_ENGINE_LOG") ? fopen(getenv("LUMABRI_ENGINE_LOG"), "a") : NULL;
     char line[512];
     while (fgets(line, sizeof line, f)) {
         size_t n = strlen(line);
         while (n && (line[n-1] == '\n' || line[n-1] == '\r')) line[--n] = 0;
         if (!n) continue;
+        if (keep) { fputs(line, keep); fputc('\n', keep); fflush(keep); }
         tail_push(line);
         g_eng.last_out = nowd();
 
@@ -1540,6 +1557,14 @@ static void *stderr_thread(void *arg) {
         if (!strncmp(line, "[segment-route]", 15)) continue;
 
         double mb, rate, gb, pct;
+        double d1, d2, d3;
+        if (sscanf(line, "[lumabri] dense %lf/%lf MB (%lf MB/s)", &d1, &d2, &d3) == 3) {
+            g_eng.dense_mb = d1; g_eng.dense_total_mb = d2; g_eng.dense_rate = d3;
+        } else if (!strncmp(line, "[lumabri] dense ready", 21)) {
+            g_eng.dense_ready = 1;
+        } else if (!strncmp(line, "[lumabri] dense warm-up incomplete", 34)) {
+            g_eng.dense_ready = 2;
+        }
         if (sscanf(line, "[lumabri] net %lf MB", &mb) == 1) {
             g_eng.net_mb = mb;
             if (sscanf(strstr(line, "(") ? strstr(line, "(") : "", "(%lf MB/s", &rate) == 1)
@@ -2080,6 +2105,40 @@ static int live_take_pending(char *out, size_t cap) {
 }
 
 /* one line, rewritten in place: the star, what it is doing, how far along */
+/* The engine is up, but on a swarm-fed model its dense weights may still be
+ * crossing the network: "ready" only after the warm-up says so, with the
+ * bar meanwhile. Bounded: a warm-up that has not moved for two minutes is
+ * left to the engine's own on-demand reads (the shim retries them). */
+static void *spinner_thread(void *arg);
+static void wait_dense_ready(void) {
+    if (g_eng.dense_ready || g_eng.dense_total_mb <= 0) {
+        /* no progress line yet: give the warm-up a moment to size itself */
+        for (int i = 0; i < 30 && !g_eng.dense_ready && g_eng.dense_total_mb <= 0; i++)
+            usleep(100 * 1000);
+        if (g_eng.dense_ready || g_eng.dense_total_mb <= 0) return;
+    }
+    g_eng.booting = 1; g_eng.spinning = 1;
+    pthread_t sp;
+    int spun = g_tty && pthread_create(&sp, NULL, spinner_thread,
+                                       (void *)"parte densa nel mirror") == 0;
+    double last_mb = g_eng.dense_mb, last_move = nowd();
+    while (!g_eng.dense_ready) {
+        usleep(200 * 1000);
+        if (g_eng.dense_mb != last_mb) { last_mb = g_eng.dense_mb; last_move = nowd(); }
+        else if (nowd() - last_move > 120) break;
+    }
+    g_eng.spinning = 0;
+    if (spun) pthread_join(sp, NULL);
+    g_eng.booting = 0;
+    if (g_eng.dense_ready == 1)
+        printf("  %s\xe2\x9c\x93 parte densa nel mirror: %.2f GB%s\n", C_DIM,
+               g_eng.dense_total_mb / 1000.0, C_R);
+    else
+        printf("  %s\xe2\x9a\xa0 parte densa incompleta (%.2f/%.2f GB): il motore "
+               "scarica il resto al primo uso%s\n", C_DIM,
+               g_eng.dense_mb / 1000.0, g_eng.dense_total_mb / 1000.0, C_R);
+}
+
 static void *spinner_thread(void *arg) {
     const char *verb = arg ? (const char *)arg : "thinking";
     const char *star[] = { "\xe2\x9c\xbb", "\xe2\x9c\xb2", "\xe2\x9c\xb3", "\xe2\x9c\xb2" };
@@ -2096,9 +2155,28 @@ static void *spinner_thread(void *arg) {
         } else
             snprintf(what, sizeof what, "%s", verb);
 
-        char prog[160] = "";
+        char prog[200] = "";
         double got = g_eng.local_gb + g_eng.net_mb / 1000.0;
-        if (g_eng.booting && g_eng.total_gb > 0)
+        if (g_eng.booting && g_eng.dense_total_mb > 0 && !g_eng.dense_ready) {
+            double frac = g_eng.dense_mb / g_eng.dense_total_mb;
+            if (frac > 1) frac = 1;
+            int cells = 20, full = (int)(frac * cells + 0.5);
+            char bar[128] = "";
+            for (int k = 0; k < cells; k++)
+                strncat(bar, k < full ? "\xe2\x96\x88" : "\xe2\x96\x91", sizeof bar - strlen(bar) - 1);
+            double left_mb = g_eng.dense_total_mb - g_eng.dense_mb;
+            char eta[40] = "";
+            if (g_eng.dense_rate > 0.05 && left_mb > 0) {
+                double sec = left_mb / g_eng.dense_rate;
+                if (sec >= 3600) snprintf(eta, sizeof eta, " \xc2\xb7 ETA %d h %d min", (int)(sec / 3600), ((int)sec % 3600) / 60);
+                else if (sec >= 60) snprintf(eta, sizeof eta, " \xc2\xb7 ETA %.0f min", sec / 60);
+                else snprintf(eta, sizeof eta, " \xc2\xb7 ETA %.0f s", sec);
+            }
+            snprintf(prog, sizeof prog, " %s\xe2\x96\x95%s\xe2\x96\x8f %.2f/%.2f GB \xc2\xb7 %.1f MB/s%s%s",
+                     C_DIM, bar, g_eng.dense_mb / 1000.0, g_eng.dense_total_mb / 1000.0,
+                     g_eng.dense_rate, eta, C_R);
+            snprintf(what, sizeof what, "parte densa nel mirror");
+        } else if (g_eng.booting && g_eng.total_gb > 0)
             snprintf(prog, sizeof prog, " %s\xc2\xb7 %.1f/%.0f GB \xc2\xb7 %.0f MB/s%s",
                      C_DIM, got, g_eng.total_gb, g_eng.rate_mbs, C_R);
         else if (g_eng.booting && g_eng.net_mb > 0)
@@ -2641,6 +2719,9 @@ static int engine_spawn(const char *engine, const char *shim, const char *tracke
          * switch, not V4's. */
         if (!local_dir) { setenv("COLI_V4_AUTOPIN", "0", 0);
                           setenv("COLI_V4_PREWARM", "0", 0); }
+        /* and pull the dense weights NOW, with a bar, instead of letting the
+         * first reply discover them layer by layer over the WAN */
+        if (!local_dir) setenv("LUMABRI_PREFETCH_DENSE", "1", 0);
         /* Same split for the expert cache. A swarm chatter caches almost nothing
          * (experts run on peers), so its cap stays at the small default. But a
          * --local run holds its own experts, and there the cap IS the resident
@@ -3062,6 +3143,50 @@ static void le_set(char *buf, size_t cap, int *len, int *pos, const char *text) 
     fwrite(buf, 1, (size_t)*len, stdout);
 }
 
+/* This machine as a donor, for the frame above the idle prompt: experts
+ * held, calls served and the rate since the last look, work in flight,
+ * bytes served by its storage. Read from the tracker's nominative counters
+ * (the donor children never talk to the TUI directly). */
+static char g_donor_base[48];
+static uint64_t g_donor_last_calls;
+static double g_donor_last_at;
+static int donor_status_line(char *out, size_t cap) {
+    if (!g_donor_base[0] || !g_live.tracker[0]) return 0;
+    SwarmDetailRow rows[64];
+    int n = swarm_detail(g_live.tracker, rows, 64);
+    if (n <= 0) return 0;
+    uint64_t calls = 0, inflight = 0, resident = 0, resident_bytes = 0, served = 0;
+    int mine = 0, nexperts = 0;
+    for (int i = 0; i < n; i++) {
+        if (strncmp(rows[i].name, g_donor_base, strlen(g_donor_base))) continue;
+        mine++;
+        if (rows[i].roles & LMB_SWARM_ROLE_EXPERT) {
+            nexperts += (int)rows[i].nexperts;
+            calls += rows[i].exec_calls; inflight += rows[i].exec_inflight;
+            resident += rows[i].resident_experts;
+            resident_bytes += rows[i].expert_resident_bytes;
+        }
+        if (rows[i].roles & LMB_SWARM_ROLE_STORAGE) served += rows[i].served_bytes;
+    }
+    if (!mine) return 0;
+    double now = nowd(), rate = 0;
+    if (g_donor_last_at > 0 && now > g_donor_last_at && calls >= g_donor_last_calls)
+        rate = (double)(calls - g_donor_last_calls) / (now - g_donor_last_at);
+    g_donor_last_calls = calls; g_donor_last_at = now;
+    int len = snprintf(out, cap, "donor: %d esperti", nexperts);
+    if (resident)
+        len += snprintf(out + len, cap - (size_t)len, " (%llu in RAM, %.1f GB)",
+                        (unsigned long long)resident, (double)resident_bytes / 1e9);
+    len += snprintf(out + len, cap - (size_t)len, " \xc2\xb7 %llu chiamate",
+                    (unsigned long long)calls);
+    if (rate > 0) len += snprintf(out + len, cap - (size_t)len, " (%.1f/s)", rate);
+    if (inflight) len += snprintf(out + len, cap - (size_t)len, " \xc2\xb7 %llu in corso",
+                                  (unsigned long long)inflight);
+    if (served) len += snprintf(out + len, cap - (size_t)len, " \xc2\xb7 disco %.1f GB serviti",
+                                (double)served / 1e9);
+    return len > 0;
+}
+
 static int line_edit(char *buf, size_t cap) {
     struct termios old, raw;
     if (g_chat_term_valid) old = g_chat_term;
@@ -3088,6 +3213,24 @@ static int line_edit(char *buf, size_t cap) {
 
     for (;;) {
         unsigned char c;
+        if (g_donor_base[0]) {
+            /* a donor refreshes the frame above the prompt every 3 s while
+             * the user is idle: calls served, experts held, work in flight */
+            struct pollfd pfd = { 0, POLLIN, 0 };
+            int pr = poll(&pfd, 1, 3000);
+            if (pr < 0 && errno != EINTR) { rc = -1; break; }
+            if (pr == 0) {
+                char status[200] = "";
+                if (donor_status_line(status, sizeof status)) {
+                    printf("\x1b" "7\x1b[1A\r\x1b[2K");
+                    hline_text("\xe2\x95\xad", "\xe2\x95\xae", term_w() - 2, status);
+                    printf("\x1b" "8");
+                    fflush(stdout);
+                }
+                continue;
+            }
+            if (pr < 0) { if (g_stopping) { rc = -1; break; } continue; }
+        }
         ssize_t rn = read(0, &c, 1);
         if (rn < 0 && errno == EINTR) {
             if (g_stopping) { rc = -1; break; }
@@ -3747,6 +3890,7 @@ static void role_start(const Role *r, const char *tracker, const char *model,
             }
             char portstr[16], name[64], base[48];
             donor_base_name(r, base, sizeof base);
+            snprintf(g_donor_base, sizeof g_donor_base, "%s", base);
             snprintf(portstr, sizeof portstr, "%d", port);
             snprintf(name, sizeof name, "%s-exec-%d", base, port);
             char *argv[20];
@@ -3961,6 +4105,7 @@ static int model_boot(const char *tracker, const char *model, const char *shim,
         engine_stop(e);
         return -1;
     }
+    if (!local_dir) wait_dense_ready();
     printf("  %s\xe2\x9c\x93 %s pronto in %.1fs%s%s · net %.0f MB · "
            "/swarm /experts /model /debug /storage /reset /quit%s\n",
            C_GRN, model, nowd() - t0, C_R, C_DIM, g_eng.net_mb, C_R);
@@ -4171,8 +4316,10 @@ static int cmd_chat(int argc, char **argv) {
         int w = term_w() - 2;
         if (g_tty) {
             printf("\n");
-            hline("\xe2\x95\xad", "\xe2\x95\xae", w);
-            printf("%s\xe2\x94\x82%s %s%s\xe2\x80\xba%s ", C_GRAY, C_R, C_CORAL, C_BOLD, C_R);
+            char status[200] = "";
+            if (g_donor_base[0]) donor_status_line(status, sizeof status);
+            hline_text("\xe2\x95\xad", "\xe2\x95\xae", w, status);
+            printf("\n%s\xe2\x94\x82%s %s%s\xe2\x80\xba%s ", C_GRAY, C_R, C_CORAL, C_BOLD, C_R);
         } else
             printf("\n> ");
         fflush(stdout);
@@ -4219,6 +4366,11 @@ static int cmd_chat(int argc, char **argv) {
             continue;
         }
 
+        if (line[0] == '/' && strcmp(line, "/reset")) {
+            printf("  %scomando sconosciuto: %.40s \xc2\xb7 Tab completa i comandi, "
+                   "/help li elenca. Non l'ho mandato al modello.%s\n", C_RED, line, C_R);
+            continue;
+        }
         int is_reset = !strcmp(line, "/reset");
         if (eng.proto == PROTO_SERVE2) {
             /* the serve codec has no reset command; dropping the local history

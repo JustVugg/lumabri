@@ -33,8 +33,10 @@ On a machine that wants to chat:
 ./lumabri chat --tracker <server-ip>:7300
 ```
 
-That is all. The first answer is slower while the Edge working set crosses the
-network. If no complete compatible Segment route exists, the same command
+That is all. On a swarm-fed model the dense weights (everything but the
+routed experts) are pulled into the mirror before the chat says ready, with
+a bar, the rate and an ETA; the first answer then costs only the network
+round trips, not a layer-by-layer download. If no complete compatible Segment route exists, the same command
 automatically falls back to the existing expert/CAS engine, then to local
 execution as coverage permits; there is no separate `segment_chat` command for
 an end user.
@@ -76,6 +78,11 @@ binaries, CAS state, model readability, tracker reachability and the complete
 serving port block. The reproducible local, sanitizer, multi-host and soak
 release gates are documented in **[PRODUCTION.md](PRODUCTION.md)**.
 
+While you donate, the frame above the idle prompt shows what your machine is
+doing for the swarm and refreshes every few seconds: experts held (and how
+many are resident in RAM), calls served and their rate, work in flight, and
+bytes your storage served. A line starting with `/` that is not a known
+command is refused with a hint instead of being sent to the model.
 Inside the chat, `/swarm` (or `/hosts`) shows stable human-readable machine
 names, storage served, expert calls and live Segment ranges. `/experts` answers
 how often each executor has actually been used; `/model`, `/debug`, `/storage`
@@ -382,6 +389,7 @@ the command, e.g. `LUMABRI_SPREAD=1 lumabri chat …`.
 | `LUMABRI_HEDGE_MS=-1` | never ask a second peer — the only way to get one request per call, which attribution and benchmarking need |
 | `LUMABRI_ALLOW_CODEGEN_SKEW=1` | let peers built with a different compiler or CPU join (results are then verified, not bit-identical) |
 | `LUMABRI_ENCRYPT=1` | encrypt the transport (see below) |
+| `LUMABRI_ENGINE_LOG=path` | append every line the engine prints to this file (the chat otherwise keeps only the tail `/debug` shows) |
 | `LUMABRI_SWARM_PATIENCE_S=N` | on a swarm-fed chat, how long a reply waits for a vanished executor before failing plainly (default 600); it never downloads experts to run them locally |
 | `LUMABRI_READ_TIMEOUT_MS=N` | give up on a peer that has not delivered an 8 MiB block in N ms and ask the next one (default 60000; the general I/O timeout is five minutes) |
 | `RAM_GB=N` | tell a `--local` run how much RAM it may use to keep experts resident |
