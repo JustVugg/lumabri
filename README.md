@@ -55,8 +55,7 @@ them, so a script never inherits somebody's saved answers.
 
 When you join it also asks how you want to take part — just chat, or **lend your
 machine too**. `disk` receives complete rarest-first files up to the chosen GB
-budget (transferred and verified in MiB blocks). `compute` takes the rarest
-tracker-assigned Segment slice when enough spare RAM is available. It publishes
+budget (transferred and verified in MiB blocks). `compute` holds resident experts assigned by the tracker; it takes a Segment slice only when no expert executor exists for the model. It publishes
 direct P2P when reachable and otherwise uses the signed outbound Segment relay;
 the finer-grained expert donor remains the lower-memory fallback.
 Both run at low priority and die with the TUI. Nothing to configure — Enter
@@ -383,6 +382,7 @@ the command, e.g. `LUMABRI_SPREAD=1 lumabri chat …`.
 | `LUMABRI_HEDGE_MS=-1` | never ask a second peer — the only way to get one request per call, which attribution and benchmarking need |
 | `LUMABRI_ALLOW_CODEGEN_SKEW=1` | let peers built with a different compiler or CPU join (results are then verified, not bit-identical) |
 | `LUMABRI_ENCRYPT=1` | encrypt the transport (see below) |
+| `LUMABRI_SWARM_PATIENCE_S=N` | on a swarm-fed chat, how long a reply waits for a vanished executor before failing plainly (default 600); it never downloads experts to run them locally |
 | `LUMABRI_READ_TIMEOUT_MS=N` | give up on a peer that has not delivered an 8 MiB block in N ms and ask the next one (default 60000; the general I/O timeout is five minutes) |
 | `RAM_GB=N` | tell a `--local` run how much RAM it may use to keep experts resident |
 

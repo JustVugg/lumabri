@@ -3668,7 +3668,14 @@ static void role_start(const Role *r, const char *tracker, const char *model,
                        "dono calcolo saltato%s\n", C_DIM, strerror(errno), C_R);
         } else {
             g_compute_lease_fd = lease;
-            int segment_started = segment_active &&
+            /* Donate what chatters use. The chat runs the expert swarm
+             * whenever an expert executor exists, so a donor that took a
+             * Segment range there served nobody while its RAM could have
+             * held a few hundred resident experts. Segment is the donation
+             * only when no expert executor exists for the model. */
+            int prefer_segment = segment_active &&
+                                 swarm_executors(tracker, model) <= 0;
+            int segment_started = prefer_segment &&
                 role_start_segment(r, tracker, model, model_type, context,
                                    model_bytes);
             if (!segment_started) {

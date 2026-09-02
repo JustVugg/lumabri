@@ -1108,12 +1108,22 @@ static float *lumi_exec_retry(int layer, int eid, const float *x, int D, int nr,
              * LUMABRI_PEER_WAIT_S=0 still yields zero via the re-read. */
             int wait_limit = L.peer_wait_s > 0 ? L.peer_wait_s
                 : lmb_env_int("LUMABRI_PEER_WAIT_S", LUMI_WAIT_S, 0, 600);
-            if (lumi_now() < L.swarm_sick_until) wait_limit = 0;
+            /* A swarm-fed chatter (LUMABRI_VROOT: the model is a mirror, not
+             * a local copy) must never "demote to local": on a 167 GB model
+             * the local path is a 12 MB expert download per call over the
+             * WAN, and a network blip turned into a dead reply after that
+             * download stalled too. Its only honest options are patience
+             * (LUMABRI_SWARM_PATIENCE_S, ten minutes by default) and then a
+             * plain failure that says so. */
+            int swarm_fed = getenv("LUMABRI_VROOT") != NULL;
+            if (swarm_fed)
+                wait_limit = lmb_env_int("LUMABRI_SWARM_PATIENCE_S", 600, 2, 86400);
+            else if (lumi_now() < L.swarm_sick_until) wait_limit = 0;
             if (waited < wait_limit) {
-                if (!waited)
+                if (!waited || (swarm_fed && waited % 30 == 0))
                     fprintf(stderr, "[lumabri] layer %d expert %d: nessuna replica "
-                            "viva — aspetto che torni (fino a %d s)\n",
-                            layer, eid, wait_limit);
+                            "viva — aspetto che torni (%d/%d s)\n",
+                            layer, eid, waited, wait_limit);
                 tried = 0;                    /* a returning peer deserves a retry */
                 sleep(2);
                 waited += 2;
@@ -1125,6 +1135,13 @@ static float *lumi_exec_retry(int layer, int eid, const float *x, int D, int nr,
                         lumi_add_peer(addr);   /* revalidates manifest before reuse */
                     }
                 continue;
+            }
+            if (swarm_fed) {
+                char why[200];
+                snprintf(why, sizeof why, "layer %d expert %d: nessun esecutore "
+                         "raggiungibile per %d s; non scarico gli esperti in "
+                         "locale, la risposta si ferma qui", layer, eid, waited);
+                lumi_die(why);
             }
             lumi_demote_layer(layer, waited);
             if (tried_io) *tried_io = tried;
