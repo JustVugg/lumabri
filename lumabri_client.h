@@ -822,12 +822,40 @@ static LMB_MAYBE_UNUSED void lumi_init(int n_layers, int n_experts, int hidden) 
 
 /* Does this (slot, expert) pair belong on the swarm? The engines call it
  * before handing a layer over, so an unrouted slot is never a wire error. */
-static LMB_MAYBE_UNUSED int lumi_layer_on(int layer) {
-    lumi_maybe_discover();
+static int lumi_layer_covered(int layer) {
     if (!L.on || L.swarm_disabled || layer < 0 || layer >= L.n_layers) return 0;
-    if (L.routed && !L.routed[layer]) return 0;
     if (L.demote_until && L.demote_until[layer] > lumi_now()) return 0;
     return !L.layer_ok || L.layer_ok[layer];
+}
+
+static LMB_MAYBE_UNUSED int lumi_layer_on(int layer) {
+    lumi_maybe_discover();
+    if (layer < 0 || layer >= L.n_layers) return 0;
+    if (L.routed && !L.routed[layer]) return 0;
+    if (lumi_layer_covered(layer)) return 1;
+    /* A swarm-fed chatter (LUMABRI_VROOT) has no local expert to fall back
+     * to: "running experts locally" means downloading 12 MB per expert per
+     * call over the WAN. If the executors are not visible yet — the origin
+     * is restarting, the tracker blinked, discovery raced the boot — the
+     * only right thing is to wait for them, saying so, and to stop plainly
+     * if they never come. Same patience as a vanished replica mid-run. */
+    if (!getenv("LUMABRI_VROOT") || L.swarm_disabled) return 0;
+    int patience = lmb_env_int("LUMABRI_SWARM_PATIENCE_S", 600, 2, 86400);
+    for (int waited = 0; waited < patience; waited += 2) {
+        if (waited % 30 == 0)
+            fprintf(stderr, "[lumabri] layer %d: nessun esecutore per i suoi "
+                            "esperti — aspetto lo sciame (%d/%d s), non li "
+                            "eseguo in locale\n", layer, waited, patience);
+        sleep(2);
+        if (L.discovery) { lumi_discover(); lumi_relay_coverage(); }
+        lumi_enable_if_complete();
+        if (lumi_layer_covered(layer)) return 1;
+    }
+    char why[160];
+    snprintf(why, sizeof why, "layer %d: nessun esecutore per %d s; non scarico "
+             "gli esperti in locale, la risposta si ferma qui", layer, patience);
+    lumi_die(why);
+    return 0;
 }
 
 /* nearest live replica of (layer,eid) not yet tried this call, or -1 */
