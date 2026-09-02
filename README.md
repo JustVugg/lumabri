@@ -87,7 +87,10 @@ line.
 
 Generation streams as soon as decoded text is stable. During inference a small
 dock remains fixed above the input and reports routing, prefill, decode,
-checkpoint or failover without splicing diagnostics into the answer. The input
+checkpoint or failover without splicing diagnostics into the answer, plus a
+live count of what the swarm did for this reply: expert calls, the share
+that went to donors, the busiest executor, and the bytes storage donors
+served (read from the tracker every two seconds, off the token stream). The input
 remains active: read-only menus open immediately and one next prompt or command
 can be prepared while the current KV transition finishes. `Ctrl-C` interrupts
 the active turn and exits immediately instead of waiting for it to finish;
@@ -380,6 +383,7 @@ the command, e.g. `LUMABRI_SPREAD=1 lumabri chat …`.
 | `LUMABRI_HEDGE_MS=-1` | never ask a second peer — the only way to get one request per call, which attribution and benchmarking need |
 | `LUMABRI_ALLOW_CODEGEN_SKEW=1` | let peers built with a different compiler or CPU join (results are then verified, not bit-identical) |
 | `LUMABRI_ENCRYPT=1` | encrypt the transport (see below) |
+| `LUMABRI_READ_TIMEOUT_MS=N` | give up on a peer that has not delivered an 8 MiB block in N ms and ask the next one (default 60000; the general I/O timeout is five minutes) |
 | `RAM_GB=N` | tell a `--local` run how much RAM it may use to keep experts resident |
 
 ### Encrypted transport and peer identity

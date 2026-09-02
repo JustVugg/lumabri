@@ -1264,6 +1264,12 @@ static uint8_t *peer_fetch(RPeer *p, const char *rel, uint64_t off, uint32_t len
         if (fd < 0) {
             fd = lmb_connect_ms(p->dial[0] ? p->dial : p->addr, 2500);
             if (fd < 0) return NULL;             /* unreachable: relay decides */
+            /* A block is 8 MiB: a read that has not completed in a minute is
+             * a wedged peer, not a slow one, and the next peer should get the
+             * block instead of the chatter watching "0 MB/s" for the general
+             * five-minute I/O timeout. */
+            lmb_set_io_timeout(fd, lmb_env_int("LUMABRI_READ_TIMEOUT_MS",
+                                               60000, 1000, 3600000));
             if (lmb_auth(fd)) { lmb_close(fd); return NULL; }
         }
 

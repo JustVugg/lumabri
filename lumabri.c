@@ -1691,6 +1691,8 @@ typedef struct {
     struct termios old_term, raw_term;
     pthread_t thread;
     char tracker[80], model[64], phase[160], notice[160];
+    char swarm[200];              /* who is doing the work, refreshed live */
+    pthread_t swarm_thread; int swarm_started;
     char input[4096]; int input_len, input_pos;
     char pending[4096]; int pending_ready;
     char completion[64]; int completion_next;
@@ -1725,6 +1727,9 @@ static void live_draw_locked(void) {
     printf("\x1b[%d;1H\x1b[2K %s\xe2\x9c\xa6%s %.*s", g_live.rows - 1,
            C_CORAL, C_R, width > 8 ? width - 8 : 12,
            g_live.phase[0] ? g_live.phase : "elaborazione");
+    if (g_live.swarm[0])
+        printf(" %s\xc2\xb7 %.*s%s", C_DIM, width > 40 ? width / 2 : 12,
+               g_live.swarm, C_R);
     if (g_live.notice[0])
         printf(" %s\xc2\xb7 %.*s%s", C_DIM, width > 30 ? width / 2 : 12,
                g_live.notice, C_R);
@@ -1940,6 +1945,57 @@ static void *live_input_thread(void *unused) {
     return NULL;
 }
 
+/* What the swarm is doing for THIS reply: expert calls since it began, the
+ * share that went to donors (names start with "donor-"), the busiest
+ * executor, and the bytes storage donors served. Read from the tracker's
+ * nominative counters every two seconds on its own thread, so the token
+ * stream never waits on a network round trip. */
+static void *live_swarm_thread(void *arg) {
+    (void)arg;
+    SwarmDetailRow base[64];
+    int nb = swarm_detail(g_live.tracker, base, 64);
+    if (nb < 0) nb = 0;
+    while (g_live.active) {
+        for (int i = 0; i < 20 && g_live.active; i++) usleep(100000);
+        if (!g_live.active) break;
+        SwarmDetailRow now[64];
+        int n = swarm_detail(g_live.tracker, now, 64);
+        if (n <= 0) continue;
+        unsigned long long calls = 0, donor_calls = 0, bytes = 0, top = 0;
+        char top_name[64] = "";
+        for (int i = 0; i < n; i++) {
+            unsigned long long c0 = 0, b0 = 0;
+            for (int j = 0; j < nb; j++)
+                if (!strcmp(base[j].name, now[i].name)) {
+                    c0 = base[j].exec_calls; b0 = base[j].served_bytes; break;
+                }
+            if ((now[i].roles & LMB_SWARM_ROLE_EXPERT) && now[i].have_exec_stats &&
+                now[i].exec_calls >= c0) {
+                unsigned long long d = now[i].exec_calls - c0;
+                calls += d;
+                if (!strncmp(now[i].name, "donor-", 6)) donor_calls += d;
+                if (d > top) { top = d; snprintf(top_name, sizeof top_name, "%.63s", now[i].name); }
+            }
+            if ((now[i].roles & LMB_SWARM_ROLE_STORAGE) && now[i].served_bytes >= b0)
+                bytes += now[i].served_bytes - b0;
+        }
+        char text[200];
+        if (calls)
+            snprintf(text, sizeof text, "expert %llu chiamate · %llu%% ai donor · %.24s",
+                     calls, 100 * donor_calls / calls, top_name);
+        else
+            snprintf(text, sizeof text, "expert 0 chiamate finora");
+        if (bytes)
+            snprintf(text + strlen(text), sizeof text - strlen(text),
+                     " · disco %.0f MB serviti", (double)bytes / 1e6);
+        pthread_mutex_lock(&g_live.lock);
+        snprintf(g_live.swarm, sizeof g_live.swarm, "%s", text);
+        live_draw_locked();
+        pthread_mutex_unlock(&g_live.lock);
+    }
+    return NULL;
+}
+
 static int live_begin(const char *tracker, const char *model,
                       const char *initial_phase) {
     if (!g_tty || !isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) return 0;
@@ -1960,6 +2016,7 @@ static int live_begin(const char *tracker, const char *model,
     snprintf(g_live.model, sizeof g_live.model, "%s", model);
     snprintf(g_live.phase, sizeof g_live.phase, "%s", initial_phase);
     g_live.notice[0] = 0;
+    g_live.swarm[0] = 0;
     live_clear_input_locked();
     if (g_live.enabled) {
         printf("\x1b[1;%dr\x1b[%d;1H\x1b[2K", g_live.rows - 3,
@@ -1970,6 +2027,8 @@ static int live_begin(const char *tracker, const char *model,
     if (!g_live_atexit_registered) {
         if (atexit(live_atexit_restore) == 0) g_live_atexit_registered = 1;
     }
+    g_live.swarm_started = g_live.enabled && g_live.tracker[0] &&
+        pthread_create(&g_live.swarm_thread, NULL, live_swarm_thread, NULL) == 0;
     if (pthread_create(&g_live.thread, NULL, live_input_thread, NULL)) {
         if (g_live.enabled) {
             static const char reset_scroll[] = "\x1b[r";
@@ -1989,6 +2048,7 @@ static void live_end(void) {
     if (!g_live.active && !g_live.raw_set) return;
     g_live.active = 0;
     pthread_join(g_live.thread, NULL);
+    if (g_live.swarm_started) { pthread_join(g_live.swarm_thread, NULL); g_live.swarm_started = 0; }
     pthread_mutex_lock(&g_live.lock);
     if (g_live.enabled) {
         printf("\x1b[r\x1b[%d;1H\x1b[2K\x1b[%d;1H\x1b[2K"
@@ -2374,9 +2434,11 @@ static int stream_serve2(Engine *e, char *statline, size_t scap, char **captured
                     live_status("routing · %zu host · %zu segmenti · %s",
                                 current, total, third ? "relay" : "P2P diretto");
                 else if (!strcmp(phase, "PREFILL"))
-                    live_status("prefill · %zu/%zu token · Segment", current, total);
+                    live_status("prefill · %zu/%zu token · %s", current, total,
+                                e->segment ? "Segment" : "expert");
                 else if (!strcmp(phase, "DECODE"))
-                    live_status("decode · %zu token · Segment", current);
+                    live_status("decode · %zu token · %s", current,
+                                e->segment ? "Segment" : "expert");
                 else if (!strcmp(phase, "FAILOVER")) {
                     const char *peer = strstr(line, "FAILOVER ");
                     live_status("ripristino Segment · riapro %s",
@@ -2567,6 +2629,13 @@ static int engine_spawn(const char *engine, const char *shim, const char *tracke
          * a local run keeps colibri's own AUTOPIN. overwrite=0 either way, so
          * an explicit PIN still wins. */
         if (!local_dir) setenv("PIN", "0", 0);
+        /* DeepSeek V4 has its own pinning: at open it replays `.coli_usage`
+         * and pins the historically hot experts of every layer, which behind
+         * the shim is a multi-GB expert download before the first token —
+         * the experts this chatter will never execute. PIN=0 is OLMoE's
+         * switch, not V4's. */
+        if (!local_dir) { setenv("COLI_V4_AUTOPIN", "0", 0);
+                          setenv("COLI_V4_PREWARM", "0", 0); }
         /* Same split for the expert cache. A swarm chatter caches almost nothing
          * (experts run on peers), so its cap stays at the small default. But a
          * --local run holds its own experts, and there the cap IS the resident
