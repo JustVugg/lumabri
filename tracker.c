@@ -2207,6 +2207,10 @@ static void peer_unref(Peer *p) {
  * failover is the chatter's own job — it owns the tried-set, the
  * predictors and the spot-check. The reply is a plain LMB_EXEC_R, so the
  * chatter's receive path cannot tell this peer from a dialable one. */
+/* Relayed expert calls, counted: a chatter that reports "peer X failed"
+ * through the tunnel could not be told apart from a tunnel that dropped. */
+static unsigned long long g_relay_exec_ok, g_relay_exec_failed;
+
 static int handle_texec(int fd, LmbMsg *m) {
     LmbCur c = { m->body, m->body_len, 0 };
     char target[64];
@@ -2237,8 +2241,14 @@ static int handle_texec(int fd, LmbMsg *m) {
         p->rexec_fail_at = now_s();
     }
     int rc;
-    if (!ok) { free(resp); send_err(fd, "targeted exec failed"); rc = 0; }
-    else {
+    if (!ok) {
+        free(resp); send_err(fd, "targeted exec failed"); rc = 0;
+        unsigned long long f = ++g_relay_exec_failed;
+        if (f <= 20 || f % 100 == 0)
+            printf("[tracker] targeted exec to %s failed (%llu ok · %llu failed so far)\n",
+                   p->name, g_relay_exec_ok, f);
+    } else {
+        g_relay_exec_ok++;
         rc = lmb_send(fd, LMB_EXEC_R, NULL, 0, resp, resp_len);
         free(resp);
     }
@@ -2364,8 +2374,14 @@ static int handle_rexec(int fd, LmbMsg *m) {
     }
 
     int rc;
-    if (!ok) { free(resp); send_err(fd, "exec relay timeout or peer failure"); rc = 0; }
-    else {
+    if (!ok) {
+        free(resp); send_err(fd, "exec relay timeout or peer failure"); rc = 0;
+        unsigned long long f = ++g_relay_exec_failed;
+        if (f <= 20 || f % 100 == 0)
+            printf("[tracker] relayed exec failed (%llu ok · %llu failed so far)\n",
+                   g_relay_exec_ok, f);
+    } else {
+        g_relay_exec_ok++;
         LmbBuf b = {0}; lmb_buf_u32(&b, 1);
         rc = lmb_send(fd, LMB_REXEC_R, b.p, (uint32_t)b.len, resp, resp_len);
         free(b.p); free(resp);

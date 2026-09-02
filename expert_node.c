@@ -1194,6 +1194,14 @@ int main(int argc, char **argv) {
         long reserve_mb = governor_reserve_mb;
         double avail_b = avail_kb > reserve_mb * 1024L
             ? (double)(avail_kb - reserve_mb * 1024L) * 1024.0 : 0.0;
+        /* Not all of it. A donor that fills every free byte at start is at
+         * the reserve the moment anything else on the machine grows — the
+         * chat engine next to it, a browser — and the governor then flaps
+         * ACTIVE/PRESSURE/PAUSED, refusing calls while its experts sit in
+         * RAM (a real donor did exactly that: 83.6 GB resident, 14 GB free).
+         * Keep a quarter plus two gigabytes as the machine's own room. */
+        avail_b -= avail_b * 0.25 + 2e9;
+        if (avail_b < 0) avail_b = 0;
         double ebytes = node_expert_bytes();
         int total = 0;
         for (int l = 0; l < g.n_slots; l++) if (lmbe_routed(l)) total += g.n_experts;
