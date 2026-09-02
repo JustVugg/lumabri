@@ -52,12 +52,14 @@ static uint64_t lmbe_resident_nbytes;
 static const char *lmbe_engine_name(void) { return "deepseek_v4"; }
 static int lmbe_effective_bits(int bits) { (void)bits; return 0; }
 
-/* `cap` is expert slots; the store wants bytes, so it is scaled by the
- * record size the store itself reports back through its stats. Before that
- * is known, ask for cap × a generous per-expert estimate and let the store
- * clamp: it refuses anything under its own minimum and says so. */
-static void lmbe_open(const char *dir, int cap, int bits) {
-    (void)bits;                       /* V4 experts are fp4 on disk, as shipped */
+/* The store wants bytes and thinks per layer: colibri turns `cache_bytes`
+ * into `cache_bytes / (layers * record)` slots for EVERY layer. Lumabri's
+ * `--cache N` (and `serve --exec-cache N`) means N experts for the whole
+ * node, like every other glue, so N is spread over the layers here. The
+ * old code multiplied by the layer count instead: `--exec-cache 128` on the
+ * 43-layer V4-Flash was 5504 experts (~69 GB) and 1800 was the entire
+ * expert set, which is how a 64 GB server filled its RAM and died. */
+static void lmbe_open_per_layer(const char *dir, int slots_per_layer) {
     char err[512] = "";
     if (coli_v4_config_load(&lmbe_cfg, dir, err, sizeof err)) {
         fprintf(stderr, "[lumabri] %s\n", err[0] ? err : "cannot read the V4 config");
@@ -68,12 +70,13 @@ static void lmbe_open(const char *dir, int cap, int bits) {
     /* One fp4 expert is three matrices of moe_intermediate × hidden at half a
      * byte, plus the block scales — a fifth over is enough headroom, and the
      * store refuses anything under six live experts per layer (top-k), so
-     * that is the floor `--cache` cannot go below. */
+     * that is the floor the budget cannot go below. */
     uint64_t per_expert = (uint64_t)lmbe_cfg.moe_intermediate_size *
                           (uint64_t)lmbe_cfg.hidden_size * 3 / 2;
     per_expert += per_expert / 5;
-    int slots = cap > 0 ? cap : 8;
+    int slots = slots_per_layer > 0 ? slots_per_layer : 8;
     if (slots < lmbe_cfg.num_experts_per_tok) slots = lmbe_cfg.num_experts_per_tok;
+    if (slots > lmbe_cfg.n_routed_experts) slots = lmbe_cfg.n_routed_experts;
     ColiDeepSeekV4ExpertStoreOptions o = {
         .model_dir = dir,
         .layers = lmbe_cfg.num_hidden_layers,
@@ -87,6 +90,26 @@ static void lmbe_open(const char *dir, int cap, int bits) {
         fprintf(stderr, "[lumabri] expert store: %s\n", err);
         exit(1);
     }
+    fprintf(stderr, "[lumabri] expert store: %d slot%s per layer × %d layers "
+                    "= %d experts, up to %.1f GB of RAM\n",
+            slots, slots == 1 ? "" : "s", lmbe_cfg.num_hidden_layers,
+            slots * lmbe_cfg.num_hidden_layers,
+            (double)o.cache_bytes / 1e9);
+}
+
+/* `cap` is the node's total expert slots (`--cache N`); 0 means a small
+ * default. It is divided over the layers, rounding up, and the top-k floor
+ * per layer means a V4-Flash node holds at least 6 × 43 = 258 experts. */
+static void lmbe_open(const char *dir, int cap, int bits) {
+    (void)bits;                       /* V4 experts are fp4 on disk, as shipped */
+    char err[512] = "";
+    if (coli_v4_config_load(&lmbe_cfg, dir, err, sizeof err)) {
+        fprintf(stderr, "[lumabri] %s\n", err[0] ? err : "cannot read the V4 config");
+        exit(1);
+    }
+    int layers = lmbe_cfg.num_hidden_layers > 0 ? lmbe_cfg.num_hidden_layers : 1;
+    int per_layer = cap > 0 ? (cap + layers - 1) / layers : 0;
+    lmbe_open_per_layer(dir, per_layer);
 }
 
 /* READY means every assigned key already has a RAM slot. Re-open Colibri's
@@ -105,7 +128,7 @@ static int lmbe_resident_prepare(const uint8_t *holds, int layers,
     if (lmbe_store && lmbe_store->ops && lmbe_store->ops->destroy)
         lmbe_store->ops->destroy(lmbe_store);
     lmbe_store = NULL;
-    lmbe_open(lmbe_model_dir, max_per_layer, 0);
+    lmbe_open_per_layer(lmbe_model_dir, max_per_layer);
     for (int l = 0; l < layers; l++)
         for (int e = 0; e < experts; e++) {
             if (!holds[l * experts + e]) continue;
