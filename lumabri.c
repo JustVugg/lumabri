@@ -419,6 +419,32 @@ static int local_model_layers(const char *model_dir, uint32_t *layers) {
     return local_model_u32(model_dir, "num_hidden_layers", layers);
 }
 
+/* RAM the classic expert executor will grow into. It is spawned before the
+ * Segment slices and sized by --exec-cache alone, so unless its residency is
+ * subtracted here the Segment budget is computed against memory the executor
+ * is about to fill: two caches of the same experts, both sized to "all the
+ * free RAM", on one box. DeepSeek V4 is the family whose executor holds no
+ * dense weights and whose expert size is fixed by config.json, so it can be
+ * estimated exactly; the other glues run a full engine and are left at 0
+ * (unknown), which keeps the old behaviour rather than inventing a number. */
+static uint64_t expert_executor_ram_estimate(const char *model_dir,
+                                             const char *model_type,
+                                             int cache_slots) {
+    uint32_t inter = 0, hidden = 0, layers = 0, topk = 0;
+    if (!model_type || !strstr(model_type, "deepseek")) return 0;
+    if (local_model_u32(model_dir, "moe_intermediate_size", &inter) ||
+        local_model_u32(model_dir, "hidden_size", &hidden) ||
+        local_model_layers(model_dir, &layers))
+        return 0;
+    if (local_model_u32(model_dir, "num_experts_per_tok", &topk)) topk = 6;
+    uint64_t per_expert = (uint64_t)inter * hidden * 3 / 2;
+    per_expert += per_expert / 5;                 /* the glue's own headroom */
+    uint64_t slots = cache_slots > 0 ? (uint64_t)cache_slots : 8;
+    uint64_t floor = (uint64_t)topk * layers;     /* the store's per-layer minimum */
+    if (slots < floor) slots = floor;
+    return per_expert * slots + ((uint64_t)1 << 30);   /* + 1 GiB of workspace */
+}
+
 /* A server with a real public IPv4 should need no networking flag. Private,
  * loopback, link-local and CGNAT addresses are deliberately not guessed:
  * publishing one to an Internet swarm would create a "complete" Segment
@@ -504,6 +530,8 @@ static int serve_port_available(int port) {
 }
 
 static void serve_watch_start(const char *tracker, const char *model);
+
+static uint64_t du_bytes(const char *path, int depth);
 
 static int cmd_serve(int argc, char **argv) {
     const char *model = NULL, *join = NULL, *mname = NULL, *donate = NULL;
@@ -612,6 +640,16 @@ static int cmd_serve(int argc, char **argv) {
     uint64_t segment_available = serve_profile.ram_available_bytes;
     uint64_t segment_min_free = (uint64_t)lmb_env_int(
         "LUMABRI_SEGMENT_MIN_FREE_MB", 8192, 1024, 262144) << 20;
+    uint64_t exec_estimate = 0;
+    if (!disk_donor && !no_exec && node && access(exec_bin, X_OK) == 0)
+        exec_estimate = expert_executor_ram_estimate(model, mtype, cache_slots);
+    if (exec_estimate && segment_available) {
+        printf("  %sl'esecutore di esperti crescera' fino a ~%.1f GB "
+               "(--exec-cache %d): li tolgo dal budget Segment%s\n", C_DIM,
+               (double)exec_estimate / 1e9, cache_slots, C_R);
+        segment_available = segment_available > exec_estimate
+                          ? segment_available - exec_estimate : 1;
+    }
     int segment_candidate = !disk_donor && !no_exec && segment_engine &&
         segment_model && access(segment_bin, X_OK) == 0 &&
         local_model_layers(model, &segment_layers) == 0 &&
@@ -808,6 +846,12 @@ static int cmd_serve(int argc, char **argv) {
         snprintf(run_wait_text, sizeof run_wait_text, "%d", run_wait_ms);
         uint64_t total_budget = segment_available > segment_min_free
                               ? segment_available - segment_min_free : 0;
+        uint64_t origin_model_bytes = du_bytes(model, 0);
+        char origin_model_text[32], origin_layers_text[16];
+        snprintf(origin_model_text, sizeof origin_model_text, "%llu",
+                 (unsigned long long)origin_model_bytes);
+        snprintf(origin_layers_text, sizeof origin_layers_text, "%u",
+                 segment_layers);
         uint64_t slice_budget_mb = (total_budget / (uint64_t)chunks) >> 20;
         if (!slice_budget_mb) slice_budget_mb = 1;
         snprintf(memory_text, sizeof memory_text, "%llu",
@@ -851,6 +895,15 @@ static int cmd_serve(int argc, char **argv) {
             sargv[a++] = "--run-queue";    sargv[a++] = run_queue_text;
             sargv[a++] = "--run-wait-ms";  sargv[a++] = run_wait_text;
             sargv[a++] = "--memory-limit-mb"; sargv[a++] = memory_text;
+            /* A donor is refused a range it cannot hold resident; the origin
+             * used to skip that check and open the engine anyway, which on a
+             * model larger than the box meant every slice streamed experts
+             * from disk into a cache that outgrew its budget, went DRAINING
+             * and stayed there. Same check, same exit code 3, no restart. */
+            if (origin_model_bytes) {
+                sargv[a++] = "--model-bytes";  sargv[a++] = origin_model_text;
+                sargv[a++] = "--model-layers"; sargv[a++] = origin_layers_text;
+            }
             sargv[a++] = "--advertise";    sargv[a++] = sadv;
             sargv[a] = NULL;
             char slog[1200];
@@ -914,7 +967,18 @@ static int cmd_serve(int argc, char **argv) {
         if (p < 0) break;
         int idx = -1;
         for (int i = 0; i < g_nchildren; i++) if (g_children[i] == p) idx = i;
-        if (idx >= 0 && g_cargv[idx] && !g_stopping) {
+        if (idx >= 0 && g_cargv[idx] && !g_stopping &&
+            WIFEXITED(status) && WEXITSTATUS(status) == 3) {
+            /* segment_node exit 3: the assigned range does not fit the RAM
+             * budget. Restarting it every 5 s would only repeat the refusal
+             * (and, before the check existed, reload a slice into a box that
+             * is already full). The expert executor and storage stay up. */
+            printf("\n%s%s non parte: la fetta non entra nel budget RAM di "
+                   "questa macchina (vedi il suo log). Non lo riavvio; "
+                   "storage ed esperti restano attivi.%s\n",
+                   C_RED, g_cwhat[idx], C_R);
+            fflush(stdout);
+        } else if (idx >= 0 && g_cargv[idx] && !g_stopping) {
             /* Losing a child silently is the expensive failure: with the
              * executor gone every chatter falls back to downloading experts
              * and nothing anywhere says why. Name it, and bring it back. */
