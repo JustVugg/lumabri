@@ -3180,7 +3180,24 @@ static int role_unknown(const char *arg, char *out, size_t cap) {
     return 0;
 }
 
+/* What this machine can donate without being asked: RAM beyond the system
+ * reserve is the only input, read at startup like `serve` reads it. Below
+ * two spare gigabytes a donor would hold too few experts to matter and only
+ * cost the tracker a peer. */
+static double spare_ram_gb(void) {
+    LmbMachineProfile profile;
+    if (lmb_machine_probe(&profile, ".", NULL)) return 0.0;
+    uint64_t reserve = (uint64_t)lmb_env_int(
+        getenv("LUMABRI_EXPERT_RAM_RESERVE_MB") ?
+        "LUMABRI_EXPERT_RAM_RESERVE_MB" : "LUMABRI_RAM_RESERVE_MB",
+        4096, 256, 262144) << 20;
+    if (profile.ram_available_bytes <= reserve) return 0.0;
+    return (double)(profile.ram_available_bytes - reserve) / 1e9;
+}
+
 static int role_pick(Role *r, const char *model, int have_model_dir) {
+    double spare = spare_ram_gb();
+    int auto_compute = spare >= 2.0;
     printf("  %scome entri nello sciame?%s\n\n", C_BOLD, C_R);
     printf("    %s1%s  solo chattare        %snon condividi niente%s\n",
            C_CORAL, C_R, C_DIM, C_R);
@@ -3193,13 +3210,19 @@ static int role_pick(Role *r, const char *model, int have_model_dir) {
         printf("    %s3%s  chatti e doni calcolo %sla tua fetta di esperti "
                "arriva dallo sciame%s\n", C_CORAL, C_R, C_DIM, C_R);
     printf("    %s4%s  tutti e due%s\n", C_CORAL, C_R, C_R);
-    printf("\n  %sinvio = solo chattare%s\n", C_DIM, C_R);
+    if (auto_compute)
+        printf("\n  %sinvio = chatti e doni calcolo: %.0f GB di RAM liberi oltre "
+               "la riserva, ogni esperto che tieni rende lo sciame piu' veloce%s\n",
+               C_DIM, spare, C_R);
+    else
+        printf("\n  %sinvio = solo chattare (%.1f GB liberi oltre la riserva, "
+               "troppo pochi per tenere esperti)%s\n", C_DIM, spare, C_R);
     printf("\n%s\xe2\x94\x82%s %s%s\xe2\x80\xba%s ", C_GRAY, C_R, C_CORAL, C_BOLD, C_R);
     fflush(stdout);
 
     char line[256];
     if (prompt_line(line, sizeof line)) return -1;
-    int c = line[0] ? line[0] : '1';
+    int c = line[0] ? line[0] : (auto_compute ? '3' : '1');
     if (c == 'q') return -1;
     if (c == '2' || c == '4') r->disk = 1;
     if (c == '3' || c == '4') r->compute = 1;
@@ -3241,6 +3264,24 @@ static int free_port(int from) {
         if (fd >= 0) { close(fd); return p; }
     }
     return 0;
+}
+
+/* How many expert executors the tracker knows for this model right now
+ * (origin's --cache executor and resident donors alike). -1 = no answer. */
+static int swarm_executors(const char *tracker, const char *model) {
+    LmbMsg em = {0};
+    LmbBuf eb = {0};
+    lmb_buf_str(&eb, model);
+    int nexec = -1;
+    if (!lmb_request(tracker, LMB_EPEERS, eb.p, (uint32_t)eb.len, &em) &&
+        em.op == LMB_EPEERS_R) {
+        LmbCur ec = { em.body, em.body_len, 0 };
+        uint32_t n = 0;
+        if (!lmb_cur_u32(&ec, &n)) nexec = (int)n;
+    }
+    free(eb.p);
+    lmb_msg_free(&em);
+    return nexec;
 }
 
 /* Prefer one tracker-assigned Segment slice when this chat is already using
@@ -3640,14 +3681,28 @@ static int model_boot(const char *tracker, const char *model, const char *shim,
      * signed mirror, then discovery either publishes READY or exits.  Exiting
      * before READY is an ordinary coverage miss, not a chat failure; the
      * unchanged expert/local engine starts immediately afterwards. */
-    if (!local_dir && !getenv("LUMABRI_NO_SEGMENT")) {
+    /* The expert swarm is the data plane of this project: dense weights and
+     * the KV cache stay here, every routed expert runs on whichever peer
+     * holds it in RAM, and each machine that joins adds resident experts and
+     * therefore speed. A Segment chain keeps whole layer ranges and their
+     * state on a few large peers instead, where a small donor cannot help
+     * at all. So Segment is tried only when nobody executes experts for this
+     * model (or when the operator insists with LUMABRI_SEGMENT_REQUIRED);
+     * otherwise the expert path starts at once. */
+    int executors = local_dir ? -1 : swarm_executors(tracker, model);
+    if (executors > 0 && !getenv("LUMABRI_SEGMENT_REQUIRED"))
+        printf("  %s%d esecutor%s di esperti nello sciame: dense e KV restano "
+               "qui, gli esperti girano sui peer%s\n", C_DIM, executors,
+               executors == 1 ? "e" : "i", C_R);
+    if (!local_dir && !getenv("LUMABRI_NO_SEGMENT") &&
+        (executors <= 0 || getenv("LUMABRI_SEGMENT_REQUIRED"))) {
         char self[1024], segment_bin[1200];
         exe_dir(self, sizeof self);
         snprintf(segment_bin, sizeof segment_bin, "%s/segment_chat", self);
         if (access(segment_bin, X_OK) == 0 &&
             segment_engine_for(mtype) != NULL) {
-            printf("  %sprovo una catena Segment completa; se manca uso "
-                   "automaticamente expert/CAS%s\n", C_DIM, C_R);
+            printf("  %snessun esecutore di esperti: provo una catena Segment "
+                   "completa, altrimenti expert/CAS%s\n", C_DIM, C_R);
             if (!segment_engine_spawn(segment_bin, shim, tracker, model,
                                       mtype, ctx, e)) {
                 g_eng.booting = 1;
