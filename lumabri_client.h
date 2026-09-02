@@ -74,6 +74,10 @@ typedef struct {
      * origin's --cache executor); -1: not known (older node, or reached only
      * through the tracker tunnel). Only a known disk replica is penalized. */
     int resident;
+    /* the bill: what this peer answered, how long it took, and the bytes
+     * that crossed the wire each way — the report divides them by rounds */
+    unsigned long long ok_calls, bytes_out, bytes_in;
+    double lat_s;
 } LumiPeer;
 
 static struct {
@@ -151,9 +155,12 @@ static void lumi_peer_failed(LumiPeer *peer) {
 }
 
 static void lumi_peer_observed(LumiPeer *peer, double started) {
-    uint64_t elapsed = (uint64_t)((lumi_now() - started) * 1e6);
+    double took = lumi_now() - started;
+    uint64_t elapsed = (uint64_t)(took * 1e6);
     lmb_predict_observe(&peer->latency, elapsed ? elapsed : 1);
     peer->exec_observations++;
+    peer->ok_calls++;
+    peer->lat_s += took;
 }
 
 static void lumi_peer_sent(LumiPeer *peer) { peer->inflight++; }
@@ -194,7 +201,12 @@ static int lumi_take_sock(LumiPeer *p) {
     if (fd < 0) {
         fprintf(stderr, "[lumabri] peer %s unreachable — circuit failure\n", p->addr);
         lumi_peer_failed(p);
+        return fd;
     }
+    /* An expert call that has not answered in two minutes is lost, not slow:
+     * the general five-minute I/O timeout cost a reply 10 minutes twice in
+     * one hour. Long enough for a prefill block on a slow uplink. */
+    lmb_set_io_timeout(fd, lmb_env_int("LUMABRI_EXEC_TIMEOUT_MS", 120000, 1000, 3600000));
     return fd;
 }
 
@@ -979,6 +991,7 @@ static int lumi_send_exec(LumiPeer *p, int fd, int layer, int eid,
     int rc = lmb_send(fd, targeted ? LMB_TEXEC : LMB_EXEC, b.p,
                       (uint32_t)b.len,
                       x, (uint32_t)((size_t)nr * D * sizeof(float)));
+    if (!rc && p) p->bytes_out += 16 + b.len + (size_t)nr * D * sizeof(float);
     free(b.p);
     return rc;
 }
@@ -1041,6 +1054,7 @@ static float *lumi_finish_exec(int layer, int eid, const float *x, int D, int nr
                 lumi_peer_done(p[i]);
                 lumi_put_sock(p[i], fd[i]); fd[i] = -1;
                 if (i == 1) L.hedge_wins++;
+                p[i]->bytes_in += 16 + want;
                 lumi_peer_observed(p[i], started[i]);
                 for (int j = 0; j < 2; j++) if (fd[j] >= 0) {
                     close(fd[j]); lumi_peer_done(p[j]);
@@ -1754,6 +1768,28 @@ static LMB_MAYBE_UNUSED void lumi_report(void) {
         fprintf(stderr, "[lumabri] %llu layer demotion(s) to the local mirror"
                         " · %llu integrity quarantine(s)\n",
                 L.demotions, L.integrity_fails);
+    /* The bill per executor, and the bytes a layer round costs: the number
+     * that decides whether a chatter's uplink, not the peers, sets its tok/s. */
+    unsigned long long out = 0, in = 0;
+    for (int i = 0; i < L.npeers; i++) {
+        LumiPeer *p = &L.peers[i];
+        out += p->bytes_out; in += p->bytes_in;
+        if (!p->ok_calls && !p->bytes_out) continue;
+        fprintf(stderr, "[lumabri] executor %s: %llu call(s) answered · %.1f ms each · "
+                        "%.1f MB up · %.1f MB down%s%s\n",
+                p->addr, p->ok_calls,
+                p->ok_calls ? 1000.0 * p->lat_s / (double)p->ok_calls : 0.0,
+                (double)p->bytes_out / 1e6, (double)p->bytes_in / 1e6,
+                p->relay_target[0] ? " · via tracker tunnel" : "",
+                p->resident == 0 ? " · experts from disk" :
+                p->resident == 1 ? " · experts in RAM" : "");
+    }
+    if (L.layers_done)
+        fprintf(stderr, "[lumabri] wire: %.1f MB up · %.1f MB down · per layer round "
+                        "%.0f KB up · %.0f KB down\n",
+                (double)out / 1e6, (double)in / 1e6,
+                (double)out / 1e3 / (double)L.layers_done,
+                (double)in / 1e3 / (double)L.layers_done);
 }
 
 #endif /* LUMABRI_CLIENT_H */
