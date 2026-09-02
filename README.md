@@ -329,6 +329,12 @@ Lumabri excludes `.coli_*` state such as `.coli_usage`, KV/checkpoint state and
 SSD metadata from storage manifests. These files remain local and mutable;
 only checkpoint/model payloads enter signed CAS identity.
 
+Expert executors admit concurrent chatters fairly: when several wait for the
+compute gate, the next slot goes to the chatter that has been served least
+since the queue last drained, so two chatters on equal networks see the same
+tok/s instead of the busier one starving the other. Each executor's stats
+line reports compute and queue time per call; the chatter's report shows the
+average and the worst layer round, which is what a token actually pays.
 Concurrent chats are admitted FIFO at every Segment range. Queue depth and
 inflight work are published to the predictive scheduler, the queue is bounded,
 and a request that misses its admission deadline returns `BUSY` so an exact
