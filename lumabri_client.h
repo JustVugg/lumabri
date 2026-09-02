@@ -124,6 +124,7 @@ static struct {
     int swarm_disabled;         /* model identity changed mid-run: local only */
     unsigned long long demotions, integrity_fails;
     unsigned long long calls, layers_done, failovers, verified, relays;
+    double wait_max_s;          /* the slowest layer round so far: the tail a token pays */
     unsigned long long hedges, hedge_wins, batch_calls, batch_rows;
     double wait_s;
 } L = {0};
@@ -836,6 +837,15 @@ static uint32_t lumi_hash_gid(int gid) {   /* fnv1a over the (layer,expert) id *
     return h;
 }
 
+/* One layer round is over: the token paid max(...) over its experts, so
+ * the worst round is what the network really costs, not the mean. */
+static void lumi_round_done(double t0) {
+    double dt = lumi_now() - t0;
+    L.wait_s += dt;
+    if (dt > L.wait_max_s) L.wait_max_s = dt;
+    L.layers_done++;
+}
+
 /* Which replica of `gid` to send to. Default: the nearest live, untried one
  * (strict argmin — deliberate, and what a single-holder-per-expert swarm wants).
  * With LUMABRI_SPREAD on and this expert held by several near-equal replicas,
@@ -1286,9 +1296,8 @@ static LMB_MAYBE_UNUSED int lumi_moe_apply(int layer, const int *idx,
         for (int d = 0; d < D; d++) out[d] += w * h[d];
         free(res[k]);
     }
-    L.wait_s += lumi_now() - t0;
     L.calls += (unsigned long long)K;
-    L.layers_done++;
+    lumi_round_done(t0);
     return 1;
 }
 
@@ -1422,8 +1431,7 @@ static LMB_MAYBE_UNUSED int lumi_moe_apply_batch(int layer, const int *idxs,
             L.calls++;
         }
     }
-    L.wait_s += lumi_now() - t0;
-    L.layers_done++;
+    lumi_round_done(t0);
     free(seen); free(uniq); free(rows); free(rw); free(xg); free(saved);
     return 1;
 }
@@ -1529,8 +1537,7 @@ static LMB_MAYBE_UNUSED int lumi_moe_apply_union(int layer, int nu,
             L.calls++;
         }
     }
-    L.wait_s += lumi_now() - t0;
-    L.layers_done++;
+    lumi_round_done(t0);
     free(xg); free(saved);
     return 1;
 }
@@ -1662,8 +1669,7 @@ static LMB_MAYBE_UNUSED int lumi_moe_apply_v4(int layer, const int *indices,
             L.calls++;
         }
     }
-    L.wait_s += lumi_now() - t0;
-    L.layers_done++;
+    lumi_round_done(t0);
     free(used); free(uid); free(rows); free(rw); free(xg); free(saved);
     return 1;
 }
@@ -1671,12 +1677,13 @@ static LMB_MAYBE_UNUSED int lumi_moe_apply_v4(int layer, const int *indices,
 static LMB_MAYBE_UNUSED void lumi_report(void) {
     if (!L.on && !L.calls) return;
     fprintf(stderr, "[lumabri] %llu remote expert calls in %llu layer rounds · "
-                    "%.2fs waiting on peers (%.2f ms per layer round) · "
+                    "%.2fs waiting on peers (%.2f ms per layer round, worst %.1f ms) · "
                     "%llu batched call(s)/%llu rows · %llu hedge(s), %llu won · "
                     "%llu failover(s) · %llu tracker relay call(s) · "
                     "%llu spot-check(s)%s\n",
             L.calls, L.layers_done, L.wait_s,
             L.layers_done ? 1000.0 * L.wait_s / (double)L.layers_done : 0.0,
+            1000.0 * L.wait_max_s,
             L.batch_calls, L.batch_rows, L.hedges, L.hedge_wins,
             L.failovers, L.relays, L.verified,
             L.integrity_fails ? "" : ", all agreed");

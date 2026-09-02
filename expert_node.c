@@ -188,18 +188,87 @@ static void gate_init(int forced, int per_expert, int phys) {
     if (g_gate_free < 1) g_gate_free = 1;
 }
 
+/* Fair admission. FIFO let the chatter that issues the most requests take
+ * the most compute: with two chatters one saw its layers served and the
+ * other waited. Under contention the free slot goes to the WAITER whose
+ * source has been granted the least since the queue last drained (ties by
+ * arrival), so every chatter gets the same share of the executor and, with
+ * equal networks, the same tok/s. A source is one remote address; work that
+ * arrives through the tracker relay shares one source. */
+#define GATE_WAITERS_MAX 512
+#define GATE_SOURCES_MAX 64
+typedef struct { uint32_t src; uint64_t seq; } GateWaiter;
+static GateWaiter g_gate_wait[GATE_WAITERS_MAX];
+static int g_gate_nwait;
+static uint64_t g_gate_seq;
+static uint32_t g_gate_src[GATE_SOURCES_MAX];
+static uint64_t g_gate_granted[GATE_SOURCES_MAX];
+static int g_gate_nsrc;
+static __thread uint32_t t_source;          /* set per connection thread */
+static double g_gate_wait_s;                /* total time spent queued */
+
+static int gate_source_slot(uint32_t src) {
+    for (int i = 0; i < g_gate_nsrc; i++) if (g_gate_src[i] == src) return i;
+    if (g_gate_nsrc < GATE_SOURCES_MAX) {
+        g_gate_src[g_gate_nsrc] = src; g_gate_granted[g_gate_nsrc] = 0;
+        return g_gate_nsrc++;
+    }
+    return 0;                                /* table full: share slot 0 */
+}
+
+/* The waiter that should go next: least granted source, then oldest. */
+static int gate_next_locked(void) {
+    int best = -1;
+    for (int i = 0; i < g_gate_nwait; i++) {
+        int bs = gate_source_slot(g_gate_wait[i].src);
+        if (best < 0) { best = i; continue; }
+        int cs = gate_source_slot(g_gate_wait[best].src);
+        if (g_gate_granted[bs] < g_gate_granted[cs] ||
+            (g_gate_granted[bs] == g_gate_granted[cs] &&
+             g_gate_wait[i].seq < g_gate_wait[best].seq))
+            best = i;
+    }
+    return best;
+}
+
 static void gate_enter(void) {
     pthread_mutex_lock(&g_gate_lk);
-    if (g_gate_free <= 0) atomic_fetch_add(&g_gate_waits, 1);
-    while (g_gate_free <= 0) pthread_cond_wait(&g_gate_cv, &g_gate_lk);
+    if (g_gate_free > 0 && g_gate_nwait == 0) {
+        g_gate_free--;
+        g_gate_granted[gate_source_slot(t_source)]++;
+        pthread_mutex_unlock(&g_gate_lk);
+        return;
+    }
+    atomic_fetch_add(&g_gate_waits, 1);
+    double t0 = nowd();
+    uint64_t seq = ++g_gate_seq;
+    if (g_gate_nwait < GATE_WAITERS_MAX)
+        g_gate_wait[g_gate_nwait++] = (GateWaiter){ t_source, seq };
+    for (;;) {
+        int me = -1;
+        for (int i = 0; i < g_gate_nwait; i++)
+            if (g_gate_wait[i].seq == seq) { me = i; break; }
+        if (g_gate_free > 0 && (me < 0 || gate_next_locked() == me)) {
+            if (me >= 0) {
+                g_gate_wait[me] = g_gate_wait[--g_gate_nwait];
+            }
+            break;
+        }
+        pthread_cond_wait(&g_gate_cv, &g_gate_lk);
+    }
     g_gate_free--;
+    g_gate_granted[gate_source_slot(t_source)]++;
+    g_gate_wait_s += nowd() - t0;
+    /* no one waiting: the round is over, everybody starts equal again */
+    if (g_gate_nwait == 0)
+        for (int i = 0; i < g_gate_nsrc; i++) g_gate_granted[i] = 0;
     pthread_mutex_unlock(&g_gate_lk);
 }
 
 static void gate_leave(void) {
     pthread_mutex_lock(&g_gate_lk);
     g_gate_free++;
-    pthread_cond_signal(&g_gate_cv);
+    pthread_cond_broadcast(&g_gate_cv);
     pthread_mutex_unlock(&g_gate_lk);
 }
 
@@ -509,8 +578,24 @@ static int handle_emanifest(int fd) {
     return rc;
 }
 
+static uint32_t peer_source(int fd) {
+    struct sockaddr_storage ss;
+    socklen_t len = sizeof ss;
+    if (getpeername(fd, (struct sockaddr *)&ss, &len)) return 1;
+    const uint8_t *bytes = NULL; size_t n = 0;
+    if (ss.ss_family == AF_INET) {
+        bytes = (const uint8_t *)&((struct sockaddr_in *)&ss)->sin_addr; n = 4;
+    } else if (ss.ss_family == AF_INET6) {
+        bytes = (const uint8_t *)&((struct sockaddr_in6 *)&ss)->sin6_addr; n = 16;
+    } else return 1;
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < n; i++) { h ^= bytes[i]; h *= 16777619u; }
+    return h ? h : 1;
+}
+
 static void *conn_thread(void *arg) {
     int fd = (int)(intptr_t)arg;
+    t_source = peer_source(fd);
     if (lmb_secure_server(fd)) { close(fd); lmb_conn_gate_leave(&g_conn_gate); return NULL; }
     int authed = g.token[0] ? 0 : 1;
     LmbMsg m;
@@ -844,11 +929,20 @@ static void *stats_thread(void *arg) {
              * most), so clamp the difference instead of letting the unsigned
              * subtraction wrap to a monstrous percentage. */
             uint64_t hits = calls > cold ? calls - cold : 0;
-            printf("[%s] %llu exec calls · %llu cold loads · %.1f%% RAM hit\n",
+            printf("[%s] %llu exec calls · %llu cold loads · %.1f%% RAM hit",
                    g.name, (unsigned long long)calls, (unsigned long long)cold,
                    calls ? 100.0 * (double)hits / (double)calls : 0.0);
         } else
-            printf("[%s] %llu exec calls\n", g.name, (unsigned long long)calls);
+            printf("[%s] %llu exec calls", g.name, (unsigned long long)calls);
+        /* Where a call's time goes, on this side of the wire: queued behind
+         * other experts, or multiplying. A chatter sees only the sum. */
+        double busy, queued;
+        pthread_mutex_lock(&g.stat_lk); busy = g.busy_s; pthread_mutex_unlock(&g.stat_lk);
+        pthread_mutex_lock(&g_gate_lk); queued = g_gate_wait_s; pthread_mutex_unlock(&g_gate_lk);
+        printf(" · %.2f ms compute · %.2f ms queued per call · %llu waited\n",
+               calls ? 1000.0 * busy / (double)calls : 0.0,
+               calls ? 1000.0 * queued / (double)calls : 0.0,
+               (unsigned long long)atomic_load(&g_gate_waits));
         fflush(stdout);
         last = calls;
     }

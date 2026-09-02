@@ -253,6 +253,9 @@ static const char *g_cwhat[MAX_CHILDREN];
 /* Children that must not share the operator's terminal keep their own log,
  * and keep it across a supervised restart. */
 static char *g_clog[MAX_CHILDREN];
+/* restart history per slot, for the supervisor's backoff */
+static int g_crestarts[MAX_CHILDREN];
+static double g_cstarted[MAX_CHILDREN];
 
 static void child_publish(int idx, pid_t pid) {
     g_children[idx] = pid;
@@ -924,10 +927,22 @@ static int cmd_serve(int argc, char **argv) {
             else
                 printf("\n%s⚠ %s e' uscito (codice %d)%s\n",
                        C_RED, g_cwhat[idx], WEXITSTATUS(status), C_R);
-            printf("  %slo riavvio fra 5 s — finche' manca, i chatter si "
-                   "scaricano gli esperti invece di farli eseguire%s\n", C_DIM, C_R);
+            /* Backoff: a child that dies right after starting (OOM, a port
+             * taken, a corrupt model) used to be relaunched every 5 s
+             * forever, reloading gigabytes into a box that is already
+             * full. The delay doubles up to two minutes and resets once the
+             * child has lived ten minutes. */
+            double alive = nowd() - g_cstarted[idx];
+            if (alive >= 600.0) g_crestarts[idx] = 0;
+            int delay = 5 << (g_crestarts[idx] < 5 ? g_crestarts[idx] : 5);
+            if (delay > 120) delay = 120;
+            g_crestarts[idx]++;
+            printf("  %slo riavvio fra %d s — finche' manca, i chatter si "
+                   "scaricano gli esperti invece di farli eseguire%s\n",
+                   C_DIM, delay, C_R);
             fflush(stdout);
-            sleep(5);
+            sleep((unsigned)delay);
+            g_cstarted[idx] = nowd();
             pid_t np = g_clog[idx]
                 ? spawn_argv_logged(g_cargv[idx], NULL, g_clog[idx])
                 : spawn_argv(g_cargv[idx]);
