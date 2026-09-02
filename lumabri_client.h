@@ -28,6 +28,7 @@
 #define LUMABRI_CLIENT_H
 
 #include <limits.h>
+#include <poll.h>
 
 #include "lumabri_proto.h"
 #include "lumabri_sign.h"
@@ -164,8 +165,25 @@ static void lumi_peer_done(LumiPeer *peer) {
  * layer must see them as two concurrent requests, not a queue of one. A
  * transport failure feeds the circuit breaker; it does not erase a valid
  * manifest permanently. */
+/* A pooled socket may have been closed by the executor while it sat idle
+ * (its I/O timeout is minutes; a slow reply leaves sockets idle longer).
+ * Reusing it means a send that succeeds into the kernel and a recv that
+ * finds EOF: a "failed" call charged to a healthy peer, a retry, and after
+ * a few of those an open circuit and a patience wait. A closed socket is
+ * readable (EOF) before we write to it, so ask, and dial fresh instead. */
+static int lumi_sock_alive(int fd) {
+    struct pollfd pfd = { fd, POLLIN, 0 };
+    int r = poll(&pfd, 1, 0);
+    if (r < 0) return 1;                       /* cannot tell: use it */
+    return r == 0;                             /* nothing pending = idle and open */
+}
+
 static int lumi_take_sock(LumiPeer *p) {
-    if (p->nsocks) return p->socks[--p->nsocks];
+    while (p->nsocks) {
+        int fd = p->socks[--p->nsocks];
+        if (lumi_sock_alive(fd)) return fd;
+        close(fd);                             /* stale: the peer hung up */
+    }
     const char *dial = p->loopback[0] ? p->loopback : p->addr;
     if (p->relay_target[0]) {
         dial = getenv("LUMABRI_TRACKER");
