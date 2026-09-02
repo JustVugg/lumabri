@@ -158,6 +158,10 @@ static struct {
     LmbTrustKeys trust;                    /* old+new keys during rotation */
     RFile *_Atomic fdmap[FD_LIMIT];
     _Atomic uint64_t net_bytes, net_blocks, warm_reads, cas_hits, cas_bytes;
+    /* the dense warm-up: bytes of non-expert tensors, and how many of them
+     * are in the mirror (already there, or fetched by the warm-up thread) */
+    _Atomic uint64_t dense_total, dense_done;
+    _Atomic int dense_state;        /* 0 off · 1 running · 2 ready · 3 failed */
     pthread_once_t once;
 } g = { .cache_lock_fd = -1, .reset_lock_fd = -1, .once = PTHREAD_ONCE_INIT };
 
@@ -829,6 +833,7 @@ static pthread_mutex_t pf_lk = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t pf_cv = PTHREAD_COND_INITIALIZER;
 
 static int ensure_block(RFile *f, uint32_t blk);      /* fwd */
+static int ensure_range(RFile *f, uint64_t off, uint64_t len);   /* fwd */
 
 static void *prefetch_thread(void *arg) {
     (void)arg;
@@ -867,11 +872,131 @@ static void prefetch_after(RFile *f, uint64_t off, uint64_t len) {
 
 /* ---- stats -------------------------------------------------------------- */
 
+/* ---- the dense warm-up ----------------------------------------------------
+ *
+ * A MoE engine loads its dense weights layer by layer, on the first forward:
+ * behind a cold mirror that made the FIRST REPLY a 7 GB download spread over
+ * 43 layers, while "ready" had been printed half an hour earlier. The warm-up
+ * reads every safetensors header, keeps the tensors that are not routed
+ * experts (name without ".experts." — shared_experts stay, they run here),
+ * and pulls their blocks through the ordinary verified path while the engine
+ * boots. The engine's own reads of the same blocks dedup on the in-flight
+ * map, so nothing is fetched twice. Progress is published as bytes so the
+ * chatter can draw a bar with an ETA; "ready" then means ready. */
+static int dense_is_expert(const char *name) {
+    return strstr(name, ".experts.") != NULL;
+}
+
+/* one shard: header → tensor ranges → blocks to have; returns needed blocks */
+static uint32_t dense_plan_file(RFile *f, uint8_t *need) {
+    char cpath[LMB_CACHE_PATH_MAX];
+    if (ensure_range(f, 0, 8) || data_path(cpath, sizeof cpath, f->rel)) return 0;
+    int fd = real_open(cpath, O_RDONLY, 0);
+    if (fd < 0) return 0;
+    uint8_t hdr[8];
+    uint64_t hlen = 0;
+    if (real_pread(fd, hdr, 8, 0) != 8) { real_close(fd); return 0; }
+    for (int i = 7; i >= 0; i--) hlen = (hlen << 8) | hdr[i];
+    if (!hlen || hlen > (64u << 20) || 8 + hlen > f->size) { real_close(fd); return 0; }
+    if (ensure_range(f, 8, hlen)) { real_close(fd); return 0; }
+    char *json = (char *)malloc((size_t)hlen + 1);
+    if (!json) { real_close(fd); return 0; }
+    size_t got = 0;
+    while (got < hlen) {
+        ssize_t r = real_pread(fd, json + got, (size_t)hlen - got, (off_t)(8 + got));
+        if (r <= 0) break;
+        got += (size_t)r;
+    }
+    real_close(fd);
+    if (got != hlen) { free(json); return 0; }
+    json[hlen] = 0;
+    uint32_t needed = 0;
+    for (char *p = strstr(json, "\"data_offsets\""); p; p = strstr(p + 1, "\"data_offsets\"")) {
+        /* the tensor's object starts at the previous '{'; its name is the
+         * quoted key right before it */
+        char *ob = p;
+        while (ob > json && *ob != '{') ob--;
+        char *q2 = ob;
+        while (q2 > json && *q2 != '"') q2--;           /* closing quote of the name */
+        char *q1 = q2 > json ? q2 - 1 : json;
+        while (q1 > json && *q1 != '"') q1--;
+        if (q2 <= q1) continue;
+        char name[256];
+        size_t nl = (size_t)(q2 - q1 - 1);
+        if (nl >= sizeof name) nl = sizeof name - 1;
+        memcpy(name, q1 + 1, nl); name[nl] = 0;
+        if (dense_is_expert(name)) continue;
+        unsigned long long a = 0, b = 0;
+        char *br = strchr(p, '[');
+        if (!br || sscanf(br, "[%llu,%llu]", &a, &b) != 2 || b <= a) continue;
+        uint64_t off = 8 + hlen + a, end = 8 + hlen + b;
+        if (end > f->size) end = f->size;
+        if (off >= end) continue;
+        for (uint32_t blk = (uint32_t)(off / g.block);
+             blk <= (uint32_t)((end - 1) / g.block) && blk < f->nblocks; blk++)
+            if (!need[blk]) { need[blk] = 1; needed++; }
+    }
+    free(json);
+    return needed;
+}
+
+static void *dense_prefetch_thread(void *arg) {
+    (void)arg;
+    uint8_t **plans = (uint8_t **)calloc((size_t)g.nfiles, sizeof *plans);
+    if (!plans) { atomic_store(&g.dense_state, 3); return NULL; }
+    uint64_t total = 0, done = 0;
+    for (int i = 0; i < g.nfiles; i++) {
+        RFile *f = &g.files[i];
+        size_t n = strlen(f->rel);
+        if (n < 12 || strcmp(f->rel + n - 12, ".safetensors")) continue;
+        plans[i] = (uint8_t *)calloc(f->nblocks ? f->nblocks : 1, 1);
+        if (!plans[i]) continue;
+        uint32_t needed = dense_plan_file(f, plans[i]);
+        if (!needed) { free(plans[i]); plans[i] = NULL; continue; }
+        for (uint32_t b = 0; b < f->nblocks; b++)
+            if (plans[i][b]) {
+                uint64_t bytes = (uint64_t)b + 1 == f->nblocks
+                    ? f->size - (uint64_t)b * g.block : g.block;
+                total += bytes;
+                if (f->map[b]) done += bytes;
+            }
+    }
+    atomic_store(&g.dense_total, total);
+    atomic_store(&g.dense_done, done);
+    int failed = 0;
+    for (int i = 0; i < g.nfiles; i++) {
+        if (!plans[i]) continue;
+        RFile *f = &g.files[i];
+        for (uint32_t b = 0; b < f->nblocks; b++) {
+            if (!plans[i][b] || f->map[b]) continue;
+            uint64_t bytes = (uint64_t)b + 1 == f->nblocks
+                ? f->size - (uint64_t)b * g.block : g.block;
+            if (ensure_block(f, b)) { failed = 1; continue; }
+            atomic_fetch_add(&g.dense_done, bytes);
+        }
+        free(plans[i]);
+    }
+    free(plans);
+    atomic_store(&g.dense_state, failed ? 3 : 2);
+    fprintf(stderr, "[lumabri] dense %s: %.0f MB of non-expert weights in the mirror%s\n",
+            failed ? "warm-up incomplete" : "ready",
+            (double)atomic_load(&g.dense_done) / 1e6,
+            failed ? " (some blocks could not be fetched; the engine will retry them)" : "");
+    return NULL;
+}
+
 static void *stats_thread(void *arg) {
     int period = (int)(intptr_t)arg;
-    uint64_t last_bytes = 0, last_cas = 0;
+    uint64_t last_bytes = 0, last_cas = 0, last_dense = 0;
     for (;;) {
         sleep((unsigned)period);
+        if (atomic_load(&g.dense_state) == 1) {
+            uint64_t dt = atomic_load(&g.dense_total), dd = atomic_load(&g.dense_done);
+            fprintf(stderr, "[lumabri] dense %.1f/%.1f MB (%.1f MB/s)\n",
+                    (double)dd / 1e6, (double)dt / 1e6,
+                    (double)(dd > last_dense ? dd - last_dense : 0) / 1e6 / period);
+            last_dense = dd;
+        }
         uint64_t nb = atomic_load(&g.net_bytes);
         uint64_t blk = atomic_load(&g.net_blocks);
         uint64_t warm = atomic_load(&g.warm_reads);
@@ -1240,6 +1365,15 @@ static void shim_init_impl(void) {
         pthread_t t;
         if (pthread_create(&t, NULL, stats_thread, (void *)(intptr_t)atoi(stats)) == 0)
             pthread_detach(t);
+    }
+    /* The chatter asks for the dense warm-up on a swarm-fed model: it needs
+     * peers (or a CAS) to pull from, and it must not run for a local copy. */
+    if (getenv("LUMABRI_PREFETCH_DENSE") && (g.npeers || g.cas_dir[0])) {
+        pthread_t t;
+        atomic_store(&g.dense_state, 1);
+        if (pthread_create(&t, NULL, dense_prefetch_thread, NULL) == 0)
+            pthread_detach(t);
+        else atomic_store(&g.dense_state, 3);
     }
     fprintf(stderr, "[lumabri] %d files · %.1f GB · %.1f%% already local · "
                     "%d peer(s) · block %u MiB · prefetch %d%s\n",
