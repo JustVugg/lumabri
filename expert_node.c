@@ -143,6 +143,17 @@ static struct {
         .stat_lk = PTHREAD_MUTEX_INITIALIZER,
         .identity_lk = PTHREAD_MUTEX_INITIALIZER };
 
+/* Bytes of one expert as this node keeps it: the glue's exact figure when
+ * it has one (fp4 on DeepSeek), otherwise the int8 width the cache uses. */
+static double node_expert_bytes(void) {
+#ifdef LMBE_EXPERT_BYTES
+    return (double)LMBE_EXPERT_BYTES();
+#else
+    return 3.0 * g.inter * g.hidden;
+#endif
+}
+
+
 static LmbConnGate g_conn_gate = LMB_CONN_GATE_INIT;
 static __thread void *t_scratch;
 static __thread int t_scratch_rows;
@@ -1183,10 +1194,7 @@ int main(int argc, char **argv) {
         long reserve_mb = governor_reserve_mb;
         double avail_b = avail_kb > reserve_mb * 1024L
             ? (double)(avail_kb - reserve_mb * 1024L) * 1024.0 : 0.0;
-        double ebytes = 3.0 * g.inter * g.hidden;     /* same width the cache MB uses */
-#ifdef LMBE_EXPERT_BYTES
-        ebytes = (double)LMBE_EXPERT_BYTES();        /* the glue knows its format */
-#endif
+        double ebytes = node_expert_bytes();
         int total = 0;
         for (int l = 0; l < g.n_slots; l++) if (lmbe_routed(l)) total += g.n_experts;
         long n = ebytes > 0 ? (long)(avail_b / ebytes) : total;
@@ -1254,7 +1262,7 @@ int main(int argc, char **argv) {
         g.cs = calloc((size_t)cache, sizeof(CSlot));
         for (int i = 0; i < cache; i++) g.cs[i].gid = -1;
         pthread_cond_init(&g.c_cv, NULL);
-        double mb = (double)cache * (3.0 * g.inter * g.hidden) / 1e6;
+        double mb = (double)cache * node_expert_bytes() / 1e6;
         printf("[%s] holding %d experts on disk · %d-slot RAM cache (%.0f MB) · "
                "hidden=%d inter=%d\n",
                g.name, g.nholds, cache, mb, g.hidden, g.inter);
@@ -1279,14 +1287,13 @@ int main(int argc, char **argv) {
                 lmbe_slot_load(l, e, &h->slot);
                 g.index[gid] = g.nheld++;
             }
-        double mb = (double)g.nheld * (3.0 * g.inter * g.hidden) / 1e6;
+        double mb = (double)g.nheld * node_expert_bytes() / 1e6;
         printf("[%s] holding %d experts (%.0f MB resident) loaded in %.1fs · "
                "hidden=%d inter=%d\n",
                g.name, g.nheld, mb, nowd() - t0, g.hidden, g.inter);
     }
     if (g.resident_mode) {
-        g.resident_bytes = (uint64_t)((double)g.nholds *
-                           (3.0 * g.inter * g.hidden));
+        g.resident_bytes = (uint64_t)((double)g.nholds * node_expert_bytes());
 #ifdef LMBE_STORE_OWNS_RESIDENCY
         g.resident_bytes = lmbe_resident_bytes();
 #endif
