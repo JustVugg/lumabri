@@ -14,6 +14,7 @@ Changing one payload never permits silently reinterpreting another.
 | Expert stats capability | `ECAP` / 1, `EST1` / 2 | fall back to legacy registration without stats |
 | swarm execution/detail | `SWX1` / 1, detail 2 | omit unavailable telemetry, not compute identity |
 | executor residency (`LMB_ERES` 70/71) | additive op | older node answers `ERR`; chatter treats residency as unknown, no penalty |
+| encoded expert call (`LMB_EXEC2` 72/73, caps word in `ERES_R`) | additive op | a chatter sends `EXEC2` only to a node whose `ERES_R` carries `LMB_CAP_EXEC2`; the tunnel keeps `EXEC`; bf16 only for values that are exactly bf16 |
 
 The model root, engine ID, source/build profile, numeric class, state schema,
 dtype and width are compatibility data rather than decoration. A peer with a

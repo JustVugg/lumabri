@@ -350,7 +350,8 @@ static void cache_release(CSlot *s) {
  * to be all of them at once: an engine that computes nr rows in one call
  * does not produce the same floats as nr calls of one row, and byte identity
  * with the local path is the entire claim of this project. */
-static int exec_compute(LmbMsg *m, float **outp, uint32_t *out_len) {
+static int exec_compute(LmbMsg *m, float **outp, uint32_t *out_len, uint32_t *enc_out) {
+    if (enc_out) *enc_out = LMB_ENC_F32;
     if (!lmb_governor_accepting(&g.governor)) return -2;
     /* Test aid, in the spirit of LUMABRI_RTT_US: a deliberate compute delay
      * lets the relay tests prove concurrency and heartbeat liveness without
@@ -364,6 +365,11 @@ static int exec_compute(LmbMsg *m, float **outp, uint32_t *out_len) {
         return -1;
     }
     lmb_cur_u32(&cur, &nrows);            /* absent in the single-row dialect */
+    uint32_t enc_in = LMB_ENC_F32, hdr = 16;
+    if (m->op == LMB_EXEC2) {
+        if (lmb_cur_u32(&cur, &enc_in) || enc_in > LMB_ENC_BF16) return -1;
+        hdr = 20;
+    }
     /* The cap is not decoration. The size check below used to be computed in
      * 32 bits, so on a model with a large hidden size a caller could pick a
      * row count whose byte length wrapped to something small, match it with a
@@ -378,13 +384,22 @@ static int exec_compute(LmbMsg *m, float **outp, uint32_t *out_len) {
      * projection, so it is not something the chatter can multiply back. The
      * body length says which dialect this is. */
     const float *rw = NULL;
-    if (m->body_len == 16 + (uint64_t)nrows * sizeof(float))
-        rw = (const float *)(m->body + 16);
-    else if (m->body_len != 16) return -1;
+    if (m->body_len == hdr + (uint64_t)nrows * sizeof(float))
+        rw = (const float *)(m->body + hdr);
+    else if (m->body_len != hdr) return -1;
     uint64_t want = (uint64_t)nrows * dim * sizeof(float);
+    uint64_t pay_want = enc_in == LMB_ENC_BF16 ? want / 2 : want;
     if (!expert_index_ok(layer, eid) || dim != (uint32_t)g.hidden ||
-        want > LMB_MAX_PAY || m->pay_len != want) {
+        want > LMB_MAX_PAY || m->pay_len != pay_want) {
         return -1;
+    }
+    /* bf16 in: widen to the floats the kernel takes; exact by construction */
+    float *x_bf16 = NULL;
+    const float *x = (const float *)m->pay;
+    if (enc_in == LMB_ENC_BF16) {
+        x_bf16 = node_falloc((size_t)nrows * dim);
+        lmb_bf16_unpack(x_bf16, (const uint16_t *)m->pay, (size_t)nrows * dim);
+        x = x_bf16;
     }
     size_t gid = (size_t)layer * (size_t)g.n_experts + eid;
     if (!g.holds[gid]) return -1;
@@ -420,15 +435,24 @@ static int exec_compute(LmbMsg *m, float **outp, uint32_t *out_len) {
     float *out = node_falloc((size_t)nrows * g.hidden);
     double t0 = nowd();
     if (cs) {
-        lmbe_apply(&cs->slot, (int)layer, (const float *)m->pay, out, (int)nrows, rw, t_scratch);
+        lmbe_apply(&cs->slot, (int)layer, x, out, (int)nrows, rw, t_scratch);
         cache_release(cs);
     } else {
         lmbe_apply(&g.held[g.index[gid]].slot, (int)layer,
-                   (const float *)m->pay, out, (int)nrows, rw, t_scratch);
+                   x, out, (int)nrows, rw, t_scratch);
     }
     double dt = nowd() - t0;
     gate_leave();
+    free(x_bf16);
     maybe_corrupt_out(out);
+    /* bf16 out when every value already is one: half the bytes down, same
+     * numbers. The chatter asked with EXEC2, so it can read either. */
+    if (enc_out && m->op == LMB_EXEC2 &&
+        lmb_bf16_exact(out, (size_t)nrows * g.hidden)) {
+        lmb_bf16_pack((uint16_t *)out, out, (size_t)nrows * g.hidden);
+        obytes = want / 2;
+        *enc_out = LMB_ENC_BF16;
+    }
     { const char *slow = getenv("LUMABRI_EXEC_DELAY_MS");
       if (slow && atoi(slow) > 0) usleep((useconds_t)atoi(slow) * 1000u); }
     lmb_emu_delay();   /* the reply's flight time, when one is being emulated */
@@ -440,14 +464,19 @@ static int exec_compute(LmbMsg *m, float **outp, uint32_t *out_len) {
 }
 
 static int handle_exec(int fd, LmbMsg *m) {
-    float *out = NULL; uint32_t out_len = 0;
-    int status = exec_compute(m, &out, &out_len);
+    float *out = NULL; uint32_t out_len = 0, enc = LMB_ENC_F32;
+    int status = exec_compute(m, &out, &out_len, m->op == LMB_EXEC2 ? &enc : NULL);
     if (status) {
         send_err(fd, status == -2 ? "executor draining under machine pressure" :
                                     "bad exec request or expert not held");
         return -1;
     }
-    int rc = lmb_send(fd, LMB_EXEC_R, NULL, 0, out, out_len);
+    int rc;
+    if (m->op == LMB_EXEC2) {
+        uint8_t body[4]; lmb_put32(body, enc);
+        rc = lmb_send(fd, LMB_EXEC2_R, body, 4, out, out_len);
+    } else
+        rc = lmb_send(fd, LMB_EXEC_R, NULL, 0, out, out_len);
     free(out);
     return rc;
 }
@@ -476,7 +505,7 @@ static int handle_rexec_fwd(int fd, LmbMsg *m) {
                      .body_len = m->body_len - 4,
                      .pay = m->pay, .pay_len = m->pay_len };
     float *out = NULL; uint32_t out_len = 0;
-    int ok = exec_compute(&inner, &out, &out_len) == 0;
+    int ok = exec_compute(&inner, &out, &out_len, NULL) == 0;
     if (getenv("LUMABRI_RELAY_TRACE"))
         fprintf(stderr, "[%s] relay exec id=%u %s out=%u\n",
                 g.name, id, ok ? "ok" : "refused", out_len);
@@ -576,6 +605,7 @@ static int handle_eres(int fd) {
     LmbBuf b = {0};
     lmb_buf_u32(&b, g.resident_flags);
     lmb_buf_u32(&b, atomic_load(&g.resident_state));
+    lmb_buf_u32(&b, LMB_CAP_EXEC2);           /* what this node speaks beyond EXEC */
     int rc = lmb_send(fd, LMB_ERES_R, b.p, (uint32_t)b.len, NULL, 0);
     free(b.p);
     return rc;
@@ -630,7 +660,8 @@ static void *conn_thread(void *arg) {
             } else { send_err(fd, "bad token"); rc = -1; }
             break;
         }
-        case LMB_EXEC:      rc = handle_exec(fd, &m); break;
+        case LMB_EXEC:
+        case LMB_EXEC2:     rc = handle_exec(fd, &m); break;
         case LMB_EMANIFEST: rc = handle_emanifest(fd); break;
         case LMB_ERES: rc = handle_eres(fd); break;
         default:            send_err(fd, "unknown op"); rc = -1; break;

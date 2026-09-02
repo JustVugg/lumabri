@@ -19,7 +19,7 @@ endif
 # regressions would make this gate depend on whichever checkout ENGINE names.
 check-warnings:
 	$(MAKE) -B all test_relay_exec test_swarm_fed test_key_rotation \
-		test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 \
+		test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 test_exec2 \
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
 		test_meminfo test_compute_lease test_content_filter \
 		test_scheduler test_run_gate \
@@ -386,6 +386,9 @@ test_key_rotation: test_key_rotation.c lumabri_sign.h
 test_hedge: test_hedge.c lumabri_client.h lumabri_proto.h lumabri_sign.h $(SECURE_DEPS)
 	$(CC) $(CFLAGS) -pthread test_hedge.c -o $@
 
+test_exec2: test_exec2.c lumabri_proto.h $(SECURE_DEPS)
+	$(CC) $(CFLAGS) -pthread test_exec2.c -o $@ -lm
+
 test_local_fallback: test_local_fallback.c lumabri_client.h lumabri_proto.h lumabri_sign.h $(SECURE_DEPS)
 	$(CC) $(CFLAGS) -pthread test_local_fallback.c -o $@
 
@@ -599,6 +602,7 @@ test: all test_key_rotation test_hedge test_local_fallback test_nat_adopt test_v
 	bash ./hot_cache_integrity_test.sh
 	bash ./role_test.sh
 	bash ./serve_failfast_test.sh
+	bash ./exec2_test.sh
 	bash ./security_test.sh
 	bash ./expert_input_test.sh
 	bash ./prefetch_policy_test.sh

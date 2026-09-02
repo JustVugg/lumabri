@@ -353,8 +353,13 @@ ranges concurrently. Lumabri deliberately does not fuse rows from unrelated
 sessions: current Colibri adapters own opaque per-session state and can round a
 cross-session batch differently. Calling that continuous batching before an
 engine-neutral multi-session batch ABI exists would break the token oracle.
-A replica that holds the expert in RAM is always preferred to one that
-streams it from disk, whatever their RTTs: the origin's `--exec-cache`
+An activation crosses the wire as bf16 when every one of its values already
+is a bf16 (DeepSeek V4 rounds its MoE input and every expert's output to
+bf16, so always there; other engines whenever it happens), and an executor
+answers in bf16 the same way: half the bytes in each direction on the uplink
+that sets a home chatter's tok/s, with the arithmetic untouched, because a
+value is never rounded to fit. A replica that holds the expert in RAM is
+always preferred to one that streams it from disk, whatever their RTTs: the origin's `--exec-cache`
 executor is the last resort, so a donor that loaded an expert receives its
 calls the moment it is visible. When two donors hold the *same* expert, the
 chatter spreads the load between them by default (set `LUMABRI_SPREAD=0`
