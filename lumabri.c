@@ -1477,7 +1477,13 @@ static void render_experts(const char *tracker) {
 /* distinct model names on the swarm; returns count */
 static int swarm_models(const char *tracker, char names[][64], int cap) {
     SwarmRow rows[64];
-    int n = swarm_stats(tracker, rows, 64, NULL, 0, NULL), out = 0;
+    /* One lost packet at startup used to print "no swarm" and exit while
+     * the tracker was answering everyone else. Ask a few times first. */
+    int n = -1, out = 0;
+    for (int attempt = 0; attempt < 4 && n < 0; attempt++) {
+        if (attempt) sleep(1);
+        n = swarm_stats(tracker, rows, 64, NULL, 0, NULL);
+    }
     if (n < 0) return 0;
     for (int i = 0; i < n; i++) {
         int seen = 0;
