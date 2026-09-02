@@ -146,6 +146,25 @@ static int lmbe_resident_prepare(const uint8_t *holds, int layers,
 
 static uint64_t lmbe_resident_bytes(void) { return lmbe_resident_nbytes; }
 
+/* Warm one expert into the store's RAM cache (its own LRU, pins included)
+ * so the compute gate is never held across a disk read. A miss here is
+ * not fatal: apply will look it up again and report the real error. */
+static void lmbe_touch(int layer, int eid) {
+    ColiExpertView view = {0};
+    if (!lmbe_store) return;
+    if (coli_expert_lookup(lmbe_store, (ColiExpertKey){layer, eid}, &view)) return;
+    coli_expert_release(lmbe_store, &view);
+}
+
+/* fp4 expert: three moe_intermediate × hidden matrices at half a byte plus
+ * block scales; the same figure lmbe_open budgets with. */
+static uint64_t lmbe_expert_bytes(void) {
+    uint64_t per_expert = (uint64_t)lmbe_cfg.moe_intermediate_size *
+                          (uint64_t)lmbe_cfg.hidden_size * 3 / 2;
+    return per_expert + per_expert / 5;
+}
+#define LMBE_EXPERT_BYTES lmbe_expert_bytes
+
 static int lmbe_n_slots(void)   { return lmbe_cfg.num_hidden_layers; }
 static int lmbe_n_experts(void) { return lmbe_cfg.n_routed_experts; }
 static int lmbe_hidden(void)    { return lmbe_cfg.hidden_size; }

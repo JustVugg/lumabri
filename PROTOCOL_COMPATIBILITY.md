@@ -13,6 +13,7 @@ Changing one payload never permits silently reinterpreting another.
 | Segment assignment | `GSA1` / 2 | release/retry assignment, never guess a range |
 | Expert stats capability | `ECAP` / 1, `EST1` / 2 | fall back to legacy registration without stats |
 | swarm execution/detail | `SWX1` / 1, detail 2 | omit unavailable telemetry, not compute identity |
+| executor residency (`LMB_ERES` 70/71) | additive op | older node answers `ERR`; chatter treats residency as unknown, no penalty |
 
 The model root, engine ID, source/build profile, numeric class, state schema,
 dtype and width are compatibility data rather than decoration. A peer with a

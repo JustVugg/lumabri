@@ -273,6 +273,12 @@ enum {
      * the same way. */
     LMB_TEXEC = 66,
     LMB_TMAN = 67, LMB_TMAN_FWD = 68, LMB_TMAN_R = 69,
+    /* Where an executor's experts live. ERES_R body: u32 resident_flags
+     * (LMB_EXPERT_RESIDENT_RAM / LMB_EXPERT_DISK_FALLBACK), u32 state. A
+     * chatter asks once after the manifest; an older node answers ERR and is
+     * simply treated as "unknown". Additive: the manifest itself is
+     * unchanged, so old chatters keep admitting new nodes. */
+    LMB_ERES = 70, LMB_ERES_R = 71,
 };
 
 /* REGISTER body: str name, str addr, str model, u64 held_bytes,

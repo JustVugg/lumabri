@@ -69,6 +69,10 @@ typedef struct {
     LmbLatencyPredictor latency;
     uint32_t inflight;
     uint64_t exec_observations, exec_observations_at_probe;
+    /* 1: its experts are resident in RAM; 0: it streams them from disk (the
+     * origin's --cache executor); -1: not known (older node, or reached only
+     * through the tracker tunnel). Only a known disk replica is penalized. */
+    int resident;
 } LumiPeer;
 
 static struct {
@@ -508,8 +512,25 @@ static int lumi_add_peer(const char *addr) {
     }
     lmb_predict_observe(&p->latency, (uint64_t)p->rtt_us);
     p->exec_observations_at_probe = p->exec_observations;
-    fprintf(stderr, "[lumabri] peer %s: %u experts (%d first-holder) · rtt %.2f ms\n",
-            p->addr, n, claimed, (double)p->rtt_us / 1000.0);
+    /* RAM or disk? Asked once, directly (a tunnel-only peer stays unknown,
+     * and a donor behind NAT is a resident donor in practice). */
+    p->resident = -1;
+    if (!p->relay_target[0]) {
+        LmbMsg rm = {0};
+        const char *dial = p->loopback[0] ? p->loopback : p->addr;
+        if (!lmb_request(dial, LMB_ERES, NULL, 0, &rm) && rm.op == LMB_ERES_R) {
+            LmbCur rc = { rm.body, rm.body_len, 0 };
+            uint32_t flags = 0;
+            if (!lmb_cur_u32(&rc, &flags))
+                p->resident = (flags & LMB_EXPERT_DISK_FALLBACK) ? 0 : 1;
+        }
+        lmb_msg_free(&rm);
+    }
+    fprintf(stderr, "[lumabri] peer %s: %u experts (%d first-holder) · rtt %.2f ms · %s\n",
+            p->addr, n, claimed, (double)p->rtt_us / 1000.0,
+            p->resident == 1 ? "experts in RAM" :
+            p->resident == 0 ? "experts streamed from disk (last resort)" :
+                               "residency unknown");
     if (reprobe < 0) L.npeers++;
     return 0;
 }
@@ -825,6 +846,22 @@ static uint32_t lumi_hash_gid(int gid) {   /* fnv1a over the (layer,expert) id *
  * whenever the band has one member, nothing is near-equal, or the best is still
  * unprobed (LONG_MAX), which also keeps the percentage arithmetic from
  * overflowing. Never returns a dead, tried, or absent replica. */
+/* A replica that streams its experts from disk costs a disk read per call
+ * that no RTT estimate sees until it has happened, and it is usually the
+ * origin: the one machine with the lowest RTT and the least spare RAM. Rank
+ * it behind every replica that holds the expert in RAM, however far; this
+ * is what makes a joining donor actually receive the calls for the experts
+ * it loaded. The penalty is a score offset in microseconds, so an unusable
+ * RAM replica (dead, circuit open) still loses to a live disk one. */
+#define LUMI_DISK_PENALTY_US 250000u
+
+static uint64_t lumi_replica_score(const LumiPeer *p) {
+    uint64_t score = lmb_predict_score(&p->latency, p->inflight);
+    if (p->resident == 0 && score < UINT64_MAX - LUMI_DISK_PENALTY_US)
+        score += LUMI_DISK_PENALTY_US;
+    return score;
+}
+
 static int lumi_pick(int gid, uint32_t tried) {
     const int *own = &L.own[(size_t)gid * LUMI_MAX_REP];
     int best = -1;
@@ -834,8 +871,7 @@ static int lumi_pick(int gid, uint32_t tried) {
         int pi = own[r];
         if (pi < 0 || ((tried >> r) & 1) || L.peers[pi].dead ||
             !lmb_predict_available(&L.peers[pi].latency, now)) continue;
-        uint64_t score = lmb_predict_score(&L.peers[pi].latency,
-                                            L.peers[pi].inflight);
+        uint64_t score = lumi_replica_score(&L.peers[pi]);
         if (best < 0 || score < best_score)
             { best = r; best_score = score; }
     }
@@ -847,8 +883,7 @@ static int lumi_pick(int gid, uint32_t tried) {
         int pi = own[r];
         if (pi < 0 || ((tried >> r) & 1) || L.peers[pi].dead ||
             !lmb_predict_available(&L.peers[pi].latency, now)) continue;
-        uint64_t score = lmb_predict_score(&L.peers[pi].latency,
-                                            L.peers[pi].inflight);
+        uint64_t score = lumi_replica_score(&L.peers[pi]);
         if (score <= band) cand[nc++] = r;
     }
     if (nc <= 1) return best;

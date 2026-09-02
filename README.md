@@ -60,7 +60,9 @@ tracker-assigned Segment slice when enough spare RAM is available. It publishes
 direct P2P when reachable and otherwise uses the signed outbound Segment relay;
 the finer-grained expert donor remains the lower-memory fallback.
 Both run at low priority and die with the TUI. Nothing to configure — Enter
-picks "just chat".
+picks what this machine can afford: with at least 2 GB of RAM free beyond
+the system reserve it chats **and** donates compute, otherwise it just
+chats. The menu says which before you press it; `1` always means chat only.
 
 `lumabri machine` shows the quick startup profile used for donation: CPU
 model/ISA, physical and logical cores, NUMA, RAM/swap, visible GPU/VRAM, disk,
@@ -221,9 +223,11 @@ the engines your colibri checkout actually has.
 
 The Segment path keeps whole contiguous layer ranges and their sequence state
 resident on peers, reducing the network boundary from one request per
-layer/expert to one request per segment. It is the preferred path of ordinary
-`lumabri chat` when the matching Colibri ABI and a complete compatible route
-exist. GLM, Inkling, Kimi K3, OLMoE, Qwen3.6 and DeepSeek V4 are all release
+layer/expert to one request per segment. Ordinary `lumabri chat` uses it only
+when nobody in the swarm executes experts for the model (or under
+`LUMABRI_SEGMENT_REQUIRED=1`): the expert swarm is the primary data plane,
+because a machine that donates a few hundred resident experts speeds it up,
+while it cannot help a Segment chain at all. GLM, Inkling, Kimi K3, OLMoE, Qwen3.6 and DeepSeek V4 are all release
 gates; OLMoE is not a special-case definition of complete. Build details,
 relay/failover semantics and the remaining operational boundaries are in
 **[SEGMENT_DIRECT.md](SEGMENT_DIRECT.md)**.
@@ -334,8 +338,12 @@ ranges concurrently. Lumabri deliberately does not fuse rows from unrelated
 sessions: current Colibri adapters own opaque per-session state and can round a
 cross-session batch differently. Calling that continuous batching before an
 engine-neutral multi-session batch ABI exists would break the token oracle.
-When two donors hold the *same* expert, the chatter spreads the load between
-them by default (set `LUMABRI_SPREAD=0` for strict nearest-replica routing).
+A replica that holds the expert in RAM is always preferred to one that
+streams it from disk, whatever their RTTs: the origin's `--exec-cache`
+executor is the last resort, so a donor that loaded an expert receives its
+calls the moment it is visible. When two donors hold the *same* expert, the
+chatter spreads the load between them by default (set `LUMABRI_SPREAD=0`
+for strict nearest-replica routing).
 Neither donor needs to know the others exist. Expert requests can fail over to another replica. Stateful
 Segment sessions with compatible replicas checkpoint at turn boundaries; on
 failure the gateway restores an exact-range replica, replays tokens after the

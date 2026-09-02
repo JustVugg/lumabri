@@ -319,6 +319,14 @@ static int exec_compute(LmbMsg *m, float **outp, uint32_t *out_len) {
      * Keep it visible through configured response delays as those calls still
      * consume end-to-end executor capacity from the chatter's perspective. */
     atomic_fetch_add(&g.in_flight, 1);
+    /* Bring the weights in BEFORE taking the compute gate: a cold expert is a
+     * disk read of tens of milliseconds, and holding the gate across it
+     * turned every cache miss into a stall for every other chatter. The gate
+     * protects the cores, not the SSD. */
+    CSlot *cs = g.ncs ? cache_acquire((int)layer, (int)eid) : NULL;
+#ifdef LMBE_STORE_OWNS_RESIDENCY
+    lmbe_touch((int)layer, (int)eid);
+#endif
     gate_enter();
 
     /* one scratch per connection thread: the kernels are called concurrently */
@@ -331,10 +339,9 @@ static int exec_compute(LmbMsg *m, float **outp, uint32_t *out_len) {
     size_t obytes = (size_t)want;
     float *out = node_falloc((size_t)nrows * g.hidden);
     double t0 = nowd();
-    if (g.ncs) {
-        CSlot *s = cache_acquire((int)layer, (int)eid);
-        lmbe_apply(&s->slot, (int)layer, (const float *)m->pay, out, (int)nrows, rw, t_scratch);
-        cache_release(s);
+    if (cs) {
+        lmbe_apply(&cs->slot, (int)layer, (const float *)m->pay, out, (int)nrows, rw, t_scratch);
+        cache_release(cs);
     } else {
         lmbe_apply(&g.held[g.index[gid]].slot, (int)layer,
                    (const float *)m->pay, out, (int)nrows, rw, t_scratch);
@@ -485,6 +492,15 @@ static void manifest_build(LmbBuf *b) {
     lmb_buf_u32(b, (uint32_t)g.hidden);
 }
 
+static int handle_eres(int fd) {
+    LmbBuf b = {0};
+    lmb_buf_u32(&b, g.resident_flags);
+    lmb_buf_u32(&b, atomic_load(&g.resident_state));
+    int rc = lmb_send(fd, LMB_ERES_R, b.p, (uint32_t)b.len, NULL, 0);
+    free(b.p);
+    return rc;
+}
+
 static int handle_emanifest(int fd) {
     LmbBuf b = {0};
     manifest_build(&b);
@@ -520,6 +536,7 @@ static void *conn_thread(void *arg) {
         }
         case LMB_EXEC:      rc = handle_exec(fd, &m); break;
         case LMB_EMANIFEST: rc = handle_emanifest(fd); break;
+        case LMB_ERES: rc = handle_eres(fd); break;
         default:            send_err(fd, "unknown op"); rc = -1; break;
         }
         lmb_msg_free(&m);
@@ -1024,6 +1041,21 @@ int main(int argc, char **argv) {
         fprintf(stderr, "[OMP] lumabri: %d physical-core threads instead of %d logical\n",
                 runtime_phys, logical);
     }
+    /* One expert call is one small matmul (a 12 MB fp4 expert on DeepSeek,
+     * a few MB elsewhere); a full-machine OpenMP team spends more time
+     * forking than multiplying, and the admission gate then admits exactly
+     * ONE expert at a time: 258 serialized calls per DeepSeek token, and two
+     * chatters queued behind each other. A small team per call lets several
+     * experts run at once, which is what a layer's top-k arrive as. The
+     * operator's explicit OMP_NUM_THREADS or --parallel still wins. */
+    if (!getenv("OMP_NUM_THREADS") && !getenv("COLI_NO_OMP_TUNE") &&
+        parallel <= 0 && runtime_phys >= 4) {
+        int team = runtime_phys >= 16 ? 4 : 2;
+        omp_set_num_threads(team);
+        fprintf(stderr, "[OMP] lumabri: %d-thread team per expert, %d experts "
+                        "at a time on %d physical cores\n",
+                team, runtime_phys / team, runtime_phys);
+    }
     if (resident && cache > 0) {
         fprintf(stderr, "--resident and --cache are mutually exclusive\n");
         return 2;
@@ -1058,6 +1090,9 @@ int main(int argc, char **argv) {
         double avail_b = avail_kb > reserve_mb * 1024L
             ? (double)(avail_kb - reserve_mb * 1024L) * 1024.0 : 0.0;
         double ebytes = 3.0 * g.inter * g.hidden;     /* same width the cache MB uses */
+#ifdef LMBE_EXPERT_BYTES
+        ebytes = (double)LMBE_EXPERT_BYTES();        /* the glue knows its format */
+#endif
         int total = 0;
         for (int l = 0; l < g.n_slots; l++) if (lmbe_routed(l)) total += g.n_experts;
         long n = ebytes > 0 ? (long)(avail_b / ebytes) : total;
