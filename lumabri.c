@@ -2488,12 +2488,18 @@ static int sr_take(SReader *s, size_t n, int emit, Cap *cap) {   /* copy/discard
  * dashboard lines (EMAP/TIERS/…) and ACCEPT are skipped. On success returns 0
  * with the STAT tail in statline and, if captured != NULL, the assistant text
  * malloc'd into *captured (for the conversation history). -1 if the engine died. */
+/* When the first token of the current reply arrived: everything before it
+ * is prefill (the prompt crossing the layers), everything after is decode.
+ * One number for both hid a 60 s prefill inside "0.2 tok/s". */
+static volatile double g_first_token_at;
+
 static int stream_serve2(Engine *e, char *statline, size_t scap, char **captured) {
     SReader s = { e->from, {0}, 0, 0 };
     char line[600];
     Cap cap = {0};
     if (statline && scap) statline[0] = 0;
     if (captured) *captured = NULL;
+    g_first_token_at = 0;
     for (;;) {
         if (sr_line(&s, line, sizeof line) < 0) { free(cap.p); return -1; }
         if (!strncmp(line, "DATA ", 5)) {
@@ -2501,6 +2507,7 @@ static int stream_serve2(Engine *e, char *statline, size_t scap, char **captured
                                                 "expert/engine");
             char *sp = strchr(line + 5, ' ');            /* DATA <id> <bytes> */
             size_t n = sp ? strtoull(sp + 1, NULL, 10) : 0;
+            if (n && g_first_token_at == 0) g_first_token_at = nowd();
             if (sr_take(&s, n, 1, captured ? &cap : NULL) < 0) { free(cap.p); return -1; }
             if (sr_take(&s, 1, 0, NULL) < 0) { free(cap.p); return -1; } /* frame '\n' */
         } else if (!strncmp(line, "DONE ", 5)) {
@@ -4496,8 +4503,17 @@ static int cmd_chat(int argc, char **argv) {
         int ntok = 0;
         int nstat = sscanf(stat, "STAT %d %lf %lf %lf", &ntok, &tps, &hit, &rss);
         double dmb = g_eng.net_mb - m0;
-        printf("%s  %.1fs", C_DIM, nowd() - r0);
-        if (nstat >= 2 && tps > 0) printf(" · %.1f tok/s", tps);
+        double end = nowd(), first = g_first_token_at;
+        if (first > r0 && ntok > 0 && end > first) {
+            /* prefill and decode are two different costs: the prompt crossing
+             * every layer once, then one network round per layer per token */
+            double decode_s = end - first;
+            printf("%s  prefill %.1fs · decode %d token in %.1fs · %.2f tok/s",
+                   C_DIM, first - r0, ntok, decode_s, (double)ntok / decode_s);
+        } else {
+            printf("%s  %.1fs", C_DIM, end - r0);
+            if (nstat >= 2 && tps > 0) printf(" · %.1f tok/s", tps);
+        }
         if (nstat >= 4 && rss > 0) printf(" · %.1f GB residenti", rss);
         if (local_dir)    printf(" · disco locale");
         else if (dmb > 0.5) printf(" · %.0f MB dallo sciame · mirror %.0f MB", dmb, g_eng.net_mb);
