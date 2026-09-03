@@ -2728,6 +2728,16 @@ static int engine_spawn(const char *engine, const char *shim, const char *tracke
         /* and pull the dense weights NOW, with a bar, instead of letting the
          * first reply discover them layer by layer over the WAN */
         if (!local_dir) setenv("LUMABRI_PREFETCH_DENSE", "1", 0);
+        /* Speculative decoding on a swarm-fed DeepSeek chat: every token is
+         * 43 network rounds, and the only way to amortize them without
+         * moving state off this machine is to verify several candidate
+         * tokens per round. Colibri's V4 n-gram drafter proposes up to
+         * V4_DRAFT tokens from the context and the full model verifies them
+         * in one batched pass (greedy: the tokens are exactly those of the
+         * one-by-one path). The batched MoE rows travel as one multi-row
+         * call per expert, which the client already speaks. An explicit
+         * V4_DRAFT (0 to turn it off) still wins. */
+        if (!local_dir && strstr(engine, "deepseek")) setenv("V4_DRAFT", "8", 0);
         /* Same split for the expert cache. A swarm chatter caches almost nothing
          * (experts run on peers), so its cap stays at the small default. But a
          * --local run holds its own experts, and there the cap IS the resident
