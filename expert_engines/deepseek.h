@@ -216,15 +216,32 @@ static void lmbe_apply(const LmbeSlot *s, int slot, const float *x, float *out,
         lmbe_apply_failed = 1;
         return;
     }
-    for (int r = 0; r < nrows; r++)
-        if (coli_v4_expert_forward_ref(out + (size_t)r * d, &view,
-                                       x + (size_t)r * d, w[r],
-                                       lmbe_cfg.swiglu_limit)) {
-            coli_expert_release(lmbe_store, &view);
-            fprintf(stderr, "[lumabri] expert forward failed at layer %d expert %d\n",
-                    slot, s->eid);
-            exit(1);
-        }
+    /* All the rows of one call in one pass: the batch kernel streams each
+     * expert matrix once for every row, where the per-row loop re-read the
+     * 12.6 MB expert for each of them — a layer round with 8 rows cost 7.6×
+     * one with 1 (measured with swarm_rows_bench), so a 64-row prefill call
+     * cost 64 expert reads. It is the kernel the engine itself uses for its
+     * batched prefill (count > 1 → batch_ref), with the same numerical
+     * contract; hot rows16 experts fall back to the scalar path inside it. */
+    int failed = 0;
+    for (int at = 0; at < nrows && !failed; at += 128) {
+        int n = nrows - at < 128 ? nrows - at : 128;
+        if (n == 1)
+            failed = coli_v4_expert_forward_ref(out + (size_t)at * d, &view,
+                                                x + (size_t)at * d, w[at],
+                                                lmbe_cfg.swiglu_limit);
+        else
+            failed = coli_v4_expert_forward_batch_ref(out + (size_t)at * d, &view,
+                                                      x + (size_t)at * d, w + at,
+                                                      n, lmbe_cfg.swiglu_limit);
+    }
+    if (failed) {
+        coli_expert_release(lmbe_store, &view);
+        fprintf(stderr, "[lumabri] expert forward failed at layer %d expert %d: "
+                        "refusing this call\n", slot, s->eid);
+        lmbe_apply_failed = 1;              /* ERR to the chatter, not exit */
+        return;
+    }
     coli_expert_release(lmbe_store, &view);
 }
 
