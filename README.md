@@ -160,6 +160,10 @@ samples show a real p95 tail. `LUMABRI_HEDGE_MS` remains an explicit
 override: a positive value is the fixed delay, and `-1` turns hedging off.
 These are online estimates, not a speed claim: `swarm_bench.py` on distinct
 hosts remains the authority for single-chat and aggregate throughput.
+`swarm_rows_bench ADDR LAYER HIDDEN` asks one executor what a layer round
+costs with 1, 2, 4, 8 and 16 rows per expert (six experts in parallel, bf16
+when the node speaks it): the price of verifying B speculative tokens per
+round on that network, before anyone writes a drafter.
 
 The TUI's temperature and top-p are applied to logits returned by Colibri Edge;
 temperature zero retains the exact greedy selector. When a compatible replica
