@@ -223,17 +223,30 @@ static void lmbe_apply(const LmbeSlot *s, int slot, const float *x, float *out,
      * cost 64 expert reads. It is the kernel the engine itself uses for its
      * batched prefill (count > 1 → batch_ref), with the same numerical
      * contract; hot rows16 experts fall back to the scalar path inside it. */
+    /* Measured on the origin (swarm_rows_bench, ms per layer round): the
+     * scalar kernel is ~15 ms per row and parallel inside; the batch kernel
+     * is a reference implementation with ~50 ms of fixed cost that pays off
+     * between 4 and 8 rows (8 rows: 113 → 65 ms) and degrades past 8
+     * (16 rows: 300 ms). So: rows one by one below four, the batch kernel in
+     * blocks of eight from four on. */
     int failed = 0;
-    for (int at = 0; at < nrows && !failed; at += 128) {
-        int n = nrows - at < 128 ? nrows - at : 128;
-        if (n == 1)
-            failed = coli_v4_expert_forward_ref(out + (size_t)at * d, &view,
-                                                x + (size_t)at * d, w[at],
+    if (nrows < 4) {
+        for (int r = 0; r < nrows && !failed; r++)
+            failed = coli_v4_expert_forward_ref(out + (size_t)r * d, &view,
+                                                x + (size_t)r * d, w[r],
                                                 lmbe_cfg.swiglu_limit);
-        else
-            failed = coli_v4_expert_forward_batch_ref(out + (size_t)at * d, &view,
-                                                      x + (size_t)at * d, w + at,
-                                                      n, lmbe_cfg.swiglu_limit);
+    } else {
+        for (int at = 0; at < nrows && !failed; at += 8) {
+            int n = nrows - at < 8 ? nrows - at : 8;
+            if (n == 1)
+                failed = coli_v4_expert_forward_ref(out + (size_t)at * d, &view,
+                                                    x + (size_t)at * d, w[at],
+                                                    lmbe_cfg.swiglu_limit);
+            else
+                failed = coli_v4_expert_forward_batch_ref(out + (size_t)at * d, &view,
+                                                          x + (size_t)at * d, w + at,
+                                                          n, lmbe_cfg.swiglu_limit);
+        }
     }
     if (failed) {
         coli_expert_release(lmbe_store, &view);
