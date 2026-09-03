@@ -352,7 +352,13 @@ static void cache_release(CSlot *s) {
  * with the local path is the entire claim of this project. */
 static int exec_compute(LmbMsg *m, float **outp, uint32_t *out_len, uint32_t *enc_out) {
     if (enc_out) *enc_out = LMB_ENC_F32;
-    if (!lmb_governor_accepting(&g.governor)) return -2;
+    /* PRESSURE means "stop growing", not "stop serving": this process's
+     * experts are already in RAM, bounded by the store budget, and refusing
+     * a call frees nothing — it only stalls every chatter for the patience
+     * window. The origin executor did exactly that when the chat engine
+     * next to it grew and MemAvailable touched the reserve. Only the
+     * critical floor (PAUSED: below half the reserve) refuses. */
+    if (lmb_governor_state(&g.governor) == LMB_GOV_PAUSED) return -2;
     /* Test aid, in the spirit of LUMABRI_RTT_US: a deliberate compute delay
      * lets the relay tests prove concurrency and heartbeat liveness without
      * needing a model slow enough to exhibit them. */

@@ -75,6 +75,24 @@ def main():
          '\n'
          '    int key_count = 0;'),
     ]
+    # site 4 — the resource planner: a swarm-fed chatter (LUMABRI_VROOT) never
+    # executes a routed expert locally, so its expert cache stays at the
+    # top-k floor instead of growing into every free byte. On the origin host
+    # that cache reached ~15 GB next to a 27 GB executor and pushed the
+    # machine under its reserve; dense and head residency are untouched.
+    hooks.append((
+        '    int slots = (int)(cache_limit / per_slot);\n'
+        '    if (slots > plan.slots_per_layer) slots = plan.slots_per_layer;\n'
+        '    if (slots < options->experts_per_layer && slots < 6) slots = 6;\n',
+        '    int slots = (int)(cache_limit / per_slot);\n'
+        '    if (slots > plan.slots_per_layer) slots = plan.slots_per_layer;\n'
+        '    if (slots < options->experts_per_layer && slots < 6) slots = 6;\n'
+        '#ifdef LUMABRI_P2P\n'
+        '    if (getenv("LUMABRI_VROOT")) {\n'
+        '        int floor = options->experts_per_layer < 6 ? options->experts_per_layer : 6;\n'
+        '        if (slots > floor) slots = floor;   /* swarm-fed: experts run on peers */\n'
+        '    }\n'
+        '#endif\n'))
     for anchor, repl in hooks:
         if s.count(anchor) != 1:
             sys.exit("deepseek_v4.c: expert-apply anchor found %d times (want 1) — "
