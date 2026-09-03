@@ -457,6 +457,14 @@ static int exec_compute(LmbMsg *m, float **outp, uint32_t *out_len, uint32_t *en
     double dt = nowd() - t0;
     gate_leave();
     free(x_bf16);
+#ifdef LMBE_APPLY_MAY_FAIL
+    if (lmbe_apply_failed) {
+        lmbe_apply_failed = 0;
+        free(out);
+        atomic_fetch_sub(&g.in_flight, 1);
+        return -1;                          /* ERR to the chatter, not exit */
+    }
+#endif
     maybe_corrupt_out(out);
     /* bf16 out when every value already is one: half the bytes down, same
      * numbers. The chatter asked with EXEC2, so it can read either. */
