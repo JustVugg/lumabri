@@ -396,6 +396,7 @@ the command, e.g. `LUMABRI_SPREAD=1 lumabri chat …`.
 | `LUMABRI_ENCRYPT=1` | encrypt the transport (see below) |
 | `LUMABRI_ENGINE_LOG=path` | append every line the engine prints to this file (the chat otherwise keeps only the tail `/debug` shows) |
 | `LUMABRI_SWARM_PATIENCE_S=N` | on a swarm-fed chat, how long a reply waits for a vanished executor before failing plainly (default 600); it never downloads experts to run them locally |
+| `V4_DRAFT=N` | on a swarm-fed DeepSeek chat, candidate tokens verified per network round (default 8; `0` turns speculation off); tokens are identical to the one-by-one path, only the number of rounds changes |
 | `LUMABRI_EXEC_TIMEOUT_MS=N` | give up on an expert call that has not answered in N ms and fail over (default 120000; the general I/O timeout is five minutes) |
 | `LUMABRI_READ_TIMEOUT_MS=N` | give up on a peer that has not delivered an 8 MiB block in N ms and ask the next one (default 60000; the general I/O timeout is five minutes) |
 | `RAM_GB=N` | tell a `--local` run how much RAM it may use to keep experts resident |
