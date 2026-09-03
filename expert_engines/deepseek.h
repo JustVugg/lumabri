@@ -146,6 +146,11 @@ static int lmbe_resident_prepare(const uint8_t *holds, int layers,
 
 static uint64_t lmbe_resident_bytes(void) { return lmbe_resident_nbytes; }
 
+/* set by lmbe_apply when it could not compute; the node turns it into a
+ * refused call instead of a dead process */
+static __thread int lmbe_apply_failed;
+#define LMBE_APPLY_MAY_FAIL 1
+
 /* Warm one expert into the store's RAM cache (its own LRU, pins included)
  * so the compute gate is never held across a disk read. A miss here is
  * not fatal: apply will look it up again and report the real error. */
@@ -195,10 +200,21 @@ static void lmbe_apply(const LmbeSlot *s, int slot, const float *x, float *out,
     }
     int d = lmbe_cfg.hidden_size;
     ColiExpertView view;
-    if (coli_expert_lookup(lmbe_store,
-                           (ColiExpertKey){slot, s->eid}, &view)) {
-        fprintf(stderr, "[lumabri] cannot lease layer %d expert %d\n", slot, s->eid);
-        exit(1);
+    /* A lease can fail transiently: a prefill burst pins every slot of one
+     * layer for a moment. That used to exit(1) the whole executor — the
+     * origin died mid-reply and every chatter waited for the restart. Wait
+     * a little for a slot, then fail THIS call (the chatter retries on the
+     * next replica or later), never the process. */
+    int leased = 0;
+    for (int attempt = 0; attempt < 40 && !leased; attempt++) {
+        if (!coli_expert_lookup(lmbe_store, (ColiExpertKey){slot, s->eid}, &view)) leased = 1;
+        else usleep(5000);
+    }
+    if (!leased) {
+        fprintf(stderr, "[lumabri] cannot lease layer %d expert %d after 200 ms: "
+                        "refusing this call\n", slot, s->eid);
+        lmbe_apply_failed = 1;
+        return;
     }
     for (int r = 0; r < nrows; r++)
         if (coli_v4_expert_forward_ref(out + (size_t)r * d, &view,
