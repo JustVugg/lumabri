@@ -273,6 +273,13 @@ static void gate_enter(void) {
     /* no one waiting: the round is over, everybody starts equal again */
     if (g_gate_nwait == 0)
         for (int i = 0; i < g_gate_nsrc; i++) g_gate_granted[i] = 0;
+    /* Slots may still be free and others still queued: only the chosen
+     * waiter left the wait, and a broadcast comes only from a leave. Without
+     * this, a burst of six calls was admitted one per completion — the
+     * origin executor served ~120 calls/s with eight slots and 10 ms of
+     * compute, the same with four, and a token cost 43 × 6 × 8 ms. */
+    else if (g_gate_free > 0)
+        pthread_cond_broadcast(&g_gate_cv);
     pthread_mutex_unlock(&g_gate_lk);
 }
 
