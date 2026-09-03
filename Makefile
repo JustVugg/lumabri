@@ -386,6 +386,9 @@ test_key_rotation: test_key_rotation.c lumabri_sign.h
 test_hedge: test_hedge.c lumabri_client.h lumabri_proto.h lumabri_sign.h $(SECURE_DEPS)
 	$(CC) $(CFLAGS) -pthread test_hedge.c -o $@
 
+swarm_rows_bench: swarm_rows_bench.c lumabri_proto.h $(SECURE_DEPS)
+	$(CC) $(CFLAGS) -pthread swarm_rows_bench.c -o $@ -lm
+
 test_exec2: test_exec2.c lumabri_proto.h $(SECURE_DEPS)
 	$(CC) $(CFLAGS) -pthread test_exec2.c -o $@ -lm
 
