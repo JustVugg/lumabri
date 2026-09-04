@@ -624,6 +624,9 @@ test-segment-budget: tracker segment_node segment_budget_probe
 test-multi-session: tracker segment_node segment_chat
 	bash ./multi_session_test.sh
 
+test-segment-coverage: tracker segment_node segment_chat
+	bash ./segment_coverage_test.sh
+
 test-adapters: tracker segment_node segment_chat
 	bash ./adapter_conformance_test.sh
 
