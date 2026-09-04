@@ -610,6 +610,20 @@ test-hedge: test_hedge
 test-segment-v2: test_segment_v2
 	./test_segment_v2
 
+# The Segment gates that need real nodes: slower than `make test`, and the
+# ones that actually answer step 0 of the roadmap.
+test-segment-split: tracker segment_node segment_chat
+	bash ./segment_split_test.sh
+
+test-segment-budget: tracker segment_node segment_budget_probe
+	bash ./segment_budget_test.sh
+
+test-multi-session: tracker segment_node segment_chat
+	bash ./multi_session_test.sh
+
+test-adapters: tracker segment_node segment_chat
+	bash ./adapter_conformance_test.sh
+
 test-segment-discovery: tracker test_segment_discovery
 	bash ./segment_discovery_test.sh
 
@@ -643,6 +657,8 @@ test: all test_key_rotation test_hedge test_local_fallback test_nat_adopt test_v
 	./test_residency_report
 	./test_model_family
 	bash ./model_family_test.sh
+	bash ./catalog_test.sh
+	bash ./hosted_chat_test.sh
 	./test_planner
 	./test_cluster
 	./test_nat_adopt
