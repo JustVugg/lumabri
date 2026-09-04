@@ -938,32 +938,36 @@ static void lumi_round_done(double t0) {
  * hanging tunnel must still lose to a healthy disk replica 25 ms away. The
  * offset is in microseconds of score, so an unusable RAM replica (dead,
  * circuit open) always loses to a live disk one. */
-/* Residency is a PRIOR on the service time, not a sentence: added while this
- * peer has answered fewer than LUMI_PRIOR_CALLS times, and gone once the
- * measurements speak — an EXEC observation already contains the service, so
- * keeping the offset forever would count it twice, and a healthy disk
- * replica next door would lose to a RAM replica behind a hanging tunnel.
- * The three figures are measured: VRAM one to two ms, RAM ten to fifteen,
- * a cold NVMe read forty to fifty. */
-#define LUMI_PRIOR_CALLS 8u
-#define LUMI_SERVICE_VRAM_US  2000u
-#define LUMI_SERVICE_RAM_US  12000u
-#define LUMI_SERVICE_DISK_US 50000u
+/* Where an executor keeps its experts is worth about an order of magnitude
+ * per call: measured, one to two milliseconds from VRAM, ten to fifteen
+ * from RAM, forty to fifty from a cold NVMe read. The RTT probe is a PING
+ * and cannot see any of it, so the tier enters the score as a RELATIVE
+ * offset — VRAM is the zero, RAM and disk are what they cost more.
+ *
+ * Always applied, never faded. A prior that depends on how many calls a
+ * peer has answered penalises exactly the replica nobody has tried yet: in
+ * CI a freshly refreshed peer took sixteen probes and zero calls while the
+ * busy one kept every one of them. Constant, the offset cancels between two
+ * replicas of the same tier — so their measurements decide, as before — and
+ * survives only where the tiers differ, which is the whole point. */
+#define LUMI_TIER_VRAM_US     0u
+#define LUMI_TIER_RAM_US  10000u
+#define LUMI_TIER_DISK_US 48000u
 
-static uint64_t lumi_service_prior(int residency) {
+static uint64_t lumi_tier_offset(int residency) {
     switch (residency) {
-    case 2:  return LUMI_SERVICE_VRAM_US;
-    case 1:  return LUMI_SERVICE_RAM_US;
-    case 0:  return LUMI_SERVICE_DISK_US;
-    default: return LUMI_SERVICE_RAM_US;      /* unknown: assume the middle */
+    case 2:  return LUMI_TIER_VRAM_US;
+    case 1:  return LUMI_TIER_RAM_US;
+    case 0:  return LUMI_TIER_DISK_US;
+    default: return LUMI_TIER_RAM_US;         /* unknown: assume the middle */
     }
 }
 
 static uint64_t lumi_replica_score(const LumiPeer *p) {
     uint64_t score = lmb_predict_score(&p->latency, p->inflight);
-    if (p->ok_calls >= LUMI_PRIOR_CALLS || score == UINT64_MAX) return score;
-    uint64_t prior = lumi_service_prior(p->resident);
-    return score < UINT64_MAX - prior ? score + prior : score;
+    uint64_t tier = lumi_tier_offset(p->resident);
+    if (score == UINT64_MAX || !tier) return score;
+    return score < UINT64_MAX - tier ? score + tier : score;
 }
 
 static int lumi_pick(int gid, uint32_t tried) {
