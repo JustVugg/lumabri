@@ -73,9 +73,10 @@ typedef struct {
     LmbLatencyPredictor latency;
     uint32_t inflight;
     uint64_t exec_observations, exec_observations_at_probe;
-    /* 1: its experts are resident in RAM; 0: it streams them from disk (the
-     * origin's --cache executor); -1: not known (older node, or reached only
-     * through the tracker tunnel). Only a known disk replica is penalized. */
+    /* Where this executor keeps the experts it holds: 2 in VRAM, 1 in RAM,
+     * 0 streamed from disk, -1 unknown (older node, or reached only through
+     * the tracker tunnel). A prior on the service time, used until this peer
+     * has answered enough calls for the measurement to speak. */
     int resident;
     /* the bill: what this peer answered, how long it took, and the bytes
      * that crossed the wire each way — the report divides them by rounds */
@@ -564,7 +565,8 @@ static int lumi_add_peer(const char *addr) {
             LmbCur rc = { rm.body, rm.body_len, 0 };
             uint32_t flags = 0, state = 0, caps = 0;
             if (!lmb_cur_u32(&rc, &flags))
-                p->resident = (flags & LMB_EXPERT_DISK_FALLBACK) ? 0 : 1;
+                p->resident = (flags & LMB_EXPERT_RESIDENT_VRAM) ? 2 :
+                              (flags & LMB_EXPERT_DISK_FALLBACK) ? 0 : 1;
             if (!lmb_cur_u32(&rc, &state) && !lmb_cur_u32(&rc, &caps))
                 p->caps = caps;               /* absent on older nodes: plain EXEC */
         }
@@ -572,6 +574,7 @@ static int lumi_add_peer(const char *addr) {
     }
     fprintf(stderr, "[lumabri] peer %s: %u experts (%d first-holder) · rtt %.2f ms · %s\n",
             p->addr, n, claimed, (double)p->rtt_us / 1000.0,
+            p->resident == 2 ? "experts in VRAM" :
             p->resident == 1 ? "experts in RAM" :
             p->resident == 0 ? "experts streamed from disk (last resort)" :
                                "residency unknown");
@@ -935,13 +938,32 @@ static void lumi_round_done(double t0) {
  * hanging tunnel must still lose to a healthy disk replica 25 ms away. The
  * offset is in microseconds of score, so an unusable RAM replica (dead,
  * circuit open) always loses to a live disk one. */
-#define LUMI_DISK_PENALTY_US 40000u
+/* Residency is a PRIOR on the service time, not a sentence: added while this
+ * peer has answered fewer than LUMI_PRIOR_CALLS times, and gone once the
+ * measurements speak — an EXEC observation already contains the service, so
+ * keeping the offset forever would count it twice, and a healthy disk
+ * replica next door would lose to a RAM replica behind a hanging tunnel.
+ * The three figures are measured: VRAM one to two ms, RAM ten to fifteen,
+ * a cold NVMe read forty to fifty. */
+#define LUMI_PRIOR_CALLS 8u
+#define LUMI_SERVICE_VRAM_US  2000u
+#define LUMI_SERVICE_RAM_US  12000u
+#define LUMI_SERVICE_DISK_US 50000u
+
+static uint64_t lumi_service_prior(int residency) {
+    switch (residency) {
+    case 2:  return LUMI_SERVICE_VRAM_US;
+    case 1:  return LUMI_SERVICE_RAM_US;
+    case 0:  return LUMI_SERVICE_DISK_US;
+    default: return LUMI_SERVICE_RAM_US;      /* unknown: assume the middle */
+    }
+}
 
 static uint64_t lumi_replica_score(const LumiPeer *p) {
     uint64_t score = lmb_predict_score(&p->latency, p->inflight);
-    if (p->resident == 0 && score < UINT64_MAX - LUMI_DISK_PENALTY_US)
-        score += LUMI_DISK_PENALTY_US;
-    return score;
+    if (p->ok_calls >= LUMI_PRIOR_CALLS || score == UINT64_MAX) return score;
+    uint64_t prior = lumi_service_prior(p->resident);
+    return score < UINT64_MAX - prior ? score + prior : score;
 }
 
 static int lumi_pick(int gid, uint32_t tried) {

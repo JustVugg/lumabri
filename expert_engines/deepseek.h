@@ -141,10 +141,37 @@ static int lmbe_resident_prepare(const uint8_t *holds, int layers,
     if (lmbe_store->ops && lmbe_store->ops->stats)
         lmbe_store->ops->stats(lmbe_store, &stats);
     lmbe_resident_nbytes = stats.resident_bytes;
+#ifdef COLI_V4_GPU_TIER
+    /* Ask the tier which of the assigned experts already carry GPU mirrors.
+     * peek never uploads, so this measures rather than provokes residency. */
+    lmbe_vram_nbytes = 0;
+    if (lmbe_store->gpu)
+        for (int l = 0; l < layers; l++)
+            for (int e = 0; e < experts; e++) {
+                ColiExpertView view = {0};
+                if (!holds[l * experts + e]) continue;
+                if (coli_expert_lookup(lmbe_store, (ColiExpertKey){l, e}, &view))
+                    continue;
+                if (!coli_v4_gpu_expert_peek(lmbe_store, &view) &&
+                    view.gate.gpu && view.up.gpu && view.down.gpu)
+                    lmbe_vram_nbytes += lmbe_expert_bytes();
+                coli_expert_release(lmbe_store, &view);
+            }
+#endif
     return nholds > 0 && stats.resident_bytes > 0 ? 0 : -1;
 }
 
 static uint64_t lmbe_resident_bytes(void) { return lmbe_resident_nbytes; }
+
+/* Experts this node keeps mirrored in VRAM. Colibri's V4 GPU tier attaches
+ * fp4 mirrors to a view on lookup and reports residency through
+ * coli_v4_gpu_expert_peek, so the count is taken once per resident-prepare
+ * over the assigned keys: a peek never uploads, it only answers. Without
+ * the GPU tier compiled in, or without a card, this is zero and the node
+ * advertises RAM residency exactly as before. */
+static uint64_t lmbe_vram_nbytes;
+static uint64_t lmbe_vram_bytes(void) { return lmbe_vram_nbytes; }
+#define LMBE_VRAM_BYTES lmbe_vram_bytes
 
 /* set by lmbe_apply when it could not compute; the node turns it into a
  * refused call instead of a dead process */
