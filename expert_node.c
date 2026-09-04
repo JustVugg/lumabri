@@ -1361,6 +1361,18 @@ int main(int argc, char **argv) {
     } else {
         g.resident_flags = LMB_EXPERT_DISK_FALLBACK;
     }
+    /* A donor with a GPU answers in one or two milliseconds instead of ten
+     * to fifteen, so a chatter must be able to tell it apart. The glue
+     * reports the bytes its engine actually mirrors into VRAM (zero on a
+     * build without a GPU tier); the flag is added, not substituted, since
+     * those experts are resident in RAM as well. */
+#ifdef LMBE_VRAM_BYTES
+    g.resident_vram_bytes = LMBE_VRAM_BYTES();
+    if (g.resident_vram_bytes) g.resident_flags |= LMB_EXPERT_RESIDENT_VRAM;
+#endif
+    if (g.resident_vram_bytes)
+        printf("[%s] %.1f GB of experts mirrored in VRAM\n",
+               g.name, (double)g.resident_vram_bytes / 1e9);
     atomic_store(&g.resident_state,
                  lmb_governor_accepting(&g.governor) ?
                  LMB_EXPERT_STATE_ACTIVE : LMB_EXPERT_STATE_DRAINING);
