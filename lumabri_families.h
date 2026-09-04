@@ -34,6 +34,13 @@
 #include <stddef.h>
 #include <string.h>
 
+/* Header-only helpers: a translation unit uses the few it needs. */
+#if defined(__GNUC__)
+#define LMB_UNUSED __attribute__((unused))
+#else
+#define LMB_UNUSED
+#endif
+
 typedef struct {
     const char *segment_id;   /* Colibri Segment and Edge adapter id */
     const char *engine;       /* monolithic engine binary basename */
@@ -74,7 +81,7 @@ static const char *const LMB_FAMILY_UNMAPPED[] = { "glm53", "qwen38" };
 #define LMB_FAMILY_UNMAPPED_COUNT \
     (sizeof LMB_FAMILY_UNMAPPED / sizeof *LMB_FAMILY_UNMAPPED)
 
-static const LmbModelFamily *lmb_family_by_id(const char *segment_id) {
+static LMB_UNUSED const LmbModelFamily *lmb_family_by_id(const char *segment_id) {
     if (!segment_id || !segment_id[0]) return NULL;
     for (size_t i = 0; i < LMB_FAMILY_COUNT; i++)
         if (!strcmp(LMB_FAMILIES[i].segment_id, segment_id))
@@ -85,7 +92,7 @@ static const LmbModelFamily *lmb_family_by_id(const char *segment_id) {
 /* The checkpoint's model_type decides, and the longest declared match wins.
  * NULL means "no family claims this string" — the caller must say so out
  * loud rather than pick one. */
-static const LmbModelFamily *lmb_family_for(const char *model_type) {
+static LMB_UNUSED const LmbModelFamily *lmb_family_for(const char *model_type) {
     if (!model_type || !model_type[0]) return NULL;
     const LmbModelFamily *best = NULL;
     size_t best_len = 0;
@@ -105,7 +112,7 @@ static const LmbModelFamily *lmb_family_for(const char *model_type) {
 /* An operator with a checkpoint we have not mapped names the adapter
  * directly. Returns NULL when the name is not one Colibri registers, so a
  * typo is refused instead of silently ignored. */
-static const LmbModelFamily *lmb_family_override(const char *segment_id) {
+static LMB_UNUSED const LmbModelFamily *lmb_family_override(const char *segment_id) {
     return lmb_family_by_id(segment_id);
 }
 

@@ -6,6 +6,7 @@
 #include "lumabri_segment_discovery.h"
 #include "lumabri_machine.h"
 #include "lumabri_run_gate.h"
+#include "lumabri_planner.h"
 #include "lumabri_sign.h"
 #include "lumabri_secure.h"
 #include "segment_colibri.h"
@@ -1282,7 +1283,66 @@ int main(int argc, char **argv) {
         reserve_name, 4096, 256, 262144) << 20;
     if (!process_limit && available != UINT64_MAX && available > reserve)
         process_limit = available - reserve;
-    if (process_limit && model_bytes && model_layers) {
+    /* What this range needs before it is allowed to start.
+     *
+     * The old rule was a proportional share of the WHOLE checkpoint plus 5%,
+     * which is the right guard against the incident it was written for —
+     * slices sized at "all the free RAM" fighting each other on one box —
+     * and the wrong basis for the question. It assumes every weight of the
+     * range must be resident, so a node with a working NVMe and enough room
+     * for the dense part plus a top-k expert cache was refused before it
+     * could open the engine. Disk mode was not merely unadvertised: it was
+     * unreachable.
+     *
+     * So the guard stays and its basis changes. The planner sizes the range
+     * from the checkpoint's own config: everything resident when it fits,
+     * and otherwise the working set — dense weights, a top-k cache, kernel
+     * scratch, state — which is the floor below which the node cannot run at
+     * all, whatever the disk can stream. The proportional figure remains the
+     * fallback for a checkpoint the planner cannot describe: an unknown
+     * model is not a licence to over-commit. */
+    LmbModelShape shape;
+    int shaped = model_dir && !lmb_shape_from_config(model_dir, &shape);
+    if (process_limit && shaped) {
+        LmbRangeCost cost = lmb_estimate_segment(&shape, begin, end,
+                                                 (uint32_t)context,
+                                                 (uint32_t)max_sessions);
+        uint64_t live = cost.state_bytes + cost.scratch_bytes;
+        uint64_t need = cost.resident_bytes + live;
+        int from_disk = 0;
+        if (cost.ok && need > process_limit) {
+            /* Streaming is a capability, not a consolation prize: only where
+             * the adapter has demonstrated it, which today is nowhere until
+             * step 8 of the roadmap proves one. LUMABRI_SEGMENT_DISK=1 is
+             * the diagnostic path the split test uses, and it says so. */
+            uint64_t floor = cost.working_set_bytes + live;
+            if (lmb_env_int("LUMABRI_SEGMENT_DISK", 0, 0, 1) &&
+                floor <= process_limit) {
+                fprintf(stderr, "[segment-node] range %u:%u does not fit "
+                        "resident (%.1f GB of %.1f GB) but its working set "
+                        "does (%.1f GB): starting in DIAGNOSTIC disk mode, "
+                        "which no adapter has yet demonstrated\n",
+                        begin, end, (double)need / 1e9,
+                        (double)process_limit / 1e9, (double)floor / 1e9);
+                from_disk = 1;
+                need = floor;
+            }
+        }
+        if (cost.ok && need > process_limit) {
+            fprintf(stderr, "[segment-node] assigned range %u:%u needs "
+                    "%.1f GB resident (working set %.1f GB) but the donor "
+                    "budget is %.1f GB; releasing it before loading weights\n",
+                    begin, end, (double)(cost.resident_bytes + live) / 1e9,
+                    (double)(cost.working_set_bytes + live) / 1e9,
+                    (double)process_limit / 1e9);
+            if (auto_range)
+                (void)auto_range_release(tracker, model, name, engine_id,
+                                         resolved_model_root);
+            preflight_signal(&preflight_fd, 'F');
+            return 3;
+        }
+        (void)from_disk;
+    } else if (process_limit && model_bytes && model_layers) {
         uint64_t range_layers = end - begin;
         uint64_t proportional = model_bytes / model_layers * range_layers;
         uint64_t remainder = model_bytes % model_layers * range_layers /

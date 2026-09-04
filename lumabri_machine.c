@@ -250,6 +250,81 @@ static void gpu_profile(LmbMachineProfile *profile) {
     closedir(dir);
 }
 
+/* How fast this machine reads a file it has not cached.
+ *
+ * The planner uses it to decide whether a range that does not fit RAM is a
+ * usable disk mode or a promise: at NVMe speeds a cold expert is tens of
+ * milliseconds, on a slow disk it is seconds, and calling both "from disk"
+ * would put an unusable configuration in the catalogue next to a working
+ * one. Measured, briefly, on the path the weights will actually live on —
+ * never assumed from the device name.
+ *
+ * O_DIRECT where the filesystem allows it, so the number is the disk and
+ * not the page cache. A failure leaves zero, which prints as unmeasured. */
+static uint64_t disk_read_speed(const char *path) {
+    if (!path || !path[0]) return 0;
+    char probe[1024];
+    snprintf(probe, sizeof probe, "%s/.lumabri_disk_probe", path);
+    enum { CHUNK = 1u << 20, ROUNDS = 8 };
+    void *buf = NULL;
+    if (posix_memalign(&buf, 4096, CHUNK)) return 0;
+    memset(buf, 0xA5, CHUNK);
+    int fd = open(probe, O_CREAT | O_WRONLY | O_TRUNC, 0600);
+    if (fd < 0) { free(buf); return 0; }
+    for (int i = 0; i < ROUNDS; i++)
+        if (write(fd, buf, CHUNK) != (ssize_t)CHUNK) {
+            close(fd); unlink(probe); free(buf); return 0;
+        }
+    if (fsync(fd)) { close(fd); unlink(probe); free(buf); return 0; }
+    close(fd);
+
+    int flags = O_RDONLY;
+#ifdef O_DIRECT
+    flags |= O_DIRECT;
+#endif
+    fd = open(probe, flags);
+    if (fd < 0) fd = open(probe, O_RDONLY);   /* O_DIRECT refused: still useful */
+    if (fd < 0) { unlink(probe); free(buf); return 0; }
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    uint64_t got = 0;
+    for (int i = 0; i < ROUNDS; i++) {
+        ssize_t n = read(fd, buf, CHUNK);
+        if (n <= 0) break;
+        got += (uint64_t)n;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    close(fd); unlink(probe); free(buf);
+    double secs = (double)(t1.tv_sec - t0.tv_sec) +
+                  (double)(t1.tv_nsec - t0.tv_nsec) * 1e-9;
+    if (secs <= 0.0 || got == 0) return 0;
+    return (uint64_t)((double)got / secs);
+}
+
+/* Which GPU backends this build can actually drive.
+ *
+ * Deliberately NOT "is there a card in /sys". Colibri's Segment adapters
+ * advertise CPU only until one exposes a real backend, so a machine with an
+ * idle RTX in it is a CPU machine as far as a plan is concerned, and showing
+ * it as a fast host would be a promise nothing keeps. Compiled-in support is
+ * the honest signal; the device count stays separate. */
+static uint32_t gpu_backends(void) {
+    uint32_t bits = LMB_GPU_NONE;
+#ifdef COLI_V4_GPU_TIER
+    bits |= LMB_GPU_CUDA;
+#endif
+#ifdef COLI_HIP
+    bits |= LMB_GPU_HIP;
+#endif
+#ifdef COLI_METAL
+    bits |= LMB_GPU_METAL;
+#endif
+#ifdef COLI_VULKAN
+    bits |= LMB_GPU_VULKAN;
+#endif
+    return bits;
+}
+
 static int public_address(uint32_t host_order) {
     return (host_order >> 24) != 0 && (host_order >> 24) != 10 &&
            (host_order >> 24) != 127 && (host_order >> 16) != 0xa9fe &&
@@ -296,10 +371,17 @@ int lmb_machine_probe(LmbMachineProfile *profile, const char *disk_path,
     meminfo(&profile->ram_total_bytes, &profile->ram_available_bytes,
             &profile->swap_total_bytes, &profile->swap_free_bytes);
     gpu_profile(profile);
+    profile->gpu_backends = gpu_backends();
     network_profile(profile);
     struct statvfs disk;
     if (!statvfs(disk_path && *disk_path ? disk_path : ".", &disk))
         profile->disk_available_bytes = (uint64_t)disk.f_bavail * disk.f_frsize;
+    /* Writing and reading 8 MB is cheap, but it is still I/O on somebody's
+     * machine: LUMABRI_NO_DISK_PROBE=1 leaves it unmeasured, and unmeasured
+     * prints as unmeasured rather than as a default. */
+    if (!lmb_env_int("LUMABRI_NO_DISK_PROBE", 0, 0, 1))
+        profile->disk_read_bps = disk_read_speed(
+            disk_path && *disk_path ? disk_path : ".");
     double loads[1];
     if (getloadavg(loads, 1) == 1) profile->load_one = loads[0];
     profile->tracker_rtt_ms = -1.0;
@@ -341,9 +423,13 @@ void lmb_machine_print(FILE *out, const LmbMachineProfile *p, int json) {
                 (unsigned long long)p->swap_total_bytes,
                 (unsigned long long)p->swap_free_bytes);
         fprintf(out, ",\"gpu\":{\"count\":%u,\"vram_total\":%llu,"
-                "\"vram_available\":%llu}", p->gpu_count,
+                "\"vram_available\":%llu,\"backends\":%u}", p->gpu_count,
                 (unsigned long long)p->vram_total_bytes,
-                (unsigned long long)p->vram_available_bytes);
+                (unsigned long long)p->vram_available_bytes,
+                p->gpu_backends);
+        fprintf(out, ",\"disk_read_bps\":%llu,\"lan_bps\":%llu",
+                (unsigned long long)p->disk_read_bps,
+                (unsigned long long)p->lan_bps);
         fprintf(out, ",\"disk_available\":%llu,\"network\":{\"interfaces\":%u,"
                 "\"public_ipv4\":%s,\"tracker_rtt_ms\":%.3f},\"load1\":%.3f}\n",
                 (unsigned long long)p->disk_available_bytes,
@@ -358,8 +444,11 @@ void lmb_machine_print(FILE *out, const LmbMachineProfile *p, int json) {
     fprintf(out, "RAM     %.1f/%.1f GB available · swap %.1f/%.1f GB free\n",
             p->ram_available_bytes / 1e9, p->ram_total_bytes / 1e9,
             p->swap_free_bytes / 1e9, p->swap_total_bytes / 1e9);
-    fprintf(out, "GPU     %u device(s) · %.1f/%.1f GB VRAM visible\n",
-            p->gpu_count, p->vram_available_bytes / 1e9, p->vram_total_bytes / 1e9);
+    fprintf(out, "GPU     %u device(s) · %.1f/%.1f GB VRAM visible · engine %s\n",
+            p->gpu_count, p->vram_available_bytes / 1e9, p->vram_total_bytes / 1e9,
+            p->gpu_backends ? "can use it" : "CPU only");
+    if (p->disk_read_bps)
+        fprintf(out, "disk    %.0f MB/s cold read\n", p->disk_read_bps / 1e6);
     fprintf(out, "disk    %.1f GB available · network %u interface(s) · public IPv4 %s",
             p->disk_available_bytes / 1e9, p->network_interfaces,
             p->public_ipv4 ? "yes" : "no");

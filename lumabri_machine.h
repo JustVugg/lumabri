@@ -27,7 +27,33 @@ typedef struct {
     uint32_t public_ipv4;
     double load_one;
     double tracker_rtt_ms;
+    /* Three things a planner needs and a profiler did not answer.
+     *
+     * A GPU that /sys reports is not a GPU the engine can use: Colibri's
+     * Segment adapters advertise CPU only until an adapter exposes a real
+     * backend, so "has a card" and "runs on the card" are different claims
+     * and only the second may be shown as a fast host.
+     *
+     * Disk read speed decides whether a range that does not fit RAM is a
+     * usable disk mode or a promise; a slow spinning disk is not an NVMe.
+     *
+     * LAN bandwidth decides how long distributing the weights takes, which
+     * is the number the catalogue quotes as "ready in". None of them can be
+     * assumed, so zero means unmeasured and prints as such. */
+    uint32_t gpu_backends;        /* LMB_GPU_* bits the ENGINE can use */
+    uint64_t disk_read_bps;       /* measured sequential read, 0 = unmeasured */
+    uint64_t lan_bps;             /* measured to the nearest peer, 0 = unmeasured */
 } LmbMachineProfile;
+
+/* Backends an engine build can actually reach on this machine. Detected from
+ * the binary's own capabilities, never from the presence of a device node. */
+enum {
+    LMB_GPU_NONE   = 0,
+    LMB_GPU_CUDA   = 1u << 0,
+    LMB_GPU_HIP    = 1u << 1,
+    LMB_GPU_METAL  = 1u << 2,
+    LMB_GPU_VULKAN = 1u << 3,
+};
 
 typedef enum {
     LMB_GOV_ACTIVE = 0,
