@@ -386,6 +386,31 @@ static int lumi_refresh_identity(void) {
  *
  * A tunnel-only peer is never asked: the question would be answered by the
  * tracker's socket, not the executor's. */
+/* A maintenance question must never be able to hold up a reply.
+ *
+ * lmb_request has no deadline of its own: it connects, sends and then waits.
+ * Against a peer that is wedged rather than gone — registered, socket open,
+ * answering nothing, which is the more dangerous of the two failures and the
+ * one segment_hybrid_test builds on purpose — that wait is unbounded, and
+ * this runs on the generation path. Give it its own short deadline; a
+ * residency report that does not arrive in two seconds is one we can do
+ * without until the next sweep. */
+#define LUMI_ERES_TIMEOUT_MS 2000
+
+static int lumi_request_bounded(const char *addr, uint32_t op, LmbMsg *resp) {
+    int fd = lmb_connect(addr);
+    if (fd < 0) return -1;
+    struct timeval tv = { LUMI_ERES_TIMEOUT_MS / 1000,
+                          (LUMI_ERES_TIMEOUT_MS % 1000) * 1000 };
+    int rc = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv) ||
+             setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+    if (!rc) rc = lmb_auth(fd);
+    if (!rc) rc = lmb_send(fd, op, NULL, 0, NULL, 0);
+    if (!rc) rc = lmb_recv(fd, resp);
+    lmb_close(fd);
+    return rc;
+}
+
 static void lumi_read_residency(LumiPeer *p) {
     p->resident = -1;
     p->hot_permille = 1000;
@@ -394,7 +419,7 @@ static void lumi_read_residency(LumiPeer *p) {
     if (p->relay_target[0]) return;
     LmbMsg rm = {0};
     const char *dial = p->loopback[0] ? p->loopback : p->addr;
-    if (!lmb_request(dial, LMB_ERES, NULL, 0, &rm) && rm.op == LMB_ERES_R) {
+    if (!lumi_request_bounded(dial, LMB_ERES, &rm) && rm.op == LMB_ERES_R) {
         LmbCur rc = { rm.body, rm.body_len, 0 };
         uint32_t flags = 0, state = 0, caps = 0;
         if (!lmb_cur_u32(&rc, &flags))
