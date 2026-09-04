@@ -43,6 +43,7 @@
 #include <unistd.h>
 
 #include "lumabri_proto.h"
+#include "lumabri_families.h"
 #include "lumabri_machine.h"
 
 #ifdef __linux__
@@ -346,30 +347,58 @@ static void install_chat_signal_handlers(void) {
     sigaction(SIGQUIT, &action, NULL);
 }
 
+/* One table decides the family; the three lookups below only read it.
+ *
+ * LUMABRI_ENGINE_ID names an adapter directly, for a checkpoint whose
+ * model_type nobody has declared yet — the two rows of LMB_FAMILY_UNMAPPED
+ * are reachable only this way, and a name Colibri does not register is
+ * refused instead of ignored. */
+static const LmbModelFamily *lumi_family(const char *model_type) {
+    const char *forced = getenv("LUMABRI_ENGINE_ID");
+    if (forced && forced[0]) {
+        const LmbModelFamily *f = lmb_family_override(forced);
+        if (!f)
+            fprintf(stderr, "[lumabri] LUMABRI_ENGINE_ID=%s is not an adapter "
+                            "Colibri registers; ignoring it\n", forced);
+        else
+            return f;
+    }
+    const LmbModelFamily *f = lmb_family_for(model_type ? model_type : "");
+    /* A model_type nobody claims used to be impossible: every ladder ended in
+     * a substring broad enough to catch anything, so an unknown checkpoint
+     * was executed by whichever engine shared three letters with it. Now it
+     * is a real state, and a real state has to be said out loud — once, with
+     * the string and the way out, rather than a Segment path that silently
+     * never starts. */
+    static int told;
+    if (!f && !told && model_type && model_type[0]) {
+        told = 1;
+        fprintf(stderr,
+                "[lumabri] model_type \"%s\" is not mapped to any Colibri "
+                "adapter, so no engine is chosen for it. Set "
+                "LUMABRI_ENGINE_ID=<adapter> to name one:", model_type);
+        for (size_t i = 0; i < LMB_FAMILY_COUNT; i++)
+            fprintf(stderr, " %s", LMB_FAMILIES[i].segment_id);
+        fprintf(stderr, "\n");
+    }
+    return f;
+}
+
 /* Which expert-node binary can execute this model's experts, or NULL when
  * that engine has no phase-2 build yet. One per engine family: the engines
  * do not share an expert shape, so neither can the peers. */
 static const char *expert_node_for(const char *model_type) {
-    if (strstr(model_type, "olmoe"))    return "expert_node";
-    if (strstr(model_type, "glm"))      return "expert_node_glm";
-    if (strstr(model_type, "inkling"))  return "expert_node_inkling";
-    if (strstr(model_type, "kimi"))     return "expert_node_kimi";
-    if (strstr(model_type, "deepseek")) return "expert_node_deepseek";
-    if (strstr(model_type, "qwen"))     return "expert_node_qwen36";
-    return NULL;
+    const LmbModelFamily *f = lumi_family(model_type);
+    return f ? f->expert_node : NULL;
 }
 
 /* Public Colibri Segment adapter ID for the same model family.  Unlike the
  * expert executors, these names are the stable ABI IDs rather than binary
- * basenames. */
+ * basenames. NULL when no family claims this model_type — the caller says so
+ * out loud rather than picking whichever row shares three letters with it. */
 static const char *segment_engine_for(const char *model_type) {
-    if (strstr(model_type, "olmoe"))    return "olmoe";
-    if (strstr(model_type, "glm"))      return "glm";
-    if (strstr(model_type, "inkling")) return "inkling";
-    if (strstr(model_type, "kimi"))     return "kimi";
-    if (strstr(model_type, "deepseek")) return "deepseek_v4";
-    if (strstr(model_type, "qwen"))     return "qwen36";
-    return NULL;
+    const LmbModelFamily *f = lumi_family(model_type);
+    return f ? f->segment_id : NULL;
 }
 
 /* model_type from a local config.json; "" when absent or unparseable */
@@ -2660,13 +2689,15 @@ static char *serve2_history_append(Engine *e, char *history, const char *user,
     return c.p ? c.p : calloc(1, 1);
 }
 
+/* The monolithic engine binary for the same family. "colibri" stays the
+ * last resort here — unlike the Segment id, an unknown model_type used to
+ * land on the monolith and sometimes worked, and refusing to launch anything
+ * would be a regression for a checkpoint that runs today. The refusal that
+ * matters is the Segment one, where the wrong adapter is silent corruption
+ * rather than a failed open. */
 static const char *engine_for(const char *model_type) {
-    if (strstr(model_type, "olmoe")) return "olmoe";
-    if (strstr(model_type, "deepseek")) return "deepseek";
-    if (strstr(model_type, "kimi")) return "kimi_k3";
-    if (strstr(model_type, "inkling")) return "inkling";
-    if (strstr(model_type, "qwen")) return "qwen36";
-    return "colibri";
+    const LmbModelFamily *f = lumi_family(model_type);
+    return f ? f->engine : "colibri";
 }
 
 /* `local_dir` non-NULL: the model is already on this disk, so no shim, no
