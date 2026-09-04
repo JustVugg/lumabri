@@ -19,7 +19,7 @@ endif
 # regressions would make this gate depend on whichever checkout ENGINE names.
 check-warnings:
 	$(MAKE) -B all test_relay_exec test_swarm_fed test_key_rotation \
-		test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 test_exec2 test_accum_order test_residency_report test_model_family test_planner test_cluster \
+		test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 test_exec2 test_accum_order test_residency_report test_model_family test_planner test_cluster test_calibration \
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
 		test_meminfo test_compute_lease test_content_filter \
 		test_scheduler test_run_gate \
@@ -410,6 +410,9 @@ test_planner: test_planner.c lumabri_planner.h lumabri_families.h
 test_cluster: test_cluster.c lumabri_cluster.h lumabri_planner.h lumabri_families.h lumabri_machine.h
 	$(CC) $(CFLAGS) test_cluster.c -o $@
 
+test_calibration: test_calibration.c lumabri_calibration.h lumabri_planner.h
+	$(CC) $(CFLAGS) test_calibration.c -o $@
+
 segment_budget_probe: segment_budget_probe.c lumabri_planner.h lumabri_families.h
 	$(CC) $(CFLAGS) segment_budget_probe.c -o $@
 
@@ -661,6 +664,7 @@ test: all test_key_rotation test_hedge test_local_fallback test_nat_adopt test_v
 	bash ./hosted_chat_test.sh
 	./test_planner
 	./test_cluster
+	./test_calibration
 	./test_nat_adopt
 	bash ./rtt_refresh_test.sh
 	./test_segment_v2
@@ -702,7 +706,7 @@ clean:
 	rm -f tracker maintainer liblumabri.so test_shim swarm_probe lumabri \
 	      test_relay_exec test_swarm_fed test_key_rotation test_hedge \
 	      test_local_fallback test_accum_order test_residency_report \
-	      test_model_family test_planner test_cluster segment_budget_probe \
+	      test_model_family test_planner test_cluster test_calibration segment_budget_probe \
 	      test_nat_adopt test_rtt_refresh \
 	      test_verify_failover test_segment_v2 test_segment_discovery test_sampling \
 	      test_swarm_detail test_relay_rate test_machine test_meminfo \
