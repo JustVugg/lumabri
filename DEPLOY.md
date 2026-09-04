@@ -311,8 +311,13 @@ spare RAM (the log prints the hit rate and, for DeepSeek, the resulting GB),
 lower it if it swaps. Size it from the expert, not the slot count: a
 DeepSeek V4 Flash expert is ~15 MB with headroom, so `--exec-cache 1800` is
 about 27 GB, and the store keeps at least top-k experts per layer (258 on
-V4-Flash) whatever you pass. `serve` subtracts this figure from the RAM it
-offers the Segment origin slices, and a slice whose layer range does not fit
+V4-Flash) whatever you pass. A caching node is not "a disk node" to the chatters that call it: it reports
+how many experts it keeps hot, out of how many it serves, and how often a
+call is answered without a disk read, and they blend the RAM and disk costs
+by that rate when they choose a replica. So raising `--exec-cache` on a box
+that holds more of the model than fits its RAM buys latency *and* calls,
+where before it bought only latency. `serve` subtracts this figure from the
+RAM it offers the Segment origin slices, and a slice whose layer range does not fit
 its share resident is not started (exit code 3, not restarted): on a box
 smaller than the model you get storage plus the streaming executor, which is
 the honest capacity, instead of five caches of the same experts fighting for
@@ -571,5 +576,5 @@ Two things worth knowing:
 | client says `not signed by the operator key` | server not started with `--key`, or a different key than the client's `LUMABRI_PUBKEY` |
 | `engine not found` after Segment fallback | install the classic Colibri engine or pass `--engines-dir /path/to/colibri/c` |
 | tracker logs `REJECTED: ... unsigned` | a peer joined a signed swarm without signed truth — that is the defence working |
-| expert cache hit rate very low | raise `--exec-cache`; each slot is one expert of RAM (~15 MB on DeepSeek V4 Flash), spread over the layers |
+| expert cache hit rate very low | raise `--exec-cache`; each slot is one expert of RAM (~15 MB on DeepSeek V4 Flash), spread over the layers. The rate is also what chatters route on: the node reports it, and a box that hits often is preferred over one that reads the disk |
 | first start takes minutes | hashing the model; cached afterwards in `.lumabri_hashes/` |

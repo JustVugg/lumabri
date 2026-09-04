@@ -622,11 +622,39 @@ static void manifest_build(LmbBuf *b) {
     lmb_buf_u32(b, (uint32_t)g.hidden);
 }
 
+/* How often a call is served without touching the disk, per thousand.
+ *
+ * A node with a RAM cache in front of on-disk experts is neither "RAM" nor
+ * "disk": it is both, in a proportion only it can know. Reporting the flag
+ * alone makes a box holding a third of a model hot look exactly like one
+ * holding none of it, and a chatter that believes the flag then routes
+ * around experts this node has warm.
+ *
+ * The measured rate is the truth once enough calls have gone through. Below
+ * that, the slot ratio is the honest floor — a cache cannot hold more than
+ * its slots — so a node that has just started is under-promised, never
+ * over-promised. */
+#define NODE_HOT_MIN_CALLS 64u
+
+static uint32_t node_hot_permille(void) {
+    if (!g.ncs) return 1000;                  /* fully resident: no cold path */
+    uint64_t calls = atomic_load(&g.calls), cold = atomic_load(&g.cold);
+    if (calls >= NODE_HOT_MIN_CALLS) {
+        uint64_t hits = calls > cold ? calls - cold : 0;
+        return (uint32_t)(hits * 1000u / calls);
+    }
+    return g.nholds > 0
+         ? (uint32_t)((uint64_t)g.ncs * 1000u / (uint64_t)g.nholds) : 1000u;
+}
+
 static int handle_eres(int fd) {
     LmbBuf b = {0};
     lmb_buf_u32(&b, g.resident_flags);
     lmb_buf_u32(&b, atomic_load(&g.resident_state));
     lmb_buf_u32(&b, LMB_CAP_EXEC2);           /* what this node speaks beyond EXEC */
+    lmb_buf_u32(&b, (uint32_t)(g.ncs ? g.ncs : g.nholds));   /* experts kept hot */
+    lmb_buf_u32(&b, (uint32_t)g.nholds);                     /* experts served */
+    lmb_buf_u32(&b, node_hot_permille());
     int rc = lmb_send(fd, LMB_ERES_R, b.p, (uint32_t)b.len, NULL, 0);
     free(b.p);
     return rc;

@@ -78,6 +78,9 @@ typedef struct {
      * the tracker tunnel). A prior on the service time, used until this peer
      * has answered enough calls for the measurement to speak. */
     int resident;
+    uint32_t hot_permille;      /* calls served without a disk read, per 1000 */
+    uint32_t hot_experts;       /* experts this node keeps hot */
+    uint32_t held_experts;      /* experts it serves in all */
     /* the bill: what this peer answered, how long it took, and the bytes
      * that crossed the wire each way — the report divides them by rounds */
     unsigned long long ok_calls, bytes_out, bytes_in;
@@ -558,6 +561,8 @@ static int lumi_add_peer(const char *addr) {
     /* RAM or disk? Asked once, directly (a tunnel-only peer stays unknown,
      * and a donor behind NAT is a resident donor in practice). */
     p->resident = -1;
+    p->hot_permille = 1000;       /* no counts: believe the flag, as before */
+    p->hot_experts = p->held_experts = 0;
     if (!p->relay_target[0]) {
         LmbMsg rm = {0};
         const char *dial = p->loopback[0] ? p->loopback : p->addr;
@@ -569,15 +574,32 @@ static int lumi_add_peer(const char *addr) {
                               (flags & LMB_EXPERT_DISK_FALLBACK) ? 0 : 1;
             if (!lmb_cur_u32(&rc, &state) && !lmb_cur_u32(&rc, &caps))
                 p->caps = caps;               /* absent on older nodes: plain EXEC */
+            /* How much of what it serves it actually keeps hot. Absent on a
+             * node that predates the field, and then the flag stands alone
+             * exactly as before. */
+            uint32_t hot = 0, held = 0, permille = 0;
+            if (!lmb_cur_u32(&rc, &hot) && !lmb_cur_u32(&rc, &held) &&
+                !lmb_cur_u32(&rc, &permille)) {
+                p->hot_experts = hot;
+                p->held_experts = held;
+                p->hot_permille = permille > 1000 ? 1000 : permille;
+            }
         }
         lmb_msg_free(&rm);
     }
+    char tier[96];
+    if (p->resident == 0 && p->held_experts)
+        snprintf(tier, sizeof tier,
+                 "%u of %u experts hot, %u%% of calls served without the disk",
+                 p->hot_experts, p->held_experts, p->hot_permille / 10);
+    else
+        snprintf(tier, sizeof tier, "%s",
+                 p->resident == 2 ? "experts in VRAM" :
+                 p->resident == 1 ? "experts in RAM" :
+                 p->resident == 0 ? "experts streamed from disk (last resort)" :
+                                    "residency unknown");
     fprintf(stderr, "[lumabri] peer %s: %u experts (%d first-holder) · rtt %.2f ms · %s\n",
-            p->addr, n, claimed, (double)p->rtt_us / 1000.0,
-            p->resident == 2 ? "experts in VRAM" :
-            p->resident == 1 ? "experts in RAM" :
-            p->resident == 0 ? "experts streamed from disk (last resort)" :
-                               "residency unknown");
+            p->addr, n, claimed, (double)p->rtt_us / 1000.0, tier);
     if (reprobe < 0) L.npeers++;
     return 0;
 }
@@ -963,9 +985,23 @@ static uint64_t lumi_tier_offset(int residency) {
     }
 }
 
+/* A node with a RAM cache in front of on-disk experts pays the RAM price on
+ * a hit and the disk price on a miss, so its offset is the two blended by
+ * the rate it reports. A node that keeps everything resident reports a
+ * thousand out of a thousand and lands exactly where it did before; so does
+ * one too old to report anything. And a caching node that genuinely hits
+ * every time IS a RAM node for our purposes, which is the point. */
+static uint64_t lumi_blend_offset(const LumiPeer *p) {
+    /* the cache in front of the disk is RAM, whatever the flag says overall */
+    uint64_t warm = lumi_tier_offset(p->resident == 0 ? 1 : p->resident);
+    uint64_t cold = p->resident == 0 ? LUMI_TIER_DISK_US : warm;
+    uint64_t hot = p->hot_permille > 1000 ? 1000 : p->hot_permille;
+    return (warm * hot + cold * (1000 - hot)) / 1000;
+}
+
 static uint64_t lumi_replica_score(const LumiPeer *p) {
     uint64_t score = lmb_predict_score(&p->latency, p->inflight);
-    uint64_t tier = lumi_tier_offset(p->resident);
+    uint64_t tier = lumi_blend_offset(p);
     if (score == UINT64_MAX || !tier) return score;
     return score < UINT64_MAX - tier ? score + tier : score;
 }
