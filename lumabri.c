@@ -44,6 +44,7 @@
 
 #include "lumabri_proto.h"
 #include "lumabri_families.h"
+#include "lumabri_cluster.h"
 #include "lumabri_machine.h"
 
 #ifdef __linux__
@@ -313,6 +314,8 @@ static volatile sig_atomic_t g_stopping = 0;
  * it separately so a shutdown signal can break a blocked read immediately
  * instead of waiting for a long inference to finish. */
 static volatile sig_atomic_t g_signal_engine_pid = 0;
+/* The same, for an engine that is a socket rather than a child. -1 = none. */
+static volatile sig_atomic_t g_signal_engine_fd = -1;
 
 static void on_sigint(int sig) {
     if (g_stopping) {
@@ -322,11 +325,23 @@ static void on_sigint(int sig) {
          * deadlock on a stdio/pthread lock held by another thread. */
         sig_atomic_t engine = g_signal_engine_pid;
         if (engine > 0) kill((pid_t)engine, SIGKILL);
+        /* A remote engine has no pid to kill, so the escape hatch is the
+         * socket: shutdown() from a signal handler is async-signal-safe and
+         * makes the blocked read in stream_serve2 return at once. Without
+         * it, Ctrl-C on a hosted chat waits for a reply that may never
+         * come. */
+        sig_atomic_t sock = g_signal_engine_fd;
+        if (sock >= 0) shutdown((int)sock, SHUT_RDWR);
         _exit(128 + (sig > 0 && sig < 128 ? sig : SIGTERM));
     }
     g_stopping = 1;
     sig_atomic_t engine = g_signal_engine_pid;
     if (engine > 0) kill((pid_t)engine, SIGTERM);
+    /* A remote engine gets the same courtesy on the FIRST Ctrl-C: shutting
+     * the socket down for reading wakes a blocked stream without discarding
+     * anything already queued, which is what SIGTERM does for a child. */
+    sig_atomic_t sock = g_signal_engine_fd;
+    if (sock >= 0) shutdown((int)sock, SHUT_RD);
     for (int i = 0; i < MAX_CHILDREN; i++) {
         sig_atomic_t p = g_signal_children[i];
         if (p > 0) kill((pid_t)p, SIGTERM);
@@ -2278,12 +2293,27 @@ typedef enum {
     EK_INKLING,        /* inkling:      <|message_user|><|content_text|>…      */
     EK_KIMI            /* kimi_k3:      K3CHAT1 byte-counted wire              */
 } EngKind;
+/* Where the engine actually is.
+ *
+ * Every shutdown path in this file was written for a child process: stop
+ * returns immediately without a pid, and the second Ctrl-C kills a pid to
+ * break a blocked read. Neither is true of an engine reached over a socket,
+ * and the failure is silent — /quit would drop the connection without ever
+ * closing the remote session, and a hung read would never wake. So the
+ * transport is declared rather than inferred from whether pid happens to be
+ * positive. */
+typedef enum {
+    ENGINE_CHILD = 0,   /* a process we forked; pipes to it */
+    ENGINE_SOCKET,      /* a host we dialled; to == from == the socket */
+} EngineTransport;
+
 typedef struct {
     pid_t pid;
     int to, from;
     Proto proto;
     EngKind kind;
     int segment;
+    EngineTransport transport;
 } Engine;
 
 /* Map the resolved engine binary name to its kind. Unknown ⇒ EK_GLM, the safe
@@ -2930,6 +2960,20 @@ static void engine_diag(Engine *e, int booting) {
 }
 
 static void engine_stop(Engine *e) {
+    if (e->transport == ENGINE_SOCKET) {
+        /* One descriptor, closed once. `to` and `from` are the same socket,
+         * so closing both would close a number the process may already have
+         * handed to something else. Shutdown first: it wakes a peer blocked
+         * on read, which a bare close does not guarantee while another
+         * thread still holds the descriptor. */
+        if (e->to >= 0) {
+            shutdown(e->to, SHUT_RDWR);
+            close(e->to);
+        }
+        e->to = e->from = -1;
+        e->pid = 0;
+        return;
+    }
     if (e->pid <= 0) return;
     pid_t pid = e->pid;
     if (g_signal_engine_pid == (sig_atomic_t)pid)
@@ -2956,6 +3000,262 @@ static void engine_stop(Engine *e) {
     kill(pid, SIGTERM);
     waitpid(pid, NULL, 0);
     e->pid = 0;
+}
+
+/* model_boot is defined with the chat command below; the host uses the same
+ * one, because a host IS a chat whose terminal happens to be a socket. */
+static int model_boot(const char *tracker, const char *model, const char *shim,
+                      const char *engines_dir, const char *engine_path,
+                      const char *local_dir, int ctx, int max_new,
+                      int cap_experts, Engine *e, Swarm *sw);
+
+/* ---- the host side ------------------------------------------------------
+ *
+ * One engine, one session at a time, and a socket in front of it.
+ *
+ * The bridge is deliberately a byte pipe rather than a parser: the client
+ * writes SUBMIT and reads DATA/DONE exactly as it would over a pipe, so the
+ * codec, the templating and the arithmetic are all unchanged and untouched
+ * by this file. What the host adds is the things a socket needs and a pipe
+ * did not: a greeting, admission, limits, and a reset between clients.
+ *
+ * BUSY is a real answer. A second client is refused immediately rather than
+ * queued, because a queue that nobody can see is how "it got slow" replaces
+ * "it is full" — and this session owns the KV of the first client, which
+ * cannot be shared or interleaved without the work of step 9. */
+typedef struct {
+    Engine *engine;
+    const char *model_type;
+    const char *engine_kind;
+    uint32_t speed_milli;      /* 0 until this host has been measured */
+    uint32_t max_frame;
+} HostState;
+
+static int host_greet(int fd, const HostState *h, int busy) {
+    LmbBuf b = {0};
+    lmb_buf_str(&b, h->model_type ? h->model_type : "");
+    lmb_buf_str(&b, h->engine_kind ? h->engine_kind : "");
+    lmb_buf_str(&b, "cpu");    /* no Segment adapter advertises a GPU yet */
+    lmb_buf_u32(&b, busy ? 0u : 1u);
+    lmb_buf_u32(&b, h->speed_milli);
+    int rc = lmb_send(fd, LMB_HOST_HELLO_R, b.p, (uint32_t)b.len, NULL, 0);
+    free(b.p);
+    return rc;
+}
+
+/* Copy between the client socket and the engine until one of them ends.
+ *
+ * Both directions have to be watched at once. Reading the client to
+ * completion first would deadlock the moment a reply is larger than a pipe
+ * buffer — the engine blocks writing, the host blocks reading, and the chat
+ * hangs with no error anywhere. */
+static void host_bridge(int fd, Engine *e, uint32_t max_frame) {
+    char buf[16384];
+    uint64_t from_client = 0;
+    for (;;) {
+        struct pollfd p[2] = { { fd, POLLIN, 0 }, { e->from, POLLIN, 0 } };
+        int n = poll(p, 2, 1000);
+        if (g_stopping) return;
+        if (n < 0) { if (errno == EINTR) continue; return; }
+        if (p[0].revents & POLLIN) {
+            ssize_t got = read(fd, buf, sizeof buf);
+            if (got <= 0) return;                 /* client left: session over */
+            /* A prompt is text, and text has a size. Without a cap a client
+             * can make the host allocate its context on demand, which is a
+             * denial of service dressed as a long question. */
+            from_client += (uint64_t)got;
+            if (max_frame && from_client > max_frame) {
+                fprintf(stderr, "[host] client sent more than %u bytes in one "
+                        "turn; closing\n", max_frame);
+                return;
+            }
+            if (write(e->to, buf, (size_t)got) != got) return;
+            if (memchr(buf, '\n', (size_t)got)) from_client = 0;
+        }
+        if (p[1].revents & POLLIN) {
+            ssize_t got = read(e->from, buf, sizeof buf);
+            if (got <= 0) return;                 /* engine died: so does this */
+            if (write(fd, buf, (size_t)got) != got) return;
+        }
+        if ((p[0].revents | p[1].revents) & (POLLERR | POLLHUP)) return;
+    }
+}
+
+static int cmd_host(int argc, char **argv) {
+    const char *tracker = NULL, *want_model = NULL, *local_dir = NULL;
+    const char *engines_dir = NULL, *engine_path = NULL;
+    int port = 7350, ctx = 2048, max_new = 256, cap_experts = 64;
+    uint32_t max_frame = 1u << 20;
+    for (int i = 0; i < argc; i++) {
+        if (!strcmp(argv[i], "--port") && i + 1 < argc) port = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--tracker") && i + 1 < argc) tracker = argv[++i];
+        else if (!strcmp(argv[i], "--model") && i + 1 < argc) want_model = argv[++i];
+        else if (!strcmp(argv[i], "--local") && i + 1 < argc) local_dir = argv[++i];
+        else if (!strcmp(argv[i], "--engines-dir") && i + 1 < argc) engines_dir = argv[++i];
+        else if (!strcmp(argv[i], "--engine") && i + 1 < argc) engine_path = argv[++i];
+        else if (!strcmp(argv[i], "--ctx") && i + 1 < argc) ctx = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--max-new") && i + 1 < argc) max_new = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--max-frame") && i + 1 < argc)
+            max_frame = (uint32_t)atoi(argv[++i]);
+        else {
+            fprintf(stderr, "usage: lumabri host --model NAME [--port N] "
+                            "[--tracker H:P] [--local DIR]\n"
+                            "                   [--ctx N] [--max-new N] "
+                            "[--max-frame BYTES]\n");
+            return 2;
+        }
+    }
+    if (!want_model && !local_dir) {
+        fprintf(stderr, "lumabri host needs --model NAME or --local DIR\n");
+        return 2;
+    }
+    char dir[1024], shim[1200];
+    exe_dir(dir, sizeof dir);
+    snprintf(shim, sizeof shim, "%s/liblumabri.so", dir);
+    if (access(shim, R_OK))
+        snprintf(shim, sizeof shim, "%s/../lib/lumabri/liblumabri.so", dir);
+
+    char model[128];
+    snprintf(model, sizeof model, "%s", want_model ? want_model : "local");
+    Engine eng = {0};
+    Swarm sw;
+    if (model_boot(tracker ? tracker : "", model, shim, engines_dir,
+                   engine_path, local_dir, ctx, max_new, cap_experts, &eng, &sw))
+        return 1;
+
+    char mtype[64] = "";
+    if (local_dir) local_model_type(local_dir, mtype, sizeof mtype);
+    else snprintf(mtype, sizeof mtype, "%s", sw.model_type);
+    HostState h = { &eng, mtype, engine_for(mtype), 0, max_frame };
+
+    int lfd = lmb_listen(port);
+    if (lfd < 0) {
+        fprintf(stderr, "[host] cannot listen on %d\n", port);
+        engine_stop(&eng);
+        return 1;
+    }
+    printf("  %shost ready on port %d · %s · one session at a time%s\n",
+           C_DIM, port, mtype[0] ? mtype : "?", C_R);
+    printf("  %sclients need no checkpoint; this machine holds the model and "
+           "sees the text of every conversation%s\n", C_DIM, C_R);
+
+    int serving = 0;
+    while (!g_stopping) {
+        struct pollfd lp = { lfd, POLLIN, 0 };
+        int r = poll(&lp, 1, 500);
+        if (r <= 0) { if (r < 0 && errno != EINTR) break; continue; }
+        int fd = accept(lfd, NULL, NULL);
+        if (fd < 0) continue;
+        LmbMsg m = {0};
+        if (lmb_secure_server(fd) || lmb_recv(fd, &m) ||
+            m.op != LMB_HOST_HELLO) {
+            lmb_msg_free(&m); close(fd); continue;
+        }
+        lmb_msg_free(&m);
+        if (serving) {
+            /* Busy is an answer, not a wait. */
+            (void)host_greet(fd, &h, 1);
+            close(fd);
+            continue;
+        }
+        if (host_greet(fd, &h, 0)) { close(fd); continue; }
+        serving = 1;
+        host_bridge(fd, &eng, max_frame);
+        close(fd);
+        serving = 0;
+        /* Between two clients the engine keeps the previous conversation in
+         * its KV, so the next client would continue somebody else's chat.
+         * Restart it: with one session there is nothing cheaper that is also
+         * correct, and correctness here is somebody else's private text. */
+        fprintf(stderr, "[host] session closed; restarting the engine so the "
+                "next client starts clean\n");
+        engine_stop(&eng);
+        if (model_boot(tracker ? tracker : "", model, shim, engines_dir,
+                       engine_path, local_dir, ctx, max_new, cap_experts,
+                       &eng, &sw)) {
+            fprintf(stderr, "[host] the engine did not come back; stopping\n");
+            break;
+        }
+        h.engine = &eng;
+    }
+    close(lfd);
+    engine_stop(&eng);
+    return 0;
+}
+
+/* ---- a host, instead of a local engine -----------------------------------
+ *
+ * The chat loop below talks to two descriptors and nothing else: it writes
+ * SUBMIT, it reads DATA until DONE. That boundary is the whole reason a
+ * thin client is a small change rather than a rewrite — put a socket where
+ * the pipes were and the templating, the history, the streaming and the
+ * report all keep working unmodified.
+ *
+ * What the client must NOT do is boot an engine. No shim, no vroot, no CAS,
+ * no mirror, and not even a tokenizer: the serve-codec engines tokenize the
+ * SUBMIT payload themselves, so a hosted chatter needs zero bytes of the
+ * checkpoint. That is the promise, and it is only kept by not calling
+ * model_boot at all. */
+static int host_connect(const char *addr, const char *model_type, Engine *e) {
+    memset(e, 0, sizeof *e);
+    e->to = e->from = -1;
+    e->pid = 0;
+    e->transport = ENGINE_SOCKET;
+    int fd = lmb_connect(addr);
+    if (fd < 0) {
+        fprintf(stderr, "[lumabri] no host at %s\n", addr);
+        return -1;
+    }
+    /* The host answers with the engine kind, because the client applies the
+     * chat template and cannot guess it from an address. A host that will
+     * not say is one whose replies we would format wrongly. */
+    LmbMsg m = {0};
+    if (lmb_auth(fd) || lmb_send(fd, LMB_HOST_HELLO, NULL, 0, NULL, 0) ||
+        lmb_recv(fd, &m) || m.op != LMB_HOST_HELLO_R) {
+        fprintf(stderr, "[lumabri] %s did not answer as an inference host\n",
+                addr);
+        lmb_msg_free(&m);
+        close(fd);
+        return -1;
+    }
+    LmbCur c = { m.body, m.body_len, 0 };
+    char kind[64] = "", mtype[64] = "", backend[32] = "";
+    uint32_t sessions_free = 0, speed_milli = 0;
+    if (lmb_cur_str(&c, mtype, sizeof mtype) ||
+        lmb_cur_str(&c, kind, sizeof kind) ||
+        lmb_cur_str(&c, backend, sizeof backend) ||
+        lmb_cur_u32(&c, &sessions_free) || lmb_cur_u32(&c, &speed_milli)) {
+        fprintf(stderr, "[lumabri] %s sent a greeting this build cannot read\n",
+                addr);
+        lmb_msg_free(&m); close(fd); return -1;
+    }
+    lmb_msg_free(&m);
+    if (model_type && model_type[0] && strcmp(model_type, mtype)) {
+        fprintf(stderr, "[lumabri] %s serves %s, not %s\n", addr, mtype,
+                model_type);
+        close(fd); return -1;
+    }
+    e->to = e->from = fd;
+    e->kind = engine_kind_of(kind);
+    e->proto = kind_is_serve2(e->kind) ? PROTO_SERVE2 : PROTO_FRAMED;
+    g_signal_engine_fd = (sig_atomic_t)fd;
+
+    printf("  %shost %s · %s · %s%s\n", C_DIM, addr, mtype,
+           backend[0] ? backend : "cpu", C_R);
+    /* Speed is shown only when the host has measured one. "unknown" is the
+     * honest state for a host nobody has run yet, and a CPU host is slow
+     * rather than broken — saying so before the first prompt is the whole
+     * point of putting it here. */
+    if (speed_milli)
+        printf("  %s~%.1f tok/s measured · %u session%s free%s\n", C_DIM,
+               speed_milli / 1000.0, sessions_free,
+               sessions_free == 1 ? "" : "s", C_R);
+    else
+        printf("  %sspeed not yet measured on this host · %u session%s free%s\n",
+               C_DIM, sessions_free, sessions_free == 1 ? "" : "s", C_R);
+    printf("  %s%sthe host runs the model and therefore receives the text of "
+           "this conversation%s\n", C_CORAL, C_BOLD, C_R);
+    return 0;
 }
 
 /* ---- chat --------------------------------------------------------------- */
@@ -4173,7 +4473,7 @@ static int cmd_chat(int argc, char **argv) {
     const char *engine_path = NULL, *engines_dir = getenv("LUMABRI_ENGINES");
     const char *want_model = NULL, *local_dir = NULL;
     const char *role_arg = NULL, *model_dir_arg = NULL;
-    const char *donor_name_arg = NULL;
+    const char *donor_name_arg = NULL, *host_addr = NULL;
     double donate_gb = 0;
     int max_new = 256, ctx = 2048, cap_experts = 64;
     for (int i = 0; i < argc; i++) {
@@ -4189,10 +4489,12 @@ static int cmd_chat(int argc, char **argv) {
         else if (!strcmp(argv[i], "--model-dir") && i + 1 < argc) model_dir_arg = argv[++i];
         else if (!strcmp(argv[i], "--donate") && i + 1 < argc) donate_gb = atof(argv[++i]);
         else if (!strcmp(argv[i], "--donor-name") && i + 1 < argc) donor_name_arg = argv[++i];
+        else if (!strcmp(argv[i], "--host") && i + 1 < argc) host_addr = argv[++i];
         else if (!strcmp(argv[i], "--plain")) g_tty = 0;
         else { fprintf(stderr, "usage: lumabri chat [--tracker H:P] [--model NAME] "
                                "[--local DIR] [--engine BIN] [--engines-dir DIR]\n"
-                               "                    [--max-new N] [--ctx N] [--cap N]\n"
+                               "                    [--host HOST:PORT] "
+                               "[--max-new N] [--ctx N] [--cap N]\n"
                                "                    [--role chat|disk|compute|all] "
                                "[--donate GB] [--model-dir DIR] [--donor-name S]\n");
                return 2; }
@@ -4257,7 +4559,13 @@ static int cmd_chat(int argc, char **argv) {
     char models[16][64];
     int nmodels = 0;
     char model[64];
-    if (local_dir) {
+    if (host_addr) {
+        /* A hosted client asks the swarm nothing: it does not need a tracker,
+         * a model list or an engine, and requiring one would put a whole
+         * discovery step in front of the case that is supposed to have none.
+         * The host names the model in its greeting. */
+        snprintf(model, sizeof model, "%s", want_model ? want_model : "hosted");
+    } else if (local_dir) {
         const char *base = strrchr(local_dir, '/');
         if (checked_printf(model, sizeof model, "%s",
                            base && base[1] ? base + 1 : local_dir)) {
@@ -4322,7 +4630,10 @@ static int cmd_chat(int argc, char **argv) {
     Role role = {0};
     if (donor_name_arg)
         snprintf(role.donor_name, sizeof role.donor_name, "%s", donor_name_arg);
-    if (!local_dir && role_arg) {
+    /* A hosted chat is never also a donor: donating means holding weights,
+     * which is the one thing a thin client has said it will not do. The
+     * question is not asked, so it cannot be answered by accident. */
+    if (!host_addr && !local_dir && role_arg) {
         char bad[40];
         if (role_unknown(role_arg, bad, sizeof bad)) {
             fprintf(stderr, "--role: non conosco \"%s\". Vuole chat, disk, "
@@ -4349,15 +4660,22 @@ static int cmd_chat(int argc, char **argv) {
             snprintf(probe, sizeof probe, "%s/config.json", role.model_dir);
             have_dir = access(probe, R_OK) == 0;
         }
-        if (role_pick(&role, model, have_dir)) return 0;
+        if (!host_addr && role_pick(&role, model, have_dir)) return 0;
         if (have_dir && role.compute)
             snprintf(role.model_dir, sizeof role.model_dir, "%s", model_dir_arg);
     }
 
-    if (model_boot(tracker, model, shim, engines_dir, engine_path, local_dir,
-                   ctx, max_new, cap_experts, &eng, &sw))
+    /* A hosted chat boots no engine. Everything model_boot would do —
+     * inspect the swarm, size the mirror, start the shim, open Colibri — is
+     * skipped, which is exactly what "zero bytes of the checkpoint" means
+     * and the only way to actually mean it. */
+    if (host_addr) {
+        memset(&sw, 0, sizeof sw);
+        if (host_connect(host_addr, NULL, &eng)) return 1;
+    } else if (model_boot(tracker, model, shim, engines_dir, engine_path,
+                          local_dir, ctx, max_new, cap_experts, &eng, &sw))
         return 1;
-    if (role.disk || role.compute) {
+    if (!host_addr && (role.disk || role.compute)) {
         role_start(&role, tracker, model, sw.model_type, eng.segment, ctx,
                    sw.total_bytes);
     }
@@ -4668,6 +4986,141 @@ static int cmd_peer_key(int argc, char **argv) {
     return 0;
 }
 
+/* ---- the catalogue -------------------------------------------------------
+ *
+ * What this collection of computers can actually run, model by model, with
+ * the three states kept apart and no speed anywhere.
+ *
+ * The screen answers three questions and refuses a fourth. Can it run — as
+ * resident weights, from disk, or not at all. What is missing — in gigabytes
+ * and in machines, because gigabytes are not something a person can go and
+ * buy. How would it be split — a range per computer. It does NOT say tok/s,
+ * because a plan knows what fits and only a calibration knows what it does,
+ * and printing them in the same voice is how a catalogue starts lying. */
+
+typedef struct {
+    char dir[512];
+    char name[64];
+    LmbModelShape shape;
+} CatalogEntry;
+
+static int catalog_scan(const char *root, CatalogEntry *out, int cap) {
+    DIR *d = opendir(root);
+    if (!d) return 0;
+    int n = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) && n < cap) {
+        if (e->d_name[0] == '.') continue;
+        char path[832];
+        snprintf(path, sizeof path, "%s/%s", root, e->d_name);
+        char cfg[960];
+        snprintf(cfg, sizeof cfg, "%s/config.json", path);
+        if (access(cfg, R_OK)) continue;
+        if (lmb_shape_from_config(path, &out[n].shape)) continue;
+        snprintf(out[n].dir, sizeof out[n].dir, "%.511s", path);
+        snprintf(out[n].name, sizeof out[n].name, "%.63s", e->d_name);
+        n++;
+    }
+    closedir(d);
+    return n;
+}
+
+/* This machine as a planner node. The reserve is the governor's, so the
+ * catalogue never plans into memory the governor would refuse to give. */
+static void catalog_self(LmbClusterNode *n, const char *disk) {
+    LmbMachineProfile p;
+    memset(n, 0, sizeof *n);
+    if (lmb_machine_probe(&p, disk, NULL)) return;
+    snprintf(n->name, sizeof n->name, "%s", p.hostname);
+    uint64_t reserve = (uint64_t)lmb_env_int("LUMABRI_RAM_RESERVE_MB",
+                                             4096, 256, 262144) << 20;
+    n->ram_budget_bytes = p.ram_available_bytes > reserve
+                        ? p.ram_available_bytes - reserve : 0;
+    n->vram_budget_bytes = p.gpu_backends ? p.vram_available_bytes : 0;
+    n->disk_read_bps = p.disk_read_bps;
+    n->gpu_backends = p.gpu_backends;
+    n->threads = p.logical_cpus;
+    n->has_checkpoint = 1;
+}
+
+static void catalog_row(const CatalogEntry *m, const LmbClusterNode *nodes,
+                        uint32_t nn, uint32_t context, uint32_t sessions) {
+    LmbClusterPlan plan;
+    int ok = !lmb_plan_cluster(&m->shape, nodes, nn, context, sessions,
+                               LMB_GOAL_ONE_SESSION, &plan);
+    const char *state = !ok ? "not runnable"
+                            : lmb_plan_state_name(plan.state);
+    const char *mark = !ok || plan.state == LMB_PLAN_UNRUNNABLE ? "x"
+                     : plan.state == LMB_PLAN_DISK ? "!" : "+";
+    char detail[96] = "";
+    if (ok && plan.state == LMB_PLAN_UNRUNNABLE && plan.missing_bytes)
+        snprintf(detail, sizeof detail, "%.0f GB short (~%u more machine%s)",
+                 (double)plan.missing_bytes / 1e9, plan.missing_nodes,
+                 plan.missing_nodes == 1 ? "" : "s");
+    else if (ok && plan.ready_known && plan.ready_seconds > 0)
+        snprintf(detail, sizeof detail, "ready in ~%.0f min",
+                 plan.ready_seconds / 60.0);
+    else if (ok)
+        snprintf(detail, sizeof detail, "%u slice%s", plan.nslices,
+                 plan.nslices == 1 ? "" : "s");
+    /* The speed column is deliberately not a number. It becomes one when a
+     * calibration exists for THIS model on THIS cluster with THIS plan, and
+     * not one moment earlier. */
+    printf("  %s%-2s%s %-22s %-14s %-28s %s\n",
+           mark[0] == 'x' ? C_RED : mark[0] == '!' ? C_CORAL : C_GRN,
+           mark, C_R, m->name, state, detail, "not calibrated");
+}
+
+static int cmd_models(int argc, char **argv) {
+    const char *root = NULL, *disk = ".";
+    uint32_t context = 4096, sessions = 1;
+    for (int i = 0; i < argc; i++) {
+        if (!strcmp(argv[i], "--models-dir") && i + 1 < argc) root = argv[++i];
+        else if (!strcmp(argv[i], "--disk") && i + 1 < argc) disk = argv[++i];
+        else if (!strcmp(argv[i], "--context") && i + 1 < argc)
+            context = (uint32_t)atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--sessions") && i + 1 < argc)
+            sessions = (uint32_t)atoi(argv[++i]);
+        else {
+            fprintf(stderr, "usage: lumabri models [--models-dir DIR] "
+                            "[--disk PATH] [--context N] [--sessions N]\n");
+            return 2;
+        }
+    }
+    char def[512];
+    if (!root) {
+        const char *home = getenv("HOME") ? getenv("HOME") : ".";
+        snprintf(def, sizeof def, "%s/.lumabri/models", home);
+        root = def;
+    }
+    CatalogEntry models[64];
+    int n = catalog_scan(root, models, 64);
+    LmbClusterNode self;
+    catalog_self(&self, disk);
+
+    printf("%s%sLUMABRI · what these computers can run%s\n\n", C_BOLD, C_CORAL, C_R);
+    printf("  %s1 computer · %.0f GB usable RAM · engine %s%s\n", C_DIM,
+           (double)self.ram_budget_bytes / 1e9,
+           self.gpu_backends ? "can use a GPU" : "CPU only", C_R);
+    if (self.disk_read_bps)
+        printf("  %sdisk %.0f MB/s cold read%s\n", C_DIM,
+               self.disk_read_bps / 1e6, C_R);
+    printf("\n");
+
+    if (!n) {
+        printf("  %sno checkpoints under %s%s\n", C_DIM, root, C_R);
+        printf("  %sput a model directory there, or pass --models-dir%s\n",
+               C_DIM, C_R);
+        return 0;
+    }
+    printf("  %-2s %-22s %-14s %-28s %s\n", "", "MODEL", "STATE", "", "SPEED");
+    for (int i = 0; i < n; i++)
+        catalog_row(&models[i], &self, 1, context, sessions);
+    printf("\n  %sa speed appears only after a calibration on this cluster "
+           "with this plan%s\n", C_DIM, C_R);
+    return 0;
+}
+
 static int cmd_machine(int argc, char **argv) {
     int json = 0;
     const char *tracker = NULL, *disk = ".";
@@ -4943,6 +5396,9 @@ int main(int argc, char **argv) {
     if (argc >= 2 && !strcmp(argv[1], "key")) return cmd_key(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "peer-key"))
         return cmd_peer_key(argc - 2, argv + 2);
+    if (argc >= 2 && !strcmp(argv[1], "host")) return cmd_host(argc - 2, argv + 2);
+    if (argc >= 2 && !strcmp(argv[1], "models"))
+        return cmd_models(argc - 2, argv + 2);
     if (argc >= 2 && (!strcmp(argv[1], "machine") || !strcmp(argv[1], "status")))
         return cmd_machine(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "limits"))

@@ -299,6 +299,18 @@ enum {
      * Advertised by an executor as bit 0 of the caps word ERES_R carries
      * third, after residency and state; an older node never receives EXEC2. */
     LMB_EXEC2 = 72, LMB_EXEC2_R = 73,
+    /* An inference host: it owns the engine, the dense weights and the KV,
+     * and a client sends it text. HELLO_R body: model_type, engine kind,
+     * backend ("cpu"/"cuda"), u32 free sessions, u32 measured tok/s in
+     * thousandths — zero meaning nobody has measured this host yet, which
+     * is a state the screen shows rather than a number it invents.
+     *
+     * After the greeting the socket carries the SUBMIT/DATA/DONE codec the
+     * terminal already speaks, unchanged: that is what makes a thin client a
+     * connection rather than a rewrite. The client boots no engine, opens no
+     * mirror and holds no checkpoint — the serve-codec engines tokenize the
+     * payload themselves, so it needs no tokenizer either. */
+    LMB_HOST_HELLO = 74, LMB_HOST_HELLO_R = 75,
 };
 #define LMB_CAP_EXEC2 (1u << 0)
 #define LMB_ENC_F32  0u

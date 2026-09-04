@@ -73,3 +73,7 @@ kimi_k3_p2p
 deepseek_p2p
 qwen36_p2p
 selftest
+segment_budget_probe
+test_planner
+test_cluster
+test_model_family
