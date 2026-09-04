@@ -274,10 +274,19 @@ enum {
     LMB_TEXEC = 66,
     LMB_TMAN = 67, LMB_TMAN_FWD = 68, LMB_TMAN_R = 69,
     /* Where an executor's experts live. ERES_R body: u32 resident_flags
-     * (LMB_EXPERT_RESIDENT_VRAM / _RAM / LMB_EXPERT_DISK_FALLBACK), u32 state. A
-     * chatter asks once after the manifest; an older node answers ERR and is
-     * simply treated as "unknown". Additive: the manifest itself is
-     * unchanged, so old chatters keep admitting new nodes. */
+     * (LMB_EXPERT_RESIDENT_VRAM / _RAM / LMB_EXPERT_DISK_FALLBACK), u32 state,
+     * u32 caps, then u32 hot_experts, u32 held_experts, u32 hot_permille.
+     *
+     * The flag alone cannot describe a node that keeps a RAM cache in front
+     * of on-disk experts: holding a third of a model hot reads exactly like
+     * holding none of it. The three counts say how much is hot, out of how
+     * much, and how often a call is actually served without a disk read —
+     * measured once enough calls have gone through, and the slot ratio,
+     * which is the floor, before that. A chatter asks once after the
+     * manifest; an older node answers ERR and is treated as "unknown", or
+     * answers the first three fields alone and is read exactly as before.
+     * Additive: the manifest itself is unchanged, so old chatters keep
+     * admitting new nodes. */
     LMB_ERES = 70, LMB_ERES_R = 71,
     /* EXEC with an explicit encoding. Body: u32 layer, eid, D, nrows,
      * enc_in, then the router weights when the engine wants them applied
@@ -288,7 +297,7 @@ enum {
      * round their MoE input and expert output to bf16 (DeepSeek V4 does)
      * pay half the bytes, others keep floats, and nothing is approximated.
      * Advertised by an executor as bit 0 of the caps word ERES_R carries
-     * after residency and state; an older node never receives EXEC2. */
+     * third, after residency and state; an older node never receives EXEC2. */
     LMB_EXEC2 = 72, LMB_EXEC2_R = 73,
 };
 #define LMB_CAP_EXEC2 (1u << 0)
