@@ -1067,11 +1067,30 @@ static uint64_t lumi_blend_offset(const LumiPeer *p) {
     return (warm * hot + cold * (1000 - hot)) / 1000;
 }
 
+/* The score is what we measured, and nothing else.
+ *
+ * An EXEC observation is the whole call — transport, queue and compute — so
+ * residency is already inside every sample the predictor holds. Adding the
+ * tier on top of that counts the same cost twice, and once a peer has been
+ * observed enough it can lose the call for belonging to the wrong class
+ * while genuinely being the faster machine. That is #121 in reverse, and
+ * #121 was a real incident on this network.
+ *
+ * The two other shapes we tried both trade the double count for starvation.
+ * A prior that fades while a peer is unmeasured falls hardest on the
+ * replica nobody has tried yet, which is how #131 first failed CI. Seeding
+ * the predictor with the tier and folding it back on every idle refresh
+ * does the same thing more slowly: the peer that has been called sheds the
+ * tier through its observations, the peer that has not keeps it forever,
+ * and it is never called again. Measured, that is not a hypothetical — it
+ * reproduces the same test failure.
+ *
+ * So the tier does not enter the score at all. It decides between replicas
+ * the measurements do not separate, in lumi_pick. A peer that is genuinely
+ * faster still wins outright; a peer nobody has measured still gets its
+ * turn whenever its transport says it should. */
 static uint64_t lumi_replica_score(const LumiPeer *p) {
-    uint64_t score = lmb_predict_score(&p->latency, p->inflight);
-    uint64_t tier = lumi_blend_offset(p);
-    if (score == UINT64_MAX || !tier) return score;
-    return score < UINT64_MAX - tier ? score + tier : score;
+    return lmb_predict_score(&p->latency, p->inflight);
 }
 
 static int lumi_pick(int gid, uint32_t tried) {
@@ -1087,18 +1106,41 @@ static int lumi_pick(int gid, uint32_t tried) {
         if (best < 0 || score < best_score)
             { best = r; best_score = score; }
     }
-    if (best < 0 || !L.spread || best_score == UINT64_MAX) return best;
+    if (best < 0 || best_score == UINT64_MAX) return best;
 
+    /* The band: replicas the measurements do not meaningfully separate.
+     * Within it, and only within it, where the experts live decides — an
+     * expert answered from VRAM costs one to two milliseconds, from RAM ten
+     * to fifteen, from a cold NVMe read forty to fifty, and a PING cannot
+     * see any of that. Outside the band the measurement has already spoken
+     * and is not overruled. */
     uint64_t band = best_score + best_score / 4 + 2000;
     int cand[LUMI_MAX_REP], nc = 0;
+    uint64_t best_tier = UINT64_MAX;
     for (int r = 0; r < LUMI_MAX_REP; r++) {
         int pi = own[r];
         if (pi < 0 || ((tried >> r) & 1) || L.peers[pi].dead ||
             !lmb_predict_available(&L.peers[pi].latency, now)) continue;
-        uint64_t score = lumi_replica_score(&L.peers[pi]);
-        if (score <= band) cand[nc++] = r;
+        if (lumi_replica_score(&L.peers[pi]) > band) continue;
+        uint64_t tier = lumi_blend_offset(&L.peers[pi]);
+        if (tier < best_tier) best_tier = tier;
+        cand[nc++] = r;
     }
     if (nc <= 1) return best;
+    int keep = 0;
+    for (int i = 0; i < nc; i++)
+        if (lumi_blend_offset(&L.peers[own[cand[i]]]) == best_tier)
+            cand[keep++] = cand[i];
+    nc = keep;
+    if (nc == 1) return cand[0];
+    if (!L.spread) {
+        /* No spreading: the best-scoring replica of the best tier. */
+        int pick = cand[0];
+        for (int i = 1; i < nc; i++)
+            if (lumi_replica_score(&L.peers[own[cand[i]]]) <
+                lumi_replica_score(&L.peers[own[pick]])) pick = cand[i];
+        return pick;
+    }
     for (int i = 1; i < nc; i++)            /* canonical: sort the band by address */
         for (int j = i; j > 0 &&
              strcmp(L.peers[own[cand[j]]].addr, L.peers[own[cand[j-1]]].addr) < 0; j--) {

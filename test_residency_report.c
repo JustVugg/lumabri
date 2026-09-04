@@ -154,6 +154,47 @@ int main(void) {
     }
     bad |= check("tunnel peer", lumi_blend_offset(&p), LUMI_TIER_RAM_US);
 
+    /* ---- and what the routing does with it -----------------------------
+     *
+     * Two claims, and they pull in opposite directions. Where the
+     * measurements do not separate two replicas, the tier decides — that is
+     * the whole reason to ask. Where they DO separate them, the tier must
+     * not overrule the measurement: an EXEC observation already contains
+     * the residency, so charging it again can hand the call to the slower
+     * machine for belonging to the favoured class. */
+    L.n_layers = 1; L.n_experts = 1; L.npeers = 2; L.spread = 0;
+    L.own = (int *)malloc(LUMI_MAX_REP * sizeof(int));
+    for (int i = 0; i < LUMI_MAX_REP; i++) L.own[i] = -1;
+    L.own[0] = 0; L.own[1] = 1;
+
+    /* same measured cost, different residency: residency decides */
+    memset(&L.peers[0], 0, sizeof L.peers[0]);
+    memset(&L.peers[1], 0, sizeof L.peers[1]);
+    snprintf(L.peers[0].addr, sizeof L.peers[0].addr, "a:1");
+    snprintf(L.peers[1].addr, sizeof L.peers[1].addr, "b:1");
+    L.peers[0].resident = 0; L.peers[0].hot_permille = 0;
+    L.peers[0].hot_experts = 1; L.peers[0].held_experts = 1000;
+    L.peers[1].resident = 1; L.peers[1].hot_permille = 1000;
+    L.peers[1].hot_experts = 1000; L.peers[1].held_experts = 1000;
+    lmb_predict_init(&L.peers[0].latency, 20000);
+    lmb_predict_init(&L.peers[1].latency, 20000);
+    if (lumi_pick(0, 0) != 1) {
+        fprintf(stderr, "tied on measurement: the disk replica was chosen\n");
+        bad = 1;
+    }
+
+    /* now the disk replica is measurably four times faster. The measurement
+     * already contains its disk reads; charging the tier again would lose
+     * the call to a slower machine. */
+    lmb_predict_init(&L.peers[0].latency, 5000);
+    lmb_predict_init(&L.peers[1].latency, 20000);
+    if (lumi_pick(0, 0) != 0) {
+        fprintf(stderr, "measured four times faster and still not chosen: "
+                        "the residency cost is being counted twice\n");
+        bad = 1;
+    }
+    free(L.own);
+
     atomic_store(&g_stop, 1);
     for (int i = 0; i < n; i++) pthread_join(th[i], NULL);
     printf("RESIDENCY REPORT: %s\n", bad ? "FAIL" : "PASS");
