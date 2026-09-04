@@ -19,7 +19,7 @@ endif
 # regressions would make this gate depend on whichever checkout ENGINE names.
 check-warnings:
 	$(MAKE) -B all test_relay_exec test_swarm_fed test_key_rotation \
-		test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 test_exec2 test_accum_order \
+		test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 test_exec2 test_accum_order test_residency_report \
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
 		test_meminfo test_compute_lease test_content_filter \
 		test_scheduler test_run_gate \
@@ -398,6 +398,9 @@ test_local_fallback: test_local_fallback.c lumabri_client.h lumabri_proto.h luma
 test_accum_order: test_accum_order.c lumabri_client.h lumabri_proto.h lumabri_sign.h $(SECURE_DEPS)
 	$(CC) $(CFLAGS) -pthread test_accum_order.c -o $@ -lm
 
+test_residency_report: test_residency_report.c lumabri_client.h lumabri_proto.h lumabri_sign.h $(SECURE_DEPS)
+	$(CC) $(CFLAGS) -pthread test_residency_report.c -o $@ -lm
+
 test_rtt_refresh: test_rtt_refresh.c lumabri_client.h lumabri_proto.h lumabri_sign.h $(SECURE_DEPS)
 	$(CC) $(CFLAGS) -pthread test_rtt_refresh.c -o $@
 
@@ -598,7 +601,7 @@ test-segment-v2: test_segment_v2
 test-segment-discovery: tracker test_segment_discovery
 	bash ./segment_discovery_test.sh
 
-test: all test_key_rotation test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 test_accum_order \
+test: all test_key_rotation test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 test_accum_order test_residency_report \
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
 		test_meminfo test_compute_lease test_content_filter \
 		test_scheduler test_run_gate
@@ -625,6 +628,7 @@ test: all test_key_rotation test_hedge test_local_fallback test_nat_adopt test_v
 	./test_hedge
 	./test_local_fallback
 	./test_accum_order
+	./test_residency_report
 	./test_nat_adopt
 	bash ./rtt_refresh_test.sh
 	./test_segment_v2
@@ -665,7 +669,8 @@ install: all
 clean:
 	rm -f tracker maintainer liblumabri.so test_shim swarm_probe lumabri \
 	      test_relay_exec test_swarm_fed test_key_rotation test_hedge \
-	      test_local_fallback test_accum_order test_nat_adopt test_rtt_refresh \
+	      test_local_fallback test_accum_order test_residency_report \
+	      test_nat_adopt test_rtt_refresh \
 	      test_verify_failover test_segment_v2 test_segment_discovery test_sampling \
 	      test_swarm_detail test_relay_rate test_machine test_meminfo \
 	      test_compute_lease test_content_filter test_scheduler test_run_gate \

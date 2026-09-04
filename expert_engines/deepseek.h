@@ -59,6 +59,11 @@ static int lmbe_effective_bits(int bits) { (void)bits; return 0; }
  * old code multiplied by the layer count instead: `--exec-cache 128` on the
  * 43-layer V4-Flash was 5504 experts (~69 GB) and 1800 was the entire
  * expert set, which is how a 64 GB server filled its RAM and died. */
+/* Whatever the store had already counted when it opened, or reopened for a
+ * resident node: those lookups were ours, warming it, not calls anyone made
+ * of us, and they must not be mistaken for a service record. */
+static uint64_t lmbe_stat_base_requests, lmbe_stat_base_hits;
+
 static void lmbe_open_per_layer(const char *dir, int slots_per_layer) {
     char err[512] = "";
     if (coli_v4_config_load(&lmbe_cfg, dir, err, sizeof err)) {
@@ -95,6 +100,13 @@ static void lmbe_open_per_layer(const char *dir, int slots_per_layer) {
             slots, slots == 1 ? "" : "s", lmbe_cfg.num_hidden_layers,
             slots * lmbe_cfg.num_hidden_layers,
             (double)o.cache_bytes / 1e9);
+    lmbe_stat_base_requests = lmbe_stat_base_hits = 0;
+    if (lmbe_store->ops && lmbe_store->ops->stats) {
+        ColiExpertStoreStats st = {0};
+        lmbe_store->ops->stats(lmbe_store, &st);
+        lmbe_stat_base_requests = st.requests;
+        lmbe_stat_base_hits = st.hits;
+    }
 }
 
 /* `cap` is the node's total expert slots (`--cache N`); 0 means a small
@@ -172,6 +184,34 @@ static uint64_t lmbe_resident_bytes(void) { return lmbe_resident_nbytes; }
 static uint64_t lmbe_vram_nbytes;
 static uint64_t lmbe_vram_bytes(void) { return lmbe_vram_nbytes; }
 #define LMBE_VRAM_BYTES lmbe_vram_bytes
+
+/* How often a lookup was answered from RAM, per thousand, since this store
+ * opened.
+ *
+ * This has to come from the store, not from the node's own slot table: on
+ * V4 `lmbe_slot_load` copies a layer and an expert id and loads no weights
+ * at all, because "the store is the cache". The node's LRU is therefore a
+ * shadow — global over N keys — while the one that actually reads the disk
+ * lives here and is sized per layer. Counting misses in the shadow measures
+ * a different cache with a different geometry, and publishing that number
+ * as "calls served without the disk" would be confidently wrong.
+ *
+ * Returns -1 when the store cannot say, or has not been asked enough times
+ * to mean anything; the node then falls back to its opening estimate. */
+static int lmbe_hot_permille(uint32_t *out) {
+    if (!lmbe_store || !lmbe_store->ops || !lmbe_store->ops->stats) return -1;
+    ColiExpertStoreStats st = {0};
+    lmbe_store->ops->stats(lmbe_store, &st);
+    uint64_t reqs = st.requests > lmbe_stat_base_requests
+                  ? st.requests - lmbe_stat_base_requests : 0;
+    uint64_t hits = st.hits > lmbe_stat_base_hits
+                  ? st.hits - lmbe_stat_base_hits : 0;
+    if (reqs < 64) return -1;
+    if (hits > reqs) hits = reqs;
+    *out = (uint32_t)(hits * 1000u / reqs);
+    return 0;
+}
+#define LMBE_HOT_PERMILLE lmbe_hot_permille
 
 /* set by lmbe_apply when it could not compute; the node turns it into a
  * refused call instead of a dead process */
