@@ -96,7 +96,7 @@ static LMB_UNUSED void lmb_cal_speed_text(const LmbCalibration *have,
     if (!have) { snprintf(out, cap, "not calibrated"); return; }
     const char *moved = lmb_cal_mismatch(&have->key, want);
     if (moved) {
-        snprintf(out, cap, "stale (%s changed) — recalibrate", moved);
+        snprintf(out, cap, "stale (%.20s changed) — recalibrate", moved);
         return;
     }
     snprintf(out, cap, "%.2f tok/s", have->decode_tok_s);

@@ -45,6 +45,7 @@
 #include "lumabri_proto.h"
 #include "lumabri_families.h"
 #include "lumabri_cluster.h"
+#include "lumabri_tui.h"
 #include "lumabri_machine.h"
 
 #ifdef __linux__
@@ -5071,9 +5072,16 @@ static void catalog_row(const CatalogEntry *m, const LmbClusterNode *nodes,
            mark, C_R, m->name, state, detail, "not calibrated");
 }
 
+static int models_screen(const char *root, const char *disk, uint32_t context,
+                         uint32_t sessions, int snapshot, const char *keys);
+
 static int cmd_models(int argc, char **argv) {
-    const char *root = NULL, *disk = ".";
+    const char *root = NULL, *disk = ".", *keys = NULL;
     uint32_t context = 4096, sessions = 1;
+    /* The screen is the default and the listing is the fallback, not the
+     * other way round: a plain list is what you want in a pipe or a log, and
+     * a pipe is exactly where a full-screen interface is useless. */
+    int plain = !isatty(STDOUT_FILENO), snapshot = 0;
     for (int i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "--models-dir") && i + 1 < argc) root = argv[++i];
         else if (!strcmp(argv[i], "--disk") && i + 1 < argc) disk = argv[++i];
@@ -5081,9 +5089,14 @@ static int cmd_models(int argc, char **argv) {
             context = (uint32_t)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--sessions") && i + 1 < argc)
             sessions = (uint32_t)atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--plain")) plain = 1;
+        else if (!strcmp(argv[i], "--snapshot")) { snapshot = 1; plain = 0; }
+        else if (!strcmp(argv[i], "--keys") && i + 1 < argc) keys = argv[++i];
         else {
             fprintf(stderr, "usage: lumabri models [--models-dir DIR] "
-                            "[--disk PATH] [--context N] [--sessions N]\n");
+                            "[--disk PATH] [--context N] [--sessions N]\n"
+                            "                      [--plain] [--snapshot] "
+                            "[--keys SEQUENCE]\n");
             return 2;
         }
     }
@@ -5093,6 +5106,8 @@ static int cmd_models(int argc, char **argv) {
         snprintf(def, sizeof def, "%s/.lumabri/models", home);
         root = def;
     }
+    if (!plain)
+        return models_screen(root, disk, context, sessions, snapshot, keys);
     CatalogEntry models[64];
     int n = catalog_scan(root, models, 64);
     LmbClusterNode self;
@@ -5119,6 +5134,41 @@ static int cmd_models(int argc, char **argv) {
     printf("\n  %sa speed appears only after a calibration on this cluster "
            "with this plan%s\n", C_DIM, C_R);
     return 0;
+}
+
+/* The same facts, on a screen. The state is built once here and handed over;
+ * the interface plans nothing of its own, so what it shows can never be a
+ * fact the planner does not have. */
+static int models_screen(const char *root, const char *disk, uint32_t context,
+                         uint32_t sessions, int snapshot, const char *keys) {
+    static LmbTuiState st;            /* a few hundred KB: not on the stack */
+    memset(&st, 0, sizeof st);
+    st.context = context;
+    st.sessions = sessions;
+    snprintf(st.root, sizeof st.root, "%.511s", root);
+
+    catalog_self(&st.nodes[0], disk);
+    st.nnodes = 1;
+
+    CatalogEntry found[LMB_TUI_MAX_MODELS];
+    int n = catalog_scan(root, found, LMB_TUI_MAX_MODELS);
+    for (int i = 0; i < n; i++) {
+        LmbTuiModel *m = &st.models[st.nmodels];
+        snprintf(m->name, sizeof m->name, "%.63s", found[i].name);
+        snprintf(m->dir, sizeof m->dir, "%.511s", found[i].dir);
+        m->shape = found[i].shape;
+        m->planned = !lmb_plan_cluster(&m->shape, st.nodes, st.nnodes,
+                                       context, sessions,
+                                       LMB_GOAL_ONE_SESSION, &m->plan);
+        m->calibration = NULL;        /* nothing measured yet, and it shows */
+        st.nmodels++;
+    }
+    if (!st.nmodels) {
+        printf("no checkpoints under %s\n", root);
+        printf("put a model directory there, or pass --models-dir\n");
+        return 0;
+    }
+    return lmb_tui_run(&st, snapshot, keys);
 }
 
 static int cmd_machine(int argc, char **argv) {

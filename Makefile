@@ -29,8 +29,8 @@ SECURE_DEPS = lumabri_secure.h lumabri_crypto.h
 MACHINE_SRC = lumabri_machine.c
 MACHINE_DEPS = lumabri_machine.h $(MACHINE_SRC)
 
-lumabri: lumabri.c lumabri_proto.h lumabri_sign.h $(SECURE_DEPS) $(MACHINE_DEPS)
-	$(CC) $(CFLAGS) -pthread lumabri.c $(MACHINE_SRC) -o $@
+lumabri: lumabri.c lumabri_tui.c lumabri_tui.h lumabri_proto.h lumabri_sign.h $(SECURE_DEPS) $(MACHINE_DEPS)
+	$(CC) $(CFLAGS) -pthread lumabri.c lumabri_tui.c $(MACHINE_SRC) -o $@
 
 # ---- phase 2: peers execute experts ------------------------------------
 # Both sides are built from the engine's own source so the expert math cannot
@@ -665,6 +665,7 @@ test: all test_key_rotation test_hedge test_local_fallback test_nat_adopt test_v
 	bash ./model_family_test.sh
 	bash ./catalog_test.sh
 	bash ./hosted_chat_test.sh
+	bash ./tui_test.sh
 	./test_planner
 	./test_cluster
 	./test_calibration
