@@ -987,7 +987,7 @@ static void *dense_prefetch_thread(void *arg) {
 
 static void *stats_thread(void *arg) {
     int period = (int)(intptr_t)arg;
-    uint64_t last_bytes = 0, last_cas = 0, last_dense = 0;
+    uint64_t last_bytes = 0, last_cas = 0, last_dense = 0, last_warm = 0;
     for (;;) {
         sleep((unsigned)period);
         if (atomic_load(&g.dense_state) == 1) {
@@ -1001,13 +1001,18 @@ static void *stats_thread(void *arg) {
         uint64_t blk = atomic_load(&g.net_blocks);
         uint64_t warm = atomic_load(&g.warm_reads);
         uint64_t cb = atomic_load(&g.cas_bytes), ch = atomic_load(&g.cas_hits);
-        if (nb == last_bytes && cb == last_cas && !warm) continue;
+        /* Nothing moved since the last tick: say nothing. The test used to be
+         * `!warm`, the running total rather than the change, so one warm read
+         * at startup made this line print every period for the rest of the
+         * session — hundreds of identical rows that bury the report a reader
+         * actually came for. */
+        if (nb == last_bytes && cb == last_cas && warm == last_warm) continue;
         fprintf(stderr, "[lumabri] net %.1f MB in %llu blocks (%.1f MB/s) · "
                 "CAS %.1f MB in %llu hits · warm preads %llu\n",
                 (double)nb / 1e6, (unsigned long long)blk,
                 (double)(nb - last_bytes) / 1e6 / period, (double)cb / 1e6,
                 (unsigned long long)ch, (unsigned long long)warm);
-        last_bytes = nb; last_cas = cb;
+        last_bytes = nb; last_cas = cb; last_warm = warm;
     }
     return NULL;
 }
