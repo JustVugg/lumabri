@@ -630,14 +630,28 @@ static void manifest_build(LmbBuf *b) {
  * holding none of it, and a chatter that believes the flag then routes
  * around experts this node has warm.
  *
- * The measured rate is the truth once enough calls have gone through. Below
- * that, the slot ratio is the honest floor — a cache cannot hold more than
- * its slots — so a node that has just started is under-promised, never
- * over-promised. */
+ * An engine that owns its own cache answers first, because it is the cache
+ * that actually reads the disk. On V4 the node's slot table loads nothing —
+ * a slot there is a key, and colibri's per-layer store does the reading —
+ * so counting misses in the slot table would measure a different cache with
+ * a different geometry and publish the answer as if it were this one.
+ *
+ * Failing that, the node's own cold count, once enough calls have gone
+ * through to mean something.
+ *
+ * Failing THAT, the slot ratio: an opening estimate, not a floor. A cold
+ * cache hits nothing, and a working set that cycles past the cache keeps
+ * hitting nothing, so the ratio can be optimistic — it is a starting guess
+ * that the measurement replaces within the first minute of traffic, not a
+ * bound. */
 #define NODE_HOT_MIN_CALLS 64u
 
 static uint32_t node_hot_permille(void) {
     if (!g.ncs) return 1000;                  /* fully resident: no cold path */
+#ifdef LMBE_HOT_PERMILLE
+    uint32_t engine = 0;
+    if (!LMBE_HOT_PERMILLE(&engine)) return engine > 1000 ? 1000 : engine;
+#endif
     uint64_t calls = atomic_load(&g.calls), cold = atomic_load(&g.cold);
     if (calls >= NODE_HOT_MIN_CALLS) {
         uint64_t hits = calls > cold ? calls - cold : 0;

@@ -43,6 +43,13 @@
  * the tracker's hop to the peer and back, home-line grade */
 #define LUMI_TUNNEL_PENALTY_US 60000u
 #define LUMI_RTT_REFRESH_S 30.0
+/* How often one peer's residency report is read again. A cache warms, a
+ * measured rate replaces the opening estimate, a node is rebalanced, a
+ * cache starts missing: all of that moves, and reading it once when the
+ * peer joined publishes a dynamic number through a static channel. Slower
+ * than the RTT cadence and on its own connection, so the pooled sockets the
+ * RTT refresh accounts for are left alone. */
+#define LUMI_ERES_REFRESH_S 60.0
 #define LUMI_RTT_SAMPLES   2
 #ifndef LUMI_RTT_PROBE_TIMEOUT_MS
 #define LUMI_RTT_PROBE_TIMEOUT_MS 2000
@@ -81,6 +88,7 @@ typedef struct {
     uint32_t hot_permille;      /* calls served without a disk read, per 1000 */
     uint32_t hot_experts;       /* experts this node keeps hot */
     uint32_t held_experts;      /* experts it serves in all */
+    double eres_read_at;        /* when the residency report was last read */
     /* the bill: what this peer answered, how long it took, and the bytes
      * that crossed the wire each way — the report divides them by rounds */
     unsigned long long ok_calls, bytes_out, bytes_in;
@@ -104,6 +112,7 @@ static struct {
     LmbTrustKeys trust;
     double next_discover, discover_period_s;
     double next_rtt_refresh;  /* one healthy pooled peer per slow cadence */
+    double next_eres_refresh; /* likewise for the residency report */
     int verify_pct;             /* LUMABRI_VERIFY: % of calls double-checked */
     int allow_codegen_skew;     /* LUMABRI_ALLOW_CODEGEN_SKEW: cc/isa -> warn, not refuse */
     int spread;                 /* LUMABRI_SPREAD: near-band replica spreading, not strict argmin */
@@ -365,6 +374,70 @@ static int lumi_refresh_identity(void) {
     return 1;
 }
 
+/* Where this executor keeps the experts it holds, and how much of that it
+ * really keeps hot.
+ *
+ * ERES answers three words on every node, and three more on a node new
+ * enough to count: experts kept hot, experts served, and calls answered per
+ * thousand without a disk read. The silence of an older node is not "it
+ * hits every time" — it is "we do not know", and the only safe reading of
+ * an unknown disk node is the disk price. `held_experts == 0` is what says
+ * the counts never arrived, and it is what the score checks.
+ *
+ * A tunnel-only peer is never asked: the question would be answered by the
+ * tracker's socket, not the executor's. */
+/* A maintenance question must never be able to hold up a reply.
+ *
+ * lmb_request has no deadline of its own: it connects, sends and then waits.
+ * Against a peer that is wedged rather than gone — registered, socket open,
+ * answering nothing, which is the more dangerous of the two failures and the
+ * one segment_hybrid_test builds on purpose — that wait is unbounded, and
+ * this runs on the generation path. Give it its own short deadline; a
+ * residency report that does not arrive in two seconds is one we can do
+ * without until the next sweep. */
+#define LUMI_ERES_TIMEOUT_MS 2000
+
+static int lumi_request_bounded(const char *addr, uint32_t op, LmbMsg *resp) {
+    int fd = lmb_connect(addr);
+    if (fd < 0) return -1;
+    struct timeval tv = { LUMI_ERES_TIMEOUT_MS / 1000,
+                          (LUMI_ERES_TIMEOUT_MS % 1000) * 1000 };
+    int rc = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv) ||
+             setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+    if (!rc) rc = lmb_auth(fd);
+    if (!rc) rc = lmb_send(fd, op, NULL, 0, NULL, 0);
+    if (!rc) rc = lmb_recv(fd, resp);
+    lmb_close(fd);
+    return rc;
+}
+
+static void lumi_read_residency(LumiPeer *p) {
+    p->resident = -1;
+    p->hot_permille = 1000;
+    p->hot_experts = p->held_experts = 0;
+    p->eres_read_at = lumi_now();
+    if (p->relay_target[0]) return;
+    LmbMsg rm = {0};
+    const char *dial = p->loopback[0] ? p->loopback : p->addr;
+    if (!lumi_request_bounded(dial, LMB_ERES, &rm) && rm.op == LMB_ERES_R) {
+        LmbCur rc = { rm.body, rm.body_len, 0 };
+        uint32_t flags = 0, state = 0, caps = 0;
+        if (!lmb_cur_u32(&rc, &flags))
+            p->resident = (flags & LMB_EXPERT_RESIDENT_VRAM) ? 2 :
+                          (flags & LMB_EXPERT_DISK_FALLBACK) ? 0 : 1;
+        if (!lmb_cur_u32(&rc, &state) && !lmb_cur_u32(&rc, &caps))
+            p->caps = caps;               /* absent on older nodes: plain EXEC */
+        uint32_t hot = 0, held = 0, permille = 0;
+        if (!lmb_cur_u32(&rc, &hot) && !lmb_cur_u32(&rc, &held) &&
+            !lmb_cur_u32(&rc, &permille) && held > 0) {
+            p->hot_experts = hot;
+            p->held_experts = held;
+            p->hot_permille = permille > 1000 ? 1000 : permille;
+        }
+    }
+    lmb_msg_free(&rm);
+}
+
 /* Learn one peer: manifest, replica claims, distance. Returns 0, or -1 on
  * any failure (already-known addresses are a no-op success). */
 static int lumi_add_peer(const char *addr) {
@@ -558,35 +631,7 @@ static int lumi_add_peer(const char *addr) {
     }
     lmb_predict_observe(&p->latency, (uint64_t)p->rtt_us);
     p->exec_observations_at_probe = p->exec_observations;
-    /* RAM or disk? Asked once, directly (a tunnel-only peer stays unknown,
-     * and a donor behind NAT is a resident donor in practice). */
-    p->resident = -1;
-    p->hot_permille = 1000;       /* no counts: believe the flag, as before */
-    p->hot_experts = p->held_experts = 0;
-    if (!p->relay_target[0]) {
-        LmbMsg rm = {0};
-        const char *dial = p->loopback[0] ? p->loopback : p->addr;
-        if (!lmb_request(dial, LMB_ERES, NULL, 0, &rm) && rm.op == LMB_ERES_R) {
-            LmbCur rc = { rm.body, rm.body_len, 0 };
-            uint32_t flags = 0, state = 0, caps = 0;
-            if (!lmb_cur_u32(&rc, &flags))
-                p->resident = (flags & LMB_EXPERT_RESIDENT_VRAM) ? 2 :
-                              (flags & LMB_EXPERT_DISK_FALLBACK) ? 0 : 1;
-            if (!lmb_cur_u32(&rc, &state) && !lmb_cur_u32(&rc, &caps))
-                p->caps = caps;               /* absent on older nodes: plain EXEC */
-            /* How much of what it serves it actually keeps hot. Absent on a
-             * node that predates the field, and then the flag stands alone
-             * exactly as before. */
-            uint32_t hot = 0, held = 0, permille = 0;
-            if (!lmb_cur_u32(&rc, &hot) && !lmb_cur_u32(&rc, &held) &&
-                !lmb_cur_u32(&rc, &permille)) {
-                p->hot_experts = hot;
-                p->held_experts = held;
-                p->hot_permille = permille > 1000 ? 1000 : permille;
-            }
-        }
-        lmb_msg_free(&rm);
-    }
+    lumi_read_residency(p);
     char tier[96];
     if (p->resident == 0 && p->held_experts)
         snprintf(tier, sizeof tier,
@@ -739,10 +784,27 @@ static void lumi_maybe_refresh_rtt(double now) {
     if (oldest >= 0) lumi_refresh_rtt(&L.peers[oldest]);
 }
 
+/* The same shape for the residency report: one peer per cadence, the one
+ * read longest ago. A dead peer is skipped; a tunnel peer answers instantly
+ * from lumi_read_residency without dialing anything. */
+static void lumi_maybe_refresh_residency(double now) {
+    if (now < L.next_eres_refresh) return;
+    L.next_eres_refresh = now + LUMI_ERES_REFRESH_S;
+    int oldest = -1;
+    for (int i = 0; i < L.npeers; i++) {
+        LumiPeer *p = &L.peers[i];
+        if (p->dead || p->relay_target[0]) continue;
+        if (oldest < 0 || p->eres_read_at < L.peers[oldest].eres_read_at)
+            oldest = i;
+    }
+    if (oldest >= 0) lumi_read_residency(&L.peers[oldest]);
+}
+
 static void lumi_maybe_discover(void) {
     if (!L.initialized) return;
     double now = lumi_now();
     lumi_maybe_refresh_rtt(now);
+    lumi_maybe_refresh_residency(now);
     if (!L.discovery || now < L.next_discover) return;
     L.next_discover = now + L.discover_period_s;
     if (!L.have_identity) lumi_refresh_identity();
@@ -868,6 +930,7 @@ static void lumi_init_ex(int n_layers, int n_experts, int hidden,
     /* Bootstrap probes may themselves be slow; begin the maintenance cadence
      * only after every initial peer has been discovered and measured. */
     L.next_rtt_refresh = lumi_now() + LUMI_RTT_REFRESH_S;
+    L.next_eres_refresh = lumi_now() + LUMI_ERES_REFRESH_S;
 
     int missing = lumi_missing_experts();
     if (missing && !discovery) {
@@ -987,11 +1050,16 @@ static uint64_t lumi_tier_offset(int residency) {
 
 /* A node with a RAM cache in front of on-disk experts pays the RAM price on
  * a hit and the disk price on a miss, so its offset is the two blended by
- * the rate it reports. A node that keeps everything resident reports a
- * thousand out of a thousand and lands exactly where it did before; so does
- * one too old to report anything. And a caching node that genuinely hits
- * every time IS a RAM node for our purposes, which is the point. */
+ * the rate it reports. A caching node that genuinely never misses IS a RAM
+ * node for our purposes, which is the point of asking.
+ *
+ * A node that reported no counts is not blended at all. Its silence used to
+ * be read as "hits every time", which handed an older disk executor the RAM
+ * price — the opposite of the flag it had just sent, and a quiet route to
+ * the slowest replica in the swarm. No counts, no blend: the flag alone,
+ * exactly as it scored before any of this. */
 static uint64_t lumi_blend_offset(const LumiPeer *p) {
+    if (!p->held_experts) return lumi_tier_offset(p->resident);
     /* the cache in front of the disk is RAM, whatever the flag says overall */
     uint64_t warm = lumi_tier_offset(p->resident == 0 ? 1 : p->resident);
     uint64_t cold = p->resident == 0 ? LUMI_TIER_DISK_US : warm;

@@ -281,8 +281,8 @@ enum {
      * of on-disk experts: holding a third of a model hot reads exactly like
      * holding none of it. The three counts say how much is hot, out of how
      * much, and how often a call is actually served without a disk read —
-     * measured once enough calls have gone through, and the slot ratio,
-     * which is the floor, before that. A chatter asks once after the
+     * measured once enough calls have gone through, and an opening
+     * estimate from the slot ratio before that. A chatter asks once after the
      * manifest; an older node answers ERR and is treated as "unknown", or
      * answers the first three fields alone and is read exactly as before.
      * Additive: the manifest itself is unchanged, so old chatters keep
