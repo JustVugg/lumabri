@@ -35,7 +35,31 @@ def main():
          '    }\n'
          '#endif\n'
          '    for (int expert_id = 0; !result && expert_id < n; expert_id++) {'),
-        # site 2 — moe_token_pipeline: dual loader, reset selected.
+        # site 2a — moe_token_pipeline, BEFORE the loaders. The engine starts
+        # `lanes` expert loaders for this layer before it reaches the old hook
+        # site, and the cleanup loop waits for them even when `selected` has
+        # been zeroed — so a swarm-fed chatter read (and, through the mirror,
+        # DOWNLOADED) two 12.6 MB experts per layer that it never executed.
+        # Decide remotely here instead: on success the routed partial lands in
+        # a buffer, `selected` becomes 0 before a single loader starts, and
+        # site 2b adds the buffer where the local loop would have accumulated.
+        ('    if (!result && selected != topk) result = -1;\n',
+         '    if (!result && selected != topk) result = -1;\n'
+         '#ifdef LUMABRI_P2P\n'
+         '    float *lumi_partial = NULL;\n'
+         '    if (!result && lumi_v4_bridge_on(weights->plan.layer)) {\n'
+         '        lumi_partial = malloc((size_t)d * sizeof(*lumi_partial));\n'
+         '        if (lumi_partial) {\n'
+         '            memset(lumi_partial, 0, (size_t)d * sizeof(*lumi_partial));\n'
+         '            if (lumi_v4_bridge_apply(weights->plan.layer, indices,\n'
+         '                                     route_weights, topk, input, 1, d,\n'
+         '                                     lumi_partial))\n'
+         '                selected = 0;   /* no local loader will start */\n'
+         '            else { free(lumi_partial); lumi_partial = NULL; }\n'
+         '        }\n'
+         '    }\n'
+         '#endif\n'),
+        # site 2b — moe_token_pipeline: dual loader, reset selected.
         # Current colibri allocates a `views` array (and, under COLI_V4_GPU_TIER,
         # a batch path) before the per-expert loop, so the anchor is the malloc,
         # not the loop. selected=0 stays correct on the CPU build we compile:
@@ -49,11 +73,10 @@ def main():
          '    ColiExpertView *views = malloc((size_t)selected * sizeof(*views));',
          '    if (!result) memset(output, 0, (size_t)d * sizeof(*output));\n'
          '#ifdef LUMABRI_P2P\n'
-         '    if (!result && lumi_v4_bridge_on(weights->plan.layer)) {\n'
-         '        if (lumi_v4_bridge_apply(weights->plan.layer, indices, route_weights,\n'
-         '                                 topk, input, 1, d, output))\n'
-         '            selected = 0;\n'
+         '    if (!result && lumi_partial) {\n'
+         '        for (int i = 0; i < d; i++) output[i] += lumi_partial[i];\n'
          '    }\n'
+         '    free(lumi_partial); lumi_partial = NULL;\n'
          '#endif\n'
          '\n'
          '#ifdef COLI_V4_EXPERIMENTAL_DUAL_EXPERT_LOADER\n'
@@ -116,7 +139,7 @@ def main():
 
     open(dst, "w").write(s)
     if n < 4:
-        sys.exit("expected at least 4 insertions, made %d" % n)
+        sys.exit("expected at least 5 insertions, made %d" % n)
     print("deepseek_v4 p2p: %d hooks inserted (%d engine-open tail)" % (n, inits))
 
 if __name__ == "__main__":
