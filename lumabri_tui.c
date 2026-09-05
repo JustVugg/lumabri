@@ -60,8 +60,8 @@ static Size term_size(void) {
     struct winsize ws;
     Size s = { 100, 30 };
     if (ioctl(1, TIOCGWINSZ, &ws) == 0) {
-        if (ws.ws_col > 40) s.w = ws.ws_col;
-        if (ws.ws_row > 10) s.h = ws.ws_row;
+        if (ws.ws_col > 0) s.w = ws.ws_col;
+        if (ws.ws_row > 0) s.h = ws.ws_row;
     }
     /* A terminal narrower than this cannot show the table without wrapping
      * into nonsense, so the compact view takes over rather than the layout
@@ -134,14 +134,11 @@ static const char *state_word(const LmbTuiModel *m) {
  * calibration exists for this exact plan. */
 static void speed_text(const LmbTuiModel *m, char *out, size_t cap) {
     if (!m->calibration) { snprintf(out, cap, "not calibrated"); return; }
-    LmbCalKey want;
-    memset(&want, 0, sizeof want);
-    /* Only the fields this screen knows; the rest come from the record and
-     * therefore always match, which is why a real calibration is written by
-     * the run that measured it and not assembled here. */
-    snprintf(want.adapter, sizeof want.adapter, "%s", m->shape.segment_id);
-    want.context = m->plan.sessions ? 4096 : 4096;
-    lmb_cal_speed_text(m->calibration, &want, out, cap);
+    if (!m->calibration_key_valid) {
+        snprintf(out, cap, "stale (plan key unavailable)");
+        return;
+    }
+    lmb_cal_speed_text(m->calibration, &m->calibration_key, out, cap);
 }
 
 static void human_bytes(uint64_t b, char *out, size_t cap) {
@@ -255,7 +252,7 @@ static void draw_nodes(const LmbTuiState *st, Size sz) {
                                        n->disk_read_bps / 1e6);
         else snprintf(disk, sizeof disk, "unmeasured");
         at(5 + (int)i, 1);
-        fputs("\x1b[K", stdout);
+        if (!g_snapshot) fputs("\x1b[K", stdout);
         printf("  %-20.20s %-12s %-12s %-12s %s", n->name, ram,
                n->vram_budget_bytes ? vram : "—", disk,
                /* A card the engine cannot drive is not a GPU machine, and
@@ -271,6 +268,30 @@ static void draw_nodes(const LmbTuiState *st, Size sz) {
     fflush(stdout);
 }
 
+static void draw_compact(const LmbTuiState *st, Size sz, int tab, int sel) {
+    clear_screen();
+    at(1, 1); printf("%s%sLUMABRI%s  %u computer%s", c(BOLD), c(AMBER),
+                     c(OFF), st->nnodes, st->nnodes == 1 ? "" : "s");
+    at(2, 1); printf("%s%s%s", c(INV), tab ? "COMPUTERS" : "MODELS", c(OFF));
+    int room = sz.w > 8 ? sz.w - 8 : 8;
+    if (tab) {
+        for (uint32_t i = 0; i < st->nnodes && (int)i + 4 < sz.h; i++) {
+            at(4 + (int)i, 1);
+            printf("%c %-*.*s", (int)i == sel ? '>' : ' ', room, room,
+                   st->nodes[i].name);
+        }
+    } else {
+        for (int i = 0; i < st->nmodels && i + 4 < sz.h; i++) {
+            at(4 + i, 1);
+            printf("%c %-*.*s %s", i == sel ? '>' : ' ', room / 2, room / 2,
+                   st->models[i].name, state_word(&st->models[i]));
+        }
+    }
+    at(sz.h > 1 ? sz.h : 1, 1);
+    printf("%s↑↓  tab  r  q%s", c(DIM), c(OFF));
+    fflush(stdout);
+}
+
 /* ---- the detail --------------------------------------------------------- */
 
 static void draw_detail(const LmbTuiState *st, Size sz, int sel) {
@@ -280,7 +301,7 @@ static void draw_detail(const LmbTuiState *st, Size sz, int sel) {
     LmbRangeCost edge = lmb_estimate_edge(&m->shape, st->context, st->sessions);
     uint64_t budget = 0;
     for (uint32_t i = 0; i < st->nnodes; i++)
-        budget += st->nodes[i].ram_budget_bytes + st->nodes[i].vram_budget_bytes;
+        budget += st->nodes[i].ram_budget_bytes;
 
     clear_screen();
     at(1, 1);
@@ -292,6 +313,14 @@ static void draw_detail(const LmbTuiState *st, Size sz, int sel) {
     int row = 4;
     at(row++, 1);
     printf("  %sWHAT IT NEEDS%s", c(DIM), c(OFF));
+    if (!whole.ok || !edge.ok) {
+        at(row++, 1);
+        printf("    adapter-specific sizing is unavailable; no fit decision");
+        at(sz.h, 1);
+        printf("%s ↵ back   q quit%s", c(DIM), c(OFF));
+        fflush(stdout);
+        return;
+    }
     char t[32];
     human_bytes(whole.resident_bytes, t, sizeof t);
     at(row++, 1); printf("    every weight resident      %10s", t);
@@ -413,14 +442,24 @@ int lmb_tui_run(LmbTuiState *st, int snapshot, const char *keys) {
             case 'j': if (sel + 1 < st->nmodels) sel++; break;
             case 'k': if (sel > 0) sel--; break;
             case '\t': tab = !tab; break;
-            case '\r': case '\n': if (st->nmodels) detail = 1; break;
+            case 'r':
+                if (st->refresh) {
+                    (void)st->refresh(st, st->refresh_context);
+                    if (!st->nmodels) sel = top = 0;
+                    else if (sel >= st->nmodels) sel = st->nmodels - 1;
+                }
+                break;
+            case '\r': case '\n':
+                if (st->nmodels && sz.w >= 60 && sz.h >= 12) detail = 1;
+                break;
             default: break;
             }
         }
         int rows = sz.h - 7; if (rows < 1) rows = 1;
         if (sel < top) top = sel;
         if (sel >= top + rows) top = sel - rows + 1;
-        if (detail) draw_detail(st, sz, sel);
+        if (sz.w < 60 || sz.h < 12) draw_compact(st, sz, tab, sel);
+        else if (detail) draw_detail(st, sz, sel);
         else {
             draw_header(st, sz, tab);
             if (tab == 0) draw_models(st, sz, sel, top);
@@ -442,7 +481,8 @@ int lmb_tui_run(LmbTuiState *st, int snapshot, const char *keys) {
     for (;;) {
         if (g_quit) break;
         if (g_resized) { g_resized = 0; sz = term_size(); clear_screen(); }
-        if (detail) draw_detail(st, sz, sel);
+        if (sz.w < 60 || sz.h < 12) draw_compact(st, sz, tab, sel);
+        else if (detail) draw_detail(st, sz, sel);
         else {
             clear_screen();
             draw_header(st, sz, tab);
@@ -459,7 +499,17 @@ int lmb_tui_run(LmbTuiState *st, int snapshot, const char *keys) {
         case 'j': if (sel + 1 < st->nmodels) sel++; break;
         case 'k': if (sel > 0) sel--; break;
         case '\t': tab = !tab; break;
-        case '\r': case '\n': if (st->nmodels) detail = 1; break;
+        case 'r':
+            if (st->refresh) {
+                int selected = sel;
+                (void)st->refresh(st, st->refresh_context);
+                if (!st->nmodels) sel = top = 0;
+                else if (selected >= st->nmodels) sel = st->nmodels - 1;
+            }
+            break;
+        case '\r': case '\n':
+            if (st->nmodels && sz.w >= 60 && sz.h >= 12) detail = 1;
+            break;
         default: break;
         }
         int rows = sz.h - 7; if (rows < 1) rows = 1;

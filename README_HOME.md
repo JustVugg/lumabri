@@ -3,8 +3,19 @@
 Turn the computers you already have into one machine that runs a model none
 of them could hold alone.
 
+## Current implementation boundary
+
+The home-cluster roadmap is not complete yet. The current code has the exact
+eight-adapter registry, a loopback Segment proof, a conservative memory
+preflight, a local catalogue/TUI, and one-session Hosted chat by explicit
+address. The catalogue does not yet collect a distributed LAN inventory or
+apply its proposed plan. Adapter-specific memory sizing is currently verified
+only for OLMoE and DeepSeek V4; the other registered adapters are shown as
+experimental/unsized until their C planner and real-checkpoint conformance run
+land. A real two-physical-machine LAN gate is still required.
+
 ```
-lumabri models          # what these computers can run, and what is missing
+lumabri models          # current local planning preview
 lumabri host --model M  # this machine owns the model and serves sessions
 lumabri chat --host H   # this machine holds nothing and just types
 ```
@@ -81,7 +92,7 @@ calls it experimental, and CI fails while the two registries disagree.
 ## Verifying it yourself
 
 ```
-bash ./segment_split_test.sh    # same tokens on one node and split across two
+bash ./segment_split_test.sh    # loopback: same tokens on one node and two
 bash ./segment_budget_test.sh   # a range that does not fit is refused, and says why
 bash ./multi_session_test.sh    # contention may make a session wait, never change it
 bash ./hosted_chat_test.sh      # zero checkpoint bytes on the client
@@ -89,7 +100,9 @@ bash ./catalog_test.sh          # no invented speeds, shortfall in machines
 bash ./adapter_conformance_test.sh
 ```
 
-`segment_split_test.sh` withholds its timings when the machine's load average
+`segment_split_test.sh` is a loopback rehearsal, not a LAN benchmark. It
+withholds its timings when the machine's load average
 exceeds its core count, because on a busy box the numbers describe the
 contention rather than the topology. The token comparison still runs: that
-one is machine-independent.
+one is machine-independent. The two-physical-machine LAN gate remains a
+separate roadmap item.

@@ -16,9 +16,10 @@
 # Relay is forbidden throughout: every node advertises a direct address, and
 # a run that fell back to the tracker tunnel would measure the tunnel.
 #
-# On one machine this is a loopback rehearsal — real LAN numbers need real
-# machines, and LUMABRI_SPLIT_HOSTS is where those go. What it proves here is
-# the invariance, which is machine-independent, and the shape of the cost.
+# This script is deliberately a loopback rehearsal. It proves protocol/token
+# invariance and exercises the one-node/two-node topology, but it does not
+# measure a LAN and accepts no remote-host option. Real LAN numbers require a
+# separate two-machine harness and must never be inferred from this output.
 set -euo pipefail
 cd "$(dirname "$0")"
 

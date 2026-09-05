@@ -25,15 +25,20 @@ typedef struct {
     LmbClusterPlan plan;
     int planned;                    /* 0 when the cluster cannot be planned */
     const LmbCalibration *calibration;   /* NULL until something is measured */
+    LmbCalKey calibration_key;      /* exact current conditions */
+    int calibration_key_valid;
 } LmbTuiModel;
 
-typedef struct {
+typedef struct LmbTuiState {
     LmbTuiModel models[LMB_TUI_MAX_MODELS];
     int nmodels;
     LmbClusterNode nodes[LMB_CLUSTER_MAX_NODES];
     uint32_t nnodes;
     uint32_t context, sessions;
     char root[512];                 /* where the checkpoints were found */
+    char disk[512];
+    int (*refresh)(struct LmbTuiState *state, void *context);
+    void *refresh_context;
 } LmbTuiState;
 
 /* Run the interface. `snapshot` renders one frame to stdout and returns

@@ -26,6 +26,8 @@ cat >"$T/models/small/config.json" <<'EOF'
  "intermediate_size":128,"num_experts":8,"num_experts_per_tok":2,
  "num_attention_heads":4,"num_key_value_heads":4,"vocab_size":256}
 EOF
+truncate -s 4096 "$T/models/huge/model.bin"
+truncate -s 4096 "$T/models/small/model.bin"
 
 snap() { ./lumabri models --models-dir "$T/models" --snapshot "$@" 2>&1; }
 
@@ -97,4 +99,3 @@ if python3 ./tui_pty_check.py "$T/models"; then :
 else fail "the terminal was left in raw mode after quitting"; fi
 
 echo "TUI TEST: PASS (nothing truncated, nothing claimed, terminal restored)"
-

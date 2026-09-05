@@ -26,9 +26,15 @@ cat >"$T/models/tiny/config.json" <<'EOF'
  "intermediate_size":128,"num_experts":8,"num_experts_per_tok":2,
  "num_attention_heads":4,"num_key_value_heads":4,"vocab_size":256}
 EOF
+# A config is metadata, not a checkpoint. These files stand in for actual
+# model containers; a separate case below proves config-only is refused.
+truncate -s 4096 "$T/models/huge/model.bin"
+truncate -s 4096 "$T/models/tiny/model.bin"
 
 out=$(./lumabri models --models-dir "$T/models" 2>&1) || fail "the catalogue exited non-zero"
 echo "$out" | sed 's/^/    /'
+echo "$out" | grep -qi "local planning preview" ||
+    fail "the one-node catalogue pretended to be a distributed cluster inventory"
 
 huge=$(echo "$out" | grep -E '^\s*[x+!]\s+huge' || true)
 tiny=$(echo "$out" | grep -E '^\s*[x+!]\s+tiny' || true)
@@ -48,12 +54,28 @@ echo "$huge" | grep -qE "more machine" ||
 echo "$tiny" | grep -q "resident" ||
     fail "a four-layer toy model was not reported as resident: $tiny"
 
+mkdir -p "$T/models/config-only"
+cp "$T/models/tiny/config.json" "$T/models/config-only/config.json"
+config_only=$(./lumabri models --models-dir "$T/models" 2>&1 |
+              grep -E '^\s*[x+!]\s+config-only' || true)
+echo "$config_only" | grep -q "checkpoint weights missing" ||
+    fail "config.json alone was presented as a resident checkpoint: $config_only"
+
 # No speed, anywhere, ever, until something is measured.
 echo "$out" | grep -q "not calibrated" ||
     fail "the speed column did not say the plan is uncalibrated"
 if echo "$out" | grep -qE "[0-9]+([.,][0-9]+)? *tok/s"; then
     fail "a tok/s figure appeared for a plan nobody has measured"
 fi
+
+json=$(./lumabri models --models-dir "$T/models" --json)
+python3 - "$json" <<'PY' || fail "the versioned JSON snapshot is invalid"
+import json, sys
+doc = json.loads(sys.argv[1])
+assert doc["schema"] == "lumabri.models.v1"
+assert {m["name"] for m in doc["models"]} >= {"huge", "tiny", "config-only"}
+assert next(m for m in doc["models"] if m["name"] == "config-only")["weights_present"] is False
+PY
 
 # A directory with no checkpoints says so instead of printing an empty table.
 mkdir -p "$T/empty"

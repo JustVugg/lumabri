@@ -33,9 +33,13 @@ typedef struct {
     char commit_lumabri[41];
     char commit_colibri[41];
     char build_id[65];          /* compiler, flags, engine configuration */
-    char backend[16];           /* the one actually in use, not the one fitted */
+    char plan_kind[16];         /* segment or expert */
+    uint32_t goal;              /* LmbPlanGoal without including cluster.h */
     uint32_t nodes;
     char node_id[LMB_CAL_NODES_MAX][64];
+    char node_hardware_id[LMB_CAL_NODES_MAX][65];
+    char node_build_id[LMB_CAL_NODES_MAX][65];
+    char node_backend[LMB_CAL_NODES_MAX][16];
     uint32_t layer_begin[LMB_CAL_NODES_MAX];
     uint32_t layer_end[LMB_CAL_NODES_MAX];
     uint32_t threads[LMB_CAL_NODES_MAX];
@@ -64,12 +68,21 @@ static LMB_UNUSED const char *lmb_cal_mismatch(const LmbCalKey *a,
     if (strcmp(a->commit_lumabri, b->commit_lumabri)) return "the Lumabri build";
     if (strcmp(a->commit_colibri, b->commit_colibri)) return "the Colibri build";
     if (strcmp(a->build_id, b->build_id))           return "the compiler flags";
-    if (strcmp(a->backend, b->backend))             return "the backend";
+    if (strcmp(a->plan_kind, b->plan_kind))         return "the execution plan";
+    if (a->goal != b->goal)                         return "the planning goal";
     if (a->context != b->context)                   return "the context length";
     if (a->sessions != b->sessions)                 return "the session count";
     if (a->nodes != b->nodes)                       return "the number of machines";
-    for (uint32_t i = 0; i < a->nodes && i < LMB_CAL_NODES_MAX; i++) {
+    if (a->nodes > LMB_CAL_NODES_MAX || b->nodes > LMB_CAL_NODES_MAX)
+        return "an invalid machine count";
+    for (uint32_t i = 0; i < a->nodes; i++) {
         if (strcmp(a->node_id[i], b->node_id[i]))   return "which machines";
+        if (strcmp(a->node_hardware_id[i], b->node_hardware_id[i]))
+            return "the machine hardware";
+        if (strcmp(a->node_build_id[i], b->node_build_id[i]))
+            return "a node build";
+        if (strcmp(a->node_backend[i], b->node_backend[i]))
+            return "a node backend";
         if (a->layer_begin[i] != b->layer_begin[i] ||
             a->layer_end[i] != b->layer_end[i])     return "the assigned ranges";
         if (a->threads[i] != b->threads[i])         return "the thread counts";
@@ -110,11 +123,15 @@ static LMB_UNUSED void lmb_cal_build_id(char *out, size_t cap,
      * to differ when a profile does. */
     uint64_t h = 1469598103934665603ull;
     const char *parts[2] = { cc ? cc : "", cflags ? cflags : "" };
-    for (int p = 0; p < 2; p++)
+    for (int p = 0; p < 2; p++) {
         for (const char *c = parts[p]; *c; c++) {
             h ^= (unsigned char)*c;
             h *= 1099511628211ull;
         }
+        /* Separate ("ab", "c") from ("a", "bc"). */
+        h ^= 0xffu;
+        h *= 1099511628211ull;
+    }
     snprintf(out, cap, "%016llx", (unsigned long long)h);
 }
 

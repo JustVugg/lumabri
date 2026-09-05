@@ -278,12 +278,14 @@ static uint64_t disk_read_speed(const char *path) {
     if (fsync(fd)) { close(fd); unlink(probe); free(buf); return 0; }
     close(fd);
 
-    int flags = O_RDONLY;
 #ifdef O_DIRECT
-    flags |= O_DIRECT;
+    fd = open(probe, O_RDONLY | O_DIRECT);
+#else
+    fd = -1;
 #endif
-    fd = open(probe, flags);
-    if (fd < 0) fd = open(probe, O_RDONLY);   /* O_DIRECT refused: still useful */
+    /* A buffered read immediately after creating the probe measures page
+     * cache, not disk. If direct I/O is unavailable, report unmeasured rather
+     * than publish a fast but fictitious "cold read" number. */
     if (fd < 0) { unlink(probe); free(buf); return 0; }
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);

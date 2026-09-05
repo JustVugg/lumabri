@@ -15,6 +15,7 @@ static LmbModelShape v4(void) {
     m.layers = 43; m.hidden = 4096; m.intermediate = 11264;
     m.moe_intermediate = 1408; m.experts = 256; m.experts_per_tok = 6;
     m.heads = 32; m.kv_heads = 8; m.vocab = 129280; m.bits_per_weight = 4;
+    m.sizing_verified = 1;
     return m;
 }
 
@@ -23,6 +24,7 @@ static LmbClusterNode node(const char *name, double gb, uint32_t gpu) {
     snprintf(n.name, sizeof n.name, "%s", name);
     n.ram_budget_bytes = (uint64_t)(gb * 1e9);
     n.gpu_backends = gpu; n.threads = 8; n.lan_bps = 100u * 1000 * 1000;
+    n.has_checkpoint = 1;
     return n;
 }
 
@@ -44,6 +46,17 @@ int main(void) {
     CHECK(p.missing_nodes > 0,
           "the shortfall was not expressed in machines, which is the only "
           "form a person can act on");
+
+    /* VRAM is not spare RAM. Until this adapter exposes a real Segment GPU
+     * backend, a large card cannot make an undersized host runnable. */
+    LmbClusterNode fake_gpu = node("gpu", 1, LMB_GPU_CUDA);
+    fake_gpu.vram_budget_bytes = 200ull * 1000 * 1000 * 1000;
+    CHECK(lmb_plan_cluster(&m, &fake_gpu, 1, 4096, 1,
+                           LMB_GOAL_ONE_SESSION, &p) != 0 ||
+          p.state == LMB_PLAN_UNRUNNABLE,
+          "VRAM was silently added to RAM for a CPU Segment adapter");
+    (void)lmb_plan_cluster(&m, house, 4, 4096, 1,
+                           LMB_GOAL_ONE_SESSION, &p);
 
     /* Coverage is not optional: every layer belongs to exactly one node, in
      * order, with no gap and no overlap. A plan that leaves layer 30
@@ -76,21 +89,25 @@ int main(void) {
     CHECK(p.missing_bytes == 0, "a plan that fits still reported %.1f GB missing",
           (double)p.missing_bytes / 1e9);
 
-    /* Edge goes to a machine whose ENGINE can use its card, not to whichever
-     * machine happens to have one fitted. */
+    /* A generic GPU inventory is not proof that this adapter can use it.
+     * Until that capability exists, Edge goes where verified RAM fits. */
     LmbClusterNode mixed[3] = { node("cpu-big", 64, 0), node("gpu", 40, LMB_GPU_CUDA),
                                 node("cpu", 40, 0) };
     CHECK(!lmb_plan_cluster(&m, mixed, 3, 4096, 1, LMB_GOAL_ONE_SESSION, &p),
           "a mixed cluster could not be planned");
-    CHECK(p.edge_node == 1,
-          "Edge went to node %u; the machine whose engine can use a GPU is 1",
+    CHECK(p.edge_node == 0,
+          "Edge went to node %u; unverified VRAM influenced placement",
           p.edge_node);
 
     /* Ready-in is bytes over MEASURED bandwidth. With none measured it is
      * unknown, and unknown has to be visible — a fabricated minute is how a
      * catalogue starts lying. */
     LmbClusterNode blind[8];
-    for (int i = 0; i < 8; i++) { blind[i] = node("big", 40, 0); blind[i].lan_bps = 0; }
+    for (int i = 0; i < 8; i++) {
+        blind[i] = node("big", 40, 0);
+        blind[i].lan_bps = 0;
+        blind[i].has_checkpoint = i == 0;
+    }
     CHECK(!lmb_plan_cluster(&m, blind, 8, 4096, 1, LMB_GOAL_ONE_SESSION, &p),
           "an unmeasured cluster could not be planned");
     CHECK(!p.ready_known, "ready-in was claimed with no bandwidth measured");

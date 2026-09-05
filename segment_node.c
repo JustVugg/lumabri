@@ -12,11 +12,13 @@
 #include "segment_colibri.h"
 
 #include <pthread.h>
+#include <dirent.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -24,6 +26,29 @@
 #define NODE_SESSIONS_MAX 256u
 #define NODE_CONNECTIONS_MAX 256u
 #define NODE_SNAPSHOT_CHUNK (1u << 20)
+
+static uint64_t directory_bytes(const char *path, unsigned depth) {
+    if (!path || depth > 8) return 0;
+    DIR *dir = opendir(path);
+    if (!dir) return 0;
+    uint64_t total = 0;
+    struct dirent *entry;
+    while ((entry = readdir(dir))) {
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, ".."))
+            continue;
+        char child[4096];
+        int n = snprintf(child, sizeof child, "%s/%s", path, entry->d_name);
+        if (n < 0 || (size_t)n >= sizeof child) { total = UINT64_MAX; break; }
+        struct stat st;
+        if (lstat(child, &st)) continue;
+        uint64_t add = S_ISREG(st.st_mode) ? (uint64_t)st.st_size :
+                       S_ISDIR(st.st_mode) ? directory_bytes(child, depth + 1) : 0;
+        if (UINT64_MAX - total < add) { total = UINT64_MAX; break; }
+        total += add;
+    }
+    closedir(dir);
+    return total;
+}
 
 typedef struct {
     int used;
@@ -1283,66 +1308,17 @@ int main(int argc, char **argv) {
         reserve_name, 4096, 256, 262144) << 20;
     if (!process_limit && available != UINT64_MAX && available > reserve)
         process_limit = available - reserve;
-    /* What this range needs before it is allowed to start.
-     *
-     * The old rule was a proportional share of the WHOLE checkpoint plus 5%,
-     * which is the right guard against the incident it was written for —
-     * slices sized at "all the free RAM" fighting each other on one box —
-     * and the wrong basis for the question. It assumes every weight of the
-     * range must be resident, so a node with a working NVMe and enough room
-     * for the dense part plus a top-k expert cache was refused before it
-     * could open the engine. Disk mode was not merely unadvertised: it was
-     * unreachable.
-     *
-     * So the guard stays and its basis changes. The planner sizes the range
-     * from the checkpoint's own config: everything resident when it fits,
-     * and otherwise the working set — dense weights, a top-k cache, kernel
-     * scratch, state — which is the floor below which the node cannot run at
-     * all, whatever the disk can stream. The proportional figure remains the
-     * fallback for a checkpoint the planner cannot describe: an unknown
-     * model is not a licence to over-commit. */
+    /* The runtime preflight must be conservative. The generic catalogue
+     * arithmetic is not an adapter contract and cannot authorize a smaller
+     * allocation; in particular setting a "disk" environment flag did not
+     * make any Colibri adapter stream its weights. Until an adapter exposes a
+     * verified minimum-working-set callback, retain the proven guard: its
+     * proportional share of the actual checkpoint plus overhead. */
     LmbModelShape shape;
     int shaped = model_dir && !lmb_shape_from_config(model_dir, &shape);
-    if (process_limit && shaped) {
-        LmbRangeCost cost = lmb_estimate_segment(&shape, begin, end,
-                                                 (uint32_t)context,
-                                                 (uint32_t)max_sessions);
-        uint64_t live = cost.state_bytes + cost.scratch_bytes;
-        uint64_t need = cost.resident_bytes + live;
-        int from_disk = 0;
-        if (cost.ok && need > process_limit) {
-            /* Streaming is a capability, not a consolation prize: only where
-             * the adapter has demonstrated it, which today is nowhere until
-             * step 8 of the roadmap proves one. LUMABRI_SEGMENT_DISK=1 is
-             * the diagnostic path the split test uses, and it says so. */
-            uint64_t floor = cost.working_set_bytes + live;
-            if (lmb_env_int("LUMABRI_SEGMENT_DISK", 0, 0, 1) &&
-                floor <= process_limit) {
-                fprintf(stderr, "[segment-node] range %u:%u does not fit "
-                        "resident (%.1f GB of %.1f GB) but its working set "
-                        "does (%.1f GB): starting in DIAGNOSTIC disk mode, "
-                        "which no adapter has yet demonstrated\n",
-                        begin, end, (double)need / 1e9,
-                        (double)process_limit / 1e9, (double)floor / 1e9);
-                from_disk = 1;
-                need = floor;
-            }
-        }
-        if (cost.ok && need > process_limit) {
-            fprintf(stderr, "[segment-node] assigned range %u:%u needs "
-                    "%.1f GB resident (working set %.1f GB) but the donor "
-                    "budget is %.1f GB; releasing it before loading weights\n",
-                    begin, end, (double)(cost.resident_bytes + live) / 1e9,
-                    (double)(cost.working_set_bytes + live) / 1e9,
-                    (double)process_limit / 1e9);
-            if (auto_range)
-                (void)auto_range_release(tracker, model, name, engine_id,
-                                         resolved_model_root);
-            preflight_signal(&preflight_fd, 'F');
-            return 3;
-        }
-        (void)from_disk;
-    } else if (process_limit && model_bytes && model_layers) {
+    if (!model_layers && shaped) model_layers = shape.layers;
+    if (!model_bytes && model_dir) model_bytes = directory_bytes(model_dir, 0);
+    if (process_limit && model_bytes && model_layers) {
         uint64_t range_layers = end - begin;
         uint64_t proportional = model_bytes / model_layers * range_layers;
         uint64_t remainder = model_bytes % model_layers * range_layers /
@@ -1354,7 +1330,8 @@ int main(int argc, char **argv) {
         if (estimated > process_limit) {
             fprintf(stderr, "[segment-node] assigned range %u:%u needs about "
                     "%.1f GB but the donor budget is %.1f GB; releasing it "
-                    "before loading weights\n", begin, end,
+                    "before loading weights (disk mode is not verified for "
+                    "this adapter)\n", begin, end,
                     (double)estimated / 1e9, (double)process_limit / 1e9);
             if (auto_range)
                 (void)auto_range_release(tracker, model, name, engine_id,

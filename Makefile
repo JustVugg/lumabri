@@ -29,7 +29,9 @@ SECURE_DEPS = lumabri_secure.h lumabri_crypto.h
 MACHINE_SRC = lumabri_machine.c
 MACHINE_DEPS = lumabri_machine.h $(MACHINE_SRC)
 
-lumabri: lumabri.c lumabri_tui.c lumabri_tui.h lumabri_proto.h lumabri_sign.h $(SECURE_DEPS) $(MACHINE_DEPS)
+lumabri: lumabri.c lumabri_tui.c lumabri_tui.h lumabri_proto.h lumabri_sign.h \
+		lumabri_families.h lumabri_planner.h lumabri_cluster.h \
+		lumabri_calibration.h $(SECURE_DEPS) $(MACHINE_DEPS)
 	$(CC) $(CFLAGS) -pthread lumabri.c lumabri_tui.c $(MACHINE_SRC) -o $@
 
 # ---- phase 2: peers execute experts ------------------------------------
@@ -539,7 +541,8 @@ $(COLIBRI_SEGMENT_LIB): $(HYBRID_ENGINE_DIR)/.prepared build/segment_hybrid_brid
 		segment-edge-library
 	$(AR) rcs $@ build/segment_hybrid_bridge.o
 
-segment_node: segment_node.c $(SEGMENT_COMMON) $(COLIBRI_SEGMENT_LIB) $(MACHINE_DEPS) \
+segment_node: segment_node.c lumabri_planner.h lumabri_families.h \
+		$(SEGMENT_COMMON) $(COLIBRI_SEGMENT_LIB) $(MACHINE_DEPS) \
 		lumabri_run_gate.c lumabri_run_gate.h
 	$(CC) $(SEGMENT_CFLAGS) -pthread segment_node.c lumabri_segment.c \
 		lumabri_segment_discovery.c $(MACHINE_SRC) lumabri_run_gate.c \

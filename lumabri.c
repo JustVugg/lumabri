@@ -365,18 +365,19 @@ static void install_chat_signal_handlers(void) {
 
 /* One table decides the family; the three lookups below only read it.
  *
- * LUMABRI_ENGINE_ID names an adapter directly, for a checkpoint whose
- * model_type nobody has declared yet — the two rows of LMB_FAMILY_UNMAPPED
- * are reachable only this way, and a name Colibri does not register is
- * refused instead of ignored. */
+ * LUMABRI_ENGINE_ID names an adapter directly. A name Colibri does not
+ * register is refused instead of being ignored and falling through to an
+ * automatic choice. */
 static const LmbModelFamily *lumi_family(const char *model_type) {
     const char *forced = getenv("LUMABRI_ENGINE_ID");
     if (forced && forced[0]) {
         const LmbModelFamily *f = lmb_family_override(forced);
-        if (!f)
+        if (!f) {
             fprintf(stderr, "[lumabri] LUMABRI_ENGINE_ID=%s is not an adapter "
-                            "Colibri registers; ignoring it\n", forced);
-        else
+                            "Colibri registers; refusing to choose an engine\n",
+                    forced);
+            return NULL;
+        } else
             return f;
     }
     const LmbModelFamily *f = lmb_family_for(model_type ? model_type : "");
@@ -427,15 +428,7 @@ static void local_model_type(const char *model_dir, char *out, size_t cap) {
     size_t n = fread(buf, 1, sizeof buf - 1, f);
     fclose(f);
     buf[n] = 0;
-    char *mt = strstr(buf, "\"model_type\"");
-    if (!mt) return;
-    mt = strchr(mt + 12, '"');
-    if (!mt) return;
-    char *end = strchr(mt + 1, '"');
-    if (end && (size_t)(end - mt - 1) < cap) {
-        memcpy(out, mt + 1, (size_t)(end - mt - 1));
-        out[end - mt - 1] = 0;
-    }
+    (void)lmb_json_string(buf, "model_type", out, cap);
 }
 
 /* All current Colibri families publish num_hidden_layers in config.json.
@@ -490,7 +483,8 @@ static uint64_t expert_executor_ram_estimate(const char *model_dir,
                                              const char *model_type,
                                              int cache_slots) {
     uint32_t inter = 0, hidden = 0, layers = 0, topk = 0;
-    if (!model_type || !strstr(model_type, "deepseek")) return 0;
+    const LmbModelFamily *family = lmb_family_for(model_type);
+    if (!family || strcmp(family->segment_id, "deepseek_v4")) return 0;
     if (local_model_u32(model_dir, "moe_intermediate_size", &inter) ||
         local_model_u32(model_dir, "hidden_size", &hidden) ||
         local_model_layers(model_dir, &layers))
@@ -1151,16 +1145,8 @@ static int swarm_inspect(const char *tracker, const char *model, Swarm *s) {
     if (cfg) {
         memcpy(cfg, r.pay, r.pay_len);
         cfg[r.pay_len] = 0;
-        char *mt = strstr(cfg, "\"model_type\"");
-        if (mt) {
-            mt = strchr(mt + 12, '"');
-            if (mt) {
-                char *end = strchr(mt + 1, '"');
-                if (end && end - mt - 1 < (long)sizeof s->model_type)
-                    { memcpy(s->model_type, mt + 1, (size_t)(end - mt - 1));
-                      s->model_type[end - mt - 1] = 0; }
-            }
-        }
+        (void)lmb_json_string(cfg, "model_type", s->model_type,
+                              sizeof s->model_type);
         free(cfg);
     }
     lmb_msg_free(&r);
@@ -2287,10 +2273,13 @@ typedef enum { PROTO_UNKNOWN = 0, PROTO_LINE, PROTO_FRAMED, PROTO_SERVE2 } Proto
  * gateway, must apply each engine's own chat template. GLM (EK_GLM) templates
  * inside its serve and speaks the older framed dialect, so it needs neither. */
 typedef enum {
+    EK_INVALID = -1,
     EK_GLM = 0,        /* colibri monolith: framed, templates internally */
+    EK_GLM53,          /* glm53:         GLM-5.3 template, serve codec        */
     EK_DEEPSEEK,       /* deepseek_v4:  <｜User｜>…<｜Assistant｜></think>       */
     EK_OLMOE,          /* olmoe:        |||IP_ADDRESS|||<|user|>…<|assistant|> */
     EK_QWEN36,         /* qwen36:       ChatML <|im_start|>…                   */
+    EK_QWEN38,         /* qwen38:       system reasoning prompt + ChatML     */
     EK_INKLING,        /* inkling:      <|message_user|><|content_text|>…      */
     EK_KIMI            /* kimi_k3:      K3CHAT1 byte-counted wire              */
 } EngKind;
@@ -2317,20 +2306,43 @@ typedef struct {
     EngineTransport transport;
 } Engine;
 
-/* Map the resolved engine binary name to its kind. Unknown ⇒ EK_GLM, the safe
- * default: the framed dialect with no client-side templating, which is exactly
- * how lumabri behaved before per-engine templates existed. */
+static int artifact_is(const char *value, const char *name) {
+    if (!value || !name) return 0;
+    const char *base = strrchr(value, '/');
+    base = base ? base + 1 : value;
+    if (!strcmp(base, name)) return 1;
+    size_t n = strlen(name);
+    return !strncmp(base, name, n) && !strcmp(base + n, "_p2p");
+}
+
+/* Protocol and prompt-template dispatch is exact for the same reason model
+ * family dispatch is exact. Unknown is not GLM: it is an error. */
 static EngKind engine_kind_of(const char *engine) {
-    if (strstr(engine, "deepseek")) return EK_DEEPSEEK;
-    if (strstr(engine, "olmoe"))    return EK_OLMOE;
-    if (strstr(engine, "qwen"))     return EK_QWEN36;
-    if (strstr(engine, "inkling"))  return EK_INKLING;
-    if (strstr(engine, "kimi"))     return EK_KIMI;
-    return EK_GLM;
+    if (artifact_is(engine, "colibri") || !strcmp(engine ? engine : "", "glm") ||
+        !strcmp(engine ? engine : "", "glm_moe_dsa") ||
+        !strcmp(engine ? engine : "", "glm5_moe")) return EK_GLM;
+    if (artifact_is(engine, "glm53") ||
+        !strcmp(engine ? engine : "", "glm5_next") ||
+        !strcmp(engine ? engine : "", "glm5_next_text")) return EK_GLM53;
+    if (artifact_is(engine, "deepseek_v4") || artifact_is(engine, "deepseek"))
+        return EK_DEEPSEEK;
+    if (artifact_is(engine, "olmoe")) return EK_OLMOE;
+    if (artifact_is(engine, "qwen36") ||
+        !strcmp(engine ? engine : "", "qwen3_5_moe") ||
+        !strcmp(engine ? engine : "", "qwen3_5_moe_text")) return EK_QWEN36;
+    if (artifact_is(engine, "qwen38") ||
+        !strcmp(engine ? engine : "", "qwen4_exp") ||
+        !strcmp(engine ? engine : "", "qwen4_exp_text")) return EK_QWEN38;
+    if (artifact_is(engine, "inkling") ||
+        !strcmp(engine ? engine : "", "inkling_mm_model")) return EK_INKLING;
+    if (artifact_is(engine, "kimi_k3") ||
+        !strcmp(engine ? engine : "", "kimi") ||
+        !strcmp(engine ? engine : "", "kimi_linear")) return EK_KIMI;
+    return EK_INVALID;
 }
 /* The serve-codec engines: framed READY at boot, but SUBMIT/DATA/DONE turns and
  * a raw (un-templated) payload. Everything but GLM. */
-static int kind_is_serve2(EngKind k) { return k != EK_GLM; }
+static int kind_is_serve2(EngKind k) { return k != EK_INVALID && k != EK_GLM; }
 
 static char *read_until_prompt(int fd) {
     size_t cap = 8192, len = 0;
@@ -2637,10 +2649,15 @@ static int stream_serve2(Engine *e, char *statline, size_t scap, char **captured
 #define GLM_BOS  "[gMASK]<sop>"
 #define GLM_U    "<|user|>"
 #define GLM_ASST "<|assistant|><think></think>"
+#define GLM53_ASST "<|assistant|><think>"
 /* qwen36 (qwen36.c: ChatML, no BOS). */
 #define QW_U    "<|im_start|>user\n"
-#define QW_ASST "<|im_end|>\n<|im_start|>assistant\n"
+#define QW_ASST "<|im_end|>\n<|im_start|>assistant\n<think>\n"
 #define QW_AEND "<|im_end|>\n"
+#define QW38_SYS "<|im_start|>system\nReasoning effort is set to xhigh. Please " \
+    "think carefully through the task, validate key assumptions, consider " \
+    "plausible alternatives, and prioritize correctness, consistency, and " \
+    "clarity in the final answer.<|im_end|>\n"
 /* inkling (inkling.c chat template, thinking-effort system line dropped). */
 #define INK_U    "<|message_user|><|content_text|>"
 #define INK_ASST "<|end_message|><|message_model|>"
@@ -2657,6 +2674,9 @@ static int serve2_turn(Cap *c, EngKind k, int first, const char *u, const char *
     case EK_GLM:
         if (cap_str(c, GLM_U) || cap_str(c, u) || cap_str(c, GLM_ASST)) return -1;
         return reply ? cap_str(c, reply) : 0;
+    case EK_GLM53:
+        if (cap_str(c, GLM_U) || cap_str(c, u) || cap_str(c, GLM53_ASST)) return -1;
+        return reply ? cap_str(c, reply) : 0;
     case EK_DEEPSEEK:
         if (cap_str(c, DS_USER) || cap_str(c, u) || cap_str(c, DS_ASST)) return -1;
         return reply ? cap_str(c, reply) : 0;
@@ -2665,6 +2685,9 @@ static int serve2_turn(Cap *c, EngKind k, int first, const char *u, const char *
             cap_str(c, OLMO_ASST)) return -1;
         return reply ? cap_str(c, reply) : 0;
     case EK_QWEN36:
+        if (cap_str(c, QW_U) || cap_str(c, u) || cap_str(c, QW_ASST)) return -1;
+        return reply ? (cap_str(c, reply) || cap_str(c, QW_AEND)) : 0;
+    case EK_QWEN38:
         if (cap_str(c, QW_U) || cap_str(c, u) || cap_str(c, QW_ASST)) return -1;
         return reply ? (cap_str(c, reply) || cap_str(c, QW_AEND)) : 0;
     case EK_INKLING:
@@ -2686,7 +2709,9 @@ static int serve2_turn(Cap *c, EngKind k, int first, const char *u, const char *
 /* The once-at-front SUBMIT prefix (kept out of the stored history). */
 static int serve2_prefix(Cap *c, EngKind k) {
     if (k == EK_GLM)      return cap_str(c, GLM_BOS);
+    if (k == EK_GLM53)    return cap_str(c, GLM_BOS);
     if (k == EK_DEEPSEEK) return cap_str(c, DS_BOS);
+    if (k == EK_QWEN38)   return cap_str(c, QW38_SYS);
     if (k == EK_KIMI)     return cap_str(c, "K3CHAT1\n");
     return 0;
 }
@@ -2700,9 +2725,10 @@ static int submit_serve2(Engine *e, const char *history, const char *prompt, int
     char hdr[128];
     int hn = snprintf(hdr, sizeof hdr, "SUBMIT %u 0 %zu %d 0.7 0.95\n",
                       ++id, c.len, max_new < 1 ? 1 : max_new);
-    int ok = hn >= 0 && write(e->to, hdr, (size_t)hn) >= 0 &&
-             write(e->to, c.p, c.len) >= 0 &&
-             write(e->to, "\n", 1) >= 0;                  /* payload terminator */
+    int ok = hn >= 0 && (size_t)hn < sizeof hdr &&
+             !lmb_write_full(e->to, hdr, (size_t)hn) &&
+             !lmb_write_full(e->to, c.p, c.len) &&
+             !lmb_write_full(e->to, "\n", 1);             /* payload terminator */
     free(c.p);
     return ok ? 0 : -1;
 }
@@ -2720,15 +2746,16 @@ static char *serve2_history_append(Engine *e, char *history, const char *user,
     return c.p ? c.p : calloc(1, 1);
 }
 
-/* The monolithic engine binary for the same family. "colibri" stays the
- * last resort here — unlike the Segment id, an unknown model_type used to
- * land on the monolith and sometimes worked, and refusing to launch anything
- * would be a regression for a checkpoint that runs today. The refusal that
- * matters is the Segment one, where the wrong adapter is silent corruption
- * rather than a failed open. */
+/* The monolithic engine binary for the same family. Unknown model types are
+ * refused: a generic fallback can tokenize or execute with the wrong ABI. */
 static const char *engine_for(const char *model_type) {
     const LmbModelFamily *f = lumi_family(model_type);
-    return f ? f->engine : "colibri";
+    return f ? f->engine : NULL;
+}
+
+static const char *p2p_engine_for(const char *model_type) {
+    const LmbModelFamily *f = lumi_family(model_type);
+    return f ? f->p2p_engine : NULL;
 }
 
 /* `local_dir` non-NULL: the model is already on this disk, so no shim, no
@@ -2736,7 +2763,8 @@ static const char *engine_for(const char *model_type) {
  * the model — otherwise chatting there downloads it from itself. */
 static int engine_spawn(const char *engine, const char *shim, const char *tracker,
                         const char *model, const char *local_dir,
-                        int ctx, int max_new, int cap_experts, Engine *e) {
+                        int ctx, int max_new, int cap_experts, EngKind kind,
+                        Engine *e) {
     const char *home = getenv("HOME") ? getenv("HOME") : ".";
     char vroot[1024], cache[1024], cas[1024];
     const char *vroot_env = getenv("LUMABRI_VROOT");
@@ -2751,7 +2779,7 @@ static int engine_spawn(const char *engine, const char *shim, const char *tracke
     /* olmoe takes <cap> <bits>; the SERVE-mode engines take <cap> alone and
      * read the quantization out of the file — passing bits there would
      * override what the model actually is */
-    int line_proto = strstr(engine, "olmoe") != NULL;
+    int line_proto = kind == EK_OLMOE;
     char cap_s[32];
     snprintf(cap_s, sizeof cap_s, "%d", cap_experts);
 
@@ -2806,7 +2834,7 @@ static int engine_spawn(const char *engine, const char *shim, const char *tracke
          * one-by-one path). The batched MoE rows travel as one multi-row
          * call per expert, which the client already speaks. An explicit
          * V4_DRAFT (0 to turn it off) still wins. */
-        if (!local_dir && strstr(engine, "deepseek")) setenv("V4_DRAFT", "8", 0);
+        if (!local_dir && kind == EK_DEEPSEEK) setenv("V4_DRAFT", "8", 0);
         /* Same split for the expert cache. A swarm chatter caches almost nothing
          * (experts run on peers), so its cap stays at the small default. But a
          * --local run holds its own experts, and there the cap IS the resident
@@ -2833,7 +2861,14 @@ static int engine_spawn(const char *engine, const char *shim, const char *tracke
     e->pid = pid; e->to = in_pipe[1]; e->from = out_pipe[0];
     g_signal_engine_pid = (sig_atomic_t)pid;
     e->proto = PROTO_UNKNOWN;
-    e->kind = engine_kind_of(engine);
+    e->kind = kind;
+    if (e->kind == EK_INVALID) {
+        fprintf(stderr, "[lumabri] cannot determine protocol for engine %s\n",
+                engine);
+        close(e->to); close(e->from); kill(pid, SIGTERM); waitpid(pid, NULL, 0);
+        e->pid = 0; e->to = e->from = -1;
+        return -1;
+    }
     e->segment = 0;
     pthread_t t;
     pthread_create(&t, NULL, stderr_thread, (void *)(intptr_t)err_pipe[0]);
@@ -2898,6 +2933,11 @@ static int segment_engine_spawn(const char *engine, const char *shim,
     g_signal_engine_pid = (sig_atomic_t)pid;
     e->proto = PROTO_UNKNOWN;
     e->kind = engine_kind_of(model_type);
+    if (e->kind == EK_INVALID) {
+        close(e->to); close(e->from); kill(pid, SIGTERM); waitpid(pid, NULL, 0);
+        e->pid = 0; e->to = e->from = -1;
+        return -1;
+    }
     e->segment = 1;
     pthread_t thread;
     pthread_create(&thread, NULL, stderr_thread,
@@ -2909,7 +2949,18 @@ static int segment_engine_spawn(const char *engine, const char *shim,
 /* Why the child is gone, in the words of the kernel and of the child. */
 static void engine_diag(Engine *e, int booting) {
     int st = 0;
-    if (e->pid > 0 && waitpid(e->pid, &st, WNOHANG) == e->pid) {
+    pid_t waited = e->pid > 0 ? waitpid(e->pid, &st, WNOHANG) : -1;
+    /* EOF on the child's stdout can win the tiny race before exit status is
+     * published. Give a boot failure a bounded moment to become waitable so
+     * diagnostics do not randomly lose the engine's actual exit code. */
+    if (booting && e->pid > 0 && waited == 0) {
+        for (int i = 0; i < 20 && waited == 0; i++) {
+            struct timespec pause = {0, 10 * 1000 * 1000};
+            while (nanosleep(&pause, &pause) && errno == EINTR) { }
+            waited = waitpid(e->pid, &st, WNOHANG);
+        }
+    }
+    if (e->pid > 0 && waited == e->pid) {
         if (g_signal_engine_pid == (sig_atomic_t)e->pid)
             g_signal_engine_pid = 0;
         e->pid = 0;
@@ -2973,6 +3024,7 @@ static void engine_stop(Engine *e) {
         }
         e->to = e->from = -1;
         e->pid = 0;
+        g_signal_engine_fd = -1;
         return;
     }
     if (e->pid <= 0) return;
@@ -3030,6 +3082,8 @@ typedef struct {
     const char *engine_kind;
     uint32_t speed_milli;      /* 0 until this host has been measured */
     uint32_t max_frame;
+    uint32_t max_new;
+    uint32_t idle_seconds;
 } HostState;
 
 static int host_greet(int fd, const HostState *h, int busy) {
@@ -3039,47 +3093,142 @@ static int host_greet(int fd, const HostState *h, int busy) {
     lmb_buf_str(&b, "cpu");    /* no Segment adapter advertises a GPU yet */
     lmb_buf_u32(&b, busy ? 0u : 1u);
     lmb_buf_u32(&b, h->speed_milli);
+    lmb_buf_u32(&b, h->max_new);
+    lmb_buf_u32(&b, h->max_frame);
     int rc = lmb_send(fd, LMB_HOST_HELLO_R, b.p, (uint32_t)b.len, NULL, 0);
     free(b.p);
     return rc;
 }
 
-/* Copy between the client socket and the engine until one of them ends.
- *
- * Both directions have to be watched at once. Reading the client to
- * completion first would deadlock the moment a reply is larger than a pipe
- * buffer — the engine blocks writing, the host blocks reading, and the chat
- * hangs with no error anywhere. */
-static void host_bridge(int fd, Engine *e, uint32_t max_frame) {
+typedef struct {
+    char header[512];
+    size_t header_len;
+    uint64_t payload_left;
+    int need_terminator;
+} HostInput;
+
+static int host_header(HostInput *in, Engine *e, const HostState *h) {
+    in->header[in->header_len] = 0;
+    char id[64], extra;
+    unsigned slot = 0, max_new = 0;
+    unsigned long long bytes = 0;
+    float temp = 0, top_p = 0;
+    int fields = sscanf(in->header, "SUBMIT %63s %u %llu %u %f %f %c",
+                        id, &slot, &bytes, &max_new, &temp, &top_p, &extra);
+    if (fields == 6) {
+        if (slot != 0 || bytes > h->max_frame || max_new < 1 ||
+            max_new > h->max_new || !isfinite(temp) || !isfinite(top_p) ||
+            temp < 0 || top_p <= 0 || top_p > 1) return -1;
+        if (lmb_write_full(e->to, in->header, in->header_len)) return -1;
+        in->payload_left = bytes;
+        in->need_terminator = bytes == 0;
+        in->header_len = 0;
+        return 0;
+    }
+    fields = sscanf(in->header, "CANCEL %63s %c", id, &extra);
+    if (fields == 1) {
+        int rc = lmb_write_full(e->to, in->header, in->header_len);
+        in->header_len = 0;
+        return rc;
+    }
+    fields = sscanf(in->header, "STOP %63s %c", id, &extra);
+    if (fields == 1) {
+        int rc = lmb_write_full(e->to, in->header, in->header_len);
+        in->header_len = 0;
+        return rc;
+    }
+    return -1;
+}
+
+static int host_input(HostInput *in, Engine *e, const HostState *h,
+                      const uint8_t *data, size_t bytes) {
+    size_t at = 0;
+    while (at < bytes) {
+        if (in->payload_left) {
+            size_t take = bytes - at;
+            if ((uint64_t)take > in->payload_left)
+                take = (size_t)in->payload_left;
+            if (lmb_write_full(e->to, data + at, take)) return -1;
+            at += take;
+            in->payload_left -= take;
+            if (!in->payload_left) in->need_terminator = 1;
+            continue;
+        }
+        if (in->need_terminator) {
+            if (data[at++] != '\n' || lmb_write_full(e->to, "\n", 1))
+                return -1;
+            in->need_terminator = 0;
+            continue;
+        }
+        const uint8_t *nl = memchr(data + at, '\n', bytes - at);
+        size_t take = nl ? (size_t)(nl - (data + at)) + 1 : bytes - at;
+        if (take > sizeof in->header - 1 - in->header_len) return -1;
+        memcpy(in->header + in->header_len, data + at, take);
+        in->header_len += take;
+        at += take;
+        if (nl && host_header(in, e, h)) return -1;
+    }
+    return 0;
+}
+
+/* Both directions remain inside LMB_HOST_STREAM frames (authenticated and
+ * encrypted whenever the transport's strict mode is enabled). */
+static void host_bridge(int fd, Engine *e, const HostState *h) {
     char buf[16384];
-    uint64_t from_client = 0;
+    HostInput input = {0};
+    double last_input = nowd();
     for (;;) {
         struct pollfd p[2] = { { fd, POLLIN, 0 }, { e->from, POLLIN, 0 } };
         int n = poll(p, 2, 1000);
         if (g_stopping) return;
         if (n < 0) { if (errno == EINTR) continue; return; }
+        if (!n && h->idle_seconds && nowd() - last_input > h->idle_seconds) {
+            fprintf(stderr, "[host] idle session expired\n");
+            return;
+        }
         if (p[0].revents & POLLIN) {
-            ssize_t got = read(fd, buf, sizeof buf);
-            if (got <= 0) return;                 /* client left: session over */
-            /* A prompt is text, and text has a size. Without a cap a client
-             * can make the host allocate its context on demand, which is a
-             * denial of service dressed as a long question. */
-            from_client += (uint64_t)got;
-            if (max_frame && from_client > max_frame) {
-                fprintf(stderr, "[host] client sent more than %u bytes in one "
-                        "turn; closing\n", max_frame);
+            LmbMsg m = {0};
+            if (lmb_recv(fd, &m) || m.op != LMB_HOST_STREAM || m.body_len ||
+                !m.pay_len || host_input(&input, e, h, m.pay, m.pay_len)) {
+                lmb_msg_free(&m);
+                fprintf(stderr, "[host] invalid or oversized client frame\n");
                 return;
             }
-            if (write(e->to, buf, (size_t)got) != got) return;
-            if (memchr(buf, '\n', (size_t)got)) from_client = 0;
+            last_input = nowd();
+            lmb_msg_free(&m);
         }
         if (p[1].revents & POLLIN) {
             ssize_t got = read(e->from, buf, sizeof buf);
             if (got <= 0) return;                 /* engine died: so does this */
-            if (write(fd, buf, (size_t)got) != got) return;
+            if (lmb_send(fd, LMB_HOST_STREAM, NULL, 0, buf, (uint32_t)got))
+                return;
         }
         if ((p[0].revents | p[1].revents) & (POLLERR | POLLHUP)) return;
     }
+}
+
+typedef struct {
+    int lfd;
+    const HostState *host;
+    _Atomic int stop;
+} BusyAcceptor;
+
+static void *host_busy_acceptor(void *arg) {
+    BusyAcceptor *a = (BusyAcceptor *)arg;
+    while (!atomic_load(&a->stop) && !g_stopping) {
+        struct pollfd p = { a->lfd, POLLIN, 0 };
+        int n = poll(&p, 1, 100);
+        if (n <= 0) continue;
+        int fd = accept(a->lfd, NULL, NULL);
+        if (fd < 0) continue;
+        LmbMsg m = {0};
+        if (!lmb_secure_server(fd) && !lmb_recv(fd, &m) &&
+            m.op == LMB_HOST_HELLO)
+            (void)host_greet(fd, a->host, 1);
+        lmb_msg_free(&m);
+        lmb_close(fd);
+    }
+    return NULL;
 }
 
 static int cmd_host(int argc, char **argv) {
@@ -3087,6 +3236,7 @@ static int cmd_host(int argc, char **argv) {
     const char *engines_dir = NULL, *engine_path = NULL;
     int port = 7350, ctx = 2048, max_new = 256, cap_experts = 64;
     uint32_t max_frame = 1u << 20;
+    uint32_t idle_seconds = 300;
     for (int i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "--port") && i + 1 < argc) port = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--tracker") && i + 1 < argc) tracker = argv[++i];
@@ -3098,16 +3248,23 @@ static int cmd_host(int argc, char **argv) {
         else if (!strcmp(argv[i], "--max-new") && i + 1 < argc) max_new = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--max-frame") && i + 1 < argc)
             max_frame = (uint32_t)atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--idle-seconds") && i + 1 < argc)
+            idle_seconds = (uint32_t)atoi(argv[++i]);
         else {
             fprintf(stderr, "usage: lumabri host --model NAME [--port N] "
                             "[--tracker H:P] [--local DIR]\n"
                             "                   [--ctx N] [--max-new N] "
-                            "[--max-frame BYTES]\n");
+                            "[--max-frame BYTES] [--idle-seconds N]\n");
             return 2;
         }
     }
     if (!want_model && !local_dir) {
         fprintf(stderr, "lumabri host needs --model NAME or --local DIR\n");
+        return 2;
+    }
+    if (max_new < 1 || max_new > (1 << 20) || max_frame < 1 ||
+        max_frame > LMB_MAX_PAY || idle_seconds < 1) {
+        fprintf(stderr, "invalid host limit\n");
         return 2;
     }
     char dir[1024], shim[1200];
@@ -3127,7 +3284,10 @@ static int cmd_host(int argc, char **argv) {
     char mtype[64] = "";
     if (local_dir) local_model_type(local_dir, mtype, sizeof mtype);
     else snprintf(mtype, sizeof mtype, "%s", sw.model_type);
-    HostState h = { &eng, mtype, engine_for(mtype), 0, max_frame };
+    const char *host_engine = engine_for(mtype);
+    if (!host_engine) { engine_stop(&eng); return 1; }
+    HostState h = { &eng, mtype, host_engine, 0, max_frame,
+                    (uint32_t)max_new, idle_seconds };
 
     int lfd = lmb_listen(port);
     if (lfd < 0) {
@@ -3139,8 +3299,8 @@ static int cmd_host(int argc, char **argv) {
            C_DIM, port, mtype[0] ? mtype : "?", C_R);
     printf("  %sclients need no checkpoint; this machine holds the model and "
            "sees the text of every conversation%s\n", C_DIM, C_R);
+    fflush(stdout);
 
-    int serving = 0;
     while (!g_stopping) {
         struct pollfd lp = { lfd, POLLIN, 0 };
         int r = poll(&lp, 1, 500);
@@ -3150,20 +3310,18 @@ static int cmd_host(int argc, char **argv) {
         LmbMsg m = {0};
         if (lmb_secure_server(fd) || lmb_recv(fd, &m) ||
             m.op != LMB_HOST_HELLO) {
-            lmb_msg_free(&m); close(fd); continue;
+            lmb_msg_free(&m); lmb_close(fd); continue;
         }
         lmb_msg_free(&m);
-        if (serving) {
-            /* Busy is an answer, not a wait. */
-            (void)host_greet(fd, &h, 1);
-            close(fd);
-            continue;
-        }
-        if (host_greet(fd, &h, 0)) { close(fd); continue; }
-        serving = 1;
-        host_bridge(fd, &eng, max_frame);
-        close(fd);
-        serving = 0;
+        if (host_greet(fd, &h, 0)) { lmb_close(fd); continue; }
+        BusyAcceptor busy = { lfd, &h, 0 };
+        pthread_t busy_thread;
+        int watching = pthread_create(&busy_thread, NULL,
+                                      host_busy_acceptor, &busy) == 0;
+        host_bridge(fd, &eng, &h);
+        atomic_store(&busy.stop, 1);
+        if (watching) pthread_join(busy_thread, NULL);
+        lmb_close(fd);
         /* Between two clients the engine keeps the previous conversation in
          * its KV, so the next client would continue somebody else's chat.
          * Restart it: with one session there is nothing cheaper that is also
@@ -3197,7 +3355,44 @@ static int cmd_host(int argc, char **argv) {
  * SUBMIT payload themselves, so a hosted chatter needs zero bytes of the
  * checkpoint. That is the promise, and it is only kept by not calling
  * model_boot at all. */
-static int host_connect(const char *addr, const char *model_type, Engine *e) {
+typedef struct { int local_fd, network_fd; } HostPump;
+
+static void *host_client_pump(void *arg) {
+    HostPump *pump = (HostPump *)arg;
+    char bytes[16384];
+    for (;;) {
+        struct pollfd p[2] = {
+            { pump->local_fd, POLLIN, 0 }, { pump->network_fd, POLLIN, 0 }
+        };
+        int n = poll(p, 2, 1000);
+        if (n < 0) { if (errno == EINTR) continue; break; }
+        if (!n) continue;
+        if (p[0].revents & POLLIN) {
+            ssize_t got = read(pump->local_fd, bytes, sizeof bytes);
+            if (got <= 0 || lmb_send(pump->network_fd, LMB_HOST_STREAM,
+                                     NULL, 0, bytes, (uint32_t)got)) break;
+        }
+        if (p[1].revents & POLLIN) {
+            LmbMsg m = {0};
+            if (lmb_recv(pump->network_fd, &m) ||
+                m.op != LMB_HOST_STREAM || m.body_len || !m.pay_len ||
+                lmb_write_full(pump->local_fd, m.pay, m.pay_len)) {
+                lmb_msg_free(&m);
+                break;
+            }
+            lmb_msg_free(&m);
+        }
+        if ((p[0].revents | p[1].revents) & (POLLERR | POLLHUP)) break;
+    }
+    shutdown(pump->local_fd, SHUT_RDWR);
+    close(pump->local_fd);
+    lmb_close(pump->network_fd);
+    free(pump);
+    return NULL;
+}
+
+static int host_connect(const char *addr, const char *model_type, Engine *e,
+                        int *requested_max_new) {
     memset(e, 0, sizeof *e);
     e->to = e->from = -1;
     e->pid = 0;
@@ -3216,30 +3411,64 @@ static int host_connect(const char *addr, const char *model_type, Engine *e) {
         fprintf(stderr, "[lumabri] %s did not answer as an inference host\n",
                 addr);
         lmb_msg_free(&m);
-        close(fd);
+        lmb_close(fd);
         return -1;
     }
     LmbCur c = { m.body, m.body_len, 0 };
     char kind[64] = "", mtype[64] = "", backend[32] = "";
     uint32_t sessions_free = 0, speed_milli = 0;
+    uint32_t host_max_new = 0, host_max_frame = 0;
     if (lmb_cur_str(&c, mtype, sizeof mtype) ||
         lmb_cur_str(&c, kind, sizeof kind) ||
         lmb_cur_str(&c, backend, sizeof backend) ||
         lmb_cur_u32(&c, &sessions_free) || lmb_cur_u32(&c, &speed_milli)) {
         fprintf(stderr, "[lumabri] %s sent a greeting this build cannot read\n",
                 addr);
-        lmb_msg_free(&m); close(fd); return -1;
+        lmb_msg_free(&m); lmb_close(fd); return -1;
+    }
+    if (c.off < c.len &&
+        (lmb_cur_u32(&c, &host_max_new) || lmb_cur_u32(&c, &host_max_frame))) {
+        fprintf(stderr, "[lumabri] %s sent invalid host limits\n", addr);
+        lmb_msg_free(&m); lmb_close(fd); return -1;
     }
     lmb_msg_free(&m);
     if (model_type && model_type[0] && strcmp(model_type, mtype)) {
         fprintf(stderr, "[lumabri] %s serves %s, not %s\n", addr, mtype,
                 model_type);
-        close(fd); return -1;
+        lmb_close(fd); return -1;
     }
-    e->to = e->from = fd;
-    e->kind = engine_kind_of(kind);
+    if (!sessions_free) {
+        fprintf(stderr, "[lumabri] host %s is busy (0 sessions free)\n", addr);
+        lmb_close(fd); return -1;
+    }
+    if (host_max_new && requested_max_new && *requested_max_new > (int)host_max_new) {
+        printf("  %shost limit: max-new reduced from %d to %u%s\n", C_DIM,
+               *requested_max_new, host_max_new, C_R);
+        *requested_max_new = (int)host_max_new;
+    }
+    (void)host_max_frame;
+    EngKind kind_id = engine_kind_of(kind);
+    if (kind_id == EK_INVALID) {
+        fprintf(stderr, "[lumabri] host %s announced unknown engine %s\n",
+                addr, kind);
+        lmb_close(fd); return -1;
+    }
+    int pair[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair)) {
+        lmb_close(fd); return -1;
+    }
+    HostPump *pump = calloc(1, sizeof *pump);
+    if (!pump) { close(pair[0]); close(pair[1]); lmb_close(fd); return -1; }
+    pump->local_fd = pair[1]; pump->network_fd = fd;
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, host_client_pump, pump)) {
+        free(pump); close(pair[0]); close(pair[1]); lmb_close(fd); return -1;
+    }
+    pthread_detach(thread);
+    e->to = e->from = pair[0];
+    e->kind = kind_id;
     e->proto = kind_is_serve2(e->kind) ? PROTO_SERVE2 : PROTO_FRAMED;
-    g_signal_engine_fd = (sig_atomic_t)fd;
+    g_signal_engine_fd = (sig_atomic_t)pair[0];
 
     printf("  %shost %s · %s · %s%s\n", C_DIM, addr, mtype,
            backend[0] ? backend : "cpu", C_R);
@@ -3267,17 +3496,23 @@ static int resolve_engine(const char *engines_dir, const char *engine_path,
         if (checked_printf(out, cap, "%s", engine_path)) return -1;
         return access(out, X_OK);
     }
-    const char *eng = engine_for(model_type);
+    const LmbModelFamily *family = lumi_family(model_type);
+    const char *eng = family ? family->engine : NULL;
+    if (!eng) { if (cap) out[0] = 0; return -1; }
     const char *dir = engines_dir ? engines_dir : "../moe-stream/c";
     /* prefer the P2P build when one exists: it is the same engine (identical
      * without expert peers) plus the ability to run the routed experts on
      * the swarm when the tracker offers executors */
     char me[1200];
     exe_dir(me, sizeof me);
-    if (checked_printf(out, cap, "%s/%s_p2p", dir, eng)) return -1;
-    if (access(out, X_OK) == 0) return 0;
-    if (checked_printf(out, cap, "%s/%s_p2p", me, eng)) return -1;
-    if (access(out, X_OK) == 0) return 0;
+    if (family->p2p_engine) {
+        if (checked_printf(out, cap, "%s/%s_p2p", dir,
+                           family->p2p_engine)) return -1;
+        if (access(out, X_OK) == 0) return 0;
+        if (checked_printf(out, cap, "%s/%s_p2p", me,
+                           family->p2p_engine)) return -1;
+        if (access(out, X_OK) == 0) return 0;
+    }
     if (checked_printf(out, cap, "%s/%s", dir, eng)) return -1;
     return access(out, X_OK);
 }
@@ -4320,7 +4555,8 @@ static int model_boot(const char *tracker, const char *model, const char *shim,
         local_model_type(local_dir, mtype, sizeof mtype);
         printf("  %smodello locale %s%s%s%s · niente rete, niente mirror%s\n",
                C_DIM, C_R, C_BOLD, local_dir, C_DIM, C_R);
-        if (strstr(mtype, "kimi"))
+        const LmbModelFamily *family = lmb_family_for(mtype);
+        if (family && !strcmp(family->segment_id, "kimi"))
             kimi_tokenizer_selfheal(local_dir, engines_dir);
     } else {
         printf("  %schiedo allo sciame chi ha %s…%s\n", C_DIM, model, C_R);
@@ -4397,6 +4633,13 @@ static int model_boot(const char *tracker, const char *model, const char *shim,
         }
     }
 
+    const char *expected_engine = engine_for(mtype);
+    EngKind expected_kind = engine_kind_of(expected_engine);
+    if (!expected_engine || expected_kind == EK_INVALID) {
+        printf("  %sunsupported model_type: %s%s\n", C_RED,
+               mtype[0] ? mtype : "(missing)", C_R);
+        return -1;
+    }
     char engine[1200];
     if (resolve_engine(engines_dir, engine_path, mtype, engine, sizeof engine)) {
         printf("  %sengine not found: %s%s\n"
@@ -4427,14 +4670,15 @@ static int model_boot(const char *tracker, const char *model, const char *shim,
                    "scarichera' invece di farli eseguire%s\n"
                    "  %sci sono %d peer pronti a eseguirli. Serve %s_p2p, che "
                    "si costruisce con:  make chatters ENGINE=/path/to/colibri/c%s\n\n",
-                   C_RED, C_R, C_DIM, nexec, engine_for(mtype), C_R);
+                   C_RED, C_R, C_DIM, nexec,
+                   p2p_engine_for(mtype) ? p2p_engine_for(mtype) : "(none)", C_R);
     }
     if (!local_dir)
         printf("  %sora scarico la parte densa una volta sola — gli esperti "
                "restano sullo sciame%s\n", C_DIM, C_R);
 
     if (engine_spawn(engine, shim, tracker, model, local_dir,
-                     ctx, max_new, cap_experts, e)) return -1;
+                     ctx, max_new, cap_experts, expected_kind, e)) return -1;
 
     g_eng.booting = 1;
     g_eng.last_out = nowd();
@@ -4596,7 +4840,7 @@ static int cmd_chat(int argc, char **argv) {
     snprintf(shim, sizeof shim, "%s/liblumabri.so", dir);
     if (access(shim, R_OK))       /* installed layout: bin/../lib/lumabri/ */
         snprintf(shim, sizeof shim, "%s/../lib/lumabri/liblumabri.so", dir);
-    if (!local_dir && access(shim, R_OK)) {
+    if (!host_addr && !local_dir && access(shim, R_OK)) {
         fprintf(stderr, "liblumabri.so missing; run make (or make install)\n");
         return 1;
     }
@@ -4672,7 +4916,7 @@ static int cmd_chat(int argc, char **argv) {
      * and the only way to actually mean it. */
     if (host_addr) {
         memset(&sw, 0, sizeof sw);
-        if (host_connect(host_addr, NULL, &eng)) return 1;
+        if (host_connect(host_addr, NULL, &eng, &max_new)) return 1;
     } else if (model_boot(tracker, model, shim, engines_dir, engine_path,
                           local_dir, ctx, max_new, cap_experts, &eng, &sw))
         return 1;
@@ -4758,11 +5002,11 @@ static int cmd_chat(int argc, char **argv) {
             /* framed dialect: reset is a control byte, everything else is the
              * prompt line as-is */
             const char *send = is_reset ? "\x02RESET" : line;
-            if (write(eng.to, send, strlen(send)) < 0) break;
-            if (write(eng.to, "\n", 1) < 0) break;
+            if (lmb_write_full(eng.to, send, strlen(send))) break;
+            if (lmb_write_full(eng.to, "\n", 1)) break;
         } else {
             line[L] = '\n';
-            if (write(eng.to, line, L + 1) < 0) break;
+            if (lmb_write_full(eng.to, line, L + 1)) break;
             line[L] = 0;
             if (is_reset) {
                 printf("  %s\xe2\x9c\xa6 nuova conversazione%s\n", C_DIM, C_R);
@@ -5003,7 +5247,38 @@ typedef struct {
     char dir[512];
     char name[64];
     LmbModelShape shape;
+    int has_weights;
 } CatalogEntry;
+
+static int catalog_has_weights(const char *root, unsigned depth) {
+    if (depth > 3) return 0;
+    DIR *d = opendir(root);
+    if (!d) return 0;
+    int found = 0;
+    struct dirent *e;
+    while (!found && (e = readdir(d))) {
+        if (e->d_name[0] == '.') continue;
+        char path[1024];
+        int n = snprintf(path, sizeof path, "%s/%s", root, e->d_name);
+        if (n < 0 || (size_t)n >= sizeof path) continue;
+        struct stat st;
+        if (stat(path, &st)) continue;
+        if (S_ISDIR(st.st_mode)) {
+            found = catalog_has_weights(path, depth + 1);
+            continue;
+        }
+        /* A config-side metadata stub is not a weight container. Four KiB is
+         * still only a presence check—the adapter validates the real format
+         * before READY—but it rejects empty and token-sized placeholders. */
+        if (!S_ISREG(st.st_mode) || st.st_size < 4096) continue;
+        const char *dot = strrchr(e->d_name, '.');
+        if (dot && (!strcmp(dot, ".safetensors") || !strcmp(dot, ".bin") ||
+                    !strcmp(dot, ".gguf") || !strcmp(dot, ".coli")))
+            found = 1;
+    }
+    closedir(d);
+    return found;
+}
 
 static int catalog_scan(const char *root, CatalogEntry *out, int cap) {
     DIR *d = opendir(root);
@@ -5020,6 +5295,7 @@ static int catalog_scan(const char *root, CatalogEntry *out, int cap) {
         if (lmb_shape_from_config(path, &out[n].shape)) continue;
         snprintf(out[n].dir, sizeof out[n].dir, "%.511s", path);
         snprintf(out[n].name, sizeof out[n].name, "%.63s", e->d_name);
+        out[n].has_weights = catalog_has_weights(path, 0);
         n++;
     }
     closedir(d);
@@ -5041,20 +5317,55 @@ static void catalog_self(LmbClusterNode *n, const char *disk) {
     n->disk_read_bps = p.disk_read_bps;
     n->gpu_backends = p.gpu_backends;
     n->threads = p.logical_cpus;
-    n->has_checkpoint = 1;
+    n->has_checkpoint = 0;      /* set per catalogue entry, never globally */
+}
+
+static int catalog_state_refresh(LmbTuiState *st, void *unused) {
+    (void)unused;
+    CatalogEntry found[LMB_TUI_MAX_MODELS];
+    int n = catalog_scan(st->root, found, LMB_TUI_MAX_MODELS);
+    st->nmodels = 0;
+    catalog_self(&st->nodes[0], st->disk[0] ? st->disk : ".");
+    st->nnodes = 1;
+    for (int i = 0; i < n; i++) {
+        LmbTuiModel *m = &st->models[st->nmodels];
+        memset(m, 0, sizeof *m);
+        snprintf(m->name, sizeof m->name, "%.63s", found[i].name);
+        snprintf(m->dir, sizeof m->dir, "%.511s", found[i].dir);
+        m->shape = found[i].shape;
+        st->nodes[0].has_checkpoint = found[i].has_weights;
+        m->planned = !lmb_plan_cluster(&m->shape, st->nodes, st->nnodes,
+                                       st->context, st->sessions,
+                                       LMB_GOAL_ONE_SESSION, &m->plan);
+        /* A calibration store is not implemented yet. Never manufacture a
+         * partial key in the renderer: no record means no speed. */
+        m->calibration = NULL;
+        st->nmodels++;
+    }
+    return 0;
 }
 
 static void catalog_row(const CatalogEntry *m, const LmbClusterNode *nodes,
                         uint32_t nn, uint32_t context, uint32_t sessions) {
+    LmbClusterNode actual[LMB_CLUSTER_MAX_NODES];
+    if (nn > LMB_CLUSTER_MAX_NODES) nn = LMB_CLUSTER_MAX_NODES;
+    memcpy(actual, nodes, (size_t)nn * sizeof *actual);
+    /* The current local catalogue has one complete-checkpoint source. The
+     * distributed CAS inventory will replace this boolean at step 2. */
+    if (nn) actual[0].has_checkpoint = m->has_weights;
     LmbClusterPlan plan;
-    int ok = !lmb_plan_cluster(&m->shape, nodes, nn, context, sessions,
+    int ok = !lmb_plan_cluster(&m->shape, actual, nn, context, sessions,
                                LMB_GOAL_ONE_SESSION, &plan);
-    const char *state = !ok ? "not runnable"
+    const char *state = !ok ? "cannot plan"
                             : lmb_plan_state_name(plan.state);
     const char *mark = !ok || plan.state == LMB_PLAN_UNRUNNABLE ? "x"
                      : plan.state == LMB_PLAN_DISK ? "!" : "+";
     char detail[96] = "";
-    if (ok && plan.state == LMB_PLAN_UNRUNNABLE && plan.missing_bytes)
+    if (!m->shape.sizing_verified)
+        snprintf(detail, sizeof detail, "adapter sizing unavailable");
+    else if (!m->has_weights)
+        snprintf(detail, sizeof detail, "checkpoint weights missing");
+    else if (ok && plan.state == LMB_PLAN_UNRUNNABLE && plan.missing_bytes)
         snprintf(detail, sizeof detail, "%.0f GB short (~%u more machine%s)",
                  (double)plan.missing_bytes / 1e9, plan.missing_nodes,
                  plan.missing_nodes == 1 ? "" : "s");
@@ -5072,6 +5383,53 @@ static void catalog_row(const CatalogEntry *m, const LmbClusterNode *nodes,
            mark, C_R, m->name, state, detail, "not calibrated");
 }
 
+static void json_string(FILE *out, const char *s) {
+    fputc('"', out);
+    for (const unsigned char *p = (const unsigned char *)(s ? s : ""); *p; p++) {
+        if (*p == '"' || *p == '\\') fprintf(out, "\\%c", *p);
+        else if (*p == '\n') fputs("\\n", out);
+        else if (*p == '\r') fputs("\\r", out);
+        else if (*p == '\t') fputs("\\t", out);
+        else if (*p < 0x20) fprintf(out, "\\u%04x", *p);
+        else fputc(*p, out);
+    }
+    fputc('"', out);
+}
+
+static void catalog_json(const CatalogEntry *models, int n,
+                         const LmbClusterNode *self, uint32_t context,
+                         uint32_t sessions) {
+    fputs("{\"schema\":\"lumabri.models.v1\",\"nodes\":[{\"name\":", stdout);
+    json_string(stdout, self->name);
+    printf(",\"ram_budget_bytes\":%llu,\"vram_inventory_bytes\":%llu,"
+           "\"threads\":%u}],\"models\":[",
+           (unsigned long long)self->ram_budget_bytes,
+           (unsigned long long)self->vram_budget_bytes, self->threads);
+    for (int i = 0; i < n; i++) {
+        LmbClusterNode node = *self;
+        node.has_checkpoint = models[i].has_weights;
+        LmbClusterPlan plan;
+        int planned = !lmb_plan_cluster(&models[i].shape, &node, 1, context,
+                                        sessions, LMB_GOAL_ONE_SESSION, &plan);
+        if (i) fputc(',', stdout);
+        fputs("{\"name\":", stdout); json_string(stdout, models[i].name);
+        fputs(",\"model_type\":", stdout);
+        json_string(stdout, models[i].shape.model_type);
+        fputs(",\"adapter\":", stdout);
+        json_string(stdout, models[i].shape.segment_id);
+        printf(",\"sizing_verified\":%s,\"weights_present\":%s,"
+               "\"planned\":%s,\"state\":",
+               models[i].shape.sizing_verified ? "true" : "false",
+               models[i].has_weights ? "true" : "false",
+               planned ? "true" : "false");
+        json_string(stdout, planned ? lmb_plan_state_name(plan.state) :
+                                     "cannot plan");
+        printf(",\"missing_bytes\":%llu,\"calibration\":null}",
+               (unsigned long long)(planned ? plan.missing_bytes : 0));
+    }
+    fputs("]}\n", stdout);
+}
+
 static int models_screen(const char *root, const char *disk, uint32_t context,
                          uint32_t sessions, int snapshot, const char *keys);
 
@@ -5081,7 +5439,7 @@ static int cmd_models(int argc, char **argv) {
     /* The screen is the default and the listing is the fallback, not the
      * other way round: a plain list is what you want in a pipe or a log, and
      * a pipe is exactly where a full-screen interface is useless. */
-    int plain = !isatty(STDOUT_FILENO), snapshot = 0;
+    int plain = !isatty(STDOUT_FILENO), snapshot = 0, json = 0;
     for (int i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "--models-dir") && i + 1 < argc) root = argv[++i];
         else if (!strcmp(argv[i], "--disk") && i + 1 < argc) disk = argv[++i];
@@ -5090,12 +5448,13 @@ static int cmd_models(int argc, char **argv) {
         else if (!strcmp(argv[i], "--sessions") && i + 1 < argc)
             sessions = (uint32_t)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--plain")) plain = 1;
+        else if (!strcmp(argv[i], "--json")) { json = 1; plain = 1; }
         else if (!strcmp(argv[i], "--snapshot")) { snapshot = 1; plain = 0; }
         else if (!strcmp(argv[i], "--keys") && i + 1 < argc) keys = argv[++i];
         else {
             fprintf(stderr, "usage: lumabri models [--models-dir DIR] "
                             "[--disk PATH] [--context N] [--sessions N]\n"
-                            "                      [--plain] [--snapshot] "
+                            "                      [--plain|--json] [--snapshot] "
                             "[--keys SEQUENCE]\n");
             return 2;
         }
@@ -5113,7 +5472,9 @@ static int cmd_models(int argc, char **argv) {
     LmbClusterNode self;
     catalog_self(&self, disk);
 
-    printf("%s%sLUMABRI · what these computers can run%s\n\n", C_BOLD, C_CORAL, C_R);
+    if (json) { catalog_json(models, n, &self, context, sessions); return 0; }
+
+    printf("%s%sLUMABRI · local planning preview%s\n\n", C_BOLD, C_CORAL, C_R);
     printf("  %s1 computer · %.0f GB usable RAM · engine %s%s\n", C_DIM,
            (double)self.ram_budget_bytes / 1e9,
            self.gpu_backends ? "can use a GPU" : "CPU only", C_R);
@@ -5146,23 +5507,9 @@ static int models_screen(const char *root, const char *disk, uint32_t context,
     st.context = context;
     st.sessions = sessions;
     snprintf(st.root, sizeof st.root, "%.511s", root);
-
-    catalog_self(&st.nodes[0], disk);
-    st.nnodes = 1;
-
-    CatalogEntry found[LMB_TUI_MAX_MODELS];
-    int n = catalog_scan(root, found, LMB_TUI_MAX_MODELS);
-    for (int i = 0; i < n; i++) {
-        LmbTuiModel *m = &st.models[st.nmodels];
-        snprintf(m->name, sizeof m->name, "%.63s", found[i].name);
-        snprintf(m->dir, sizeof m->dir, "%.511s", found[i].dir);
-        m->shape = found[i].shape;
-        m->planned = !lmb_plan_cluster(&m->shape, st.nodes, st.nnodes,
-                                       context, sessions,
-                                       LMB_GOAL_ONE_SESSION, &m->plan);
-        m->calibration = NULL;        /* nothing measured yet, and it shows */
-        st.nmodels++;
-    }
+    snprintf(st.disk, sizeof st.disk, "%.511s", disk);
+    st.refresh = catalog_state_refresh;
+    catalog_state_refresh(&st, NULL);
     if (!st.nmodels) {
         printf("no checkpoints under %s\n", root);
         printf("put a model directory there, or pass --models-dir\n");
@@ -5446,11 +5793,8 @@ int main(int argc, char **argv) {
     if (argc >= 2 && !strcmp(argv[1], "key")) return cmd_key(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "peer-key"))
         return cmd_peer_key(argc - 2, argv + 2);
-    if (argc >= 2 && !strcmp(argv[1], "host")) return cmd_host(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "models"))
         return cmd_models(argc - 2, argv + 2);
-    if (argc >= 2 && (!strcmp(argv[1], "machine") || !strcmp(argv[1], "status")))
-        return cmd_machine(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "limits"))
         return cmd_limits(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "pause"))
@@ -5458,6 +5802,10 @@ int main(int argc, char **argv) {
     if (argc >= 2 && !strcmp(argv[1], "resume"))
         return cmd_governor_manual(argc - 2, argv + 2, 0);
     if (lmb_secure_init()) return 1; /* children inherit the same strict mode */
+    if (argc >= 2 && !strcmp(argv[1], "host"))
+        return cmd_host(argc - 2, argv + 2);
+    if (argc >= 2 && (!strcmp(argv[1], "machine") || !strcmp(argv[1], "status")))
+        return cmd_machine(argc - 2, argv + 2);
     const char *tok = getenv("LUMABRI_TOKEN");
     if (tok && strlen(tok) > LMB_TOKEN_MAX) {
         fprintf(stderr, "LUMABRI_TOKEN must be at most %u bytes\n",

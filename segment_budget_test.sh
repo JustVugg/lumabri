@@ -3,18 +3,17 @@
 # before opening the engine — so a wrong basis is invisible until someone
 # notices a machine that never joins.
 #
-# Its old basis was a proportional share of the whole checkpoint plus 5%,
-# which assumes every weight of the range must be resident. That is right for
-# the incident it was written for (slices sized at "all the free RAM" fighting
-# on one box) and wrong as a rule: it refused a node that had room for the
-# dense part and a top-k expert cache and a working NVMe. Disk mode was not
-# unadvertised, it was unreachable.
+# The adapter ABI currently exposes no verified minimum working set and no
+# switch that makes a resident Segment engine stream weights. Therefore the
+# production guard must remain conservative: proportional checkpoint bytes
+# plus overhead. A catalogue estimate must never authorize a smaller runtime
+# allocation.
 #
 # Three claims:
 #   1. a budget that fits the whole range still starts, unchanged;
-#   2. a budget below the working set is still refused, and says both figures;
-#   3. between the two, the node starts ONLY when disk mode is asked for —
-#      streaming is a capability, not a consolation prize.
+#   2. a budget below the conservative share is refused;
+#   3. LUMABRI_SEGMENT_DISK cannot bypass it: that variable never changed the
+#      Colibri engine's allocation policy.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -87,7 +86,13 @@ got=$(run_node "$roomy" roomy)
 
 got=$(run_node "$tight" tight)
 [[ "$got" == refused:3 ]] || { echo "a node below its working set was not refused ($got)" >&2; exit 1; }
-grep -q "working set" "$TMP/tight.log" ||
-    { echo "the refusal did not name the working set" >&2; exit 1; }
+grep -q "needs about" "$TMP/tight.log" ||
+    { echo "the refusal did not state its conservative estimate" >&2; exit 1; }
 
-echo "SEGMENT BUDGET TEST: PASS (whole range starts, below the working set refuses)"
+got=$(run_node "$tight" fake-disk LUMABRI_SEGMENT_DISK=1)
+[[ "$got" == refused:3 ]] || {
+    echo "an unimplemented disk-mode flag bypassed the memory guard ($got)" >&2
+    exit 1
+}
+
+echo "SEGMENT BUDGET TEST: PASS (resident share starts, undersized range refuses)"
