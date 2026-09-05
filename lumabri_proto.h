@@ -299,6 +299,18 @@ enum {
      * Advertised by an executor as bit 0 of the caps word ERES_R carries
      * third, after residency and state; an older node never receives EXEC2. */
     LMB_EXEC2 = 72, LMB_EXEC2_R = 73,
+    /* An inference host: it owns the engine, the dense weights and the KV,
+     * and a client sends it text. HELLO_R body: model_type, engine kind,
+     * backend ("cpu"/"cuda"), u32 free sessions, u32 measured tok/s in
+     * thousandths — zero meaning nobody has measured this host yet, which
+     * is a state the screen shows rather than a number it invents.
+     *
+     * HOST_STREAM payloads carry chunks of the SUBMIT/DATA/DONE codec. When
+     * transport encryption is enabled they remain authenticated and encrypted;
+     * a local socketpair unwraps them so the terminal-facing Engine API still
+     * sees an ordinary byte stream. */
+    LMB_HOST_HELLO = 74, LMB_HOST_HELLO_R = 75,
+    LMB_HOST_STREAM = 76,
 };
 #define LMB_CAP_EXEC2 (1u << 0)
 #define LMB_ENC_F32  0u
@@ -421,6 +433,7 @@ static void lmb_frame_caps(uint32_t op, uint32_t *body_cap, uint32_t *pay_cap) {
     case LMB_SEG_RUN_R:
     case LMB_SEG_SNAPSHOT_R:
     case LMB_SEG_RESTORE:
+    case LMB_HOST_STREAM:
     case LMB_RSEG:
     case LMB_RSEG_FWD:
     case LMB_RSEG_R:

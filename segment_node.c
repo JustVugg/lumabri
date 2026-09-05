@@ -6,16 +6,19 @@
 #include "lumabri_segment_discovery.h"
 #include "lumabri_machine.h"
 #include "lumabri_run_gate.h"
+#include "lumabri_planner.h"
 #include "lumabri_sign.h"
 #include "lumabri_secure.h"
 #include "segment_colibri.h"
 
 #include <pthread.h>
+#include <dirent.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -23,6 +26,29 @@
 #define NODE_SESSIONS_MAX 256u
 #define NODE_CONNECTIONS_MAX 256u
 #define NODE_SNAPSHOT_CHUNK (1u << 20)
+
+static uint64_t directory_bytes(const char *path, unsigned depth) {
+    if (!path || depth > 8) return 0;
+    DIR *dir = opendir(path);
+    if (!dir) return 0;
+    uint64_t total = 0;
+    struct dirent *entry;
+    while ((entry = readdir(dir))) {
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, ".."))
+            continue;
+        char child[4096];
+        int n = snprintf(child, sizeof child, "%s/%s", path, entry->d_name);
+        if (n < 0 || (size_t)n >= sizeof child) { total = UINT64_MAX; break; }
+        struct stat st;
+        if (lstat(child, &st)) continue;
+        uint64_t add = S_ISREG(st.st_mode) ? (uint64_t)st.st_size :
+                       S_ISDIR(st.st_mode) ? directory_bytes(child, depth + 1) : 0;
+        if (UINT64_MAX - total < add) { total = UINT64_MAX; break; }
+        total += add;
+    }
+    closedir(dir);
+    return total;
+}
 
 typedef struct {
     int used;
@@ -1282,6 +1308,16 @@ int main(int argc, char **argv) {
         reserve_name, 4096, 256, 262144) << 20;
     if (!process_limit && available != UINT64_MAX && available > reserve)
         process_limit = available - reserve;
+    /* The runtime preflight must be conservative. The generic catalogue
+     * arithmetic is not an adapter contract and cannot authorize a smaller
+     * allocation; in particular setting a "disk" environment flag did not
+     * make any Colibri adapter stream its weights. Until an adapter exposes a
+     * verified minimum-working-set callback, retain the proven guard: its
+     * proportional share of the actual checkpoint plus overhead. */
+    LmbModelShape shape;
+    int shaped = model_dir && !lmb_shape_from_config(model_dir, &shape);
+    if (!model_layers && shaped) model_layers = shape.layers;
+    if (!model_bytes && model_dir) model_bytes = directory_bytes(model_dir, 0);
     if (process_limit && model_bytes && model_layers) {
         uint64_t range_layers = end - begin;
         uint64_t proportional = model_bytes / model_layers * range_layers;
@@ -1294,7 +1330,8 @@ int main(int argc, char **argv) {
         if (estimated > process_limit) {
             fprintf(stderr, "[segment-node] assigned range %u:%u needs about "
                     "%.1f GB but the donor budget is %.1f GB; releasing it "
-                    "before loading weights\n", begin, end,
+                    "before loading weights (disk mode is not verified for "
+                    "this adapter)\n", begin, end,
                     (double)estimated / 1e9, (double)process_limit / 1e9);
             if (auto_range)
                 (void)auto_range_release(tracker, model, name, engine_id,

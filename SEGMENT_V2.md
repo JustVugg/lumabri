@@ -176,9 +176,10 @@ execution, fence, restore, stale owners, snapshot checks, close and TTL reap.
 The real-tracker discovery gate additionally covers signed registration,
 compatibility filtering, replicas, complete chains, telemetry stability,
 draining, lease rotation and asynchronous snapshots. These are protocol and
-control-plane fixtures. `segment_direct_test.sh` adds the real data plane: two
-peers per family, real prefill/decode, persistent sampled sessions and three
-greedy oracle tokens for all six models, plus overlapping real sessions. The
+control-plane fixtures. `segment_direct_test.sh` adds the real data plane for
+the six fixture-backed families: two peers per family, real prefill/decode,
+persistent sampled sessions and three greedy oracle tokens per model, plus
+overlapping real sessions. The
 relay gate forces every stateful operation through tracker tunnels; the
 failover gate kills a selected peer between turns and requires checkpoint
 restore plus replay before generation can continue.

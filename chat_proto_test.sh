@@ -18,7 +18,7 @@ make -s lumabri
 T=$(mktemp -d /tmp/lumabri-proto.XXXXXX)
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/model"
-printf '{"model_type":"fake"}' > "$T/model/config.json"
+printf '{"model_type":"glm"}' > "$T/model/config.json"
 
 # --- a fake engine that speaks the framed SERVE protocol ------------------
 cat > "$T/framed" <<'EOF'
@@ -51,6 +51,7 @@ echo "$OUT" | grep -q "disco locale" || { echo "   --local not honoured"; echo "
 echo "   ✓ two turns and a reset, streamed, with the engine's own numbers"
 
 echo "· 2) line dialect (olmoe) still works"
+printf '{"model_type":"olmoe"}' > "$T/model/config.json"
 cat > "$T/liner" <<'EOF'
 #!/usr/bin/env bash
 [ -n "${CHAT:-}" ] || { echo "CHAT not set" >&2; exit 3; }
@@ -64,6 +65,7 @@ echo "$OUT" | grep -q "echo: salve" || { echo "   line protocol broke"; echo "$O
 echo "   ✓ olmoe's prompt dialect untouched"
 
 echo "· 3) an engine that dies must say why"
+printf '{"model_type":"glm"}' > "$T/model/config.json"
 cat > "$T/dead" <<'EOF'
 #!/usr/bin/env bash
 echo "config.json: unsupported quantization iq3_xxs" >&2

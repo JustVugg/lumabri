@@ -13,18 +13,30 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Every adapter Colibri exposes, Segment and Edge.
+ *
+ * This list used to hold six of the eight: `glm53` and `qwen38` were never
+ * registered, so those two engines could not be reached by any spelling —
+ * and the substring dispatch quietly handed their checkpoints to `glm` and
+ * `qwen36` instead. Registering them is half the fix; lumabri_families.h is
+ * the other half, and model_family_test.sh keeps the two halves in step with
+ * whatever Colibri exposes next. */
 static int lmb_colibri_register_all(void) {
     return coli_glm_segment_adapter_register() ||
+           coli_glm53_segment_adapter_register() ||
            coli_inkling_segment_adapter_register() ||
            coli_kimi_segment_adapter_register() ||
            coli_olmoe_segment_adapter_register() ||
            coli_qwen36_segment_adapter_register() ||
+           coli_qwen38_segment_adapter_register() ||
            coli_deepseek_v4_segment_adapter_register() ||
            coli_glm_edge_adapter_register() ||
+           coli_glm53_edge_adapter_register() ||
            coli_inkling_edge_adapter_register() ||
            coli_kimi_edge_adapter_register() ||
            coli_olmoe_edge_adapter_register() ||
            coli_qwen36_edge_adapter_register() ||
+           coli_qwen38_edge_adapter_register() ||
            coli_deepseek_v4_edge_adapter_register();
 }
 

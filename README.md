@@ -1,14 +1,23 @@
 <img src="logo.svg" alt="lumabri: tiny engine, immense swarm" width="524">
 
-Run huge mixture-of-experts models from a swarm of peers, with the
-[colibri](https://github.com/JustVugg/colibri) engine. Pure C, no dependencies.
+Run huge mixture-of-experts models across the computers you already have,
+with the [colibri](https://github.com/JustVugg/colibri) engine. Pure C, no
+dependencies.
 
-One machine shares a model. Any other machine chats with it. Nothing is
-downloaded up front: the bytes an inference actually touches arrive from a peer
-on first use and stay in the shared CAS. With Segment available, the chatter
-keeps only tokenizer, embeddings, final transform/head and conversation state;
-whole layer ranges and their state remain resident on executor peers. Colibri's
-ordinary executables and local-inference behaviour are unchanged.
+The model is split into contiguous ranges of layers, one range per machine,
+and each node keeps the state for its own layers. Activations cross the
+network between them; the weights stop moving once they are in place. Nothing
+is downloaded up front: the bytes an inference actually touches arrive from a
+peer on first use and stay in the shared CAS. Colibri's ordinary executables
+and local-inference behaviour are unchanged.
+
+**Adding computers always adds memory, capacity and availability. It makes a
+single chat faster only when the new plan removes disk reads or brings faster
+hardware** — layers are sequential, so twelve on one machine cost about what
+six plus six cost on two, plus a hop. The case that changes everything is the
+other one: a model that one machine would stream from NVMe and three hold in
+RAM. See [README_HOME.md](README_HOME.md) for the catalogue, the three states
+and the hosted chat.
 
 Any machine may join, GPU or not. The engine was built for CPU and SSD first; a
 GPU only makes it faster, never different, and the output is byte-for-byte the
@@ -463,16 +472,16 @@ have their own scripts (`assign_test.sh`, `concurrency_test.sh`,
 `make test-cas test-key-rotation test-hedge test-relay-exec` and
 `make test-segment-v2 test-segment-discovery test-segment-direct-real`.
 Segment discovery checks leases, route generations, replicas, draining,
-compatibility and the asynchronous snapshot. The direct gate runs all six tiny
-families through real TCP executors, matches independent Colibri token oracles,
+compatibility and the asynchronous snapshot. The direct gate runs six
+fixture-backed families through real TCP executors, matches independent Colibri token oracles,
 drives sampled persistent TUI turns, overlaps sessions, and proves rarest-first
 automatic range replacement. The same target also forces Segment through a
 relay-only NAT topology, kills a selected executor to require checkpoint
 restore/replay, and launches the ordinary `serve` + `chat` UX without a public
 data address. Relay EXEC needs
 an OLMoE engine source under `ENGINE`; its script reports `SKIP` explicitly
-when that external checkout is absent. Every claim in this README has a script
-behind it.
+when that external checkout is absent. GLM-5.3 and Qwen3.8 remain experimental
+until they pass the same real-checkpoint conformance matrix.
 
 ## How it compares
 

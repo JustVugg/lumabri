@@ -19,7 +19,7 @@ endif
 # regressions would make this gate depend on whichever checkout ENGINE names.
 check-warnings:
 	$(MAKE) -B all test_relay_exec test_swarm_fed test_key_rotation \
-		test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 test_exec2 test_accum_order test_residency_report \
+		test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 test_exec2 test_accum_order test_residency_report test_model_family test_planner test_cluster test_calibration \
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
 		test_meminfo test_compute_lease test_content_filter \
 		test_scheduler test_run_gate \
@@ -29,8 +29,10 @@ SECURE_DEPS = lumabri_secure.h lumabri_crypto.h
 MACHINE_SRC = lumabri_machine.c
 MACHINE_DEPS = lumabri_machine.h $(MACHINE_SRC)
 
-lumabri: lumabri.c lumabri_proto.h lumabri_sign.h $(SECURE_DEPS) $(MACHINE_DEPS)
-	$(CC) $(CFLAGS) -pthread lumabri.c $(MACHINE_SRC) -o $@
+lumabri: lumabri.c lumabri_tui.c lumabri_tui.h lumabri_proto.h lumabri_sign.h \
+		lumabri_families.h lumabri_planner.h lumabri_cluster.h \
+		lumabri_calibration.h $(SECURE_DEPS) $(MACHINE_DEPS)
+	$(CC) $(CFLAGS) -pthread lumabri.c lumabri_tui.c $(MACHINE_SRC) -o $@
 
 # ---- phase 2: peers execute experts ------------------------------------
 # Both sides are built from the engine's own source so the expert math cannot
@@ -401,6 +403,21 @@ test_accum_order: test_accum_order.c lumabri_client.h lumabri_proto.h lumabri_si
 test_residency_report: test_residency_report.c lumabri_client.h lumabri_proto.h lumabri_sign.h $(SECURE_DEPS)
 	$(CC) $(CFLAGS) -pthread test_residency_report.c -o $@ -lm
 
+test_model_family: test_model_family.c lumabri_families.h
+	$(CC) $(CFLAGS) test_model_family.c -o $@
+
+test_planner: test_planner.c lumabri_planner.h lumabri_families.h
+	$(CC) $(CFLAGS) test_planner.c -o $@
+
+test_cluster: test_cluster.c lumabri_cluster.h lumabri_planner.h lumabri_families.h lumabri_machine.h
+	$(CC) $(CFLAGS) test_cluster.c -o $@
+
+test_calibration: test_calibration.c lumabri_calibration.h lumabri_planner.h
+	$(CC) $(CFLAGS) test_calibration.c -o $@
+
+segment_budget_probe: segment_budget_probe.c lumabri_planner.h lumabri_families.h
+	$(CC) $(CFLAGS) segment_budget_probe.c -o $@
+
 test_rtt_refresh: test_rtt_refresh.c lumabri_client.h lumabri_proto.h lumabri_sign.h $(SECURE_DEPS)
 	$(CC) $(CFLAGS) -pthread test_rtt_refresh.c -o $@
 
@@ -524,7 +541,8 @@ $(COLIBRI_SEGMENT_LIB): $(HYBRID_ENGINE_DIR)/.prepared build/segment_hybrid_brid
 		segment-edge-library
 	$(AR) rcs $@ build/segment_hybrid_bridge.o
 
-segment_node: segment_node.c $(SEGMENT_COMMON) $(COLIBRI_SEGMENT_LIB) $(MACHINE_DEPS) \
+segment_node: segment_node.c lumabri_planner.h lumabri_families.h \
+		$(SEGMENT_COMMON) $(COLIBRI_SEGMENT_LIB) $(MACHINE_DEPS) \
 		lumabri_run_gate.c lumabri_run_gate.h
 	$(CC) $(SEGMENT_CFLAGS) -pthread segment_node.c lumabri_segment.c \
 		lumabri_segment_discovery.c $(MACHINE_SRC) lumabri_run_gate.c \
@@ -598,10 +616,27 @@ test-hedge: test_hedge
 test-segment-v2: test_segment_v2
 	./test_segment_v2
 
+# The Segment gates that need real nodes: slower than `make test`, and the
+# ones that actually answer step 0 of the roadmap.
+test-segment-split: tracker segment_node segment_chat
+	bash ./segment_split_test.sh
+
+test-segment-budget: tracker segment_node segment_budget_probe
+	bash ./segment_budget_test.sh
+
+test-multi-session: tracker segment_node segment_chat
+	bash ./multi_session_test.sh
+
+test-segment-coverage: tracker segment_node segment_chat
+	bash ./segment_coverage_test.sh
+
+test-adapters: tracker segment_node segment_chat
+	bash ./adapter_conformance_test.sh
+
 test-segment-discovery: tracker test_segment_discovery
 	bash ./segment_discovery_test.sh
 
-test: all test_key_rotation test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 test_accum_order test_residency_report \
+test: all test_key_rotation test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 test_accum_order test_residency_report test_model_family test_planner test_cluster \
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
 		test_meminfo test_compute_lease test_content_filter \
 		test_scheduler test_run_gate
@@ -629,6 +664,14 @@ test: all test_key_rotation test_hedge test_local_fallback test_nat_adopt test_v
 	./test_local_fallback
 	./test_accum_order
 	./test_residency_report
+	./test_model_family
+	bash ./model_family_test.sh
+	bash ./catalog_test.sh
+	bash ./hosted_chat_test.sh
+	bash ./tui_test.sh
+	./test_planner
+	./test_cluster
+	./test_calibration
 	./test_nat_adopt
 	bash ./rtt_refresh_test.sh
 	./test_segment_v2
@@ -670,6 +713,7 @@ clean:
 	rm -f tracker maintainer liblumabri.so test_shim swarm_probe lumabri \
 	      test_relay_exec test_swarm_fed test_key_rotation test_hedge \
 	      test_local_fallback test_accum_order test_residency_report \
+	      test_model_family test_planner test_cluster test_calibration segment_budget_probe \
 	      test_nat_adopt test_rtt_refresh \
 	      test_verify_failover test_segment_v2 test_segment_discovery test_sampling \
 	      test_swarm_detail test_relay_rate test_machine test_meminfo \
