@@ -423,7 +423,7 @@ static int disc_same_route(const LmbSegRouteEntry *a,
 
 static uint64_t disc_probe_us(const char *addr) {
     uint64_t before = disc_now_ms();
-    int fd = lmb_connect_ms(addr, 250);
+    int fd = lmb_connect_ms_io(addr, 250, 250);
     if (fd < 0) return 0;
     LmbMsg reply = {0};
     int bad = lmb_send(fd, LMB_PING, NULL, 0, NULL, 0) ||

@@ -24,11 +24,15 @@
  * where mirroring would mean a second copy of the same bytes.
  */
 #define _GNU_SOURCE
+#include "lumabri_ready.h"
 #include <arpa/inet.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <ifaddrs.h>
 #include <math.h>
+#include <locale.h>
+#include <limits.h>
+#include <wchar.h>
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
@@ -55,6 +59,7 @@
 #include "lumabri_sign.h"
 #include "lumabri_secure.h"
 #include "lumabri_inventory.h"
+#include "lumabri_home.h"
 
 /* ---- terminal ----------------------------------------------------------- */
 
@@ -84,6 +89,19 @@ static int term_w(void) {
     return 80;
 }
 
+/* Engine descriptors are pipes for a child and sockets for a hosted engine.
+ * lmb_write_full is socket-only (send), so it cannot write to a child pipe. */
+static int engine_write_full(int fd, const void *data, size_t bytes) {
+    const unsigned char *p = data;
+    while (bytes) {
+        ssize_t n = write(fd, p, bytes);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return -1;
+        p += n; bytes -= (size_t)n;
+    }
+    return 0;
+}
+
 static int term_h(void) {
     struct winsize ws;
     if (g_tty && ioctl(1, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 7)
@@ -95,6 +113,22 @@ static const char *const CHAT_COMMANDS[] = {
     "/swarm", "/experts", "/hosts", "/model", "/debug", "/storage",
     "/reset", "/help", "/quit",
 };
+static int g_slash_completion;
+static const char *const CHAT_COMMAND_HELP[] = {
+    "Show cluster activity", "Show expert execution", "Show computers",
+    "Show the current model", "Open diagnostics", "Show cache storage",
+    "Start a fresh conversation", "List chat commands", "Close this chat",
+};
+_Static_assert(sizeof CHAT_COMMANDS / sizeof *CHAT_COMMANDS ==
+               sizeof CHAT_COMMAND_HELP / sizeof *CHAT_COMMAND_HELP, "command help parity");
+
+static int chat_command_matches(const char *prefix, int *indices) {
+    if (!prefix || prefix[0] != '/' || strchr(prefix, ' ')) return 0;
+    int n = 0;
+    for (size_t i = 0; i < sizeof CHAT_COMMANDS / sizeof *CHAT_COMMANDS; i++)
+        if (!strncmp(CHAT_COMMANDS[i], prefix, strlen(prefix))) indices[n++] = (int)i;
+    return n;
+}
 
 static void exe_dir(char *dst, size_t cap) {
     ssize_t n = readlink("/proc/self/exe", dst, cap - 1);
@@ -1764,6 +1798,9 @@ typedef struct {
     char input[4096]; int input_len, input_pos;
     char pending[4096]; int pending_ready;
     char completion[64]; int completion_next;
+    int output_col;
+    mbstate_t output_utf8;
+    char output_bytes[MB_LEN_MAX]; size_t output_len;
 } LiveUi;
 
 static LiveUi g_live = { .lock = PTHREAD_MUTEX_INITIALIZER };
@@ -1790,7 +1827,13 @@ static void live_draw_locked(void) {
     int width = g_live.cols > 20 ? g_live.cols : 80;
     printf("\x1b" "7");
     printf("\x1b[%d;1H\x1b[2K%s", g_live.rows - 2, C_GRAY);
-    for (int i = 0; i < width; i++) fputs("\xe2\x94\x80", stdout);
+    int indices[sizeof CHAT_COMMANDS / sizeof *CHAT_COMMANDS];
+    int matches = chat_command_matches(g_live.input, indices);
+    if (matches) {
+        int selected = indices[g_live.completion_next % matches];
+        printf(" %s %.*s · ↑↓ / Tab", CHAT_COMMANDS[selected], width > 45 ? width - 45 : 1,
+               CHAT_COMMAND_HELP[selected]);
+    } else for (int i = 0; i < width; i++) fputs("\xe2\x94\x80", stdout);
     printf("%s", C_R);
     printf("\x1b[%d;1H\x1b[2K %s\xe2\x9c\xa6%s %.*s", g_live.rows - 1,
            C_CORAL, C_R, width > 8 ? width - 8 : 12,
@@ -1829,7 +1872,37 @@ static void live_write(const void *data, size_t bytes) {
         return;
     }
     pthread_mutex_lock(&g_live.lock);
-    if (bytes) fwrite(data, 1, bytes, stdout);
+    const unsigned char *p = data;
+    for (size_t i = 0; i < bytes; i++) {
+        wchar_t glyph;
+        char byte = (char)p[i];
+        if (g_live.output_len >= sizeof g_live.output_bytes) {
+            memset(&g_live.output_utf8, 0, sizeof g_live.output_utf8);
+            g_live.output_len = 0;
+        }
+        g_live.output_bytes[g_live.output_len++] = byte;
+        size_t decoded = mbrtowc(&glyph, &byte, 1, &g_live.output_utf8);
+        if (decoded == (size_t)-2) continue;
+        if (decoded == (size_t)-1) {
+            memset(&g_live.output_utf8, 0, sizeof g_live.output_utf8);
+            glyph = L'?'; g_live.output_bytes[0] = '?'; g_live.output_len = 1;
+        }
+        int columns = glyph == L'\t' ? 4 : wcwidth(glyph);
+        if (glyph == L'\n' || (columns > 0 && g_live.output_col + columns > g_live.cols - 1)) {
+            /* Scroll the WHOLE terminal by writing a newline at its bottom.
+             * A partial DECSTBM region discards transcript lines in several
+             * terminals instead of preserving them in normal scrollback. */
+            printf("\x1b[%d;1H\r\n\x1b[%d;1H\x1b[2K", g_live.rows, g_live.rows - 3);
+            g_live.output_col = 0;
+            live_draw_locked();
+        }
+        if (glyph == L'\t') { fputs("    ", stdout); g_live.output_col += 4; }
+        else if (columns >= 0 && glyph != L'\n' && glyph != L'\r' && glyph != 0) {
+            fwrite(g_live.output_bytes, 1, g_live.output_len, stdout);
+            g_live.output_col += columns;
+        }
+        g_live.output_len = 0;
+    }
     fflush(stdout);
     pthread_mutex_unlock(&g_live.lock);
 }
@@ -1840,23 +1913,13 @@ static void live_clear_input_locked(void) {
 }
 
 static void live_complete_locked(void) {
-    if (!g_live.input_len || g_live.input[0] != '/' ||
-        strchr(g_live.input, ' ')) return;
-    if (!g_live.completion[0])
-        snprintf(g_live.completion, sizeof g_live.completion, "%s", g_live.input);
-    int matches = 0;
-    size_t prefix = strlen(g_live.completion);
-    for (size_t i = 0; i < sizeof CHAT_COMMANDS / sizeof *CHAT_COMMANDS; i++)
-        if (!strncmp(CHAT_COMMANDS[i], g_live.completion, prefix)) matches++;
+    int indices[sizeof CHAT_COMMANDS / sizeof *CHAT_COMMANDS];
+    int matches = chat_command_matches(g_live.input, indices);
     if (!matches) return;
-    int wanted = g_live.completion_next++ % matches;
-    for (size_t i = 0; i < sizeof CHAT_COMMANDS / sizeof *CHAT_COMMANDS; i++) {
-        if (strncmp(CHAT_COMMANDS[i], g_live.completion, prefix)) continue;
-        if (wanted--) continue;
-        snprintf(g_live.input, sizeof g_live.input, "%s", CHAT_COMMANDS[i]);
-        g_live.input_len = g_live.input_pos = (int)strlen(g_live.input);
-        break;
-    }
+    int wanted = indices[g_live.completion_next % matches];
+    snprintf(g_live.input, sizeof g_live.input, "%s", CHAT_COMMANDS[wanted]);
+    g_live.input_len = g_live.input_pos = (int)strlen(g_live.input);
+    g_live.completion_next = 0;
 }
 
 static int live_immediate_command_locked(const char *command) {
@@ -1870,6 +1933,9 @@ static int live_immediate_command_locked(const char *command) {
     else if (!strcmp(command, "/debug")) render_debug();
     else if (!strcmp(command, "/storage")) render_storage();
     else render_help();
+    printf("\x1b[%d;1H\r\n\r\n\r\n\r\n\x1b[%d;1H",
+           g_live.rows, g_live.rows - 3);
+    g_live.output_col = 0;
     live_clear_input_locked();
     snprintf(g_live.notice, sizeof g_live.notice, "inferenza ancora attiva");
     live_draw_locked();
@@ -1936,8 +2002,11 @@ static void live_suspend_locked(void) {
     g_live.raw_set = 1;
     g_live.rows = term_h(); g_live.cols = term_w();
     g_live.enabled = g_live.rows >= 8;
-    if (g_live.enabled)
-        printf("\x1b[1;%dr", g_live.rows - 3);
+    if (g_live.enabled) {
+        printf("\x1b[r\x1b[%d;1H\r\n\r\n\r\n\r\n\x1b[%d;1H",
+               g_live.rows, g_live.rows - 3);
+        g_live.output_col = 0;
+    }
     live_draw_locked();
 }
 
@@ -1986,6 +2055,10 @@ static void *live_input_thread(void *unused) {
             ssize_t ar = read(STDIN_FILENO, &a, 1);
             ssize_t br = ar == 1 ? read(STDIN_FILENO, &b, 1) : -1;
             if (ar != 1 || br != 1) { pthread_mutex_unlock(&g_live.lock); continue; }
+            int indices[sizeof CHAT_COMMANDS / sizeof *CHAT_COMMANDS];
+            int matches = chat_command_matches(g_live.input, indices);
+            if ((a == '[' || a == 'O') && (b == 'A' || b == 'B') && matches)
+                g_live.completion_next = (g_live.completion_next + (b == 'A' ? matches - 1 : 1)) % matches;
             if ((a == '[' || a == 'O') && b == 'D' && g_live.input_pos > 0)
                 g_live.input_pos = le_prev(g_live.input, g_live.input_pos);
             else if ((a == '[' || a == 'O') && b == 'C' &&
@@ -2087,8 +2160,12 @@ static int live_begin(const char *tracker, const char *model,
     g_live.swarm[0] = 0;
     live_clear_input_locked();
     if (g_live.enabled) {
-        printf("\x1b[1;%dr\x1b[%d;1H\x1b[2K", g_live.rows - 3,
-               g_live.rows - 3);
+        /* Reserve fresh lines before drawing the dock: never clear a line
+         * which still contains the user's just-submitted message. */
+        printf("\x1b[r\x1b[%d;1H\r\n\r\n\r\n\r\n\x1b[%d;1H",
+               g_live.rows, g_live.rows - 3);
+        g_live.output_col = 0; g_live.output_len = 0;
+        memset(&g_live.output_utf8, 0, sizeof g_live.output_utf8);
         live_draw_locked();
     }
     pthread_mutex_unlock(&g_live.lock);
@@ -2119,8 +2196,8 @@ static void live_end(void) {
     if (g_live.swarm_started) { pthread_join(g_live.swarm_thread, NULL); g_live.swarm_started = 0; }
     pthread_mutex_lock(&g_live.lock);
     if (g_live.enabled) {
-        printf("\x1b[r\x1b[%d;1H\x1b[2K\x1b[%d;1H\x1b[2K"
-               "\x1b[%d;1H\x1b[2K", g_live.rows - 2, g_live.rows - 1,
+        printf("\x1b" "7\x1b[r\x1b[%d;1H\x1b[2K\x1b[%d;1H\x1b[2K"
+               "\x1b[%d;1H\x1b[2K\x1b" "8", g_live.rows - 2, g_live.rows - 1,
                g_live.rows);
         fflush(stdout);
     }
@@ -2727,9 +2804,9 @@ static int submit_serve2(Engine *e, const char *history, const char *prompt, int
     int hn = snprintf(hdr, sizeof hdr, "SUBMIT %u 0 %zu %d 0.7 0.95\n",
                       ++id, c.len, max_new < 1 ? 1 : max_new);
     int ok = hn >= 0 && (size_t)hn < sizeof hdr &&
-             !lmb_write_full(e->to, hdr, (size_t)hn) &&
-             !lmb_write_full(e->to, c.p, c.len) &&
-             !lmb_write_full(e->to, "\n", 1);             /* payload terminator */
+             !engine_write_full(e->to, hdr, (size_t)hn) &&
+             !engine_write_full(e->to, c.p, c.len) &&
+             !engine_write_full(e->to, "\n", 1);             /* payload terminator */
     free(c.p);
     return ok ? 0 : -1;
 }
@@ -2911,8 +2988,9 @@ static int segment_engine_spawn(const char *engine, const char *shim,
         setenv("LUMABRI_TRACKER", tracker, 1);
         setenv("LUMABRI_MODEL", model, 1);
         setenv("LUMABRI_STATS", "2", 1);
-        char context[32];
+        char context[32], discovery_ms[32];
         snprintf(context, sizeof context, "%d", ctx);
+        snprintf(discovery_ms, sizeof discovery_ms, "%d", getenv("LUMABRI_SEGMENT_REQUIRED") ? 30000 : 2500);
         char *argv[] = {
             (char *)engine,
             "--serve",
@@ -2922,7 +3000,7 @@ static int segment_engine_spawn(const char *engine, const char *shim,
             "--tracker", (char *)tracker,
             "--context", context,
             "--max-rows", "16",
-            "--discovery-timeout-ms", "2500",
+            "--discovery-timeout-ms", discovery_ms,
             NULL
         };
         execv(engine, argv);
@@ -3085,7 +3163,32 @@ typedef struct {
     uint32_t max_frame;
     uint32_t max_new;
     uint32_t idle_seconds;
+    const uint8_t *client_key; /* optional identity bound by an accepted home plan */
 } HostState;
+
+static int host_read_hello(int fd, const HostState *h) {
+    lmb_set_io_timeout(fd, 2000);
+    if (lmb_secure_server(fd) ||
+        (h->client_key && !lmb_secure_peer_matches(fd, h->client_key))) return -1;
+    LmbMsg m = {0};
+    int rc = lmb_recv(fd, &m);
+    const char *token = getenv("LUMABRI_TOKEN");
+    if (!rc && m.op == LMB_AUTH) {
+        char supplied[LMB_TOKEN_MAX + 1] = "", expected[LMB_TOKEN_MAX + 1] = "";
+        LmbCur c = {m.body, m.body_len, 0};
+        rc = m.pay_len || lmb_cur_str(&c, supplied, sizeof supplied) || c.off != c.len ||
+             !token || strlen(token) > LMB_TOKEN_MAX;
+        if (!rc) {
+            snprintf(expected, sizeof expected, "%s", token);
+            rc = !lmb_token_equal(supplied, expected);
+        }
+        lmb_msg_free(&m);
+        if (!rc) rc = lmb_send(fd, LMB_OK, NULL, 0, NULL, 0) || lmb_recv(fd, &m);
+    } else if (token && *token) rc = -1;
+    if (!rc) rc = m.op != LMB_HOST_HELLO || m.body_len || m.pay_len;
+    lmb_msg_free(&m);
+    return rc ? -1 : 0;
+}
 
 static int host_greet(int fd, const HostState *h, int busy) {
     LmbBuf b = {0};
@@ -3096,6 +3199,7 @@ static int host_greet(int fd, const HostState *h, int busy) {
     lmb_buf_u32(&b, h->speed_milli);
     lmb_buf_u32(&b, h->max_new);
     lmb_buf_u32(&b, h->max_frame);
+    lmb_buf_u32(&b, 2);       /* SUBMIT/DATA/DONE, independent of model family */
     int rc = lmb_send(fd, LMB_HOST_HELLO_R, b.p, (uint32_t)b.len, NULL, 0);
     free(b.p);
     return rc;
@@ -3119,8 +3223,11 @@ static int host_header(HostInput *in, Engine *e, const HostState *h) {
     if (fields == 6) {
         if (slot != 0 || bytes > h->max_frame || max_new < 1 ||
             max_new > h->max_new || !isfinite(temp) || !isfinite(top_p) ||
-            temp < 0 || top_p <= 0 || top_p > 1) return -1;
-        if (lmb_write_full(e->to, in->header, in->header_len)) return -1;
+            temp < 0 || top_p <= 0 || top_p > 1) {
+            fprintf(stderr, "[host] refused SUBMIT limits (slot=%u bytes=%llu max_new=%u/%u)\n", slot, bytes, max_new, h->max_new);
+            return -1;
+        }
+        if (engine_write_full(e->to, in->header, in->header_len)) return -1;
         in->payload_left = bytes;
         in->need_terminator = bytes == 0;
         in->header_len = 0;
@@ -3128,16 +3235,17 @@ static int host_header(HostInput *in, Engine *e, const HostState *h) {
     }
     fields = sscanf(in->header, "CANCEL %63s %c", id, &extra);
     if (fields == 1) {
-        int rc = lmb_write_full(e->to, in->header, in->header_len);
+        int rc = engine_write_full(e->to, in->header, in->header_len);
         in->header_len = 0;
         return rc;
     }
     fields = sscanf(in->header, "STOP %63s %c", id, &extra);
     if (fields == 1) {
-        int rc = lmb_write_full(e->to, in->header, in->header_len);
+        int rc = engine_write_full(e->to, in->header, in->header_len);
         in->header_len = 0;
         return rc;
     }
+    fprintf(stderr, "[host] unrecognized codec header (%zu bytes)\n", in->header_len);
     return -1;
 }
 
@@ -3149,14 +3257,14 @@ static int host_input(HostInput *in, Engine *e, const HostState *h,
             size_t take = bytes - at;
             if ((uint64_t)take > in->payload_left)
                 take = (size_t)in->payload_left;
-            if (lmb_write_full(e->to, data + at, take)) return -1;
+            if (engine_write_full(e->to, data + at, take)) return -1;
             at += take;
             in->payload_left -= take;
             if (!in->payload_left) in->need_terminator = 1;
             continue;
         }
         if (in->need_terminator) {
-            if (data[at++] != '\n' || lmb_write_full(e->to, "\n", 1))
+            if (data[at++] != '\n' || engine_write_full(e->to, "\n", 1))
                 return -1;
             in->need_terminator = 0;
             continue;
@@ -3222,19 +3330,21 @@ static void *host_busy_acceptor(void *arg) {
         if (n <= 0) continue;
         int fd = accept(a->lfd, NULL, NULL);
         if (fd < 0) continue;
-        LmbMsg m = {0};
-        if (!lmb_secure_server(fd) && !lmb_recv(fd, &m) &&
-            m.op == LMB_HOST_HELLO)
+        if (!host_read_hello(fd, a->host))
             (void)host_greet(fd, a->host, 1);
-        lmb_msg_free(&m);
         lmb_close(fd);
     }
     return NULL;
 }
 
 static int cmd_host(int argc, char **argv) {
+    g_stopping = 0;
+    install_chat_signal_handlers();
+    signal(SIGPIPE, SIG_IGN);
     const char *tracker = NULL, *want_model = NULL, *local_dir = NULL;
     const char *engines_dir = NULL, *engine_path = NULL;
+    const char *client_key = NULL;
+    uint8_t allowed_client[32];
     int port = 7350, ctx = 2048, max_new = 256, cap_experts = 64;
     uint32_t max_frame = 1u << 20;
     uint32_t idle_seconds = 300;
@@ -3245,6 +3355,7 @@ static int cmd_host(int argc, char **argv) {
         else if (!strcmp(argv[i], "--local") && i + 1 < argc) local_dir = argv[++i];
         else if (!strcmp(argv[i], "--engines-dir") && i + 1 < argc) engines_dir = argv[++i];
         else if (!strcmp(argv[i], "--engine") && i + 1 < argc) engine_path = argv[++i];
+        else if (!strcmp(argv[i], "--client-key") && i + 1 < argc) client_key = argv[++i];
         else if (!strcmp(argv[i], "--ctx") && i + 1 < argc) ctx = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--max-new") && i + 1 < argc) max_new = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--max-frame") && i + 1 < argc)
@@ -3259,6 +3370,8 @@ static int cmd_host(int argc, char **argv) {
             return 2;
         }
     }
+    if (client_key && (!lmb_secure_enabled() || strlen(client_key) != 64 ||
+                       lmb_unhex(allowed_client, client_key, 32))) return 2;
     if (!want_model && !local_dir) {
         fprintf(stderr, "lumabri host needs --model NAME or --local DIR\n");
         return 2;
@@ -3281,6 +3394,10 @@ static int cmd_host(int argc, char **argv) {
     if (model_boot(tracker ? tracker : "", model, shim, engines_dir,
                    engine_path, local_dir, ctx, max_new, cap_experts, &eng, &sw))
         return 1;
+    if (!eng.segment && !kind_is_serve2(eng.kind)) {
+        fprintf(stderr, "Hosted chat requires a SUBMIT/DATA/DONE engine; use Segment for this adapter.\n");
+        engine_stop(&eng); return 1;
+    }
 
     char mtype[64] = "";
     if (local_dir) local_model_type(local_dir, mtype, sizeof mtype);
@@ -3288,7 +3405,7 @@ static int cmd_host(int argc, char **argv) {
     const char *host_engine = engine_for(mtype);
     if (!host_engine) { engine_stop(&eng); return 1; }
     HostState h = { &eng, mtype, host_engine, 0, max_frame,
-                    (uint32_t)max_new, idle_seconds };
+                    (uint32_t)max_new, idle_seconds, client_key ? allowed_client : NULL };
 
     int lfd = lmb_listen(port);
     if (lfd < 0) {
@@ -3301,6 +3418,7 @@ static int cmd_host(int argc, char **argv) {
     printf("  %sclients need no checkpoint; this machine holds the model and "
            "sees the text of every conversation%s\n", C_DIM, C_R);
     fflush(stdout);
+    if (lmb_ready_notify()) { close(lfd); engine_stop(&eng); return 1; }
 
     while (!g_stopping) {
         struct pollfd lp = { lfd, POLLIN, 0 };
@@ -3308,12 +3426,7 @@ static int cmd_host(int argc, char **argv) {
         if (r <= 0) { if (r < 0 && errno != EINTR) break; continue; }
         int fd = accept(lfd, NULL, NULL);
         if (fd < 0) continue;
-        LmbMsg m = {0};
-        if (lmb_secure_server(fd) || lmb_recv(fd, &m) ||
-            m.op != LMB_HOST_HELLO) {
-            lmb_msg_free(&m); lmb_close(fd); continue;
-        }
-        lmb_msg_free(&m);
+        if (host_read_hello(fd, &h)) { lmb_close(fd); continue; }
         if (host_greet(fd, &h, 0)) { lmb_close(fd); continue; }
         BusyAcceptor busy = { lfd, &h, 0 };
         pthread_t busy_thread;
@@ -3392,7 +3505,7 @@ static void *host_client_pump(void *arg) {
     return NULL;
 }
 
-static int host_connect(const char *addr, const char *model_type, Engine *e,
+static int host_connect(const char *addr, const char *model_type, const char *expected_key, Engine *e,
                         int *requested_max_new) {
     memset(e, 0, sizeof *e);
     e->to = e->from = -1;
@@ -3402,6 +3515,14 @@ static int host_connect(const char *addr, const char *model_type, Engine *e,
     if (fd < 0) {
         fprintf(stderr, "[lumabri] no host at %s\n", addr);
         return -1;
+    }
+    if (expected_key) {
+        uint8_t key[32];
+        if (strlen(expected_key) != 64 || lmb_unhex(key, expected_key, 32) ||
+            !lmb_secure_enabled() || !lmb_secure_peer_matches(fd, key)) {
+            fprintf(stderr, "[lumabri] host identity differs from the accepted plan\n");
+            lmb_close(fd); return -1;
+        }
     }
     /* The host answers with the engine kind, because the client applies the
      * chat template and cannot guess it from an address. A host that will
@@ -3418,7 +3539,7 @@ static int host_connect(const char *addr, const char *model_type, Engine *e,
     LmbCur c = { m.body, m.body_len, 0 };
     char kind[64] = "", mtype[64] = "", backend[32] = "";
     uint32_t sessions_free = 0, speed_milli = 0;
-    uint32_t host_max_new = 0, host_max_frame = 0;
+    uint32_t host_max_new = 0, host_max_frame = 0, codec = 0;
     if (lmb_cur_str(&c, mtype, sizeof mtype) ||
         lmb_cur_str(&c, kind, sizeof kind) ||
         lmb_cur_str(&c, backend, sizeof backend) ||
@@ -3432,6 +3553,11 @@ static int host_connect(const char *addr, const char *model_type, Engine *e,
         fprintf(stderr, "[lumabri] %s sent invalid host limits\n", addr);
         lmb_msg_free(&m); lmb_close(fd); return -1;
     }
+    if (c.off < c.len && (lmb_cur_u32(&c, &codec) || codec != 2)) {
+        fprintf(stderr, "[lumabri] unsupported hosted codec\n");
+        lmb_msg_free(&m); lmb_close(fd); return -1;
+    }
+    if (c.off != c.len || m.pay_len) { lmb_msg_free(&m); lmb_close(fd); return -1; }
     lmb_msg_free(&m);
     if (model_type && model_type[0] && strcmp(model_type, mtype)) {
         fprintf(stderr, "[lumabri] %s serves %s, not %s\n", addr, mtype,
@@ -3468,7 +3594,7 @@ static int host_connect(const char *addr, const char *model_type, Engine *e,
     pthread_detach(thread);
     e->to = e->from = pair[0];
     e->kind = kind_id;
-    e->proto = kind_is_serve2(e->kind) ? PROTO_SERVE2 : PROTO_FRAMED;
+    e->proto = codec == 2 || kind_is_serve2(e->kind) ? PROTO_SERVE2 : PROTO_FRAMED;
     g_signal_engine_fd = (sig_atomic_t)pair[0];
 
     printf("  %shost %s · %s · %s%s\n", C_DIM, addr, mtype,
@@ -3734,6 +3860,39 @@ static void le_set(char *buf, size_t cap, int *len, int *pos, const char *text) 
     fwrite(buf, 1, (size_t)*len, stdout);
 }
 
+/* The popup owns only freshly reserved rows below the input. It never
+ * clears transcript rows above it; Enter and Escape remove just these rows. */
+static void le_command_menu(const char *buf, int pos, int selected, int show, int *reserved) {
+    int indices[sizeof CHAT_COMMANDS / sizeof *CHAT_COMMANDS];
+    int count = show && g_slash_completion ? chat_command_matches(buf, indices) : 0;
+    if (count && !*reserved) {
+        int rows = term_h() > 12 ? 6 : 3;
+        for (int i = 0; i < rows; i++) printf("\r\n");
+        printf("\x1b[%dA\x1b[%dG", rows, 5 + le_cols(buf, 0, pos));
+        *reserved = rows;
+    }
+    if (!*reserved) return;
+    int rows = *reserved;
+    if (selected < 0 || selected >= count) selected = 0;
+    int first = selected >= rows - 1 ? selected - rows + 2 : 0;
+    printf("\x1b" "7");
+    for (int i = 0; i < rows; i++) {
+        printf("\x1b[1B\r\x1b[2K");
+        if (!count) continue;
+        int at = first + i;
+        if (i == rows - 1) printf("  %s↑↓ choose · Tab complete · Enter run · Esc dismiss%s", C_DIM, C_R);
+        else if (at < count) {
+            int k = indices[at];
+            printf("  %s%s %-10s %.*s%s", at == selected ? "\x1b[7m" : "",
+                   at == selected ? ">" : " ", CHAT_COMMANDS[k],
+                   term_w() > 20 ? term_w() - 20 : 1, CHAT_COMMAND_HELP[k], C_R);
+        }
+    }
+    printf("\x1b" "8");
+    if (!count) *reserved = 0;
+    fflush(stdout);
+}
+
 /* This machine as a donor, for the frame above the idle prompt: experts
  * held, calls served and the rate since the last look, work in flight,
  * bytes served by its storage. Read from the tracker's nominative counters
@@ -3796,14 +3955,20 @@ static int line_edit(char *buf, size_t cap) {
     int len = 0, pos = 0, rc = 0;
     int hidx = le_hist_n;                       /* == "the line being typed" */
     char *save = (char *)malloc(cap);           /* in-progress line, for down */
-    char completion[64] = "";
-    int completion_next = 0;
+    int command_selected = 0, command_rows = 0, command_hidden = 0;
     if (!save) { tcsetattr(0, TCSANOW, &old); return -2; }   /* -> caller fgets */
     save[0] = 0;
     buf[0] = 0;
 
     for (;;) {
         unsigned char c;
+        /* A donor can disappear while this editor is idle. The control
+         * worker sets g_stopping; do not wait for another user keystroke. */
+        if (g_stopping) { rc = -1; break; }
+        struct pollfd input_ready = {0, POLLIN, 0};
+        int input_poll = poll(&input_ready, 1, 100);
+        if ((input_poll == 0 && !g_donor_base[0]) || (input_poll < 0 && errno == EINTR)) continue;
+        if (input_poll < 0) { rc = -1; break; }
         if (g_donor_base[0]) {
             /* a donor refreshes the frame above the prompt every 3 s while
              * the user is idle: calls served, experts held, work in flight */
@@ -3829,7 +3994,13 @@ static int line_edit(char *buf, size_t cap) {
         }
         if (rn <= 0) { rc = -1; break; }
 
-        if (c == '\r' || c == '\n') { printf("\r\n"); break; }
+        if (c == '\r' || c == '\n') {
+            int indices[sizeof CHAT_COMMANDS / sizeof *CHAT_COMMANDS];
+            int n = command_hidden || !g_slash_completion ? 0 : chat_command_matches(buf, indices);
+            if (n) le_set(buf, cap, &len, &pos, CHAT_COMMANDS[indices[command_selected % n]]);
+            le_command_menu(buf, pos, 0, 0, &command_rows);
+            printf("\r\n"); break;
+        }
         if (c == 3) {                            /* Ctrl-C: cancel, keep old semantics */
             tcsetattr(0, TCSANOW, &old);
             printf("\r\n");
@@ -3849,25 +4020,12 @@ static int line_edit(char *buf, size_t cap) {
             raise(SIGQUIT);
             rc = -1; len = 0; break;
         }
-        if (c != '\t') { completion[0] = 0; completion_next = 0; }
-        if (c == '\t') {                        /* cycle slash-command matches */
-            if (len && buf[0] == '/' && !strchr(buf, ' ')) {
-                if (!completion[0])
-                    snprintf(completion, sizeof completion, "%s", buf);
-                size_t prefix = strlen(completion);
-                int matches = 0;
-                for (size_t i = 0; i < sizeof CHAT_COMMANDS / sizeof *CHAT_COMMANDS; i++)
-                    if (!strncmp(CHAT_COMMANDS[i], completion, prefix)) matches++;
-                if (matches) {
-                    int wanted = completion_next++ % matches;
-                    for (size_t i = 0; i < sizeof CHAT_COMMANDS / sizeof *CHAT_COMMANDS; i++) {
-                        if (strncmp(CHAT_COMMANDS[i], completion, prefix)) continue;
-                        if (wanted--) continue;
-                        le_set(buf, cap, &len, &pos, CHAT_COMMANDS[i]);
-                        break;
-                    }
-                }
-            }
+        if (c != 27 && c != '\t') { command_selected = 0; command_hidden = 0; }
+        if (c == '\t') {
+            int indices[sizeof CHAT_COMMANDS / sizeof *CHAT_COMMANDS];
+            int n = g_slash_completion ? chat_command_matches(buf, indices) : 0;
+            if (n) le_set(buf, cap, &len, &pos, CHAT_COMMANDS[indices[command_selected % n]]);
+            command_selected = 0;
         } else if (c == 4) {                    /* Ctrl-D: EOF on empty, else Delete */
             if (len == 0) { rc = -1; break; }
             if (pos < len) {
@@ -3912,6 +4070,12 @@ static int line_edit(char *buf, size_t cap) {
             }
         } else if (c == 27) {                    /* an escape sequence */
             unsigned char a, b;
+            struct pollfd escape = {0, POLLIN, 0};
+            if (poll(&escape, 1, 100) <= 0) {
+                command_hidden = 1;
+                le_command_menu(buf, pos, 0, 0, &command_rows);
+                continue;
+            }
             if (read(0, &a, 1) <= 0) continue;
             if (a != '[' && a != 'O') continue;
             if (read(0, &b, 1) <= 0) continue;
@@ -3925,6 +4089,13 @@ static int line_edit(char *buf, size_t cap) {
             } else if (b == 'F') {               /* End */
                 fwrite(buf + pos, 1, (size_t)(len - pos), stdout); pos = len;
             } else if (b == 'A' || b == 'B') {   /* Up / Down: history */
+                int indices[sizeof CHAT_COMMANDS / sizeof *CHAT_COMMANDS];
+                int matches = command_hidden || !g_slash_completion ? 0 : chat_command_matches(buf, indices);
+                if (matches) {
+                    command_selected = (command_selected + (b == 'A' ? matches - 1 : 1)) % matches;
+                    le_command_menu(buf, pos, command_selected, 1, &command_rows);
+                    continue;
+                }
                 int avail = le_hist_n < LE_HIST ? le_hist_n : LE_HIST;
                 int oldest = le_hist_n - avail;
                 if (b == 'A' && hidx > oldest) {
@@ -3971,10 +4142,12 @@ static int line_edit(char *buf, size_t cap) {
             }
         }
         buf[len] = 0;
+        le_command_menu(buf, pos, command_selected, !command_hidden, &command_rows);
         fflush(stdout);
     }
 
     buf[len] = 0;
+    le_command_menu(buf, pos, 0, 0, &command_rows);
     tcsetattr(0, TCSANOW, &old);
     if (rc == 0) le_hist_push(buf);
     free(save);
@@ -4634,6 +4807,10 @@ static int model_boot(const char *tracker, const char *model, const char *shim,
         }
     }
 
+    if (!local_dir && getenv("LUMABRI_SEGMENT_REQUIRED")) {
+        fprintf(stderr, "The accepted plan requires Segment; no local or Expert fallback is permitted.\n");
+        return -1;
+    }
     const char *expected_engine = engine_for(mtype);
     EngKind expected_kind = engine_kind_of(expected_engine);
     if (!expected_engine || expected_kind == EK_INVALID) {
@@ -4719,7 +4896,7 @@ static int cmd_chat(int argc, char **argv) {
     const char *engine_path = NULL, *engines_dir = getenv("LUMABRI_ENGINES");
     const char *want_model = NULL, *local_dir = NULL;
     const char *role_arg = NULL, *model_dir_arg = NULL;
-    const char *donor_name_arg = NULL, *host_addr = NULL;
+    const char *donor_name_arg = NULL, *host_addr = NULL, *host_key = NULL;
     double donate_gb = 0;
     int max_new = 256, ctx = 2048, cap_experts = 64;
     for (int i = 0; i < argc; i++) {
@@ -4736,6 +4913,7 @@ static int cmd_chat(int argc, char **argv) {
         else if (!strcmp(argv[i], "--donate") && i + 1 < argc) donate_gb = atof(argv[++i]);
         else if (!strcmp(argv[i], "--donor-name") && i + 1 < argc) donor_name_arg = argv[++i];
         else if (!strcmp(argv[i], "--host") && i + 1 < argc) host_addr = argv[++i];
+        else if (!strcmp(argv[i], "--host-key") && i + 1 < argc) host_key = argv[++i];
         else if (!strcmp(argv[i], "--plain")) g_tty = 0;
         else { fprintf(stderr, "usage: lumabri chat [--tracker H:P] [--model NAME] "
                                "[--local DIR] [--engine BIN] [--engines-dir DIR]\n"
@@ -4752,7 +4930,7 @@ static int cmd_chat(int argc, char **argv) {
      * is missing, then the role. A TUI user never sees a flag. */
     Cfg cfg;
     cfg_load(&cfg);
-    int interactive = !local_dir && g_tty;
+    int interactive = !local_dir && !host_addr && g_tty;
     if (interactive) {
         int W0 = term_w() - 2; if (W0 > 66) W0 = 66;
         printf("\n");
@@ -4917,7 +5095,7 @@ static int cmd_chat(int argc, char **argv) {
      * and the only way to actually mean it. */
     if (host_addr) {
         memset(&sw, 0, sizeof sw);
-        if (host_connect(host_addr, NULL, &eng, &max_new)) return 1;
+        if (host_connect(host_addr, NULL, host_key, &eng, &max_new)) return 1;
     } else if (model_boot(tracker, model, shim, engines_dir, engine_path,
                           local_dir, ctx, max_new, cap_experts, &eng, &sw))
         return 1;
@@ -4927,6 +5105,7 @@ static int cmd_chat(int argc, char **argv) {
     }
 
     char *conv = calloc(1, 1);   /* serve-codec conversation history (after bos) */
+    int chat_failed = 0;
     char line[4096];
     for (;;) {
         if (g_stopping) break;
@@ -4946,8 +5125,11 @@ static int cmd_chat(int argc, char **argv) {
             printf("%s\r\n", line);
             le_hist_push(line);
             got = 1;
-        } else
-            got = prompt_line(line, sizeof line) == 0;   /* line editor when a tty */
+        } else {
+            g_slash_completion = 1;
+            got = prompt_line(line, sizeof line) == 0;
+            g_slash_completion = 0;
+        }
         if (g_tty) hline("\xe2\x95\xb0", "\xe2\x95\xaf", w);
         if (!got || g_stopping) break;
         size_t L = strlen(line);   /* prompt_line already stripped the newline */
@@ -4962,6 +5144,10 @@ static int cmd_chat(int argc, char **argv) {
         if (!strncmp(line, "/model", 6)) {
             const char *arg = line + 6;
             while (*arg == ' ') arg++;
+            if (host_addr) {
+                printf("  Hosted model: %s. Return to the catalogue to request a different plan.\n", model);
+                continue;
+            }
             if (local_dir) { printf("  %s--local: un modello solo%s\n", C_DIM, C_R); continue; }
             nmodels = swarm_models(tracker, models, 16);
             if (!*arg) {
@@ -4998,16 +5184,16 @@ static int cmd_chat(int argc, char **argv) {
                 printf("  %s\xe2\x9c\xa6 nuova conversazione%s\n", C_DIM, C_R);
                 continue;
             }
-            if (!conv || submit_serve2(&eng, conv, line, max_new)) break;
+            if (!conv || submit_serve2(&eng, conv, line, max_new)) { chat_failed = 1; break; }
         } else if (eng.proto == PROTO_FRAMED) {
             /* framed dialect: reset is a control byte, everything else is the
              * prompt line as-is */
             const char *send = is_reset ? "\x02RESET" : line;
-            if (lmb_write_full(eng.to, send, strlen(send))) break;
-            if (lmb_write_full(eng.to, "\n", 1)) break;
+            if (engine_write_full(eng.to, send, strlen(send))) break;
+            if (engine_write_full(eng.to, "\n", 1)) break;
         } else {
             line[L] = '\n';
-            if (lmb_write_full(eng.to, line, L + 1)) break;
+            if (engine_write_full(eng.to, line, L + 1)) break;
             line[L] = 0;
             if (is_reset) {
                 printf("  %s\xe2\x9c\xa6 nuova conversazione%s\n", C_DIM, C_R);
@@ -5034,6 +5220,7 @@ static int cmd_chat(int argc, char **argv) {
                 break;
             }
             if (dead) {
+                chat_failed = 1;
                 fprintf(stderr, "\n%sengine exited%s\n", C_RED, C_R);
                 engine_diag(&eng, 0);
                 free(reply);
@@ -5054,6 +5241,7 @@ static int cmd_chat(int argc, char **argv) {
                 break;
             }
             if (dead) {
+                chat_failed = 1;
                 fprintf(stderr, "\n%sengine exited%s\n", C_RED, C_R);
                 engine_diag(&eng, 0);
                 break;
@@ -5076,6 +5264,7 @@ static int cmd_chat(int argc, char **argv) {
                 break;
             }
             if (!reply) {
+                chat_failed = 1;
                 fprintf(stderr, "%sengine exited%s\n", C_RED, C_R);
                 engine_diag(&eng, 0);
                 break;
@@ -5110,7 +5299,8 @@ static int cmd_chat(int argc, char **argv) {
             if (nstat >= 2 && tps > 0) printf(" · %.1f tok/s", tps);
         }
         if (nstat >= 4 && rss > 0) printf(" · %.1f GB residenti", rss);
-        if (local_dir)    printf(" · disco locale");
+        if (host_addr)   printf(" · hosted stream · no local checkpoint");
+        else if (local_dir) printf(" · disco locale");
         else if (dmb > 0.5) printf(" · %.0f MB dallo sciame · mirror %.0f MB", dmb, g_eng.net_mb);
         else                printf(" · mirror caldo, zero rete");
         printf("%s\n", C_R);
@@ -5134,7 +5324,7 @@ static int cmd_chat(int argc, char **argv) {
     }
     if (g_nchildren) printf("  %sdonazione chiusa%s\n", C_DIM, C_R);
     printf("\n");
-    return 0;
+    return chat_failed;
 }
 
 /* ---- key: the operator's identity ---------------------------------------
@@ -5361,6 +5551,7 @@ static int catalog_inventory(LmbTuiState *st) {
         }
         LmbClusterNode *node = &st->nodes[at];
         snprintf(node->name, sizeof node->name, "%s", r->machine.hostname);
+        snprintf(node->addr, sizeof node->addr, "%s", r->control_addr);
         node->ram_budget_bytes = r->ram_budget_bytes;
         node->vram_budget_bytes = r->machine.vram_available_bytes;
         node->threads = r->machine.logical_cpus;
@@ -5389,9 +5580,24 @@ static int catalog_state_refresh(LmbTuiState *st, void *unused) {
         m->shape = found[i].shape;
         m->weights_present = found[i].has_weights;
         st->nodes[0].has_checkpoint = found[i].has_weights;
-        m->planned = st->inventory_ok && !lmb_plan_cluster(&m->shape, st->nodes, st->nnodes,
+        LmbClusterNode selected[LMB_CLUSTER_MAX_NODES];
+        uint32_t mapping[LMB_CLUSTER_MAX_NODES], nselected = 0;
+        int household = 0;
+        for (uint32_t j = 0; j < st->nnodes; j++)
+            if (st->nodes[j].addr[0]) household = 1;
+        for (uint32_t j = 0; j < st->nnodes; j++) {
+            if (household && !lmb_tui_node_enabled(st, j)) continue;
+            selected[nselected] = st->nodes[j];
+            mapping[nselected++] = j;
+        }
+        m->planned = st->inventory_ok && !lmb_plan_cluster_source(&m->shape, selected, nselected,
                                        st->context, st->sessions,
-                                       LMB_GOAL_ONE_SESSION, &m->plan);
+                                       LMB_GOAL_ONE_SESSION, household && found[i].has_weights, &m->plan);
+        if (m->planned) {
+            m->plan.edge_node = mapping[m->plan.edge_node];
+            for (uint32_t j = 0; j < m->plan.nslices; j++)
+                m->plan.slices[j].node = mapping[m->plan.slices[j].node];
+        }
         /* A calibration store is not implemented yet. Never manufacture a
          * partial key in the renderer: no record means no speed. */
         m->calibration = NULL;
@@ -5493,9 +5699,11 @@ static void catalog_json(const LmbTuiState *st) {
     fputs("]}\n", stdout);
 }
 
+#include "lumabri_home_runtime.h"
+
 static int cmd_models(int argc, char **argv) {
     const char *root = NULL, *disk = ".", *keys = NULL, *tracker = NULL;
-    uint32_t context = 4096, sessions = 1;
+    uint32_t context = 4096, sessions = 1, max_new = 256;
     /* The screen is the default and the listing is the fallback, not the
      * other way round: a plain list is what you want in a pipe or a log, and
      * a pipe is exactly where a full-screen interface is useless. */
@@ -5508,6 +5716,8 @@ static int cmd_models(int argc, char **argv) {
             context = (uint32_t)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--sessions") && i + 1 < argc)
             sessions = (uint32_t)atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--max-new") && i + 1 < argc)
+            max_new = (uint32_t)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--plain")) plain = 1;
         else if (!strcmp(argv[i], "--json")) { json = 1; plain = 1; }
         else if (!strcmp(argv[i], "--snapshot")) { snapshot = 1; plain = 0; }
@@ -5528,13 +5738,17 @@ static int cmd_models(int argc, char **argv) {
     }
     static LmbTuiState st;
     memset(&st, 0, sizeof st);
-    st.context = context; st.sessions = sessions;
+    if (!max_new || max_new > 4096) return 2;
+    st.context = context; st.sessions = sessions; st.max_new = max_new;
     if (checked_printf(st.root, sizeof st.root, "%s", root) ||
         checked_printf(st.disk, sizeof st.disk, "%s", disk) ||
         (tracker && checked_printf(st.tracker, sizeof st.tracker, "%s", tracker))) return 2;
     st.refresh = catalog_state_refresh;
     catalog_state_refresh(&st, NULL);
-    if (!plain) return lmb_tui_run(&st, snapshot, keys);
+    if (!plain) {
+        int action = lmb_tui_run(&st, snapshot, keys);
+        return action == LMB_TUI_REQUEST_CHAT ? home_request_chat(&st, st.action_model) : action;
+    }
     if (json) { catalog_json(&st); return st.inventory_ok ? 0 : 1; }
 
     printf("%s%sLUMABRI · %s planning preview%s\n\n", C_BOLD, C_CORAL,
@@ -5568,12 +5782,13 @@ static int cmd_models(int argc, char **argv) {
 /* A worker publishes inventory even before a model is selected. This command
  * does not reserve RAM, launch engines or download checkpoint blocks. */
 static int cmd_worker(int argc, char **argv) {
-    const char *tracker = NULL, *name = NULL, *disk = ".";
+    const char *tracker = NULL, *name = NULL, *disk = ".", *control = "";
     uint64_t limit = UINT64_MAX;
     for (int i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "--join") && i + 1 < argc) tracker = argv[++i];
         else if (!strcmp(argv[i], "--name") && i + 1 < argc) name = argv[++i];
         else if (!strcmp(argv[i], "--disk") && i + 1 < argc) disk = argv[++i];
+        else if (!strcmp(argv[i], "--control-address") && i + 1 < argc) control = argv[++i];
         else if (!strcmp(argv[i], "--ram-gb") && i + 1 < argc) {
             char *end;
             double gb = strtod(argv[++i], &end);
@@ -5586,7 +5801,8 @@ static int cmd_worker(int argc, char **argv) {
             return 2;
         }
     }
-    if (!tracker || !*tracker || (name && (!*name || strlen(name) >= 64 ||
+    if (!tracker || !*tracker || strlen(control) >= 64 || lmb_inventory_text(control) ||
+        (name && (!*name || strlen(name) >= 64 ||
                                           lmb_inventory_text(name)))) return 2;
     char kp[1024];
     uint8_t sk[64], pk[32];
@@ -5611,6 +5827,7 @@ static int cmd_worker(int argc, char **argv) {
         while (ready && !g_stopping) {
             LmbMachineReport report = {0};
             memcpy(report.identity, pk, sizeof pk);
+            snprintf(report.control_addr, sizeof report.control_addr, "%s", control);
             lmb_machine_refresh_resources(&profile, disk);
             report.machine = profile;
             if (name) snprintf(report.machine.hostname, sizeof report.machine.hostname, "%s", name);
@@ -5918,9 +6135,12 @@ static int cmd_doctor(int argc, char **argv) {
 }
 
 /* ---- main --------------------------------------------------------------- */
+#include "lumabri_home_ui.h"
 
 int main(int argc, char **argv) {
+    (void)setlocale(LC_CTYPE, "");
     g_tty = isatty(1);
+    signal(SIGPIPE, SIG_IGN); /* a closed child pipe is an error, not an exit */
     if (argc >= 2 && !strcmp(argv[1], "key")) return cmd_key(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "peer-key"))
         return cmd_peer_key(argc - 2, argv + 2);
@@ -5935,6 +6155,8 @@ int main(int argc, char **argv) {
         return cmd_models(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "worker"))
         return cmd_worker(argc - 2, argv + 2);
+    if (argc >= 2 && !strcmp(argv[1], "donor"))
+        return cmd_donor(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "host"))
         return cmd_host(argc - 2, argv + 2);
     if (argc >= 2 && (!strcmp(argv[1], "machine") || !strcmp(argv[1], "status")))
@@ -5952,7 +6174,7 @@ int main(int argc, char **argv) {
     /* No arguments and a terminal: this is a person, not a script. Chat is
      * the only thing a person wants by default, and everything it needs is
      * either remembered or asked for in the panel. */
-    if (argc == 1 && g_tty) return cmd_chat(0, NULL);
+    if (argc == 1 && g_tty) return cmd_home();
     fprintf(stderr,
         "lumabri: run huge models from a swarm of peers\n\n"
         "  lumabri                                                    chat (asks what it needs)\n"

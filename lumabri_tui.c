@@ -215,10 +215,16 @@ static void draw_models(const LmbTuiState *st, Size sz, int sel, int top) {
         } else if (m->planned && m->plan.ready_known && m->plan.ready_seconds > 0)
             snprintf(detail, sizeof detail, "ready in ~%.0f min",
                      m->plan.ready_seconds / 60.0);
-        else if (m->planned)
+        else if (m->planned) {
+            uint32_t computers = m->plan.nslices;
+            int edge_seen = 0;
+            for (uint32_t i = 0; i < m->plan.nslices; i++)
+                if (m->plan.slices[i].node == m->plan.edge_node) edge_seen = 1;
+            if (!edge_seen) computers++;
             snprintf(detail, sizeof detail, "%u slice%s across %u machine%s",
                      m->plan.nslices, m->plan.nslices == 1 ? "" : "s",
-                     st->nnodes, st->nnodes == 1 ? "" : "s");
+                     computers, computers == 1 ? "" : "s");
+        }
         speed_text(m, speed, sizeof speed);
         printf("%s", idx == sel ? c(INV) : "");
         printf("%s", idx == sel ? "▸" : " ");
@@ -241,7 +247,7 @@ static void draw_models(const LmbTuiState *st, Size sz, int sel, int top) {
     at(sz.h - 1, 1);
     rule(sz.w, NULL);
     at(sz.h, 1);
-    printf("%s ↑↓ select   ⏎ details   tab switch   r refresh   "
+    printf("%s ↑↓ select   ⏎ details   c request chat   tab switch   r refresh   "
            "q quit%s", c(DIM), c(OFF));
     fflush(stdout);
 }
@@ -262,7 +268,8 @@ static void draw_nodes(const LmbTuiState *st, Size sz, int sel, int top) {
         snprintf(hardware, sizeof hardware, "%s · %s/%s", p->cpu_model, p->os, p->arch);
         at(5 + row * 2, 1);
         if (!g_snapshot) fputs("\x1b[K", stdout);
-        printf("%c %-20.20s %-12s %-12s %-12s %u", i == sel ? '>' : ' ', n->name, ram,
+        printf("%c%c%-20.20s %-12s %-12s %-12s %u", i == sel ? '>' : ' ',
+               lmb_tui_node_enabled(st, (uint32_t)i) ? '+' : '-', n->name, ram,
                n->vram_budget_bytes ? vram : "—", cores, p->gpu_count);
         at(6 + row * 2, 1);
         printf("    %.*s", sz.w > 8 ? sz.w - 8 : 1, hardware);
@@ -271,7 +278,7 @@ static void draw_nodes(const LmbTuiState *st, Size sz, int sel, int top) {
     at(sz.h - 1, 1);
     rule(sz.w, NULL);
     at(sz.h, 1);
-    printf("%s ↑↓ select · tab switch · r refresh · q quit%s", c(DIM), c(OFF));
+    printf("%s ↑↓ select · space include/exclude · tab switch · q quit%s", c(DIM), c(OFF));
     fflush(stdout);
 }
 
@@ -399,7 +406,7 @@ static void draw_detail(const LmbTuiState *st, Size sz, int sel) {
     }
 
     at(sz.h, 1);
-    printf("%s ↵ back   q quit%s", c(DIM), c(OFF));
+    printf("%s ↵ back   c request chat   q quit%s", c(DIM), c(OFF));
     fflush(stdout);
 }
 
@@ -459,7 +466,9 @@ static double refresh_clock(void) {
 }
 
 int lmb_tui_run(LmbTuiState *st, int snapshot, const char *keys) {
+    g_quit = 0;
     int sel = 0, top = 0, tab = 0, detail = 0;
+    int action = 0;
     Size sz = term_size();
 
     if (snapshot) {
@@ -523,6 +532,11 @@ int lmb_tui_run(LmbTuiState *st, int snapshot, const char *keys) {
         if (g_quit) break;
         if (job.next && atomic_load(&job.done)) {
             pthread_join(job.thread, NULL);
+            int selection_changed = memcmp(job.next->selected_nodes, st->selected_nodes,
+                                             sizeof st->selected_nodes) != 0;
+            memcpy(job.next->selected_nodes, st->selected_nodes, sizeof st->selected_nodes);
+            if (selection_changed)
+                for (int i = 0; i < job.next->nmodels; i++) job.next->models[i].planned = 0;
             char selected_dir[512] = "";
             if (!tab && sel < st->nmodels)
                 snprintf(selected_dir, sizeof selected_dir, "%s", st->models[sel].dir);
@@ -542,7 +556,7 @@ int lmb_tui_run(LmbTuiState *st, int snapshot, const char *keys) {
             if (!count) { sel = top = detail = 0; }
             else if (sel >= count) { sel = count - 1; detail = 0; }
             if (top > sel) top = sel;
-            refreshed = refresh_clock();
+            refreshed = selection_changed ? 0 : refresh_clock();
         }
         if (st->tracker[0] && refresh_clock() - refreshed >= 5.0)
             refresh_start(&job, st);
@@ -560,8 +574,28 @@ int lmb_tui_run(LmbTuiState *st, int snapshot, const char *keys) {
         else k = read_key(250);
         if (!k) continue;
         if (k == 'q' || k == 3) break;
+        if (k == 'c' && !tab && st->nmodels && st->tracker[0]) {
+            st->action_model = sel;
+            action = LMB_TUI_REQUEST_CHAT;
+            break;
+        }
         if (detail) { if (k == '\r' || k == '\n' || k == 0x1b) detail = 0; continue; }
         switch (k) {
+        case ' ':
+            if (tab && sel < (int)st->nnodes && st->identities[sel][0] && st->nodes[sel].addr[0]) {
+                int removed = 0;
+                for (uint32_t i = 0; i < LMB_CLUSTER_MAX_NODES; i++)
+                    if (!strcmp(st->selected_nodes[i], st->identities[sel])) {
+                        st->selected_nodes[i][0] = 0; removed = 1; break;
+                    }
+                if (!removed)
+                    for (uint32_t i = 0; i < LMB_CLUSTER_MAX_NODES; i++)
+                        if (!st->selected_nodes[i][0]) {
+                            memmove(st->selected_nodes[i], st->identities[sel], sizeof st->selected_nodes[i]); break;
+                        }
+                refresh_start(&job, st);
+            }
+            break;
         case 'j': if (sel + 1 < (tab ? (int)st->nnodes : st->nmodels)) sel++; break;
         case 'k': if (sel > 0) sel--; break;
         case '\t': tab = !tab; sel = top = 0; break;
@@ -579,5 +613,5 @@ int lmb_tui_run(LmbTuiState *st, int snapshot, const char *keys) {
     }
     cooked();
     if (job.next) { pthread_join(job.thread, NULL); free(job.next); }
-    return 0;
+    return action;
 }

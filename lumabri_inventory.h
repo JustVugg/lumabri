@@ -5,7 +5,7 @@
 #include "lumabri_proto.h"
 #include "lumabri_machine.h"
 
-#define LMB_INVENTORY_VERSION 1u
+#define LMB_INVENTORY_VERSION 2u
 #define LMB_INVENTORY_MAX 32u
 #define LMB_INVENTORY_TTL_MS 15000u
 #define LMB_INVENTORY_HEARTBEAT_MS 5000u
@@ -15,6 +15,7 @@ typedef struct {
     LmbMachineProfile machine;
     uint64_t ram_budget_bytes;
     uint32_t age_ms;
+    char control_addr[64];      /* empty for an inventory-only worker */
 } LmbMachineReport;
 
 /* Lengths and control characters are checked before any field reaches a
@@ -50,7 +51,7 @@ static LMB_MAYBE_UNUSED int lmb_inventory_pack(LmbBuf *b,
     INV_U64(vram_total_bytes); INV_U64(vram_available_bytes);
     INV_U64(disk_available_bytes); INV_U64(disk_read_bps);
 #undef INV_U64
-    return lmb_buf_u64(b, r->ram_budget_bytes);
+    return lmb_buf_u64(b, r->ram_budget_bytes) || lmb_buf_str(b, r->control_addr);
 }
 
 static LMB_MAYBE_UNUSED int lmb_inventory_unpack(LmbCur *c,
@@ -74,7 +75,8 @@ static LMB_MAYBE_UNUSED int lmb_inventory_unpack(LmbCur *c,
     INV_U64(vram_total_bytes); INV_U64(vram_available_bytes);
     INV_U64(disk_available_bytes); INV_U64(disk_read_bps);
 #undef INV_U64
-    if (lmb_cur_u64(c, &r->ram_budget_bytes)) return -1;
+    if (lmb_cur_u64(c, &r->ram_budget_bytes) ||
+        lmb_inventory_string(c, r->control_addr, sizeof r->control_addr)) return -1;
     uint8_t nonzero = 0;
     for (size_t i = 0; i < sizeof r->identity; i++) nonzero |= r->identity[i];
     if (!nonzero || !m->hostname[0] || !m->logical_cpus ||

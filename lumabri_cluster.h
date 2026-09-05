@@ -70,15 +70,17 @@ typedef struct {
  * a 32 GB machine takes twice the range of a 16 GB one instead of the same.
  * Equal splits are the obvious thing and they are wrong on the hardware a
  * house actually has, where one box is always the big one. */
-static LMB_UNUSED int lmb_plan_cluster(const LmbModelShape *m,
+static LMB_UNUSED int lmb_plan_cluster_source(const LmbModelShape *m,
                                        const LmbClusterNode *nodes, uint32_t n,
                                        uint32_t context, uint32_t sessions,
                                        LmbPlanGoal goal,
+                                       int external_checkpoint,
                                        LmbClusterPlan *out) {
     memset(out, 0, sizeof *out);
     out->goal = goal;
     out->sessions = sessions ? sessions : 1;
     out->state = LMB_PLAN_UNRUNNABLE;
+    out->data_available = external_checkpoint != 0;
     if (!m->layers || !n || n > LMB_CLUSTER_MAX_NODES) return -1;
 
     /* Until an adapter declares a working GPU backend, RAM and VRAM are not
@@ -188,6 +190,12 @@ static LMB_UNUSED int lmb_plan_cluster(const LmbModelShape *m,
     }
     out->ready_known = all_measured;
     return 0;
+}
+
+static LMB_UNUSED int lmb_plan_cluster(const LmbModelShape *m,
+    const LmbClusterNode *nodes, uint32_t n, uint32_t context,
+    uint32_t sessions, LmbPlanGoal goal, LmbClusterPlan *out) {
+    return lmb_plan_cluster_source(m, nodes, n, context, sessions, goal, 0, out);
 }
 
 /* Would adding this machine help, and at what?

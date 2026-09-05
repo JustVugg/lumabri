@@ -14,7 +14,9 @@ Changing one payload never permits silently reinterpreting another.
 | Expert stats capability | `ECAP` / 1, `EST1` / 2 | fall back to legacy registration without stats |
 | swarm execution/detail | `SWX1` / 1, detail 2 | omit unavailable telemetry, not compute identity |
 | executor residency (`LMB_ERES` 70/71) | additive op | older node answers `ERR`; chatter treats residency as unknown, no penalty |
-| machine inventory (`LMB_MACHINE_REPORT/LIST/LIST_R` 77/78/79) | body version 1 | older tracker refuses; viewer clears remote inventory and invalidates proposed plans |
+| machine inventory (`LMB_MACHINE_REPORT/LIST/LIST_R` 77/78/79) | body version 2, including signed donor control address | incompatible versions refuse; viewer clears remote inventory and invalidates proposed plans |
+| household consent (`LMB_HOME_*` 80–85) | body version 1 | authenticated offer, immutable allocation, explicit donor approval and commit; no negotiation or execution fallback |
+| hosted greeting | optional codec field `2` after limits | new hosts explicitly declare SUBMIT/DATA/DONE independently of model family; unsupported codecs fail closed |
 | encoded expert call (`LMB_EXEC2` 72/73, caps word in `ERES_R`) | additive op | a chatter sends `EXEC2` only to a node whose `ERES_R` carries `LMB_CAP_EXEC2`; the tunnel keeps `EXEC`; bf16 only for values that are exactly bf16 |
 
 The model root, engine ID, source/build profile, numeric class, state schema,

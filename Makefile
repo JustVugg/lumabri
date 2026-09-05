@@ -30,7 +30,7 @@ MACHINE_SRC = lumabri_machine.c
 MACHINE_DEPS = lumabri_machine.h $(MACHINE_SRC)
 
 lumabri: lumabri.c lumabri_tui.c lumabri_tui.h lumabri_proto.h lumabri_sign.h \
-		lumabri_inventory.h \
+		lumabri_inventory.h lumabri_home.h lumabri_home_runtime.h lumabri_home_ui.h lumabri_ready.h \
 		lumabri_families.h lumabri_planner.h lumabri_cluster.h \
 		lumabri_calibration.h $(SECURE_DEPS) $(MACHINE_DEPS)
 	$(CC) $(CFLAGS) -pthread lumabri.c lumabri_tui.c $(MACHINE_SRC) -o $@
@@ -420,6 +420,15 @@ test_calibration: test_calibration.c lumabri_calibration.h lumabri_planner.h
 test_inventory: test_inventory.c lumabri_inventory.h lumabri_machine.h lumabri_proto.h lumabri_sign.h $(SECURE_DEPS)
 	$(CC) $(CFLAGS) -pthread test_inventory.c -o $@
 
+test_home: test_home.c lumabri_home.h lumabri_inventory.h lumabri_families.h lumabri_proto.h
+	$(CC) $(CFLAGS) -pthread test_home.c -o $@
+
+test_chat_ui: test_chat_ui.c lumabri.c lumabri_tui.c lumabri_tui.h lumabri_home_runtime.h lumabri_home_ui.h lumabri_ready.h lumabri_cluster.h
+	$(CC) $(CFLAGS) -pthread test_chat_ui.c lumabri_tui.c lumabri_machine.c -o $@
+
+test-chat-ui: test_chat_ui
+	python3 chat_ui_test.py
+
 segment_budget_probe: segment_budget_probe.c lumabri_planner.h lumabri_families.h
 	$(CC) $(CFLAGS) segment_budget_probe.c -o $@
 
@@ -546,7 +555,7 @@ $(COLIBRI_SEGMENT_LIB): $(HYBRID_ENGINE_DIR)/.prepared build/segment_hybrid_brid
 		segment-edge-library
 	$(AR) rcs $@ build/segment_hybrid_bridge.o
 
-segment_node: segment_node.c lumabri_planner.h lumabri_families.h \
+segment_node: segment_node.c lumabri_planner.h lumabri_families.h lumabri_ready.h \
 		$(SEGMENT_COMMON) $(COLIBRI_SEGMENT_LIB) $(MACHINE_DEPS) \
 		lumabri_run_gate.c lumabri_run_gate.h
 	$(CC) $(SEGMENT_CFLAGS) -pthread segment_node.c lumabri_segment.c \
@@ -642,7 +651,7 @@ test-segment-discovery: tracker test_segment_discovery
 	bash ./segment_discovery_test.sh
 
 test: all test_key_rotation test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 test_accum_order test_residency_report test_model_family test_planner test_cluster \
-		test_inventory \
+		test_inventory test_home test_chat_ui \
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
 		test_meminfo test_compute_lease test_content_filter \
 		test_scheduler test_run_gate
@@ -674,6 +683,8 @@ test: all test_key_rotation test_hedge test_local_fallback test_nat_adopt test_v
 	bash ./model_family_test.sh
 	bash ./catalog_test.sh
 	./test_inventory
+	./test_home
+	python3 ./chat_ui_test.py
 	python3 ./lan_inventory_test.py
 	bash ./hosted_chat_test.sh
 	bash ./tui_test.sh
@@ -721,7 +732,7 @@ clean:
 	rm -f tracker maintainer liblumabri.so test_shim swarm_probe lumabri \
 	      test_relay_exec test_swarm_fed test_key_rotation test_hedge \
 	      test_local_fallback test_accum_order test_residency_report \
-	      test_model_family test_planner test_cluster test_calibration test_inventory segment_budget_probe \
+	      test_model_family test_planner test_cluster test_calibration test_inventory test_home test_chat_ui segment_budget_probe \
 	      test_nat_adopt test_rtt_refresh \
 	      test_verify_failover test_segment_v2 test_segment_discovery test_sampling \
 	      test_swarm_detail test_relay_rate test_machine test_meminfo \
