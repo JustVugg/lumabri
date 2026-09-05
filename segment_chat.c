@@ -1889,6 +1889,11 @@ int main(int argc, char **argv) {
         .struct_size = sizeof edge_options,
         .model_dir = model_dir,
     };
+    const char *edge_limit = getenv("LUMABRI_EDGE_RAM_BYTES");
+    if (edge_limit && (parse_u64(edge_limit, &edge_options.memory_limit_bytes) ||
+                        !edge_options.memory_limit_bytes)) {
+        fprintf(stderr, "invalid accepted Edge memory limit\n"); return 2;
+    }
     ColiEdgeEngine *edge = NULL;
     /* Never hand an uninitialised buffer to the engine ABI: a failure that
      * writes nothing would otherwise be reported as whatever was on the

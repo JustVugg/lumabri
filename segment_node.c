@@ -10,6 +10,7 @@
 #include "lumabri_sign.h"
 #include "lumabri_secure.h"
 #include "segment_colibri.h"
+#include "lumabri_ready.h"
 
 #include <pthread.h>
 #include <dirent.h>
@@ -1200,6 +1201,12 @@ int main(int argc, char **argv) {
     }
 #endif
     if (lmb_secure_init()) return 1;
+    uint8_t home_client[32];
+    const char *home_client_key = getenv("LUMABRI_SEGMENT_CLIENT_PK");
+    if (home_client_key && (!lmb_secure_enabled() || strlen(home_client_key) != 64 ||
+                            lmb_unhex(home_client, home_client_key, 32))) {
+        fprintf(stderr, "invalid accepted Segment client identity\n"); return 2;
+    }
     signal(SIGINT, stop_handler); signal(SIGTERM, stop_handler);
     signal(SIGPIPE, SIG_IGN);
     /* The hybrid engine is a Lumabri-only build copy. Its transport client
@@ -1481,10 +1488,14 @@ int main(int argc, char **argv) {
     printf("[segment-node] %s %s layers %u:%u at %s (tracker %s)\n",
            engine_id, model, begin, end, advertise, tracker);
     fflush(stdout);
+    if (lmb_ready_notify()) { g_stop = 1; shutdown(g_listen_fd, SHUT_RDWR); }
     while (!g_stop) {
         int fd = accept(g_listen_fd, NULL, NULL);
         if (fd < 0) { if (g_stop) break; continue; }
         if (lmb_secure_server(fd)) { lmb_close(fd); continue; }
+        if (home_client_key && !lmb_secure_peer_matches(fd, home_client)) {
+            lmb_close(fd); continue;
+        }
         lmb_set_io_timeout(fd, lmb_env_int("LUMABRI_IO_TIMEOUT_MS",
                            LMB_DEFAULT_IO_TIMEOUT_MS, 100, 3600000));
         Connection *connection = malloc(sizeof *connection);

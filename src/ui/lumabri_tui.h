@@ -15,6 +15,7 @@
 
 #include "lumabri_cluster.h"
 #include "lumabri_calibration.h"
+#include "lumabri_machine.h"
 
 #define LMB_TUI_MAX_MODELS 64
 
@@ -24,6 +25,7 @@ typedef struct {
     LmbModelShape shape;
     LmbClusterPlan plan;
     int planned;                    /* 0 when the cluster cannot be planned */
+    int weights_present;
     const LmbCalibration *calibration;   /* NULL until something is measured */
     LmbCalKey calibration_key;      /* exact current conditions */
     int calibration_key_valid;
@@ -33,13 +35,29 @@ typedef struct LmbTuiState {
     LmbTuiModel models[LMB_TUI_MAX_MODELS];
     int nmodels;
     LmbClusterNode nodes[LMB_CLUSTER_MAX_NODES];
+    LmbMachineProfile profiles[LMB_CLUSTER_MAX_NODES];
+    char identities[LMB_CLUSTER_MAX_NODES][65];
+    uint32_t ages_ms[LMB_CLUSTER_MAX_NODES];
     uint32_t nnodes;
-    uint32_t context, sessions;
+    int inventory_ok;
+    int action_model;
+    char selected_nodes[LMB_CLUSTER_MAX_NODES][65];
+    uint32_t context, sessions, max_new;
     char root[512];                 /* where the checkpoints were found */
     char disk[512];
+    char tracker[256];
     int (*refresh)(struct LmbTuiState *state, void *context);
     void *refresh_context;
 } LmbTuiState;
+
+enum { LMB_TUI_REQUEST_CHAT = 10 };
+
+static inline int lmb_tui_node_enabled(const LmbTuiState *st, uint32_t node) {
+    if (node >= st->nnodes || !st->nodes[node].addr[0]) return 0;
+    for (uint32_t i = 0; i < LMB_CLUSTER_MAX_NODES; i++)
+        if (st->selected_nodes[i][0] && !strcmp(st->selected_nodes[i], st->identities[node])) return 1;
+    return 0;
+}
 
 /* Run the interface. `snapshot` renders one frame to stdout and returns
  * instead of taking the terminal, so the screen can be tested without a pty;

@@ -153,6 +153,18 @@ int main(void) {
     CHECK(many.state != LMB_PLAN_RESIDENT || one.state == LMB_PLAN_RESIDENT,
           "sixteen sessions fitted where one did not");
 
+    LmbClusterNode remote_only[4];
+    for (int i = 0; i < 4; i++) {
+        remote_only[i] = node("selected-donor", 60, 0);
+        remote_only[i].has_checkpoint = 0;
+        remote_only[i].lan_bps = 0;
+    }
+    CHECK(!lmb_plan_cluster_source(&m, remote_only, 4, 4096, 1,
+                                   LMB_GOAL_ONE_SESSION, 1, &p) &&
+          p.state == LMB_PLAN_RESIDENT && p.fetch_bytes > 0 && !p.ready_known,
+          "external checkpoint source was mistaken for warm donor weights");
+    CHECK(!lmb_plan_cluster(&m, remote_only, 4, 4096, 1, LMB_GOAL_ONE_SESSION, &p) &&
+          p.state == LMB_PLAN_UNRUNNABLE, "missing checkpoint source was silently invented");
     printf("CLUSTER PLAN: %s\n", bad ? "FAIL" : "PASS");
     return bad ? 1 : 0;
 }

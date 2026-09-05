@@ -1133,6 +1133,19 @@ static void shim_init_impl(void) {
         return;
     }
     int have_saved_id = cache_identity_get(&saved_rec, &saved_id) == 0;
+    /* A household donor consented to this exact checkpoint. Never promote a
+     * replacement root, even if the same trusted owner signed both models. */
+    const char *expected_root = getenv("LUMABRI_EXPECT_MODEL_ROOT");
+    if (expected_root) {
+        uint8_t expected[32];
+        const LmbModelIdentity *resolved = have_current_id ? &current_id :
+                                            (have_saved_id ? &saved_id : NULL);
+        if (strlen(expected_root) != 64 || lmb_unhex(expected, expected_root, 32) ||
+            !resolved || memcmp(expected, resolved->root, 32)) {
+            fprintf(stderr, "[lumabri] checkpoint differs from the accepted household plan — disabled\n");
+            cache_lock_release(); return;
+        }
+    }
     if (!online_placement && g.trust.n && !have_saved_id) {
         fprintf(stderr, "[lumabri] offline mirror has no verified model identity — disabled\n");
         cache_lock_release();

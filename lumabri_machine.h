@@ -80,6 +80,9 @@ typedef struct {
 
 int lmb_machine_probe(LmbMachineProfile *profile, const char *disk_path,
                       const char *tracker);
+/* Heartbeat sample: preserve hardware and disk calibration, refresh live
+ * memory/load/free-space without creating a benchmark file. */
+void lmb_machine_refresh_resources(LmbMachineProfile *profile, const char *disk_path);
 /* Parse Linux /proc/meminfo. Exposed so compatibility fixtures can exercise
  * kernels that predate MemAvailable without replacing the process procfs. */
 int lmb_machine_read_meminfo(FILE *stream, uint64_t *total,

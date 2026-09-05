@@ -57,7 +57,7 @@ printf 'hi\n/quit\n' | HOME="$TMP/client-home" OMP_NUM_THREADS=2 \
     --max-new 2 --role chat >"$TMP/chat.log" 2>&1
 status=$?
 set -e
-if (( status != 0 )) || ! grep -q 'pronto via Segment' "$TMP/chat.log" ||
+if (( status != 0 )) || ! grep -q 'ready via Segment' "$TMP/chat.log" ||
    ! grep -q 'data plane relay (nessuna porta pubblica richiesta)' "$TMP/server.log" ||
    grep -q 'continuo con il percorso expert/CAS' "$TMP/chat.log" ||
    grep -q 'Segment route generation' "$TMP/chat.log"; then
@@ -99,7 +99,7 @@ while time.monotonic() < deadline:
             break
         out.extend(chunk)
         log.write(chunk); log.flush()
-    if not sent and "pronto via Segment".encode() in out:
+    if not sent and "ready via Segment".encode() in out:
         os.write(master, b"hi\n")
         time.sleep(.15)
         os.write(master, b"/exp\t\n")
@@ -150,7 +150,7 @@ def control_case(name, action):
             if process.poll() is not None: return False
         return False
 
-    if not pump_until(["pronto via Segment".encode()], 30):
+    if not pump_until(["ready via Segment".encode()], 30):
         sys.stderr.buffer.write(transcript)
         raise SystemExit(name + ": chat did not become ready")
     os.write(master, b"hi\n")
@@ -219,7 +219,7 @@ shell_term = termios.tcgetattr(probe)
 command = ("./lumabri chat --tracker 127.0.0.1:7880 --ctx 2048 "
            "--max-new 64 --role chat\n").encode()
 os.write(master, command)
-if not shell_pump(lambda: "pronto via Segment".encode() in transcript, 30):
+if not shell_pump(lambda: "ready via Segment".encode() in transcript, 30):
     raise SystemExit("Ctrl-Z: chat did not become ready under job-control shell")
 os.write(master, b"hi\n")
 if not shell_pump(lambda: b"prefill" in transcript, 10):
