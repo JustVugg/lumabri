@@ -10,7 +10,9 @@
 # A family with no fixture checkpoint on this machine is SKIPPED, and skipped
 # is not passed: the summary says so, and the exit status stays zero only
 # because a laptop cannot be expected to hold a 167 GB checkpoint. The real
-# matrix runs where the checkpoints live.
+# matrix runs where the checkpoints live. Set LUMABRI_REQUIRE_ALL_ADAPTERS=1
+# there: then a missing fixture is a failure, so green really means that every
+# registered adapter was exercised rather than merely enumerated.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -60,5 +62,11 @@ echo "ADAPTER CONFORMANCE: $pass supported, $skip experimental, $fail failed"
 if (( fail > 0 )); then exit 1; fi
 if (( pass == 0 )); then
     echo "  nothing was actually exercised: this run proves nothing" >&2
+fi
+if [[ "${LUMABRI_REQUIRE_ALL_ADAPTERS:-0}" == 1 ]] && (( skip > 0 )); then
+    printf '  strict run requires all adapters; missing:' >&2
+    printf ' %s' "${untested[@]}" >&2
+    printf '\n' >&2
+    exit 1
 fi
 exit 0

@@ -21,10 +21,14 @@ static LmbCalKey base(void) {
     snprintf(k.commit_lumabri, sizeof k.commit_lumabri, "deadbeef");
     snprintf(k.commit_colibri, sizeof k.commit_colibri, "cafebabe");
     snprintf(k.build_id, sizeof k.build_id, "0123456789abcdef");
-    snprintf(k.backend, sizeof k.backend, "cpu");
+    snprintf(k.plan_kind, sizeof k.plan_kind, "segment");
+    k.goal = 0;
     k.nodes = 2; k.context = 4096; k.sessions = 1;
     for (int i = 0; i < 2; i++) {
         snprintf(k.node_id[i], sizeof k.node_id[i], "node%d", i);
+        snprintf(k.node_hardware_id[i], sizeof k.node_hardware_id[i], "hw%d", i);
+        snprintf(k.node_build_id[i], sizeof k.node_build_id[i], "build%d", i);
+        snprintf(k.node_backend[i], sizeof k.node_backend[i], "cpu");
         k.layer_begin[i] = (uint32_t)i * 22;
         k.layer_end[i] = (uint32_t)(i + 1) * 22;
         k.threads[i] = 8;
@@ -39,7 +43,7 @@ int main(void) {
 
     /* Every field, one at a time. A key that lets any of these through will
      * eventually show somebody the wrong number with full confidence. */
-    struct { const char *what; LmbCalKey k; } cases[16];
+    struct { const char *what; LmbCalKey k; } cases[24];
     int n = 0;
 #define VARY(label, mutation) do { LmbCalKey v = base(); mutation; \
     cases[n].what = label; cases[n].k = v; n++; } while (0)
@@ -50,11 +54,15 @@ int main(void) {
     VARY("lumabri commit",  snprintf(v.commit_lumabri, sizeof v.commit_lumabri, "0000"));
     VARY("colibri commit",  snprintf(v.commit_colibri, sizeof v.commit_colibri, "1111"));
     VARY("build id",        snprintf(v.build_id, sizeof v.build_id, "ffff"));
-    VARY("backend",         snprintf(v.backend, sizeof v.backend, "cuda"));
+    VARY("plan",            snprintf(v.plan_kind, sizeof v.plan_kind, "expert"));
+    VARY("goal",            v.goal = 1);
     VARY("context",         v.context = 8192);
     VARY("sessions",        v.sessions = 4);
     VARY("machine count",   v.nodes = 1);
     VARY("which machine",   snprintf(v.node_id[1], sizeof v.node_id[1], "elsewhere"));
+    VARY("node hardware",   snprintf(v.node_hardware_id[1], sizeof v.node_hardware_id[1], "other"));
+    VARY("node build",      snprintf(v.node_build_id[1], sizeof v.node_build_id[1], "other"));
+    VARY("node backend",    snprintf(v.node_backend[1], sizeof v.node_backend[1], "cuda"));
     VARY("ranges",          v.layer_begin[1] = 20; v.layer_end[0] = 20);
     VARY("threads",         v.threads[0] = 4);
     VARY("resident/disk",   v.from_disk[1] = 1);
@@ -86,7 +94,7 @@ int main(void) {
           "a matching calibration did not print its number: \"%s\"", text);
 
     LmbCalKey gpu = base();
-    snprintf(gpu.backend, sizeof gpu.backend, "cuda");
+    snprintf(gpu.node_backend[0], sizeof gpu.node_backend[0], "cuda");
     lmb_cal_speed_text(&have, &gpu, text, sizeof text);
     CHECK(strstr(text, "stale") != NULL,
           "a CPU measurement was shown for a CUDA plan: \"%s\"", text);
@@ -103,6 +111,13 @@ int main(void) {
     lmb_cal_build_id(id3, sizeof id3, "cc", "-O2 -fopenmp");
     CHECK(strcmp(id1, id2), "two different flag sets produced the same build id");
     CHECK(!strcmp(id1, id3), "the same flags produced different build ids");
+    lmb_cal_build_id(id2, sizeof id2, "ab", "c");
+    lmb_cal_build_id(id3, sizeof id3, "a", "bc");
+    CHECK(strcmp(id2, id3), "build-id fields were concatenated ambiguously");
+
+    LmbCalKey invalid = base(); invalid.nodes = LMB_CAL_NODES_MAX + 1;
+    CHECK(!lmb_cal_matches(&invalid, &invalid),
+          "an out-of-bounds machine count was accepted as a calibration key");
 
     printf("CALIBRATION KEY: %s\n", bad ? "FAIL" : "PASS");
     return bad ? 1 : 0;

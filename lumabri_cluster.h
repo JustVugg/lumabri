@@ -11,13 +11,12 @@
  * knows what fits; only a calibration knows what it does, and the two must
  * never be printed in the same voice.
  *
- * The placement has two objectives and they pull apart, so the caller says
- * which one it wants. One session is a chain: the layers are sequential, so
- * what matters is the SUM of the stages plus the hops between them, and
- * fewer machines can be better because every boundary is another hop. Many
- * sessions are a pipeline: different chats occupy different stages at once,
- * so what matters is the SLOWEST stage. Optimising one while reporting the
- * other is how a plan looks good and feels wrong. */
+ * The final placement has two objectives and they pull apart: one serial
+ * session minimises the SUM of stages and hops, while concurrent sessions
+ * minimise the SLOWEST pipeline stage. This preliminary planner records the
+ * requested goal but has no calibrated stage times yet; it therefore makes a
+ * memory-feasible proportional split and never claims that split is a speed
+ * optimum. Calibration is the prerequisite for performance placement. */
 #ifndef LUMABRI_CLUSTER_H
 #define LUMABRI_CLUSTER_H
 
@@ -30,11 +29,11 @@ typedef struct {
     char name[64];
     char addr[64];
     uint64_t ram_budget_bytes;   /* what this machine offers, reserve removed */
-    uint64_t vram_budget_bytes;
+    uint64_t vram_budget_bytes;  /* inventory only; never fungible with RAM */
     uint64_t disk_read_bps;      /* 0 = unmeasured: disk mode cannot be judged */
     uint64_t lan_bps;            /* to the node running Edge; 0 = unmeasured */
     double rtt_ms;               /* to the node running Edge */
-    uint32_t gpu_backends;       /* what the ENGINE can use, not what is fitted */
+    uint32_t gpu_backends;       /* inventory; adapter-specific use comes later */
     uint32_t threads;
     int has_checkpoint;          /* the weights are already on this machine */
 } LmbClusterNode;
@@ -64,6 +63,7 @@ typedef struct {
     double ready_seconds;        /* download and distribution, NOT speed */
     int ready_known;             /* 0 when no bandwidth was measured */
     uint32_t sessions;
+    int data_available;          /* at least one node owns the checkpoint */
 } LmbClusterPlan;
 
 /* Give each node a share of the layers proportional to what it can hold, so
@@ -81,25 +81,32 @@ static LMB_UNUSED int lmb_plan_cluster(const LmbModelShape *m,
     out->state = LMB_PLAN_UNRUNNABLE;
     if (!m->layers || !n || n > LMB_CLUSTER_MAX_NODES) return -1;
 
-    /* Edge goes where it fits and the engine is fastest: a machine whose
-     * engine can use its GPU beats one that merely has a card in it. */
+    /* Until an adapter declares a working GPU backend, RAM and VRAM are not
+     * interchangeable. Counting both can accept a plan no engine can load. */
     LmbRangeCost edge = lmb_estimate_edge(m, context, sessions);
+    if (!edge.ok) return -1;
+    uint64_t edge_need = edge.resident_bytes + edge.state_bytes +
+                         edge.scratch_bytes;
     uint32_t best_edge = UINT32_MAX;
     uint64_t best_edge_room = 0;
     for (uint32_t i = 0; i < n; i++) {
-        uint64_t room = nodes[i].ram_budget_bytes + nodes[i].vram_budget_bytes;
-        if (edge.ok && room < edge.resident_bytes + edge.state_bytes) continue;
-        uint64_t score = room + (nodes[i].gpu_backends ? room : 0);
-        if (best_edge == UINT32_MAX || score > best_edge_room) {
-            best_edge = i; best_edge_room = score;
+        uint64_t room = nodes[i].ram_budget_bytes;
+        if (room < edge_need) continue;
+        if (best_edge == UINT32_MAX || room > best_edge_room) {
+            best_edge = i; best_edge_room = room;
         }
     }
     if (best_edge == UINT32_MAX) return -1;      /* nobody can hold Edge */
     out->edge_node = best_edge;
 
+    uint64_t effective[LMB_CLUSTER_MAX_NODES];
     uint64_t total_budget = 0;
-    for (uint32_t i = 0; i < n; i++)
-        total_budget += nodes[i].ram_budget_bytes + nodes[i].vram_budget_bytes;
+    for (uint32_t i = 0; i < n; i++) {
+        effective[i] = nodes[i].ram_budget_bytes;
+        if (i == best_edge) effective[i] -= edge_need;
+        total_budget += effective[i];
+        if (nodes[i].has_checkpoint) out->data_available = 1;
+    }
     if (!total_budget) return -1;
 
     /* Hand out layers in proportion to budget, in one pass, never leaving a
@@ -107,7 +114,7 @@ static LMB_UNUSED int lmb_plan_cluster(const LmbModelShape *m,
     uint32_t assigned = 0;
     uint64_t whole_resident = 0;
     for (uint32_t i = 0; i < n && assigned < m->layers; i++) {
-        uint64_t budget = nodes[i].ram_budget_bytes + nodes[i].vram_budget_bytes;
+        uint64_t budget = effective[i];
         uint32_t take = (uint32_t)((uint64_t)m->layers * budget / total_budget);
         if (i + 1 == n) take = m->layers - assigned;
         if (!take) continue;
@@ -124,7 +131,9 @@ static LMB_UNUSED int lmb_plan_cluster(const LmbModelShape *m,
         s->bytes_resident = s->state == LMB_PLAN_DISK
                           ? c.working_set_bytes + live
                           : c.resident_bytes + live;
-        s->bytes_to_fetch = nodes[i].has_checkpoint ? 0 : c.resident_bytes;
+        uint64_t needed_weights = s->state == LMB_PLAN_DISK
+                                ? c.working_set_bytes : c.resident_bytes;
+        s->bytes_to_fetch = nodes[i].has_checkpoint ? 0 : needed_weights;
         whole_resident += c.resident_bytes + live;
         if (s->state == LMB_PLAN_UNRUNNABLE) {
             /* Missing is measured against what this node would ACTUALLY have
@@ -155,6 +164,10 @@ static LMB_UNUSED int lmb_plan_cluster(const LmbModelShape *m,
         if (out->slices[i].state == LMB_PLAN_DISK)
             out->state = LMB_PLAN_DISK;
     }
+    if (!out->data_available) {
+        out->state = LMB_PLAN_UNRUNNABLE;
+        out->missing_bytes = whole_resident + edge.resident_bytes;
+    }
 
     if (out->state == LMB_PLAN_UNRUNNABLE && out->missing_bytes) {
         uint64_t median = total_budget / n;
@@ -164,18 +177,16 @@ static LMB_UNUSED int lmb_plan_cluster(const LmbModelShape *m,
 
     /* How long before it can answer, which is bytes over measured bandwidth
      * and nothing else. Unmeasured bandwidth means unknown, not a guess. */
-    uint64_t slowest = 0;
     int all_measured = 1;
     for (uint32_t i = 0; i < out->nslices; i++) {
         const LmbClusterNode *nd = &nodes[out->slices[i].node];
         if (!out->slices[i].bytes_to_fetch) continue;
         if (!nd->lan_bps) { all_measured = 0; continue; }
-        uint64_t secs = out->slices[i].bytes_to_fetch / nd->lan_bps;
-        if (secs > slowest) slowest = secs;
+        double secs = (double)out->slices[i].bytes_to_fetch /
+                      (double)nd->lan_bps;
+        if (secs > out->ready_seconds) out->ready_seconds = secs;
     }
     out->ready_known = all_measured;
-    out->ready_seconds = (double)slowest;
-    (void)whole_resident;
     return 0;
 }
 

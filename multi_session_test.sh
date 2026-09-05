@@ -45,7 +45,7 @@ LUMABRI_VERIFY=0 OMP_NUM_THREADS=2 \
     --range 0:16 --port "$(( PORT + 1 ))" --tracker "127.0.0.1:$PORT" \
     --advertise "127.0.0.1:$(( PORT + 1 ))" --name solo \
     --model-root "$mr" --tokenizer-root "$tk" --context 64 --max-rows 16 \
-    --sessions 1 --threads 2 --run-queue 1 --run-wait-ms 1500 \
+    --sessions 1 --threads 2 --run-queue 0 --run-wait-ms 1500 \
     >"$TMP/node.log" 2>&1 &
 PIDS+=("$!"); wait_port "$(( PORT + 1 ))"
 sleep 3
@@ -88,7 +88,9 @@ for got in "$a" "$b"; do
   under contention: $got
   contention may make a session wait or be refused; it may never change it."
 done
-(( served >= 1 )) || fail "neither of two concurrent sessions completed"
+(( served == 1 )) || fail "capacity one served $served of two concurrent sessions; expected exactly one"
+grep -qiE "busy|refused|admission" "$TMP/par-a.log" "$TMP/par-b.log" ||
+    fail "the rejected session did not receive an explicit capacity refusal"
 
 # Capacity is stated, not implied: the node has to have said how many it takes.
 grep -qE "[0-9]+ session" "$TMP/node.log" ||

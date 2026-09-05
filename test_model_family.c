@@ -26,15 +26,21 @@ static void want(const char *model_type, const char *expect_id) {
 }
 
 int main(void) {
-    /* the two the table knows exactly */
     want("olmoe", "olmoe");
     want("deepseek_v4", "deepseek_v4");
-
-    /* the families that still match by declared prefix, unchanged */
-    want("kimi_k2", "kimi");
+    want("kimi_k3", "kimi");
+    want("kimi_linear", "kimi");
+    want("inkling_mm_model", "inkling");
     want("inkling", "inkling");
-    want("qwen3_moe", "qwen36");
-    want("glm4_moe", "glm");
+    want("qwen3_5_moe", "qwen36");
+    want("qwen3_5_moe_text", "qwen36");
+    want("qwen4_exp", "qwen38");
+    want("qwen4_exp_text", "qwen38");
+    want("glm_moe_dsa", "glm");
+    want("glm5_moe", "glm");
+    want("glm", "glm");
+    want("glm5_next", "glm53");
+    want("glm5_next_text", "glm53");
 
     /* the refusals. Nothing here shares enough with a declared prefix to be
      * claimed, and every one of them used to be swallowed silently. */
@@ -42,35 +48,28 @@ int main(void) {
     want("llama", NULL);
     want("mixtral", NULL);
     want("deepseek_v3", NULL);   /* "deepseek" was a prefix once: not any more */
+    want("kimi_future", NULL);
+    want("glm53_moe", NULL);
+    want("qwen3_moe", NULL);
+    want("qwen36_moe", NULL);
 
-    /* a family with no declared model_type is unreachable by detection... */
-    const LmbModelFamily *f;
-    for (size_t i = 0; i < LMB_FAMILY_UNMAPPED_COUNT; i++) {
-        const char *id = LMB_FAMILY_UNMAPPED[i];
-        f = lmb_family_by_id(id);
-        if (!f) { fprintf(stderr, "unmapped family %s has no row\n", id); bad = 1; continue; }
-        if (f->aliases[0] || f->prefixes[0]) {
-            fprintf(stderr, "%s is listed as unmapped but claims a model_type\n", id);
-            bad = 1;
-        }
-        /* ...and reachable by explicit name, which is the whole point of
-         * registering it. */
-        if (lmb_family_override(id) != f) {
-            fprintf(stderr, "%s cannot be selected explicitly\n", id);
-            bad = 1;
-        }
+    const LmbModelFamily *deepseek = lmb_family_by_id("deepseek_v4");
+    if (!deepseek || strcmp(deepseek->engine, "deepseek_v4") ||
+        !deepseek->p2p_engine || strcmp(deepseek->p2p_engine, "deepseek")) {
+        fprintf(stderr, "DeepSeek artifact/P2P names drifted apart\n");
+        bad = 1;
+    }
+    const LmbModelFamily *glm53 = lmb_family_by_id("glm53");
+    const LmbModelFamily *qwen38 = lmb_family_by_id("qwen38");
+    if (!glm53 || glm53->p2p_engine || glm53->expert_node ||
+        !qwen38 || qwen38->p2p_engine || qwen38->expert_node) {
+        fprintf(stderr, "an adapter without an Expert path advertised one\n");
+        bad = 1;
     }
 
     /* a name Colibri does not register is refused, not ignored */
     if (lmb_family_override("qwen39")) {
         fprintf(stderr, "an unknown adapter name was accepted\n");
-        bad = 1;
-    }
-
-    /* the longest declared match wins, so a more specific family can always
-     * be added later without disturbing the broader one */
-    if (lmb_family_for("qwen36_moe") != lmb_family_by_id("qwen36")) {
-        fprintf(stderr, "longest-match did not prefer the specific family\n");
         bad = 1;
     }
 

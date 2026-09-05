@@ -7,6 +7,7 @@
  * "runs from disk" exists only in the gap between the first two. */
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 #include "lumabri_planner.h"
 
 static int bad;
@@ -21,6 +22,7 @@ static LmbModelShape v4(void) {
     m.layers = 43; m.hidden = 4096; m.intermediate = 11264;
     m.moe_intermediate = 1408; m.experts = 256; m.experts_per_tok = 6;
     m.heads = 32; m.kv_heads = 8; m.vocab = 129280; m.bits_per_weight = 4;
+    m.sizing_verified = 1;
     return m;
 }
 
@@ -139,6 +141,24 @@ int main(void) {
     LmbModelShape none;
     CHECK(lmb_shape_from_config("/nonexistent", &none) != 0,
           "a missing checkpoint produced a shape");
+
+    /* A structurally plausible config for a family we do not support must not
+     * become a plan merely because it contains familiar transformer keys. */
+    char tmp[] = "/tmp/lmb-plan-XXXXXX";
+    char *td = mkdtemp(tmp);
+    if (td) {
+        char path[256]; snprintf(path, sizeof path, "%s/config.json", td);
+        FILE *fp = fopen(path, "w");
+        if (fp) {
+            fputs("{\"model_type\":\"not_a_colibri_adapter\","
+                  "\"num_hidden_layers\":4,\"hidden_size\":64}", fp);
+            fclose(fp);
+            CHECK(lmb_shape_from_config(td, &none) != 0,
+                  "an unsupported model_type produced a shape");
+            unlink(path);
+        }
+        rmdir(td);
+    }
 
     printf("PLANNER: %s\n", bad ? "FAIL" : "PASS");
     return bad ? 1 : 0;

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Real network gate: every current Colibri family is split across two direct
+# Real network gate for the six fixture-backed Colibri families. GLM-5.3 and
+# Qwen3.8 are registered separately but are not covered by this legacy matrix
+# until real fixtures are supplied to adapter_conformance_test.sh.
 # Segment peers and its first three greedy tokens must match the independent
 # tiny-model oracle. No family is accepted from registration alone.
 set -euo pipefail
@@ -256,4 +258,4 @@ PY
     echo "SEGMENT DIRECT $family: PASS (two peers, oracle + TUI codec)"
 done
 
-echo "SEGMENT DIRECT: PASS (all six Colibri families)"
+echo "SEGMENT DIRECT: PASS (six fixture-backed Colibri families)"

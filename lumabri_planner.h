@@ -3,9 +3,9 @@
  *
  * The catalogue has to say "this cluster can run that model, split this way,
  * ready in about this long" without opening an engine, so somebody has to
- * turn a checkpoint into memory figures. Colibri will not: only DeepSeek V4
- * reads model_type at all, and no adapter exposes a sizing call. So the
- * description lives here, on our side, and Colibri stays untouched.
+ * turn a checkpoint into memory figures. The Colibri runtime ABI exposes no
+ * C sizing call (its Python control plane is not linked here), so the
+ * description lives in Lumabri's adapter layer and Colibri stays untouched.
  *
  * Three numbers matter and they are not the same number:
  *
@@ -57,6 +57,7 @@ typedef struct {
     uint32_t vocab;
     uint32_t bits_per_weight;   /* 16 bf16, 8, 4 for fp4 checkpoints */
     int disk_streaming;         /* the adapter has DEMONSTRATED disk mode */
+    int sizing_verified;        /* adapter-specific arithmetic was verified */
 } LmbModelShape;
 
 typedef struct {
@@ -120,7 +121,8 @@ static LmbRangeCost LMB_UNUSED lmb_estimate_segment(const LmbModelShape *m,
                                          uint32_t context, uint32_t sessions) {
     LmbRangeCost c;
     memset(&c, 0, sizeof c);
-    if (!m->layers || begin >= end || end > m->layers || !m->hidden) return c;
+    if (!m->sizing_verified || !m->layers || begin >= end ||
+        end > m->layers || !m->hidden) return c;
     uint32_t n = end - begin;
 
     uint64_t dense = lmb_dense_layer_bytes(m) * n;
@@ -150,7 +152,7 @@ static LmbRangeCost LMB_UNUSED lmb_estimate_edge(const LmbModelShape *m,
                                       uint32_t context, uint32_t sessions) {
     LmbRangeCost c;
     memset(&c, 0, sizeof c);
-    if (!m->vocab || !m->hidden) return c;
+    if (!m->sizing_verified || !m->vocab || !m->hidden) return c;
     c.resident_bytes = c.working_set_bytes = lmb_edge_bytes(m);
     c.state_bytes = (uint64_t)(context ? context : 4096) * m->hidden * 4u *
                     (sessions ? sessions : 1);
@@ -193,6 +195,70 @@ static LMB_UNUSED const char *lmb_plan_state_name(LmbPlanState s) {
  * alternative — defaults — is how a catalogue ends up promising a model it
  * cannot size. Returns 0 when at least the layer count and hidden size were
  * found, which is the minimum any estimate needs. */
+/* Small, scope-aware JSON member lookup. It intentionally handles only the
+ * primitive/object forms config.json needs, but unlike strstr it never picks
+ * a same-named field from a nested vision config. */
+static const char *LMB_UNUSED lmb_json_member(const char *object,
+                                              const char *key) {
+    if (!object || *object != '{') return NULL;
+    int depth = 1, in_string = 0, escape = 0;
+    for (const char *p = object + 1; *p && depth; p++) {
+        if (in_string) {
+            if (escape) { escape = 0; continue; }
+            if (*p == '\\') { escape = 1; continue; }
+            if (*p == '"') in_string = 0;
+            continue;
+        }
+        if (*p == '{' || *p == '[') { depth++; continue; }
+        if (*p == '}' || *p == ']') { depth--; continue; }
+        if (*p != '"') continue;
+        const char *start = p + 1, *q = start;
+        int esc = 0;
+        for (; *q; q++) {
+            if (esc) { esc = 0; continue; }
+            if (*q == '\\') { esc = 1; continue; }
+            if (*q == '"') break;
+        }
+        if (!*q) return NULL;
+        if (depth == 1 && (size_t)(q - start) == strlen(key) &&
+            !memcmp(start, key, (size_t)(q - start))) {
+            const char *v = q + 1;
+            while (*v == ' ' || *v == '\t' || *v == '\r' || *v == '\n') v++;
+            if (*v != ':') return NULL;
+            do { v++; } while (*v == ' ' || *v == '\t' || *v == '\r' || *v == '\n');
+            return v;
+        }
+        p = q;
+    }
+    return NULL;
+}
+
+static int LMB_UNUSED lmb_json_u32(const char *object, const char *key,
+                                   uint32_t *out) {
+    const char *v = lmb_json_member(object, key);
+    if (!v || *v < '0' || *v > '9') return -1;
+    char *end = NULL;
+    unsigned long n = strtoul(v, &end, 10);
+    if (end == v || n == 0 || n > UINT32_MAX) return -1;
+    *out = (uint32_t)n;
+    return 0;
+}
+
+static int LMB_UNUSED lmb_json_string(const char *object, const char *key,
+                                      char *out, size_t cap) {
+    const char *v = lmb_json_member(object, key);
+    if (!v || *v != '"' || cap == 0) return -1;
+    const char *end = v + 1;
+    while (*end && *end != '"') {
+        if (*end == '\\') return -1; /* model_type never needs escapes */
+        end++;
+    }
+    size_t n = (size_t)(end - (v + 1));
+    if (*end != '"' || n >= cap) return -1;
+    memcpy(out, v + 1, n); out[n] = 0;
+    return 0;
+}
+
 static LMB_UNUSED int lmb_shape_from_config(const char *model_dir,
                                             LmbModelShape *out) {
     memset(out, 0, sizeof *out);
@@ -206,6 +272,19 @@ static LMB_UNUSED int lmb_shape_from_config(const char *model_dir,
     fclose(f);
     buf[n] = 0;
 
+    if (lmb_json_string(buf, "model_type", out->model_type,
+                        sizeof out->model_type)) return -1;
+    const LmbModelFamily *fam = lmb_family_for(out->model_type);
+    if (!fam) return -1;
+    snprintf(out->segment_id, sizeof out->segment_id, "%s", fam->segment_id);
+
+    const char *cfg = buf;
+    if (!strcmp(fam->config_section, "text_config")) {
+        const char *nested = lmb_json_member(buf, "text_config");
+        /* Text-only exports put their text fields at the root. Vision wrappers
+         * must provide a real text_config object. */
+        if (nested && *nested == '{') cfg = nested;
+    }
     struct { const char *key; uint32_t *slot; } nums[] = {
         { "num_hidden_layers",    &out->layers },
         { "hidden_size",          &out->hidden },
@@ -219,28 +298,14 @@ static LMB_UNUSED int lmb_shape_from_config(const char *model_dir,
         { "vocab_size",           &out->vocab },
     };
     for (size_t i = 0; i < sizeof nums / sizeof *nums; i++) {
-        char needle[64];
-        snprintf(needle, sizeof needle, "\"%s\"", nums[i].key);
-        const char *at = strstr(buf, needle);
-        if (!at) continue;
-        at = strchr(at + strlen(needle), ':');
-        if (!at) continue;
-        long v = strtol(at + 1, NULL, 10);
-        if (v > 0 && !*nums[i].slot) *nums[i].slot = (uint32_t)v;
+        uint32_t v = 0;
+        if (!lmb_json_u32(cfg, nums[i].key, &v) && !*nums[i].slot)
+            *nums[i].slot = v;
     }
-    const char *mt = strstr(buf, "\"model_type\"");
-    if (mt && (mt = strchr(mt + 12, '"')) && *++mt) {
-        size_t len = strcspn(mt, "\"");
-        if (len < sizeof out->model_type)
-            memcpy(out->model_type, mt, len);
-    }
-    const LmbModelFamily *fam = lmb_family_for(out->model_type);
-    if (fam) snprintf(out->segment_id, sizeof out->segment_id, "%s",
-                      fam->segment_id);
     /* Quantisation is not in config.json for every family, so it is declared
      * per family rather than guessed: fp4 for V4, bf16 elsewhere until a
      * checkpoint of that family says otherwise. */
-    out->bits_per_weight = !strcmp(out->model_type, "deepseek_v4") ? 4 : 16;
+    out->bits_per_weight = !strcmp(fam->segment_id, "deepseek_v4") ? 4 : 16;
     if (!out->kv_heads) out->kv_heads = out->heads;
     /* Not every family names the expert width separately. OLMoE routes every
      * layer and its experts are `intermediate_size` wide, so a checkpoint
@@ -249,6 +314,12 @@ static LMB_UNUSED int lmb_shape_from_config(const char *model_dir,
      * in the working set and make disk mode indistinguishable from resident. */
     if (out->experts && !out->moe_intermediate)
         out->moe_intermediate = out->intermediate;
+    /* The current formula is verified only for the two fixtures against which
+     * it was written. Other adapters remain visible through the family table,
+     * but cannot produce a fit decision until their adapter-specific sizing
+     * callback lands. This is preferable to a confident under-allocation. */
+    out->sizing_verified = !strcmp(fam->segment_id, "olmoe") ||
+                           !strcmp(fam->segment_id, "deepseek_v4");
     return out->layers && out->hidden ? 0 : -1;
 }
 

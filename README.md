@@ -472,16 +472,16 @@ have their own scripts (`assign_test.sh`, `concurrency_test.sh`,
 `make test-cas test-key-rotation test-hedge test-relay-exec` and
 `make test-segment-v2 test-segment-discovery test-segment-direct-real`.
 Segment discovery checks leases, route generations, replicas, draining,
-compatibility and the asynchronous snapshot. The direct gate runs all six tiny
-families through real TCP executors, matches independent Colibri token oracles,
+compatibility and the asynchronous snapshot. The direct gate runs six
+fixture-backed families through real TCP executors, matches independent Colibri token oracles,
 drives sampled persistent TUI turns, overlaps sessions, and proves rarest-first
 automatic range replacement. The same target also forces Segment through a
 relay-only NAT topology, kills a selected executor to require checkpoint
 restore/replay, and launches the ordinary `serve` + `chat` UX without a public
 data address. Relay EXEC needs
 an OLMoE engine source under `ENGINE`; its script reports `SKIP` explicitly
-when that external checkout is absent. Every claim in this README has a script
-behind it.
+when that external checkout is absent. GLM-5.3 and Qwen3.8 remain experimental
+until they pass the same real-checkpoint conformance matrix.
 
 ## How it compares
 

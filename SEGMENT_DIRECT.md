@@ -7,10 +7,13 @@ chain of layer-aligned peers:
 prompt -> local Edge -> peer A [0:k] -> peer B [k:n] -> local Edge -> token
 ```
 
-The implementation is model-neutral. The release gate runs the same direct
-TCP path for GLM, Inkling, Kimi K3, OLMoE, Qwen3.6 and DeepSeek V4. Every
-family is split over two peers and three generated token IDs are compared with
-its independent Colibri tiny-model oracle. The gate also overlaps two OLMoE
+The registry is model-neutral and mirrors all eight adapters currently exposed
+by Colibri: GLM, GLM-5.3, Inkling, Kimi, OLMoE, Qwen3.6, Qwen3.8 and DeepSeek
+V4. Registration is not the same as conformance: the legacy real-checkpoint
+release gate covers GLM, Inkling, Kimi K3, OLMoE, Qwen3.6 and DeepSeek V4;
+GLM-5.3 and Qwen3.8 remain experimental until their fixture runs pass the same
+gate. Each gated family is split over two peers and its generated token IDs
+are compared with an independent Colibri oracle. The gate also overlaps two OLMoE
 chats against the same executors to exercise real session isolation, and
 retransmits a committed run to prove the cached duplicate response is exact.
 
@@ -43,8 +46,9 @@ make ENGINE=/path/to/colibri/c
 
 When the two additive ABI headers exist, ordinary `make` includes
 `segment_node` and `segment_chat`; older Colibri release trees keep the legacy
-build. `segment-edge-library` contains both public runtimes and all six
-adapters, and is not linked into ordinary Colibri executables.
+build. `segment-edge-library` contains both public runtimes and every adapter
+exposed by the selected Colibri checkout, and is not linked into ordinary
+Colibri executables.
 
 ## Normal use
 
@@ -136,7 +140,7 @@ relay with the same idempotent request ID.
 
 ## Sampling and recovery
 
-Colibri Edge ABI v2 exposes the full logits for all six adapters. The ordinary
+Colibri Edge ABI v2 exposes the full logits for the conforming adapters. The ordinary
 TUI's temperature and top-p are therefore honored on the Segment path. A zero
 temperature calls Colibri's original greedy selector unchanged; a positive
 temperature uses deterministic-seedable nucleus sampling (`--seed` or
@@ -203,6 +207,6 @@ the oracle again.
 - One chatter process hosts one active Edge model. This also respects Qwen's
   currently process-global tokenizer state.
 
-These are roadmap items, not hidden fallbacks. The completed milestone proves
-one RTT per segment, sampled multi-session generation, NAT reachability and
-checkpoint/replay over the network for every current model family.
+These are roadmap items, not hidden fallbacks. Existing gates prove the common
+Segment path and the explicitly exercised adapters; they do not yet prove a
+real two-machine LAN, disk mode, or conformance of every current family.

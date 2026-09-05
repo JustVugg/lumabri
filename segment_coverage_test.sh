@@ -87,7 +87,8 @@ print(','.join(map(str,json.loads(lines[-1])['token_ids'])) if lines else '')
 PY
 )
 [[ -n "$ids" ]] || fail "a complete chain produced no tokens"
-grep -qE "cov-0.*cov-2.*cov-1|Segment route" "$TMP/whole.log" ||
-    echo "  (note: the route line was not in the expected form; tokens were produced)"
+grep -qE "cov-0\[0:6\].*cov-2\[6:10\].*cov-1\[10:16\]" \
+    "$TMP/whole.json" "$TMP/whole.log" ||
+    fail "the complete-chain run produced tokens without proving that the exact 0:16 Segment route served them"
 
 echo "SEGMENT COVERAGE TEST: PASS (a gap in the chain never silently answers)"
