@@ -154,7 +154,7 @@ def main():
         chat.send("/he")
         until(lambda: chat.has("List chat commands"), message="slash suggestions did not appear")
         chat.send("\t\n")
-        until(lambda: chat.has("Tab completa i comandi"), message="slash completion did not execute help")
+        until(lambda: chat.has("Tab completes commands"), message="slash completion did not execute help")
         chat.send("hi\n")
         until(lambda: chat.has("tok/s") or chat.p.poll() is not None, seconds=120,
               message="real model did not finish a response")

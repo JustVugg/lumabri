@@ -159,7 +159,7 @@ fencing are both required during a network partition.
 
 ## Conformance coverage
 
-`test_segment_v2.c` and `test_segment_discovery.c` run the same contracts
+`tests/c/test_segment_v2.c` and `tests/c/test_segment_discovery.c` run the same contracts
 against representative tiny schemas
 for:
 

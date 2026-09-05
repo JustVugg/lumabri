@@ -44,10 +44,10 @@ OUT=$(printf 'ciao mondo\n/reset\nancora\n/quit\n' | \
       ./lumabri chat --local "$T/model" --engine "$T/framed" --plain --max-new 16 2>&1)
 echo "$OUT" | grep -q "ciao mondo" || { echo "   the reply never reached the user"; echo "$OUT"; exit 1; }
 echo "$OUT" | grep -q "4.2 tok/s"  || { echo "   STAT was not read back"; echo "$OUT"; exit 1; }
-echo "$OUT" | grep -q "2.8 GB residenti" || { echo "   STAT rss missing"; echo "$OUT"; exit 1; }
-echo "$OUT" | grep -q "nuova conversazione" || { echo "   /reset did not round-trip"; echo "$OUT"; exit 1; }
+echo "$OUT" | grep -q "2.8 GB resident" || { echo "   STAT rss missing"; echo "$OUT"; exit 1; }
+echo "$OUT" | grep -q "new conversation" || { echo "   /reset did not round-trip"; echo "$OUT"; exit 1; }
 echo "$OUT" | grep -q "ancora" || { echo "   the turn after /reset was lost"; echo "$OUT"; exit 1; }
-echo "$OUT" | grep -q "disco locale" || { echo "   --local not honoured"; echo "$OUT"; exit 1; }
+echo "$OUT" | grep -q "local disk" || { echo "   --local not honoured"; echo "$OUT"; exit 1; }
 echo "   ✓ two turns and a reset, streamed, with the engine's own numbers"
 
 echo "· 2) line dialect (olmoe) still works"
@@ -78,7 +78,7 @@ OUT=$(printf '/quit\n' | ./lumabri chat --local "$T/model" --engine "$T/dead" --
 RC=$?
 set -e
 [ "$RC" -ne 0 ] || { echo "   a dead engine reported success"; exit 1; }
-echo "$OUT" | grep -q "codice 42" || { echo "   the exit code was swallowed"; echo "$OUT"; exit 1; }
+echo "$OUT" | grep -q "code 42" || { echo "   the exit code was swallowed"; echo "$OUT"; exit 1; }
 echo "$OUT" | grep -q "unsupported quantization" || {
     echo "   the engine's own error was swallowed — the bug this test exists for"
     echo "$OUT"; exit 1; }

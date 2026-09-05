@@ -974,17 +974,17 @@ static LMB_MAYBE_UNUSED int lumi_layer_on(int layer) {
     int patience = lmb_env_int("LUMABRI_SWARM_PATIENCE_S", 600, 2, 86400);
     for (int waited = 0; waited < patience; waited += 2) {
         if (waited % 30 == 0)
-            fprintf(stderr, "[lumabri] layer %d: nessun esecutore per i suoi "
-                            "esperti — aspetto lo sciame (%d/%d s), non li "
-                            "eseguo in locale\n", layer, waited, patience);
+            fprintf(stderr, "[lumabri] layer %d: no executor for its "
+                            "experts — waiting for the swarm (%d/%d s), "
+                            "without local execution\n", layer, waited, patience);
         sleep(2);
         if (L.discovery) { lumi_discover(); lumi_relay_coverage(); }
         lumi_enable_if_complete();
         if (lumi_layer_covered(layer)) return 1;
     }
     char why[160];
-    snprintf(why, sizeof why, "layer %d: nessun esecutore per %d s; non scarico "
-             "gli esperti in locale, la risposta si ferma qui", layer, patience);
+    snprintf(why, sizeof why, "layer %d: no executor for %d s; not downloading "
+             "expert weights locally, stopping the response", layer, patience);
     lumi_die(why);
     return 0;
 }
@@ -1342,9 +1342,9 @@ static void lumi_demote_layer(int layer, int waited) {
         L.demote_until[layer] = now + (double)(L.demote_s > 0 ? L.demote_s : 120);
     L.swarm_sick_until = now + (double)(L.demote_s > 0 ? L.demote_s : 120);
     L.demotions++;
-    fprintf(stderr, "[lumabri] layer %d: nessuna replica viva dopo %d s — "
-                    "eseguo questo layer in locale dal mirror per %d s, poi "
-                    "ritento lo sciame\n",
+    fprintf(stderr, "[lumabri] layer %d: no live replica after %d s — "
+                    "executing this layer locally from the mirror for %d s, then "
+                    "retrying the swarm\n",
             layer, waited, L.demote_s > 0 ? L.demote_s : 120);
 }
 
@@ -1404,8 +1404,8 @@ static float *lumi_exec_retry(int layer, int eid, const float *x, int D, int nr,
             else if (lumi_now() < L.swarm_sick_until) wait_limit = 0;
             if (waited < wait_limit) {
                 if (!waited || (swarm_fed && waited % 30 == 0))
-                    fprintf(stderr, "[lumabri] layer %d expert %d: nessuna replica "
-                            "viva — aspetto che torni (%d/%d s)\n",
+                    fprintf(stderr, "[lumabri] layer %d expert %d: no live replica "
+                            "— waiting for one to return (%d/%d s)\n",
                             layer, eid, waited, wait_limit);
                 tried = 0;                    /* a returning peer deserves a retry */
                 sleep(2);
@@ -1421,9 +1421,9 @@ static float *lumi_exec_retry(int layer, int eid, const float *x, int D, int nr,
             }
             if (swarm_fed) {
                 char why[200];
-                snprintf(why, sizeof why, "layer %d expert %d: nessun esecutore "
-                         "raggiungibile per %d s; non scarico gli esperti in "
-                         "locale, la risposta si ferma qui", layer, eid, waited);
+                snprintf(why, sizeof why, "layer %d expert %d: no executor "
+                         "reachable for %d s; not downloading expert weights "
+                         "locally, stopping the response", layer, eid, waited);
                 lumi_die(why);
             }
             lumi_demote_layer(layer, waited);

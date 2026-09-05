@@ -49,7 +49,7 @@
 #include "lumabri_proto.h"
 #include "lumabri_families.h"
 #include "lumabri_cluster.h"
-#include "lumabri_tui.h"
+#include "src/ui/lumabri_tui.h"
 #include "lumabri_machine.h"
 
 #ifdef __linux__
@@ -684,10 +684,10 @@ static int cmd_serve(int argc, char **argv) {
         char probe[1200];
         snprintf(probe, sizeof probe, "%s/config.json", model);
         if (!disk_donor && access(probe, R_OK)) {
-            fprintf(stderr, "%s%s non contiene config.json — non e' una "
-                            "directory di modello%s\n"
-                            "  (se il modello e' in una sottocartella, punta "
-                            "li: --model %s/<sottocartella>)\n",
+            fprintf(stderr, "%s%s does not contain config.json — not a "
+                            "model directory%s\n"
+                            "  (if the model is in a subdirectory, use "
+                            "--model %s/<subdirectory>)\n",
                     C_RED, model, C_R, model);
             return 2;
         }
@@ -697,7 +697,7 @@ static int cmd_serve(int argc, char **argv) {
     if (!advertise && machine_public_ipv4(auto_advertise,
                                            sizeof auto_advertise) == 0) {
         advertise = auto_advertise;
-        printf("  %srete: pubblico automaticamente %s%s\n",
+        printf("  %snetwork: automatically advertising %s%s\n",
                C_DIM, advertise, C_R);
     }
 
@@ -732,8 +732,8 @@ static int cmd_serve(int argc, char **argv) {
     if (!disk_donor && !no_exec && node && access(exec_bin, X_OK) == 0)
         exec_estimate = expert_executor_ram_estimate(model, mtype, cache_slots);
     if (exec_estimate && segment_available) {
-        printf("  %sl'esecutore di esperti crescera' fino a ~%.1f GB "
-               "(--exec-cache %d): li tolgo dal budget Segment%s\n", C_DIM,
+        printf("  %sthe expert executor may grow to ~%.1f GB "
+               "(--exec-cache %d): reserving this outside the Segment budget%s\n", C_DIM,
                (double)exec_estimate / 1e9, cache_slots, C_R);
         segment_available = segment_available > exec_estimate
                           ? segment_available - exec_estimate : 1;
@@ -745,9 +745,9 @@ static int cmd_serve(int argc, char **argv) {
     if (!segment_candidate && !disk_donor && !no_exec && segment_engine &&
         segment_model && access(segment_bin, X_OK) == 0 && segment_available &&
         segment_available < segment_min_free)
-        printf("  %sSegment automatico non avviato: %.1f GB RAM disponibili, "
-               "il governor ne richiede %.1f. Storage ed expert restano "
-               "disponibili.%s\n", C_DIM,
+        printf("  %sAutomatic Segment startup skipped: %.1f GB RAM available, "
+               "the governor requires %.1f. Storage and experts remain "
+               "available.%s\n", C_DIM,
                (double)segment_available / 1e9,
                (double)segment_min_free / 1e9, C_R);
 
@@ -763,14 +763,14 @@ static int cmd_serve(int argc, char **argv) {
             lease_owner, sizeof lease_owner);
         if (g_compute_lease_fd < 0) {
             if (errno == EWOULDBLOCK || errno == EAGAIN)
-                printf("  %sdono calcolo gia' attivo su questa macchina%s%s%s; "
-                       "questo processo offre soltanto storage%s\n", C_DIM,
+                printf("  %scompute sharing is already active on this machine%s%s%s; "
+                       "this process offers storage only%s\n", C_DIM,
                        lease_owner[0] ? " (" : "",
                        lease_owner[0] ? lease_owner : "",
                        lease_owner[0] ? ")" : "", C_R);
             else
-                printf("  %slease RAM del donor non disponibile: %s; "
-                       "questo processo offre soltanto storage%s\n",
+                printf("  %sdonor RAM lease unavailable: %s; "
+                       "this process offers storage only%s\n",
                        C_DIM, strerror(errno), C_R);
             no_exec = 1;
             segment_candidate = 0;
@@ -822,7 +822,7 @@ static int cmd_serve(int argc, char **argv) {
             if (kf) fclose(kf);
         }
         targv[t] = NULL;
-        spawn_tracked(targv, "il tracker");
+        spawn_tracked(targv, "the tracker");
         usleep(300 * 1000);
     }
     char storage_name[64];
@@ -847,7 +847,7 @@ static int cmd_serve(int argc, char **argv) {
         margv[a++] = "--advertise"; margv[a++] = madv;
     }
     margv[a] = NULL;
-    spawn_tracked(margv, "il maintainer");
+    spawn_tracked(margv, "the maintainer");
 
     /* The bootstrap executor: when the model family has an expert node
      * build, serve also runs one on the whole model with an SSD-streaming
@@ -858,11 +858,11 @@ static int cmd_serve(int argc, char **argv) {
     /* one node binary per engine family — they do not share an expert shape */
     int with_exec = 0;
     if (!no_exec && !disk_donor && !node && mtype[0])
-        printf("  %sfase 2 non disponibile per il motore %s: questo server "
-               "serve i byte, gli esperti li esegue il chatter%s\n",
+        printf("  %sphase 2 unavailable for engine %s: this server "
+               "serves weights; the chatter executes experts%s\n",
                C_DIM, mtype, C_R);
     if (!no_exec && !disk_donor && node && access(exec_bin, X_OK))
-        printf("  %s%s non è compilato: nessun esperto eseguito qui "
+        printf("  %s%s is not built: no experts execute here "
                "(make %s ENGINE=/path/to/colibri/c)%s\n", C_DIM, node, node, C_R);
     if (!no_exec && !disk_donor && node && access(exec_bin, X_OK) == 0) {
         char eport[16], cachestr[16], ename[64];
@@ -884,7 +884,7 @@ static int cmd_serve(int argc, char **argv) {
             eargv[a++] = "--advertise"; eargv[a++] = eadv;
         }
         eargv[a] = NULL;
-        spawn_tracked(eargv, "l'esecutore di esperti");
+        spawn_tracked(eargv, "the expert executor");
         with_exec = 1;
     }
     /* The node opens its port only after loading the dense side, which on a
@@ -892,9 +892,9 @@ static int cmd_serve(int argc, char **argv) {
      * executor and concludes phase 2 is impossible — so say it, rather than
      * let someone race their own server and blame the swarm. */
     if (with_exec)
-        printf("  %sl'esecutore sta caricando il modello: la porta %d si apre "
-               "quando ha finito. Un chatter che si collega prima non lo "
-               "trovera' e scarichera' gli esperti.%s\n",
+        printf("  %sthe executor is loading the model: port %d opens "
+               "when loading finishes. A chatter connecting earlier will not "
+               "find it and will download expert weights.%s\n",
                C_DIM, port + 2, C_R);
 
     /* Segment bootstrap: the origin publishes complete stateful coverage in
@@ -995,8 +995,8 @@ static int cmd_serve(int argc, char **argv) {
             sargv[a++] = "--advertise";    sargv[a++] = sadv;
             sargv[a] = NULL;
             char slog[1200];
-            spawn_tracked_logged(sargv, join ? "l'esecutore Segment peer"
-                                             : "l'esecutore Segment origin",
+            spawn_tracked_logged(sargv, join ? "the Segment peer executor"
+                                             : "the Segment origin executor",
                                  donor_log_path(sname, slog, sizeof slog));
             with_segment++;
         }
@@ -1007,23 +1007,23 @@ static int cmd_serve(int argc, char **argv) {
                serve_profile.isa, serve_profile.ram_available_bytes / 1e9,
                serve_profile.ram_total_bytes / 1e9, serve_profile.gpu_count,
                serve_profile.gpu_count ? " detected" : "", C_R);
-        printf("  %sSegment prepara %d fette layer-aligned sulle porte %d-%d "
-               "(%ld CPU, %.1f GB RAM disponibili, %d thread e %d sessioni/fetta). "
+        printf("  %sSegment is preparing %d layer-aligned slices on ports %d-%d "
+               "(%ld CPUs, %.1f GB RAM available, %d threads and %d sessions/slice). "
                "%s%s%s\n",
                C_DIM, chunks, port + 3, port + 2 + chunks, cores, ram_gb,
-               slice_threads, sessions, join ? "Sono peer ordinari; " :
-               "Sono il fallback sostituibile; ",
-               advertise ? "data plane diretto con relay di sicurezza. " :
-                           "data plane relay (nessuna porta pubblica richiesta). ",
+               slice_threads, sessions, join ? "Ordinary peers; " :
+               "Replaceable fallback peers; ",
+               advertise ? "direct data plane with relay fallback. " :
+                           "relay data plane (no public port required). ",
                C_R);
         /* Their diagnostics belong in one file per slice: N unbuffered
          * writers on one terminal shred each other's lines exactly when
          * something has gone wrong and the line matters most. */
-        printf("  %slog delle fette: %s/.lumabri/logs/%s-segment-*.log · "
+        printf("  %sslice logs: %s/.lumabri/logs/%s-segment-*.log · "
                "%s%s\n",
                C_DIM, home, host_base,
-               advertise ? "apri le porte Segment sul firewall per il P2P diretto"
-                         : "relay NAT attivo: non serve aprire le porte Segment",
+               advertise ? "allow Segment ports through the firewall for direct P2P"
+                         : "NAT relay active: no need to open Segment ports",
                C_R);
     }
     signal(SIGINT, on_sigint);
@@ -1031,17 +1031,17 @@ static int cmd_serve(int argc, char **argv) {
 
     printf("\n%sserving%s %s %s(host %s · tracker %s%s)%s\n", C_GRN, C_R,
            model, C_DIM, host_base, taddr,
-           with_segment ? " · Segment origin attivo" :
+           with_segment ? " · Segment origin active" :
            (with_exec ? " · executing experts for the swarm" : ""), C_R);
     /* Without --advertise every local peer uses its signed outbound tracker
      * tunnel for READ/EXEC/Segment. It works through NAT with no open data
      * ports, while --advertise retains the lower-latency direct preference. */
     if (!advertise && !join)
-        printf("%s⚠ nessun --advertise: i chatter remoti useranno il relay del "
-               "tracker per READ, EXEC e Segment.%s\n"
-               "%s  Funziona anche dietro NAT, ma aggiunge un hop e carica il "
-               "tracker; --advertise abilita il P2P diretto.%s\n"
-               "%s  Per il percorso diretto: lumabri serve --model %s --advertise <ip-pubblico>%s\n",
+        printf("%s⚠ no --advertise: remote chatters will use the "
+               "tracker relay for READ, EXEC and Segment.%s\n"
+               "%s  This works behind NAT, but adds a hop and loads the "
+               "tracker; --advertise enables direct P2P.%s\n"
+               "%s  For direct connections: lumabri serve --model %s --advertise <public-ip>%s\n",
                C_RED, C_R, C_DIM, C_R, C_DIM, model, C_R);
     printf("%schat from this machine:   lumabri chat%s\n", C_DIM, C_R);
     printf("%schat from another one:    lumabri chat --tracker <this-ip>:%d%s\n\n",
@@ -1061,9 +1061,9 @@ static int cmd_serve(int argc, char **argv) {
              * budget. Restarting it every 5 s would only repeat the refusal
              * (and, before the check existed, reload a slice into a box that
              * is already full). The expert executor and storage stay up. */
-            printf("\n%s%s non parte: la fetta non entra nel budget RAM di "
-                   "questa macchina (vedi il suo log). Non lo riavvio; "
-                   "storage ed esperti restano attivi.%s\n",
+            printf("\n%s%s cannot start: the slice exceeds the RAM budget of "
+                   "this machine (see its log). It will not restart; "
+                   "storage and experts remain active.%s\n",
                    C_RED, g_cwhat[idx], C_R);
             fflush(stdout);
         } else if (idx >= 0 && g_cargv[idx] && !g_stopping) {
@@ -1071,10 +1071,10 @@ static int cmd_serve(int argc, char **argv) {
              * executor gone every chatter falls back to downloading experts
              * and nothing anywhere says why. Name it, and bring it back. */
             if (WIFSIGNALED(status))
-                printf("\n%s⚠ %s e' stato ucciso (segnale %d)%s\n",
+                printf("\n%s⚠ %s was killed (signal %d)%s\n",
                        C_RED, g_cwhat[idx], WTERMSIG(status), C_R);
             else
-                printf("\n%s⚠ %s e' uscito (codice %d)%s\n",
+                printf("\n%s⚠ %s exited (code %d)%s\n",
                        C_RED, g_cwhat[idx], WEXITSTATUS(status), C_R);
             /* Backoff: a child that dies right after starting (OOM, a port
              * taken, a corrupt model) used to be relaunched every 5 s
@@ -1086,8 +1086,8 @@ static int cmd_serve(int argc, char **argv) {
             int delay = 5 << (g_crestarts[idx] < 5 ? g_crestarts[idx] : 5);
             if (delay > 120) delay = 120;
             g_crestarts[idx]++;
-            printf("  %slo riavvio fra %d s — finche' manca, i chatter si "
-                   "scaricano gli esperti invece di farli eseguire%s\n",
+            printf("  %srestarting in %d s — while it is unavailable, chatters "
+                   "download expert weights instead of delegating execution%s\n",
                    C_DIM, delay, C_R);
             fflush(stdout);
             sleep((unsigned)delay);
@@ -1096,7 +1096,7 @@ static int cmd_serve(int argc, char **argv) {
                 ? spawn_argv_logged(g_cargv[idx], NULL, g_clog[idx])
                 : spawn_argv(g_cargv[idx]);
             child_publish(idx, np);
-            printf("  %s%s riavviato%s\n", C_DIM, g_cwhat[idx], C_R);
+            printf("  %s%s restarted%s\n", C_DIM, g_cwhat[idx], C_R);
             fflush(stdout);
             continue;
         }
@@ -1282,8 +1282,8 @@ static void *serve_watch_thread(void *opaque) {
         int n = swarm_detail(watch->tracker, rows, 64);
         if (n < 0) {
             if ((tick++ % 3u) == 0)
-                printf("%s[swarm] tracker non raggiungibile; i nodi continuano "
-                       "a ritentare%s\n", C_DIM, C_R);
+                printf("%s[swarm] tracker unreachable; nodes will keep "
+                       "retrying%s\n", C_DIM, C_R);
             continue;
         }
         int hosts = 0, storage = 0, experts = 0, segments = 0;
@@ -1304,9 +1304,9 @@ static void *serve_watch_thread(void *opaque) {
                       experts != last_experts || segments != last_segments ||
                       calls != last_calls || expert_inflight || segment_inflight;
         if (changed || (++tick % 6u) == 0) {
-            printf("%s[swarm]%s %d nodi collegati · %d storage · %d expert "
-                   "(%llu chiamate, %u attive) · %d Segment "
-                   "(%u sessioni, %u run attive)\n",
+            printf("%s[swarm]%s %d connected nodes · %d storage · %d expert "
+                   "(%llu calls, %u active) · %d Segment "
+                   "(%u sessions, %u run active)\n",
                    C_CORAL, C_R, hosts, storage, experts,
                    (unsigned long long)calls, expert_inflight, segments,
                    sessions, segment_inflight);
@@ -1393,7 +1393,7 @@ static void render_named_swarm(const SwarmDetailRow *rows, int n) {
         experts += !!(rows[i].roles & LMB_SWARM_ROLE_EXPERT);
         segments += !!(rows[i].roles & LMB_SWARM_ROLE_SEGMENT);
     }
-    printf("\n  %s%ssciame live%s  %s%d nodi · %d storage · %d expert · "
+    printf("\n  %s%slive swarm%s  %s%d nodes · %d storage · %d expert · "
            "%d Segment%s\n", C_BOLD, C_CORAL, C_R, C_DIM, n, storage,
            experts, segments, C_R);
     for (int i = 0; i < n; i++) {
@@ -1418,21 +1418,21 @@ static void render_named_swarm(const SwarmDetailRow *rows, int n) {
                 printf(" · %u VRAM-ready (%.1f GB)", row->resident_experts,
                        (double)row->expert_vram_bytes / 1e9);
             else if (row->expert_resident_flags & LMB_EXPERT_DISK_FALLBACK)
-                printf(" · fallback disco");
+                printf(" · disk fallback");
             if (row->have_exec_stats)
-                printf(" · %llu call · %u attive",
+                printf(" · %llu call · %u active",
                        (unsigned long long)row->exec_calls,
                        row->exec_inflight);
             separator = 1;
         }
         if (row->roles & LMB_SWARM_ROLE_SEGMENT) {
             if (separator) printf(" | ");
-            printf("layer %u:%u · sessioni %u/%u · %u attive%s",
+            printf("layer %u:%u · sessions %u/%u · %u active%s",
                    row->layer_begin, row->layer_end,
                    row->active_sessions, row->max_sessions,
                    row->segment_inflight,
                    row->segment_flags & LMB_SEG_ADVERT_RELAY_ONLY
-                       ? " · relay" : " · diretto");
+                       ? " · relay" : " · direct");
         }
         printf(" %s· hb %us%s\n", C_DIM, row->age_s, C_R);
     }
@@ -1453,7 +1453,7 @@ static void render_swarm(const char *tracker) {
     char lines[129][256];
     int nl = 0;
     snprintf(lines[nl++], sizeof lines[0],
-             "%s%sla rete adesso%s  %s%d peer vivi \xc2\xb7 %d exec%s",
+             "%s%snetwork now%s  %s%d live peers \xc2\xb7 %d exec%s",
              C_BOLD, C_CORAL, C_R, C_DIM, n, ne, C_R);
     for (int i = 0; i < n; i++)
         snprintf(lines[nl++], sizeof lines[0],
@@ -1496,14 +1496,14 @@ static void render_swarm(const char *tracker) {
 static void render_experts(const char *tracker) {
     SwarmDetailRow rows[64];
     int n = swarm_detail(tracker, rows, 64);
-    if (n == -1) { printf("  %stracker irraggiungibile%s\n", C_RED, C_R); return; }
+    if (n == -1) { printf("  %stracker unreachable%s\n", C_RED, C_R); return; }
     if (n < 0) {
-        printf("  %sil tracker non espone ancora i contatori nominativi%s\n",
+        printf("  %sthe tracker does not expose named counters yet%s\n",
                C_DIM, C_R); return;
     }
     int shown = 0;
     uint64_t calls = 0;
-    printf("\n  %s%suso degli executor%s\n", C_BOLD, C_CORAL, C_R);
+    printf("\n  %s%sexecutor activity%s\n", C_BOLD, C_CORAL, C_R);
     for (int i = 0; i < n; i++) {
         SwarmDetailRow *row = &rows[i];
         if (!(row->roles & (LMB_SWARM_ROLE_EXPERT |
@@ -1512,31 +1512,31 @@ static void render_experts(const char *tracker) {
         printf("  %s%-28.28s%s  ", C_BOLD, row->name, C_R);
         if (row->roles & LMB_SWARM_ROLE_EXPERT) {
             if (row->have_exec_stats) {
-                printf("%llu chiamate expert · %u in corso",
+                printf("%llu expert calls · %u in flight",
                        (unsigned long long)row->exec_calls,
                        row->exec_inflight);
                 calls += row->exec_calls;
-            } else printf("%u expert · contatore in attesa", row->nexperts);
+            } else printf("%u expert · counter pending", row->nexperts);
             if (row->expert_resident_flags & LMB_EXPERT_RESIDENT_RAM)
-                printf(" · %u residenti RAM (%.1f GB)", row->resident_experts,
+                printf(" · %u RAM-resident (%.1f GB)", row->resident_experts,
                        (double)row->expert_resident_bytes / 1e9);
             else if (row->expert_resident_flags & LMB_EXPERT_RESIDENT_VRAM)
-                printf(" · %u residenti VRAM (%.1f GB)", row->resident_experts,
+                printf(" · %u VRAM-resident (%.1f GB)", row->resident_experts,
                        (double)row->expert_vram_bytes / 1e9);
             else if (row->expert_resident_flags & LMB_EXPERT_DISK_FALLBACK)
-                printf(" · fallback disco");
+                printf(" · disk fallback");
         }
         if (row->roles & LMB_SWARM_ROLE_SEGMENT) {
             if (row->roles & LMB_SWARM_ROLE_EXPERT) printf(" | ");
-            printf("Segment %u:%u · sessioni %u/%u · %u run in corso",
+            printf("Segment %u:%u · sessions %u/%u · %u run in flight",
                    row->layer_begin, row->layer_end,
                    row->active_sessions, row->max_sessions,
                    row->segment_inflight);
         }
         printf("\n");
     }
-    if (!shown) printf("  %snessun executor collegato%s\n", C_DIM, C_R);
-    else printf("  %stotale classico: %llu chiamate expert completate%s\n",
+    if (!shown) printf("  %sno executors connected%s\n", C_DIM, C_R);
+    else printf("  %sclassic total: %llu completed expert calls%s\n",
                 C_DIM, (unsigned long long)calls, C_R);
 }
 
@@ -1681,7 +1681,7 @@ static void *stderr_thread(void *arg) {
  * used to shout over the streamed reply, on demand instead. */
 static void tail_file(const char *path, int max) {
     FILE *f = fopen(path, "r");
-    if (!f) { printf("    %s(niente ancora)%s\n", C_DIM, C_R); return; }
+    if (!f) { printf("    %s(nothing yet)%s\n", C_DIM, C_R); return; }
     char ring[8][256];
     int n = 0;
     if (max > 8) max = 8;
@@ -1697,7 +1697,7 @@ static void tail_file(const char *path, int max) {
     int show = n < max ? n : max;
     for (int i = n - show; i < n; i++)
         printf("    %s\xe2\x94\x82%s %s\n", C_GRAY, C_R, ring[i % 8]);
-    if (!n) printf("    %s(niente ancora)%s\n", C_DIM, C_R);
+    if (!n) printf("    %s(nothing yet)%s\n", C_DIM, C_R);
 }
 
 /* /storage: where the disk went. The mirror is a cache — every byte is
@@ -1734,8 +1734,8 @@ static void render_storage(void) {
     char root[1100];
     snprintf(root, sizeof root, "%s/.lumabri", home);
     DIR *d = opendir(root);
-    if (!d) { printf("  %sniente in %s%s\n", C_DIM, root, C_R); return; }
-    printf("  %sdisco usato da lumabri in %s:%s\n", C_DIM, root, C_R);
+    if (!d) { printf("  %snothing in %s%s\n", C_DIM, root, C_R); return; }
+    printf("  %sLumabri disk usage in %s:%s\n", C_DIM, root, C_R);
     struct dirent *e;
     uint64_t tot = 0;
     while ((e = readdir(d))) {
@@ -1748,35 +1748,35 @@ static void render_storage(void) {
         printf("    %s%-24s%s %8.1f GB\n", C_BOLD, e->d_name, C_R, (double)b / 1e9);
     }
     closedir(d);
-    printf("  %stotale %.1f GB · il mirror è una cache: ogni byte è "
-           "riscaricabile dallo sciame.%s\n"
-           "  %sper liberare un modello:  rm -rf %s/<modello>/cache%s\n",
+    printf("  %stotal %.1f GB · the mirror is a cache: weights can be "
+           "fetched again while their sources remain available.%s\n"
+           "  %sinspect before removing a model cache: %s/<model>/cache%s\n",
            C_DIM, (double)tot / 1e9, C_R, C_DIM, root, C_R);
 }
 
 static void render_debug(void) {
-    printf("  %sultime righe del motore:%s\n", C_DIM, C_R);
+    printf("  %srecent engine output:%s\n", C_DIM, C_R);
     tail_dump(15);
     for (int i = 0; i < g_ndonor_logs; i++) {
         printf("  %s%s%s\n", C_DIM, g_donor_logs[i], C_R);
         tail_file(g_donor_logs[i], 8);
     }
     if (!g_ndonor_logs)
-        printf("  %snessun donatore in questa sessione%s\n", C_DIM, C_R);
+        printf("  %sno donors in this session%s\n", C_DIM, C_R);
 }
 
 static void render_help(void) {
-    printf("\n  %s%scomandi%s\n", C_BOLD, C_CORAL, C_R);
-    printf("  %-12s stato nominativo di host, storage, expert e Segment\n", "/swarm");
-    printf("  %-12s chiamate degli expert e sessioni Segment\n", "/experts");
-    printf("  %-12s alias compatto di /swarm\n", "/hosts");
-    printf("  %-12s elenca o cambia il modello\n", "/model");
-    printf("  %-12s diagnostica del motore e dei donor\n", "/debug");
-    printf("  %-12s spazio occupato da mirror e CAS\n", "/storage");
-    printf("  %-12s nuova conversazione\n", "/reset");
-    printf("  %-12s chiude la chat\n", "/quit");
-    printf("  %sTab completa i comandi. Durante l'inferenza puoi aprire questi "
-           "pannelli o preparare il prompt successivo.%s\n", C_DIM, C_R);
+    printf("\n  %s%scommands%s\n", C_BOLD, C_CORAL, C_R);
+    printf("  %-12s named host, storage, expert and Segment status\n", "/swarm");
+    printf("  %-12s expert calls and Segment sessions\n", "/experts");
+    printf("  %-12s compact alias for /swarm\n", "/hosts");
+    printf("  %-12s list or switch models (hosted: current model only)\n", "/model");
+    printf("  %-12s engine and donor diagnostics\n", "/debug");
+    printf("  %-12s mirror and CAS disk usage\n", "/storage");
+    printf("  %-12s new conversation\n", "/reset");
+    printf("  %-12s close chat\n", "/quit");
+    printf("  %sTab completes commands. During inference you can open these "
+           "panels or prepare your next prompt.%s\n", C_DIM, C_R);
 }
 
 static int le_prev(const char *s, int pos);
@@ -1837,7 +1837,7 @@ static void live_draw_locked(void) {
     printf("%s", C_R);
     printf("\x1b[%d;1H\x1b[2K %s\xe2\x9c\xa6%s %.*s", g_live.rows - 1,
            C_CORAL, C_R, width > 8 ? width - 8 : 12,
-           g_live.phase[0] ? g_live.phase : "elaborazione");
+           g_live.phase[0] ? g_live.phase : "processing");
     if (g_live.swarm[0])
         printf(" %s\xc2\xb7 %.*s%s", C_DIM, width > 40 ? width / 2 : 12,
                g_live.swarm, C_R);
@@ -1937,7 +1937,7 @@ static int live_immediate_command_locked(const char *command) {
            g_live.rows, g_live.rows - 3);
     g_live.output_col = 0;
     live_clear_input_locked();
-    snprintf(g_live.notice, sizeof g_live.notice, "inferenza ancora attiva");
+    snprintf(g_live.notice, sizeof g_live.notice, "inference still running");
     live_draw_locked();
     return 1;
 }
@@ -1949,11 +1949,11 @@ static void live_submit_input_locked(void) {
         snprintf(g_live.pending, sizeof g_live.pending, "%s", g_live.input);
         g_live.pending_ready = 1;
         snprintf(g_live.notice, sizeof g_live.notice,
-                 g_live.input[0] == '/' ? "comando in coda" :
-                                          "prompt successivo pronto");
+                 g_live.input[0] == '/' ? "command queued" :
+                                          "next prompt ready");
     } else {
         snprintf(g_live.notice, sizeof g_live.notice,
-                 "c'e' gia' un prompt in coda");
+                 "a prompt is already queued");
     }
     live_clear_input_locked();
     live_draw_locked();
@@ -2025,7 +2025,7 @@ static void *live_input_thread(void *unused) {
             live_complete_locked(); live_draw_locked();
         } else if (c == 3) {
             snprintf(g_live.notice, sizeof g_live.notice,
-                     "interrompo l'inferenza ed esco");
+                     "stopping inference and exiting");
             live_draw_locked();
             live_release_terminal_locked();
             on_sigint(SIGINT);
@@ -2033,7 +2033,7 @@ static void *live_input_thread(void *unused) {
             live_suspend_locked();
         } else if (c == 28) {
             snprintf(g_live.notice, sizeof g_live.notice,
-                     "SIGQUIT: interrompo l'inferenza ed esco");
+                     "SIGQUIT: stopping inference and exiting");
             live_draw_locked();
             live_release_terminal_locked();
             /* ISIG is disabled only while this worker owns the terminal; emit
@@ -2122,13 +2122,13 @@ static void *live_swarm_thread(void *arg) {
         }
         char text[200];
         if (calls)
-            snprintf(text, sizeof text, "expert %llu chiamate · %llu%% ai donor · %.24s",
+            snprintf(text, sizeof text, "expert %llu calls · %llu%% to donors · %.24s",
                      calls, 100 * donor_calls / calls, top_name);
         else
-            snprintf(text, sizeof text, "expert 0 chiamate finora");
+            snprintf(text, sizeof text, "expert 0 calls so far");
         if (bytes)
             snprintf(text + strlen(text), sizeof text - strlen(text),
-                     " · disco %.0f MB serviti", (double)bytes / 1e6);
+                     " · disk %.0f MB served", (double)bytes / 1e6);
         pthread_mutex_lock(&g_live.lock);
         snprintf(g_live.swarm, sizeof g_live.swarm, "%s", text);
         live_draw_locked();
@@ -2235,7 +2235,7 @@ static void wait_dense_ready(void) {
     g_eng.booting = 1; g_eng.spinning = 1;
     pthread_t sp;
     int spun = g_tty && pthread_create(&sp, NULL, spinner_thread,
-                                       (void *)"parte densa nel mirror") == 0;
+                                       (void *)"dense weights in mirror") == 0;
     double last_mb = g_eng.dense_mb, last_move = nowd();
     while (!g_eng.dense_ready) {
         usleep(200 * 1000);
@@ -2246,11 +2246,11 @@ static void wait_dense_ready(void) {
     if (spun) pthread_join(sp, NULL);
     g_eng.booting = 0;
     if (g_eng.dense_ready == 1)
-        printf("  %s\xe2\x9c\x93 parte densa nel mirror: %.2f GB%s\n", C_DIM,
+        printf("  %s\xe2\x9c\x93 dense weights in mirror: %.2f GB%s\n", C_DIM,
                g_eng.dense_total_mb / 1000.0, C_R);
     else
-        printf("  %s\xe2\x9a\xa0 parte densa incompleta (%.2f/%.2f GB): il motore "
-               "scarica il resto al primo uso%s\n", C_DIM,
+        printf("  %s\xe2\x9a\xa0 dense weights incomplete (%.2f/%.2f GB): the engine "
+               "downloads the rest on first use%s\n", C_DIM,
                g_eng.dense_mb / 1000.0, g_eng.dense_total_mb / 1000.0, C_R);
 }
 
@@ -2290,7 +2290,7 @@ static void *spinner_thread(void *arg) {
             snprintf(prog, sizeof prog, " %s\xe2\x96\x95%s\xe2\x96\x8f %.2f/%.2f GB \xc2\xb7 %.1f MB/s%s%s",
                      C_DIM, bar, g_eng.dense_mb / 1000.0, g_eng.dense_total_mb / 1000.0,
                      g_eng.dense_rate, eta, C_R);
-            snprintf(what, sizeof what, "parte densa nel mirror");
+            snprintf(what, sizeof what, "dense weights in mirror");
         } else if (g_eng.booting && g_eng.total_gb > 0)
             snprintf(prog, sizeof prog, " %s\xc2\xb7 %.1f/%.0f GB \xc2\xb7 %.0f MB/s%s",
                      C_DIM, got, g_eng.total_gb, g_eng.rate_mbs, C_R);
@@ -2306,9 +2306,9 @@ static void *spinner_thread(void *arg) {
          * the two things that actually explain it */
         if (!stalled && g_eng.booting && g_eng.last_out > 0 &&
             nowd() - g_eng.last_out > 90 && g_eng.rate_mbs < 0.05) {
-            fprintf(stderr, "\r\x1b[2K  %s90s senza un byte n\xc3\xa9 una riga dal motore. "
-                            "Se \xc3\xa8 la prima volta pu\xc3\xb2 essere l'hashing del modello "
-                            "lato server; altrimenti guarda `df -h` e `dmesg | tail`.%s\n",
+            fprintf(stderr, "\r\x1b[2K  %sNo bytes or engine output for 90s. "
+                            "On first use the server may be hashing the model; "
+                            "otherwise check disk space and system logs.%s\n",
                     C_DIM, C_R);
             stalled = 1;
         }
@@ -2653,7 +2653,7 @@ static int stream_serve2(Engine *e, char *statline, size_t scap, char **captured
     for (;;) {
         if (sr_line(&s, line, sizeof line) < 0) { free(cap.p); return -1; }
         if (!strncmp(line, "DATA ", 5)) {
-            live_status("decode · %s", e->segment ? "Segment sullo sciame" :
+            live_status("decode · %s", e->segment ? "Segment in the swarm" :
                                                 "expert/engine");
             char *sp = strchr(line + 5, ' ');            /* DATA <id> <bytes> */
             size_t n = sp ? strtoull(sp + 1, NULL, 10) : 0;
@@ -2677,8 +2677,8 @@ static int stream_serve2(Engine *e, char *statline, size_t scap, char **captured
             if (sscanf(line, "PROGRESS %u %23s %zu %zu %zu",
                        &id, phase, &current, &total, &third) >= 2) {
                 if (!strcmp(phase, "ROUTE"))
-                    live_status("routing · %zu host · %zu segmenti · %s",
-                                current, total, third ? "relay" : "P2P diretto");
+                    live_status("routing · %zu hosts · %zu segments · %s",
+                                current, total, third ? "relay" : "direct P2P");
                 else if (!strcmp(phase, "PREFILL"))
                     live_status("prefill · %zu/%zu token · %s", current, total,
                                 e->segment ? "Segment" : "expert");
@@ -2687,10 +2687,10 @@ static int stream_serve2(Engine *e, char *statline, size_t scap, char **captured
                                 e->segment ? "Segment" : "expert");
                 else if (!strcmp(phase, "FAILOVER")) {
                     const char *peer = strstr(line, "FAILOVER ");
-                    live_status("ripristino Segment · riapro %s",
+                    live_status("Segment recovery · reopening %s",
                                 peer ? peer + strlen("FAILOVER ") : "peer");
                 } else if (!strcmp(phase, "CHECKPOINT"))
-                    live_status("checkpoint KV · %zu token protetti", current);
+                    live_status("KV checkpoint · %zu tokens saved", current);
             }
         }
         /* ACCEPT / EMAP / TIERS / HITS / HWINFO / PROF / other: skip */
@@ -3045,28 +3045,28 @@ static void engine_diag(Engine *e, int booting) {
         e->pid = 0;
         if (WIFSIGNALED(st)) {
             int s = WTERMSIG(st);
-            printf("  %sil motore è stato ucciso dal kernel (segnale %d: %s)%s\n",
+            printf("  %sthe engine was terminated (signal %d: %s)%s\n",
                    C_RED, s, strsignal(s), C_R);
             if (s == SIGKILL)
-                printf("  %squasi sempre è la RAM: `dmesg | grep -i oom` lo conferma. "
-                       "Riduci --ctx e --cap, o prendi una macchina con più memoria.%s\n",
+                printf("  %sCheck system logs for an out-of-memory kill. "
+                       "Try reducing --ctx and --cap, or using more RAM.%s\n",
                        C_DIM, C_R);
         } else if (WIFEXITED(st)) {
             int c = WEXITSTATUS(st);
-            printf("  %sil motore è uscito con codice %d%s\n", C_RED, c, C_R);
+            printf("  %sthe engine exited with code %d%s\n", C_RED, c, C_R);
             if (c == 127)
-                printf("  %sil binario non è partito affatto: libreria mancante? "
-                       "provalo a mano con `ldd`.%s\n", C_DIM, C_R);
+                printf("  %sthe binary did not start: a library may be missing. "
+                       "Check its shared-library dependencies.%s\n", C_DIM, C_R);
         }
     } else if (booting)
-        printf("  %sil motore ha chiuso il suo stdout senza dire di essere pronto%s\n",
+        printf("  %sthe engine closed stdout before reporting readiness%s\n",
                C_RED, C_R);
     else
-        printf("  %sil motore si e' fermato durante la risposta%s\n"
-               "  %sla causa piu' probabile e' un peer sparito: con un solo "
-               "detentore per esperto non c'e' dove ripiegare%s\n",
+        printf("  %sthe engine stopped during the response%s\n"
+               "  %sA peer may have disconnected: with only one "
+               "holder per expert there is no fallback%s\n",
                C_RED, C_R, C_DIM, C_R);
-    printf("  %sultime righe del motore:%s\n", C_DIM, C_R);
+    printf("  %srecent engine output:%s\n", C_DIM, C_R);
     tail_dump(25);
     /* A known fatal line deserves its cure, not just its epitaph. The tail
      * told the truth all along — but nobody reads a truth buried under
@@ -3081,13 +3081,13 @@ static void engine_diag(Engine *e, int booting) {
     }
     pthread_mutex_unlock(&g_eng.lk);
     if (tok_missing || xtml_missing)
-        printf("  %s→ il container non ha un tokenizer.json %s. Il repo HF di "
-               "Kimi K3 non lo distribuisce: va sintetizzato una volta con\n"
+        printf("  %s→ the checkpoint has no tokenizer.json %s. The Kimi K3 HF repository "
+               "does not include it; generate it once with\n"
                "    python3 <colibri>/c/tools/k3_tokenizer.py <model_dir> "
                "-o <model_dir>/tokenizer.json\n"
-               "  su un container locale lumabri lo fa da solo al prossimo "
-               "avvio; su uno sciame deve farlo l'operatore del server.%s\n",
-               C_RED, xtml_missing ? "con i token XTML" : "utilizzabile", C_R);
+               "  For a local checkpoint Lumabri retries this on the next "
+               "startup; for a swarm, the server operator must do it.%s\n",
+               C_RED, xtml_missing ? "with XTML tokens" : "usable", C_R);
 }
 
 static void engine_stop(Engine *e) {
@@ -3656,21 +3656,21 @@ static void disk_preflight(const char *model, uint64_t model_bytes) {
     if (statvfs(cache, &vfs)) return;
     double free_gb = (double)vfs.f_bavail * (double)vfs.f_frsize / 1e9;
     double need_gb = (double)model_bytes / 1e9;
-    printf("  %smirror di %s in %s: %.0f GB liberi. Tiene solo i blocchi che tocchi "
-           "— la parte densa sempre, gli esperti solo se nessun peer li esegue "
-           "(al limite %.0f GB)%s\n",
+    printf("  %smirror for %s in %s: %.0f GB free. Stores only accessed blocks "
+           "— dense weights always, experts when no peer executes them "
+           "(up to %.0f GB)%s\n",
            C_DIM, model, cache, free_gb, need_gb, C_R);
     /* the dense part is the floor; a tenth of the model is a generous guess
      * at it, and below that even a warm phase-2 chatter cannot boot */
     if (free_gb < need_gb * 0.1)
-        printf("  %s⚠ %.0f GB liberi non bastano nemmeno per la parte densa. "
-               "Se il modello è già su questo disco usa `--local DIR`: la chat "
-               "lo legge dov'è, senza copiarne un byte.%s\n",
+        printf("  %s⚠ %.0f GB free may not be enough for dense weights. "
+               "If the model is already on this disk, use `--local DIR`: chat "
+               "reads it in place without copying it.%s\n",
                C_RED, free_gb, C_R);
     else if (free_gb < need_gb)
-        printf("  %snon c'è spazio per il modello intero: va bene finché gli "
-               "esperti girano sui peer, ma se lo sciame si svuota la chat si "
-               "ferma per disco pieno.%s\n", C_DIM, C_R);
+        printf("  %sNot enough space for the full model: this can work while "
+               "peers execute experts, but if they leave, chat may "
+               "stop when the disk fills.%s\n", C_DIM, C_R);
 }
 
 /* ---- the settings a TUI user must never be asked twice -------------------
@@ -3923,16 +3923,16 @@ static int donor_status_line(char *out, size_t cap) {
     if (g_donor_last_at > 0 && now > g_donor_last_at && calls >= g_donor_last_calls)
         rate = (double)(calls - g_donor_last_calls) / (now - g_donor_last_at);
     g_donor_last_calls = calls; g_donor_last_at = now;
-    int len = snprintf(out, cap, "donor: %d esperti", nexperts);
+    int len = snprintf(out, cap, "donor: %d experts", nexperts);
     if (resident)
         len += snprintf(out + len, cap - (size_t)len, " (%llu in RAM, %.1f GB)",
                         (unsigned long long)resident, (double)resident_bytes / 1e9);
-    len += snprintf(out + len, cap - (size_t)len, " \xc2\xb7 %llu chiamate",
+    len += snprintf(out + len, cap - (size_t)len, " \xc2\xb7 %llu calls",
                     (unsigned long long)calls);
     if (rate > 0) len += snprintf(out + len, cap - (size_t)len, " (%.1f/s)", rate);
-    if (inflight) len += snprintf(out + len, cap - (size_t)len, " \xc2\xb7 %llu in corso",
+    if (inflight) len += snprintf(out + len, cap - (size_t)len, " \xc2\xb7 %llu in flight",
                                   (unsigned long long)inflight);
-    if (served) len += snprintf(out + len, cap - (size_t)len, " \xc2\xb7 disco %.1f GB serviti",
+    if (served) len += snprintf(out + len, cap - (size_t)len, " \xc2\xb7 disk %.1f GB served",
                                 (double)served / 1e9);
     return len > 0;
 }
@@ -4169,36 +4169,36 @@ static int prompt_line(char *buf, size_t cap) {
  * value, so the second time this is three keypresses of nothing. */
 static void setup_panel(Cfg *c) {
     char line[1200];
-    printf("  %sa quale sciame ti colleghi?%s\n", C_BOLD, C_R);
+    printf("  %swhich swarm do you want to join?%s\n", C_BOLD, C_R);
     if (c->tracker[0])
-        printf("  %sinvio = %s%s\n", C_DIM, c->tracker, C_R);
+        printf("  %sEnter = %s%s\n", C_DIM, c->tracker, C_R);
     else
-        printf("  %sindirizzo del server, es. 148.251.4.122 (invio = questo "
+        printf("  %sserver address, e.g. 192.168.1.10 (Enter = this "
                "computer)%s\n", C_DIM, C_R);
     printf("\n%s\xe2\x94\x82%s %s%s\xe2\x80\xba%s ", C_GRAY, C_R, C_CORAL, C_BOLD, C_R);
     fflush(stdout);
     if (!prompt_line(line, sizeof line) && line[0]) {
         /* a bare host means the default port: nobody should have to know it */
         if (tracker_addr_set(c->tracker, sizeof c->tracker, line))
-            printf("  %sindirizzo troppo lungo, uso quello salvato%s\n", C_RED, C_R);
+            printf("  %saddress too long; using the saved address%s\n", C_RED, C_R);
     } else if (!c->tracker[0])
         snprintf(c->tracker, sizeof c->tracker, "127.0.0.1:7300");
 
     if (!c->pubkey[0]) {
-        printf("\n  %schiave pubblica dello sciame%s %s(64 caratteri, te la da "
-               "chi lo gestisce)%s\n", C_BOLD, C_R, C_DIM, C_R);
-        printf("  %scon la chiave ogni byte del modello viene verificato; "
-               "invio per saltare e fidarti del server%s\n", C_DIM, C_R);
+        printf("\n  %sswarm public key%s %s(64 characters, provided by "
+               "its operator)%s\n", C_BOLD, C_R, C_DIM, C_R);
+        printf("  %swith the key, every model byte is verified; "
+               "Enter to skip and trust the server%s\n", C_DIM, C_R);
         printf("\n%s\xe2\x94\x82%s %s%s\xe2\x80\xba%s ", C_GRAY, C_R, C_CORAL, C_BOLD, C_R);
         fflush(stdout);
         if (!prompt_line(line, sizeof line) && strlen(line) == 64)
             snprintf(c->pubkey, sizeof c->pubkey, "%s", line);
         else if (line[0])
-            printf("  %snon sono 64 caratteri esadecimali — proseguo senza "
-                   "verifica%s\n", C_DIM, C_R);
+            printf("  %snot 64 hexadecimal characters — continuing without "
+                   "verification%s\n", C_DIM, C_R);
     }
     cfg_save(c);
-    printf("\n  %sricordato in ~/.lumabri/config%s\n\n", C_DIM, C_R);
+    printf("\n  %ssaved in ~/.lumabri/config%s\n\n", C_DIM, C_R);
 }
 
 /* Returns 0 when the user chose, -1 when they quit. `have_model_dir` is
@@ -4236,7 +4236,7 @@ static int role_unknown(const char *arg, char *out, size_t cap) {
         }
         p += n; if (*p) p++;
     }
-    if (!any) { snprintf(out, cap, "%s", "(vuoto)"); return 1; }
+    if (!any) { snprintf(out, cap, "%s", "(empty)"); return 1; }
     return 0;
 }
 
@@ -4258,25 +4258,25 @@ static double spare_ram_gb(void) {
 static int role_pick(Role *r, const char *model, int have_model_dir) {
     double spare = spare_ram_gb();
     int auto_compute = spare >= 2.0;
-    printf("  %scome entri nello sciame?%s\n\n", C_BOLD, C_R);
-    printf("    %s1%s  solo chattare        %snon condividi niente%s\n",
+    printf("  %show do you want to join the swarm?%s\n\n", C_BOLD, C_R);
+    printf("    %s1%s  chat only           %sshare no resources%s\n",
            C_CORAL, C_R, C_DIM, C_R);
-    printf("    %s2%s  chatti e doni disco  %stieni un pezzo di %s per lo sciame%s\n",
+    printf("    %s2%s  chat + share disk   %sstore a slice of %s for the swarm%s\n",
            C_CORAL, C_R, C_DIM, model, C_R);
     if (have_model_dir)
-        printf("    %s3%s  chatti e doni calcolo %sesegui esperti per gli altri%s\n",
+        printf("    %s3%s  chat + share compute %sexecute experts for others%s\n",
                C_CORAL, C_R, C_DIM, C_R);
     else
-        printf("    %s3%s  chatti e doni calcolo %sla tua fetta di esperti "
-               "arriva dallo sciame%s\n", C_CORAL, C_R, C_DIM, C_R);
-    printf("    %s4%s  tutti e due%s\n", C_CORAL, C_R, C_R);
+        printf("    %s3%s  chat + share compute %syour expert slice "
+               "comes from the swarm%s\n", C_CORAL, C_R, C_DIM, C_R);
+    printf("    %s4%s  share both%s\n", C_CORAL, C_R, C_R);
     if (auto_compute)
-        printf("\n  %sinvio = chatti e doni calcolo: %.0f GB di RAM liberi oltre "
-               "la riserva, ogni esperto che tieni rende lo sciame piu' veloce%s\n",
+        printf("\n  %sEnter = chat + share compute: %.0f GB RAM free above "
+               "the reserve; resident experts add serving capacity%s\n",
                C_DIM, spare, C_R);
     else
-        printf("\n  %sinvio = solo chattare (%.1f GB liberi oltre la riserva, "
-               "troppo pochi per tenere esperti)%s\n", C_DIM, spare, C_R);
+        printf("\n  %sEnter = chat only (%.1f GB free above the reserve, "
+               "too little to hold experts)%s\n", C_DIM, spare, C_R);
     printf("\n%s\xe2\x94\x82%s %s%s\xe2\x80\xba%s ", C_GRAY, C_R, C_CORAL, C_BOLD, C_R);
     fflush(stdout);
 
@@ -4297,16 +4297,16 @@ static int role_pick(Role *r, const char *model, int have_model_dir) {
         double suggest = freeg * 0.25;
         if (suggest > 100) suggest = 100;
         if (suggest < 1) suggest = 1;
-        printf("\n  %squanti GB doni? %.0f liberi in %s%s\n",
+        printf("\n  %show many GB will you share? %.0f free in %s%s\n",
                C_DIM, freeg, r->model_dir, C_R);
-        printf("  %sinvio = %.0f GB%s\n", C_DIM, suggest, C_R);
+        printf("  %sEnter = %.0f GB%s\n", C_DIM, suggest, C_R);
         printf("\n%s\xe2\x94\x82%s %s%s\xe2\x80\xba%s ", C_GRAY, C_R, C_CORAL, C_BOLD, C_R);
         fflush(stdout);
         if (prompt_line(line, sizeof line)) return -1;
         r->gb = line[0] ? atof(line) : suggest;
         if (r->gb <= 0) r->gb = suggest;
         if (r->gb > freeg) {
-            printf("  %s%.0f GB non ci stanno: dono %.0f%s\n",
+            printf("  %s%.0f GB will not fit: sharing %.0f%s\n",
                    C_DIM, r->gb, freeg > 1 ? freeg - 1 : 0.0, C_R);
             r->gb = freeg > 1 ? freeg - 1 : 0;
             if (r->gb <= 0) r->disk = 0;
@@ -4503,13 +4503,13 @@ static int role_start_segment(const Role *r, const char *tracker,
             kill(pid, SIGTERM);
             waitpid(pid, &status, 0);
         }
-        printf("  %sla fetta Segment assegnata non entra nel budget RAM; "
-               "passo al donatore di esperti%s\n", C_DIM, C_R);
+        printf("  %sthe assigned Segment slice exceeds the RAM budget; "
+               "switching to expert sharing%s\n", C_DIM, C_R);
         return 0;
     }
     child_publish(g_nchildren++, pid);
-    printf("  %s\xe2\x9c\xa6 eseguo una fetta Segment assegnata dal tracker "
-           "per lo sciame%s %s(priorita' bassa, %d sessioni massime%s)%s\n",
+    printf("  %s\xe2\x9c\xa6 executing a tracker-assigned Segment slice "
+           "for the swarm%s %s(low priority, %d sessions maximum%s)%s\n",
            C_GRN, C_R, C_DIM, sessions,
            relay_only ? ", relay NAT automatico" : ", P2P diretto + relay",
            C_R);
@@ -4529,7 +4529,7 @@ static void role_start(const Role *r, const char *tracker, const char *model,
         snprintf(bin, sizeof bin, "%s/maintainer", dir);
         int port = free_port(7601);   /* clear of the test ranges */
         if (!port || access(bin, X_OK)) {
-            printf("  %snon riesco ad avviare il maintainer: dono disco saltato%s\n",
+            printf("  %scannot start the maintainer: disk sharing skipped%s\n",
                    C_DIM, C_R);
         } else {
             char base[48];
@@ -4556,8 +4556,8 @@ static void role_start(const Role *r, const char *tracker, const char *model,
               pid_t np = spawn_argv_logged(argv, NULL,
                                            donor_log_path(name, lp, sizeof lp));
               if (np > 0) child_publish(g_nchildren++, np); }
-            printf("  %s\xe2\x9c\xa6 dono %.0f GB di %s%s%s%s: il tracker mi assegna "
-                   "i file piu\xcc\x80 rari%s\n",
+            printf("  %s\xe2\x9c\xa6 sharing %.0f GB of %s%s%s%s: the tracker assigns "
+                   "the rarest files%s\n",
                    C_GRN, r->gb, C_R, C_BOLD, model, C_DIM, C_R);
         }
     }
@@ -4569,15 +4569,15 @@ static void role_start(const Role *r, const char *tracker, const char *model,
             model, tracker, lease_owner, sizeof lease_owner);
         if (lease < 0) {
             if (errno == EWOULDBLOCK || errno == EAGAIN)
-                printf("  %sdono calcolo gia' attivo su questa macchina%s%s%s; "
-                       "non avvio un secondo executor che prenoterebbe la "
-                       "stessa RAM%s\n", C_DIM,
+                printf("  %scompute sharing is already active on this machine%s%s%s; "
+                       "not starting another executor that would reserve the "
+                       "same RAM%s\n", C_DIM,
                        lease_owner[0] ? " (" : "",
                        lease_owner[0] ? lease_owner : "",
                        lease_owner[0] ? ")" : "", C_R);
             else
-                printf("  %snon posso acquisire la lease RAM del donor: %s; "
-                       "dono calcolo saltato%s\n", C_DIM, strerror(errno), C_R);
+                printf("  %scannot acquire the donor RAM lease: %s; "
+                       "compute sharing skipped%s\n", C_DIM, strerror(errno), C_R);
         } else {
             g_compute_lease_fd = lease;
             /* Donate what chatters use. The chat runs the expert swarm
@@ -4610,10 +4610,10 @@ static void role_start(const Role *r, const char *tracker, const char *model,
         if (access(shim, R_OK))
             snprintf(shim, sizeof shim, "%s/../lib/lumabri/liblumabri.so", dir);
         if (!node || !port || access(bin, X_OK)) {
-            printf("  %snessun expert node per %s (make engines): dono calcolo "
-                   "saltato%s\n", C_DIM, model_type ? model_type : "?", C_R);
+            printf("  %sno expert node for %s (make engines): compute sharing "
+                   "skipped%s\n", C_DIM, model_type ? model_type : "?", C_R);
         } else if (!local && access(shim, R_OK)) {
-            printf("  %sliblumabri.so mancante (make): dono calcolo saltato%s\n",
+            printf("  %sliblumabri.so mancante (make): compute sharing skipped%s\n",
                    C_DIM, C_R);
         } else {
             /* same mirror the chatter uses: dense blocks are shared, and the
@@ -4673,12 +4673,12 @@ static void role_start(const Role *r, const char *tracker, const char *model,
                                            donor_log_path(name, lp, sizeof lp));
               if (np > 0) child_publish(g_nchildren++, np); }
             if (local)
-                printf("  %s\xe2\x9c\xa6 eseguo esperti per lo sciame%s %s(%s · "
-                       "log in ~/.lumabri/logs, /debug per vederli)%s\n",
+                printf("  %s\xe2\x9c\xa6 executing experts for the swarm%s %s(%s · "
+                       "logs in ~/.lumabri/logs; use /debug to view them)%s\n",
                        C_GRN, C_R, C_DIM, node, C_R);
             else
-                printf("  %s\xe2\x9c\xa6 eseguo esperti per lo sciame%s %s(%s, "
-                       "la fetta assegnata arriva dallo sciame · /debug per i log)%s\n",
+                printf("  %s\xe2\x9c\xa6 executing experts for the swarm%s %s(%s, "
+                       "the assigned slice comes from the swarm · /debug for logs)%s\n",
                        C_GRN, C_R, C_DIM, node, C_R);
             }
             }
@@ -4689,8 +4689,8 @@ static void role_start(const Role *r, const char *tracker, const char *model,
         }
     }
     if (r->disk || r->compute)
-        printf("  %sfinche\xcc\x81 questa chat resta aperta. Per un donatore che "
-               "sopravvive alla sessione: lumabri serve --join%s\n", C_DIM, C_R);
+        printf("  %swhile this chat remains open. For a donor that "
+               "outlives the session: lumabri serve --join%s\n", C_DIM, C_R);
 }
 
 /* Kimi K3's HF repo ships tiktoken.model but no tokenizer.json; the engine
@@ -4705,16 +4705,16 @@ static void kimi_tokenizer_selfheal(const char *model_dir, const char *engines_d
     if (!engines_dir || !engines_dir[0]) return;
     snprintf(tool, sizeof tool, "%s/tools/k3_tokenizer.py", engines_dir);
     if (access(tool, R_OK)) return;
-    printf("  %skimi: il container non ha tokenizer.json — lo sintetizzo con "
+    printf("  %skimi: checkpoint has no tokenizer.json — generating it with "
            "k3_tokenizer.py…%s\n", C_DIM, C_R);
     snprintf(cmd, sizeof cmd, "python3 '%s' '%s' -o '%s' >/dev/null 2>&1",
              tool, model_dir, tok);
     if (system(cmd) == 0 && access(tok, R_OK) == 0)
-        printf("  %s\xe2\x9c\x93 tokenizer.json generato in %s%s\n",
+        printf("  %s\xe2\x9c\x93 tokenizer.json generated in %s%s\n",
                C_DIM, model_dir, C_R);
     else
-        printf("  %s✗ non sono riuscito a generarlo (serve python3). "
-               "Comando manuale:\n    python3 %s %s -o %s%s\n",
+        printf("  %s✗ could not generate it (python3 required). "
+               "Manual command:\n    python3 %s %s -o %s%s\n",
                C_RED, tool, model_dir, tok, C_R);
 }
 
@@ -4727,19 +4727,19 @@ static int model_boot(const char *tracker, const char *model, const char *shim,
     memset(sw, 0, sizeof *sw);
     if (local_dir) {
         local_model_type(local_dir, mtype, sizeof mtype);
-        printf("  %smodello locale %s%s%s%s · niente rete, niente mirror%s\n",
+        printf("  %slocal model %s%s%s%s · no network, no mirror%s\n",
                C_DIM, C_R, C_BOLD, local_dir, C_DIM, C_R);
         const LmbModelFamily *family = lmb_family_for(mtype);
         if (family && !strcmp(family->segment_id, "kimi"))
             kimi_tokenizer_selfheal(local_dir, engines_dir);
     } else {
-        printf("  %schiedo allo sciame chi ha %s…%s\n", C_DIM, model, C_R);
+        printf("  %sasking the swarm who has %s…%s\n", C_DIM, model, C_R);
         if (swarm_inspect(tracker, model, sw)) {
             printf("  %smodel %s: nobody on the swarm has it%s\n", C_RED, model, C_R);
             return -1;
         }
         snprintf(mtype, sizeof mtype, "%s", sw->model_type);
-        printf("  %s%d file · %.0f GB · %d peer · tipo %s%s\n", C_DIM,
+        printf("  %s%d files · %.0f GB · %d peers · type %s%s\n", C_DIM,
                sw->nfiles, (double)sw->total_bytes / 1e9, sw->npeers,
                mtype[0] ? mtype : "?", C_R);
         disk_preflight(model, sw->total_bytes);
@@ -4760,9 +4760,9 @@ static int model_boot(const char *tracker, const char *model, const char *shim,
      * otherwise the expert path starts at once. */
     int executors = local_dir ? -1 : swarm_executors(tracker, model);
     if (executors > 0 && !getenv("LUMABRI_SEGMENT_REQUIRED"))
-        printf("  %s%d esecutor%s di esperti nello sciame: dense e KV restano "
-               "qui, gli esperti girano sui peer%s\n", C_DIM, executors,
-               executors == 1 ? "e" : "i", C_R);
+        printf("  %s%d expert executor%s in the swarm: dense weights and KV stay "
+               "here; experts run on peers%s\n", C_DIM, executors,
+               executors == 1 ? "" : "s", C_R);
     if (!local_dir && !getenv("LUMABRI_NO_SEGMENT") &&
         (executors <= 0 || getenv("LUMABRI_SEGMENT_REQUIRED"))) {
         char self[1024], segment_bin[1200];
@@ -4770,8 +4770,8 @@ static int model_boot(const char *tracker, const char *model, const char *shim,
         snprintf(segment_bin, sizeof segment_bin, "%s/segment_chat", self);
         if (access(segment_bin, X_OK) == 0 &&
             segment_engine_for(mtype) != NULL) {
-            printf("  %snessun esecutore di esperti: provo una catena Segment "
-                   "completa, altrimenti expert/CAS%s\n", C_DIM, C_R);
+            printf("  %sno expert executor: trying a complete Segment chain "
+                   "with expert/CAS fallback if permitted%s\n", C_DIM, C_R);
             if (!segment_engine_spawn(segment_bin, shim, tracker, model,
                                       mtype, ctx, e)) {
                 g_eng.booting = 1;
@@ -4780,7 +4780,7 @@ static int model_boot(const char *tracker, const char *model, const char *shim,
                 pthread_t segment_spinner;
                 if (g_tty)
                     pthread_create(&segment_spinner, NULL, spinner_thread,
-                                   (void *)"cerco segmenti compatibili");
+                                   (void *)"finding compatible segments");
                 double segment_started = nowd();
                 int segment_ready = engine_wait_ready(e);
                 g_eng.spinning = 0;
@@ -4788,8 +4788,8 @@ static int model_boot(const char *tracker, const char *model, const char *shim,
                 g_eng.booting = 0;
                 if (!segment_ready) {
                     e->proto = PROTO_SERVE2;
-                    printf("  %s\xe2\x9c\x93 %s pronto via Segment in %.1fs%s%s "
-                           "\xc2\xb7 Edge nel CAS \xc2\xb7 /swarm /experts /model /debug "
+                    printf("  %s\xe2\x9c\x93 %s ready via Segment in %.1fs%s%s "
+                           "\xc2\xb7 Edge in CAS \xc2\xb7 /swarm /experts /model /debug "
                            "/storage /reset /quit%s\n",
                            C_GRN, model, nowd() - segment_started, C_R,
                            C_DIM, C_R);
@@ -4797,12 +4797,12 @@ static int model_boot(const char *tracker, const char *model, const char *shim,
                 }
                 engine_stop(e);
                 if (getenv("LUMABRI_SEGMENT_REQUIRED")) {
-                    printf("  %sSegment richiesto ma non disponibile%s\n",
+                    printf("  %sSegment required but unavailable%s\n",
                            C_RED, C_R);
                     return -1;
                 }
-                printf("  %snessuna catena Segment completa: continuo con "
-                       "il percorso expert/CAS%s\n", C_DIM, C_R);
+                printf("  %sno complete Segment chain: continuing with "
+                       "the expert/CAS path%s\n", C_DIM, C_R);
             }
         }
     }
@@ -4825,7 +4825,7 @@ static int model_boot(const char *tracker, const char *model, const char *shim,
                C_RED, engine, C_R);
         return -1;
     }
-    printf("  %smotore %s%s\n", C_DIM, engine, C_R);
+    printf("  %sengine %s%s\n", C_DIM, engine, C_R);
     /* The stock engine works and downloads every expert it routes to. On a
      * 299 GB model that is the difference between 12 GB and all of it, and
      * the only sign used to be the absence of a line. If the swarm has
@@ -4844,16 +4844,16 @@ static int model_boot(const char *tracker, const char *model, const char *shim,
         free(eb.p);
         lmb_msg_free(&em);
         if (nexec > 0)
-            printf("\n  %s⚠ questo motore non e' la build P2P: gli esperti li "
-                   "scarichera' invece di farli eseguire%s\n"
-                   "  %sci sono %d peer pronti a eseguirli. Serve %s_p2p, che "
-                   "si costruisce con:  make chatters ENGINE=/path/to/colibri/c%s\n\n",
+            printf("\n  %s⚠ this is not a P2P engine build: expert weights will be "
+                   "downloaded instead of delegated for execution%s\n"
+                   "  %s%d peers are ready to execute them. Use %s_p2p, "
+                   "built with:  make chatters ENGINE=/path/to/colibri/c%s\n\n",
                    C_RED, C_R, C_DIM, nexec,
                    p2p_engine_for(mtype) ? p2p_engine_for(mtype) : "(none)", C_R);
     }
     if (!local_dir)
-        printf("  %sora scarico la parte densa una volta sola — gli esperti "
-               "restano sullo sciame%s\n", C_DIM, C_R);
+        printf("  %sdownloading dense weights once — experts "
+               "remain in the swarm%s\n", C_DIM, C_R);
 
     if (engine_spawn(engine, shim, tracker, model, local_dir,
                      ctx, max_new, cap_experts, expected_kind, e)) return -1;
@@ -4862,7 +4862,7 @@ static int model_boot(const char *tracker, const char *model, const char *shim,
     g_eng.last_out = nowd();
     g_eng.spinning = 1;
     pthread_t tspin;
-    if (g_tty) pthread_create(&tspin, NULL, spinner_thread, (void *)"lo sciame si scalda");
+    if (g_tty) pthread_create(&tspin, NULL, spinner_thread, (void *)"warming up the swarm");
     double t0 = nowd();
     int ready = engine_wait_ready(e);
     g_eng.spinning = 0;
@@ -4877,13 +4877,13 @@ static int model_boot(const char *tracker, const char *model, const char *shim,
     if (e->proto == PROTO_FRAMED && kind_is_serve2(e->kind))
         e->proto = PROTO_SERVE2;
     if (ready) {
-        printf("  %s✗ il motore non è arrivato a essere pronto%s\n", C_RED, C_R);
+        printf("  %s✗ the engine failed to become ready%s\n", C_RED, C_R);
         engine_diag(e, 1);
         engine_stop(e);
         return -1;
     }
     if (!local_dir) wait_dense_ready();
-    printf("  %s\xe2\x9c\x93 %s pronto in %.1fs%s%s · net %.0f MB · "
+    printf("  %s\xe2\x9c\x93 %s ready in %.1fs%s%s · net %.0f MB · "
            "/swarm /experts /model /debug /storage /reset /quit%s\n",
            C_GRN, model, nowd() - t0, C_R, C_DIM, g_eng.net_mb, C_R);
     return 0;
@@ -4949,14 +4949,14 @@ static int cmd_chat(int argc, char **argv) {
         printf("\n");
         if (!tracker && !cfg.tracker[0]) setup_panel(&cfg);
         else if (!tracker) {
-            printf("  %ssciame%s %s%s%s%s   invio per confermare, o un altro "
-                   "indirizzo%s\n", C_DIM, C_R, C_BOLD, cfg.tracker, C_R, C_DIM, C_R);
+            printf("  %sswarm%s %s%s%s%s   Enter to confirm, or enter another "
+                   "address%s\n", C_DIM, C_R, C_BOLD, cfg.tracker, C_R, C_DIM, C_R);
             printf("\n%s\xe2\x94\x82%s %s%s\xe2\x80\xba%s ", C_GRAY, C_R, C_CORAL, C_BOLD, C_R);
             fflush(stdout);
             char l[1200];
             if (!prompt_line(l, sizeof l) && l[0]) {
                 if (tracker_addr_set(cfg.tracker, sizeof cfg.tracker, l))
-                    printf("  %sindirizzo troppo lungo, uso quello salvato%s\n", C_RED, C_R);
+                    printf("  %saddress too long; using the saved address%s\n", C_RED, C_R);
                 else
                     cfg_save(&cfg);
             }
@@ -5043,9 +5043,9 @@ static int cmd_chat(int argc, char **argv) {
         hline("\xe2\x95\xb0", "\xe2\x95\xaf", W);
     }
     if (nmodels > 1) {
-        printf("  %s%d modelli sullo sciame:%s", C_DIM, nmodels, C_R);
+        printf("  %s%d models in the swarm:%s", C_DIM, nmodels, C_R);
         for (int i = 0; i < nmodels; i++) printf(" %s%s%s", C_BOLD, models[i], C_R);
-        printf("  %s(/model per cambiare)%s\n", C_DIM, C_R);
+        printf("  %s(/model to switch)%s\n", C_DIM, C_R);
     }
     printf("\n");
 
@@ -5060,8 +5060,8 @@ static int cmd_chat(int argc, char **argv) {
     if (!host_addr && !local_dir && role_arg) {
         char bad[40];
         if (role_unknown(role_arg, bad, sizeof bad)) {
-            fprintf(stderr, "--role: non conosco \"%s\". Vuole chat, disk, "
-                            "compute o all (anche combinati: "
+            fprintf(stderr, "--role: unknown value \"%s\". Expected chat, disk, "
+                            "compute or all (combinations allowed: "
                             "--role disk,compute)\n", bad);
             return 2;
         }
@@ -5148,19 +5148,19 @@ static int cmd_chat(int argc, char **argv) {
                 printf("  Hosted model: %s. Return to the catalogue to request a different plan.\n", model);
                 continue;
             }
-            if (local_dir) { printf("  %s--local: un modello solo%s\n", C_DIM, C_R); continue; }
+            if (local_dir) { printf("  %s--local: one model only%s\n", C_DIM, C_R); continue; }
             nmodels = swarm_models(tracker, models, 16);
             if (!*arg) {
-                printf("  %smodelli:%s", C_DIM, C_R);
+                printf("  %smodels:%s", C_DIM, C_R);
                 for (int i = 0; i < nmodels; i++)
                     printf(" %s%s%s%s", strcmp(models[i], model) ? "" : "*",
                            C_BOLD, models[i], C_R);
-                printf("  %s/model <nome> per cambiare%s\n", C_DIM, C_R);
+                printf("  %s/model <name> to switch%s\n", C_DIM, C_R);
                 continue;
             }
-            if (!strcmp(arg, model)) { printf("  %sgià su %s%s\n", C_DIM, model, C_R); continue; }
+            if (!strcmp(arg, model)) { printf("  %salready using %s%s\n", C_DIM, model, C_R); continue; }
             if (checked_printf(model, sizeof model, "%s", arg)) {
-                printf("  %snome modello troppo lungo%s\n", C_RED, C_R);
+                printf("  %smodel name too long%s\n", C_RED, C_R);
                 continue;
             }
             engine_stop(&eng);
@@ -5171,8 +5171,8 @@ static int cmd_chat(int argc, char **argv) {
         }
 
         if (line[0] == '/' && strcmp(line, "/reset")) {
-            printf("  %scomando sconosciuto: %.40s \xc2\xb7 Tab completa i comandi, "
-                   "/help li elenca. Non l'ho mandato al modello.%s\n", C_RED, line, C_R);
+            printf("  %sunknown command: %.40s \xc2\xb7 Tab completes commands, "
+                   "/help lists them. Not sent to the model.%s\n", C_RED, line, C_R);
             continue;
         }
         int is_reset = !strcmp(line, "/reset");
@@ -5181,7 +5181,7 @@ static int cmd_chat(int argc, char **argv) {
              * (and starting a fresh bos) is the conversation reset. */
             if (is_reset) {
                 free(conv); conv = calloc(1, 1);
-                printf("  %s\xe2\x9c\xa6 nuova conversazione%s\n", C_DIM, C_R);
+                printf("  %s\xe2\x9c\xa6 new conversation%s\n", C_DIM, C_R);
                 continue;
             }
             if (!conv || submit_serve2(&eng, conv, line, max_new)) { chat_failed = 1; break; }
@@ -5196,7 +5196,7 @@ static int cmd_chat(int argc, char **argv) {
             if (engine_write_full(eng.to, line, L + 1)) break;
             line[L] = 0;
             if (is_reset) {
-                printf("  %s\xe2\x9c\xa6 nuova conversazione%s\n", C_DIM, C_R);
+                printf("  %s\xe2\x9c\xa6 new conversation%s\n", C_DIM, C_R);
                 continue;
             }
         }
@@ -5208,15 +5208,15 @@ static int cmd_chat(int argc, char **argv) {
             char *reply = NULL;
             printf("%s%s\xe2\x97\x86 %s%s\n  ", C_BOLD, C_CORAL, model, C_R);
             live_begin(tracker, model,
-                       eng.segment ? "routing · cerco la catena Segment" :
-                                     "prefill · preparo il prompt");
+                       eng.segment ? "routing · finding the Segment chain" :
+                                     "prefill · preparing the prompt");
             g_eng.streaming = 1;
             int dead = stream_serve2(&eng, stat, sizeof stat, &reply);
             g_eng.streaming = 0;
             live_end();
             if (g_stopping) {
                 free(reply);
-                printf("\n  %sinferenza interrotta%s\n", C_DIM, C_R);
+                printf("\n  %sinference interrupted%s\n", C_DIM, C_R);
                 break;
             }
             if (dead) {
@@ -5231,13 +5231,13 @@ static int cmd_chat(int argc, char **argv) {
             free(reply);
         } else if (eng.proto == PROTO_FRAMED) {
             if (!is_reset) printf("%s%s\xe2\x97\x86 %s%s\n  ", C_BOLD, C_CORAL, model, C_R);
-            live_begin(tracker, model, "prefill · motore sullo sciame");
+            live_begin(tracker, model, "prefill · swarm engine");
             g_eng.streaming = 1;
             int dead = stream_until_end(&eng, stat, sizeof stat);
             g_eng.streaming = 0;
             live_end();
             if (g_stopping) {
-                printf("\n  %sinferenza interrotta%s\n", C_DIM, C_R);
+                printf("\n  %sinference interrupted%s\n", C_DIM, C_R);
                 break;
             }
             if (dead) {
@@ -5247,10 +5247,10 @@ static int cmd_chat(int argc, char **argv) {
                 break;
             }
             printf("\n");
-            if (is_reset) { printf("  %s\xe2\x9c\xa6 nuova conversazione%s\n", C_DIM, C_R); continue; }
+            if (is_reset) { printf("  %s\xe2\x9c\xa6 new conversation%s\n", C_DIM, C_R); continue; }
         } else {
             int live = live_begin(tracker, model,
-                                  "inferenza · motore locale/expert");
+                                  "inference · local/expert engine");
             g_eng.spinning = !live;
             pthread_t tspin;
             if (g_tty && !live) pthread_create(&tspin, NULL, spinner_thread, NULL);
@@ -5260,7 +5260,7 @@ static int cmd_chat(int argc, char **argv) {
             else if (g_tty) pthread_join(tspin, NULL);
             if (g_stopping) {
                 free(reply);
-                printf("\n  %sinferenza interrotta%s\n", C_DIM, C_R);
+                printf("\n  %sinference interrupted%s\n", C_DIM, C_R);
                 break;
             }
             if (!reply) {
@@ -5277,8 +5277,8 @@ static int cmd_chat(int argc, char **argv) {
         }
 
         if (g_eng.deferred) {
-            printf("  %s\xe2\x9c\xa6 %d righe di rete durante la risposta — "
-                   "/debug per vederle%s\n", C_DIM, g_eng.deferred, C_R);
+            printf("  %s\xe2\x9c\xa6 %d network log lines during the response — "
+                   "/debug to view them%s\n", C_DIM, g_eng.deferred, C_R);
             g_eng.deferred = 0;
         }
 
@@ -5298,11 +5298,11 @@ static int cmd_chat(int argc, char **argv) {
             printf("%s  %.1fs", C_DIM, end - r0);
             if (nstat >= 2 && tps > 0) printf(" · %.1f tok/s", tps);
         }
-        if (nstat >= 4 && rss > 0) printf(" · %.1f GB residenti", rss);
+        if (nstat >= 4 && rss > 0) printf(" · %.1f GB resident", rss);
         if (host_addr)   printf(" · hosted stream · no local checkpoint");
-        else if (local_dir) printf(" · disco locale");
-        else if (dmb > 0.5) printf(" · %.0f MB dallo sciame · mirror %.0f MB", dmb, g_eng.net_mb);
-        else                printf(" · mirror caldo, zero rete");
+        else if (local_dir) printf(" · local disk");
+        else if (dmb > 0.5) printf(" · %.0f MB from swarm · mirror %.0f MB", dmb, g_eng.net_mb);
+        else                printf(" · warm mirror, no weight transfers");
         printf("%s\n", C_R);
     }
 
@@ -5322,7 +5322,7 @@ static int cmd_chat(int argc, char **argv) {
         close(g_compute_lease_fd);
         g_compute_lease_fd = -1;
     }
-    if (g_nchildren) printf("  %sdonazione chiusa%s\n", C_DIM, C_R);
+    if (g_nchildren) printf("  %sresource sharing stopped%s\n", C_DIM, C_R);
     printf("\n");
     return chat_failed;
 }
@@ -6135,7 +6135,7 @@ static int cmd_doctor(int argc, char **argv) {
 }
 
 /* ---- main --------------------------------------------------------------- */
-#include "lumabri_home_ui.h"
+#include "src/ui/lumabri_home_ui.h"
 
 int main(int argc, char **argv) {
     (void)setlocale(LC_CTYPE, "");

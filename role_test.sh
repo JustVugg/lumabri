@@ -64,12 +64,12 @@ echo "   ✓ ogni parola vale per se stessa"
 
 echo "· a typo is refused, not silently demoted to chat"
 try bogus no 2
-grep -q 'non conosco "bogus"' "$T/out" || {
+grep -q 'unknown value "bogus"' "$T/out" || {
     echo "   nessun messaggio utile per un ruolo sconosciuto"; cat "$T/out"; exit 1; }
 # and the half-right case: accepting "chat,compute-ish" because "chat" is in
 # there would drop exactly the half the user meant to add
 try chat,bogus no 2
-grep -q 'non conosco "bogus"' "$T/out" || {
+grep -q 'unknown value "bogus"' "$T/out" || {
     echo "   un ruolo valido ha coperto uno sbagliato"; cat "$T/out"; exit 1; }
 try disk,compute,nope no 2
 echo "   ✓ chi sbaglia a scrivere lo sa subito, anche se ha ragione a meta'"

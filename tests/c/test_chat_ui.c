@@ -5,6 +5,10 @@
 #include <assert.h>
 
 int main(int argc, char **argv) {
+    if (argc > 1 && !strcmp(argv[1], "help")) {
+        render_help();
+        return 0;
+    }
     (void)setlocale(LC_CTYPE, "");
     g_tty = 1;
     g_slash_completion = 1;
