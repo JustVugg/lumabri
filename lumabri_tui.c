@@ -11,6 +11,9 @@
 
 #include <errno.h>
 #include <poll.h>
+#include <pthread.h>
+#include <stdatomic.h>
+#include <time.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -174,6 +177,8 @@ static void draw_header(const LmbTuiState *st, Size sz, int tab) {
     static const char *tabs[] = { "Models", "Computers" };
     for (int i = 0; i < 2; i++)
         printf(" %s%s%s ", i == tab ? c(INV) : c(DIM), tabs[i], c(OFF));
+    if (st->tracker[0]) printf(" %s", st->inventory_ok ? "LAN inventory · plan preview" :
+                                                         "TRACKER OFFLINE · plans unavailable");
     if (!g_snapshot) printf("\n");
     at(3, 1);
     rule(sz.w, NULL);
@@ -186,7 +191,10 @@ static void draw_models(const LmbTuiState *st, Size sz, int sel, int top) {
     if (!g_snapshot) fputc('\n', stdout);
     int rows = sz.h - 7;
     if (rows < 1) rows = 1;
-    for (int i = 0; i < rows; i++) {
+    if (!st->nmodels) {
+        at(5, 1); printf("  no checkpoints; switch to Computers to see the LAN");
+    }
+    for (int i = 0; i < rows && st->nmodels; i++) {
         int idx = top + i;
         if (idx >= st->nmodels) {
             if (g_snapshot) break;         /* no point padding a snapshot */
@@ -238,33 +246,32 @@ static void draw_models(const LmbTuiState *st, Size sz, int sel, int top) {
     fflush(stdout);
 }
 
-static void draw_nodes(const LmbTuiState *st, Size sz) {
+static void draw_nodes(const LmbTuiState *st, Size sz, int sel, int top) {
     at(4, 1);
-    printf("  %s%-20s %-12s %-12s %-12s %s%s", c(DIM), "COMPUTER", "RAM",
-           "VRAM", "DISK READ", "ENGINE", c(OFF));
+    printf("  %s%-20s %-12s %-12s %-12s %s%s", c(DIM), "COMPUTER", "RAM OFFERED",
+           "VRAM", "CORES/THREADS", "GPU DETECTED", c(OFF));
     if (!g_snapshot) fputc('\n', stdout);
-    for (uint32_t i = 0; i < st->nnodes && (int)i < sz.h - 7; i++) {
+    for (int row = 0; row < (sz.h - 7) / 2 && top + row < (int)st->nnodes; row++) {
+        int i = top + row;
         const LmbClusterNode *n = &st->nodes[i];
-        char ram[32], vram[32], disk[32];
+        const LmbMachineProfile *p = &st->profiles[i];
+        char ram[32], vram[32], cores[32], hardware[256];
         human_bytes(n->ram_budget_bytes, ram, sizeof ram);
         human_bytes(n->vram_budget_bytes, vram, sizeof vram);
-        if (n->disk_read_bps) snprintf(disk, sizeof disk, "%.0f MB/s",
-                                       n->disk_read_bps / 1e6);
-        else snprintf(disk, sizeof disk, "unmeasured");
-        at(5 + (int)i, 1);
+        snprintf(cores, sizeof cores, "%u/%u", p->physical_cores, n->threads);
+        snprintf(hardware, sizeof hardware, "%s · %s/%s", p->cpu_model, p->os, p->arch);
+        at(5 + row * 2, 1);
         if (!g_snapshot) fputs("\x1b[K", stdout);
-        printf("  %-20.20s %-12s %-12s %-12s %s", n->name, ram,
-               n->vram_budget_bytes ? vram : "—", disk,
-               /* A card the engine cannot drive is not a GPU machine, and
-                * saying so here is the difference between a plan that works
-                * and a promise that does not. */
-               n->gpu_backends ? "can use its GPU" : "CPU only");
+        printf("%c %-20.20s %-12s %-12s %-12s %u", i == sel ? '>' : ' ', n->name, ram,
+               n->vram_budget_bytes ? vram : "—", cores, p->gpu_count);
+        at(6 + row * 2, 1);
+        printf("    %.*s", sz.w > 8 ? sz.w - 8 : 1, hardware);
         if (!g_snapshot) fputc('\n', stdout);
     }
     at(sz.h - 1, 1);
     rule(sz.w, NULL);
     at(sz.h, 1);
-    printf("%s tab switch   r refresh   q quit%s", c(DIM), c(OFF));
+    printf("%s ↑↓ select · tab switch · r refresh · q quit%s", c(DIM), c(OFF));
     fflush(stdout);
 }
 
@@ -422,6 +429,35 @@ static int read_key(int timeout_ms) {
     }
 }
 
+typedef struct {
+    LmbTuiState *next;
+    pthread_t thread;
+    _Atomic int done;
+} RefreshJob;
+
+static void *refresh_thread(void *arg) {
+    RefreshJob *job = arg;
+    job->next->refresh(job->next, job->next->refresh_context);
+    atomic_store(&job->done, 1);
+    return NULL;
+}
+
+static void refresh_start(RefreshJob *job, const LmbTuiState *st) {
+    if (job->next || !st->refresh) return;
+    job->next = malloc(sizeof *st);
+    if (!job->next) return;
+    memcpy(job->next, st, sizeof *st);
+    atomic_store(&job->done, 0);
+    if (pthread_create(&job->thread, NULL, refresh_thread, job)) {
+        free(job->next); job->next = NULL;
+    }
+}
+
+static double refresh_clock(void) {
+    struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec + t.tv_nsec / 1e9;
+}
+
 int lmb_tui_run(LmbTuiState *st, int snapshot, const char *keys) {
     int sel = 0, top = 0, tab = 0, detail = 0;
     Size sz = term_size();
@@ -439,23 +475,24 @@ int lmb_tui_run(LmbTuiState *st, int snapshot, const char *keys) {
         for (const char *k = keys ? keys : ""; *k; k++) {
             if (detail) { if (*k == '\r' || *k == '\n') detail = 0; continue; }
             switch (*k) {
-            case 'j': if (sel + 1 < st->nmodels) sel++; break;
+            case 'j': if (sel + 1 < (tab ? (int)st->nnodes : st->nmodels)) sel++; break;
             case 'k': if (sel > 0) sel--; break;
-            case '\t': tab = !tab; break;
+            case '\t': tab = !tab; sel = top = 0; break;
             case 'r':
                 if (st->refresh) {
                     (void)st->refresh(st, st->refresh_context);
-                    if (!st->nmodels) sel = top = 0;
-                    else if (sel >= st->nmodels) sel = st->nmodels - 1;
+                    int count = tab ? (int)st->nnodes : st->nmodels;
+                    if (!count) sel = top = 0;
+                    else if (sel >= count) sel = count - 1;
                 }
                 break;
             case '\r': case '\n':
-                if (st->nmodels && sz.w >= 60 && sz.h >= 12) detail = 1;
+                if (!tab && st->nmodels && sz.w >= 60 && sz.h >= 12) detail = 1;
                 break;
             default: break;
             }
         }
-        int rows = sz.h - 7; if (rows < 1) rows = 1;
+        int rows = (sz.h - 7) / (tab ? 2 : 1); if (rows < 1) rows = 1;
         if (sel < top) top = sel;
         if (sel >= top + rows) top = sel - rows + 1;
         if (sz.w < 60 || sz.h < 12) draw_compact(st, sz, tab, sel);
@@ -463,7 +500,7 @@ int lmb_tui_run(LmbTuiState *st, int snapshot, const char *keys) {
         else {
             draw_header(st, sz, tab);
             if (tab == 0) draw_models(st, sz, sel, top);
-            else draw_nodes(st, sz);
+            else draw_nodes(st, sz, sel, top);
         }
         fputc('\n', stdout);
         return 0;
@@ -476,10 +513,39 @@ int lmb_tui_run(LmbTuiState *st, int snapshot, const char *keys) {
     }
     signal(SIGWINCH, on_winch);
     signal(SIGINT, on_int);
+    signal(SIGTERM, on_int);
+    signal(SIGHUP, on_int);
 
     const char *kp = keys;
+    RefreshJob job = {0};
+    double refreshed = refresh_clock();
     for (;;) {
         if (g_quit) break;
+        if (job.next && atomic_load(&job.done)) {
+            pthread_join(job.thread, NULL);
+            char selected_dir[512] = "";
+            if (!tab && sel < st->nmodels)
+                snprintf(selected_dir, sizeof selected_dir, "%s", st->models[sel].dir);
+            /* Swap complete snapshots on the UI thread. The renderer never
+             * races a network update or observes half a plan. */
+            memcpy(st, job.next, sizeof *st);
+            free(job.next); job.next = NULL;
+            if (selected_dir[0]) {
+                int found = 0;
+                for (int i = 0; i < st->nmodels; i++)
+                    if (!strcmp(st->models[i].dir, selected_dir)) {
+                        sel = i; found = 1; break;
+                    }
+                if (!found) detail = 0;
+            }
+            int count = tab ? (int)st->nnodes : st->nmodels;
+            if (!count) { sel = top = detail = 0; }
+            else if (sel >= count) { sel = count - 1; detail = 0; }
+            if (top > sel) top = sel;
+            refreshed = refresh_clock();
+        }
+        if (st->tracker[0] && refresh_clock() - refreshed >= 5.0)
+            refresh_start(&job, st);
         if (g_resized) { g_resized = 0; sz = term_size(); clear_screen(); }
         if (sz.w < 60 || sz.h < 12) draw_compact(st, sz, tab, sel);
         else if (detail) draw_detail(st, sz, sel);
@@ -487,7 +553,7 @@ int lmb_tui_run(LmbTuiState *st, int snapshot, const char *keys) {
             clear_screen();
             draw_header(st, sz, tab);
             if (tab == 0) draw_models(st, sz, sel, top);
-            else draw_nodes(st, sz);
+            else draw_nodes(st, sz, sel, top);
         }
         int k;
         if (kp) { k = *kp ? (unsigned char)*kp++ : 'q'; }
@@ -496,26 +562,22 @@ int lmb_tui_run(LmbTuiState *st, int snapshot, const char *keys) {
         if (k == 'q' || k == 3) break;
         if (detail) { if (k == '\r' || k == '\n' || k == 0x1b) detail = 0; continue; }
         switch (k) {
-        case 'j': if (sel + 1 < st->nmodels) sel++; break;
+        case 'j': if (sel + 1 < (tab ? (int)st->nnodes : st->nmodels)) sel++; break;
         case 'k': if (sel > 0) sel--; break;
-        case '\t': tab = !tab; break;
+        case '\t': tab = !tab; sel = top = 0; break;
         case 'r':
-            if (st->refresh) {
-                int selected = sel;
-                (void)st->refresh(st, st->refresh_context);
-                if (!st->nmodels) sel = top = 0;
-                else if (selected >= st->nmodels) sel = st->nmodels - 1;
-            }
+            refresh_start(&job, st);
             break;
         case '\r': case '\n':
-            if (st->nmodels && sz.w >= 60 && sz.h >= 12) detail = 1;
+            if (!tab && st->nmodels && sz.w >= 60 && sz.h >= 12) detail = 1;
             break;
         default: break;
         }
-        int rows = sz.h - 7; if (rows < 1) rows = 1;
+        int rows = (sz.h - 7) / (tab ? 2 : 1); if (rows < 1) rows = 1;
         if (sel < top) top = sel;
         if (sel >= top + rows) top = sel - rows + 1;
     }
     cooked();
+    if (job.next) { pthread_join(job.thread, NULL); free(job.next); }
     return 0;
 }

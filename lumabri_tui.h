@@ -15,6 +15,7 @@
 
 #include "lumabri_cluster.h"
 #include "lumabri_calibration.h"
+#include "lumabri_machine.h"
 
 #define LMB_TUI_MAX_MODELS 64
 
@@ -24,6 +25,7 @@ typedef struct {
     LmbModelShape shape;
     LmbClusterPlan plan;
     int planned;                    /* 0 when the cluster cannot be planned */
+    int weights_present;
     const LmbCalibration *calibration;   /* NULL until something is measured */
     LmbCalKey calibration_key;      /* exact current conditions */
     int calibration_key_valid;
@@ -33,10 +35,15 @@ typedef struct LmbTuiState {
     LmbTuiModel models[LMB_TUI_MAX_MODELS];
     int nmodels;
     LmbClusterNode nodes[LMB_CLUSTER_MAX_NODES];
+    LmbMachineProfile profiles[LMB_CLUSTER_MAX_NODES];
+    char identities[LMB_CLUSTER_MAX_NODES][65];
+    uint32_t ages_ms[LMB_CLUSTER_MAX_NODES];
     uint32_t nnodes;
+    int inventory_ok;
     uint32_t context, sessions;
     char root[512];                 /* where the checkpoints were found */
     char disk[512];
+    char tracker[256];
     int (*refresh)(struct LmbTuiState *state, void *context);
     void *refresh_context;
 } LmbTuiState;

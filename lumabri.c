@@ -54,6 +54,7 @@
 #include "lumabri_segment_discovery.h"
 #include "lumabri_sign.h"
 #include "lumabri_secure.h"
+#include "lumabri_inventory.h"
 
 /* ---- terminal ----------------------------------------------------------- */
 
@@ -5304,20 +5305,74 @@ static int catalog_scan(const char *root, CatalogEntry *out, int cap) {
 
 /* This machine as a planner node. The reserve is the governor's, so the
  * catalogue never plans into memory the governor would refuse to give. */
-static void catalog_self(LmbClusterNode *n, const char *disk) {
+static void catalog_self(LmbClusterNode *n, LmbMachineProfile *profile,
+                          const char *disk) {
     LmbMachineProfile p;
     memset(n, 0, sizeof *n);
-    if (lmb_machine_probe(&p, disk, NULL)) return;
+    if (profile->logical_cpus) {
+        p = *profile;
+        lmb_machine_refresh_resources(&p, disk);
+    } else if (lmb_machine_probe(&p, disk, NULL)) return;
+    *profile = p;
     snprintf(n->name, sizeof n->name, "%s", p.hostname);
     uint64_t reserve = (uint64_t)lmb_env_int("LUMABRI_RAM_RESERVE_MB",
                                              4096, 256, 262144) << 20;
     n->ram_budget_bytes = p.ram_available_bytes > reserve
                         ? p.ram_available_bytes - reserve : 0;
-    n->vram_budget_bytes = p.gpu_backends ? p.vram_available_bytes : 0;
+    n->vram_budget_bytes = p.vram_available_bytes;
     n->disk_read_bps = p.disk_read_bps;
     n->gpu_backends = p.gpu_backends;
     n->threads = p.logical_cpus;
     n->has_checkpoint = 0;      /* set per catalogue entry, never globally */
+}
+
+static void inventory_id_text(const uint8_t id[32], char out[65]) {
+    for (size_t i = 0; i < 32; i++) snprintf(out + i * 2, 3, "%02x", id[i]);
+}
+
+static int catalog_inventory(LmbTuiState *st) {
+    memset(st->nodes, 0, sizeof st->nodes);
+    memset(st->identities, 0, sizeof st->identities);
+    memset(st->ages_ms, 0, sizeof st->ages_ms);
+    catalog_self(&st->nodes[0], &st->profiles[0], st->disk[0] ? st->disk : ".");
+    st->nnodes = 1;
+    st->inventory_ok = 1;
+    if (!st->tracker[0]) return 0;
+    char path[1024]; uint8_t sk[64], pk[32];
+    if (lmb_peer_identity(lmb_peer_key_path(path, sizeof path), sk, pk)) {
+        st->inventory_ok = 0; return -1;
+    }
+    memset(sk, 0, sizeof sk);
+    inventory_id_text(pk, st->identities[0]);
+    LmbMachineReport reports[LMB_INVENTORY_MAX];
+    uint32_t n = 0;
+    if (lmb_inventory_fetch(st->tracker, reports, &n)) {
+        st->inventory_ok = 0; return -1;
+    }
+    for (uint32_t i = 0; i < n; i++) {
+        LmbMachineReport *r = &reports[i];
+        uint32_t at;
+        if (!memcmp(pk, r->identity, 32)) at = 0;
+        else {
+            if (st->nnodes == LMB_CLUSTER_MAX_NODES) {
+                st->nnodes = 1; st->inventory_ok = 0; return -1;
+            }
+            at = st->nnodes++;
+        }
+        LmbClusterNode *node = &st->nodes[at];
+        snprintf(node->name, sizeof node->name, "%s", r->machine.hostname);
+        node->ram_budget_bytes = r->ram_budget_bytes;
+        node->vram_budget_bytes = r->machine.vram_available_bytes;
+        node->threads = r->machine.logical_cpus;
+        /* Resource reporting is not executable Segment capability. No remote
+         * card is promoted to a supported backend by an inventory advert. */
+        node->gpu_backends = 0;
+        node->disk_read_bps = r->machine.disk_read_bps;
+        st->profiles[at] = r->machine;
+        st->ages_ms[at] = r->age_ms;
+        inventory_id_text(r->identity, st->identities[at]);
+    }
+    return 0;
 }
 
 static int catalog_state_refresh(LmbTuiState *st, void *unused) {
@@ -5325,16 +5380,16 @@ static int catalog_state_refresh(LmbTuiState *st, void *unused) {
     CatalogEntry found[LMB_TUI_MAX_MODELS];
     int n = catalog_scan(st->root, found, LMB_TUI_MAX_MODELS);
     st->nmodels = 0;
-    catalog_self(&st->nodes[0], st->disk[0] ? st->disk : ".");
-    st->nnodes = 1;
+    (void)catalog_inventory(st);
     for (int i = 0; i < n; i++) {
         LmbTuiModel *m = &st->models[st->nmodels];
         memset(m, 0, sizeof *m);
         snprintf(m->name, sizeof m->name, "%.63s", found[i].name);
         snprintf(m->dir, sizeof m->dir, "%.511s", found[i].dir);
         m->shape = found[i].shape;
+        m->weights_present = found[i].has_weights;
         st->nodes[0].has_checkpoint = found[i].has_weights;
-        m->planned = !lmb_plan_cluster(&m->shape, st->nodes, st->nnodes,
+        m->planned = st->inventory_ok && !lmb_plan_cluster(&m->shape, st->nodes, st->nnodes,
                                        st->context, st->sessions,
                                        LMB_GOAL_ONE_SESSION, &m->plan);
         /* A calibration store is not implemented yet. Never manufacture a
@@ -5345,17 +5400,9 @@ static int catalog_state_refresh(LmbTuiState *st, void *unused) {
     return 0;
 }
 
-static void catalog_row(const CatalogEntry *m, const LmbClusterNode *nodes,
-                        uint32_t nn, uint32_t context, uint32_t sessions) {
-    LmbClusterNode actual[LMB_CLUSTER_MAX_NODES];
-    if (nn > LMB_CLUSTER_MAX_NODES) nn = LMB_CLUSTER_MAX_NODES;
-    memcpy(actual, nodes, (size_t)nn * sizeof *actual);
-    /* The current local catalogue has one complete-checkpoint source. The
-     * distributed CAS inventory will replace this boolean at step 2. */
-    if (nn) actual[0].has_checkpoint = m->has_weights;
-    LmbClusterPlan plan;
-    int ok = !lmb_plan_cluster(&m->shape, actual, nn, context, sessions,
-                               LMB_GOAL_ONE_SESSION, &plan);
+static void catalog_row(const LmbTuiModel *m) {
+    LmbClusterPlan plan = m->plan;
+    int ok = m->planned;
     const char *state = !ok ? "cannot plan"
                             : lmb_plan_state_name(plan.state);
     const char *mark = !ok || plan.state == LMB_PLAN_UNRUNNABLE ? "x"
@@ -5363,7 +5410,7 @@ static void catalog_row(const CatalogEntry *m, const LmbClusterNode *nodes,
     char detail[96] = "";
     if (!m->shape.sizing_verified)
         snprintf(detail, sizeof detail, "adapter sizing unavailable");
-    else if (!m->has_weights)
+    else if (!m->weights_present)
         snprintf(detail, sizeof detail, "checkpoint weights missing");
     else if (ok && plan.state == LMB_PLAN_UNRUNNABLE && plan.missing_bytes)
         snprintf(detail, sizeof detail, "%.0f GB short (~%u more machine%s)",
@@ -5396,45 +5443,58 @@ static void json_string(FILE *out, const char *s) {
     fputc('"', out);
 }
 
-static void catalog_json(const CatalogEntry *models, int n,
-                         const LmbClusterNode *self, uint32_t context,
-                         uint32_t sessions) {
-    fputs("{\"schema\":\"lumabri.models.v1\",\"nodes\":[{\"name\":", stdout);
-    json_string(stdout, self->name);
-    printf(",\"ram_budget_bytes\":%llu,\"vram_inventory_bytes\":%llu,"
-           "\"threads\":%u}],\"models\":[",
-           (unsigned long long)self->ram_budget_bytes,
-           (unsigned long long)self->vram_budget_bytes, self->threads);
-    for (int i = 0; i < n; i++) {
-        LmbClusterNode node = *self;
-        node.has_checkpoint = models[i].has_weights;
-        LmbClusterPlan plan;
-        int planned = !lmb_plan_cluster(&models[i].shape, &node, 1, context,
-                                        sessions, LMB_GOAL_ONE_SESSION, &plan);
+static void catalog_json(const LmbTuiState *st) {
+    printf("{\"schema\":\"lumabri.models.v1\",\"inventory_ok\":%s,"
+           "\"execution_ready\":false,\"nodes\":[", st->inventory_ok ? "true" : "false");
+    for (uint32_t i = 0; i < st->nnodes; i++) {
+        const LmbClusterNode *node = &st->nodes[i];
+        const LmbMachineProfile *p = &st->profiles[i];
         if (i) fputc(',', stdout);
-        fputs("{\"name\":", stdout); json_string(stdout, models[i].name);
+        fputs("{\"name\":", stdout); json_string(stdout, node->name);
+        fputs(",\"identity\":", stdout); json_string(stdout, st->identities[i]);
+        fputs(",\"cpu_model\":", stdout); json_string(stdout, p->cpu_model);
+        fputs(",\"os\":", stdout); json_string(stdout, p->os);
+        fputs(",\"arch\":", stdout); json_string(stdout, p->arch);
+        fputs(",\"isa\":", stdout); json_string(stdout, p->isa);
+        printf(",\"ram_budget_bytes\":%llu,\"ram_total_bytes\":%llu,"
+               "\"ram_available_bytes\":%llu,\"vram_inventory_bytes\":%llu,"
+               "\"threads\":%u,\"physical_cores\":%u,\"numa_nodes\":%u,"
+               "\"gpu_detected\":%u,\"segment_gpu_verified\":false,"
+               "\"disk_available_bytes\":%llu,\"disk_read_bps\":%llu,\"age_ms\":%u}",
+               (unsigned long long)node->ram_budget_bytes,
+               (unsigned long long)p->ram_total_bytes,
+               (unsigned long long)p->ram_available_bytes,
+               (unsigned long long)node->vram_budget_bytes,
+               node->threads, p->physical_cores, p->numa_nodes, p->gpu_count,
+               (unsigned long long)p->disk_available_bytes,
+               (unsigned long long)node->disk_read_bps, st->ages_ms[i]);
+    }
+    fputs("],\"models\":[", stdout);
+    for (int i = 0; i < st->nmodels; i++) {
+        const LmbTuiModel *model = &st->models[i];
+        const LmbClusterPlan *plan = &model->plan;
+        int planned = model->planned;
+        if (i) fputc(',', stdout);
+        fputs("{\"name\":", stdout); json_string(stdout, model->name);
         fputs(",\"model_type\":", stdout);
-        json_string(stdout, models[i].shape.model_type);
+        json_string(stdout, model->shape.model_type);
         fputs(",\"adapter\":", stdout);
-        json_string(stdout, models[i].shape.segment_id);
+        json_string(stdout, model->shape.segment_id);
         printf(",\"sizing_verified\":%s,\"weights_present\":%s,"
                "\"planned\":%s,\"state\":",
-               models[i].shape.sizing_verified ? "true" : "false",
-               models[i].has_weights ? "true" : "false",
+               model->shape.sizing_verified ? "true" : "false",
+               model->weights_present ? "true" : "false",
                planned ? "true" : "false");
-        json_string(stdout, planned ? lmb_plan_state_name(plan.state) :
+        json_string(stdout, planned ? lmb_plan_state_name(plan->state) :
                                      "cannot plan");
         printf(",\"missing_bytes\":%llu,\"calibration\":null}",
-               (unsigned long long)(planned ? plan.missing_bytes : 0));
+               (unsigned long long)(planned ? plan->missing_bytes : 0));
     }
     fputs("]}\n", stdout);
 }
 
-static int models_screen(const char *root, const char *disk, uint32_t context,
-                         uint32_t sessions, int snapshot, const char *keys);
-
 static int cmd_models(int argc, char **argv) {
-    const char *root = NULL, *disk = ".", *keys = NULL;
+    const char *root = NULL, *disk = ".", *keys = NULL, *tracker = NULL;
     uint32_t context = 4096, sessions = 1;
     /* The screen is the default and the listing is the fallback, not the
      * other way round: a plain list is what you want in a pipe or a log, and
@@ -5442,6 +5502,7 @@ static int cmd_models(int argc, char **argv) {
     int plain = !isatty(STDOUT_FILENO), snapshot = 0, json = 0;
     for (int i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "--models-dir") && i + 1 < argc) root = argv[++i];
+        else if (!strcmp(argv[i], "--tracker") && i + 1 < argc) tracker = argv[++i];
         else if (!strcmp(argv[i], "--disk") && i + 1 < argc) disk = argv[++i];
         else if (!strcmp(argv[i], "--context") && i + 1 < argc)
             context = (uint32_t)atoi(argv[++i]);
@@ -5453,7 +5514,7 @@ static int cmd_models(int argc, char **argv) {
         else if (!strcmp(argv[i], "--keys") && i + 1 < argc) keys = argv[++i];
         else {
             fprintf(stderr, "usage: lumabri models [--models-dir DIR] "
-                            "[--disk PATH] [--context N] [--sessions N]\n"
+                            "[--disk PATH] [--context N] [--sessions N] [--tracker H:P]\n"
                             "                      [--plain|--json] [--snapshot] "
                             "[--keys SEQUENCE]\n");
             return 2;
@@ -5465,57 +5526,127 @@ static int cmd_models(int argc, char **argv) {
         snprintf(def, sizeof def, "%s/.lumabri/models", home);
         root = def;
     }
-    if (!plain)
-        return models_screen(root, disk, context, sessions, snapshot, keys);
-    CatalogEntry models[64];
-    int n = catalog_scan(root, models, 64);
-    LmbClusterNode self;
-    catalog_self(&self, disk);
+    static LmbTuiState st;
+    memset(&st, 0, sizeof st);
+    st.context = context; st.sessions = sessions;
+    if (checked_printf(st.root, sizeof st.root, "%s", root) ||
+        checked_printf(st.disk, sizeof st.disk, "%s", disk) ||
+        (tracker && checked_printf(st.tracker, sizeof st.tracker, "%s", tracker))) return 2;
+    st.refresh = catalog_state_refresh;
+    catalog_state_refresh(&st, NULL);
+    if (!plain) return lmb_tui_run(&st, snapshot, keys);
+    if (json) { catalog_json(&st); return st.inventory_ok ? 0 : 1; }
 
-    if (json) { catalog_json(models, n, &self, context, sessions); return 0; }
-
-    printf("%s%sLUMABRI · local planning preview%s\n\n", C_BOLD, C_CORAL, C_R);
-    printf("  %s1 computer · %.0f GB usable RAM · engine %s%s\n", C_DIM,
-           (double)self.ram_budget_bytes / 1e9,
-           self.gpu_backends ? "can use a GPU" : "CPU only", C_R);
-    if (self.disk_read_bps)
-        printf("  %sdisk %.0f MB/s cold read%s\n", C_DIM,
-               self.disk_read_bps / 1e6, C_R);
+    printf("%s%sLUMABRI · %s planning preview%s\n\n", C_BOLD, C_CORAL,
+           tracker ? "LAN" : "local", C_R);
+    printf("  %s%u computer%s · CPU only execution plan%s\n", C_DIM,
+           st.nnodes, st.nnodes == 1 ? "" : "s", C_R);
+    if (!st.inventory_ok)
+        printf("  tracker unavailable or incompatible; remote inventory cleared, plans unavailable\n");
+    for (uint32_t i = 0; i < st.nnodes; i++) {
+        const LmbMachineProfile *p = &st.profiles[i];
+        printf("  %s · %s · %u cores/%u threads · %.1f GB offered RAM · "
+               "%u GPU detected / %.1f GB VRAM\n", st.nodes[i].name, p->cpu_model,
+               p->physical_cores, p->logical_cpus, st.nodes[i].ram_budget_bytes / 1e9,
+               p->gpu_count, p->vram_available_bytes / 1e9);
+    }
     printf("\n");
 
-    if (!n) {
+    if (!st.nmodels) {
         printf("  %sno checkpoints under %s%s\n", C_DIM, root, C_R);
         printf("  %sput a model directory there, or pass --models-dir%s\n",
                C_DIM, C_R);
-        return 0;
+        return st.inventory_ok ? 0 : 1;
     }
     printf("  %-2s %-22s %-14s %-28s %s\n", "", "MODEL", "STATE", "", "SPEED");
-    for (int i = 0; i < n; i++)
-        catalog_row(&models[i], &self, 1, context, sessions);
+    for (int i = 0; i < st.nmodels; i++) catalog_row(&st.models[i]);
     printf("\n  %sa speed appears only after a calibration on this cluster "
            "with this plan%s\n", C_DIM, C_R);
-    return 0;
+    return st.inventory_ok ? 0 : 1;
 }
 
-/* The same facts, on a screen. The state is built once here and handed over;
- * the interface plans nothing of its own, so what it shows can never be a
- * fact the planner does not have. */
-static int models_screen(const char *root, const char *disk, uint32_t context,
-                         uint32_t sessions, int snapshot, const char *keys) {
-    static LmbTuiState st;            /* a few hundred KB: not on the stack */
-    memset(&st, 0, sizeof st);
-    st.context = context;
-    st.sessions = sessions;
-    snprintf(st.root, sizeof st.root, "%.511s", root);
-    snprintf(st.disk, sizeof st.disk, "%.511s", disk);
-    st.refresh = catalog_state_refresh;
-    catalog_state_refresh(&st, NULL);
-    if (!st.nmodels) {
-        printf("no checkpoints under %s\n", root);
-        printf("put a model directory there, or pass --models-dir\n");
-        return 0;
+/* A worker publishes inventory even before a model is selected. This command
+ * does not reserve RAM, launch engines or download checkpoint blocks. */
+static int cmd_worker(int argc, char **argv) {
+    const char *tracker = NULL, *name = NULL, *disk = ".";
+    uint64_t limit = UINT64_MAX;
+    for (int i = 0; i < argc; i++) {
+        if (!strcmp(argv[i], "--join") && i + 1 < argc) tracker = argv[++i];
+        else if (!strcmp(argv[i], "--name") && i + 1 < argc) name = argv[++i];
+        else if (!strcmp(argv[i], "--disk") && i + 1 < argc) disk = argv[++i];
+        else if (!strcmp(argv[i], "--ram-gb") && i + 1 < argc) {
+            char *end;
+            double gb = strtod(argv[++i], &end);
+            if (!argv[i][0] || *end || !isfinite(gb) || gb <= 0 || gb > 1048576)
+                return 2;
+            limit = (uint64_t)(gb * 1e9);
+        } else {
+            fprintf(stderr, "usage: lumabri worker --join HOST:PORT "
+                            "[--name NAME] [--ram-gb N] [--disk PATH]\n");
+            return 2;
+        }
     }
-    return lmb_tui_run(&st, snapshot, keys);
+    if (!tracker || !*tracker || (name && (!*name || strlen(name) >= 64 ||
+                                          lmb_inventory_text(name)))) return 2;
+    char kp[1024];
+    uint8_t sk[64], pk[32];
+    if (lmb_peer_identity(lmb_peer_key_path(kp, sizeof kp), sk, pk)) return 1;
+    g_stopping = 0;
+    install_chat_signal_handlers();
+    signal(SIGPIPE, SIG_IGN);
+    LmbMachineProfile profile;
+    if (lmb_machine_probe(&profile, disk, NULL)) return 1;
+    printf("worker: reporting this computer to %s; waiting for a model plan\n", tracker);
+    fflush(stdout);
+    while (!g_stopping) {
+        int fd = lmb_connect_ms_io(tracker, 1500, 2000);
+        LmbMsg reply = {0};
+        uint8_t nonce[32];
+        int ready = fd >= 0 && !lmb_auth(fd) &&
+                    !lmb_send(fd, LMB_CHALLENGE, NULL, 0, NULL, 0) &&
+                    !lmb_recv(fd, &reply) && reply.op == LMB_CHALLENGE_R &&
+                    reply.body_len == sizeof nonce && !reply.pay_len;
+        if (ready) memcpy(nonce, reply.body, sizeof nonce);
+        lmb_msg_free(&reply);
+        while (ready && !g_stopping) {
+            LmbMachineReport report = {0};
+            memcpy(report.identity, pk, sizeof pk);
+            lmb_machine_refresh_resources(&profile, disk);
+            report.machine = profile;
+            if (name) snprintf(report.machine.hostname, sizeof report.machine.hostname, "%s", name);
+            uint64_t reserve = (uint64_t)lmb_env_int("LUMABRI_RAM_RESERVE_MB", 4096, 256, 262144) << 20;
+            uint64_t available = report.machine.ram_available_bytes;
+            report.ram_budget_bytes = available > reserve ? available - reserve : 0;
+            if (report.ram_budget_bytes > limit) report.ram_budget_bytes = limit;
+            if (lmb_governor_manual_paused()) report.ram_budget_bytes = 0;
+            LmbBuf body = {0}, signed_data = {0};
+            uint8_t sig[64];
+            int bad = lmb_inventory_pack(&body, &report) ||
+                      lmb_buf_str(&signed_data, "lumabri.machine.v1") ||
+                      lmb_buf_bytes(&signed_data, nonce, sizeof nonce) ||
+                      lmb_buf_bytes(&signed_data, body.p, body.len);
+            if (!bad) {
+                lmb_sign(sig, signed_data.p, signed_data.len, sk);
+                bad = lmb_buf_bytes(&body, sig, sizeof sig) ||
+                      lmb_send(fd, LMB_MACHINE_REPORT, body.p, (uint32_t)body.len, NULL, 0) ||
+                      lmb_recv(fd, &reply) || reply.op != LMB_OK;
+            }
+            free(signed_data.p); free(body.p); lmb_msg_free(&reply);
+            if (bad) break;
+            fprintf(stderr, "[worker] %s: %u cores, %.1f GB offered RAM, %u GPU detected\n",
+                    report.machine.hostname, report.machine.physical_cores,
+                    report.ram_budget_bytes / 1e9, report.machine.gpu_count);
+            for (unsigned i = 0; i < LMB_INVENTORY_HEARTBEAT_MS / 100 && !g_stopping; i++)
+                (void)poll(NULL, 0, 100);
+        }
+        if (fd >= 0) lmb_close(fd);
+        if (!g_stopping) {
+            fprintf(stderr, "[worker] tracker unavailable or report refused; reconnecting\n");
+            for (int i = 0; i < 20 && !g_stopping; i++) (void)poll(NULL, 0, 100);
+        }
+    }
+    memset(sk, 0, sizeof sk);
+    return 0;
 }
 
 static int cmd_machine(int argc, char **argv) {
@@ -5793,8 +5924,6 @@ int main(int argc, char **argv) {
     if (argc >= 2 && !strcmp(argv[1], "key")) return cmd_key(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "peer-key"))
         return cmd_peer_key(argc - 2, argv + 2);
-    if (argc >= 2 && !strcmp(argv[1], "models"))
-        return cmd_models(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "limits"))
         return cmd_limits(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "pause"))
@@ -5802,6 +5931,10 @@ int main(int argc, char **argv) {
     if (argc >= 2 && !strcmp(argv[1], "resume"))
         return cmd_governor_manual(argc - 2, argv + 2, 0);
     if (lmb_secure_init()) return 1; /* children inherit the same strict mode */
+    if (argc >= 2 && !strcmp(argv[1], "models"))
+        return cmd_models(argc - 2, argv + 2);
+    if (argc >= 2 && !strcmp(argv[1], "worker"))
+        return cmd_worker(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "host"))
         return cmd_host(argc - 2, argv + 2);
     if (argc >= 2 && (!strcmp(argv[1], "machine") || !strcmp(argv[1], "status")))
@@ -5824,6 +5957,8 @@ int main(int argc, char **argv) {
         "lumabri: run huge models from a swarm of peers\n\n"
         "  lumabri                                                    chat (asks what it needs)\n"
         "  lumabri machine [--json] [--tracker HOST:PORT]             profile this machine\n"
+        "  lumabri worker --join HOST:PORT [--ram-gb N]              publish LAN inventory\n"
+        "  lumabri models --tracker HOST:PORT                       cluster planning preview\n"
         "  lumabri status | limits | pause | resume                    resource governor\n"
         "  lumabri doctor [--json] [--tracker H:P] [--model DIR]      deployment preflight\n"
         "  lumabri peer-key                                           print this machine's endpoint identity\n"

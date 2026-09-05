@@ -311,6 +311,7 @@ enum {
      * sees an ordinary byte stream. */
     LMB_HOST_HELLO = 74, LMB_HOST_HELLO_R = 75,
     LMB_HOST_STREAM = 76,
+    LMB_MACHINE_REPORT = 77, LMB_MACHINE_LIST = 78, LMB_MACHINE_LIST_R = 79,
 };
 #define LMB_CAP_EXEC2 (1u << 0)
 #define LMB_ENC_F32  0u
@@ -412,6 +413,7 @@ static void lmb_frame_caps(uint32_t op, uint32_t *body_cap, uint32_t *pay_cap) {
     case LMB_MANIFEST_R:
     case LMB_SWARM_R:
     case LMB_SWARM_DETAIL_R:
+    case LMB_MACHINE_LIST_R:
     case LMB_EPEERS_R:
     case LMB_EMANIFEST_R:
     case LMB_EASSIGN_R:
@@ -938,7 +940,7 @@ static LMB_MAYBE_UNUSED const char *lmb_connect_why(void) {
 /* addr is "host:port". Bounded connect: an unreachable peer must cost
  * `timeout_ms`, not the kernel's minutes — the caller has a relay to fall
  * back to. Returns a blocking fd with TCP_NODELAY, or -1. */
-static int lmb_connect_ms(const char *addr, int timeout_ms) {
+static int lmb_connect_ms_io(const char *addr, int timeout_ms, int io_timeout_ms) {
     char host[256];
     lmb_connect_errno = 0;
     const char *colon = strrchr(addr, ':');
@@ -976,8 +978,7 @@ static int lmb_connect_ms(const char *addr, int timeout_ms) {
     if (fd >= 0) {
         int one = 1;
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-        lmb_set_io_timeout(fd, lmb_env_int("LUMABRI_IO_TIMEOUT_MS",
-                                           LMB_DEFAULT_IO_TIMEOUT_MS, 100, 3600000));
+        lmb_set_io_timeout(fd, io_timeout_ms);
         /* when this component has enabled encryption, every outbound
          * connection handshakes here, before any frame is sent */
         if (lmb_enc_wrap && lmb_enc_wrap(fd, 1, addr)) { lmb_close(fd); fd = -1; }
@@ -985,6 +986,11 @@ static int lmb_connect_ms(const char *addr, int timeout_ms) {
     return fd;
 }
 
+static int lmb_connect_ms(const char *addr, int timeout_ms) {
+    return lmb_connect_ms_io(addr, timeout_ms,
+                            lmb_env_int("LUMABRI_IO_TIMEOUT_MS", LMB_DEFAULT_IO_TIMEOUT_MS,
+                                        100, 3600000));
+}
 static int lmb_connect(const char *addr) { return lmb_connect_ms(addr, 5000); }
 
 /* ---- userspace network emulation ---------------------------------------

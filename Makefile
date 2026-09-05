@@ -22,7 +22,7 @@ check-warnings:
 		test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 test_exec2 test_accum_order test_residency_report test_model_family test_planner test_cluster test_calibration \
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
 		test_meminfo test_compute_lease test_content_filter \
-		test_scheduler test_run_gate \
+		test_scheduler test_run_gate test_inventory \
 		CFLAGS='$(CFLAGS) -Werror'
 
 SECURE_DEPS = lumabri_secure.h lumabri_crypto.h
@@ -30,6 +30,7 @@ MACHINE_SRC = lumabri_machine.c
 MACHINE_DEPS = lumabri_machine.h $(MACHINE_SRC)
 
 lumabri: lumabri.c lumabri_tui.c lumabri_tui.h lumabri_proto.h lumabri_sign.h \
+		lumabri_inventory.h \
 		lumabri_families.h lumabri_planner.h lumabri_cluster.h \
 		lumabri_calibration.h $(SECURE_DEPS) $(MACHINE_DEPS)
 	$(CC) $(CFLAGS) -pthread lumabri.c lumabri_tui.c $(MACHINE_SRC) -o $@
@@ -362,6 +363,7 @@ test-engines: test-phase2 test-phase2-glm test-phase2-inkling test-phase2-kimi
 	fi
 
 tracker: tracker.c lumabri_segment_discovery.c lumabri_segment_discovery.h \
+		 lumabri_inventory.h lumabri_machine.h \
 		 lumabri_segment.c lumabri_segment.h lumabri_proto.h lumabri_sha.h \
 		 lumabri_sign.h $(SECURE_DEPS)
 	$(CC) $(CFLAGS) -pthread tracker.c lumabri_segment_discovery.c \
@@ -414,6 +416,9 @@ test_cluster: test_cluster.c lumabri_cluster.h lumabri_planner.h lumabri_familie
 
 test_calibration: test_calibration.c lumabri_calibration.h lumabri_planner.h
 	$(CC) $(CFLAGS) test_calibration.c -o $@
+
+test_inventory: test_inventory.c lumabri_inventory.h lumabri_machine.h lumabri_proto.h lumabri_sign.h $(SECURE_DEPS)
+	$(CC) $(CFLAGS) -pthread test_inventory.c -o $@
 
 segment_budget_probe: segment_budget_probe.c lumabri_planner.h lumabri_families.h
 	$(CC) $(CFLAGS) segment_budget_probe.c -o $@
@@ -637,6 +642,7 @@ test-segment-discovery: tracker test_segment_discovery
 	bash ./segment_discovery_test.sh
 
 test: all test_key_rotation test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 test_accum_order test_residency_report test_model_family test_planner test_cluster \
+		test_inventory \
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
 		test_meminfo test_compute_lease test_content_filter \
 		test_scheduler test_run_gate
@@ -667,6 +673,8 @@ test: all test_key_rotation test_hedge test_local_fallback test_nat_adopt test_v
 	./test_model_family
 	bash ./model_family_test.sh
 	bash ./catalog_test.sh
+	./test_inventory
+	python3 ./lan_inventory_test.py
 	bash ./hosted_chat_test.sh
 	bash ./tui_test.sh
 	./test_planner
@@ -713,7 +721,7 @@ clean:
 	rm -f tracker maintainer liblumabri.so test_shim swarm_probe lumabri \
 	      test_relay_exec test_swarm_fed test_key_rotation test_hedge \
 	      test_local_fallback test_accum_order test_residency_report \
-	      test_model_family test_planner test_cluster test_calibration segment_budget_probe \
+	      test_model_family test_planner test_cluster test_calibration test_inventory segment_budget_probe \
 	      test_nat_adopt test_rtt_refresh \
 	      test_verify_failover test_segment_v2 test_segment_discovery test_sampling \
 	      test_swarm_detail test_relay_rate test_machine test_meminfo \

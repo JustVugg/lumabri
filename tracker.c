@@ -27,6 +27,7 @@
 #include "lumabri_sha.h"
 #include "lumabri_sign.h"
 #include "lumabri_secure.h"
+#include "lumabri_inventory.h"
 
 #define MAX_PEERS  64
 #define MAX_FILES  4096
@@ -2674,6 +2675,97 @@ static void ctrl_teardown(Peer *p, int fd) {
 
 /* ---- connections -------------------------------------------------------- */
 
+typedef struct {
+    int active, fd;
+    double updated;
+    LmbMachineReport report;
+} InventorySlot;
+static InventorySlot g_inventory[LMB_INVENTORY_MAX];
+static pthread_mutex_t g_inventory_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static double inventory_clock(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec + t.tv_nsec / 1e9;
+}
+
+static int handle_machine_report(int fd, const LmbMsg *m,
+                                  const uint8_t *nonce) {
+    if (!nonce || m->pay_len || m->body_len < 96) return -1;
+    size_t bytes = m->body_len - 64;
+    LmbCur c = {m->body, bytes, 0};
+    LmbMachineReport report;
+    if (lmb_inventory_unpack(&c, &report) || c.off != c.len) return -1;
+    /* Bind every resource field to this connection's challenge; signing only
+     * the name would leave the memory budget editable on a plaintext LAN. */
+    LmbBuf signed_data = {0};
+    int bad = lmb_buf_str(&signed_data, "lumabri.machine.v1") ||
+              lmb_buf_bytes(&signed_data, nonce, 32) ||
+              lmb_buf_bytes(&signed_data, m->body, bytes);
+    if (!bad) bad = lmb_sign_verify(m->body + bytes, signed_data.p,
+                                    signed_data.len, report.identity);
+    free(signed_data.p);
+    if (bad || (lmb_secure_enabled() &&
+                !lmb_secure_peer_matches(fd, report.identity))) return -1;
+    double now = inventory_clock();
+    int slot = -1, free_slot = -1;
+    pthread_mutex_lock(&g_inventory_lock);
+    for (unsigned i = 0; i < LMB_INVENTORY_MAX; i++) {
+        InventorySlot *s = &g_inventory[i];
+        if (s->active && now - s->updated > LMB_INVENTORY_TTL_MS / 1000.0)
+            s->active = 0;
+        if (!s->active) { if (free_slot < 0) free_slot = (int)i; continue; }
+        if (s->fd == fd && memcmp(s->report.identity, report.identity, 32)) {
+            bad = 1; break; /* one identity per connection */
+        }
+        if (!memcmp(s->report.identity, report.identity, 32)) {
+            if (s->fd != fd) bad = 1; /* do not count a computer twice */
+            slot = (int)i;
+        }
+    }
+    if (slot < 0) slot = free_slot;
+    if (!bad && slot >= 0) {
+        g_inventory[slot] = (InventorySlot){1, fd, now, report};
+    } else bad = 1;
+    pthread_mutex_unlock(&g_inventory_lock);
+    if (bad) { send_err(fd, "machine already connected or inventory full"); return -1; }
+    return lmb_send(fd, LMB_OK, NULL, 0, NULL, 0);
+}
+
+static int handle_machine_list(int fd, const LmbMsg *m) {
+    if (m->body_len || m->pay_len) return -1;
+    double now = inventory_clock();
+    LmbBuf b = {0};
+    uint32_t n = 0;
+    pthread_mutex_lock(&g_inventory_lock);
+    for (unsigned i = 0; i < LMB_INVENTORY_MAX; i++) {
+        InventorySlot *s = &g_inventory[i];
+        if (s->active && now - s->updated > LMB_INVENTORY_TTL_MS / 1000.0)
+            s->active = 0;
+        if (s->active) n++;
+    }
+    int bad = lmb_buf_u32(&b, LMB_INVENTORY_VERSION) || lmb_buf_u32(&b, n);
+    for (unsigned i = 0; !bad && i < LMB_INVENTORY_MAX; i++) {
+        InventorySlot *s = &g_inventory[i];
+        if (!s->active) continue;
+        bad = lmb_buf_u32(&b, (uint32_t)((now - s->updated) * 1000)) ||
+              lmb_inventory_pack(&b, &s->report);
+    }
+    pthread_mutex_unlock(&g_inventory_lock);
+    int rc = bad ? -1 : lmb_send(fd, LMB_MACHINE_LIST_R, b.p,
+                                (uint32_t)b.len, NULL, 0);
+    free(b.p);
+    return rc;
+}
+
+static void inventory_disconnect(int fd) {
+    pthread_mutex_lock(&g_inventory_lock);
+    for (unsigned i = 0; i < LMB_INVENTORY_MAX; i++)
+        if (g_inventory[i].active && g_inventory[i].fd == fd)
+            g_inventory[i].active = 0;
+    pthread_mutex_unlock(&g_inventory_lock);
+}
+
 static void *conn_thread(void *arg) {
     int fd = (int)(intptr_t)arg;
     if (lmb_secure_server(fd)) { close(fd); lmb_conn_gate_leave(&g_conn_gate); return NULL; }
@@ -2848,6 +2940,9 @@ static void *conn_thread(void *arg) {
         case LMB_SWARM:     rc = handle_swarm(fd); break;
         case LMB_REACH:     rc = handle_reach(fd, &m); break;
         case LMB_SWARM_DETAIL: rc = handle_swarm_detail(fd); break;
+        case LMB_MACHINE_REPORT:
+            rc = handle_machine_report(fd, &m, have_nonce ? nonce : NULL); break;
+        case LMB_MACHINE_LIST: rc = handle_machine_list(fd, &m); break;
         case LMB_RREAD:     rc = handle_rread(fd, &m); break;
         case LMB_REXEC:     rc = handle_rexec(fd, &m); break;
         case LMB_TEXEC:     rc = handle_texec(fd, &m); break;
@@ -2860,6 +2955,7 @@ static void *conn_thread(void *arg) {
         if (rc) break;
     }
     if (ctrl) ctrl_teardown(ctrl, fd);
+    inventory_disconnect(fd);
     close(fd);
     lmb_conn_gate_leave(&g_conn_gate);
     return NULL;

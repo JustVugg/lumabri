@@ -77,3 +77,4 @@ segment_budget_probe
 test_planner
 test_cluster
 test_model_family
+test_inventory

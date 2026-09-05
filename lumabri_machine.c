@@ -264,12 +264,13 @@ static void gpu_profile(LmbMachineProfile *profile) {
 static uint64_t disk_read_speed(const char *path) {
     if (!path || !path[0]) return 0;
     char probe[1024];
-    snprintf(probe, sizeof probe, "%s/.lumabri_disk_probe", path);
+    int plen = snprintf(probe, sizeof probe, "%s/.lumabri_disk_probe.XXXXXX", path);
+    if (plen < 0 || (size_t)plen >= sizeof probe) return 0;
     enum { CHUNK = 1u << 20, ROUNDS = 8 };
     void *buf = NULL;
     if (posix_memalign(&buf, 4096, CHUNK)) return 0;
     memset(buf, 0xA5, CHUNK);
-    int fd = open(probe, O_CREAT | O_WRONLY | O_TRUNC, 0600);
+    int fd = mkstemp(probe);
     if (fd < 0) { free(buf); return 0; }
     for (int i = 0; i < ROUNDS; i++)
         if (write(fd, buf, CHUNK) != (ssize_t)CHUNK) {
@@ -353,6 +354,16 @@ static double monotonic_seconds(void) {
     struct timespec time;
     clock_gettime(CLOCK_MONOTONIC, &time);
     return time.tv_sec + time.tv_nsec / 1e9;
+}
+
+void lmb_machine_refresh_resources(LmbMachineProfile *profile, const char *disk_path) {
+    meminfo(&profile->ram_total_bytes, &profile->ram_available_bytes,
+            &profile->swap_total_bytes, &profile->swap_free_bytes);
+    struct statvfs disk;
+    if (!statvfs(disk_path && *disk_path ? disk_path : ".", &disk))
+        profile->disk_available_bytes = (uint64_t)disk.f_bavail * disk.f_frsize;
+    double loads[1];
+    if (getloadavg(loads, 1) == 1) profile->load_one = loads[0];
 }
 
 int lmb_machine_probe(LmbMachineProfile *profile, const char *disk_path,
