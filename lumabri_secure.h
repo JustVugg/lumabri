@@ -29,6 +29,16 @@
 #include <ctype.h>
 #include <sys/file.h>
 
+/* Linux has a key-specific errno; Darwin uses EAUTH. Authentication still
+ * fails closed on systems that only expose the POSIX permission error. */
+#if defined(EKEYREJECTED)
+#define LMB_AUTH_REJECTED EKEYREJECTED
+#elif defined(EAUTH)
+#define LMB_AUTH_REJECTED EAUTH
+#else
+#define LMB_AUTH_REJECTED EACCES
+#endif
+
 typedef struct {
     int active;
     uint8_t tx_key[32], rx_key[32];
@@ -100,12 +110,12 @@ static int lmb_secure_handshake(int fd, int is_client,
         /* the server sends its identity and signature right after its
          * ephemeral; read and verify them, then send ours */
         if (lmb_read_full(fd, peer_id, 32) || lmb_read_full(fd, peer_sig, 64)) return -1;
-        if (lmb_sign_verify(peer_sig, tr, tl, peer_id)) { errno = EKEYREJECTED; return -1; }
+        if (lmb_sign_verify(peer_sig, tr, tl, peer_id)) { errno = LMB_AUTH_REJECTED; return -1; }
         if (lmb_write_full(fd, id_pk, 32) || lmb_write_full(fd, my_sig, 64)) return -1;
     } else {
         if (lmb_write_full(fd, id_pk, 32) || lmb_write_full(fd, my_sig, 64)) return -1;
         if (lmb_read_full(fd, peer_id, 32) || lmb_read_full(fd, peer_sig, 64)) return -1;
-        if (lmb_sign_verify(peer_sig, tr, tl, peer_id)) { errno = EKEYREJECTED; return -1; }
+        if (lmb_sign_verify(peer_sig, tr, tl, peer_id)) { errno = LMB_AUTH_REJECTED; return -1; }
     }
     memcpy(s->peer_id, peer_id, 32); s->have_peer_id = 1;
 

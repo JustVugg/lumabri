@@ -3971,7 +3971,7 @@ static int role_start_segment(const Role *r, const char *tracker,
     donor_base_name(r, base, sizeof base);
     snprintf(name, sizeof name, "%s-segment-%d", base, port);
     int ready_pipe[2];
-    if (pipe2(ready_pipe, O_CLOEXEC)) return 0;
+    if (lmb_ready_pipe(ready_pipe)) return 0;
     int fd_flags = fcntl(ready_pipe[1], F_GETFD);
     if (fd_flags < 0 || fcntl(ready_pipe[1], F_SETFD,
                               fd_flags & ~FD_CLOEXEC)) {

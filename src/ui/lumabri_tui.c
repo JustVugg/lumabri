@@ -7,6 +7,10 @@
  * in advance, and the layout code is straight-line because straight-line is
  * what two views need.
  */
+/* Darwin hides SIGWINCH in strict XSI mode even with <signal.h> included. */
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE 1
+#endif
 #define _XOPEN_SOURCE 700
 #include "lumabri_tui.h"
 #include "lumabri_visual.h"
