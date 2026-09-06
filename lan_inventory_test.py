@@ -1,5 +1,6 @@
 """Real tracker + workers + CLI/TUI; loopback protocol gate, not a physical LAN benchmark."""
 import json
+import errno
 import os
 import fcntl
 from pathlib import Path
@@ -102,7 +103,15 @@ def main():
             def screen_has(text):
                 nonlocal display
                 while select.select([master], [], [], .05)[0]:
-                    display += os.read(master, 65536).decode("utf-8", errors="replace")
+                    try:
+                        data = os.read(master, 65536)
+                    except OSError as exc:
+                        if exc.errno != errno.EIO:
+                            raise
+                        break  # Linux PTY EOF after the child closes its slave.
+                    if not data:
+                        break
+                    display += data.decode("utf-8", errors="replace")
                     if len(display) > 262144:
                         display = display[-131072:]
                 # The shared C canvas redraws in place without erasing first.
