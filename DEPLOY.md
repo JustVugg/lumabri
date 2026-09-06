@@ -146,7 +146,7 @@ Sanity check before going further — it runs in seconds and proves the whole
 byte path is byte-identical:
 
 ```sh
-su - lumabri -c "cd ~/lumabri && ./selftest.sh"
+su - lumabri -c "cd ~/lumabri && ./tests/integration/selftest.sh"
 ```
 
 ---
@@ -539,7 +539,7 @@ Two things worth knowing:
   ownership is persisted under `~/.lumabri/tracker_peer_bindings`, so restart
   does not reopen names for takeover.
 - **A client with a warm mirror keeps working with the server off.** That
-  is the design, and `selftest.sh` pass 3 tests exactly it.
+  is the design, and `tests/integration/selftest.sh` pass 3 tests exactly it.
 - **`.coli_*` files never leave their machine.** They are mutable Colibri
   runtime telemetry/cache state, not signed model bytes. If a tracker still
   prints `REJECTED ... unsigned .../.coli_usage`, restart that donor with the

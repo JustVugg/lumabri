@@ -1,7 +1,8 @@
-/* lumabri.c — the lumabri front end: one binary, two roles.
+/* lumabri.c — household workspace and explicit advanced CLI tools.
  *
  *   lumabri serve --model DIR      share a model with the swarm
- *   lumabri chat                   chat with a model that lives on the swarm
+ *   lumabri                       open the household workspace
+ *   lumabri chat --tracker H:P    use the advanced swarm chat path
  *
  * `serve` runs the tracker and a maintainer for the given directory.
  * `chat` asks the tracker what is available, mounts the chosen model through
@@ -188,7 +189,6 @@ static const char *WORDMARK[6] = {
     "███████╗╚██████╔╝██║ ╚═╝ ██║██║  ██║██████╔╝██║  ██║██║",
     "╚══════╝ ╚═════╝ ╚═╝     ╚═╝╚═╝  ╚═╝╚═════╝ ╚═╝  ╚═╝╚═╝",
 };
-static const int WORD_TINT[6] = { 203, 209, 209, 215, 216, 223 };
 
 static int vis_len(const char *s);
 static void hline(const char *l, const char *r, int w) {
@@ -217,12 +217,6 @@ static int vis_len(const char *s) {
     return v;
 }
 
-static void panel_row(int w, const char *left, const char *right) {
-    int pad = w - 2 - 2 - vis_len(left) - 3 - vis_len(right);
-    if (pad < 0) pad = 0;
-    printf("%s\xe2\x94\x82%s  %s   %s%*s%s\xe2\x94\x82%s\n",
-           C_GRAY, C_R, left, right, pad, "", C_GRAY, C_R);
-}
 
 /* ---- serve -------------------------------------------------------------- */
 
@@ -3801,411 +3795,9 @@ static void donor_base_name(const Role *r, char *out, size_t cap) {
     else   snprintf(out, cap, "donor");
 }
 
-/* free space where the donated slice would live, in GB */
-static double free_gb_at(const char *path) {
-    struct statvfs v;
-    if (statvfs(path, &v)) return 0;
-    return (double)v.f_bavail * (double)v.f_frsize / 1e9;
-}
 
-/* --- a small line editor -------------------------------------------------
- * fgets leaves the terminal in canonical mode, where the arrow keys are not
- * handled and arrive as raw escape bytes (^[[D) that land in the text. This
- * gives the prompt the editing people expect — left/right, Home/End,
- * backspace/Delete, word/line kill, and up/down history — by reading in raw
- * mode and repainting only the input, so the caller's prompt (a drawn box) is
- * left untouched. Non-interactive input (a pipe, a test) still uses fgets.
- * Cursor moves are relative and per-character (UTF-8 aware), so it assumes the
- * input does not wrap past the terminal width — fine for a chat line. */
-#define LE_HIST 64
-static char *le_hist[LE_HIST];
-static int le_hist_n = 0;
+#include "src/ui/lumabri_chat_editor.h"
 
-static void le_hist_push(const char *s) {
-    if (!s || !*s) return;
-    char *last = le_hist_n ? le_hist[(le_hist_n - 1) % LE_HIST] : NULL;
-    if (last && !strcmp(last, s)) return;      /* no consecutive duplicate */
-    char *d = strdup(s);
-    if (!d) return;
-    free(le_hist[le_hist_n % LE_HIST]);
-    le_hist[le_hist_n % LE_HIST] = d;
-    le_hist_n++;
-}
-
-static int le_lead(unsigned char c) { return (c & 0xC0) != 0x80; }
-static int le_cols(const char *s, int a, int b) {   /* characters in [a,b) */
-    int n = 0;
-    for (int i = a; i < b; i++)
-        if (le_lead((unsigned char)s[i])) n++;
-    return n;
-}
-static int le_prev(const char *s, int pos) {        /* start of char before pos */
-    int i = pos - 1;
-    while (i > 0 && !le_lead((unsigned char)s[i])) i--;
-    return i < 0 ? 0 : i;
-}
-static int le_next(const char *s, int len, int pos) {
-    int i = pos + 1;
-    while (i < len && !le_lead((unsigned char)s[i])) i++;
-    return i > len ? len : i;
-}
-static void le_left(int n) { if (n > 0) printf("\x1b[%dD", n); }
-
-/* Replace the visible input with `text` (history recall / line kill). */
-static void le_set(char *buf, size_t cap, int *len, int *pos, const char *text) {
-    le_left(le_cols(buf, 0, *pos));            /* to input start */
-    printf("\x1b[K");                          /* clear to end of line */
-    snprintf(buf, cap, "%s", text ? text : "");
-    *len = (int)strlen(buf);
-    *pos = *len;
-    fwrite(buf, 1, (size_t)*len, stdout);
-}
-
-/* The popup owns only freshly reserved rows below the input. It never
- * clears transcript rows above it; Enter and Escape remove just these rows. */
-static void le_command_menu(const char *buf, int pos, int selected, int show, int *reserved) {
-    int indices[sizeof CHAT_COMMANDS / sizeof *CHAT_COMMANDS];
-    int count = show && g_slash_completion ? chat_command_matches(buf, indices) : 0;
-    if (count && !*reserved) {
-        int rows = term_h() > 12 ? 6 : 3;
-        for (int i = 0; i < rows; i++) printf("\r\n");
-        printf("\x1b[%dA\x1b[%dG", rows, 5 + le_cols(buf, 0, pos));
-        *reserved = rows;
-    }
-    if (!*reserved) return;
-    int rows = *reserved;
-    if (selected < 0 || selected >= count) selected = 0;
-    int first = selected >= rows - 1 ? selected - rows + 2 : 0;
-    printf("\x1b" "7");
-    for (int i = 0; i < rows; i++) {
-        printf("\x1b[1B\r\x1b[2K");
-        if (!count) continue;
-        int at = first + i;
-        if (i == rows - 1) printf("  %s↑↓ choose · Tab complete · Enter run · Esc dismiss%s", C_DIM, C_R);
-        else if (at < count) {
-            int k = indices[at];
-            printf("  %s%s %-10s %.*s%s", at == selected ? "\x1b[7m" : "",
-                   at == selected ? ">" : " ", CHAT_COMMANDS[k],
-                   term_w() > 20 ? term_w() - 20 : 1, CHAT_COMMAND_HELP[k], C_R);
-        }
-    }
-    printf("\x1b" "8");
-    if (!count) *reserved = 0;
-    fflush(stdout);
-}
-
-/* This machine as a donor, for the frame above the idle prompt: experts
- * held, calls served and the rate since the last look, work in flight,
- * bytes served by its storage. Read from the tracker's nominative counters
- * (the donor children never talk to the TUI directly). */
-static char g_donor_base[48];
-static uint64_t g_donor_last_calls;
-static double g_donor_last_at;
-static int donor_status_line(char *out, size_t cap) {
-    if (!g_donor_base[0] || !g_live.tracker[0]) return 0;
-    SwarmDetailRow rows[64];
-    int n = swarm_detail(g_live.tracker, rows, 64);
-    if (n <= 0) return 0;
-    uint64_t calls = 0, inflight = 0, resident = 0, resident_bytes = 0, served = 0;
-    int mine = 0, nexperts = 0;
-    for (int i = 0; i < n; i++) {
-        if (strncmp(rows[i].name, g_donor_base, strlen(g_donor_base))) continue;
-        mine++;
-        if (rows[i].roles & LMB_SWARM_ROLE_EXPERT) {
-            nexperts += (int)rows[i].nexperts;
-            calls += rows[i].exec_calls; inflight += rows[i].exec_inflight;
-            resident += rows[i].resident_experts;
-            resident_bytes += rows[i].expert_resident_bytes;
-        }
-        if (rows[i].roles & LMB_SWARM_ROLE_STORAGE) served += rows[i].served_bytes;
-    }
-    if (!mine) return 0;
-    double now = nowd(), rate = 0;
-    if (g_donor_last_at > 0 && now > g_donor_last_at && calls >= g_donor_last_calls)
-        rate = (double)(calls - g_donor_last_calls) / (now - g_donor_last_at);
-    g_donor_last_calls = calls; g_donor_last_at = now;
-    int len = snprintf(out, cap, "donor: %d experts", nexperts);
-    if (resident)
-        len += snprintf(out + len, cap - (size_t)len, " (%llu in RAM, %.1f GB)",
-                        (unsigned long long)resident, (double)resident_bytes / 1e9);
-    len += snprintf(out + len, cap - (size_t)len, " \xc2\xb7 %llu calls",
-                    (unsigned long long)calls);
-    if (rate > 0) len += snprintf(out + len, cap - (size_t)len, " (%.1f/s)", rate);
-    if (inflight) len += snprintf(out + len, cap - (size_t)len, " \xc2\xb7 %llu in flight",
-                                  (unsigned long long)inflight);
-    if (served) len += snprintf(out + len, cap - (size_t)len, " \xc2\xb7 disk %.1f GB served",
-                                (double)served / 1e9);
-    return len > 0;
-}
-
-static int line_edit(char *buf, size_t cap) {
-    struct termios old, raw;
-    if (g_chat_term_valid) old = g_chat_term;
-    else if (tcgetattr(0, &old)) return -2;    /* not a real tty -> caller fgets */
-    raw = old;
-    /* Clear ISIG/IEXTEN too, and IXON, so Ctrl-C / Ctrl-Z / Ctrl-S reach read()
-     * as bytes instead of the tty acting on them behind our back — otherwise the
-     * Ctrl-C branch below is dead and Ctrl-Z suspends with the terminal still in
-     * raw mode, leaving a garbled shell. */
-    raw.c_lflag &= ~(tcflag_t)(ICANON | ECHO | ISIG | IEXTEN);
-    raw.c_iflag &= ~(tcflag_t)(IXON);
-    raw.c_cc[VMIN] = 1;
-    raw.c_cc[VTIME] = 0;
-    if (tcsetattr(0, TCSANOW, &raw)) return -2;
-
-    int len = 0, pos = 0, rc = 0;
-    int hidx = le_hist_n;                       /* == "the line being typed" */
-    char *save = (char *)malloc(cap);           /* in-progress line, for down */
-    int command_selected = 0, command_rows = 0, command_hidden = 0;
-    if (!save) { tcsetattr(0, TCSANOW, &old); return -2; }   /* -> caller fgets */
-    save[0] = 0;
-    buf[0] = 0;
-
-    for (;;) {
-        unsigned char c;
-        /* A donor can disappear while this editor is idle. The control
-         * worker sets g_stopping; do not wait for another user keystroke. */
-        if (g_stopping) { rc = -1; break; }
-        struct pollfd input_ready = {0, POLLIN, 0};
-        int input_poll = poll(&input_ready, 1, 100);
-        if ((input_poll == 0 && !g_donor_base[0]) || (input_poll < 0 && errno == EINTR)) continue;
-        if (input_poll < 0) { rc = -1; break; }
-        if (g_donor_base[0]) {
-            /* a donor refreshes the frame above the prompt every 3 s while
-             * the user is idle: calls served, experts held, work in flight */
-            struct pollfd pfd = { 0, POLLIN, 0 };
-            int pr = poll(&pfd, 1, 3000);
-            if (pr < 0 && errno != EINTR) { rc = -1; break; }
-            if (pr == 0) {
-                char status[200] = "";
-                if (donor_status_line(status, sizeof status)) {
-                    printf("\x1b" "7\x1b[1A\r\x1b[2K");
-                    hline_text("\xe2\x95\xad", "\xe2\x95\xae", term_w() - 2, status);
-                    printf("\x1b" "8");
-                    fflush(stdout);
-                }
-                continue;
-            }
-            if (pr < 0) { if (g_stopping) { rc = -1; break; } continue; }
-        }
-        ssize_t rn = read(0, &c, 1);
-        if (rn < 0 && errno == EINTR) {
-            if (g_stopping) { rc = -1; break; }
-            continue;
-        }
-        if (rn <= 0) { rc = -1; break; }
-
-        if (c == '\r' || c == '\n') {
-            int indices[sizeof CHAT_COMMANDS / sizeof *CHAT_COMMANDS];
-            int n = command_hidden || !g_slash_completion ? 0 : chat_command_matches(buf, indices);
-            if (n) le_set(buf, cap, &len, &pos, CHAT_COMMANDS[indices[command_selected % n]]);
-            le_command_menu(buf, pos, 0, 0, &command_rows);
-            printf("\r\n"); break;
-        }
-        if (c == 3) {                            /* Ctrl-C: cancel, keep old semantics */
-            tcsetattr(0, TCSANOW, &old);
-            printf("\r\n");
-            raise(SIGINT);
-            rc = -1; len = 0; break;
-        }
-        if (c == 26) {                           /* Ctrl-Z: suspend, terminal restored */
-            tcsetattr(0, TCSANOW, &old);
-            raise(SIGTSTP);
-            if (g_stopping) { rc = -1; len = 0; break; }
-            tcsetattr(0, TCSANOW, &raw);         /* resumed: back to raw */
-            continue;
-        }
-        if (c == 28) {                           /* Ctrl-\: conventional SIGQUIT */
-            tcsetattr(0, TCSANOW, &old);
-            printf("\r\n");
-            raise(SIGQUIT);
-            rc = -1; len = 0; break;
-        }
-        if (c != 27 && c != '\t') { command_selected = 0; command_hidden = 0; }
-        if (c == '\t') {
-            int indices[sizeof CHAT_COMMANDS / sizeof *CHAT_COMMANDS];
-            int n = g_slash_completion ? chat_command_matches(buf, indices) : 0;
-            if (n) le_set(buf, cap, &len, &pos, CHAT_COMMANDS[indices[command_selected % n]]);
-            command_selected = 0;
-        } else if (c == 4) {                    /* Ctrl-D: EOF on empty, else Delete */
-            if (len == 0) { rc = -1; break; }
-            if (pos < len) {
-                int nx = le_next(buf, len, pos);
-                memmove(buf + pos, buf + nx, (size_t)(len - nx));
-                len -= nx - pos;
-                fwrite(buf + pos, 1, (size_t)(len - pos), stdout);
-                printf(" ");
-                le_left(le_cols(buf, pos, len) + 1);
-            }
-        } else if (c == 127 || c == 8) {         /* Backspace */
-            if (pos > 0) {
-                int p = le_prev(buf, pos);
-                memmove(buf + p, buf + pos, (size_t)(len - pos));
-                len -= pos - p;
-                pos = p;
-                le_left(1);
-                fwrite(buf + pos, 1, (size_t)(len - pos), stdout);
-                printf(" ");
-                le_left(le_cols(buf, pos, len) + 1);
-            }
-        } else if (c == 1) {                     /* Ctrl-A: Home */
-            le_left(le_cols(buf, 0, pos)); pos = 0;
-        } else if (c == 5) {                     /* Ctrl-E: End */
-            fwrite(buf + pos, 1, (size_t)(len - pos), stdout); pos = len;
-        } else if (c == 21) {                    /* Ctrl-U: clear line */
-            le_set(buf, cap, &len, &pos, "");
-        } else if (c == 11) {                    /* Ctrl-K: kill to end */
-            printf("\x1b[K"); len = pos; buf[len] = 0;
-        } else if (c == 23) {                    /* Ctrl-W: delete previous word */
-            int p = pos;
-            while (p > 0 && buf[p-1] == ' ') p--;
-            while (p > 0 && buf[p-1] != ' ') p--;
-            if (p < pos) {
-                int killed = le_cols(buf, p, pos);   /* columns removed — count BEFORE the shift */
-                le_left(killed);
-                memmove(buf + p, buf + pos, (size_t)(len - pos));
-                len -= pos - p; pos = p;
-                fwrite(buf + pos, 1, (size_t)(len - pos), stdout);
-                for (int k = 0; k < killed; k++) printf(" ");
-                le_left(le_cols(buf, pos, len) + killed);
-            }
-        } else if (c == 27) {                    /* an escape sequence */
-            unsigned char a, b;
-            struct pollfd escape = {0, POLLIN, 0};
-            if (poll(&escape, 1, 100) <= 0) {
-                command_hidden = 1;
-                le_command_menu(buf, pos, 0, 0, &command_rows);
-                continue;
-            }
-            if (read(0, &a, 1) <= 0) continue;
-            if (a != '[' && a != 'O') continue;
-            if (read(0, &b, 1) <= 0) continue;
-            if (b == 'D') {                      /* Left */
-                if (pos > 0) { pos = le_prev(buf, pos); le_left(1); }
-            } else if (b == 'C') {               /* Right */
-                if (pos < len) { int nx = le_next(buf, len, pos);
-                    fwrite(buf + pos, 1, (size_t)(nx - pos), stdout); pos = nx; }
-            } else if (b == 'H') {               /* Home */
-                le_left(le_cols(buf, 0, pos)); pos = 0;
-            } else if (b == 'F') {               /* End */
-                fwrite(buf + pos, 1, (size_t)(len - pos), stdout); pos = len;
-            } else if (b == 'A' || b == 'B') {   /* Up / Down: history */
-                int indices[sizeof CHAT_COMMANDS / sizeof *CHAT_COMMANDS];
-                int matches = command_hidden || !g_slash_completion ? 0 : chat_command_matches(buf, indices);
-                if (matches) {
-                    command_selected = (command_selected + (b == 'A' ? matches - 1 : 1)) % matches;
-                    le_command_menu(buf, pos, command_selected, 1, &command_rows);
-                    continue;
-                }
-                int avail = le_hist_n < LE_HIST ? le_hist_n : LE_HIST;
-                int oldest = le_hist_n - avail;
-                if (b == 'A' && hidx > oldest) {
-                    if (hidx == le_hist_n) snprintf(save, cap, "%s", buf);
-                    hidx--;
-                    le_set(buf, cap, &len, &pos, le_hist[hidx % LE_HIST]);
-                } else if (b == 'B' && hidx < le_hist_n) {
-                    hidx++;
-                    le_set(buf, cap, &len, &pos,
-                           hidx == le_hist_n ? save : le_hist[hidx % LE_HIST]);
-                }
-            } else if (b >= '0' && b <= '9') {   /* extended: read to the final '~' */
-                unsigned char t = b, last = b;
-                while (read(0, &t, 1) == 1 && t != '~') last = t;
-                (void)last;
-                if (b == '3' && pos < len) {     /* Delete */
-                    int nx = le_next(buf, len, pos);
-                    memmove(buf + pos, buf + nx, (size_t)(len - nx));
-                    len -= nx - pos;
-                    fwrite(buf + pos, 1, (size_t)(len - pos), stdout);
-                    printf(" ");
-                    le_left(le_cols(buf, pos, len) + 1);
-                } else if (b == '1' || b == '7') {         /* Home */
-                    le_left(le_cols(buf, 0, pos)); pos = 0;
-                } else if (b == '4' || b == '8') {         /* End */
-                    fwrite(buf + pos, 1, (size_t)(len - pos), stdout); pos = len;
-                }
-            }
-        } else if (c >= 0x20) {                  /* a printable char (maybe UTF-8) */
-            unsigned char cb[4]; int nb = 1;
-            cb[0] = c;
-            if (c >= 0xC0) {
-                nb = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : 2;
-                for (int k = 1; k < nb; k++)
-                    if (read(0, &cb[k], 1) <= 0) { nb = k; break; }
-            }
-            if (len + nb < (int)cap - 1) {
-                memmove(buf + pos + nb, buf + pos, (size_t)(len - pos));
-                memcpy(buf + pos, cb, (size_t)nb);
-                len += nb;
-                fwrite(buf + pos, 1, (size_t)(len - pos), stdout);
-                le_left(le_cols(buf, pos + nb, len));
-                pos += nb;
-            }
-        }
-        buf[len] = 0;
-        le_command_menu(buf, pos, command_selected, !command_hidden, &command_rows);
-        fflush(stdout);
-    }
-
-    buf[len] = 0;
-    le_command_menu(buf, pos, 0, 0, &command_rows);
-    tcsetattr(0, TCSANOW, &old);
-    if (rc == 0) le_hist_push(buf);
-    free(save);
-    return rc;
-}
-
-static int prompt_line(char *buf, size_t cap) {
-    if (g_tty && isatty(0)) {
-        int r = line_edit(buf, cap);
-        if (r != -2) return r;                   /* -2 = no tty, fall through */
-    }
-    if (!fgets(buf, (int)cap, stdin)) return -1;
-    size_t n = strlen(buf);
-    while (n && (buf[n-1] == '\n' || buf[n-1] == '\r')) buf[--n] = 0;
-    return 0;
-}
-
-/* Ask for what is missing, once, and remember it. Enter keeps the saved
- * value, so the second time this is three keypresses of nothing. */
-static void setup_panel(Cfg *c) {
-    char line[1200];
-    printf("  %swhich swarm do you want to join?%s\n", C_BOLD, C_R);
-    if (c->tracker[0])
-        printf("  %sEnter = %s%s\n", C_DIM, c->tracker, C_R);
-    else
-        printf("  %sserver address, e.g. 192.168.1.10 (Enter = this "
-               "computer)%s\n", C_DIM, C_R);
-    printf("\n%s\xe2\x94\x82%s %s%s\xe2\x80\xba%s ", C_GRAY, C_R, C_CORAL, C_BOLD, C_R);
-    fflush(stdout);
-    if (!prompt_line(line, sizeof line) && line[0]) {
-        /* a bare host means the default port: nobody should have to know it */
-        if (tracker_addr_set(c->tracker, sizeof c->tracker, line))
-            printf("  %saddress too long; using the saved address%s\n", C_RED, C_R);
-    } else if (!c->tracker[0])
-        snprintf(c->tracker, sizeof c->tracker, "127.0.0.1:7300");
-
-    if (!c->pubkey[0]) {
-        printf("\n  %sswarm public key%s %s(64 characters, provided by "
-               "its operator)%s\n", C_BOLD, C_R, C_DIM, C_R);
-        printf("  %swith the key, every model byte is verified; "
-               "Enter to skip and trust the server%s\n", C_DIM, C_R);
-        printf("\n%s\xe2\x94\x82%s %s%s\xe2\x80\xba%s ", C_GRAY, C_R, C_CORAL, C_BOLD, C_R);
-        fflush(stdout);
-        if (!prompt_line(line, sizeof line) && strlen(line) == 64)
-            snprintf(c->pubkey, sizeof c->pubkey, "%s", line);
-        else if (line[0])
-            printf("  %snot 64 hexadecimal characters — continuing without "
-                   "verification%s\n", C_DIM, C_R);
-    }
-    cfg_save(c);
-    printf("\n  %ssaved in ~/.lumabri/config%s\n\n", C_DIM, C_R);
-}
-
-/* Returns 0 when the user chose, -1 when they quit. `have_model_dir` is
- * whether a full local copy of the model exists — without one, executing
- * experts is not on offer, because an expert node reads the weights from
- * disk and there would be none to read. */
 /* --role takes whole words: chat, disk, compute, all, or a combination like
  * "disk,compute". Matching by letter was shorter and wrong — strchr("chat",
  * 'c') is true, so the one role that donates nothing was the one that
@@ -4241,80 +3833,7 @@ static int role_unknown(const char *arg, char *out, size_t cap) {
     return 0;
 }
 
-/* What this machine can donate without being asked: RAM beyond the system
- * reserve is the only input, read at startup like `serve` reads it. Below
- * two spare gigabytes a donor would hold too few experts to matter and only
- * cost the tracker a peer. */
-static double spare_ram_gb(void) {
-    LmbMachineProfile profile;
-    if (lmb_machine_probe(&profile, ".", NULL)) return 0.0;
-    uint64_t reserve = (uint64_t)lmb_env_int(
-        getenv("LUMABRI_EXPERT_RAM_RESERVE_MB") ?
-        "LUMABRI_EXPERT_RAM_RESERVE_MB" : "LUMABRI_RAM_RESERVE_MB",
-        4096, 256, 262144) << 20;
-    if (profile.ram_available_bytes <= reserve) return 0.0;
-    return (double)(profile.ram_available_bytes - reserve) / 1e9;
-}
 
-static int role_pick(Role *r, const char *model, int have_model_dir) {
-    double spare = spare_ram_gb();
-    int auto_compute = spare >= 2.0;
-    printf("  %show do you want to join the swarm?%s\n\n", C_BOLD, C_R);
-    printf("    %s1%s  chat only           %sshare no resources%s\n",
-           C_CORAL, C_R, C_DIM, C_R);
-    printf("    %s2%s  chat + share disk   %sstore a slice of %s for the swarm%s\n",
-           C_CORAL, C_R, C_DIM, model, C_R);
-    if (have_model_dir)
-        printf("    %s3%s  chat + share compute %sexecute experts for others%s\n",
-               C_CORAL, C_R, C_DIM, C_R);
-    else
-        printf("    %s3%s  chat + share compute %syour expert slice "
-               "comes from the swarm%s\n", C_CORAL, C_R, C_DIM, C_R);
-    printf("    %s4%s  share both%s\n", C_CORAL, C_R, C_R);
-    if (auto_compute)
-        printf("\n  %sEnter = chat + share compute: %.0f GB RAM free above "
-               "the reserve; resident experts add serving capacity%s\n",
-               C_DIM, spare, C_R);
-    else
-        printf("\n  %sEnter = chat only (%.1f GB free above the reserve, "
-               "too little to hold experts)%s\n", C_DIM, spare, C_R);
-    printf("\n%s\xe2\x94\x82%s %s%s\xe2\x80\xba%s ", C_GRAY, C_R, C_CORAL, C_BOLD, C_R);
-    fflush(stdout);
-
-    char line[256];
-    if (prompt_line(line, sizeof line)) return -1;
-    int c = line[0] ? line[0] : (auto_compute ? '3' : '1');
-    if (c == 'q') return -1;
-    if (c == '2' || c == '4') r->disk = 1;
-    if (c == '3' || c == '4') r->compute = 1;
-    if (!r->disk && !r->compute) return 0;
-
-    if (r->disk) {
-        const char *home = getenv("HOME") ? getenv("HOME") : ".";
-        snprintf(r->model_dir, sizeof r->model_dir, "%s/.lumabri/%s/donated",
-                 home, model);
-        mkdir_p(r->model_dir);
-        double freeg = free_gb_at(r->model_dir);
-        double suggest = freeg * 0.25;
-        if (suggest > 100) suggest = 100;
-        if (suggest < 1) suggest = 1;
-        printf("\n  %show many GB will you share? %.0f free in %s%s\n",
-               C_DIM, freeg, r->model_dir, C_R);
-        printf("  %sEnter = %.0f GB%s\n", C_DIM, suggest, C_R);
-        printf("\n%s\xe2\x94\x82%s %s%s\xe2\x80\xba%s ", C_GRAY, C_R, C_CORAL, C_BOLD, C_R);
-        fflush(stdout);
-        if (prompt_line(line, sizeof line)) return -1;
-        r->gb = line[0] ? atof(line) : suggest;
-        if (r->gb <= 0) r->gb = suggest;
-        if (r->gb > freeg) {
-            printf("  %s%.0f GB will not fit: sharing %.0f%s\n",
-                   C_DIM, r->gb, freeg > 1 ? freeg - 1 : 0.0, C_R);
-            r->gb = freeg > 1 ? freeg - 1 : 0;
-            if (r->gb <= 0) r->disk = 0;
-        }
-    }
-    return 0;
-}
 
 /* A port nobody is on, starting from `from` — a donor picked from a TUI
  * cannot ask the user for one, and two chatters on the same box must not
@@ -4927,43 +4446,10 @@ static int cmd_chat(int argc, char **argv) {
     g_chat_term_valid = g_tty && isatty(STDIN_FILENO) &&
                         tcgetattr(STDIN_FILENO, &g_chat_term) == 0;
 
-    /* The panel comes BEFORE anything is contacted: the wordmark, then what
-     * is missing, then the role. A TUI user never sees a flag. */
+    /* Explicit CLI flags retain saved settings. Household interaction
+     * belongs to cmd_home(); sharing is never implicit. */
     Cfg cfg;
     cfg_load(&cfg);
-    int interactive = !local_dir && !host_addr && g_tty;
-    if (interactive) {
-        int W0 = term_w() - 2; if (W0 > 66) W0 = 66;
-        printf("\n");
-        hline("\xe2\x95\xad", "\xe2\x95\xae", W0);
-        panel_row(W0, "", "");
-        for (int r = 0; r < 6; r++) {
-            char row[512];
-            snprintf(row, sizeof row, "\x1b[38;5;%dm%s\x1b[0m", WORD_TINT[r], WORDMARK[r]);
-            panel_row(W0, row, "");
-        }
-        char tag0[256];
-        snprintf(tag0, sizeof tag0, "%s\xe2\x9c\xbb%s %stiny engine, immense swarm%s",
-                 C_CORAL, C_R, C_DIM, C_R);
-        panel_row(W0, "", ""); panel_row(W0, tag0, "");
-        hline("\xe2\x95\xb0", "\xe2\x95\xaf", W0);
-        printf("\n");
-        if (!tracker && !cfg.tracker[0]) setup_panel(&cfg);
-        else if (!tracker) {
-            printf("  %sswarm%s %s%s%s%s   Enter to confirm, or enter another "
-                   "address%s\n", C_DIM, C_R, C_BOLD, cfg.tracker, C_R, C_DIM, C_R);
-            printf("\n%s\xe2\x94\x82%s %s%s\xe2\x80\xba%s ", C_GRAY, C_R, C_CORAL, C_BOLD, C_R);
-            fflush(stdout);
-            char l[1200];
-            if (!prompt_line(l, sizeof l) && l[0]) {
-                if (tracker_addr_set(cfg.tracker, sizeof cfg.tracker, l))
-                    printf("  %saddress too long; using the saved address%s\n", C_RED, C_R);
-                else
-                    cfg_save(&cfg);
-            }
-            printf("\n");
-        }
-    }
     if (!tracker && cfg.tracker[0]) tracker = cfg.tracker;
     if (!tracker) tracker = "127.0.0.1:7300";
     /* the key is remembered, never retyped, and never overrides an explicit
@@ -5028,21 +4514,7 @@ static int cmd_chat(int argc, char **argv) {
     Swarm sw;
     Engine eng = {0};
 
-    if (!interactive) {                 /* the panel was already drawn above */
-        int W = term_w() - 2;
-        if (W > 66) W = 66;
-        printf("\n");
-        hline("\xe2\x95\xad", "\xe2\x95\xae", W);
-        panel_row(W, "", "");
-        for (int r = 0; r < 6; r++) {
-            char row[512];
-            snprintf(row, sizeof row, "%s", WORDMARK[r]);
-            panel_row(W, row, "");
-        }
-        panel_row(W, "", "");
-        panel_row(W, "* tiny engine, immense swarm", "");
-        hline("\xe2\x95\xb0", "\xe2\x95\xaf", W);
-    }
+    printf("\n  %s✻ lumabri%s   %sconversation · %s%s\n", C_CORAL, C_R, C_DIM, model, C_R);
     if (nmodels > 1) {
         printf("  %s%d models in the swarm:%s", C_DIM, nmodels, C_R);
         for (int i = 0; i < nmodels; i++) printf(" %s%s%s", C_BOLD, models[i], C_R);
@@ -5077,17 +4549,8 @@ static int cmd_chat(int argc, char **argv) {
             mkdir_p(role.model_dir);
             role.gb = donate_gb > 0 ? donate_gb : 10;
         }
-    } else if (!local_dir && g_tty) {
-        char probe[1100];
-        int have_dir = 0;
-        if (model_dir_arg) {
-            snprintf(role.model_dir, sizeof role.model_dir, "%s", model_dir_arg);
-            snprintf(probe, sizeof probe, "%s/config.json", role.model_dir);
-            have_dir = access(probe, R_OK) == 0;
-        }
-        if (!host_addr && role_pick(&role, model, have_dir)) return 0;
-        if (have_dir && role.compute)
-            snprintf(role.model_dir, sizeof role.model_dir, "%s", model_dir_arg);
+    } else {
+        /* Sharing requires --role explicitly, or household donor approval. */
     }
 
     /* A hosted chat boots no engine. Everything model_boot would do —
@@ -6174,14 +5637,14 @@ int main(int argc, char **argv) {
     if (argc >= 2 && !strcmp(argv[1], "doctor"))
         return cmd_doctor(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "serve")) return cmd_serve(argc - 2, argv + 2);
-    if (argc >= 2 && !strcmp(argv[1], "chat"))  return cmd_chat(argc - 2, argv + 2);
-    /* No arguments and a terminal: this is a person, not a script. Chat is
-     * the only thing a person wants by default, and everything it needs is
-     * either remembered or asked for in the panel. */
+    if (argc == 2 && !strcmp(argv[1], "chat") && g_tty && isatty(0)) return cmd_home();
+    if (argc >= 2 && !strcmp(argv[1], "chat")) return cmd_chat(argc - 2, argv + 2);
+    /* Interactive entry points share one workspace. Explicit flags remain
+     * available to scripts without inheriting an implicit sharing role. */
     if (argc == 1 && g_tty) return cmd_home();
     fprintf(stderr,
-        "lumabri: run huge models from a swarm of peers\n\n"
-        "  lumabri                                                    chat (asks what it needs)\n"
+        "lumabri: your computers, one shared model\n\n"
+        "  lumabri                                                    household workspace\n"
         "  lumabri machine [--json] [--tracker HOST:PORT]             profile this machine\n"
         "  lumabri worker --join HOST:PORT [--ram-gb N]              publish LAN inventory\n"
         "  lumabri models --tracker HOST:PORT                       cluster planning preview\n"

@@ -1,6 +1,6 @@
 /* lumabri_crypto.h — the transport crypto: ChaCha20-Poly1305 (RFC 8439),
  * X25519 (RFC 7748), and HKDF-SHA512. Self-contained C, no dependencies,
- * every primitive checked against its RFC test vectors by crypto_test.sh.
+ * every primitive checked against its RFC test vectors by tests/integration/crypto_test.sh.
  *
  * X25519 reuses the Curve25519 field arithmetic already in lumabri_sign.h
  * (both come from the TweetNaCl lineage), so only the scalar-mult ladder is

@@ -28,6 +28,8 @@ static void home_terminal_end(HomeTerminal *term) {
 }
 
 static int home_key(void) {
+    static int pending = -1;
+    if (pending >= 0) { int next = pending; pending = -1; return next; }
     struct pollfd p = {0, POLLIN, 0};
     char key;
     if (poll(&p, 1, 0) <= 0) return -1;
@@ -35,7 +37,10 @@ static int home_key(void) {
     if ((unsigned char)key != 27) return (unsigned char)key;
     char seq[2];
     if (poll(&p, 1, 30) <= 0 || read(0, seq, 1) != 1) return 27;
-    if (seq[0] != '[' || poll(&p, 1, 30) <= 0 || read(0, seq + 1, 1) != 1) return 0;
+    /* Two quick Esc presses are two actions, not an unknown CSI sequence.
+     * Preserve a following ordinary byte instead of swallowing both. */
+    if (seq[0] != '[') { pending = (unsigned char)seq[0]; return 27; }
+    if (poll(&p, 1, 30) <= 0 || read(0, seq + 1, 1) != 1) return 0;
     return seq[1] == 'A' ? 1001 : seq[1] == 'B' ? 1002 : 0;
 }
 

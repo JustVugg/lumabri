@@ -6,16 +6,6 @@ override CPPFLAGS += -I.
 
 all: tracker maintainer liblumabri.so test_shim swarm_probe lumabri
 
-# Standalone visual study; deliberately excluded from all/install and runtime.
-build/tui-preview: tools/tui_preview.c
-	@mkdir -p build
-	$(CC) $(CPPFLAGS) $(CFLAGS) tools/tui_preview.c -o $@
-
-tui-preview: build/tui-preview
-
-test-tui-preview: build/tui-preview
-	python3 tests/tui_preview_test.py
-
 
 # A checkout with Colibri's additive ABI gets the transparent Segment path
 # from the ordinary `make`; older/release Colibri trees keep the exact legacy
@@ -42,7 +32,7 @@ SECURE_DEPS = lumabri_secure.h lumabri_crypto.h
 MACHINE_SRC = lumabri_machine.c
 MACHINE_DEPS = lumabri_machine.h $(MACHINE_SRC)
 
-lumabri: lumabri.c src/ui/lumabri_tui.c src/ui/lumabri_tui.h src/ui/lumabri_visual.h lumabri_proto.h lumabri_sign.h \
+lumabri: lumabri.c src/ui/lumabri_tui.c src/ui/lumabri_tui.h src/ui/lumabri_visual.h src/ui/lumabri_chat_editor.h lumabri_proto.h lumabri_sign.h \
 		lumabri_inventory.h lumabri_home.h lumabri_home_runtime.h src/ui/lumabri_home_ui.h lumabri_ready.h \
 		lumabri_families.h lumabri_planner.h lumabri_cluster.h \
 		lumabri_calibration.h $(SECURE_DEPS) $(MACHINE_DEPS)
@@ -344,27 +334,27 @@ tiny_olmoe/config.json: make_tiny_olmoe.py
 fixture: tiny_olmoe/config.json
 
 test-phase2: phase2 fixture
-	bash ./phase2_test.sh
+	bash ./tests/integration/phase2_test.sh
 
 test-phase2-glm: phase2-glm
-	bash ./phase2_glm_test.sh
+	bash ./tests/integration/phase2_glm_test.sh
 
 test-phase2-inkling: expert_node_inkling
-	bash ./phase2_inkling_test.sh
+	bash ./tests/integration/phase2_inkling_test.sh
 
 test-phase2-kimi: expert_node_kimi
-	bash ./phase2_kimi_test.sh
+	bash ./tests/integration/phase2_kimi_test.sh
 
 # needs a real DeepSeek V4 model: MODEL=<dir> (no synthetic fixture, see the
 # script's header for why)
 test-phase2-deepseek: expert_node_deepseek
-	bash ./phase2_deepseek_test.sh
+	bash ./tests/integration/phase2_deepseek_test.sh
 
 test-phase2-qwen36: expert_node_qwen36
-	bash ./phase2_qwen36_test.sh
+	bash ./tests/integration/phase2_qwen36_test.sh
 
 # Every engine's byte-identity proof, one after the other. DeepSeek V4 has no
-# synthetic fixture (see phase2_deepseek_test.sh), so it runs only when a real
+# synthetic fixture (see tests/integration/phase2_deepseek_test.sh), so it runs only when a real
 # model is there — and says so when it is not, rather than quietly passing on
 # four engines while claiming five.
 test-engines: test-phase2 test-phase2-glm test-phase2-inkling test-phase2-kimi
@@ -436,12 +426,13 @@ test_inventory: tests/c/test_inventory.c lumabri_inventory.h lumabri_machine.h l
 test_home: tests/c/test_home.c lumabri_home.h lumabri_inventory.h lumabri_families.h lumabri_proto.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_home.c -o $@
 
-test_chat_ui: tests/c/test_chat_ui.c lumabri.c src/ui/lumabri_tui.c src/ui/lumabri_tui.h lumabri_home_runtime.h src/ui/lumabri_home_ui.h lumabri_ready.h lumabri_cluster.h
+test_chat_ui: tests/c/test_chat_ui.c lumabri.c src/ui/lumabri_tui.c src/ui/lumabri_tui.h src/ui/lumabri_visual.h src/ui/lumabri_chat_editor.h lumabri_home_runtime.h src/ui/lumabri_home_ui.h lumabri_ready.h lumabri_cluster.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_chat_ui.c src/ui/lumabri_tui.c lumabri_machine.c -o $@
 
-test-chat-ui: test_chat_ui
-	python3 chat_ui_test.py
+test-chat-ui: lumabri test_chat_ui
+	python3 tests/integration/chat_ui_test.py
 	python3 tests/ui_text_test.py
+	python3 tests/integration/workspace_navigation_test.py
 
 segment_budget_probe: segment_budget_probe.c lumabri_planner.h lumabri_families.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) segment_budget_probe.c -o $@
@@ -494,10 +485,10 @@ test_run_gate: tests/c/test_run_gate.c lumabri_run_gate.c lumabri_run_gate.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_run_gate.c lumabri_run_gate.c -o $@
 
 test-machine-governor: lumabri tracker swarm_probe expert_node segment_node fixture test_machine
-	ENGINE=$(ENGINE) bash ./machine_governor_test.sh
+	ENGINE=$(ENGINE) bash ./tests/integration/machine_governor_test.sh
 
 test-doctor: all
-	bash ./doctor_test.sh
+	bash ./tests/integration/doctor_test.sh
 
 SANITIZE_FLAGS = -O1 -g -Wall -Wextra -fno-omit-frame-pointer -fsanitize=address,undefined
 test-sanitize:
@@ -591,49 +582,49 @@ segment-direct: segment_node segment_chat
 test-segment-direct-real: tracker maintainer liblumabri.so lumabri \
 		segment-direct test_sampling
 	./test_sampling
-	bash ./segment_direct_test.sh
-	bash ./segment_relay_test.sh
-	bash ./segment_failover_test.sh
-	bash ./segment_native_test.sh
+	bash ./tests/integration/segment_direct_test.sh
+	bash ./tests/integration/segment_relay_test.sh
+	bash ./tests/integration/segment_failover_test.sh
+	bash ./tests/integration/segment_native_test.sh
 
 test-segment-relay-real: tracker segment-direct
-	bash ./segment_relay_test.sh
+	bash ./tests/integration/segment_relay_test.sh
 
 test-segment-failover-real: tracker segment-direct
-	bash ./segment_failover_test.sh
+	bash ./tests/integration/segment_failover_test.sh
 
 test-segment-priority-real: tracker segment-direct
-	bash ./segment_priority_test.sh
+	bash ./tests/integration/segment_priority_test.sh
 
 test-relay-exec: tracker expert_node test_relay_exec fixture
-	bash ./relay_exec_test.sh
+	bash ./tests/integration/relay_exec_test.sh
 
 test_swarm_fed: tests/c/test_swarm_fed.c lumabri_proto.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_swarm_fed.c -o $@
 
 test-swarm-fed: tracker maintainer liblumabri.so expert_node test_swarm_fed fixture
-	bash ./swarm_fed_exec_test.sh
+	bash ./tests/integration/swarm_fed_exec_test.sh
 
 test-assign-race: tracker
-	bash ./assign_race_test.sh
+	bash ./tests/integration/assign_race_test.sh
 
 test-partial-phase2: tracker phase2 fixture
-	bash ./partial_phase2_test.sh
+	bash ./tests/integration/partial_phase2_test.sh
 
 test-elastic: tracker expert_node fixture
-	bash ./elastic_hold_test.sh
+	bash ./tests/integration/elastic_hold_test.sh
 
 test-resident: tracker swarm_probe expert_node fixture
-	bash ./resident_hold_test.sh
+	bash ./tests/integration/resident_hold_test.sh
 
 # Segment keeps attention/state local while a complete MoE layer is served by
 # a strict-RAM Expert donor. The second run kills that donor and proves that
 # the unchanged local Colibri kernel takes over without losing the session.
 test-segment-hybrid: tracker swarm_probe expert_node segment_node segment_chat fixture
-	ENGINE=$(ENGINE) bash ./segment_hybrid_test.sh
+	ENGINE=$(ENGINE) bash ./tests/integration/segment_hybrid_test.sh
 
 test-cas: tracker maintainer liblumabri.so test_shim
-	bash ./cas_test.sh
+	bash ./tests/integration/cas_test.sh
 
 test-key-rotation: test_key_rotation
 	./test_key_rotation
@@ -647,67 +638,68 @@ test-segment-v2: test_segment_v2
 # The Segment gates that need real nodes: slower than `make test`, and the
 # ones that actually answer step 0 of the roadmap.
 test-segment-split: tracker segment_node segment_chat
-	bash ./segment_split_test.sh
+	bash ./tests/integration/segment_split_test.sh
 
 test-segment-budget: tracker segment_node segment_budget_probe
-	bash ./segment_budget_test.sh
+	bash ./tests/integration/segment_budget_test.sh
 
 test-multi-session: tracker segment_node segment_chat
-	bash ./multi_session_test.sh
+	bash ./tests/integration/multi_session_test.sh
 
 test-segment-coverage: tracker segment_node segment_chat
-	bash ./segment_coverage_test.sh
+	bash ./tests/integration/segment_coverage_test.sh
 
 test-adapters: tracker segment_node segment_chat
-	bash ./adapter_conformance_test.sh
+	bash ./tests/integration/adapter_conformance_test.sh
 
 test-segment-discovery: tracker test_segment_discovery
-	bash ./segment_discovery_test.sh
+	bash ./tests/integration/segment_discovery_test.sh
 
 test: all test_key_rotation test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 test_accum_order test_residency_report test_model_family test_planner test_cluster \
 		test_inventory test_home test_chat_ui test_calibration \
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
 		test_meminfo test_compute_lease test_content_filter \
 		test_scheduler test_run_gate
-	bash ./selftest.sh
-	bash ./donate_test.sh
-	bash ./signed_donor_test.sh
-	bash ./hot_cache_integrity_test.sh
-	bash ./role_test.sh
-	bash ./serve_failfast_test.sh
-	bash ./exec2_test.sh
-	bash ./security_test.sh
-	bash ./expert_input_test.sh
-	bash ./prefetch_policy_test.sh
-	bash ./cas_test.sh
-	bash ./relay_exec_test.sh
-	bash ./peer_identity_test.sh
-	bash ./key_test.sh
-	bash ./sign_test.sh
-	bash ./crypto_test.sh
-	bash ./secure_test.sh
-	bash ./encrypted_transport_test.sh
-	bash ./verify_failover_test.sh
+	bash ./tests/integration/selftest.sh
+	bash ./tests/integration/donate_test.sh
+	bash ./tests/integration/signed_donor_test.sh
+	bash ./tests/integration/hot_cache_integrity_test.sh
+	bash ./tests/integration/role_test.sh
+	bash ./tests/integration/serve_failfast_test.sh
+	bash ./tests/integration/exec2_test.sh
+	bash ./tests/integration/security_test.sh
+	bash ./tests/integration/expert_input_test.sh
+	bash ./tests/integration/prefetch_policy_test.sh
+	bash ./tests/integration/cas_test.sh
+	bash ./tests/integration/relay_exec_test.sh
+	bash ./tests/integration/peer_identity_test.sh
+	bash ./tests/integration/key_test.sh
+	bash ./tests/integration/sign_test.sh
+	bash ./tests/integration/crypto_test.sh
+	bash ./tests/integration/secure_test.sh
+	bash ./tests/integration/encrypted_transport_test.sh
+	bash ./tests/integration/verify_failover_test.sh
 	./test_key_rotation
 	./test_hedge
 	./test_local_fallback
 	./test_accum_order
 	./test_residency_report
 	./test_model_family
-	bash ./model_family_test.sh
-	bash ./catalog_test.sh
+	bash ./tests/integration/model_family_test.sh
+	bash ./tests/integration/catalog_test.sh
 	./test_inventory
 	./test_home
-	python3 ./chat_ui_test.py
+	python3 ./tests/integration/chat_ui_test.py
 	python3 tests/ui_text_test.py
-	python3 ./lan_inventory_test.py
-	bash ./hosted_chat_test.sh
-	bash ./tui_test.sh
+	python3 tests/integration/workspace_navigation_test.py
+	python3 ./tests/integration/lan_inventory_test.py
+	bash ./tests/integration/hosted_chat_test.sh
+	bash ./tests/integration/tui_test.sh
 	./test_planner
 	./test_cluster
 	./test_calibration
 	./test_nat_adopt
-	bash ./rtt_refresh_test.sh
+	bash ./tests/integration/rtt_refresh_test.sh
 	./test_segment_v2
 	./test_meminfo
 	./test_compute_lease
@@ -717,12 +709,12 @@ test: all test_key_rotation test_hedge test_local_fallback test_nat_adopt test_v
 	python3 ./test_swarm_bench.py
 	python3 ./test_production_check.py
 	python3 ./test_swarm_soak.py
-	bash ./production_gate_test.sh
-	bash ./segment_discovery_test.sh
-	bash ./swarm_detail_test.sh
-	bash ./relay_rate_test.sh
-	bash ./machine_governor_test.sh
-	bash ./doctor_test.sh
+	bash ./tests/integration/production_gate_test.sh
+	bash ./tests/integration/segment_discovery_test.sh
+	bash ./tests/integration/swarm_detail_test.sh
+	bash ./tests/integration/relay_rate_test.sh
+	bash ./tests/integration/machine_governor_test.sh
+	bash ./tests/integration/doctor_test.sh
 
 # ---- deploy -------------------------------------------------------------
 # make install                    → /usr/local (needs sudo)
@@ -760,7 +752,7 @@ clean:
 	      expert_node_deepseek expert_node_qwen36
 	rm -rf build
 
-.PHONY: all tui-preview test-tui-preview check-warnings test test-chat-ui clean install phase2 phase2-glm engines chatters phase2-all \
+.PHONY: all check-warnings test test-chat-ui clean install phase2 phase2-glm engines chatters phase2-all \
         fixture test-phase2 \
         test-phase2-glm test-phase2-inkling test-phase2-kimi \
         test-phase2-deepseek test-engines \

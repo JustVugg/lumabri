@@ -9,7 +9,7 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parent.parent
 SOURCES = (
-    "lumabri.c", "src/ui/lumabri_tui.c", "src/ui/lumabri_home_ui.h",
+    "lumabri.c", "src/ui/lumabri_tui.c", "src/ui/lumabri_home_ui.h", "src/ui/lumabri_chat_editor.h",
     "lumabri_home_runtime.h", "lumabri_home.h", "lumabri_client.h",
 )
 # Match comments and character literals too, so quoted text inside them is

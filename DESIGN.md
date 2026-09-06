@@ -141,7 +141,7 @@ dall'operatore con `LUMABRI_PEER_PINS`.
 
 Il muro misurato in fase 2 (30 ms × layer sequenziali) non si abbatte con una
 leva sola: si abbatte con leve moltiplicative. Tre sono implementate e
-provate da `phase3_test.sh`; due restano sul tavolo.
+provate da `tests/integration/phase3_test.sh`; due restano sul tavolo.
 
 **Topologia: perché non (ancora) un grafo/DHT.** La mappa vicino/lontano non
 richiede una DHT: ogni nodo misura da sé i propri archi — due PING per peer
@@ -217,7 +217,7 @@ delega man mano che i donatori arrivano, e resta l'ultima istanza.**
   non copre tutti gli esperti, la fase 2 resta spenta e il motore li esegue
   in locale dai byte del mirror di fase 1.
 
-Misure di `phase4_test.sh`: identità con cache affamata (19.6% hit), 
+Misure di `tests/integration/phase4_test.sh`: identità con cache affamata (19.6% hit),
 bootstrap zero-config via tracker, donatore a metà modello ucciso in piena
 generazione → failover al server, token identici al riferimento locale.
 `make install` porta tutto in PREFIX/bin + PREFIX/lib/lumabri; i binari si
@@ -260,7 +260,7 @@ nell'operatore dello sciame, mai nel peer che serve i byte:
 expert node rifiutano le connessioni non autenticate. Il token protegge
 byte e calcolo, non solo l'indice.
 
-Provato da `phase5_test.sh` con peer che mentono come mentirebbe un
+Provato da `tests/integration/phase5_test.sh` con peer che mentono come mentirebbe un
 avversario (manifest onesto, byte corrotti — `LUMABRI_CORRUPT_PPM`): 7
 blocchi corrotti rifiutati con mirror byte-identico, poisoner spogliato
 alla registrazione, esecutore bugiardo beccato al primo spot-check.
@@ -290,7 +290,7 @@ offline (le firme si calcolano una volta sola).
 
 Cripto self-contained (`lumabri_sign.h`): SHA-512 e Ed25519 in stile
 TweetNaCl, aritmetica a limbi da 16 bit su 2^255-19, swap condizionali
-constant-time. Verificato da `sign_test.sh` contro il vettore RFC 8032,
+constant-time. Verificato da `tests/integration/sign_test.sh` contro il vettore RFC 8032,
 contro `sha512sum`, e contro OpenSSL **in entrambe le direzioni** (le
 nostre firme verificano lì, le sue verificano qui). Più lo sciame firmato
 end-to-end: un peer non firmato non entra nell'indice, e un tracker che

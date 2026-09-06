@@ -19,7 +19,7 @@
  * registered, so those two engines could not be reached by any spelling —
  * and the substring dispatch quietly handed their checkpoints to `glm` and
  * `qwen36` instead. Registering them is half the fix; lumabri_families.h is
- * the other half, and model_family_test.sh keeps the two halves in step with
+ * the other half, and tests/integration/model_family_test.sh keeps the two halves in step with
  * whatever Colibri exposes next. */
 static int lmb_colibri_register_all(void) {
     return coli_glm_segment_adapter_register() ||

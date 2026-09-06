@@ -2,7 +2,7 @@
  *
  * Lumabri mirrors Colibri's authoritative family registry here because the
  * runtime ABI exposes adapter registrations, not checkpoint model_type
- * aliases. model_family_test.sh compares the two registries directly, so an
+ * aliases. tests/integration/model_family_test.sh compares the two registries directly, so an
  * alias or adapter added upstream cannot remain silently unmapped here.
  *
  * It used to be declared as three separate ladders of strstr(), and that is
