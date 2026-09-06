@@ -1,17 +1,17 @@
 # Execute the helper, not just its outer -WhatIf. No real firewall cmdlet is
 # invoked. Mandatory parameters match the production command contracts.
 $ErrorActionPreference = 'Stop'
-$script:rules = @{}
-$script:created = 0
-$script:updated = 0
-$script:removed = 0
-function Get-NetFirewallRule { [CmdletBinding()] param($Name) $script:rules[$Name] }
-function Get-NetFirewallHyperVRule { [CmdletBinding()] param($Name) $script:rules[$Name] }
+$global:LmbFirewallTestRules = @{}
+$global:LmbFirewallTestCreated = 0
+$global:LmbFirewallTestUpdated = 0
+$global:LmbFirewallTestRemoved = 0
+function Get-NetFirewallRule { [CmdletBinding()] param($Name) $global:LmbFirewallTestRules[$Name] }
+function Get-NetFirewallHyperVRule { [CmdletBinding()] param($Name) $global:LmbFirewallTestRules[$Name] }
 function New-NetFirewallRule {
     [CmdletBinding()] param([Parameter(Mandatory)]$Name, [Parameter(Mandatory)]$DisplayName,
         $Group, $Direction, $Action, $Protocol, $LocalPort, $RemoteAddress, $Profile)
     if ($RemoteAddress -ne '192.168.1.0/24' -or $Action -ne 'Allow' -or $Direction -ne 'Inbound') { throw 'Unsafe Windows rule' }
-    $script:rules[$Name] = $true; $script:created++
+    $global:LmbFirewallTestRules[$Name] = $true; $global:LmbFirewallTestCreated++
 }
 function New-NetFirewallHyperVRule {
     [CmdletBinding()] param([Parameter(Mandatory)]$Name, [Parameter(Mandatory)]$DisplayName,
@@ -20,18 +20,18 @@ function New-NetFirewallHyperVRule {
         $RemoteAddresses -ne '192.168.1.0/24' -or $Action -ne 'Allow') { throw 'Unsafe Hyper-V rule' }
     $expected = if ($Protocol -eq 'TCP') { '47300-47315' } else { '47300' }
     if ($LocalPorts -ne $expected) { throw 'Incorrect ports' }
-    $script:rules[$Name] = $true; $script:created++
+    $global:LmbFirewallTestRules[$Name] = $true; $global:LmbFirewallTestCreated++
 }
 function Set-NetFirewallRule {
     [CmdletBinding()] param($Name, $Enabled, $Direction, $Action, $Protocol, $LocalPort, $RemoteAddress, $Profile)
-    if (-not $script:rules[$Name]) { throw 'Updating an absent rule' }; $script:updated++
+    if (-not $global:LmbFirewallTestRules[$Name]) { throw 'Updating an absent rule' }; $global:LmbFirewallTestUpdated++
 }
 function Set-NetFirewallHyperVRule {
     [CmdletBinding()] param($Name, $Enabled, $Direction, $Action, $Protocol, $LocalPorts, $RemoteAddresses)
-    if (-not $script:rules[$Name]) { throw 'Updating an absent Hyper-V rule' }; $script:updated++
+    if (-not $global:LmbFirewallTestRules[$Name]) { throw 'Updating an absent Hyper-V rule' }; $global:LmbFirewallTestUpdated++
 }
-function Remove-NetFirewallRule { [CmdletBinding()] param($Name) $script:rules.Remove($Name); $script:removed++ }
-function Remove-NetFirewallHyperVRule { [CmdletBinding()] param($Name) $script:rules.Remove($Name); $script:removed++ }
+function Remove-NetFirewallRule { [CmdletBinding()] param($Name) $global:LmbFirewallTestRules.Remove($Name); $global:LmbFirewallTestRemoved++ }
+function Remove-NetFirewallHyperVRule { [CmdletBinding()] param($Name) $global:LmbFirewallTestRules.Remove($Name); $global:LmbFirewallTestRemoved++ }
 
 $helper = Join-Path $PSScriptRoot '../../tools/setup-household-firewall.ps1'
 # Refuse to run an incomplete invocation rather than waiting for a mandatory
@@ -51,9 +51,9 @@ foreach ($command in $commands) {
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Run this test on the Windows CI runner; no elevation is performed' }
 & $helper -Subnet 192.168.1.0/24 -Confirm:$false
-if ($script:created -ne 4 -or $script:rules.Count -ne 4) { throw 'Creation did not exercise all four commands' }
+if ($global:LmbFirewallTestCreated -ne 4 -or $global:LmbFirewallTestRules.Count -ne 4) { throw 'Creation did not exercise all four commands' }
 & $helper -Subnet 192.168.1.0/24 -Confirm:$false
-if ($script:created -ne 4 -or $script:updated -ne 4) { throw 'Update is not idempotent' }
+if ($global:LmbFirewallTestCreated -ne 4 -or $global:LmbFirewallTestUpdated -ne 4) { throw 'Update is not idempotent' }
 & $helper -Subnet 192.168.1.0/24 -Remove -Confirm:$false
-if ($script:removed -ne 4 -or $script:rules.Count) { throw 'Removal failed' }
+if ($global:LmbFirewallTestRemoved -ne 4 -or $global:LmbFirewallTestRules.Count) { throw 'Removal failed' }
 Write-Host 'FIREWALL HELPER: PASS (mandatory display names, scoped create, update, remove)'

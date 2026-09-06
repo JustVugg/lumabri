@@ -9,6 +9,7 @@ SHIM_FLAGS = -shared -fPIC -ldl
 OMP_FLAGS = -fopenmp
 OMP_LIBS =
 ifeq ($(PLATFORM),Darwin)
+override CPPFLAGS += -D_DARWIN_C_SOURCE
 SHIM_LIB = liblumabri.dylib
 SHIM_FLAGS = -dynamiclib -fPIC
 OMP_PREFIX := $(shell brew --prefix libomp 2>/dev/null)
@@ -777,7 +778,7 @@ install: all
 	@echo "installed under $(DESTDIR)$(PREFIX)"
 
 clean:
-	rm -f tracker maintainer liblumabri.so test_shim swarm_probe lumabri \
+	rm -f tracker maintainer liblumabri.so liblumabri.dylib test_shim swarm_probe lumabri \
 	      test_relay_exec test_swarm_fed test_key_rotation test_hedge \
 	      test_local_fallback test_accum_order test_residency_report \
 	      test_model_family test_planner test_cluster test_calibration test_inventory test_home test_chat_ui segment_budget_probe \

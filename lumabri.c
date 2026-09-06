@@ -4520,7 +4520,7 @@ static int cmd_chat(int argc, char **argv) {
     if (access(shim, R_OK))       /* installed layout: bin/../lib/lumabri/ */
         snprintf(shim, sizeof shim, "%s/../lib/lumabri/" LMB_SHIM_NAME, dir);
     if (!host_addr && !local_dir && access(shim, R_OK)) {
-        fprintf(stderr, "liblumabri.so missing; run make (or make install)\n");
+        fprintf(stderr, "%s missing; run make (or make install)\n", LMB_SHIM_NAME);
         return 1;
     }
 
@@ -5517,7 +5517,7 @@ static int cmd_doctor(int argc, char **argv) {
         snprintf(shim, sizeof shim, "%s/../lib/lumabri/" LMB_SHIM_NAME, directory);
     doctor_add(checks, &count, "library-liblumabri", access(shim, R_OK) == 0, 1,
                access(shim, R_OK) == 0 ? "CAS interposer found" :
-                                        "liblumabri.so is missing");
+                                        LMB_SHIM_NAME " is missing");
     const char *segment_bins[] = {"segment_node", "segment_chat"};
     for (size_t i = 0; i < sizeof segment_bins / sizeof segment_bins[0]; i++) {
         char path[1200], name[64];

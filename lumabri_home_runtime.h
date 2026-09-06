@@ -409,6 +409,18 @@ static int cmd_donor(int argc, char **argv) {
         return 2;
     HomeDonor d = {0}; d.client = d.lease = d.segment_ready = d.host_ready = -1;
     exe_dir(d.bin_dir, sizeof d.bin_dir);
+    const char *services[] = {"segment_node", "segment_chat"};
+    char service_path[1200];
+    for (size_t i = 0; i < sizeof services / sizeof *services; i++) {
+        if (checked_printf(service_path, sizeof service_path, "%s/%s", d.bin_dir, services[i]) ||
+            access(service_path, X_OK))
+            return home_fail("Household runtime is not installed: %s is missing. Install or build the household services, not only the TUI.", services[i]);
+    }
+    if (checked_printf(service_path, sizeof service_path, "%s/" LMB_SHIM_NAME, d.bin_dir) ||
+        (access(service_path, R_OK) &&
+         (checked_printf(service_path, sizeof service_path, "%s/../lib/lumabri/" LMB_SHIM_NAME, d.bin_dir) ||
+          access(service_path, R_OK))))
+        return home_fail("The household weight loader (%s) is missing. Install or build the complete household runtime.", LMB_SHIM_NAME);
     if (checked_printf(d.cache_base, sizeof d.cache_base, "%s/%s", disk ? disk :
                        (getenv("HOME") ? getenv("HOME") : "."), disk ? "lumabri-home" : ".lumabri/home") ||
         home_local_ip(tracker, d.ip))
@@ -506,7 +518,7 @@ static int cmd_donor(int argc, char **argv) {
     home_terminal_end(&term);
     home_donor_disconnect(&d, "Donor closed.");
     home_stop_child(&reporter); close(listener);
-    return 0;
+    return home_error[0] ? 1 : 0;
 }
 typedef struct {
     int fd[LMB_CLUSTER_MAX_NODES];
