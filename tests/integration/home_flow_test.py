@@ -112,6 +112,28 @@ def main():
             except OSError:
                 return False
         until(listening)
+
+        # A signed inventory advert does not prove the donor port is reachable.
+        # Fail before indexing or sending an allocation, with a useful reason.
+        with socket.socket() as closed_port:
+            closed_port.bind(("127.0.0.1", 0))
+            unreachable = closed_port.getsockname()[1]
+        with open(tmp / "offline-worker.log", "wb") as log:
+            offline_worker = subprocess.Popen(["./lumabri", "worker", "--join", addr,
+                "--name", "offline-test-donor", "--ram-gb", "0.5", "--disk", str(tmp),
+                "--control-address", f"127.0.0.1:{unreachable}"], cwd=ROOT,
+                env=env("offline-worker"), stdout=log, stderr=subprocess.STDOUT)
+        children.append(offline_worker)
+        offline = Terminal("offline-request", base)
+        until(lambda: offline.has("2 computers"), message="offline worker advert missing")
+        offline.send("\t\x1b[B\r\t")
+        time.sleep(.5)
+        offline.send("\r\r")
+        until(lambda: offline.p.poll() is not None, message="unreachable donor did not fail preflight")
+        assert offline.p.returncode != 0 and offline.has("Cannot reach offline-test-donor")
+        assert not list((tmp / "offline-request").rglob("home-source-*.log")), "indexed before reachability check"
+        offline_worker.terminate(); offline_worker.wait(timeout=5)
+
         a = Terminal("donor-a", ["./lumabri"])
         b = Terminal("donor-b", ["./lumabri"])
         until(lambda: a.has("your workspace") and b.has("your workspace"))

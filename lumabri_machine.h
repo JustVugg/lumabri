@@ -6,6 +6,12 @@
 #include <stdint.h>
 #include <stdio.h>
 
+/* Household default: keep one quarter of physical RAM, bounded to 1–4 GiB.
+ * Explicit operator overrides remain authoritative; available RAM is still
+ * checked at admission and continuously by the governor. */
+uint32_t lmb_machine_default_reserve_mb(uint64_t total);
+uint64_t lmb_machine_ram_reserve(void);
+
 typedef struct {
     char hostname[64];
     char os[64];

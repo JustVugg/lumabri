@@ -3,6 +3,7 @@
 #ifndef LUMABRI_HOME_RUNTIME_H
 #define LUMABRI_HOME_RUNTIME_H
 #include "lumabri_home_net.h"
+#include "lumabri_runtime_probe.h"
 
 static char home_error[512];
 static int home_fail(const char *fmt, ...) {
@@ -181,6 +182,7 @@ static int home_status_send(int fd, const LmbHomeTransaction *t, int segment_por
 
 typedef struct {
     LmbHomeTransaction transaction;
+    unsigned thread_capacity;
     int client, lease, segment_port, host_port, segment_ready, host_ready;
     pid_t segment, host;
     char bin_dir[1024], cache_base[1024], disk[512], ip[INET_ADDRSTRLEN];
@@ -214,7 +216,7 @@ static int home_donor_launch(HomeDonor *d, int edge) {
     char e_shim[1232], e_vroot[1232], e_cache[1232], e_cas[1232];
     char e_tracker[300], e_model[100], e_root[100], e_key[100], e_limit[100], e_log[1232];
     char range[40], port[20], addr[64], name[64], context[20], threads[20], ram[32];
-    char bytes[32], layers[20], max_new[20];
+    char bytes[32], layers[20], max_new[20], e_omp[64], e_omp_limit[64];
     if (checked_printf(shim, sizeof shim, "%s/" LMB_SHIM_NAME, d->bin_dir) ||
         checked_printf(binary, sizeof binary, "%s/%s", d->bin_dir, edge ? "lumabri" : "segment_node") ||
         checked_printf(vroot, sizeof vroot, "%s/%.16s/vroot", d->cache_base, id) ||
@@ -235,10 +237,14 @@ static int home_donor_launch(HomeDonor *d, int edge) {
     snprintf(e_key, sizeof e_key, "LUMABRI_SEGMENT_CLIENT_PK=%s", edge_peer);
     snprintf(e_limit, sizeof e_limit, "LUMABRI_EDGE_RAM_BYTES=%llu", (unsigned long long)o->edge_ram_bytes);
     snprintf(e_log, sizeof e_log, "LUMABRI_ENGINE_LOG=%s/edge.log", d->cache_base);
+    unsigned usable_threads = o->threads < d->thread_capacity ? o->threads : d->thread_capacity;
+    if (!usable_threads) return -1;
+    snprintf(e_omp, sizeof e_omp, "OMP_NUM_THREADS=%u", usable_threads);
+    snprintf(e_omp_limit, sizeof e_omp_limit, "OMP_THREAD_LIMIT=%u", usable_threads);
     char *envv[] = {e_shim, e_vroot, e_cache, e_cas, e_tracker, e_model, e_root,
                    e_key, "LUMABRI_SEGMENT_REQUIRED=1", "LUMABRI_VERIFY=0",
                    "LUMABRI_PREFETCH=0", "LUMABRI_NO_EXEC=1", e_log,
-                   edge ? e_limit : "LUMABRI_HOME_SEGMENT=1", NULL};
+                   edge ? e_limit : "LUMABRI_HOME_SEGMENT=1", e_omp, e_omp_limit, NULL};
     int chosen_port = 0, listener = home_listen(&chosen_port);
     if (listener < 0) return -1;
     snprintf(port, sizeof port, "%d", chosen_port);
@@ -246,7 +252,7 @@ static int home_donor_launch(HomeDonor *d, int edge) {
     snprintf(name, sizeof name, "home-%.12s-%u", id, o->begin);
     snprintf(range, sizeof range, "%u:%u", o->begin, o->end);
     snprintf(context, sizeof context, "%u", o->context);
-    snprintf(threads, sizeof threads, "%u", o->threads);
+    snprintf(threads, sizeof threads, "%u", usable_threads);
     snprintf(ram, sizeof ram, "%llu", (unsigned long long)((o->ram_bytes - o->edge_ram_bytes) >> 20));
     snprintf(bytes, sizeof bytes, "%llu", (unsigned long long)o->model_bytes);
     snprintf(layers, sizeof layers, "%u", o->layers);
@@ -286,13 +292,14 @@ static void home_donor_screen(const HomeDonor *d, const char *name, uint64_t ram
             ui_printf(12, 5, UI_MUTED, "Requester identity: %.24s…", who);
             ui_printf(14, 5, UI_TEXT, "Layers %u–%u of %u · %.2f GB RAM · %.2f GB disk headroom",
                 t->offer.begin, t->offer.end - 1, t->offer.layers, t->offer.ram_bytes / 1e9, t->offer.disk_bytes / 1e9);
-            ui_printf(16, 5, UI_MUTED, "%u context · one session · %u threads", t->offer.context, t->offer.threads);
+            ui_printf(16, 5, UI_MUTED, "%u context · one session · %u execution threads", t->offer.context,
+                      t->offer.threads < d->thread_capacity ? t->offer.threads : d->thread_capacity);
             ui_text(18, 5, UI_MUTED, t->offer.runs_edge ?
                 "This computer hosts chat and receives the conversation text." :
                 "This computer processes activations and keeps state for its layers.");
         } else {
             ui_text(11, 5, UI_TEXT, "Visible to your household. Waiting for a request.");
-            ui_text(14, 5, UI_MUTED, "Being visible is not permission to load a model.");
+            ui_printf(14, 5, UI_MUTED, "Runtime supports up to %u thread(s). Nothing loads without approval.", d->thread_capacity);
         }
         int y = ui_h >= 34 ? 23 : 20;
         if (t->phase == LMB_HOME_PENDING) {
@@ -315,7 +322,8 @@ static void home_donor_screen(const HomeDonor *d, const char *name, uint64_t ram
                "Context: %u · one session · %u threads\n",
                who, t->offer.model, t->offer.model_type, t->offer.begin,
                t->offer.end - 1, t->offer.layers, t->offer.ram_bytes / 1e9,
-               t->offer.disk_bytes / 1e9, t->offer.context, t->offer.threads);
+               t->offer.disk_bytes / 1e9, t->offer.context,
+               t->offer.threads < d->thread_capacity ? t->offer.threads : d->thread_capacity);
         if (t->offer.runs_edge)
             puts("This computer also hosts chat and receives the conversation text.");
         else puts("This computer processes activations and keeps state for its layers.");
@@ -421,6 +429,9 @@ static int cmd_donor(int argc, char **argv) {
          (checked_printf(service_path, sizeof service_path, "%s/../lib/lumabri/" LMB_SHIM_NAME, d.bin_dir) ||
           access(service_path, R_OK))))
         return home_fail("The household weight loader (%s) is missing. Install or build the complete household runtime.", LMB_SHIM_NAME);
+    if (checked_printf(service_path, sizeof service_path, "%s/segment_node", d.bin_dir) ||
+        lmb_runtime_thread_capacity(service_path, &d.thread_capacity))
+        return home_fail("Cannot query the installed Segment runtime. Rebuild the complete household runtime; no resources were shared.");
     if (checked_printf(d.cache_base, sizeof d.cache_base, "%s/%s", disk ? disk :
                        (getenv("HOME") ? getenv("HOME") : "."), disk ? "lumabri-home" : ".lumabri/home") ||
         home_local_ip(tracker, d.ip))
@@ -435,7 +446,7 @@ static int cmd_donor(int argc, char **argv) {
     LmbMachineProfile profile;
     if (lmb_machine_probe(&profile, d.cache_base, NULL) || !profile.ram_total_bytes)
         return home_fail("Cannot read this computer's memory. Sharing is disabled until hardware detection succeeds.");
-    uint64_t reserve = (uint64_t)lmb_env_int("LUMABRI_RAM_RESERVE_MB", 4096, 256, 262144) << 20;
+    uint64_t reserve = lmb_machine_ram_reserve();
     uint64_t ram = profile.ram_available_bytes > reserve ? profile.ram_available_bytes - reserve : 0;
     if (limit < ram) ram = limit;
     if (ram < (32u << 20)) return home_fail("Not enough available RAM to share safely: %.2f GB available, %.2f GB system reserve. Close other applications and retry.", profile.ram_available_bytes / 1e9, reserve / 1e9);
@@ -589,11 +600,13 @@ static void home_session_close(HomeSession *s) {
 }
 
 static int home_request_chat(LmbTuiState *st, int selected) {
+    home_error[0] = 0;
     if (selected < 0 || selected >= st->nmodels || !st->tracker[0] ||
-        !st->inventory_ok || home_private_network()) return -1;
+        !st->inventory_ok || home_private_network())
+        return home_fail("Cannot prepare chat: refresh the household inventory and select a model.");
     LmbTuiModel *m = &st->models[selected];
     if (!m->weights_present || !m->shape.sizing_verified || st->sessions != 1) {
-        fprintf(stderr, "This checkpoint needs verified sizing, local source weights and a one-session plan.\n"); return -1;
+        return home_fail("This checkpoint needs verified sizing, local source weights and a one-session plan.");
     }
     LmbClusterNode nodes[LMB_CLUSTER_MAX_NODES];
     uint32_t indices[LMB_CLUSTER_MAX_NODES], count = 0;
@@ -605,13 +618,30 @@ static int home_request_chat(LmbTuiState *st, int selected) {
     LmbClusterPlan plan;
     if (!count || lmb_plan_cluster_source(&m->shape, nodes, count, st->context, 1,
                                    LMB_GOAL_ONE_SESSION, 1, &plan) || plan.state != LMB_PLAN_RESIDENT) {
-        fprintf(stderr, "No complete resident plan fits the computers running Share resources.\n"); return -1;
+        return home_fail("No complete resident plan fits the selected computers. Keep Share resources open and check their offered RAM.");
+    }
+    /* Discovery is not proof that inbound connections work. Authenticate the
+     * selected donors before indexing/starting a source, without any OFFER,
+     * reservation or engine launch. Recheck again when actually sending. */
+    for (uint32_t i = 0; i < count; i++) {
+        uint8_t expected[32];
+        if (lmb_unhex(expected, st->identities[indices[i]], 32))
+            return home_fail("Invalid identity for %.64s. Refresh the computer list.", nodes[i].name);
+        int fd = lmb_connect_ms_io(nodes[i].addr, 2000, 2000);
+        if (fd < 0) return home_fail("Cannot reach %.64s at %.64s: %s. Check inbound permissions on that computer; no model was loaded.",
+                                    nodes[i].name, nodes[i].addr, lmb_connect_why());
+        int matched = lmb_secure_peer_matches(fd, expected);
+        int authenticated = matched && !lmb_auth(fd);
+        lmb_close(fd);
+        if (!authenticated) return home_fail("Cannot authenticate %.64s at %.64s. %s No model was loaded.",
+            nodes[i].name, nodes[i].addr, matched ? "Check the household key." : "The donor identity changed; refresh the computer list.");
     }
     HomeSession s = {0};
     for (uint32_t i = 0; i < LMB_CLUSTER_MAX_NODES; i++) s.fd[i] = -1;
     char kp[1024], pkhex[65], idhex[65];
     uint8_t sk[64], pk[32], id[32];
-    if (lmb_peer_identity(lmb_peer_key_path(kp, sizeof kp), sk, pk)) return -1;
+    if (lmb_peer_identity(lmb_peer_key_path(kp, sizeof kp), sk, pk))
+        return home_fail("Cannot load this computer's identity. Check home-directory permissions.");
     memset(sk, 0, sizeof sk); lmb_hex(pkhex, pk, 32);
     lmb_random(id, sizeof id); lmb_hex(idhex, id, 32);
     char model[64]; snprintf(model, sizeof model, "home-%.12s-%.12s-%.24s", pkhex, idhex, m->name);
@@ -621,9 +651,10 @@ static int home_request_chat(LmbTuiState *st, int selected) {
     char dir[1024], maintainer[1200], ip[INET_ADDRSTRLEN], port[20], addr[64], name[64];
     char logdir[1100], logfile[1200];
     exe_dir(dir, sizeof dir); snprintf(maintainer, sizeof maintainer, "%s/maintainer", dir);
-    if (access(maintainer, X_OK) || home_local_ip(st->tracker, ip)) return -1;
+    if (access(maintainer, X_OK)) return home_fail("The checkpoint source service is missing. Build the complete household runtime.");
+    if (home_local_ip(st->tracker, ip)) return home_fail("Cannot reach the household tracker. Keep Lumabri open on the household owner.");
     int source_port = 0, source_listener = home_listen(&source_port);
-    if (source_listener < 0) return -1;
+    if (source_listener < 0) return home_fail("Cannot open a checkpoint source port: %s.", strerror(errno));
     snprintf(port, sizeof port, "%d", source_port); snprintf(addr, sizeof addr, "%s:%d", ip, source_port);
     snprintf(name, sizeof name, "home-source-%.16s", idhex);
     snprintf(logdir, sizeof logdir, "%s/.lumabri/logs", getenv("HOME") ? getenv("HOME") : ".");
@@ -635,11 +666,13 @@ static int home_request_chat(LmbTuiState *st, int selected) {
     g_stopping = 0; install_chat_signal_handlers(); signal(SIGPIPE, SIG_IGN);
     s.source = home_spawn(source_argv, NULL, logfile, NULL, source_listener);
     int result = -1;
+    const char *stage = "starting the checkpoint source";
     if (s.source <= 0) goto done;
     LmbModelIdentity identity;
     Swarm swarm = {0};
     double started = nowd(), pulse = 0;
     int found = 0;
+    stage = "indexing and verifying the checkpoint source";
     while (!g_stopping && nowd() - started < 600) {
         if (term.active) { ui_begin("prepare chat");
             ui_printf(7, 5, UI_TEXT, "Indexing %s", m->name);
@@ -657,6 +690,7 @@ static int home_request_chat(LmbTuiState *st, int selected) {
         (void)poll(NULL, 0, 200);
     }
     if (!found) goto done;
+    stage = "validating the indexed plan";
     LmbRangeCost edge_cost = lmb_estimate_edge(&m->shape, st->context, 1);
     uint64_t edge_ram = edge_cost.resident_bytes + edge_cost.state_bytes + edge_cost.scratch_bytes + (64u << 20);
     uint8_t edge_pk[32];
@@ -687,19 +721,30 @@ static int home_request_chat(LmbTuiState *st, int selected) {
         o->ram_bytes = runtime + o->edge_ram_bytes;
         o->ram_bytes = (o->ram_bytes + ((1u << 20) - 1)) & ~((uint64_t)(1u << 20) - 1);
         o->disk_bytes = swarm.total_bytes * 2 + (256u << 20);
-        if (o->ram_bytes > nodes[n].ram_budget_bytes || !lmb_home_offer_valid(o)) goto done;
+        if (o->ram_bytes > nodes[n].ram_budget_bytes) {
+            home_fail("%.64s needs %.2f GB for this plan, but offers %.2f GB. No allocation was committed.",
+                      nodes[n].name, o->ram_bytes / 1e9, nodes[n].ram_budget_bytes / 1e9);
+            goto done;
+        }
+        if (!lmb_home_offer_valid(o)) { home_fail("The proposed allocation failed validation. No allocation was committed."); goto done; }
         snprintf(s.names[s.count], sizeof s.names[0], "%s", nodes[n].name);
         snprintf(s.addresses[s.count], sizeof s.addresses[0], "%s", nodes[n].addr);
         uint8_t recipient[32];
         if (lmb_unhex(recipient, st->identities[indices[n]], 32)) goto done;
         int fd = lmb_connect_ms_io(nodes[n].addr, 1500, 1000);
-        if (fd < 0) goto done;
+        if (fd < 0) {
+            home_fail("Cannot reach %.64s at %.64s while sending the request: %s.", nodes[n].name, nodes[n].addr, lmb_connect_why());
+            goto done;
+        }
         (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
-        if (!lmb_secure_peer_matches(fd, recipient) || lmb_auth(fd)) { lmb_close(fd); goto done; }
+        if (!lmb_secure_peer_matches(fd, recipient) || lmb_auth(fd)) {
+            home_fail("Authentication failed while requesting %.64s. Refresh the household identity and key.", nodes[n].name);
+            lmb_close(fd); goto done;
+        }
         LmbBuf b = {0};
         int bad = lmb_home_offer_pack(&b, o) || lmb_send(fd, LMB_HOME_OFFER, b.p, (uint32_t)b.len, NULL, 0);
         free(b.p);
-        if (bad) { lmb_close(fd); goto done; }
+        if (bad) { home_fail("Cannot send the request to %.64s. Check its connection.", nodes[n].name); lmb_close(fd); goto done; }
         s.fd[s.count] = fd; s.phase[s.count] = LMB_HOME_PENDING;
         if (o->runs_edge) { s.edge = s.count; have_edge = 1; }
         s.count++;
@@ -708,6 +753,8 @@ static int home_request_chat(LmbTuiState *st, int selected) {
     int committed = 0, host_started = 0;
     started = nowd();
     while (!g_stopping && nowd() - started < 900) {
+        stage = !committed ? "waiting for donor approval" :
+                !host_started ? "loading the approved segments" : "starting the chat host";
         int send_pulse = nowd() - pulse >= 1;
         if (send_pulse) pulse = nowd();
         if (home_session_poll(&s, send_pulse)) goto done;
@@ -758,6 +805,13 @@ done:
     home_terminal_end(&term);
     home_session_close(&s);
     if (result) {
+        if (!home_error[0]) {
+            for (uint32_t i = 0; i < s.count; i++) if (s.reason[i][0]) {
+                home_fail("%.64s: %.240s", s.names[i], s.reason[i]);
+                break;
+            }
+        }
+        if (!home_error[0]) home_fail("Chat stopped while %s. Resources were released. Source log: %.240s", stage, logfile);
         fprintf(stderr, "Household plan did not complete; allocations have been cancelled. Source log: %s\n", logfile);
         for (uint32_t i = 0; i < s.count; i++) if (s.reason[i][0])
             fprintf(stderr, "%s: %s\n", s.names[i], s.reason[i]);

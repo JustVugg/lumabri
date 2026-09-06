@@ -127,6 +127,19 @@ uint64_t lmb_machine_available_ram(void) {
     return value;
 }
 
+uint32_t lmb_machine_default_reserve_mb(uint64_t total) {
+    if (!total) return 4096; /* unknown hardware is not a reason to lower safety */
+    uint64_t mib = total >> 22;
+    if (mib < 1024) mib = 1024;
+    if (mib > 4096) mib = 4096;
+    return (uint32_t)mib;
+}
+
+uint64_t lmb_machine_ram_reserve(void) {
+    return (uint64_t)lmb_env_int("LUMABRI_RAM_RESERVE_MB",
+        (int)lmb_machine_default_reserve_mb(lmb_machine_total_ram()), 256, 262144) << 20;
+}
+
 uint64_t lmb_machine_total_ram(void) {
     uint64_t value = 0;
     meminfo(&value, NULL, NULL, NULL);

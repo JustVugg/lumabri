@@ -108,6 +108,16 @@ def main():
 
         try:
             owner = start("owner")
+            owner.action(2)
+            owner.expect("Folder containing your model directories")
+            model_folder = str(Path(tmp) / "models with spaces")
+            Path(model_folder).mkdir()
+            owner.send(model_folder.encode() + b"\n")
+            owner.expect("Maximum RAM to offer")
+            owner.send(b"0.5\n")
+            owner.expect("Settings saved.")
+            assert owner.settings()["models"] == model_folder
+            assert owner.settings()["ram"] == "0.5"
             owner.action(0)
             owner.expect("Host identity:")
             saved = owner.settings()
