@@ -111,8 +111,8 @@ def main():
         until(listening)
         a = Terminal("donor-a", ["./lumabri"])
         b = Terminal("donor-b", ["./lumabri"])
-        until(lambda: a.has("YOUR COMPUTERS") and b.has("YOUR COMPUTERS"))
-        a.send("d"); b.send("d")
+        until(lambda: a.has("your workspace") and b.has("your workspace"))
+        a.send("\x1b[B\x1b[B\x1b[B\r"); b.send("\x1b[B\x1b[B\x1b[B\r")
         until(lambda: a.has("Available") and b.has("Available"))
 
         def inventory_ready():
@@ -123,17 +123,17 @@ def main():
         reject = Terminal("reject", base)
         until(lambda: reject.has("3 computers"))
         reject.send("\t")
-        until(lambda: reject.has("CORES/THREADS"))
-        reject.send("j j \t")
+        until(lambda: reject.has("Nothing is selected automatically"))
+        reject.send("\x1b[B\r\x1b[B\r\t")
         time.sleep(.5)
-        reject.send("c")
+        reject.send("\r\r")
         until(lambda: a.has("Waiting for your approval") and b.has("Waiting for your approval"),
               seconds=60, message="offers never reached both donor TUIs")
         assert not engines_started("donor-a") and not engines_started("donor-b")
-        a.send("y")
+        a.send("\x1b[A\r")
         until(lambda: a.has("Accepted; waiting"))
         assert not engines_started("donor-a") and not engines_started("donor-b")
-        b.send("n")
+        b.send("\r")  # Safe default is Decline, not Accept.
         until(lambda: reject.p.poll() is not None, message="rejection did not cancel the whole plan")
         assert reject.p.returncode != 0
         assert not engines_started("donor-a") and not engines_started("donor-b")
@@ -142,12 +142,12 @@ def main():
         chat = Terminal("chatter", base)
         until(lambda: chat.has("3 computers"))
         chat.send("\t")
-        until(lambda: chat.has("CORES/THREADS"))
-        chat.send("j j \t")
+        until(lambda: chat.has("Nothing is selected automatically"))
+        chat.send("\x1b[B\r\x1b[B\r\t")
         time.sleep(.5)
-        chat.send("c")
+        chat.send("\r\r")
         until(lambda: a.has("Waiting for your approval") and b.has("Waiting for your approval"), seconds=60)
-        a.send("y"); b.send("y")
+        a.send("\x1b[A\r"); b.send("\x1b[A\r")
         until(lambda: chat.has("receives the text") or chat.p.poll() is not None, seconds=180,
               message="accepted plan did not reach real hosted chat")
         assert chat.p.poll() is None, "accepted plan failed; inspect donor engine logs"
@@ -176,11 +176,10 @@ def main():
         for name in ("chatter", "reject"):
             assert not list((tmp / name).rglob("*.safetensors")), "thin client downloaded weights"
             assert not list((tmp / name).rglob("vroot")), "thin client mounted a checkpoint"
-        previous_a = a.text.count("YOUR COMPUTERS")
-        previous_b = b.text.count("YOUR COMPUTERS")
-        a.send("q"); b.send("q")
-        until(lambda: a.text.count("YOUR COMPUTERS") > previous_a and b.text.count("YOUR COMPUTERS") > previous_b)
-        a.send("q"); b.send("q")
+        a.text = b.text = ""
+        a.send("\x1b"); b.send("\x1b")
+        until(lambda: a.has("your workspace") and b.has("your workspace"))
+        a.send("\x1b"); b.send("\x1b")
         until(lambda: a.p.poll() is not None and b.p.poll() is not None)
         print("HOME FLOW: PASS (all-party consent, rejection, real Segment load, hosted generation, cleanup)", flush=True)
     finally:

@@ -3,19 +3,31 @@
 Raw mode clears ICANON and ECHO. A clean exit has to put them back, from the
 normal path, from a signal, and from atexit — all three routes land in the
 same idempotent restore, and this checks the result rather than the routes."""
-import os, pty, sys, termios, time
+import os, pty, select, sys, termios, time
 
 models = sys.argv[1]
 pid, fd = pty.fork()
 if pid == 0:
     os.execvp("./lumabri", ["./lumabri", "models", "--models-dir", models])
-time.sleep(2.0)
+def drain():
+    while select.select([fd], [], [], 0)[0]:
+        try:
+            if not os.read(fd, 65536):
+                break
+        except OSError:
+            break
+
+deadline = time.time() + 2.0
+while time.time() < deadline:
+    drain()
+    time.sleep(.02)
 try:
     os.write(fd, b"q")
 except OSError:
     pass
 deadline = time.time() + 10
 while time.time() < deadline:
+    drain()
     done, _ = os.waitpid(pid, os.WNOHANG)
     if done == pid:
         break

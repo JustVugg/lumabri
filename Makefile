@@ -42,7 +42,7 @@ SECURE_DEPS = lumabri_secure.h lumabri_crypto.h
 MACHINE_SRC = lumabri_machine.c
 MACHINE_DEPS = lumabri_machine.h $(MACHINE_SRC)
 
-lumabri: lumabri.c src/ui/lumabri_tui.c src/ui/lumabri_tui.h lumabri_proto.h lumabri_sign.h \
+lumabri: lumabri.c src/ui/lumabri_tui.c src/ui/lumabri_tui.h src/ui/lumabri_visual.h lumabri_proto.h lumabri_sign.h \
 		lumabri_inventory.h lumabri_home.h lumabri_home_runtime.h src/ui/lumabri_home_ui.h lumabri_ready.h \
 		lumabri_families.h lumabri_planner.h lumabri_cluster.h \
 		lumabri_calibration.h $(SECURE_DEPS) $(MACHINE_DEPS)

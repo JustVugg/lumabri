@@ -85,19 +85,55 @@ static int cmd_home(void) {
     HomeSettings s; home_settings_load(&s);
     pid_t tracker_child = 0;
     char notice[200] = "";
+    int selected = 0, actions = 0;
     g_stopping = 0; install_chat_signal_handlers();
     while (!g_stopping) {
         HomeTerminal term; home_terminal_begin(&term);
-        fputs("\x1b[2J\x1b[HLUMABRI / YOUR COMPUTERS\n\n", stdout);
-        printf("Household: %s\n\n[c] Chat\n[d] Share resources (requests require your approval)\n\n"
-               "[n] Create a household on this computer\n[j] Join a household\n"
-               "[s] Model folder and RAM limit\n[q] Exit\n\n%s\n",
-               s.tracker[0] ? s.tracker : "not connected", notice);
-        fflush(stdout);
         int key = -1;
-        while (!g_stopping && key < 0) { key = home_key(); (void)poll(NULL, 0, 50); }
+        while (!g_stopping) {
+            ui_begin("your workspace");
+            int top = 5;
+            if (ui_h >= 34 && ui_w >= 64) {
+                for (int r = 0; r < 6; r++) ui_text(top + r, 5, r < 3 ? UI_ACCENT : UI_SAND, WORDMARK[r]);
+                ui_text(top + 7, 5, UI_MUTED, "tiny engine, immense swarm");
+                if (ui_w >= 100) {
+                    ui_text(top + 1, 67, UI_TEXT, "Your computers.");
+                    ui_text(top + 2, 67, UI_TEXT, "One shared possibility.");
+                    ui_text(top + 4, 67, UI_MUTED, "A private cluster, at home.");
+                }
+                top += 10;
+            }
+            static const char *titles[] = {"Start a conversation", "Explore models", "Your computers", "Share resources"};
+            static const char *help[] = {"Choose a model and ask your selected donors.", "Memory needs, plans and measured speed.",
+                "See resources. Choose who participates.", "Review a request before anything is loaded."};
+            static const char *commands[] = {"/create", "/join", "/settings", "/quit"};
+            static const char *command_help[] = {"Create a household on this computer", "Join with its LAN address and household key",
+                "Model folder and maximum RAM to share", "Close Lumabri"};
+            ui_text(top, 5, UI_TEXT, actions ? "Workspace actions" : "What would you like to do?");
+            for (int i = 0; i < 4; i++) ui_item(top + 2 + i * 3, selected == i,
+                actions ? commands[i] : titles[i], actions ? command_help[i] : help[i]);
+            ui_footer(notice[0] ? notice : s.tracker[0] ? s.tracker : "Create or join a household with / actions.",
+                      "↑ ↓ move   Enter select   / actions   Esc back   Ctrl-C exit");
+            if (ui_h < 28 || ui_w < 60) {
+                ui_begin("your workspace");
+                ui_text(5, 4, UI_SAND, "Resize the terminal to at least 60 × 28.");
+                ui_text(7, 4, UI_MUTED, "Esc or Ctrl-C exits.");
+            }
+            ui_present();
+            key = home_key();
+            if (key == 3 || (key == 27 && !actions)) break;
+            if (key == 27) { actions = 0; selected = 0; }
+            if (key == '/') { actions = !actions; selected = 0; }
+            if (key == 1001) selected = (selected + 3) % 4;
+            if (key == 1002) selected = (selected + 1) % 4;
+            if ((key == '\r' || key == '\n') && ui_h >= 28 && ui_w >= 60) {
+                key = actions ? "njsq"[selected] : "ccpd"[selected];
+                actions = 0; selected = 0; break;
+            }
+            (void)poll(NULL, 0, 100);
+        }
         home_terminal_end(&term);
-        if (key == 'q' || key == 3 || g_stopping) break;
+        if (key == 'q' || key == 3 || key == 27 || g_stopping) break;
         notice[0] = 0;
         if (key == 'j') {
             if (tracker_child > 0) {
@@ -153,7 +189,7 @@ static int cmd_home(void) {
             printf("\nOn your other computers choose Join a household.\n\nAddress: %s\nHousehold key: %s\n\n"
                    "Keep this Lumabri window open. Only share the key with your household.\nPress Enter to continue.\n", s.tracker, s.token);
             char line[16]; if (!fgets(line, sizeof line, stdin)) break;
-        } else if (key == 'c' || key == '\r' || key == '\n' || key == 'd') {
+        } else if (key == 'c' || key == 'p' || key == 'd') {
             if (!s.tracker[0] || !s.token[0]) { snprintf(notice, sizeof notice, "Create or join a household first."); continue; }
             setenv("LUMABRI_TOKEN", s.token, 1);
             int rc;
@@ -161,8 +197,8 @@ static int cmd_home(void) {
                 char *args[] = {"--join", s.tracker, "--ram-gb", s.ram};
                 rc = cmd_donor(4, args);
             } else {
-                char *args[] = {"--tracker", s.tracker, "--models-dir", s.models};
-                rc = cmd_models(4, args);
+                char *args[] = {"--tracker", s.tracker, "--models-dir", s.models, "--computers"};
+                rc = cmd_models(key == 'p' ? 5 : 4, args);
             }
             g_stopping = 0; install_chat_signal_handlers();
             if (rc) snprintf(notice, sizeof notice, "The operation did not finish. No plan is running; check diagnostics before retrying.");

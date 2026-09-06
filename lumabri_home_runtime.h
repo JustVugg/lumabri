@@ -9,6 +9,7 @@ typedef struct {
 } HomeTerminal;
 
 static void home_terminal_begin(HomeTerminal *term) {
+    (void)setlocale(LC_CTYPE, "");
     memset(term, 0, sizeof *term);
     if (!g_tty || !isatty(0) || tcgetattr(0, &term->saved)) return;
     struct termios t = term->saved;
@@ -29,7 +30,13 @@ static void home_terminal_end(HomeTerminal *term) {
 static int home_key(void) {
     struct pollfd p = {0, POLLIN, 0};
     char key;
-    return poll(&p, 1, 0) > 0 && read(0, &key, 1) == 1 ? (unsigned char)key : -1;
+    if (poll(&p, 1, 0) <= 0) return -1;
+    if (read(0, &key, 1) != 1) return (p.revents & POLLHUP) ? 3 : -1;
+    if ((unsigned char)key != 27) return (unsigned char)key;
+    char seq[2];
+    if (poll(&p, 1, 30) <= 0 || read(0, seq, 1) != 1) return 27;
+    if (seq[0] != '[' || poll(&p, 1, 30) <= 0 || read(0, seq + 1, 1) != 1) return 0;
+    return seq[1] == 'A' ? 1001 : seq[1] == 'B' ? 1002 : 0;
 }
 
 static int home_private_network(void) {
@@ -235,9 +242,37 @@ static int home_donor_launch(HomeDonor *d, int edge) {
     return d->segment > 0 ? 0 : -1;
 }
 
-static void home_donor_screen(const HomeDonor *d, const char *name, uint64_t ram, int clear) {
-    if (clear) fputs("\033[2J\033[H", stdout);
+static void home_donor_screen(const HomeDonor *d, const char *name, uint64_t ram, int clear, int choice) {
     const LmbHomeTransaction *t = &d->transaction;
+    if (clear) {
+        ui_begin("share resources");
+        ui_printf(5, 5, UI_TEXT, "%s · up to %.1f GB RAM · CPU execution", name, ram / 1e9);
+        ui_text(7, 5, UI_SAND, lmb_home_phase_name(t->phase));
+        if (t->phase != LMB_HOME_IDLE) {
+            char who[65]; lmb_hex(who, t->offer.requester, 32);
+            ui_printf(10, 5, UI_TEXT, "Model: %s (%s)", t->offer.model, t->offer.model_type);
+            ui_printf(12, 5, UI_MUTED, "Requester identity: %.24s…", who);
+            ui_printf(14, 5, UI_TEXT, "Layers %u–%u of %u · %.2f GB RAM · %.2f GB disk headroom",
+                t->offer.begin, t->offer.end - 1, t->offer.layers, t->offer.ram_bytes / 1e9, t->offer.disk_bytes / 1e9);
+            ui_printf(16, 5, UI_MUTED, "%u context · one session · %u threads", t->offer.context, t->offer.threads);
+            ui_text(18, 5, UI_MUTED, t->offer.runs_edge ?
+                "This computer hosts chat and receives the conversation text." :
+                "This computer processes activations and keeps state for its layers.");
+        } else {
+            ui_text(11, 5, UI_TEXT, "Visible to your household. Waiting for a request.");
+            ui_text(14, 5, UI_MUTED, "Being visible is not permission to load a model.");
+        }
+        int y = ui_h >= 34 ? 23 : 20;
+        if (t->phase == LMB_HOME_PENDING) {
+            ui_item(y, choice == 0, "Accept this request", "Reserve only the displayed resources for this plan.");
+            ui_item(y + 3, choice == 1, "Decline", "No weights or model state will be loaded.");
+        } else ui_item(y, 1, "Stop sharing and return", "Release this plan and its resources.");
+        ui_footer(t->reason[0] ? t->reason : d->log, "↑ ↓ choose   Enter confirm   Esc stop and return");
+        if (ui_w < 60 || ui_h < 28) {
+            ui_begin("share resources"); ui_text(5, 4, UI_SAND, "Resize to at least 60 × 28. Esc stops sharing.");
+        }
+        ui_present(); return;
+    }
     printf("LUMABRI / SHARE RESOURCES\n\n%s · up to %.1f GB RAM · CPU\n\n%s\n",
            name, ram / 1e9, lmb_home_phase_name(t->phase));
     if (t->phase != LMB_HOME_IDLE) {
@@ -367,14 +402,16 @@ static int cmd_donor(int argc, char **argv) {
     g_stopping = 0; install_chat_signal_handlers(); signal(SIGPIPE, SIG_IGN);
     HomeTerminal term; home_terminal_begin(&term);
     double redraw = 0;
+    int donor_choice = 1; /* Enter alone must never accept a new allocation. */
     while (!g_stopping) {
         double now = nowd();
-        if (now - redraw >= .25) { home_donor_screen(&d, name, ram, term.active); redraw = now; }
+        if (now - redraw >= .25) { home_donor_screen(&d, name, ram, term.active, donor_choice); redraw = now; }
         struct pollfd ready[2] = {{listener, POLLIN, 0}, {d.client, POLLIN, 0}};
         (void)poll(ready, 2, 50);
         if (ready[0].revents & POLLIN) {
             int incoming = accept(listener, NULL, NULL);
             if (incoming >= 0) {
+                donor_choice = 1;
                 lmb_machine_refresh_resources(&profile, d.cache_base);
                 uint64_t free_ram = profile.ram_available_bytes > reserve ? profile.ram_available_bytes - reserve : 0;
                 if (free_ram > ram) free_ram = ram;
@@ -387,7 +424,13 @@ static int cmd_donor(int argc, char **argv) {
         if (d.client >= 0 && ready[1].fd == d.client && ready[1].revents && home_donor_message(&d))
             home_donor_disconnect(&d, "The requester disconnected or sent an invalid command.");
         int key = home_key();
-        if (key == 'q' || key == 3) break;
+        if (key == 'q' || key == 3 || key == 27) break;
+        if (key == 1001 || key == 1002) { donor_choice = !donor_choice; redraw = 0; }
+        if (key == '\r' || key == '\n') {
+            if (term.active && (ui_w < 60 || ui_h < 28)) continue;
+            if (d.transaction.phase != LMB_HOME_PENDING) break;
+            key = donor_choice ? 'n' : 'y';
+        }
         if (key == 'x') home_donor_disconnect(&d, "Stopped by this computer's owner.");
         if ((key == 'y' || key == 'n') && d.transaction.phase == LMB_HOME_PENDING) {
             lmb_machine_refresh_resources(&profile, d.cache_base);
@@ -540,13 +583,16 @@ static int home_request_chat(LmbTuiState *st, int selected) {
     double started = nowd(), pulse = 0;
     int found = 0;
     while (!g_stopping && nowd() - started < 600) {
-        if (term.active) fputs("\033[2J\033[H", stdout);
-        printf("LUMABRI / PREPARE CHAT\n\nIndexing %s and verifying its checkpoint identity.\n"
+        if (term.active) { ui_begin("prepare chat");
+            ui_printf(7, 5, UI_TEXT, "Indexing %s", m->name);
+            ui_text(10, 5, UI_MUTED, "Verifying checkpoint identity before requesting allocations.");
+            ui_footer("No donor starts without approval.", "Esc cancels"); ui_present();
+        } else printf("LUMABRI / PREPARE CHAT\n\nIndexing %s and verifying its checkpoint identity.\n"
                "No donor engine is running yet.\n\n[q] Cancel\n", m->name); fflush(stdout);
         if (!lmb_model_identity_get(st->tracker, model, &identity) &&
             !swarm_inspect(st->tracker, model, &swarm) && swarm.total_bytes) { found = 1; break; }
         if (waitpid(s.source, NULL, WNOHANG) == s.source) break;
-        if (home_key() == 'q') break;
+        int key = home_key(); if (key == 'q' || key == 27 || key == 3) break;
         (void)poll(NULL, 0, 200);
     }
     if (!found) goto done;
@@ -604,16 +650,20 @@ static int home_request_chat(LmbTuiState *st, int selected) {
         int send_pulse = nowd() - pulse >= 1;
         if (send_pulse) pulse = nowd();
         if (home_session_poll(&s, send_pulse)) goto done;
-        if (term.active) fputs("\033[2J\033[H", stdout);
-        printf("LUMABRI / PREPARE CHAT\n\n%s · %u computer(s) · one session\n\n", m->name, s.count);
+        if (term.active) {
+            ui_begin("prepare chat");
+            ui_printf(6, 5, UI_TEXT, "%s · %u computer(s) · one session", m->name, s.count);
+        } else printf("LUMABRI / PREPARE CHAT\n\n%s · %u computer(s) · one session\n\n", m->name, s.count);
         int accepted = 1, ready = 1;
         for (uint32_t i = 0; i < s.count; i++) {
-            printf("%-20s %s\n", s.names[i], lmb_home_phase_name(s.phase[i]));
+            if (term.active) ui_printf(10 + (int)i * 2, 5, UI_TEXT, "%s · %s", s.names[i], lmb_home_phase_name(s.phase[i]));
+            else printf("%-20s %s\n", s.names[i], lmb_home_phase_name(s.phase[i]));
             if (s.phase[i] != LMB_HOME_ACCEPTED) accepted = 0;
             if (s.phase[i] < LMB_HOME_SEGMENT_READY) ready = 0;
         }
-        puts("\nNothing loads until every selected computer accepts.\n[q] Cancel and release all computers"); fflush(stdout);
-        if (home_key() == 'q') goto done;
+        if (!term.active) { puts("\nNothing loads until every selected computer accepts.\n[q] Cancel and release all computers"); fflush(stdout); }
+        if (term.active) { ui_footer("Chat starts only when the entire approved chain is ready.", "Esc cancels and releases the plan"); ui_present(); }
+        int key = home_key(); if (key == 'q' || key == 27 || key == 3) goto done;
         if (!committed && accepted) {
             for (uint32_t i = 0; i < s.count; i++)
                 if (lmb_send(s.fd[i], LMB_HOME_COMMIT, id, 32, NULL, 0)) goto done;

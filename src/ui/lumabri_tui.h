@@ -41,6 +41,7 @@ typedef struct LmbTuiState {
     uint32_t nnodes;
     int inventory_ok;
     int action_model;
+    int initial_tab;
     char selected_nodes[LMB_CLUSTER_MAX_NODES][65];
     uint32_t context, sessions, max_new;
     char root[512];                 /* where the checkpoints were found */
