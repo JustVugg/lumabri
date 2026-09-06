@@ -37,7 +37,9 @@ static void lc_st32(uint8_t *p, uint32_t v) {
 
 static void lc_chacha_block(const uint8_t key[32], uint32_t counter,
                             const uint8_t nonce[12], uint8_t out[64]) {
-    static const char sigma[16] = "expand 32-byte k";
+    /* Keep the C string terminator; the four loads below consume only the
+     * 16 protocol bytes, not the terminator. */
+    static const char sigma[] = "expand 32-byte k";
     uint32_t s[16], x[16];
     s[0] = lc_ld32((const uint8_t *)sigma);
     s[1] = lc_ld32((const uint8_t *)sigma + 4);

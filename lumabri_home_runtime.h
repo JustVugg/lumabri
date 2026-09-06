@@ -592,8 +592,11 @@ static int home_request_chat(LmbTuiState *st, int selected) {
             ui_printf(7, 5, UI_TEXT, "Indexing %s", m->name);
             ui_text(10, 5, UI_MUTED, "Verifying checkpoint identity before requesting allocations.");
             ui_footer("No donor starts without approval.", "Esc cancels"); ui_present();
-        } else printf("LUMABRI / PREPARE CHAT\n\nIndexing %s and verifying its checkpoint identity.\n"
-               "No donor engine is running yet.\n\n[q] Cancel\n", m->name); fflush(stdout);
+        } else {
+            printf("LUMABRI / PREPARE CHAT\n\nIndexing %s and verifying its checkpoint identity.\n"
+                   "No donor engine is running yet.\n\n[q] Cancel\n", m->name);
+        }
+        fflush(stdout);
         if (!lmb_model_identity_get(st->tracker, model, &identity) &&
             !swarm_inspect(st->tracker, model, &swarm) && swarm.total_bytes) { found = 1; break; }
         if (waitpid(s.source, NULL, WNOHANG) == s.source) break;

@@ -22,6 +22,8 @@ jobs:
         run: make lumabri test_chat_ui CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
       - name: Readiness descriptors and portable fallback
         run: make test-ready-pipe CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
+      - name: Native cryptographic known-answer tests
+        run: bash tests/integration/crypto_test.sh
       - name: Native workspace navigation and terminal restoration
         run: python3 tests/integration/workspace_navigation_test.py
   linux:
