@@ -14,6 +14,7 @@ import signal
 import socket
 import struct
 import subprocess
+import sys
 import tempfile
 import termios
 import time
@@ -24,6 +25,8 @@ ROOT = Path(__file__).resolve().parents[2]
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--models-dir", required=True)
+    parser.add_argument("--kill-donor", action="store_true",
+                        help="kill a donor TUI after generation; assert engines and leases are released")
     args = parser.parse_args()
     tmp = Path(tempfile.mkdtemp(prefix="lumabri-home-flow-"))
     children, terminals = [], []
@@ -163,10 +166,28 @@ def main():
               message="real model did not finish a response")
         assert chat.has("tok/s"), "engine failed during generation"
         assert "hosted stream · no local checkpoint" in chat.text
-        chat.send("/quit\n")
-        until(lambda: chat.p.poll() is not None, message="quit left hosted chat blocked")
-        assert chat.p.returncode == 0
-        until(lambda: a.has("Released") and b.has("Released"), message="donor leases were not released")
+        owned_groups = set()
+        if args.kill_donor:
+            rows = subprocess.check_output(["ps", "-axo", "pid=,ppid=,pgid="], text=True)
+            processes = [tuple(map(int, row.split())) for row in rows.splitlines()]
+            owned = {a.p.pid}
+            while True:
+                descendants = owned | {pid for pid, parent, group in processes if parent in owned}
+                if descendants == owned:
+                    break
+                owned = descendants
+            owned_groups = {group for pid, parent, group in processes
+                            if pid in owned and group != os.getpgrp() and group == pid}
+            assert owned_groups, "test did not find the owned runtime groups"
+            a.p.kill(); a.p.wait(timeout=5)
+            until(lambda: chat.p.poll() is not None, seconds=45,
+                  message="lost donor left hosted chat blocked")
+            until(lambda: b.has("Released"), message="surviving donor was not released")
+        else:
+            chat.send("/quit\n")
+            until(lambda: chat.p.poll() is not None, message="quit left hosted chat blocked")
+            assert chat.p.returncode == 0
+            until(lambda: a.has("Released") and b.has("Released"), message="donor leases were not released")
         def leases_released():
             for name in ("donor-a", "donor-b"):
                 with open(tmp / name / ".lumabri" / "compute-donor.lock", "r") as lease:
@@ -176,15 +197,27 @@ def main():
                         return False
             return True
         until(leases_released, message="a child retained a donor resource lease after closing chat")
+        def no_owned_processes():
+            rows = subprocess.check_output(["ps", "-axo", "pgid=,stat="], text=True)
+            return not any(int(row.split()[0]) in owned_groups and not row.split()[1].startswith("Z")
+                           for row in rows.splitlines())
+        if args.kill_donor:
+            until(no_owned_processes, message="a donor engine survived its terminated TUI")
         for name in ("chatter", "reject"):
             assert not list((tmp / name).rglob("*.safetensors")), "thin client downloaded weights"
             assert not list((tmp / name).rglob("vroot")), "thin client mounted a checkpoint"
-        a.text = b.text = ""
-        a.send("\x1b"); b.send("\x1b")
-        until(lambda: a.has("your workspace") and b.has("your workspace"))
-        a.send("\x1b"); b.send("\x1b")
+        for donor in ([b] if args.kill_donor else [a, b]):
+            donor.text = ""
+            donor.send("\x1b")
+            until(lambda: donor.has("your workspace"))
+            donor.send("\x1b")
         until(lambda: a.p.poll() is not None and b.p.poll() is not None)
-        print("HOME FLOW: PASS (all-party consent, rejection, real Segment load, hosted generation, cleanup)", flush=True)
+        print(f"HOME FLOW: PASS (consent, real Segment generation, {'killed donor recovery' if args.kill_donor else 'normal cleanup'})", flush=True)
+    except Exception:
+        # Only test-owned engine logs: no shell environment or real keys.
+        for log in tmp.rglob("engines.log"):
+            print(f"\n{log.relative_to(tmp)}:\n{log.read_text(errors='replace')[-12000:]}", file=sys.stderr)
+        raise
     finally:
         for p in reversed(children):
             if p.poll() is None:

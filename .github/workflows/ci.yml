@@ -42,8 +42,9 @@ jobs:
           python-version: "3.12"
       - name: Build the C workspace with Apple Clang
         run: |
-          make lumabri tracker maintainer liblumabri.dylib test_machine test_chat_ui CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
+          make lumabri tracker maintainer liblumabri.dylib test_shim test_machine test_chat_ui CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           ./test_machine
+          python3 tests/integration/native_shim_test.py
           python3 tests/integration/household_network_test.py
       - name: Readiness descriptors and portable fallback
         run: make test-ready-pipe CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
@@ -121,6 +122,7 @@ jobs:
           mkdir -p build/home-flow-models
           cp -a ../colibri/c/olmoe_tiny_merged build/home-flow-models/olmoe-tiny
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models
+          python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --kill-donor
   macos-household:
     # Real native CPU engines + signed CAS + approvals + streaming. Loopback
     # coverage does not replace the macOS 12.6 / physical household LAN test.
@@ -153,4 +155,14 @@ jobs:
           path: lumabri/build/home-flow-models/olmoe-tiny
       - name: Request, accept, fetch weights and chat on native macOS
         working-directory: lumabri
-        run: python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models
+          python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --kill-donor
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: household-logs-${{ matrix.runner }}
+          path: ${{ runner.temp }}/lumabri-home-flow-*/**/*.log
+          retention-days: 3
