@@ -28,11 +28,14 @@ static inline int lmb_home_take_listener(int port) {
     int bad = errno || !*value || *end || n < 3 || n > INT_MAX;
     unsetenv("LUMABRI_HOME_LISTEN_FD");
     if (bad) { errno = EINVAL; return -1; }
-    int fd = (int)n, listening = 0;
-    struct sockaddr_in addr = {0}; socklen_t size = sizeof addr, opt = sizeof listening;
+    int fd = (int)n, type = 0;
+    struct sockaddr_in addr = {0}; socklen_t size = sizeof addr, opt = sizeof type;
+    /* Darwin defines SO_ACCEPTCONN but does not expose it via getsockopt.
+     * Validate the type/endpoint, then assert listening with portable listen;
+     * this is idempotent for our listener and rejects connected sockets. */
     if (getsockname(fd, (struct sockaddr *)&addr, &size) || size != sizeof addr ||
         addr.sin_family != AF_INET || ntohs(addr.sin_port) != port ||
-        getsockopt(fd, SOL_SOCKET, SO_ACCEPTCONN, &listening, &opt) || !listening ||
+        getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &opt) || type != SOCK_STREAM || listen(fd, 64) ||
         fcntl(fd, F_SETFD, FD_CLOEXEC)) { close(fd); errno = EINVAL; return -1; }
     return fd;
 }

@@ -48,6 +48,15 @@ int main(void) {
     setenv("LUMABRI_HOME_LISTEN_FD", "1", 1);
     assert(lmb_home_take_listener(port) < 0);
     assert(fcntl(1, F_GETFD) >= 0); /* malformed env must not close stdout */
+    int udp = socket(AF_INET, SOCK_DGRAM, 0);
+    assert(udp >= 3);
+    struct sockaddr_in invalid = {0}; invalid.sin_family = AF_INET;
+    invalid.sin_port = htons((uint16_t)port); invalid.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    assert(!bind(udp, (struct sockaddr *)&invalid, sizeof invalid));
+    snprintf(descriptor, sizeof descriptor, "%d", udp);
+    setenv("LUMABRI_HOME_LISTEN_FD", descriptor, 1);
+    assert(lmb_home_take_listener(port) < 0); /* matching port is not enough: it must be TCP */
+    assert(fcntl(udp, F_GETFD) < 0);
 
     uint8_t nonce[16] = {3}, reply[LMB_HOME_DISC_REPLY] = {0};
     memcpy(reply, "LMBHOME1", 8); memcpy(reply + 8, nonce, 16);
