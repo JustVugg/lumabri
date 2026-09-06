@@ -97,7 +97,7 @@ There are no promised tok/s or automatic “best model” recommendations.
 
 ```sh
 make test ENGINE=/path/to/colibri/c
-python3 home_flow_test.py --models-dir /path/to/tiny-model-folder
+python3 tests/integration/home_flow_test.py --models-dir /path/to/tiny-model-folder
 ```
 
 The second command starts a loopback integration test with real engines; it

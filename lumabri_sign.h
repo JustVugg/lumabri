@@ -10,7 +10,7 @@
  * The Ed25519 implementation follows the TweetNaCl construction (public
  * domain, D. J. Bernstein et al.): 16-bit-limb field arithmetic over
  * 2^255-19, constant-time conditional swaps, no secret-dependent branches.
- * It is verified against OpenSSL in both directions by sign_test.sh —
+ * It is verified against OpenSSL in both directions by tests/integration/sign_test.sh —
  * signatures we make verify there, signatures made there verify here.
  */
 #ifndef LUMABRI_SIGN_H

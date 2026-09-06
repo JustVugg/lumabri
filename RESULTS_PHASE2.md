@@ -3,7 +3,7 @@
 Data: 2026-08-04. Macchina: WSL2, 12 core logici / 6 fisici, 25 GB RAM.
 Modello: `tiny_olmoe` (fixture sintetica, pesi casuali) — hidden 1024,
 inter 1024, 16 layer, 8 esperti/layer, top-4, esperto = 3.1 MB int8.
-Comando: `./phase2_test.sh`.
+Comando: `./tests/integration/phase2_test.sh`.
 
 ## Cosa è stato messo alla prova
 

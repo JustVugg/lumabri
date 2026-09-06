@@ -1,17 +1,17 @@
 # Repository layout and retention audit
 
 This is a developer map, not a statement that every runtime or platform is
-ready for household use. The public README is unchanged by this cleanup.
+ready for household use. The public README documents the tested TUI path.
 
 ## Layout
 
 | Location | Responsibility |
 | --- | --- |
-| `src/ui/` | C catalogue renderer, typed UI state and household launcher |
+| `src/ui/` | C workspace canvas, catalogue, household launcher and chat editor |
 | `tests/c/` | C unit tests and integration-test clients |
 | `tests/ui_text_test.py` | English application-copy and rendered-help regression guard |
-| Root `*_test.sh`, `*_test.py` | Integration runners; still launched from the root |
-| `lumabri.c` | CLI, chat editor/streaming and orchestration; still a large translation unit |
+| `tests/integration/` | Shell integration runners and household/chat/inventory PTY tests |
+| `lumabri.c` | CLI, streaming and orchestration; still a large translation unit |
 | `lumabri_home*.h` | Household consent transaction and runtime orchestration |
 | `segment_*.c`, `lumabri_segment*`, `segment_colibri.h` | Segment workers, Edge chat, discovery and Colibri integration |
 | `tracker.c`, `maintainer.c`, `lumashim.c` | Discovery/control, checkpoint distribution and block mirror |
@@ -44,15 +44,33 @@ headers still live at the root; Make supplies that include directory through
   without reducing the tracked repository.
 
 This audit follows build and include references. It is **not** a whole-program
-proof that every function is reachable. No production source was deleted in
-this pass. The 30 relocated C test sources are preserved, not removed.
+proof that every function is reachable. C and integration tests are preserved,
+not removed. Shell runners change to the repository root before using binaries.
+
+## Retired code
+
+- The old interactive swarm-address panel and automatic chat-plus-donation
+  picker, together with helpers that only those panels called.
+- The boxed chat splash. The existing wordmark remains in the workspace.
+- The isolated sample-data TUI preview, its screenshot tool and its tests now
+  that the approved design runs on real household state. The production-frame
+  capture tool and screenshots remain.
+
+Bare interactive `lumabri chat` opens the same household workspace as
+`lumabri`. Explicit CLI arguments and script usage stay available; donation
+requires an explicit role or household approval. Old saved CLI settings are
+still read, not erased or conflated with household membership keys.
+
+The removed sources remain recoverable in Git history. No user configuration,
+model, key, cache or untracked workspace file is deleted.
 
 ## Further cleanup boundaries
 
-Next candidates are integration scripts and historical engineering documents,
-then splitting chat lifecycle/editor code out of `lumabri.c`. Each requires
-updating path assumptions, install rules and tests together. Do not remove
-the compatibility names or engine hooks before retiring their callers.
+The chat editor is an internal include of `lumabri.c`: this reduces file size
+without pretending the editor has an independent lifecycle. Further separation
+of streaming/session ownership needs its own tests and API boundary. Historical
+engineering documents and active engine hooks are retained; do not remove
+compatibility names before retiring their callers.
 
 Keep checkout models, user keys and `~/.lumabri` outside source-cleanup work.
 Never treat a local file as disposable just because Git does not track it.
