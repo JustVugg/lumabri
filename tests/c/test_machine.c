@@ -12,6 +12,11 @@ int main(void) {
     assert(profile.physical_cores > 0);
     assert(profile.ram_total_bytes > 0);
     assert(profile.ram_available_bytes > 0);
+    assert(profile.ram_available_bytes <= profile.ram_total_bytes);
+    assert(profile.physical_cores <= profile.logical_cpus);
+#ifdef __APPLE__
+    assert(profile.cpu_model[0]);
+#endif
 
     /* Never alter the real user's persistent pause state while testing. */
     char home[] = "/tmp/lumabri-machine.XXXXXX";

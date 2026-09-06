@@ -127,6 +127,10 @@ def main():
             wrong.send(b"yes\n"); wrong.expect("Household key from its owner")
             wrong.send(b"incorrect-test-key\n"); wrong.expect("Household authentication failed")
             assert not (wrong.home / ".lumabri/home.conf").exists()
+            wrong.data.clear()
+            time.sleep(.3)
+            wrong.expect("Could not join the household")  # persists until acknowledged
+            wrong.send(b"\r"); wrong.expect("What would you like to do?")
             wrong.quit()
 
             joiner = start("joiner")

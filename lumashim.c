@@ -47,6 +47,14 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <time.h>
+#ifdef __APPLE__
+#include <mach-o/dyld-interposing.h>
+#define O_TMPFILE 0
+#define O_LARGEFILE 0
+/* Darwin has no Linux data-only durability primitive. Never weaken the
+ * write-before-publication guarantee of the signed block cache. */
+#define fdatasync fsync
+#endif
 
 #define LMB_SECURE_NO_CLOSE_REDIRECT 1
 #include "lumabri_proto.h"
@@ -1936,6 +1944,18 @@ static int open_common(const char *path, int flags, mode_t mode) {
     return fd;
 }
 
+#ifdef __APPLE__
+/* Mach-O does not use ELF symbol preemption. Keep replacements distinct
+ * from their libc targets; dyld excludes this image from its interposition. */
+#define open lmb_darwin_open
+#define openat lmb_darwin_openat
+#define fopen lmb_darwin_fopen
+#define opendir lmb_darwin_opendir
+#define pread lmb_darwin_pread
+#define read lmb_darwin_read
+#define mmap lmb_darwin_mmap
+#define close lmb_darwin_close
+#endif
 int open(const char *path, int flags, ...) {
     mode_t mode = 0;
     if (flags & (O_CREAT | O_TMPFILE)) {
@@ -2087,3 +2107,21 @@ int close(int fd) {
     lmb_sec_forget_hook(fd);
     return real_close(fd);
 }
+#ifdef __APPLE__
+#undef open
+#undef openat
+#undef fopen
+#undef opendir
+#undef pread
+#undef read
+#undef mmap
+#undef close
+DYLD_INTERPOSE(lmb_darwin_open, open)
+DYLD_INTERPOSE(lmb_darwin_openat, openat)
+DYLD_INTERPOSE(lmb_darwin_fopen, fopen)
+DYLD_INTERPOSE(lmb_darwin_opendir, opendir)
+DYLD_INTERPOSE(lmb_darwin_pread, pread)
+DYLD_INTERPOSE(lmb_darwin_read, read)
+DYLD_INTERPOSE(lmb_darwin_mmap, mmap)
+DYLD_INTERPOSE(lmb_darwin_close, close)
+#endif

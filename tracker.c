@@ -19,7 +19,7 @@
 #include <arpa/inet.h>
 #include <poll.h>
 #include <pthread.h>
-#include <sys/eventfd.h>
+#include "lumabri_wakeup.h"
 #include <time.h>
 
 #include "lumabri_proto.h"
@@ -100,6 +100,7 @@ typedef struct {
      * forwards it and completes it. evfd wakes the control thread. */
     int ctrl_fd;                /* the live control connection, -1 if none */
     int evfd;
+    int evwrite;
     pthread_mutex_t rq_lk;
     pthread_cond_t rq_cv;
     int rq_busy, rq_sent, rq_done, rq_ok;
@@ -513,12 +514,13 @@ static Peer *peer_slot_new(int is_expert, int *idx) {
         }
         for (int r = 0; r < REXEC_INFLIGHT; r++) free(p->rex[r].resp);
         if (p->evfd >= 0) close(p->evfd);
+        if (p->evwrite >= 0) close(p->evwrite);
         pthread_mutex_destroy(&p->rq_lk);
         pthread_cond_destroy(&p->rq_cv);
     }
     memset(p, 0, sizeof *p);
     p->ctrl_fd = -1;
-    p->evfd = eventfd(0, EFD_NONBLOCK);
+    p->evfd = lmb_wakeup_open(&p->evwrite);
     pthread_mutex_init(&p->rq_lk, NULL);
     pthread_cond_init(&p->rq_cv, NULL);
     g_known_logged[pick] = 0;
@@ -2086,7 +2088,7 @@ static int handle_rread(int fd, LmbMsg *m) {
     pthread_mutex_unlock(&p->rq_lk);
 
     uint64_t one = 1;
-    if (write(p->evfd, &one, 8) != 8) { /* control thread also polls the socket */ }
+    if (write(p->evwrite, &one, 8) != 8) { /* control thread also polls the socket */ }
 
     struct timespec dl;
     clock_gettime(CLOCK_REALTIME, &dl);
@@ -2158,7 +2160,7 @@ static int relay_forward(Peer *p, uint32_t fwd_op,
     if (p->outq_tail) p->outq_tail->next = f; else p->outq_head = f;
     p->outq_tail = f;
     pthread_mutex_unlock(&p->rq_lk);
-    uint64_t one = 1; if (write(p->evfd, &one, 8) != 8) {}
+    uint64_t one = 1; if (write(p->evwrite, &one, 8) != 8) {}
 
     pthread_mutex_lock(&p->rq_lk);
     while (!p->rex[slot].done && p->rex[slot].id == id)
@@ -2479,7 +2481,7 @@ static int handle_rseg(int fd, LmbMsg *m) {
     free(p->rq_resp_pay); p->rq_resp_pay = NULL; p->rq_resp_pay_len = 0;
     p->rq_resp_op = 0;
     pthread_mutex_unlock(&p->rq_lk);
-    uint64_t one = 1; if (write(p->evfd, &one, sizeof one) != sizeof one) {}
+    uint64_t one = 1; if (write(p->evwrite, &one, sizeof one) != sizeof one) {}
 
     struct timespec deadline;
     clock_gettime(CLOCK_REALTIME, &deadline); deadline.tv_sec += RELAY_WAIT_S;

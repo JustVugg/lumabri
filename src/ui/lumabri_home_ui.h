@@ -84,6 +84,38 @@ static int home_connection_check(const char *address, const uint8_t *expected_id
     return rc ? -2 : 0;
 }
 
+/* Failure is an acknowledged screen, not a footer erased by the next frame.
+ * Never include household secrets or captured engine output here. */
+static void home_error_dialog(const char *title, const char *message) {
+    HomeTerminal term; home_terminal_begin(&term);
+    while (!g_stopping) {
+        ui_begin("action could not complete");
+        ui_text(5, 4, UI_SAND, title);
+        const char *p = message;
+        int width = ui_w > 12 ? ui_w - 8 : 10;
+        if (width > 120) width = 120;
+        for (int row = 8; *p && row < ui_h - 4; row++) {
+            char line[121];
+            size_t n = strlen(p);
+            if (n > (size_t)width) {
+                n = (size_t)width;
+                while (n > 0 && p[n] != ' ') n--;
+                if (!n) n = (size_t)width;
+            }
+            memcpy(line, p, n); line[n] = 0;
+            ui_text(row, 4, UI_TEXT, line);
+            p += n; while (*p == ' ') p++;
+        }
+        ui_footer("Your previous household settings are unchanged.", "Enter or Esc back   Ctrl-C exit");
+        ui_present();
+        int key = home_key();
+        if (key == 3) { g_stopping = 1; break; }
+        if (key == '\r' || key == '\n' || key == 27) break;
+        (void)poll(NULL, 0, 50);
+    }
+    home_terminal_end(&term);
+}
+
 /* Persist the household key and fixed tracker endpoint. A second local
  * window may attach to our authenticated tracker; an unrelated listener
  * must never be adopted or displaced. */
@@ -328,12 +360,17 @@ static int cmd_home(void) {
                 snprintf(notice, sizeof notice, "%s", connected == -1 ?
                     "Connection or secure handshake failed. Check the LAN address and Windows/WSL firewall." :
                     "Household authentication failed. Check the household key and tracker.");
+                home_error_dialog("Could not join the household", notice);
                 continue;
             }
             next.owner = s.owner && !strcmp(s.tracker, next.tracker);
-            s = next;
-            if (home_settings_save(&s)) snprintf(notice, sizeof notice, "Could not save household settings.");
-            else snprintf(notice, sizeof notice, "Connected. Open Your computers; helpers must keep Share resources active.");
+            if (home_settings_save(&next)) {
+                setenv("LUMABRI_TOKEN", s.token, 1);
+                home_error_dialog("Could not save household settings", "Check that your home directory is writable, then retry.");
+            } else {
+                s = next;
+                snprintf(notice, sizeof notice, "Connected. Open Your computers; helpers must keep Share resources active.");
+            }
         } else if (key == 's') {
             HomeSettings next = s;
             if (home_field("Folder containing your model directories", next.models, sizeof next.models, 0) ||
@@ -342,8 +379,8 @@ static int cmd_home(void) {
             if (*end || !isfinite(ram) || ram <= 0 || ram > 1048576) {
                 snprintf(notice, sizeof notice, "RAM limit must be a positive number of GB."); continue;
             }
-            s = next;
-            if (home_settings_save(&s)) snprintf(notice, sizeof notice, "Could not save settings.");
+            if (home_settings_save(&next)) home_error_dialog("Could not save settings", "Check that your home directory is writable, then retry.");
+            else s = next;
         } else if (key == 'n') {
             if (tracker_child <= 0 && home_tracker_resume(&s, &tracker_child, notice, sizeof notice)) continue;
             char identity[65]; lmb_hex(identity, g_sec_pk, 32);
@@ -353,6 +390,7 @@ static int cmd_home(void) {
         } else if (key == 'c' || key == 'p' || key == 'd') {
             if (!s.tracker[0] || !s.token[0]) { snprintf(notice, sizeof notice, "Create or join a household first."); continue; }
             setenv("LUMABRI_TOKEN", s.token, 1);
+            home_error[0] = 0;
             int rc;
             if (key == 'd') {
                 char *args[] = {"--join", s.tracker, "--ram-gb", s.ram};
@@ -362,7 +400,8 @@ static int cmd_home(void) {
                 rc = cmd_models(key == 'p' ? 5 : 4, args);
             }
             g_stopping = 0; install_chat_signal_handlers();
-            if (rc) snprintf(notice, sizeof notice, "The operation did not finish. No plan is running; check diagnostics before retrying.");
+            if (rc || home_error[0]) home_error_dialog("Could not complete the operation", home_error[0] ? home_error :
+                "The operation did not finish. No plan is running. Check diagnostics before retrying.");
         }
     }
     home_stop_child(&tracker_child);
