@@ -44,7 +44,7 @@ class Terminal:
         env = {**os.environ, "HOME": str(home), "LUMABRI_HOME_PORT_BASE": str(base),
                "LUMABRI_PEER_KEY": str(self.home / "peer.key"), "LUMABRI_TOKEN": "",
                "LUMABRI_KNOWN_HOSTS": str(self.home / "known.hosts"), "LUMABRI_ENCRYPT": "1"}
-        self.p = subprocess.Popen([str(ROOT / "lumabri")], cwd=ROOT, env=env,
+        self.p = subprocess.Popen([str(ROOT / "lumabri")], cwd=home, env=env,
                                   stdin=self.slave, stdout=self.slave, stderr=self.slave)
 
     def drain(self):

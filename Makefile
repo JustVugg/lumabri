@@ -572,7 +572,7 @@ HYBRID_PATCH_INPUTS = engine_patches/make_patches.py \
 	lumabri_proto.h lumabri_sign.h lumabri_secure.h lumabri_crypto.h \
 	lumabri_sha.h
 
-$(HYBRID_ENGINE_DIR)/.prepared: $(HYBRID_PATCH_INPUTS) \
+$(HYBRID_ENGINE_DIR)/.prepared: Makefile $(HYBRID_PATCH_INPUTS) \
 		$(ENGINE)/colibri.c $(ENGINE)/inkling.c $(ENGINE)/kimi_k3.c \
 		$(ENGINE)/olmoe.c $(ENGINE)/qwen36.c $(ENGINE)/deepseek_v4.c
 	rm -rf $(HYBRID_ENGINE_DIR)
@@ -594,7 +594,7 @@ build/segment_hybrid_bridge.o: lumi_v4_bridge.c $(HYBRID_PATCH_INPUTS)
 $(COLIBRI_SEGMENT_LIB): $(HYBRID_ENGINE_DIR)/.prepared build/segment_hybrid_bridge.o
 	env -u MAKEFLAGS $(MAKE) -C $(HYBRID_ENGINE_DIR) MAKEOVERRIDES= \
 		COLI_V4_SUPPORTED=1 CC='$(CC)' \
-		CFLAGS='-O2 $(OMP_FLAGS) -pthread -I$(HYBRID_ROOT) -include $(HYBRID_ROOT)/lumi_v4_ext.h -DLUMABRI_P2P -DLUMIBRI_P2P' \
+		CFLAGS='-O2 $(CPPFLAGS) $(OMP_FLAGS) -pthread -I$(HYBRID_ROOT) -include $(HYBRID_ROOT)/lumi_v4_ext.h -DLUMABRI_P2P -DLUMIBRI_P2P' \
 		segment-edge-library
 	$(AR) rcs $@ build/segment_hybrid_bridge.o
 
