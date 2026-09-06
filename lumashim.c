@@ -91,6 +91,20 @@ static void  *(*real_mmap64)(void *, size_t, int, int, int, off_t);
 
 static void shim_resolve(void) {
     if (real_open) return;
+#ifdef __APPLE__
+    /* References from the interposing image keep their original libc
+     * bindings. Resolve them directly: querying dyld while its initializer
+     * is running can itself need the I/O functions being interposed. This
+     * also preserves the SDK's ABI aliases (notably opendir$INODE64). */
+    real_openat = openat; real_openat64 = openat;
+    real_fopen = fopen; real_fopen64 = fopen;
+    real_opendir = opendir;
+    real_pread = pread; real_pread64 = pread;
+    real_read = read; real_close = close;
+    real_mmap = mmap; real_mmap64 = mmap;
+    real_open64 = open;
+    real_open = open;
+#else
     real_open64   = (int (*)(const char *, int, ...))dlsym(RTLD_NEXT, "open64");
     real_openat   = (int (*)(int, const char *, int, ...))dlsym(RTLD_NEXT, "openat");
     real_openat64 = (int (*)(int, const char *, int, ...))dlsym(RTLD_NEXT, "openat64");
@@ -105,6 +119,7 @@ static void shim_resolve(void) {
     real_pread    = (ssize_t (*)(int, void *, size_t, off_t))dlsym(RTLD_NEXT, "pread");
     /* last, and last assigned: real_open doubles as the "resolved" flag */
     real_open     = (int (*)(const char *, int, ...))dlsym(RTLD_NEXT, "open");
+#endif
 }
 
 /* forward: g is defined below; the ctor only resolves symbols and learns the

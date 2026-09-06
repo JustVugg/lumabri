@@ -71,10 +71,21 @@ def main():
                        "LUMABRI_CAS": str(tmp / "cas"), "LUMABRI_BLOCK_MIB": "1",
                        "LUMABRI_CACHE": str(tmp / f"cache-{name}"),
                        "LUMABRI_VROOT": str(tmp / f"vroot-{name}")}
-                result = subprocess.run([str(ROOT / "test_shim"), env["LUMABRI_VROOT"], str(source)],
-                                        cwd=ROOT, env=env, capture_output=True, text=True, timeout=60)
-                if result.returncode:
-                    raise AssertionError(f"{name}: {result.stdout}\n{result.stderr}")
+                with subprocess.Popen([str(ROOT / "test_shim"), env["LUMABRI_VROOT"], str(source)],
+                                      cwd=ROOT, env=env, stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE, text=True) as client:
+                    try:
+                        out, err = client.communicate(timeout=30)
+                    except subprocess.TimeoutExpired:
+                        if sys.platform == "darwin":
+                            sample = tmp / "blocked-reader.log"
+                            subprocess.run(["/usr/bin/sample", str(client.pid), "1", "1", "-file", str(sample)],
+                                           capture_output=True, timeout=10)
+                        client.kill()
+                        out, err = client.communicate(timeout=5)
+                        raise AssertionError(f"{name} reader blocked: {out}\n{err}")
+                    if client.returncode:
+                        raise AssertionError(f"{name}: {out}\n{err}")
             assert any((tmp / "cas").rglob("*")), "CAS was not populated"
             print("NATIVE SHIM: PASS (encrypted byte-exact libc reads, cold transfer, fresh mirror with origin offline)")
         except Exception:
