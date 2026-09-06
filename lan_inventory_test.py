@@ -105,7 +105,9 @@ def main():
                     display += os.read(master, 65536).decode("utf-8", errors="replace")
                     if len(display) > 262144:
                         display = display[-131072:]
-                latest = display.rsplit("\x1b[2J\x1b[H", 1)[-1]
+                # The shared C canvas redraws in place without erasing first.
+                # Only the latest frame is evidence of current inventory.
+                latest = display.rsplit("\x1b[H", 1)[-1]
                 return text in latest
 
             until(lambda: screen_has("3 computers"))
@@ -142,7 +144,9 @@ def main():
             assert not any(m["planned"] for m in offline["models"])
             until(lambda: screen_has("TRACKER OFFLINE"))
             os.write(master, b"q")
-            live.wait(timeout=5)
+            # A terminal consumes output while the process exits; a stopped
+            # PTY reader can otherwise block its final full-frame write.
+            until(lambda: (screen_has("TRACKER OFFLINE"), live.poll() is not None)[1], seconds=5)
             assert live.returncode == 0
             print("LAN INVENTORY: PASS (signed reports, two workers, dedupe, expiry, disconnect, JSON/live TUI)", flush=True)
         finally:

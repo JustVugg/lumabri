@@ -481,7 +481,7 @@ static void draw_workspace(const LmbTuiState *st, int tab, int sel, int detail,
               st->nnodes, selected, ram / 1e9);
     ui_text(7, 5, UI_MUTED, "Models     /     Computers     ·     Tab switches views");
     const char *status = st->inventory_ok ? "Donors must approve the allocation before anything is loaded." :
-        "Tracker unavailable. No requests can start; check the household address.";
+        "TRACKER OFFLINE · No requests can start; check the household address.";
     if (detail && sel < st->nmodels) {
         const LmbTuiModel *m = &st->models[sel];
         char speed[96]; speed_text(m, speed, sizeof speed);
