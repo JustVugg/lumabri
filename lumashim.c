@@ -48,7 +48,10 @@
 #include <sys/stat.h>
 #include <time.h>
 #ifdef __APPLE__
-#include <mach-o/dyld-interposing.h>
+/* The dyld interpose ABI is a retained Mach-O section of pointer pairs:
+ * replacement first, original symbol second. Xcode's public SDK does not
+ * ship dyld-interposing.h, so emit that ABI directly, without a private SDK
+ * dependency. The array is used even though C code never references it. */
 #define O_TMPFILE 0
 #define O_LARGEFILE 0
 /* Darwin has no Linux data-only durability primitive. Never weaken the
@@ -2116,12 +2119,15 @@ int close(int fd) {
 #undef read
 #undef mmap
 #undef close
-DYLD_INTERPOSE(lmb_darwin_open, open)
-DYLD_INTERPOSE(lmb_darwin_openat, openat)
-DYLD_INTERPOSE(lmb_darwin_fopen, fopen)
-DYLD_INTERPOSE(lmb_darwin_opendir, opendir)
-DYLD_INTERPOSE(lmb_darwin_pread, pread)
-DYLD_INTERPOSE(lmb_darwin_read, read)
-DYLD_INTERPOSE(lmb_darwin_mmap, mmap)
-DYLD_INTERPOSE(lmb_darwin_close, close)
+__attribute__((used, section("__DATA,__interpose")))
+static const struct { const void *replacement, *original; } lmb_interpose[] = {
+    {(const void *)lmb_darwin_open, (const void *)open},
+    {(const void *)lmb_darwin_openat, (const void *)openat},
+    {(const void *)lmb_darwin_fopen, (const void *)fopen},
+    {(const void *)lmb_darwin_opendir, (const void *)opendir},
+    {(const void *)lmb_darwin_pread, (const void *)pread},
+    {(const void *)lmb_darwin_read, (const void *)read},
+    {(const void *)lmb_darwin_mmap, (const void *)mmap},
+    {(const void *)lmb_darwin_close, (const void *)close}
+};
 #endif

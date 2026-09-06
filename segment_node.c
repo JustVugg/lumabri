@@ -21,6 +21,9 @@
 #include <string.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#ifdef __APPLE__
+#include <mach/mach.h>
+#endif
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -118,11 +121,18 @@ static uint64_t now_ms(void) {
 }
 
 static uint64_t available_memory_bytes(void) {
-    uint64_t available = lmb_machine_available_ram();
-    return available ? available : UINT64_MAX;
+    /* Unknown or exhausted memory is never unlimited admission capacity. */
+    return lmb_machine_available_ram();
 }
 
 static uint64_t resident_memory_bytes(void) {
+#ifdef __APPLE__
+    struct mach_task_basic_info info;
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                  (task_info_t)&info, &count) != KERN_SUCCESS) return 0;
+    return info.resident_size;
+#else
     FILE *file = fopen("/proc/self/statm", "r");
     unsigned long long pages = 0, resident = 0;
     if (!file) return 0;
@@ -131,6 +141,7 @@ static uint64_t resident_memory_bytes(void) {
     long page = sysconf(_SC_PAGESIZE);
     if (!ok || page <= 0 || resident > UINT64_MAX / (uint64_t)page) return 0;
     return resident * (uint64_t)page;
+#endif
 }
 
 static int process_budget_exhausted(Node *node) {
