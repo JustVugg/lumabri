@@ -22,8 +22,10 @@ After launch, use **arrow keys and Enter**. Press **/** for workspace actions
 and **Esc** to go back. Use a terminal at least 60 columns by 28 rows.
 
 1. On one computer, open **/ → /create**. Keep Lumabri running.
-2. On your other computers, open **/ → /join** and enter the displayed
-   LAN address and household key. Only share that key with your household.
+2. On your other computers, open **/ → /join**. Select the household found
+   on your LAN, compare its identity with **/create** on the owner computer,
+   then enter the household key. Manual address entry remains available.
+   Only share that key with your household.
 3. Open **/settings** to set the maximum RAM you offer. Choose
    **Share resources** on each computer that may participate.
 4. On the requesting computer, set **/settings** to the folder containing
@@ -34,10 +36,26 @@ and **Esc** to go back. Use a terminal at least 60 columns by 28 rows.
    participating donors. Chat starts only after all approve and the complete
    chain is ready.
 
-The computers must be able to reach each other directly. This is explicit
-household membership, not automatic Wi-Fi discovery. If the displayed address
-belongs to a VPN or a WSL-only interface, do not assume another computer can
-reach it. Physical-LAN setup still needs validation.
+The creating computer saves its key and restarts its household when Lumabri
+reopens. The tracker uses **TCP 47300**, household services use **TCP
+47301–47315**, and LAN discovery uses **UDP 47300**. Restarting does not require
+opening another random port. If the fixed range is occupied, Lumabri reports
+the conflict instead of silently choosing ports outside it.
+
+The computers still need direct LAN connectivity. On Windows with mirrored
+WSL networking, open **/network** on the Windows computer: after your explicit
+approval and the Windows administrator prompt, it allows only those ports
+from the detected private subnet. The firewall stays enabled. The same action
+can remove Lumabri's rules. Keep the `tools` folder beside the built binary.
+Other systems use their normal firewall permissions. Guest Wi-Fi isolation,
+VPN routing and WSL NAT mode can still prevent direct discovery or connections;
+the helper does not reconfigure those networks. If your LAN address changes,
+use **/join** to rediscover the household rather than guessing an address.
+
+Apple Terminal uses a compatible 256-colour palette with a contrasting
+selection background. Other terminals use detected colour support. For
+diagnostics, `LUMABRI_COLOR=16`, `256`, `truecolor` or `none` overrides detection;
+`NO_COLOR=1` disables the canvas colours. Normal use needs no colour command.
 
 ## A plan before a download
 

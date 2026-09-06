@@ -28,6 +28,7 @@
 #include "lumabri_sign.h"
 #include "lumabri_secure.h"
 #include "lumabri_inventory.h"
+#include "lumabri_home_discovery.h"
 
 #define MAX_PEERS  64
 #define MAX_FILES  4096
@@ -2962,9 +2963,10 @@ static void *conn_thread(void *arg) {
 }
 
 int main(int argc, char **argv) {
-    int port = 7300;
+    int port = 7300, household_discovery = 0;
     for (int i = 1; i < argc; i++)
         if (!strcmp(argv[i], "--port") && i + 1 < argc) port = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--household-discovery")) household_discovery = 1;
         else if (!strcmp(argv[i], "--token") && i + 1 < argc) {
             const char *tok = argv[++i];
             if (strlen(tok) > LMB_TOKEN_MAX) {
@@ -2991,8 +2993,15 @@ int main(int argc, char **argv) {
             }
         }
         else { fprintf(stderr, "usage: %s [--port N] [--token S] [--pubkey FILE] "
-                               "[--peer-bindings FILE]\n",
+                               "[--peer-bindings FILE] [--household-discovery]\n",
                        argv[0]); return 2; }
+    if (household_discovery && !g_token[0]) {
+        const char *token = getenv("LUMABRI_TOKEN");
+        if (!token || !*token || strlen(token) > LMB_TOKEN_MAX) {
+            fprintf(stderr, "[tracker] household mode requires a nonempty household key\n"); return 2;
+        }
+        snprintf(g_token, sizeof g_token, "%s", token);
+    }
     signal(SIGPIPE, SIG_IGN);   /* a vanished peer must not kill the tracker */
     g_stale_s = (double)lmb_env_int("LUMABRI_STALE_MS", (int)(STALE_S * 1000),
                                     100, 3600000) / 1000.0;
@@ -3014,9 +3023,12 @@ int main(int argc, char **argv) {
                 g_bindings_path);
     else g_segment_generation_ready = 1;
     lmb_conn_gate_init(&g_conn_gate);
-    if (lmb_secure_init()) return 1;
-    int lfd = lmb_listen(port);
+    if (lmb_secure_init() || (household_discovery && !lmb_secure_enabled())) return 1;
+    int lfd = lmb_home_take_listener(port);
     if (lfd < 0) { perror("[tracker] listen"); return 1; }
+    if (household_discovery && (!lmb_secure_enabled() || lmb_home_beacon_start(port, g_sec_pk))) {
+        fprintf(stderr, "[tracker] household discovery unavailable; manual LAN joining remains available\n");
+    }
     printf("[tracker] listening on :%d\n", port);
     if (g_have_pubkey)
         printf("[tracker] signed swarm: truth accepted from %zu trusted "

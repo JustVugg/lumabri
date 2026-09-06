@@ -27,6 +27,7 @@
 #include "lumabri_sha.h"
 #include "lumabri_sign.h"
 #include "lumabri_secure.h"
+#include "lumabri_home_net.h"
 
 #define MAX_FILES          4096
 #define MAX_INCLUDES       64
@@ -1146,7 +1147,7 @@ int main(int argc, char **argv) {
             return 1;
         }
     }
-    int lfd = lmb_listen(port);
+    int lfd = lmb_home_take_listener(port);
     if (lfd < 0) { perror("[maintainer] listen"); return 1; }
     pthread_t t;
     if (g.tracker[0]) { pthread_create(&t, NULL, control_thread, NULL); pthread_detach(t); }

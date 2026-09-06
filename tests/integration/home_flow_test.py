@@ -97,7 +97,7 @@ def main():
 
     try:
         with open(tmp / "tracker.log", "wb") as log:
-            tracker = subprocess.Popen(["./tracker", "--port", str(port),
+            tracker = subprocess.Popen(["./tracker", "--port", str(port), "--token", "household-test",
                 "--peer-bindings", str(tmp / "bindings")], cwd=ROOT,
                 env=env("tracker"), stdout=log, stderr=subprocess.STDOUT)
         children.append(tracker)
@@ -114,6 +114,9 @@ def main():
         until(lambda: a.has("your workspace") and b.has("your workspace"))
         a.send("\x1b[B\x1b[B\x1b[B\r"); b.send("\x1b[B\x1b[B\x1b[B\r")
         until(lambda: a.has("Available") and b.has("Available"))
+        a.send("\r"); b.send("\r")  # Enter without a request must not stop sharing.
+        time.sleep(.3)
+        assert a.p.poll() is None and b.p.poll() is None
 
         def inventory_ready():
             p = subprocess.run(base + ["--json"], cwd=ROOT, env=env("observer"),

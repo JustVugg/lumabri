@@ -5,6 +5,7 @@
 #include <locale.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <wchar.h>
@@ -16,6 +17,41 @@ static const unsigned ui_colors[] = {
 typedef struct { wchar_t ch; unsigned char fg, bg; } UiCell;
 static UiCell ui_canvas[100][200];
 static int ui_w, ui_h;
+
+/* Apple Terminal can report xterm-256color but does not implement RGB SGR.
+ * Sending 48;2;r;g;b there can select unrelated ANSI backgrounds. */
+static inline int ui_color_mode(void) {
+    const char *override = getenv("LUMABRI_COLOR");
+    if (getenv("NO_COLOR") && *getenv("NO_COLOR")) return 0;
+    if (override) {
+        if (!strcmp(override, "none")) return 0;
+        if (!strcmp(override, "16")) return 16;
+        if (!strcmp(override, "256")) return 256;
+        if (!strcmp(override, "truecolor")) return 24;
+    }
+    const char *program = getenv("TERM_PROGRAM"), *color = getenv("COLORTERM");
+    if (program && !strcmp(program, "Apple_Terminal")) return 256;
+    if (color && (!strcmp(color, "truecolor") || !strcmp(color, "24bit"))) return 24;
+    const char *term = getenv("TERM");
+    if (term && strstr(term, "256color")) return 256;
+    return 16;
+}
+
+static inline void ui_sgr(int mode, int fg, int bg) {
+    static const unsigned palette256[] = {234, 255, 248, 209, 239, 238, 108, 223};
+    static const unsigned palette16[] = {30, 37, 90, 33, 90, 30, 32, 93};
+    if (mode == 24) {
+        unsigned f = ui_colors[fg], b = ui_colors[bg];
+        printf("\x1b[38;2;%u;%u;%um\x1b[48;2;%u;%u;%um",
+               f >> 16, (f >> 8) & 255, f & 255, b >> 16, (b >> 8) & 255, b & 255);
+    } else if (mode == 256) {
+        printf("\x1b[38;5;%um\x1b[48;5;%um", palette256[fg], palette256[bg]);
+    } else if (mode == 16) {
+        printf("\x1b[%u;%um", palette16[fg], bg == UI_SELECTED ? 100u : 40u);
+    } else {
+        fputs("\x1b[0m", stdout);
+    }
+}
 
 static inline void ui_text(int y, int x, int fg, const char *s) {
     mbstate_t state = {0};
@@ -70,6 +106,7 @@ static inline void ui_footer(const char *status, const char *keys) {
 
 static inline void ui_present(void) {
     int fg = -1, bg = -1;
+    int mode = ui_color_mode();
     fputs("\x1b[H", stdout);
     for (int y = 0; y < ui_h; y++) {
         printf("\x1b[%d;1H", y + 1);
@@ -79,9 +116,7 @@ static inline void ui_present(void) {
             if (!cell.ch) continue;
             if (fg != cell.fg || bg != cell.bg) {
                 fg = cell.fg; bg = cell.bg;
-                unsigned f = ui_colors[fg], b = ui_colors[bg];
-                printf("\x1b[38;2;%u;%u;%um\x1b[48;2;%u;%u;%um",
-                       f >> 16, (f >> 8) & 255, f & 255, b >> 16, (b >> 8) & 255, b & 255);
+                ui_sgr(mode, fg, bg);
             }
             printf("%lc", (wint_t)cell.ch);
         }

@@ -26,6 +26,7 @@
  */
 #define _GNU_SOURCE
 #include "lumabri_ready.h"
+#include "lumabri_home_net.h"
 #include <arpa/inet.h>
 #include <dirent.h>
 #include <fcntl.h>
@@ -3386,28 +3387,24 @@ static int cmd_host(int argc, char **argv) {
     snprintf(model, sizeof model, "%s", want_model ? want_model : "local");
     Engine eng = {0};
     Swarm sw;
+    int lfd = lmb_home_take_listener(port);
+    if (lfd < 0) { fprintf(stderr, "[host] cannot listen on %d\n", port); return 1; }
     if (model_boot(tracker ? tracker : "", model, shim, engines_dir,
                    engine_path, local_dir, ctx, max_new, cap_experts, &eng, &sw))
-        return 1;
+        { close(lfd); return 1; }
     if (!eng.segment && !kind_is_serve2(eng.kind)) {
         fprintf(stderr, "Hosted chat requires a SUBMIT/DATA/DONE engine; use Segment for this adapter.\n");
-        engine_stop(&eng); return 1;
+        close(lfd); engine_stop(&eng); return 1;
     }
 
     char mtype[64] = "";
     if (local_dir) local_model_type(local_dir, mtype, sizeof mtype);
     else snprintf(mtype, sizeof mtype, "%s", sw.model_type);
     const char *host_engine = engine_for(mtype);
-    if (!host_engine) { engine_stop(&eng); return 1; }
+    if (!host_engine) { close(lfd); engine_stop(&eng); return 1; }
     HostState h = { &eng, mtype, host_engine, 0, max_frame,
                     (uint32_t)max_new, idle_seconds, client_key ? allowed_client : NULL };
 
-    int lfd = lmb_listen(port);
-    if (lfd < 0) {
-        fprintf(stderr, "[host] cannot listen on %d\n", port);
-        engine_stop(&eng);
-        return 1;
-    }
     printf("  %shost ready on port %d · %s · one session at a time%s\n",
            C_DIM, port, mtype[0] ? mtype : "?", C_R);
     printf("  %sclients need no checkpoint; this machine holds the model and "

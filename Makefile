@@ -29,10 +29,11 @@ check-warnings:
 		CFLAGS='$(CFLAGS) -Werror'
 
 SECURE_DEPS = lumabri_secure.h lumabri_crypto.h
+HOME_NET_DEPS = lumabri_home_net.h lumabri_home_discovery.h
 MACHINE_SRC = lumabri_machine.c
 MACHINE_DEPS = lumabri_machine.h $(MACHINE_SRC)
 
-lumabri: lumabri.c src/ui/lumabri_tui.c src/ui/lumabri_tui.h src/ui/lumabri_visual.h src/ui/lumabri_chat_editor.h lumabri_proto.h lumabri_sign.h \
+lumabri: $(HOME_NET_DEPS) lumabri.c src/ui/lumabri_tui.c src/ui/lumabri_tui.h src/ui/lumabri_visual.h src/ui/lumabri_chat_editor.h lumabri_proto.h lumabri_sign.h \
 		lumabri_inventory.h lumabri_home.h lumabri_home_runtime.h src/ui/lumabri_home_ui.h lumabri_ready.h \
 		lumabri_families.h lumabri_planner.h lumabri_cluster.h \
 		lumabri_calibration.h $(SECURE_DEPS) $(MACHINE_DEPS)
@@ -365,14 +366,14 @@ test-engines: test-phase2 test-phase2-glm test-phase2-inkling test-phase2-kimi
 	    echo "   it has no synthetic fixture — MODEL=<dir> make test-engines"; \
 	fi
 
-tracker: tracker.c lumabri_segment_discovery.c lumabri_segment_discovery.h \
+tracker: $(HOME_NET_DEPS) tracker.c lumabri_segment_discovery.c lumabri_segment_discovery.h \
 		 lumabri_inventory.h lumabri_machine.h \
 		 lumabri_segment.c lumabri_segment.h lumabri_proto.h lumabri_sha.h \
 		 lumabri_sign.h $(SECURE_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tracker.c lumabri_segment_discovery.c \
 		lumabri_segment.c -o $@
 
-maintainer: maintainer.c lumabri_content.h lumabri_proto.h lumabri_sha.h \
+maintainer: maintainer.c $(HOME_NET_DEPS) lumabri_content.h lumabri_proto.h lumabri_sha.h \
 		lumabri_sign.h $(SECURE_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread maintainer.c -o $@
 
@@ -426,7 +427,7 @@ test_inventory: tests/c/test_inventory.c lumabri_inventory.h lumabri_machine.h l
 test_home: tests/c/test_home.c lumabri_home.h lumabri_inventory.h lumabri_families.h lumabri_proto.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_home.c -o $@
 
-test_chat_ui: tests/c/test_chat_ui.c lumabri.c src/ui/lumabri_tui.c src/ui/lumabri_tui.h src/ui/lumabri_visual.h src/ui/lumabri_chat_editor.h lumabri_home_runtime.h src/ui/lumabri_home_ui.h lumabri_ready.h lumabri_cluster.h
+test_chat_ui: $(HOME_NET_DEPS) $(SECURE_DEPS) tests/c/test_chat_ui.c lumabri.c src/ui/lumabri_tui.c src/ui/lumabri_tui.h src/ui/lumabri_visual.h src/ui/lumabri_chat_editor.h lumabri_home_runtime.h src/ui/lumabri_home_ui.h lumabri_ready.h lumabri_cluster.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_chat_ui.c src/ui/lumabri_tui.c lumabri_machine.c -o $@
 
 test-ready-pipe: tests/c/test_ready_pipe.c lumabri_ready.h
@@ -437,6 +438,13 @@ test-ready-pipe: tests/c/test_ready_pipe.c lumabri_ready.h
 	./build/tests/ready-pipe-portable
 
 .PHONY: test-ready-pipe
+
+test-home-network: tests/c/test_home_network.c $(HOME_NET_DEPS) src/ui/lumabri_visual.h
+	mkdir -p build/tests
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_home_network.c -o build/tests/home-network
+	./build/tests/home-network
+
+.PHONY: test-home-network
 
 test-chat-ui: lumabri test_chat_ui test-ready-pipe
 	python3 tests/integration/chat_ui_test.py
@@ -569,7 +577,7 @@ $(COLIBRI_SEGMENT_LIB): $(HYBRID_ENGINE_DIR)/.prepared build/segment_hybrid_brid
 		segment-edge-library
 	$(AR) rcs $@ build/segment_hybrid_bridge.o
 
-segment_node: segment_node.c lumabri_planner.h lumabri_families.h lumabri_ready.h \
+segment_node: segment_node.c $(HOME_NET_DEPS) lumabri_planner.h lumabri_families.h lumabri_ready.h \
 		$(SEGMENT_COMMON) $(COLIBRI_SEGMENT_LIB) $(MACHINE_DEPS) \
 		lumabri_run_gate.c lumabri_run_gate.h
 	$(CC) $(CPPFLAGS) $(SEGMENT_CFLAGS) -pthread segment_node.c lumabri_segment.c \
@@ -699,10 +707,12 @@ test: all test_key_rotation test_hedge test_local_fallback test_nat_adopt test_v
 	./test_inventory
 	./test_home
 	$(MAKE) test-ready-pipe
+	$(MAKE) test-home-network
 	python3 ./tests/integration/chat_ui_test.py
 	python3 tests/ui_text_test.py
 	python3 tests/integration/workspace_navigation_test.py
 	python3 ./tests/integration/lan_inventory_test.py
+	python3 tests/integration/household_network_test.py
 	bash ./tests/integration/hosted_chat_test.sh
 	bash ./tests/integration/tui_test.sh
 	./test_planner
@@ -738,6 +748,7 @@ install: all
 	install -d $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(PREFIX)/lib/lumabri
 	install -m 755 lumabri tracker maintainer swarm_probe $(DESTDIR)$(PREFIX)/bin/
 	install -m 644 liblumabri.so $(DESTDIR)$(PREFIX)/lib/lumabri/
+	install -m 644 tools/setup-household-firewall.ps1 $(DESTDIR)$(PREFIX)/lib/lumabri/
 	@for b in expert_node expert_node_glm expert_node_inkling expert_node_kimi \
 	         expert_node_deepseek expert_node_qwen36 \
 	         olmoe_p2p colibri_p2p inkling_p2p kimi_k3_p2p deepseek_p2p qwen36_p2p \
