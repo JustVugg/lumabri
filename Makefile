@@ -3,8 +3,28 @@ CFLAGS  ?= -O2 -Wall -Wextra
 ENGINE  ?= ../colibri/c
 # Shared headers remain in the repository root during the staged layout cleanup.
 override CPPFLAGS += -I.
+PLATFORM := $(shell uname -s)
+SHIM_LIB = liblumabri.so
+SHIM_FLAGS = -shared -fPIC -ldl
+OMP_FLAGS = -fopenmp
+OMP_LIBS =
+ifeq ($(PLATFORM),Darwin)
+override CPPFLAGS += -D_DARWIN_C_SOURCE
+SHIM_LIB = liblumabri.dylib
+SHIM_FLAGS = -dynamiclib -fPIC
+OMP_PREFIX := $(shell brew --prefix libomp 2>/dev/null)
+ifneq ($(wildcard $(OMP_PREFIX)/include/omp.h),)
+OMP_FLAGS = -Xclang -fopenmp -I$(OMP_PREFIX)/include
+OMP_LIBS = -L$(OMP_PREFIX)/lib -Wl,-rpath,$(OMP_PREFIX)/lib -lomp
+else
+OMP_FLAGS =
+endif
+endif
 
-all: tracker maintainer liblumabri.so test_shim swarm_probe lumabri
+all: tracker maintainer $(SHIM_LIB) test_shim swarm_probe lumabri
+
+# Native household runtime (Colibri sources are a build-time dependency).
+household: tracker maintainer $(SHIM_LIB) lumabri segment_node segment_chat
 
 
 # A checkout with Colibri's additive ABI gets the transparent Segment path
@@ -29,7 +49,7 @@ check-warnings:
 		CFLAGS='$(CFLAGS) -Werror'
 
 SECURE_DEPS = lumabri_secure.h lumabri_crypto.h
-HOME_NET_DEPS = lumabri_home_net.h lumabri_home_discovery.h
+HOME_NET_DEPS = lumabri_home_net.h lumabri_home_discovery.h lumabri_platform.h lumabri_wakeup.h
 MACHINE_SRC = lumabri_machine.c
 MACHINE_DEPS = lumabri_machine.h $(MACHINE_SRC)
 
@@ -379,8 +399,8 @@ maintainer: maintainer.c $(HOME_NET_DEPS) lumabri_content.h lumabri_proto.h luma
 
 # The shim interposes libc symbols, so it must not itself be interposable
 # state: -fPIC shared object, resolved via RTLD_NEXT at load time.
-liblumabri.so: lumashim.c lumabri_proto.h lumabri_sha.h lumabri_sign.h $(SECURE_DEPS)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -shared -fPIC -pthread lumashim.c -o $@ -ldl
+$(SHIM_LIB): lumashim.c lumabri_proto.h lumabri_sha.h lumabri_sign.h $(SECURE_DEPS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread lumashim.c -o $@ $(SHIM_FLAGS)
 
 test_shim: tests/c/test_shim.c lumabri_content.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_shim.c -o $@
@@ -541,7 +561,7 @@ production-gate:
 HYBRID_ENGINE_DIR = build/segment-hybrid-colibri
 COLIBRI_SEGMENT_LIB = $(HYBRID_ENGINE_DIR)/build/segment/libcolibri_segment_edge.a
 HYBRID_ROOT = $(abspath .)
-SEGMENT_CFLAGS = $(CFLAGS) -I. -I$(ENGINE) -fopenmp
+SEGMENT_CFLAGS = $(CFLAGS) -I. -I$(ENGINE) $(OMP_FLAGS)
 SEGMENT_COMMON = segment_colibri.h lumabri_segment.c lumabri_segment.h \
 		lumabri_segment_discovery.c lumabri_segment_discovery.h \
 		lumabri_proto.h lumabri_sign.h lumabri_sha.h $(SECURE_DEPS)
@@ -552,7 +572,7 @@ HYBRID_PATCH_INPUTS = engine_patches/make_patches.py \
 	lumabri_proto.h lumabri_sign.h lumabri_secure.h lumabri_crypto.h \
 	lumabri_sha.h
 
-$(HYBRID_ENGINE_DIR)/.prepared: $(HYBRID_PATCH_INPUTS) \
+$(HYBRID_ENGINE_DIR)/.prepared: Makefile $(HYBRID_PATCH_INPUTS) \
 		$(ENGINE)/colibri.c $(ENGINE)/inkling.c $(ENGINE)/kimi_k3.c \
 		$(ENGINE)/olmoe.c $(ENGINE)/qwen36.c $(ENGINE)/deepseek_v4.c
 	rm -rf $(HYBRID_ENGINE_DIR)
@@ -569,11 +589,12 @@ $(HYBRID_ENGINE_DIR)/.prepared: $(HYBRID_PATCH_INPUTS) \
 
 build/segment_hybrid_bridge.o: lumi_v4_bridge.c $(HYBRID_PATCH_INPUTS)
 	mkdir -p build
-	$(CC) $(CPPFLAGS) $(CFLAGS) -fopenmp -pthread -I. -I$(ENGINE) -c lumi_v4_bridge.c -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(OMP_FLAGS) -pthread -I. -I$(ENGINE) -c lumi_v4_bridge.c -o $@
 
 $(COLIBRI_SEGMENT_LIB): $(HYBRID_ENGINE_DIR)/.prepared build/segment_hybrid_bridge.o
 	env -u MAKEFLAGS $(MAKE) -C $(HYBRID_ENGINE_DIR) MAKEOVERRIDES= \
-		CFLAGS='-O2 -fopenmp -pthread -I$(HYBRID_ROOT) -include $(HYBRID_ROOT)/lumi_v4_ext.h -DLUMABRI_P2P -DLUMIBRI_P2P' \
+		COLI_V4_SUPPORTED=1 CC='$(CC)' \
+		CFLAGS='-O2 $(CPPFLAGS) $(OMP_FLAGS) -pthread -I$(HYBRID_ROOT) -include $(HYBRID_ROOT)/lumi_v4_ext.h -DLUMABRI_P2P -DLUMIBRI_P2P' \
 		segment-edge-library
 	$(AR) rcs $@ build/segment_hybrid_bridge.o
 
@@ -582,13 +603,13 @@ segment_node: segment_node.c $(HOME_NET_DEPS) lumabri_planner.h lumabri_families
 		lumabri_run_gate.c lumabri_run_gate.h
 	$(CC) $(CPPFLAGS) $(SEGMENT_CFLAGS) -pthread segment_node.c lumabri_segment.c \
 		lumabri_segment_discovery.c $(MACHINE_SRC) lumabri_run_gate.c \
-		$(COLIBRI_SEGMENT_LIB) -o $@ -lm
+		$(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
 
 segment_chat: segment_chat.c lumabri_sampling.c lumabri_sampling.h \
 		$(SEGMENT_COMMON) $(COLIBRI_SEGMENT_LIB)
 	$(CC) $(CPPFLAGS) $(SEGMENT_CFLAGS) -pthread segment_chat.c lumabri_segment.c \
 		lumabri_segment_discovery.c lumabri_sampling.c \
-		$(COLIBRI_SEGMENT_LIB) -o $@ -lm
+		$(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
 
 test_sampling: tests/c/test_sampling.c lumabri_sampling.c lumabri_sampling.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_sampling.c lumabri_sampling.c -o $@ -lm
@@ -747,7 +768,7 @@ PREFIX ?= /usr/local
 install: all
 	install -d $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(PREFIX)/lib/lumabri
 	install -m 755 lumabri tracker maintainer swarm_probe $(DESTDIR)$(PREFIX)/bin/
-	install -m 644 liblumabri.so $(DESTDIR)$(PREFIX)/lib/lumabri/
+	install -m 644 $(SHIM_LIB) $(DESTDIR)$(PREFIX)/lib/lumabri/
 	install -m 644 tools/setup-household-firewall.ps1 $(DESTDIR)$(PREFIX)/lib/lumabri/
 	@for b in expert_node expert_node_glm expert_node_inkling expert_node_kimi \
 	         expert_node_deepseek expert_node_qwen36 \
@@ -757,7 +778,7 @@ install: all
 	@echo "installed under $(DESTDIR)$(PREFIX)"
 
 clean:
-	rm -f tracker maintainer liblumabri.so test_shim swarm_probe lumabri \
+	rm -f tracker maintainer liblumabri.so liblumabri.dylib test_shim swarm_probe lumabri \
 	      test_relay_exec test_swarm_fed test_key_rotation test_hedge \
 	      test_local_fallback test_accum_order test_residency_report \
 	      test_model_family test_planner test_cluster test_calibration test_inventory test_home test_chat_ui segment_budget_probe \

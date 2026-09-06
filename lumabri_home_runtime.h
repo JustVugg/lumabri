@@ -4,6 +4,15 @@
 #define LUMABRI_HOME_RUNTIME_H
 #include "lumabri_home_net.h"
 
+static char home_error[512];
+static int home_fail(const char *fmt, ...) {
+    va_list args; va_start(args, fmt);
+    vsnprintf(home_error, sizeof home_error, fmt, args);
+    va_end(args);
+    fprintf(stderr, "%s\n", home_error);
+    return 1;
+}
+
 typedef struct {
     struct termios saved;
     int active;
@@ -78,6 +87,28 @@ static pid_t home_spawn(char *const argv[], char *const envv[], const char *log,
     pid_t parent = getpid(), pid = fork();
     if (!pid) {
         if (setpgid(0, 0) || child_follow_parent(parent)) _exit(125);
+#ifdef __APPLE__
+        /* Darwin has no PR_SET_PDEATHSIG. An owning supervisor keeps the
+         * dedicated group alive only while both the TUI and service live.
+         * No watcher thread is lost at exec, and no orphan retains a RAM
+         * lease when the terminal is killed. The engine still owns READY. */
+        pid_t service = fork();
+        if (service < 0) _exit(125);
+        if (service > 0) {
+            int limit = getdtablesize();
+            for (int fd = 3; fd < limit; fd++) close(fd);
+            for (;;) {
+                int status;
+                pid_t result = waitpid(service, &status, WNOHANG);
+                if (getppid() != parent || result == service ||
+                    (result < 0 && errno != EINTR)) {
+                    (void)kill(-getpgrp(), SIGKILL);
+                    _exit(125);
+                }
+                (void)poll(NULL, 0, 100);
+            }
+        }
+#endif
         int nullfd = open("/dev/null", O_RDONLY);
         int logfd = open(log, O_WRONLY | O_CREAT | O_APPEND, 0600);
         if (nullfd < 0 || logfd < 0) _exit(125);
@@ -184,17 +215,17 @@ static int home_donor_launch(HomeDonor *d, int edge) {
     char e_tracker[300], e_model[100], e_root[100], e_key[100], e_limit[100], e_log[1232];
     char range[40], port[20], addr[64], name[64], context[20], threads[20], ram[32];
     char bytes[32], layers[20], max_new[20];
-    if (checked_printf(shim, sizeof shim, "%s/liblumabri.so", d->bin_dir) ||
+    if (checked_printf(shim, sizeof shim, "%s/" LMB_SHIM_NAME, d->bin_dir) ||
         checked_printf(binary, sizeof binary, "%s/%s", d->bin_dir, edge ? "lumabri" : "segment_node") ||
         checked_printf(vroot, sizeof vroot, "%s/%.16s/vroot", d->cache_base, id) ||
         checked_printf(cache, sizeof cache, "%s/%.16s/cache", d->cache_base, id) ||
         checked_printf(cas, sizeof cas, "%s/%.16s/cas", d->cache_base, id) ||
         access(binary, X_OK)) return -1;
     if (access(shim, R_OK) &&
-        (checked_printf(shim, sizeof shim, "%s/../lib/lumabri/liblumabri.so", d->bin_dir) ||
+        (checked_printf(shim, sizeof shim, "%s/../lib/lumabri/" LMB_SHIM_NAME, d->bin_dir) ||
          access(shim, R_OK))) return -1;
     mkdir_p(cache); mkdir_p(cas);
-    snprintf(e_shim, sizeof e_shim, "LD_PRELOAD=%s", shim);
+    snprintf(e_shim, sizeof e_shim, LMB_PRELOAD_ENV "=%s", shim);
     snprintf(e_vroot, sizeof e_vroot, "LUMABRI_VROOT=%s", vroot);
     snprintf(e_cache, sizeof e_cache, "LUMABRI_CACHE=%s", cache);
     snprintf(e_cas, sizeof e_cas, "LUMABRI_CAS=%s", cas);
@@ -233,7 +264,7 @@ static int home_donor_launch(HomeDonor *d, int edge) {
     if (edge) {
         /* The host itself must not be preloaded; model_boot passes the mirror
          * to its Edge child, while its own networking remains ordinary C. */
-        envv[0] = "LD_PRELOAD=";
+        envv[0] = LMB_PRELOAD_ENV "=";
         d->host = home_spawn(host_argv, envv, d->log, &d->host_ready, listener);
         d->host_port = chosen_port;
         return d->host > 0 ? 0 : -1;
@@ -360,6 +391,7 @@ static int home_donor_message(HomeDonor *d) {
 }
 
 static int cmd_donor(int argc, char **argv) {
+    home_error[0] = 0;
     const char *tracker = NULL, *name = NULL, *disk = NULL;
     uint64_t limit = UINT64_MAX;
     for (int i = 0; i < argc; i++) {
@@ -377,20 +409,39 @@ static int cmd_donor(int argc, char **argv) {
         return 2;
     HomeDonor d = {0}; d.client = d.lease = d.segment_ready = d.host_ready = -1;
     exe_dir(d.bin_dir, sizeof d.bin_dir);
+    const char *services[] = {"segment_node", "segment_chat"};
+    char service_path[1200];
+    for (size_t i = 0; i < sizeof services / sizeof *services; i++) {
+        if (checked_printf(service_path, sizeof service_path, "%s/%s", d.bin_dir, services[i]) ||
+            access(service_path, X_OK))
+            return home_fail("Household runtime is not installed: %s is missing. Install or build the household services, not only the TUI.", services[i]);
+    }
+    if (checked_printf(service_path, sizeof service_path, "%s/" LMB_SHIM_NAME, d.bin_dir) ||
+        (access(service_path, R_OK) &&
+         (checked_printf(service_path, sizeof service_path, "%s/../lib/lumabri/" LMB_SHIM_NAME, d.bin_dir) ||
+          access(service_path, R_OK))))
+        return home_fail("The household weight loader (%s) is missing. Install or build the complete household runtime.", LMB_SHIM_NAME);
     if (checked_printf(d.cache_base, sizeof d.cache_base, "%s/%s", disk ? disk :
                        (getenv("HOME") ? getenv("HOME") : "."), disk ? "lumabri-home" : ".lumabri/home") ||
-        home_local_ip(tracker, d.ip)) return 1;
+        home_local_ip(tracker, d.ip))
+        return home_fail("Cannot reach the household. Check its address and LAN access; no resources were shared.");
+    int auth = lmb_connect_ms_io(tracker, 1200, 1500);
+    if (auth < 0) return home_fail("Cannot connect to the household tracker. No resources were shared.");
+    int rejected = lmb_auth(auth);
+    lmb_close(auth);
+    if (rejected) return home_fail("Household authentication failed. Use /join to check the household key. No resources were shared.");
     mkdir_p(d.cache_base);
     if (checked_printf(d.log, sizeof d.log, "%s/engines.log", d.cache_base)) return 1;
     LmbMachineProfile profile;
-    if (lmb_machine_probe(&profile, d.cache_base, NULL)) return 1;
+    if (lmb_machine_probe(&profile, d.cache_base, NULL) || !profile.ram_total_bytes)
+        return home_fail("Cannot read this computer's memory. Sharing is disabled until hardware detection succeeds.");
     uint64_t reserve = (uint64_t)lmb_env_int("LUMABRI_RAM_RESERVE_MB", 4096, 256, 262144) << 20;
     uint64_t ram = profile.ram_available_bytes > reserve ? profile.ram_available_bytes - reserve : 0;
     if (limit < ram) ram = limit;
-    if (ram < (32u << 20)) { fprintf(stderr, "Not enough RAM beyond the system reserve.\n"); return 1; }
+    if (ram < (32u << 20)) return home_fail("Not enough available RAM to share safely: %.2f GB available, %.2f GB system reserve. Close other applications and retry.", profile.ram_available_bytes / 1e9, reserve / 1e9);
     if (!name) name = profile.hostname;
     int port, listener = home_listen(&port);
-    if (listener < 0) return 1;
+    if (listener < 0) return home_fail("Cannot open a donor port in the household range: %s. Close another sharing window and retry.", strerror(errno));
     char own_bin[1200], addr[64], budget[32], report_log[1200];
     snprintf(own_bin, sizeof own_bin, "%s/lumabri", d.bin_dir);
     snprintf(addr, sizeof addr, "%s:%d", d.ip, port);
@@ -400,12 +451,16 @@ static int cmd_donor(int argc, char **argv) {
         "--name", (char *)name, "--ram-gb", budget, "--disk", d.cache_base,
         "--control-address", addr, NULL};
     pid_t reporter = home_spawn(worker_argv, NULL, report_log, NULL, -1);
-    if (reporter <= 0) { close(listener); return 1; }
+    if (reporter <= 0) { close(listener); return home_fail("Cannot start the inventory reporter: %s.", strerror(errno)); }
     g_stopping = 0; install_chat_signal_handlers(); signal(SIGPIPE, SIG_IGN);
     HomeTerminal term; home_terminal_begin(&term);
     double redraw = 0;
     int donor_choice = 1; /* Enter alone must never accept a new allocation. */
     while (!g_stopping) {
+        if (waitpid(reporter, NULL, WNOHANG) == reporter) {
+            (void)home_fail("The inventory reporter stopped. See %s. No new requests can be accepted.", report_log);
+            break;
+        }
         double now = nowd();
         if (now - redraw >= .25) { home_donor_screen(&d, name, ram, term.active, donor_choice); redraw = now; }
         struct pollfd ready[2] = {{listener, POLLIN, 0}, {d.client, POLLIN, 0}};
@@ -463,7 +518,7 @@ static int cmd_donor(int argc, char **argv) {
     home_terminal_end(&term);
     home_donor_disconnect(&d, "Donor closed.");
     home_stop_child(&reporter); close(listener);
-    return 0;
+    return home_error[0] ? 1 : 0;
 }
 typedef struct {
     int fd[LMB_CLUSTER_MAX_NODES];

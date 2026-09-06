@@ -21,6 +21,11 @@
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <sys/stat.h>
+#ifdef __APPLE__
+/* Darwin retains nanosecond timestamps under the BSD member names. */
+#define st_mtim st_mtimespec
+#define st_ctim st_ctimespec
+#endif
 
 #include "lumabri_proto.h"
 #include "lumabri_content.h"

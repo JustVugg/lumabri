@@ -4,6 +4,7 @@ maintainer
 lumabri
 lumibri
 liblumabri.so
+liblumabri.dylib
 liblumibri.so
 .lumabri_hashes/
 test_shim

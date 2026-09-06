@@ -26,6 +26,10 @@
  */
 #define _GNU_SOURCE
 #include "lumabri_ready.h"
+#include "lumabri_platform.h"
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 #include "lumabri_home_net.h"
 #include <arpa/inet.h>
 #include <dirent.h>
@@ -134,9 +138,21 @@ static int chat_command_matches(const char *prefix, int *indices) {
 }
 
 static void exe_dir(char *dst, size_t cap) {
+#ifdef __APPLE__
+    char executable[PATH_MAX];
+    uint32_t size = sizeof executable;
+    if (_NSGetExecutablePath(executable, &size)) {
+        snprintf(dst, cap, "."); return;
+    }
+    char *resolved = realpath(executable, NULL);
+    if (!resolved) { snprintf(dst, cap, "."); return; }
+    snprintf(dst, cap, "%s", resolved);
+    free(resolved);
+#else
     ssize_t n = readlink("/proc/self/exe", dst, cap - 1);
     if (n <= 0) { snprintf(dst, cap, "."); return; }
     dst[n] = 0;
+#endif
     char *slash = strrchr(dst, '/');
     if (slash) *slash = 0;
 }
@@ -2869,7 +2885,7 @@ static int engine_spawn(const char *engine, const char *shim, const char *tracke
         if (local_dir) {
             setenv("SNAP", local_dir, 1);
         } else {
-            setenv("LD_PRELOAD", shim, 1);
+            setenv(LMB_PRELOAD_ENV, shim, 1);
             setenv("LUMABRI_VROOT", vroot, 1);
             setenv("LUMABRI_CACHE", cache, 1);
             setenv("LUMABRI_CAS", cas, 0);       /* shared across model mirrors */
@@ -2977,7 +2993,7 @@ static int segment_engine_spawn(const char *engine, const char *shim,
     if (pid == 0) {
         dup2(in_pipe[0], 0); dup2(out_pipe[1], 1); dup2(err_pipe[1], 2);
         close(in_pipe[1]); close(out_pipe[0]); close(err_pipe[0]);
-        setenv("LD_PRELOAD", shim, 1);
+        setenv(LMB_PRELOAD_ENV, shim, 1);
         setenv("LUMABRI_VROOT", vroot, 1);
         setenv("LUMABRI_CACHE", cache, 1);
         setenv("LUMABRI_CAS", cas, 0);
@@ -3379,9 +3395,9 @@ static int cmd_host(int argc, char **argv) {
     }
     char dir[1024], shim[1200];
     exe_dir(dir, sizeof dir);
-    snprintf(shim, sizeof shim, "%s/liblumabri.so", dir);
+    snprintf(shim, sizeof shim, "%s/" LMB_SHIM_NAME, dir);
     if (access(shim, R_OK))
-        snprintf(shim, sizeof shim, "%s/../lib/lumabri/liblumabri.so", dir);
+        snprintf(shim, sizeof shim, "%s/../lib/lumabri/" LMB_SHIM_NAME, dir);
 
     char model[128];
     snprintf(model, sizeof model, "%s", want_model ? want_model : "local");
@@ -3873,9 +3889,9 @@ static int role_start_segment(const Role *r, const char *tracker,
     exe_dir(dir, sizeof dir);
     snprintf(bin, sizeof bin, "%s/segment_node", dir);
     if (access(bin, X_OK)) return 0;
-    snprintf(shim, sizeof shim, "%s/liblumabri.so", dir);
+    snprintf(shim, sizeof shim, "%s/" LMB_SHIM_NAME, dir);
     if (access(shim, R_OK))
-        snprintf(shim, sizeof shim, "%s/../lib/lumabri/liblumabri.so", dir);
+        snprintf(shim, sizeof shim, "%s/../lib/lumabri/" LMB_SHIM_NAME, dir);
 
     char host[INET_ADDRSTRLEN] = "";
     int relay_only = 0;
@@ -3931,7 +3947,7 @@ static int role_start_segment(const Role *r, const char *tracker,
         else snprintf(cachedir, sizeof cachedir, "%s/.lumabri/%s/cache", home, model);
         snprintf(casdir, sizeof casdir, "%s/.lumabri/cas", home);
         mkdir_p(cachedir);
-        snprintf(e_pre, sizeof e_pre, "LD_PRELOAD=%s", shim);
+        snprintf(e_pre, sizeof e_pre, LMB_PRELOAD_ENV "=%s", shim);
         snprintf(e_vr, sizeof e_vr, "LUMABRI_VROOT=%s", vroot);
         snprintf(e_ca, sizeof e_ca, "LUMABRI_CACHE=%s", cachedir);
         snprintf(e_cs, sizeof e_cs, "LUMABRI_CAS=%s", casdir);
@@ -4123,9 +4139,9 @@ static void role_start(const Role *r, const char *tracker, const char *model,
         char probe[1100], shim[1200];
         snprintf(probe, sizeof probe, "%s/config.json", r->model_dir);
         int local = r->model_dir[0] && access(probe, R_OK) == 0;
-        snprintf(shim, sizeof shim, "%s/liblumabri.so", dir);
+        snprintf(shim, sizeof shim, "%s/" LMB_SHIM_NAME, dir);
         if (access(shim, R_OK))
-            snprintf(shim, sizeof shim, "%s/../lib/lumabri/liblumabri.so", dir);
+            snprintf(shim, sizeof shim, "%s/../lib/lumabri/" LMB_SHIM_NAME, dir);
         if (!node || !port || access(bin, X_OK)) {
             printf("  %sno expert node for %s (make engines): compute sharing "
                    "skipped%s\n", C_DIM, model_type ? model_type : "?", C_R);
@@ -4152,7 +4168,7 @@ static void role_start(const Role *r, const char *tracker, const char *model,
                               home, model);
                 snprintf(casdir, sizeof casdir, "%s/.lumabri/cas", home);
                 mkdir_p(cachedir);              /* the vroot stays virtual */
-                snprintf(e_pre, sizeof e_pre, "LD_PRELOAD=%s", shim);
+                snprintf(e_pre, sizeof e_pre, LMB_PRELOAD_ENV "=%s", shim);
                 snprintf(e_vr, sizeof e_vr, "LUMABRI_VROOT=%s", vroot);
                 snprintf(e_ca, sizeof e_ca, "LUMABRI_CACHE=%s", cachedir);
                 snprintf(e_cs, sizeof e_cs, "LUMABRI_CAS=%s", casdir);
@@ -4500,11 +4516,11 @@ static int cmd_chat(int argc, char **argv) {
 
     char dir[1024], shim[1200];
     exe_dir(dir, sizeof dir);
-    snprintf(shim, sizeof shim, "%s/liblumabri.so", dir);
+    snprintf(shim, sizeof shim, "%s/" LMB_SHIM_NAME, dir);
     if (access(shim, R_OK))       /* installed layout: bin/../lib/lumabri/ */
-        snprintf(shim, sizeof shim, "%s/../lib/lumabri/liblumabri.so", dir);
+        snprintf(shim, sizeof shim, "%s/../lib/lumabri/" LMB_SHIM_NAME, dir);
     if (!host_addr && !local_dir && access(shim, R_OK)) {
-        fprintf(stderr, "liblumabri.so missing; run make (or make install)\n");
+        fprintf(stderr, "%s missing; run make (or make install)\n", LMB_SHIM_NAME);
         return 1;
     }
 
@@ -5496,12 +5512,12 @@ static int cmd_doctor(int argc, char **argv) {
                                             "run make all or reinstall Lumabri");
     }
     char shim[1200];
-    snprintf(shim, sizeof shim, "%s/liblumabri.so", directory);
+    snprintf(shim, sizeof shim, "%s/" LMB_SHIM_NAME, directory);
     if (access(shim, R_OK))
-        snprintf(shim, sizeof shim, "%s/../lib/lumabri/liblumabri.so", directory);
+        snprintf(shim, sizeof shim, "%s/../lib/lumabri/" LMB_SHIM_NAME, directory);
     doctor_add(checks, &count, "library-liblumabri", access(shim, R_OK) == 0, 1,
                access(shim, R_OK) == 0 ? "CAS interposer found" :
-                                        "liblumabri.so is missing");
+                                        LMB_SHIM_NAME " is missing");
     const char *segment_bins[] = {"segment_node", "segment_chat"};
     for (size_t i = 0; i < sizeof segment_bins / sizeof segment_bins[0]; i++) {
         char path[1200], name[64];

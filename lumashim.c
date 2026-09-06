@@ -47,6 +47,17 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <time.h>
+#ifdef __APPLE__
+/* The dyld interpose ABI is a retained Mach-O section of pointer pairs:
+ * replacement first, original symbol second. Xcode's public SDK does not
+ * ship dyld-interposing.h, so emit that ABI directly, without a private SDK
+ * dependency. The array is used even though C code never references it. */
+#define O_TMPFILE 0
+#define O_LARGEFILE 0
+/* Darwin has no Linux data-only durability primitive. Never weaken the
+ * write-before-publication guarantee of the signed block cache. */
+#define fdatasync fsync
+#endif
 
 #define LMB_SECURE_NO_CLOSE_REDIRECT 1
 #include "lumabri_proto.h"
@@ -80,6 +91,20 @@ static void  *(*real_mmap64)(void *, size_t, int, int, int, off_t);
 
 static void shim_resolve(void) {
     if (real_open) return;
+#ifdef __APPLE__
+    /* References from the interposing image keep their original libc
+     * bindings. Resolve them directly: querying dyld while its initializer
+     * is running can itself need the I/O functions being interposed. This
+     * also preserves the SDK's ABI aliases (notably opendir$INODE64). */
+    real_openat = openat; real_openat64 = openat;
+    real_fopen = fopen; real_fopen64 = fopen;
+    real_opendir = opendir;
+    real_pread = pread; real_pread64 = pread;
+    real_read = read; real_close = close;
+    real_mmap = mmap; real_mmap64 = mmap;
+    real_open64 = open;
+    real_open = open;
+#else
     real_open64   = (int (*)(const char *, int, ...))dlsym(RTLD_NEXT, "open64");
     real_openat   = (int (*)(int, const char *, int, ...))dlsym(RTLD_NEXT, "openat");
     real_openat64 = (int (*)(int, const char *, int, ...))dlsym(RTLD_NEXT, "openat64");
@@ -94,6 +119,7 @@ static void shim_resolve(void) {
     real_pread    = (ssize_t (*)(int, void *, size_t, off_t))dlsym(RTLD_NEXT, "pread");
     /* last, and last assigned: real_open doubles as the "resolved" flag */
     real_open     = (int (*)(const char *, int, ...))dlsym(RTLD_NEXT, "open");
+#endif
 }
 
 /* forward: g is defined below; the ctor only resolves symbols and learns the
@@ -1936,6 +1962,18 @@ static int open_common(const char *path, int flags, mode_t mode) {
     return fd;
 }
 
+#ifdef __APPLE__
+/* Mach-O does not use ELF symbol preemption. Keep replacements distinct
+ * from their libc targets; dyld excludes this image from its interposition. */
+#define open lmb_darwin_open
+#define openat lmb_darwin_openat
+#define fopen lmb_darwin_fopen
+#define opendir lmb_darwin_opendir
+#define pread lmb_darwin_pread
+#define read lmb_darwin_read
+#define mmap lmb_darwin_mmap
+#define close lmb_darwin_close
+#endif
 int open(const char *path, int flags, ...) {
     mode_t mode = 0;
     if (flags & (O_CREAT | O_TMPFILE)) {
@@ -2087,3 +2125,24 @@ int close(int fd) {
     lmb_sec_forget_hook(fd);
     return real_close(fd);
 }
+#ifdef __APPLE__
+#undef open
+#undef openat
+#undef fopen
+#undef opendir
+#undef pread
+#undef read
+#undef mmap
+#undef close
+__attribute__((used, section("__DATA,__interpose")))
+static const struct { const void *replacement, *original; } lmb_interpose[] = {
+    {(const void *)lmb_darwin_open, (const void *)open},
+    {(const void *)lmb_darwin_openat, (const void *)openat},
+    {(const void *)lmb_darwin_fopen, (const void *)fopen},
+    {(const void *)lmb_darwin_opendir, (const void *)opendir},
+    {(const void *)lmb_darwin_pread, (const void *)pread},
+    {(const void *)lmb_darwin_read, (const void *)read},
+    {(const void *)lmb_darwin_mmap, (const void *)mmap},
+    {(const void *)lmb_darwin_close, (const void *)close}
+};
+#endif

@@ -18,6 +18,10 @@
 #include <sys/utsname.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <mach/mach.h>
+#include <sys/sysctl.h>
+#endif
 
 static int read_u64_file(const char *path, uint64_t *value) {
     FILE *file = fopen(path, "r");
@@ -80,6 +84,31 @@ int lmb_machine_read_meminfo(FILE *file, uint64_t *total,
 
 static void meminfo(uint64_t *total, uint64_t *available,
                     uint64_t *swap_total, uint64_t *swap_free) {
+#ifdef __APPLE__
+    uint64_t mt = 0, ma = 0;
+    size_t size = sizeof mt;
+    if (sysctlbyname("hw.memsize", &mt, &size, NULL, 0)) mt = 0;
+    mach_port_t host = mach_host_self();
+    vm_size_t page_size = 0;
+    vm_statistics64_data_t vm = {0};
+    mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+    if (host_page_size(host, &page_size) == KERN_SUCCESS &&
+        host_statistics64(host, HOST_VM_INFO64, (host_info64_t)&vm, &count) == KERN_SUCCESS) {
+        /* free_count includes speculative pages. Purgeable pages can overlap
+         * inactive pages: do not count either twice, or count compressed/wired
+         * memory as immediately available. The governor retains its reserve. */
+        ma = ((uint64_t)vm.free_count + vm.inactive_count) * page_size;
+        if (ma > mt) ma = mt;
+    }
+    mach_port_deallocate(mach_task_self(), host);
+    struct xsw_usage swap = {0};
+    size = sizeof swap;
+    if (sysctlbyname("vm.swapusage", &swap, &size, NULL, 0)) memset(&swap, 0, sizeof swap);
+    if (total) *total = mt;
+    if (available) *available = ma;
+    if (swap_total) *swap_total = swap.xsu_total;
+    if (swap_free) *swap_free = swap.xsu_avail;
+#else
     FILE *file = fopen("/proc/meminfo", "r");
     if (!file || lmb_machine_read_meminfo(file, total, available,
                                           swap_total, swap_free)) {
@@ -89,6 +118,7 @@ static void meminfo(uint64_t *total, uint64_t *available,
         if (swap_free) *swap_free = 0;
     }
     if (file) fclose(file);
+#endif
 }
 
 uint64_t lmb_machine_available_ram(void) {
@@ -159,6 +189,30 @@ int lmb_machine_compute_lease_acquire(const char *model, const char *tracker,
 }
 
 static void cpu_profile(LmbMachineProfile *profile) {
+#ifdef __APPLE__
+    unsigned logical = 0, physical = 0;
+    size_t size = sizeof logical;
+    (void)sysctlbyname("hw.logicalcpu", &logical, &size, NULL, 0);
+    size = sizeof physical;
+    (void)sysctlbyname("hw.physicalcpu", &physical, &size, NULL, 0);
+    long online = sysconf(_SC_NPROCESSORS_ONLN);
+    profile->logical_cpus = logical ? logical : online > 0 ? (uint32_t)online : 1;
+    profile->physical_cores = physical ? physical : profile->logical_cpus;
+    size = sizeof profile->cpu_model;
+    if (sysctlbyname("machdep.cpu.brand_string", profile->cpu_model, &size, NULL, 0)) {
+        size = sizeof profile->cpu_model;
+        (void)sysctlbyname("hw.model", profile->cpu_model, &size, NULL, 0);
+    }
+    profile->cpu_model[sizeof profile->cpu_model - 1] = 0;
+    int supported = 0;
+    size = sizeof supported;
+    (void)sysctlbyname("hw.optional.avx2_0", &supported, &size, NULL, 0);
+#if defined(__aarch64__) || defined(__arm64__)
+    snprintf(profile->isa, sizeof profile->isa, "asimd");
+#else
+    snprintf(profile->isa, sizeof profile->isa, "%s", supported ? "avx2" : "generic");
+#endif
+#else
     FILE *file = fopen("/proc/cpuinfo", "r");
     char line[1024], flags[4096] = "";
     unsigned processors = 0;
@@ -212,6 +266,7 @@ static void cpu_profile(LmbMachineProfile *profile) {
     else if (strstr(flags, " avx2 ")) isa = "avx2";
     else if (strstr(flags, " asimd ")) isa = "asimd";
     snprintf(profile->isa, sizeof profile->isa, "%s", isa);
+#endif
 }
 
 static void numa_profile(LmbMachineProfile *profile) {

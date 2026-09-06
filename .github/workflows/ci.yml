@@ -24,9 +24,16 @@ jobs:
           try { & ./tools/setup-household-firewall.ps1 -Subnet 0.0.0.0/0 -WhatIf }
           catch { $rejected = $true }
           if (-not $rejected) { throw 'An unrestricted network was accepted' }
+      - name: Execute create, update and remove against strict command doubles
+        shell: powershell
+        run: ./tests/integration/firewall_helper_test.ps1
   macos-workspace:
     # Native frontend gate, not certification of Segment, GPU or a real LAN.
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15-intel, macos-15]
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -34,7 +41,11 @@ jobs:
         with:
           python-version: "3.12"
       - name: Build the C workspace with Apple Clang
-        run: make lumabri test_chat_ui CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
+        run: |
+          make lumabri tracker maintainer liblumabri.dylib test_shim test_machine test_chat_ui CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
+          ./test_machine
+          python3 tests/integration/native_shim_test.py
+          python3 tests/integration/household_network_test.py
       - name: Readiness descriptors and portable fallback
         run: make test-ready-pipe CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
       - name: Native cryptographic known-answer tests
@@ -90,6 +101,11 @@ jobs:
           python3 tools/make_olmoe_tiny.py --output olmoe_tiny_src --force
           python3 tools/make_edge_tiny_tokenizer.py olmoe_tiny_src --vocab-size 128
           python3 tools/convert_olmoe_merged.py --model olmoe_tiny_src --out olmoe_tiny_merged --min-free-gb 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tiny-olmoe-checkpoint
+          path: colibri/c/olmoe_tiny_merged/*
+          retention-days: 3
       - name: Segment failover gate — run
         working-directory: lumabri
         run: |
@@ -106,3 +122,47 @@ jobs:
           mkdir -p build/home-flow-models
           cp -a ../colibri/c/olmoe_tiny_merged build/home-flow-models/olmoe-tiny
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models
+          python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --kill-donor
+  macos-household:
+    # Real native CPU engines + signed CAS + approvals + streaming. Loopback
+    # coverage does not replace the macOS 12.6 / physical household LAN test.
+    needs: linux
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15-intel, macos-15]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: lumabri
+      - uses: actions/checkout@v4
+        with:
+          repository: JustVugg/colibri
+          ref: dev
+          path: colibri
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: brew install libomp
+      - name: Build the native household runtime
+        working-directory: lumabri
+        run: make household ENGINE=../colibri/c CC=clang -j3
+      - uses: actions/download-artifact@v4
+        with:
+          name: tiny-olmoe-checkpoint
+          path: lumabri/build/home-flow-models/olmoe-tiny
+      - name: Request, accept, fetch weights and chat on native macOS
+        working-directory: lumabri
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models
+          python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --kill-donor
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: household-logs-${{ matrix.runner }}
+          path: ${{ runner.temp }}/lumabri-home-flow-*/**/*.log
+          retention-days: 3

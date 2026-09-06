@@ -1,9 +1,26 @@
 #define _GNU_SOURCE
 #include "lumabri_home_discovery.h"
+#include "lumabri_wakeup.h"
 #include "src/ui/lumabri_visual.h"
 #include <assert.h>
 
 int main(void) {
+    int writer = -1, reader = lmb_wakeup_open(&writer);
+    assert(reader >= 0 && writer >= 0 && reader != writer);
+    assert(fcntl(reader, F_GETFL) & O_NONBLOCK);
+    assert(fcntl(writer, F_GETFL) & O_NONBLOCK);
+    assert(fcntl(reader, F_GETFD) & FD_CLOEXEC);
+    assert(fcntl(writer, F_GETFD) & FD_CLOEXEC);
+    uint64_t one = 1, got = 0;
+    assert(write(writer, &one, sizeof one) == sizeof one);
+    assert(read(reader, &got, sizeof got) == sizeof got && got == one);
+    while (write(writer, &one, sizeof one) == sizeof one) { }
+    assert(errno == EAGAIN || errno == EWOULDBLOCK);
+    while (read(reader, &got, sizeof got) == sizeof got) { }
+    assert(errno == EAGAIN || errno == EWOULDBLOCK);
+    close(writer);
+    assert(read(reader, &got, sizeof got) == 0);
+    close(reader);
     unsigned up = IFF_UP;
     assert(!lmb_home_ip_score(up | IFF_LOOPBACK, 0x0afffffe)); /* WSL DNS alias */
     assert(!lmb_home_ip_score(0, 0xc0a8010d));

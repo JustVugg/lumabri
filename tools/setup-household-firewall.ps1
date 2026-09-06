@@ -52,7 +52,7 @@ foreach ($protocol in @('TCP', 'UDP')) {
         Set-NetFirewallHyperVRule -Name $hyperName -Enabled True -Direction Inbound -Action Allow `
             -Protocol $protocol -LocalPorts $ports -RemoteAddresses $Subnet | Out-Null
     } else {
-        New-NetFirewallHyperVRule -Name $hyperName -VMCreatorId $creator `
+        New-NetFirewallHyperVRule -Name $hyperName -DisplayName $hyperName -VMCreatorId $creator `
             -Direction Inbound -Action Allow -Protocol $protocol -LocalPorts $ports `
             -RemoteAddresses $Subnet | Out-Null
     }
