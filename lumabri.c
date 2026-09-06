@@ -50,6 +50,7 @@
 #include "lumabri_families.h"
 #include "lumabri_cluster.h"
 #include "src/ui/lumabri_tui.h"
+#include "src/ui/lumabri_visual.h"
 #include "lumabri_machine.h"
 
 #ifdef __linux__
@@ -5115,8 +5116,9 @@ static int cmd_chat(int argc, char **argv) {
             printf("\n");
             char status[200] = "";
             if (g_donor_base[0]) donor_status_line(status, sizeof status);
-            hline_text("\xe2\x95\xad", "\xe2\x95\xae", w, status);
-            printf("\n%s\xe2\x94\x82%s %s%s\xe2\x80\xba%s ", C_GRAY, C_R, C_CORAL, C_BOLD, C_R);
+            printf("  %sYou%s\n", C_DIM, C_R);
+            hline_text(" ", " ", w, status);
+            printf("\n  %s%s\xe2\x80\xba%s ", C_CORAL, C_BOLD, C_R);
         } else
             printf("\n> ");
         fflush(stdout);
@@ -5130,7 +5132,7 @@ static int cmd_chat(int argc, char **argv) {
             got = prompt_line(line, sizeof line) == 0;
             g_slash_completion = 0;
         }
-        if (g_tty) hline("\xe2\x95\xb0", "\xe2\x95\xaf", w);
+        if (g_tty) hline(" ", " ", w);
         if (!got || g_stopping) break;
         size_t L = strlen(line);   /* prompt_line already stripped the newline */
         if (!L) continue;
@@ -5707,7 +5709,7 @@ static int cmd_models(int argc, char **argv) {
     /* The screen is the default and the listing is the fallback, not the
      * other way round: a plain list is what you want in a pipe or a log, and
      * a pipe is exactly where a full-screen interface is useless. */
-    int plain = !isatty(STDOUT_FILENO), snapshot = 0, json = 0;
+    int plain = !isatty(STDOUT_FILENO), snapshot = 0, json = 0, computers = 0;
     for (int i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "--models-dir") && i + 1 < argc) root = argv[++i];
         else if (!strcmp(argv[i], "--tracker") && i + 1 < argc) tracker = argv[++i];
@@ -5718,6 +5720,7 @@ static int cmd_models(int argc, char **argv) {
             sessions = (uint32_t)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--max-new") && i + 1 < argc)
             max_new = (uint32_t)atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--computers")) computers = 1;
         else if (!strcmp(argv[i], "--plain")) plain = 1;
         else if (!strcmp(argv[i], "--json")) { json = 1; plain = 1; }
         else if (!strcmp(argv[i], "--snapshot")) { snapshot = 1; plain = 0; }
@@ -5740,6 +5743,7 @@ static int cmd_models(int argc, char **argv) {
     memset(&st, 0, sizeof st);
     if (!max_new || max_new > 4096) return 2;
     st.context = context; st.sessions = sessions; st.max_new = max_new;
+    st.initial_tab = computers;
     if (checked_printf(st.root, sizeof st.root, "%s", root) ||
         checked_printf(st.disk, sizeof st.disk, "%s", disk) ||
         (tracker && checked_printf(st.tracker, sizeof st.tracker, "%s", tracker))) return 2;

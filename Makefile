@@ -6,6 +6,17 @@ override CPPFLAGS += -I.
 
 all: tracker maintainer liblumabri.so test_shim swarm_probe lumabri
 
+# Standalone visual study; deliberately excluded from all/install and runtime.
+build/tui-preview: tools/tui_preview.c
+	@mkdir -p build
+	$(CC) $(CPPFLAGS) $(CFLAGS) tools/tui_preview.c -o $@
+
+tui-preview: build/tui-preview
+
+test-tui-preview: build/tui-preview
+	python3 tests/tui_preview_test.py
+
+
 # A checkout with Colibri's additive ABI gets the transparent Segment path
 # from the ordinary `make`; older/release Colibri trees keep the exact legacy
 # build.  The user still runs only `lumabri serve` and `lumabri chat`.
@@ -31,7 +42,7 @@ SECURE_DEPS = lumabri_secure.h lumabri_crypto.h
 MACHINE_SRC = lumabri_machine.c
 MACHINE_DEPS = lumabri_machine.h $(MACHINE_SRC)
 
-lumabri: lumabri.c src/ui/lumabri_tui.c src/ui/lumabri_tui.h lumabri_proto.h lumabri_sign.h \
+lumabri: lumabri.c src/ui/lumabri_tui.c src/ui/lumabri_tui.h src/ui/lumabri_visual.h lumabri_proto.h lumabri_sign.h \
 		lumabri_inventory.h lumabri_home.h lumabri_home_runtime.h src/ui/lumabri_home_ui.h lumabri_ready.h \
 		lumabri_families.h lumabri_planner.h lumabri_cluster.h \
 		lumabri_calibration.h $(SECURE_DEPS) $(MACHINE_DEPS)
@@ -749,7 +760,7 @@ clean:
 	      expert_node_deepseek expert_node_qwen36
 	rm -rf build
 
-.PHONY: all check-warnings test test-chat-ui clean install phase2 phase2-glm engines chatters phase2-all \
+.PHONY: all tui-preview test-tui-preview check-warnings test test-chat-ui clean install phase2 phase2-glm engines chatters phase2-all \
         fixture test-phase2 \
         test-phase2-glm test-phase2-inkling test-phase2-kimi \
         test-phase2-deepseek test-engines \

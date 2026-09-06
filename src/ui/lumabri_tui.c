@@ -7,7 +7,9 @@
  * in advance, and the layout code is straight-line because straight-line is
  * what two views need.
  */
+#define _XOPEN_SOURCE 700
 #include "lumabri_tui.h"
+#include "lumabri_visual.h"
 
 #include <errno.h>
 #include <poll.h>
@@ -465,9 +467,91 @@ static double refresh_clock(void) {
     return t.tv_sec + t.tv_nsec / 1e9;
 }
 
+/* Live catalogue uses the approved open canvas; text snapshots retain their
+ * stable diagnostic format. Both read the same planner state. */
+static void draw_workspace(const LmbTuiState *st, int tab, int sel, int detail,
+                           int palette, int action_sel) {
+    ui_begin(detail ? "model plan" : tab ? "your computers" : "models");
+    uint32_t selected = 0;
+    uint64_t ram = 0;
+    for (uint32_t i = 0; i < st->nnodes; i++) if (lmb_tui_node_enabled(st, i)) {
+        selected++; ram += st->nodes[i].ram_budget_bytes;
+    }
+    ui_printf(5, 5, UI_TEXT, "%u computers visible · %u selected · %.1f GB offered RAM selected",
+              st->nnodes, selected, ram / 1e9);
+    ui_text(7, 5, UI_MUTED, "Models     /     Computers     ·     Tab switches views");
+    const char *status = st->inventory_ok ? "Donors must approve the allocation before anything is loaded." :
+        "TRACKER OFFLINE · No requests can start; check the household address.";
+    if (detail && sel < st->nmodels) {
+        const LmbTuiModel *m = &st->models[sel];
+        char speed[96]; speed_text(m, speed, sizeof speed);
+        ui_text(9, 5, UI_SAND, m->name);
+        ui_printf(11, 5, UI_MUTED, "%s · %u layers · %u context · %u session(s)",
+                  m->shape.model_type, m->shape.layers, st->context, st->sessions);
+        ui_printf(13, 5, UI_TEXT, "Plan: %s    Speed: %s", state_word(m), speed);
+        if (m->planned && m->plan.state != LMB_PLAN_UNRUNNABLE) {
+            for (uint32_t i = 0; i < m->plan.nslices && 16 + (int)i * 2 < ui_h - 7; i++) {
+                const LmbSlice *s = &m->plan.slices[i];
+                ui_printf(16 + (int)i * 2, 5, UI_TEXT, "%s%s · layers %u–%u · %.2f GB resident",
+                    st->nodes[s->node].name, s->node == m->plan.edge_node ? " (chat host)" : "",
+                    s->layer_begin, s->layer_end - 1, s->bytes_resident / 1e9);
+            }
+            ui_text(ui_h - 6, 5, UI_SAND, "Enter requests this plan. Every participating donor must accept.");
+        } else {
+            ui_printf(16, 5, UI_TEXT, "Missing: %.2f GB · sizing %s · local source weights %s",
+                m->plan.missing_bytes / 1e9, m->planned ? "available" : "unavailable",
+                m->weights_present ? "present" : "missing");
+            ui_text(19, 5, UI_MUTED, "Select computers in Share resources, then review the updated plan.");
+        }
+    } else if (tab) {
+        int rows = (ui_h - 15) / 3; if (rows < 1) rows = 1;
+        int top = sel >= rows ? sel - rows + 1 : 0;
+        if (!st->nnodes) ui_text(11, 5, UI_MUTED, "No computers reporting. Open Share resources on your other computers.");
+        for (int i = top; i < (int)st->nnodes && i < top + rows; i++) {
+            const LmbClusterNode *n = &st->nodes[i];
+            const LmbMachineProfile *p = &st->profiles[i];
+            char title[256], description[512];
+            snprintf(title, sizeof title, "[%s] %s", lmb_tui_node_enabled(st, (uint32_t)i) ? "✓" : " ", n->name);
+            snprintf(description, sizeof description, "%s · %.1f GB RAM · %u threads · %u GPU detected / %.1f GB VRAM",
+                p->cpu_model, n->ram_budget_bytes / 1e9, n->threads, p->gpu_count, p->vram_available_bytes / 1e9);
+            ui_item(10 + (i - top) * 3, i == sel, title, description);
+        }
+        ui_text(ui_h - 6, 5, UI_MUTED, "Nothing is selected automatically. GPU detected does not mean GPU execution.");
+    } else {
+        int rows = (ui_h - 15) / 3; if (rows < 1) rows = 1;
+        int top = sel >= rows ? sel - rows + 1 : 0;
+        if (!st->nmodels) {
+            ui_text(11, 5, UI_TEXT, "No checkpoints in your model folder yet.");
+            ui_text(13, 5, UI_MUTED, st->root);
+            ui_text(16, 5, UI_MUTED, "Set your existing model folder in workspace /settings.");
+        }
+        for (int i = top; i < st->nmodels && i < top + rows; i++) {
+            char speed[96], description[256]; speed_text(&st->models[i], speed, sizeof speed);
+            snprintf(description, sizeof description, "%s · %s · %u layers", state_word(&st->models[i]), speed, st->models[i].shape.layers);
+            ui_item(10 + (i - top) * 3, i == sel, st->models[i].name, description);
+        }
+        ui_text(ui_h - 6, 5, UI_MUTED, "A plan before a download. Speed appears only with a matching calibration.");
+    }
+    if (palette) {
+        ui_begin("actions");
+        static const char *names[] = {"/models", "/computers", "/refresh", "/request", "/back"};
+        static const char *helps[] = {"Browse this model folder", "Choose participating donors", "Refresh inventory and plans",
+            "Review the selected model before requesting chat", "Return to the workspace"};
+        for (int i = 0; i < 5; i++) ui_item(6 + i * 3, action_sel == i, names[i], helps[i]);
+    }
+    ui_footer(status, "↑ ↓ move   Enter select / confirm   Tab switch   / actions   Esc back");
+    if (ui_w < 60 || ui_h < 28) {
+        ui_begin("workspace"); ui_text(5, 4, UI_SAND, "Resize to at least 60 × 28. Esc returns.");
+    }
+    ui_present();
+}
+
 int lmb_tui_run(LmbTuiState *st, int snapshot, const char *keys) {
+    (void)setlocale(LC_CTYPE, "");
     g_quit = 0;
-    int sel = 0, top = 0, tab = 0, detail = 0;
+    g_snapshot = snapshot; g_color = !snapshot;
+    int sel = 0, top = 0, tab = st->initial_tab != 0, detail = 0;
+    int palette = 0, action_sel = 0;
     int action = 0;
     Size sz = term_size();
 
@@ -561,25 +645,34 @@ int lmb_tui_run(LmbTuiState *st, int snapshot, const char *keys) {
         if (st->tracker[0] && refresh_clock() - refreshed >= 5.0)
             refresh_start(&job, st);
         if (g_resized) { g_resized = 0; sz = term_size(); clear_screen(); }
-        if (sz.w < 60 || sz.h < 12) draw_compact(st, sz, tab, sel);
-        else if (detail) draw_detail(st, sz, sel);
-        else {
-            clear_screen();
-            draw_header(st, sz, tab);
-            if (tab == 0) draw_models(st, sz, sel, top);
-            else draw_nodes(st, sz, sel, top);
-        }
+        draw_workspace(st, tab, sel, detail, palette, action_sel);
         int k;
         if (kp) { k = *kp ? (unsigned char)*kp++ : 'q'; }
         else k = read_key(250);
         if (!k) continue;
         if (k == 'q' || k == 3) break;
-        if (k == 'c' && !tab && st->nmodels && st->tracker[0]) {
+        if (k == '/') { palette = !palette; action_sel = 0; continue; }
+        if (palette) {
+            if (k == 27) { palette = 0; continue; }
+            if (k == 'j') action_sel = (action_sel + 1) % 5;
+            if (k == 'k') action_sel = (action_sel + 4) % 5;
+            if (k != '\r' && k != '\n') continue;
+            palette = 0;
+            if (action_sel == 4) break;
+            if (action_sel < 2) { tab = action_sel; sel = top = detail = 0; continue; }
+            if (action_sel == 2) { refresh_start(&job, st); continue; }
+            if (!tab && st->nmodels) detail = 1;
+            continue;
+        }
+        if (k == 27 && !detail) break;
+        if (ui_w < 60 || ui_h < 28) continue;
+        if ((k == 'c' || (detail && (k == '\r' || k == '\n'))) && !tab && st->nmodels && st->tracker[0]) {
             st->action_model = sel;
             action = LMB_TUI_REQUEST_CHAT;
             break;
         }
-        if (detail) { if (k == '\r' || k == '\n' || k == 0x1b) detail = 0; continue; }
+        if (detail) { if (k == 0x1b) detail = 0; continue; }
+        if (tab && (k == '\r' || k == '\n')) k = ' ';
         switch (k) {
         case ' ':
             if (tab && sel < (int)st->nnodes && st->identities[sel][0] && st->nodes[sel].addr[0]) {
