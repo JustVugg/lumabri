@@ -9,6 +9,21 @@ permissions:
   contents: read
 
 jobs:
+  windows-network-helper:
+    # Validate the permission helper without changing runner firewall rules.
+    # This does not certify a native Windows model runtime.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse and dry-run private-LAN permission changes
+        shell: powershell
+        run: |
+          & ./tools/setup-household-firewall.ps1 -Subnet 192.168.1.0/24 -WhatIf
+          & ./tools/setup-household-firewall.ps1 -Subnet 192.168.1.0/24 -Remove -WhatIf
+          $rejected = $false
+          try { & ./tools/setup-household-firewall.ps1 -Subnet 0.0.0.0/0 -WhatIf }
+          catch { $rejected = $true }
+          if (-not $rejected) { throw 'An unrestricted network was accepted' }
   macos-workspace:
     # Native frontend gate, not certification of Segment, GPU or a real LAN.
     runs-on: macos-latest
@@ -24,6 +39,8 @@ jobs:
         run: make test-ready-pipe CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
       - name: Native cryptographic known-answer tests
         run: bash tests/integration/crypto_test.sh
+      - name: Household ports, discovery parser and terminal palettes
+        run: make test-home-network CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
       - name: Native workspace navigation and terminal restoration
         run: python3 tests/integration/workspace_navigation_test.py
   linux:
@@ -83,3 +100,9 @@ jobs:
           OLMOE_EDGE_MODEL=../colibri/c/olmoe_tiny_merged \
           SEGMENT_NODE_BIN=./segment_node SEGMENT_CHAT_BIN=./segment_chat \
             bash ./tests/integration/segment_priority_test.sh
+      - name: Household TUI — approvals through real Segment generation
+        working-directory: lumabri
+        run: |
+          mkdir -p build/home-flow-models
+          cp -a ../colibri/c/olmoe_tiny_merged build/home-flow-models/olmoe-tiny
+          python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models

@@ -2,6 +2,7 @@
  * Only this translation unit owns the secure transport sessions. */
 #ifndef LUMABRI_HOME_RUNTIME_H
 #define LUMABRI_HOME_RUNTIME_H
+#include "lumabri_home_net.h"
 
 typedef struct {
     struct termios saved;
@@ -66,25 +67,13 @@ static int home_local_ip(const char *tracker, char out[INET_ADDRSTRLEN]) {
 }
 
 static int home_listen(int *port) {
-    int fd = lmb_listen(0);
-    struct sockaddr_in local;
-    socklen_t len = sizeof local;
-    if (fd < 0) return -1;
-    if (getsockname(fd, (struct sockaddr *)&local, &len)) { close(fd); return -1; }
-    *port = ntohs(local.sin_port);
-    (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
-    return fd;
+    return lmb_home_listen_service(port);
 }
 
-static int home_free_port(void) {
-    int port = 0, fd = home_listen(&port);
-    if (fd >= 0) close(fd);
-    return port;
-}
-
-static pid_t home_spawn(char *const argv[], char *const envv[], const char *log, int *ready_fd) {
+/* Consumes listener, including on failure; other child descriptors stay CLOEXEC. */
+static pid_t home_spawn(char *const argv[], char *const envv[], const char *log, int *ready_fd, int listener) {
     int ready[2] = {-1, -1};
-    if (ready_fd && pipe(ready)) return -1;
+    if (ready_fd && pipe(ready)) { if (listener >= 0) close(listener); return -1; }
     if (ready_fd) (void)fcntl(ready[0], F_SETFD, FD_CLOEXEC);
     pid_t parent = getpid(), pid = fork();
     if (!pid) {
@@ -96,6 +85,12 @@ static pid_t home_spawn(char *const argv[], char *const envv[], const char *log,
         if (nullfd > 2) close(nullfd);
         if (logfd > 2) close(logfd);
         for (int i = 0; envv && envv[i]; i++) putenv(envv[i]);
+        if (listener >= 0) {
+            char descriptor[32];
+            if (fcntl(listener, F_SETFD, 0)) _exit(125);
+            snprintf(descriptor, sizeof descriptor, "%d", listener);
+            setenv("LUMABRI_HOME_LISTEN_FD", descriptor, 1);
+        } else unsetenv("LUMABRI_HOME_LISTEN_FD");
         if (ready_fd) {
             char descriptor[32];
             close(ready[0]);
@@ -104,6 +99,7 @@ static pid_t home_spawn(char *const argv[], char *const envv[], const char *log,
         } else unsetenv("LUMABRI_READY_FD");
         execv(argv[0], argv); _exit(127);
     }
+    if (listener >= 0) close(listener);
     if (ready_fd) {
         close(ready[1]);
         if (pid < 0) close(ready[0]);
@@ -212,8 +208,8 @@ static int home_donor_launch(HomeDonor *d, int edge) {
                    e_key, "LUMABRI_SEGMENT_REQUIRED=1", "LUMABRI_VERIFY=0",
                    "LUMABRI_PREFETCH=0", "LUMABRI_NO_EXEC=1", e_log,
                    edge ? e_limit : "LUMABRI_HOME_SEGMENT=1", NULL};
-    int chosen_port = home_free_port();
-    if (!chosen_port) return -1;
+    int chosen_port = 0, listener = home_listen(&chosen_port);
+    if (listener < 0) return -1;
     snprintf(port, sizeof port, "%d", chosen_port);
     snprintf(addr, sizeof addr, "%s:%d", d->ip, chosen_port);
     snprintf(name, sizeof name, "home-%.12s-%u", id, o->begin);
@@ -238,11 +234,11 @@ static int home_donor_launch(HomeDonor *d, int edge) {
         /* The host itself must not be preloaded; model_boot passes the mirror
          * to its Edge child, while its own networking remains ordinary C. */
         envv[0] = "LD_PRELOAD=";
-        d->host = home_spawn(host_argv, envv, d->log, &d->host_ready);
+        d->host = home_spawn(host_argv, envv, d->log, &d->host_ready, listener);
         d->host_port = chosen_port;
         return d->host > 0 ? 0 : -1;
     }
-    d->segment = home_spawn(segment_argv, envv, d->log, &d->segment_ready);
+    d->segment = home_spawn(segment_argv, envv, d->log, &d->segment_ready, listener);
     d->segment_port = chosen_port;
     return d->segment > 0 ? 0 : -1;
 }
@@ -271,8 +267,9 @@ static void home_donor_screen(const HomeDonor *d, const char *name, uint64_t ram
         if (t->phase == LMB_HOME_PENDING) {
             ui_item(y, choice == 0, "Accept this request", "Reserve only the displayed resources for this plan.");
             ui_item(y + 3, choice == 1, "Decline", "No weights or model state will be loaded.");
-        } else ui_item(y, 1, "Stop sharing and return", "Release this plan and its resources.");
-        ui_footer(t->reason[0] ? t->reason : d->log, "↑ ↓ choose   Enter confirm   Esc stop and return");
+        } else ui_item(y, 0, "Keep this window open to share", "Press Esc to stop sharing and release resources.");
+        ui_footer(t->reason[0] ? t->reason : d->log, t->phase == LMB_HOME_PENDING ?
+            "↑ ↓ choose   Enter confirm   Esc stop and return" : "Esc stop sharing and return");
         if (ui_w < 60 || ui_h < 28) {
             ui_begin("share resources"); ui_text(5, 4, UI_SAND, "Resize to at least 60 × 28. Esc stops sharing.");
         }
@@ -402,7 +399,7 @@ static int cmd_donor(int argc, char **argv) {
     char *worker_argv[] = {own_bin, "worker", "--join", (char *)tracker,
         "--name", (char *)name, "--ram-gb", budget, "--disk", d.cache_base,
         "--control-address", addr, NULL};
-    pid_t reporter = home_spawn(worker_argv, NULL, report_log, NULL);
+    pid_t reporter = home_spawn(worker_argv, NULL, report_log, NULL, -1);
     if (reporter <= 0) { close(listener); return 1; }
     g_stopping = 0; install_chat_signal_handlers(); signal(SIGPIPE, SIG_IGN);
     HomeTerminal term; home_terminal_begin(&term);
@@ -433,7 +430,7 @@ static int cmd_donor(int argc, char **argv) {
         if (key == 1001 || key == 1002) { donor_choice = !donor_choice; redraw = 0; }
         if (key == '\r' || key == '\n') {
             if (term.active && (ui_w < 60 || ui_h < 28)) continue;
-            if (d.transaction.phase != LMB_HOME_PENDING) break;
+            if (d.transaction.phase != LMB_HOME_PENDING) continue;
             key = donor_choice ? 'n' : 'y';
         }
         if (key == 'x') home_donor_disconnect(&d, "Stopped by this computer's owner.");
@@ -570,7 +567,8 @@ static int home_request_chat(LmbTuiState *st, int selected) {
     char logdir[1100], logfile[1200];
     exe_dir(dir, sizeof dir); snprintf(maintainer, sizeof maintainer, "%s/maintainer", dir);
     if (access(maintainer, X_OK) || home_local_ip(st->tracker, ip)) return -1;
-    int source_port = home_free_port(); if (!source_port) return -1;
+    int source_port = 0, source_listener = home_listen(&source_port);
+    if (source_listener < 0) return -1;
     snprintf(port, sizeof port, "%d", source_port); snprintf(addr, sizeof addr, "%s:%d", ip, source_port);
     snprintf(name, sizeof name, "home-source-%.16s", idhex);
     snprintf(logdir, sizeof logdir, "%s/.lumabri/logs", getenv("HOME") ? getenv("HOME") : ".");
@@ -580,7 +578,7 @@ static int home_request_chat(LmbTuiState *st, int selected) {
         "--advertise", addr, "--key", kp, NULL};
     HomeTerminal term; home_terminal_begin(&term);
     g_stopping = 0; install_chat_signal_handlers(); signal(SIGPIPE, SIG_IGN);
-    s.source = home_spawn(source_argv, NULL, logfile, NULL);
+    s.source = home_spawn(source_argv, NULL, logfile, NULL, source_listener);
     int result = -1;
     if (s.source <= 0) goto done;
     LmbModelIdentity identity;

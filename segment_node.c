@@ -11,6 +11,7 @@
 #include "lumabri_secure.h"
 #include "segment_colibri.h"
 #include "lumabri_ready.h"
+#include "lumabri_home_net.h"
 
 #include <pthread.h>
 #include <dirent.h>
@@ -1465,7 +1466,7 @@ int main(int argc, char **argv) {
                 peer_key_path);
         return 1;
     }
-    g_listen_fd = lmb_listen((int)port);
+    g_listen_fd = lmb_home_take_listener((int)port);
     if (g_listen_fd < 0) { perror("segment listen"); return 1; }
     pthread_t registration_thread, reaper_thread, governor_thread;
     if (pthread_create(&registration_thread, NULL, registration_worker,

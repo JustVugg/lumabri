@@ -13,13 +13,17 @@ import time
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def check(args, compact):
+def check(args, compact, apple=False):
     with tempfile.TemporaryDirectory(prefix="lumabri-workspace-") as home:
         master, slave = pty.openpty()
         before = termios.tcgetattr(slave)
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 12 if compact else 38, 50 if compact else 104, 0, 0))
         env = {**os.environ, "HOME": home, "LUMABRI_ENCRYPT": "1",
                "LUMABRI_PEER_KEY": home + "/peer.key"}
+        if apple:
+            env.update(TERM_PROGRAM="Apple_Terminal", TERM="xterm-256color", COLORTERM="truecolor")
+            env.pop("LUMABRI_COLOR", None)
+            env.pop("NO_COLOR", None)
         p = subprocess.Popen([str(ROOT / "lumabri"), *args], env=env, cwd=ROOT,
                              stdin=slave, stdout=slave, stderr=slave)
         output = bytearray()
@@ -37,6 +41,10 @@ def check(args, compact):
 
         try:
             until(lambda: (b"Resize the terminal" if compact else b"What would you like to do?") in output)
+            if apple:
+                assert b"\x1b[38;2;" not in output and b"\x1b[48;2;" not in output
+                assert b"\x1b[48;5;234m" in output
+                assert b"\x1b[48;5;238m" in output, "selection must have a contrasting background"
             if not compact:
                 os.write(master, b"\r")
                 until(lambda: b"Create or join a household first" in output)
@@ -61,4 +69,5 @@ def check(args, compact):
 for args in ([], ["chat"]):
     for compact in (False, True):
         check(args, compact)
-print("WORKSPACE NAVIGATION: PASS (app/chat, actions, no implicit sharing, compact view, terminal restore)")
+check([], False, apple=True)
+print("WORKSPACE NAVIGATION: PASS (app/chat, actions, Apple palette/selection, no implicit sharing, compact view, terminal restore)")
