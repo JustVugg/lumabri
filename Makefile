@@ -429,7 +429,16 @@ test_home: tests/c/test_home.c lumabri_home.h lumabri_inventory.h lumabri_famili
 test_chat_ui: tests/c/test_chat_ui.c lumabri.c src/ui/lumabri_tui.c src/ui/lumabri_tui.h src/ui/lumabri_visual.h src/ui/lumabri_chat_editor.h lumabri_home_runtime.h src/ui/lumabri_home_ui.h lumabri_ready.h lumabri_cluster.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_chat_ui.c src/ui/lumabri_tui.c lumabri_machine.c -o $@
 
-test-chat-ui: lumabri test_chat_ui
+test-ready-pipe: tests/c/test_ready_pipe.c lumabri_ready.h
+	mkdir -p build/tests
+	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_ready_pipe.c -o build/tests/ready-pipe
+	./build/tests/ready-pipe
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DLMB_READY_PORTABLE_PIPE tests/c/test_ready_pipe.c -o build/tests/ready-pipe-portable
+	./build/tests/ready-pipe-portable
+
+.PHONY: test-ready-pipe
+
+test-chat-ui: lumabri test_chat_ui test-ready-pipe
 	python3 tests/integration/chat_ui_test.py
 	python3 tests/ui_text_test.py
 	python3 tests/integration/workspace_navigation_test.py
@@ -689,6 +698,7 @@ test: all test_key_rotation test_hedge test_local_fallback test_nat_adopt test_v
 	bash ./tests/integration/catalog_test.sh
 	./test_inventory
 	./test_home
+	$(MAKE) test-ready-pipe
 	python3 ./tests/integration/chat_ui_test.py
 	python3 tests/ui_text_test.py
 	python3 tests/integration/workspace_navigation_test.py

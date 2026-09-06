@@ -9,6 +9,23 @@ permissions:
   contents: read
 
 jobs:
+  macos-workspace:
+    # Native frontend gate, not certification of Segment, GPU or a real LAN.
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build the C workspace with Apple Clang
+        run: make lumabri test_chat_ui CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
+      - name: Readiness descriptors and portable fallback
+        run: make test-ready-pipe CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
+      - name: Native cryptographic known-answer tests
+        run: bash tests/integration/crypto_test.sh
+      - name: Native workspace navigation and terminal restoration
+        run: python3 tests/integration/workspace_navigation_test.py
   linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
