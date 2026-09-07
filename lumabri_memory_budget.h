@@ -9,7 +9,7 @@ typedef struct {
 } LmbHomeReservation;
 
 static LMB_UNUSED uint64_t lmb_budget_add(uint64_t a, uint64_t b) {
-    return UINT64_MAX - a < b ? UINT64_MAX : a + b;
+    return lmb_size_add(a, b);
 }
 
 static LMB_UNUSED uint64_t lmb_budget_mib(uint64_t bytes) {
