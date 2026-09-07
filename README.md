@@ -98,6 +98,13 @@ Type **/** for command suggestions, use arrows to choose and Tab to complete.
 **/help**, **/debug**, **/reset** and **/quit** provide help, diagnostics, a new
 conversation and exit.
 
+Household chat also shows the approved layer allocation. **/plan** displays
+each compute donor, its layer range, reserved RAM and the Edge/chat host.
+**/experts** queries activity on the same household tracker. Serving checkpoint
+files is not the same as executing model layers; a chat process runs no layers,
+even when a separate approved donor runs on that computer. The allocation is
+a READY-time snapshot, not a live utilization or speed measurement.
+
 ## What has actually been checked?
 
 - Linux-environment build with warnings treated as errors.

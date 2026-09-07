@@ -57,6 +57,7 @@
 #include "lumabri_cluster.h"
 #include "src/ui/lumabri_tui.h"
 #include "src/ui/lumabri_visual.h"
+#include "src/ui/lumabri_execution_view.h"
 #include "lumabri_machine.h"
 
 #ifdef __linux__
@@ -71,6 +72,9 @@
 /* ---- terminal ----------------------------------------------------------- */
 
 static int g_tty = 0;
+/* Borrowed only during the synchronous household cmd_chat call. The plan is
+ * immutable while the chat's input/status workers can read it. */
+static const LmbExecutionView *g_execution_view;
 /* Snapshot the shell's terminal state once, before either line editor can
  * touch it.  Taking live_begin's "old" value from the current tty created a
  * narrow hand-off race where it could inherit the previous editor's cbreak
@@ -118,13 +122,14 @@ static int term_h(void) {
 
 static const char *const CHAT_COMMANDS[] = {
     "/swarm", "/experts", "/hosts", "/model", "/debug", "/storage",
-    "/reset", "/help", "/quit",
+    "/reset", "/help", "/quit", "/plan",
 };
 static int g_slash_completion;
 static const char *const CHAT_COMMAND_HELP[] = {
     "Show cluster activity", "Show expert execution", "Show computers",
     "Show the current model", "Open diagnostics", "Show cache storage",
     "Start a fresh conversation", "List chat commands", "Close this chat",
+    "Show the approved layer allocation",
 };
 _Static_assert(sizeof CHAT_COMMANDS / sizeof *CHAT_COMMANDS ==
                sizeof CHAT_COMMAND_HELP / sizeof *CHAT_COMMAND_HELP, "command help parity");
@@ -1784,6 +1789,7 @@ static void render_help(void) {
     printf("  %-12s compact alias for /swarm\n", "/hosts");
     printf("  %-12s list or switch models (hosted: current model only)\n", "/model");
     printf("  %-12s engine and donor diagnostics\n", "/debug");
+    printf("  %-12s approved household layer allocation\n", "/plan");
     printf("  %-12s mirror and CAS disk usage\n", "/storage");
     printf("  %-12s new conversation\n", "/reset");
     printf("  %-12s close chat\n", "/quit");
@@ -1937,13 +1943,15 @@ static void live_complete_locked(void) {
 static int live_immediate_command_locked(const char *command) {
     if (strcmp(command, "/swarm") && strcmp(command, "/hosts") &&
         strcmp(command, "/experts") && strcmp(command, "/debug") &&
-        strcmp(command, "/storage") && strcmp(command, "/help")) return 0;
+        strcmp(command, "/storage") && strcmp(command, "/help") &&
+        strcmp(command, "/plan")) return 0;
     putchar('\n');
     if (!strcmp(command, "/swarm") || !strcmp(command, "/hosts"))
         render_swarm(g_live.tracker);
     else if (!strcmp(command, "/experts")) render_experts(g_live.tracker);
     else if (!strcmp(command, "/debug")) render_debug();
     else if (!strcmp(command, "/storage")) render_storage();
+    else if (!strcmp(command, "/plan")) lmb_execution_print(stdout, g_execution_view);
     else render_help();
     printf("\x1b[%d;1H\r\n\r\n\r\n\r\n\x1b[%d;1H",
            g_live.rows, g_live.rows - 3);
@@ -4573,6 +4581,7 @@ static int cmd_chat(int argc, char **argv) {
     if (host_addr) {
         memset(&sw, 0, sizeof sw);
         if (host_connect(host_addr, NULL, host_key, &eng, &max_new)) return 1;
+        if (g_execution_view) lmb_execution_print(stdout, g_execution_view);
     } else if (model_boot(tracker, model, shim, engines_dir, engine_path,
                           local_dir, ctx, max_new, cap_experts, &eng, &sw))
         return 1;
@@ -4617,6 +4626,7 @@ static int cmd_chat(int argc, char **argv) {
         if (!strcmp(line, "/hosts")) { render_swarm(tracker); continue; }
         if (!strcmp(line, "/experts")) { render_experts(tracker); continue; }
         if (!strcmp(line, "/debug")) { render_debug(); continue; }
+        if (!strcmp(line, "/plan")) { lmb_execution_print(stdout, g_execution_view); continue; }
         if (!strcmp(line, "/storage")) { render_storage(); continue; }
         if (!strcmp(line, "/help")) { render_help(); continue; }
         if (!strncmp(line, "/model", 6)) {

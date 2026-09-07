@@ -17,6 +17,13 @@ import unicodedata
 
 ROOT = Path(__file__).resolve().parents[2]
 
+plan = subprocess.check_output(["./test_chat_ui", "plan"], cwd=ROOT, text=True)
+assert "Approved Segment plan: 2 compute donors" in plan
+assert "layers [0,2)" in plan and "layers [2,4)" in plan
+assert "This chat process runs no model layers" in plan
+assert "No approved household plan" in plan
+assert "\x1b" not in plan, "a peer name injected terminal controls"
+
 
 class Screen:
     def __init__(self, rows=16, cols=90):
