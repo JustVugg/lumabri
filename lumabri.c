@@ -4922,42 +4922,16 @@ static int cmd_peer_key(int argc, char **argv) {
  * because a plan knows what fits and only a calibration knows what it does,
  * and printing them in the same voice is how a catalogue starts lying. */
 
+#include "lumabri_checkpoint_inventory.h"
+
 typedef struct {
     char dir[512];
     char name[64];
     LmbModelShape shape;
     int has_weights;
+    uint64_t checkpoint_bytes;
+    int inventory_ok;
 } CatalogEntry;
-
-static int catalog_has_weights(const char *root, unsigned depth) {
-    if (depth > 3) return 0;
-    DIR *d = opendir(root);
-    if (!d) return 0;
-    int found = 0;
-    struct dirent *e;
-    while (!found && (e = readdir(d))) {
-        if (e->d_name[0] == '.') continue;
-        char path[1024];
-        int n = snprintf(path, sizeof path, "%s/%s", root, e->d_name);
-        if (n < 0 || (size_t)n >= sizeof path) continue;
-        struct stat st;
-        if (stat(path, &st)) continue;
-        if (S_ISDIR(st.st_mode)) {
-            found = catalog_has_weights(path, depth + 1);
-            continue;
-        }
-        /* A config-side metadata stub is not a weight container. Four KiB is
-         * still only a presence check—the adapter validates the real format
-         * before READY—but it rejects empty and token-sized placeholders. */
-        if (!S_ISREG(st.st_mode) || st.st_size < 4096) continue;
-        const char *dot = strrchr(e->d_name, '.');
-        if (dot && (!strcmp(dot, ".safetensors") || !strcmp(dot, ".bin") ||
-                    !strcmp(dot, ".gguf") || !strcmp(dot, ".coli")))
-            found = 1;
-    }
-    closedir(d);
-    return found;
-}
 
 static int catalog_scan(const char *root, CatalogEntry *out, int cap) {
     DIR *d = opendir(root);
@@ -4974,7 +4948,10 @@ static int catalog_scan(const char *root, CatalogEntry *out, int cap) {
         if (lmb_shape_from_config(path, &out[n].shape)) continue;
         snprintf(out[n].dir, sizeof out[n].dir, "%.511s", path);
         snprintf(out[n].name, sizeof out[n].name, "%.63s", e->d_name);
-        out[n].has_weights = catalog_has_weights(path, 0);
+        LmbCheckpointInventory inventory;
+        out[n].inventory_ok = !lmb_checkpoint_inventory(path, &inventory);
+        out[n].has_weights = inventory.has_weights;
+        out[n].checkpoint_bytes = inventory.bytes;
         n++;
     }
     closedir(d);
@@ -5066,6 +5043,8 @@ static int catalog_state_refresh(LmbTuiState *st, void *unused) {
         snprintf(m->dir, sizeof m->dir, "%.511s", found[i].dir);
         m->shape = found[i].shape;
         m->weights_present = found[i].has_weights;
+        m->checkpoint_bytes = found[i].checkpoint_bytes;
+        m->checkpoint_inventory_ok = found[i].inventory_ok;
         st->nodes[0].has_checkpoint = found[i].has_weights;
         LmbClusterNode selected[LMB_CLUSTER_MAX_NODES];
         uint32_t mapping[LMB_CLUSTER_MAX_NODES], nselected = 0;
@@ -5080,6 +5059,9 @@ static int catalog_state_refresh(LmbTuiState *st, void *unused) {
         m->planned = st->inventory_ok && !lmb_plan_cluster_source(&m->shape, selected, nselected,
                                        st->context, st->sessions,
                                        LMB_GOAL_ONE_SESSION, household && found[i].has_weights, &m->plan);
+        if (m->planned && household && m->weights_present)
+            m->planned = m->checkpoint_inventory_ok && !lmb_home_plan_budgets(
+                &m->shape, m->checkpoint_bytes, selected, nselected, st->context, &m->plan);
         if (m->planned) {
             m->plan.edge_node = mapping[m->plan.edge_node];
             for (uint32_t j = 0; j < m->plan.nslices; j++)
@@ -5103,6 +5085,8 @@ static void catalog_row(const LmbTuiModel *m) {
     char detail[96] = "";
     if (!m->shape.sizing_verified)
         snprintf(detail, sizeof detail, "adapter sizing unavailable");
+    else if (!m->checkpoint_inventory_ok)
+        snprintf(detail, sizeof detail, "checkpoint inventory unavailable");
     else if (!m->weights_present)
         snprintf(detail, sizeof detail, "checkpoint weights missing");
     else if (ok && plan.state == LMB_PLAN_UNRUNNABLE && plan.missing_bytes)
@@ -5174,9 +5158,12 @@ static void catalog_json(const LmbTuiState *st) {
         fputs(",\"adapter\":", stdout);
         json_string(stdout, model->shape.segment_id);
         printf(",\"sizing_verified\":%s,\"weights_present\":%s,"
+               "\"checkpoint_inventory_ok\":%s,\"checkpoint_bytes\":%llu,"
                "\"planned\":%s,\"state\":",
                model->shape.sizing_verified ? "true" : "false",
                model->weights_present ? "true" : "false",
+               model->checkpoint_inventory_ok ? "true" : "false",
+               (unsigned long long)model->checkpoint_bytes,
                planned ? "true" : "false");
         json_string(stdout, planned ? lmb_plan_state_name(plan->state) :
                                      "cannot plan");

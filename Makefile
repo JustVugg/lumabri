@@ -49,7 +49,7 @@ endif
 # regressions would make this gate depend on whichever checkout ENGINE names.
 check-warnings:
 	$(MAKE) -B all test_relay_exec test_swarm_fed test_key_rotation \
-		test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 test_exec2 test_accum_order test_residency_report test_model_family test_planner test_cluster test_calibration \
+		test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 test_exec2 test_accum_order test_residency_report test_model_family test_planner test_cluster test_memory_budget test_calibration \
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
 		test_meminfo test_compute_lease test_content_filter \
 		test_scheduler test_run_gate test_inventory test_home test_chat_ui \
@@ -62,7 +62,7 @@ MACHINE_DEPS = lumabri_machine.h $(MACHINE_SRC)
 
 lumabri: $(HOME_NET_DEPS) lumabri.c src/ui/lumabri_tui.c src/ui/lumabri_tui.h src/ui/lumabri_visual.h src/ui/lumabri_chat_editor.h src/ui/lumabri_execution_view.h lumabri_proto.h lumabri_sign.h \
 		lumabri_inventory.h lumabri_home.h lumabri_home_runtime.h src/ui/lumabri_home_ui.h lumabri_ready.h \
-		lumabri_families.h lumabri_planner.h lumabri_cluster.h \
+		lumabri_families.h lumabri_planner.h lumabri_cluster.h lumabri_memory_budget.h lumabri_checkpoint_inventory.h lumabri_content.h \
 		lumabri_calibration.h $(SECURE_DEPS) $(MACHINE_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread lumabri.c src/ui/lumabri_tui.c $(MACHINE_SRC) -o $@
 
@@ -442,8 +442,11 @@ test_model_family: tests/c/test_model_family.c lumabri_families.h
 test_planner: tests/c/test_planner.c lumabri_planner.h lumabri_families.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_planner.c -o $@
 
-test_cluster: tests/c/test_cluster.c lumabri_cluster.h lumabri_planner.h lumabri_families.h lumabri_machine.h
+test_cluster: tests/c/test_cluster.c lumabri_cluster.h lumabri_memory_budget.h lumabri_planner.h lumabri_families.h lumabri_machine.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_cluster.c -o $@
+
+test_memory_budget: tests/c/test_memory_budget.c lumabri_memory_budget.h lumabri_checkpoint_inventory.h lumabri_content.h lumabri_cluster.h lumabri_planner.h lumabri_families.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_memory_budget.c -o $@
 
 test_calibration: tests/c/test_calibration.c lumabri_calibration.h lumabri_planner.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_calibration.c -o $@
@@ -454,7 +457,7 @@ test_inventory: tests/c/test_inventory.c lumabri_inventory.h lumabri_machine.h l
 test_home: tests/c/test_home.c lumabri_home.h lumabri_inventory.h lumabri_families.h lumabri_proto.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_home.c -o $@
 
-test_chat_ui: $(HOME_NET_DEPS) $(SECURE_DEPS) tests/c/test_chat_ui.c lumabri.c src/ui/lumabri_tui.c src/ui/lumabri_tui.h src/ui/lumabri_visual.h src/ui/lumabri_chat_editor.h src/ui/lumabri_execution_view.h lumabri_home_runtime.h src/ui/lumabri_home_ui.h lumabri_ready.h lumabri_cluster.h
+test_chat_ui: $(HOME_NET_DEPS) $(SECURE_DEPS) tests/c/test_chat_ui.c lumabri.c src/ui/lumabri_tui.c src/ui/lumabri_tui.h src/ui/lumabri_visual.h src/ui/lumabri_chat_editor.h src/ui/lumabri_execution_view.h lumabri_home_runtime.h src/ui/lumabri_home_ui.h lumabri_ready.h lumabri_cluster.h lumabri_memory_budget.h lumabri_checkpoint_inventory.h lumabri_content.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_chat_ui.c src/ui/lumabri_tui.c lumabri_machine.c -o $@
 
 test-ready-pipe: tests/c/test_ready_pipe.c lumabri_ready.h
@@ -613,7 +616,7 @@ $(COLIBRI_SEGMENT_LIB): $(HYBRID_ENGINE_DIR)/.prepared build/segment_hybrid_brid
 		segment-edge-library
 	$(AR) rcs $@ build/segment_hybrid_bridge.o
 
-segment_node: segment_node.c $(HOME_NET_DEPS) lumabri_planner.h lumabri_families.h lumabri_ready.h \
+segment_node: segment_node.c $(HOME_NET_DEPS) lumabri_planner.h lumabri_memory_budget.h lumabri_families.h lumabri_ready.h \
 		$(SEGMENT_COMMON) $(COLIBRI_SEGMENT_LIB) $(MACHINE_DEPS) \
 		lumabri_run_gate.c lumabri_run_gate.h
 	$(CC) $(CPPFLAGS) $(SEGMENT_CFLAGS) -pthread segment_node.c lumabri_segment.c \
@@ -708,7 +711,7 @@ test-adapters: tracker segment_node segment_chat
 test-segment-discovery: tracker test_segment_discovery
 	bash ./tests/integration/segment_discovery_test.sh
 
-test: all test_key_rotation test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 test_accum_order test_residency_report test_model_family test_planner test_cluster \
+test: all test_key_rotation test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 test_accum_order test_residency_report test_model_family test_planner test_cluster test_memory_budget \
 		test_inventory test_home test_chat_ui test_calibration \
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
 		test_meminfo test_compute_lease test_content_filter \
@@ -753,6 +756,7 @@ test: all test_key_rotation test_hedge test_local_fallback test_nat_adopt test_v
 	bash ./tests/integration/tui_test.sh
 	./test_planner
 	./test_cluster
+	./test_memory_budget
 	./test_calibration
 	./test_nat_adopt
 	bash ./tests/integration/rtt_refresh_test.sh
@@ -796,7 +800,7 @@ clean:
 	rm -f tracker maintainer liblumabri.so liblumabri.dylib test_shim swarm_probe lumabri \
 	      test_relay_exec test_swarm_fed test_key_rotation test_hedge \
 	      test_local_fallback test_accum_order test_residency_report \
-	      test_model_family test_planner test_cluster test_calibration test_inventory test_home test_chat_ui segment_budget_probe \
+	      test_model_family test_planner test_cluster test_memory_budget test_calibration test_inventory test_home test_chat_ui segment_budget_probe \
 	      test_nat_adopt test_rtt_refresh \
 	      test_verify_failover test_segment_v2 test_segment_discovery test_sampling \
 	      test_swarm_detail test_relay_rate test_machine test_meminfo \
