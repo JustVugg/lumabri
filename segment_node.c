@@ -1140,6 +1140,17 @@ static void preflight_signal(int *fd, char status) {
 }
 
 int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "--thread-capacity")) {
+#ifdef _OPENMP
+        int capacity = omp_get_num_procs();
+        if (capacity < 1) capacity = 1;
+        if (capacity > 256) capacity = 256;
+        printf("%d\n", capacity);
+#else
+        puts("1");
+#endif
+        return 0;
+    }
     const char *engine_id = arg_value(argc, argv, "--engine");
     const char *model_dir = arg_value(argc, argv, "--model-dir");
     const char *model = arg_value(argc, argv, "--model");
@@ -1324,7 +1335,7 @@ int main(int argc, char **argv) {
                                "LUMABRI_SEGMENT_RAM_RESERVE_MB" :
                                "LUMABRI_RAM_RESERVE_MB";
     uint64_t reserve = (uint64_t)lmb_env_int(
-        reserve_name, 4096, 256, 262144) << 20;
+        reserve_name, (int)lmb_machine_default_reserve_mb(lmb_machine_total_ram()), 256, 262144) << 20;
     if (!process_limit && available != UINT64_MAX && available > reserve)
         process_limit = available - reserve;
     /* The runtime preflight must be conservative. The generic catalogue

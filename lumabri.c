@@ -3922,7 +3922,7 @@ static int role_start_segment(const Role *r, const char *tracker,
     uint64_t reserve = (uint64_t)lmb_env_int(
         getenv("LUMABRI_SEGMENT_RAM_RESERVE_MB") ?
         "LUMABRI_SEGMENT_RAM_RESERVE_MB" : "LUMABRI_RAM_RESERVE_MB",
-        4096, 256, 262144) << 20;
+        (int)lmb_machine_default_reserve_mb(profile.ram_total_bytes), 256, 262144) << 20;
     if (!available || reserve >= available)
         return 0;
     uint64_t memory_budget = available - reserve;
@@ -4983,8 +4983,7 @@ static void catalog_self(LmbClusterNode *n, LmbMachineProfile *profile,
     } else if (lmb_machine_probe(&p, disk, NULL)) return;
     *profile = p;
     snprintf(n->name, sizeof n->name, "%s", p.hostname);
-    uint64_t reserve = (uint64_t)lmb_env_int("LUMABRI_RAM_RESERVE_MB",
-                                             4096, 256, 262144) << 20;
+    uint64_t reserve = lmb_machine_ram_reserve();
     n->ram_budget_bytes = p.ram_available_bytes > reserve
                         ? p.ram_available_bytes - reserve : 0;
     n->vram_budget_bytes = p.vram_available_bytes;
@@ -5311,7 +5310,7 @@ static int cmd_worker(int argc, char **argv) {
             lmb_machine_refresh_resources(&profile, disk);
             report.machine = profile;
             if (name) snprintf(report.machine.hostname, sizeof report.machine.hostname, "%s", name);
-            uint64_t reserve = (uint64_t)lmb_env_int("LUMABRI_RAM_RESERVE_MB", 4096, 256, 262144) << 20;
+            uint64_t reserve = lmb_machine_ram_reserve();
             uint64_t available = report.machine.ram_available_bytes;
             report.ram_budget_bytes = available > reserve ? available - reserve : 0;
             if (report.ram_budget_bytes > limit) report.ram_budget_bytes = limit;
@@ -5367,8 +5366,7 @@ static int cmd_machine(int argc, char **argv) {
     }
     lmb_machine_print(stdout, &profile, json);
     if (!json) {
-        uint64_t reserve = (uint64_t)lmb_env_int(
-            "LUMABRI_RAM_RESERVE_MB", 4096, 256, 262144) << 20;
+        uint64_t reserve = lmb_machine_ram_reserve();
         LmbGovernor governor;
         lmb_governor_init(&governor, reserve);
         printf("governor %s · %.1f GB system reserve\n",
@@ -5381,8 +5379,7 @@ static int cmd_machine(int argc, char **argv) {
 static int cmd_limits(int argc, char **argv) {
     (void)argv;
     if (argc) { fprintf(stderr, "usage: lumabri limits\n"); return 2; }
-    uint64_t reserve = (uint64_t)lmb_env_int(
-        "LUMABRI_RAM_RESERVE_MB", 4096, 256, 262144) << 20;
+    uint64_t reserve = lmb_machine_ram_reserve();
     LmbMachineProfile profile;
     (void)lmb_machine_probe(&profile, ".", NULL);
     uint64_t donate = profile.ram_available_bytes > reserve ?
@@ -5470,8 +5467,7 @@ static int cmd_doctor(int argc, char **argv) {
                machine_ok ? "CPU, RAM, GPU, disk and network probed" :
                             "machine probe failed");
     if (machine_ok) {
-        uint64_t reserve = (uint64_t)lmb_env_int(
-            "LUMABRI_RAM_RESERVE_MB", 4096, 256, 262144) << 20;
+        uint64_t reserve = lmb_machine_ram_reserve();
         doctor_add(checks, &count, "ram-reserve",
                    profile.ram_available_bytes > reserve, 0,
                    profile.ram_available_bytes > reserve ?

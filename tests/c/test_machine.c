@@ -6,6 +6,14 @@
 #include <unistd.h>
 
 int main(void) {
+    assert(lmb_machine_default_reserve_mb(0) == 4096);
+    assert(lmb_machine_default_reserve_mb(2ull << 30) == 1024);
+    assert(lmb_machine_default_reserve_mb(8ull << 30) == 2048);
+    assert(lmb_machine_default_reserve_mb(16ull << 30) == 4096);
+    assert(lmb_machine_default_reserve_mb(64ull << 30) == 4096);
+    setenv("LUMABRI_RAM_RESERVE_MB", "3072", 1);
+    assert(lmb_machine_ram_reserve() == (3072ull << 20));
+    unsetenv("LUMABRI_RAM_RESERVE_MB");
     LmbMachineProfile profile;
     assert(lmb_machine_probe(&profile, ".", NULL) == 0);
     assert(profile.logical_cpus > 0);

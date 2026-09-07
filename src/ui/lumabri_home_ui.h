@@ -380,7 +380,10 @@ static int cmd_home(void) {
                 snprintf(notice, sizeof notice, "RAM limit must be a positive number of GB."); continue;
             }
             if (home_settings_save(&next)) home_error_dialog("Could not save settings", "Check that your home directory is writable, then retry.");
-            else s = next;
+            else {
+                s = next;
+                snprintf(notice, sizeof notice, "Settings saved. Models: %.110s · RAM limit: %.20s GB", s.models, s.ram);
+            }
         } else if (key == 'n') {
             if (tracker_child <= 0 && home_tracker_resume(&s, &tracker_child, notice, sizeof notice)) continue;
             char identity[65]; lmb_hex(identity, g_sec_pk, 32);

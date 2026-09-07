@@ -44,6 +44,7 @@ jobs:
         run: |
           make lumabri tracker maintainer liblumabri.dylib test_shim test_machine test_chat_ui CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           ./test_machine
+          make test-runtime-probe CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           python3 tests/integration/native_shim_test.py
           python3 tests/integration/household_network_test.py
       - name: Readiness descriptors and portable fallback
@@ -66,7 +67,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: JustVugg/colibri
-          ref: dev
+          ref: 12a5c464b5c1f8292d578c62458706bc32d6ac95
           path: colibri
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -85,7 +86,9 @@ jobs:
         run: make check-warnings ENGINE=../colibri/c
       - name: Unit and integration gates
         working-directory: lumabri
-        run: make test ENGINE=../colibri/c
+        run: |
+          make test ENGINE=../colibri/c
+          make test-runtime-probe CFLAGS='-O2 -Wall -Wextra -Werror'
       - name: Sanitizers
         working-directory: lumabri
         run: make test-sanitize
@@ -131,6 +134,7 @@ jobs:
       fail-fast: false
       matrix:
         runner: [macos-15-intel, macos-15]
+        openmp: [enabled, disabled]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 35
     steps:
@@ -140,15 +144,24 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: JustVugg/colibri
-          ref: dev
+          ref: 12a5c464b5c1f8292d578c62458706bc32d6ac95
           path: colibri
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: brew install libomp
+      - if: matrix.openmp == 'enabled'
+        run: brew install libomp
       - name: Build the native household runtime
         working-directory: lumabri
-        run: make household ENGINE=../colibri/c CC=clang -j3
+        env:
+          OPENMP_MODE: ${{ matrix.openmp }}
+        run: |
+          if [ "$OPENMP_MODE" = disabled ]; then
+            make household ENGINE=../colibri/c CC=clang OMP_FLAGS= OMP_LIBS= -j3
+            test "$(./segment_node --thread-capacity)" = 1
+          else
+            make household ENGINE=../colibri/c CC=clang -j3
+          fi
       - uses: actions/download-artifact@v4
         with:
           name: tiny-olmoe-checkpoint
@@ -163,6 +176,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: household-logs-${{ matrix.runner }}
+          name: household-logs-${{ matrix.runner }}-${{ matrix.openmp }}
           path: ${{ runner.temp }}/lumabri-home-flow-*/**/*.log
           retention-days: 3

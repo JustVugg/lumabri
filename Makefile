@@ -26,6 +26,13 @@ all: tracker maintainer $(SHIM_LIB) test_shim swarm_probe lumabri
 # Native household runtime (Colibri sources are a build-time dependency).
 household: tracker maintainer $(SHIM_LIB) lumabri segment_node segment_chat
 
+.PHONY: test-runtime-probe
+test-runtime-probe: tests/c/test_runtime_probe.c lumabri_runtime_probe.h
+	mkdir -p build/tests
+	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_runtime_probe.c -o build/tests/runtime-probe
+	./build/tests/runtime-probe
+	python3 tests/integration/build_stamp_test.py
+
 
 # A checkout with Colibri's additive ABI gets the transparent Segment path
 # from the ordinary `make`; older/release Colibri trees keep the exact legacy
@@ -49,7 +56,7 @@ check-warnings:
 		CFLAGS='$(CFLAGS) -Werror'
 
 SECURE_DEPS = lumabri_secure.h lumabri_crypto.h
-HOME_NET_DEPS = lumabri_home_net.h lumabri_home_discovery.h lumabri_platform.h lumabri_wakeup.h
+HOME_NET_DEPS = lumabri_home_net.h lumabri_home_discovery.h lumabri_platform.h lumabri_wakeup.h lumabri_runtime_probe.h
 MACHINE_SRC = lumabri_machine.c
 MACHINE_DEPS = lumabri_machine.h $(MACHINE_SRC)
 
@@ -572,7 +579,15 @@ HYBRID_PATCH_INPUTS = engine_patches/make_patches.py \
 	lumabri_proto.h lumabri_sign.h lumabri_secure.h lumabri_crypto.h \
 	lumabri_sha.h
 
-$(HYBRID_ENGINE_DIR)/.prepared: Makefile $(HYBRID_PATCH_INPUTS) \
+.PHONY: segment-options-force
+segment-options-force:
+
+# An installed libomp or changed build flags must invalidate both the runtime
+# archive and its bridge, without requiring users to discover make -B.
+build/segment-options: segment-options-force tools/update_build_stamp.py
+	python3 tools/update_build_stamp.py $@ '$(CC)' '$(CPPFLAGS)' '$(CFLAGS)' '$(OMP_FLAGS)' '$(OMP_LIBS)' '$(abspath $(ENGINE))'
+
+$(HYBRID_ENGINE_DIR)/.prepared: Makefile build/segment-options $(HYBRID_PATCH_INPUTS) \
 		$(ENGINE)/colibri.c $(ENGINE)/inkling.c $(ENGINE)/kimi_k3.c \
 		$(ENGINE)/olmoe.c $(ENGINE)/qwen36.c $(ENGINE)/deepseek_v4.c
 	rm -rf $(HYBRID_ENGINE_DIR)
@@ -587,7 +602,7 @@ $(HYBRID_ENGINE_DIR)/.prepared: Makefile $(HYBRID_PATCH_INPUTS) \
 	python3 engine_patches/deepseek_v4_p2p.py $(ENGINE)/deepseek_v4.c $(HYBRID_ENGINE_DIR)/deepseek_v4.c
 	touch $@
 
-build/segment_hybrid_bridge.o: lumi_v4_bridge.c $(HYBRID_PATCH_INPUTS)
+build/segment_hybrid_bridge.o: build/segment-options lumi_v4_bridge.c $(HYBRID_PATCH_INPUTS)
 	mkdir -p build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(OMP_FLAGS) -pthread -I. -I$(ENGINE) -c lumi_v4_bridge.c -o $@
 

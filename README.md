@@ -72,6 +72,12 @@ distributes contiguous layer ranges, not isolated experts. Each donor keeps
 the state for its layers; the chosen chat host receives the conversation text.
 The chat connection itself does not mount or download a checkpoint.
 
+The donor queries its installed Segment runtime before sharing. A runtime
+built without OpenMP uses one execution thread; CPU core count is not a
+promise of engine parallelism. The default system RAM reserve is one quarter
+of physical RAM, bounded to 1–4 GiB (2 GiB on an 8 GiB computer). The sharing
+limit is an additional cap, not permission to consume the system reserve.
+
 Adding computers can make a model fit when it would not fit on one machine.
 It does not automatically make each chat faster.
 
@@ -102,14 +108,34 @@ conversation and exit.
 - The images above are frames from that integration test, not performance
   claims for a large model or a multi-computer LAN.
 
-**Not yet certified:** a physical household LAN, native Windows or macOS
-(including Intel Macs), GPU household execution, all model families,
+Native macOS Intel and Apple Silicon CI covers the real Tiny household flow.
+A user-operated Windows/WSL-to-macOS 12.6 Intel trial also completed two Tiny
+responses with all model computation on the Mac and source weights on the PC.
+This is a smoke test, not a performance or large-model certification.
+
+**Not yet certified:** general physical-LAN reliability, native Windows,
+GPU household execution, all model families,
 multi-session household use, or transparent recovery after losing a donor.
 WSL testing is not native Windows certification.
 
 Adapter registration is broader than tested household execution. A checkpoint
 appearing in the catalogue does not make its sizing or backend supported.
 There are no promised tok/s or automatic “best model” recommendations.
+
+### Native runtime build
+
+Build the complete runtime with `make household ENGINE=/path/to/colibri/c`.
+Building only `lumabri` does not install the model services. macOS builds use
+Homebrew `libomp` when available and work single-threaded without it. Changing
+OpenMP flags invalidates the generated engine build automatically. CI pins
+Colibri to `12a5c464b5c1f8292d578c62458706bc32d6ac95` for reproducibility.
+
+Discovery and outbound reporting do not prove inbound connectivity. Before
+indexing, Lumabri checks each selected donor's address and identity. Keep the
+household owner's window open; it owns the tracker. Allow the installed
+`lumabri` and `segment_node` executables through the donor's application
+firewall rather than disabling the firewall. Rebuilding an unsigned executable
+may require reviewing its application permission again.
 
 ## Development and diagnostics
 
