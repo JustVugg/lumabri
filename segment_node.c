@@ -16,6 +16,7 @@
 #include <pthread.h>
 #include <dirent.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -108,6 +109,7 @@ typedef struct {
     uint64_t process_memory_limit_bytes;
     uint64_t session_memory_limit_bytes;
     LmbGovernor governor;
+    _Atomic uint64_t committed_runs;
     TrackerRegistration registration;
 } Node;
 
@@ -768,6 +770,17 @@ static int handle_run(Node *node, int fd, const LmbMsg *msg) {
         } else {
             status = lmb_seg_table_run_commit(node->table, &run, now_ms());
             if (status == LMB_SEG_STATUS_OK && slot) {
+                /* Log the first and then power-of-two successful commits.
+                 * This distinguishes an idle weight holder from a node that
+                 * actually executed this range, without logging user data or
+                 * flooding stderr once per token. Cached retries do not count. */
+                uint64_t completed = atomic_fetch_add_explicit(
+                    &node->committed_runs, 1, memory_order_relaxed) + 1;
+                if (completed && !(completed & (completed - 1)))
+                    fprintf(stderr, "[segment-node %s %u:%u] committed_runs=%llu backend_mask=0x%llx\n",
+                            node->advert.peer_name, node->advert.layer_begin,
+                            node->advert.layer_end, (unsigned long long)completed,
+                            (unsigned long long)(node->cap.flags & COLI_SEGMENT_CAP_BACKEND_MASK));
                 free(slot->cached_output);
                 slot->cached_output = output;
                 slot->cached_bytes = bytes;
@@ -1143,6 +1156,13 @@ int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--thread-capacity")) {
 #ifdef _OPENMP
         int capacity = omp_get_num_procs();
+        /* A donor inherits the operator's OpenMP limits. Reporting hardware
+         * cores alone would overwrite OMP_NUM_THREADS=2 with --threads=12
+         * when the household launches the real engine. */
+        int configured = omp_get_max_threads();
+        int limit = omp_get_thread_limit();
+        if (configured > 0 && configured < capacity) capacity = configured;
+        if (limit > 0 && limit < capacity) capacity = limit;
         if (capacity < 1) capacity = 1;
         if (capacity > 256) capacity = 256;
         printf("%d\n", capacity);
@@ -1373,6 +1393,7 @@ int main(int argc, char **argv) {
     preflight_signal(&preflight_fd, 'P');
     Node node;
     memset(&node, 0, sizeof node);
+    atomic_init(&node.committed_runs, 0);
     for (size_t i = 0; i < NODE_CONNECTIONS_MAX; i++) node.connection_fds[i] = -1;
     pthread_mutex_init(&node.sessions_lock, NULL);
     if (lmb_run_gate_init(&node.run_gate, 1, run_queue)) {

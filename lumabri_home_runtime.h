@@ -782,6 +782,19 @@ static int home_request_chat(LmbTuiState *st, int selected) {
             host_started = 1;
         }
         if (host_started && s.phase[s.edge] == LMB_HOME_READY && s.host_port[s.edge]) {
+            LmbExecutionView execution = { .count = s.count, .layers = m->shape.layers };
+            for (uint32_t i = 0; i < s.count; i++) {
+                LmbExecutionNode *node = &execution.nodes[i];
+                snprintf(node->name, sizeof node->name, "%s", s.names[i]);
+                snprintf(node->address, sizeof node->address, "%s", s.addresses[i]);
+                node->begin = s.offers[i].begin; node->end = s.offers[i].end;
+                node->edge = s.offers[i].runs_edge;
+                node->reserved_bytes = s.offers[i].ram_bytes;
+            }
+            if (!lmb_execution_valid(&execution)) {
+                home_fail("The approved layer allocation is incomplete. Chat was not started.");
+                goto done;
+            }
             char host[64], ctx[20], token_limit[20];
             const char *colon = strrchr(s.addresses[s.edge], ':');
             if (!colon) goto done;
@@ -794,8 +807,11 @@ static int home_request_chat(LmbTuiState *st, int selected) {
             if (pthread_create(&heartbeat, NULL, home_session_keepalive, &s)) goto done;
             char expected_host[65]; lmb_hex(expected_host, edge_pk, 32);
             char *chat_argv[] = {"--host", host, "--model", model, "--ctx", ctx,
-                                 "--role", "chat", "--max-new", token_limit, "--host-key", expected_host};
-            result = cmd_chat(12, chat_argv);
+                                 "--role", "chat", "--max-new", token_limit, "--host-key", expected_host,
+                                 "--tracker", st->tracker};
+            g_execution_view = &execution;
+            result = cmd_chat(14, chat_argv);
+            g_execution_view = NULL;
             atomic_store(&s.stop, 1); pthread_join(heartbeat, NULL);
             if (atomic_load(&s.failed)) result = -1;
             break;

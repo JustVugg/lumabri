@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import pty
+import re
 import select
 import signal
 import socket
@@ -179,6 +180,13 @@ def main():
         until(lambda: chat.has("receives the text") or chat.p.poll() is not None, seconds=180,
               message="accepted plan did not reach real hosted chat")
         assert chat.p.poll() is None, "accepted plan failed; inspect donor engine logs"
+        until(lambda: chat.has("/experts shows tracker activity."),
+              message="the accepted compute allocation is missing from chat")
+        assert "Approved Segment plan: 2 compute donors" in chat.text
+        assert "This chat process runs no model layers" in chat.text
+        announced_ranges = sorted((int(begin), int(end)) for begin, end in
+                                  re.findall(r"layers \[(\d+),(\d+)\)", chat.text))
+        assert len(announced_ranges) == 2, announced_ranges
         chat.send("/he")
         until(lambda: chat.has("List chat commands"), message="slash suggestions did not appear")
         chat.send("\t\n")
@@ -188,6 +196,21 @@ def main():
               message="real model did not finish a response")
         assert chat.has("tok/s"), "engine failed during generation"
         assert "hosted stream · no local checkpoint" in chat.text
+        executed_ranges = []
+        for donor in ("donor-a", "donor-b"):
+            log = (tmp / donor / ".lumabri/home/engines.log").read_text(errors="replace")
+            commits = re.findall(r"\[segment-node [^\]\n]+ (\d+):(\d+)\] committed_runs=(\d+)", log)
+            assert commits, f"{donor} did not report any committed model execution"
+            ranges = {(int(begin), int(end)) for begin, end, _ in commits}
+            assert len(ranges) == 1, ranges
+            executed_ranges.extend(ranges)
+        assert sorted(executed_ranges) == announced_ranges, (executed_ranges, announced_ranges)
+        chat.send("/plan\n")
+        until(lambda: chat.text.count("Approved Segment plan: 2 compute donors") >= 2,
+              message="/plan did not show the same accepted allocation")
+        chat.send("/experts\n")
+        until(lambda: chat.has("executor activity"),
+              message="hosted chat did not retain its household tracker for diagnostics")
         owned_groups = set()
         if args.kill_donor:
             rows = subprocess.check_output(["ps", "-axo", "pid=,ppid=,pgid="], text=True)
@@ -234,7 +257,7 @@ def main():
             until(lambda: donor.has("your workspace"))
             donor.send("\x1b")
         until(lambda: a.p.poll() is not None and b.p.poll() is not None)
-        print(f"HOME FLOW: PASS (consent, real Segment generation, {'killed donor recovery' if args.kill_donor else 'normal cleanup'})", flush=True)
+        print(f"HOME FLOW: PASS (consent, two executing ranges match the plan, real Segment generation, {'killed donor cleanup' if args.kill_donor else 'normal cleanup'})", flush=True)
     except Exception:
         # Only test-owned engine logs: no shell environment or real keys.
         for log in tmp.rglob("engines.log"):

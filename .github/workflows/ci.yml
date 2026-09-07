@@ -122,10 +122,18 @@ jobs:
       - name: Household TUI — approvals through real Segment generation
         working-directory: lumabri
         run: |
+          test "$(OMP_NUM_THREADS=1 ./segment_node --thread-capacity)" = 1
+          test "$(OMP_NUM_THREADS=4 OMP_THREAD_LIMIT=1 ./segment_node --thread-capacity)" = 1
           mkdir -p build/home-flow-models
           cp -a ../colibri/c/olmoe_tiny_merged build/home-flow-models/olmoe-tiny
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --kill-donor
+      - name: Same greedy tokens with one and two real Segment ranges
+        working-directory: lumabri
+        run: |
+          SPLIT_MODEL_DIR=build/home-flow-models/olmoe-tiny \
+          SPLIT_THREADS=2 SPLIT_CONTEXT=128 SPLIT_ROUNDS=2 \
+            bash tests/integration/segment_split_test.sh
   macos-household:
     # Real native CPU engines + signed CAS + approvals + streaming. Loopback
     # coverage does not replace the macOS 12.6 / physical household LAN test.
@@ -171,6 +179,8 @@ jobs:
         env:
           TMPDIR: ${{ runner.temp }}
         run: |
+          test "$(OMP_NUM_THREADS=1 ./segment_node --thread-capacity)" = 1
+          test "$(OMP_NUM_THREADS=4 OMP_THREAD_LIMIT=1 ./segment_node --thread-capacity)" = 1
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --kill-donor
       - uses: actions/upload-artifact@v4

@@ -5,6 +5,29 @@
 #include <assert.h>
 
 int main(int argc, char **argv) {
+    LmbExecutionView execution = { .count = 2, .layers = 4 };
+    for (uint32_t i = 0; i < 2; i++) {
+        snprintf(execution.nodes[i].name, 64, "donor-%u", i);
+        snprintf(execution.nodes[i].address, 64, "127.0.0.1:%u", 47301 + i);
+        execution.nodes[i].begin = i * 2; execution.nodes[i].end = i * 2 + 2;
+        execution.nodes[i].reserved_bytes = 128u << 20;
+    }
+    execution.nodes[0].edge = 1;
+    assert(lmb_execution_valid(&execution));
+    execution.nodes[1].begin = 1; assert(!lmb_execution_valid(&execution));
+    execution.nodes[1].begin = 3; assert(!lmb_execution_valid(&execution));
+    execution.nodes[1].begin = 2;
+    execution.nodes[1].edge = 1; assert(!lmb_execution_valid(&execution));
+    execution.nodes[1].edge = 0;
+    execution.count = LMB_CLUSTER_MAX_NODES + 1; assert(!lmb_execution_valid(&execution));
+    execution.count = 2;
+    assert(!lmb_execution_valid(NULL));
+    if (argc > 1 && !strcmp(argv[1], "plan")) {
+        snprintf(execution.nodes[1].name, 64, "donor-1\033[2J");
+        lmb_execution_print(stdout, &execution);
+        lmb_execution_print(stdout, NULL);
+        return 0;
+    }
     if (argc > 1 && !strcmp(argv[1], "help")) {
         render_help();
         return 0;
