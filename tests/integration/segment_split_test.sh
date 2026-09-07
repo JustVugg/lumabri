@@ -127,12 +127,13 @@ stop_phase() {
 run_chat() {                 # $1 = threads, $2 = log name
     local threads=$1 log=$2 t0 t1
     t0=$(date +%s.%N)
-    OMP_NUM_THREADS="$threads" ./segment_chat --engine "$ENGINE_ID" \
+    OMP_NUM_THREADS="$threads" LUMABRI_PEER_KEY="$TMP/client.key" \
+        LUMABRI_KNOWN_HOSTS="$TMP/client.hosts" ./segment_chat --engine "$ENGINE_ID" \
         --model-dir "$MODEL_DIR" --model "$MODEL_NAME" \
         --tracker "127.0.0.1:$TRACKER" \
         --model-root "$model_root" --tokenizer-root "$tokenizer_root" \
         --prompt-ids "$prompt" --tokens "$TOKENS" --context "$CONTEXT" \
-        --max-rows 16 --retry-first-run --json \
+        --max-rows 16 --retry-first-run --direct-only --json \
         >"$TMP/$log.json" 2>"$TMP/$log.log"
     t1=$(date +%s.%N)
     python3 - "$TMP/$log.json" "$t0" "$t1" <<'PY'
@@ -201,12 +202,8 @@ echo "  C  2 nodes, $THREADS_TOTAL+$THREADS_TOTAL threads   ${full_s}s"
 [[ "$full_ids" == "$oracle" ]] || {
     echo "SEGMENT SPLIT TEST: FAIL — the tokens changed with all cores" >&2; exit 1; }
 
-# Relay must never have been used: these nodes advertise direct addresses.
-if grep -qi "relay" "$TMP"/split-*.log "$TMP"/whole-*.log 2>/dev/null; then
-    echo "SEGMENT SPLIT TEST: FAIL — a run used the tracker relay; the numbers" \
-         "would measure the tunnel, not the split" >&2
-    exit 1
-fi
+# --direct-only forbids every relay request, including recovery and CLOSE.
+# Searching log text for "relay" is not evidence of which transport ran.
 
 # Timings are only reported when the machine could plausibly produce them.
 #

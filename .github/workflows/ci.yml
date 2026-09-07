@@ -137,6 +137,25 @@ jobs:
           SPLIT_MODEL_DIR=build/home-flow-models/olmoe-tiny \
           SPLIT_THREADS=2 SPLIT_CONTEXT=128 SPLIT_ROUNDS=2 \
             bash tests/integration/segment_split_test.sh
+      - name: Qwen hybrid memory contract — real int8 and grouped int4
+        working-directory: lumabri
+        run: |
+          python3 ../colibri/c/tools/make_qwen36_tiny.py --out build/qwen36-hf --ref-mode full --emit-ref build/qwen36-ref.json
+          python3 ../colibri/c/tools/convert_qwen36.py --model build/qwen36-hf --out build/qwen-int8/qwen36-tiny --ebits 8 --no-readme
+          python3 ../colibri/c/tools/convert_qwen36.py --model build/qwen36-hf --out build/qwen-int4/qwen36-tiny --ebits 4 --gs 16 --no-readme
+          python3 ../colibri/c/tools/make_edge_tiny_tokenizer.py build/qwen-int8/qwen36-tiny --vocab-size 320
+          python3 ../colibri/c/tools/make_edge_tiny_tokenizer.py build/qwen-int4/qwen36-tiny --vocab-size 320
+          cc -O2 -fopenmp -pthread ../colibri/c/tests/test_edge_adapters_real.c build/segment-hybrid-colibri/build/segment/libcolibri_segment_edge.a -o build/qwen-edge-oracle -lm
+          OMP_NUM_THREADS=2 build/qwen-edge-oracle qwen36 build/qwen-int8/qwen36-tiny build/qwen36-ref.json 3
+          python3 tests/integration/home_flow_test.py --models-dir build/qwen-int8
+          python3 tests/integration/home_flow_test.py --models-dir build/qwen-int4 --kill-donor
+          SPLIT_MODEL_DIR=build/qwen-int4/qwen36-tiny SPLIT_ENGINE=qwen36 SPLIT_MODEL=qwen-int4 SPLIT_ROUNDS=1 SPLIT_THREADS=2 SPLIT_TOKENS=8 PORT=8940 bash tests/integration/segment_split_test.sh
+          OLMOE_EDGE_MODEL=build/home-flow-models/olmoe-tiny OLMOE_EDGE_REF=../colibri/c/olmoe_tiny_src/ref_olmoe.json bash tests/integration/segment_relay_test.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tiny-qwen36-checkpoint
+          path: lumabri/build/qwen-int4/qwen36-tiny/*
+          retention-days: 3
   macos-household:
     # Real native CPU engines + signed CAS + approvals + streaming. Loopback
     # coverage does not replace the macOS 12.6 / physical household LAN test.
@@ -186,6 +205,13 @@ jobs:
           test "$(OMP_NUM_THREADS=4 OMP_THREAD_LIMIT=1 ./segment_node --thread-capacity)" = 1
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --kill-donor
+      - uses: actions/download-artifact@v4
+        with:
+          name: tiny-qwen36-checkpoint
+          path: lumabri/build/qwen-home-models/qwen36-tiny
+      - name: Native Qwen grouped-int4 request and execution
+        working-directory: lumabri
+        run: python3 tests/integration/home_flow_test.py --models-dir build/qwen-home-models
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

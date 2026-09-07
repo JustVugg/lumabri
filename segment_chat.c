@@ -68,6 +68,7 @@ typedef int (*GenerationEventFn)(void *opaque, GenerationEventKind kind,
                                  const void *data, size_t data_bytes);
 
 static int retry_first_run;
+static int segment_direct_only;
 static const char *segment_tracker;
 static uint64_t segment_wire_bytes;
 
@@ -97,7 +98,7 @@ static void usage(const char *program) {
         "((--prompt TEXT | --prompt-ids CSV) | --serve) "
         "[--expect-ids CSV] [--tokens N] [--context N] [--max-rows N] "
         "[--temperature F --top-p F --seed N] "
-        "[--discovery-timeout-ms N] [--retry-first-run] [--json]\n",
+        "[--discovery-timeout-ms N] [--retry-first-run] [--direct-only] [--json]\n",
         program);
 }
 
@@ -380,7 +381,7 @@ static int remote_relay_request(RemoteSegment *remote, uint32_t op,
                                 const void *body, uint32_t body_len,
                                 const void *pay, uint32_t pay_len,
                                 LmbMsg *response) {
-    if (!segment_tracker ||
+    if (segment_direct_only || !segment_tracker ||
         !(remote->route.transport & LMB_SEG_TRANSPORT_RELAY)) return -1;
     LmbBuf envelope = {0};
     if (lmb_buf_str(&envelope, remote->route.advert.peer_name) ||
@@ -459,6 +460,14 @@ static int remote_request(RemoteSegment *remote, uint32_t op,
         if (remote->fd >= 0) lmb_close(remote->fd);
         remote->fd = -1;
         remote->direct_failed = 1;
+    }
+    if (segment_direct_only) {
+        size_t used = strlen(remote->transport_error);
+        snprintf(remote->transport_error + used,
+                 sizeof remote->transport_error - used,
+                 "%sdirect-only policy forbids tracker relay for %s",
+                 used ? "; " : "", remote->route.advert.peer_name);
+        return -1;
     }
     if (!(remote->route.transport & LMB_SEG_TRANSPORT_RELAY)) return -1;
     if (!remote_relay_request(remote, op, body, body_len,
@@ -1836,6 +1845,7 @@ int main(int argc, char **argv) {
     const char *expect_ids_text = arg_value(argc, argv, "--expect-ids");
     int serve_mode = has_arg(argc, argv, "--serve");
     int json_output = has_arg(argc, argv, "--json");
+    segment_direct_only = has_arg(argc, argv, "--direct-only");
     segment_tracker = tracker;
     for (int i = 1; i < argc; i++)
         if (!strcmp(argv[i], "--retry-first-run")) retry_first_run = 1;

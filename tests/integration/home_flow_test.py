@@ -1,6 +1,6 @@
 """Real encrypted tracker, two donor TUIs, Segment engines and hosted chat.
 
-Requires an actual converted small OLMoE checkpoint (not a mock engine).
+Requires one actual small planner-supported checkpoint (not a mock engine).
 This loopback integration gate is not a physical LAN or native-platform test.
 """
 import argparse

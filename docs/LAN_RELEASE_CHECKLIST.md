@@ -19,7 +19,7 @@ execution, cross-platform numerical compatibility, or concurrent capacity.
    Current physical trial has PC source and Mac computation, not two compute
    nodes. Mac deployment/approval is user-operated; CI loopback is separate.
 2. Complete verified sizing for every registered family and supported weight
-   encoding. Currently only OLMoE and DeepSeek V4 enable sizing. Require real
+   encoding. OLMoE, DeepSeek V4 and converted Qwen3.6 enable sizing. Require real
    checkpoint/adapter conformance before promoting support.
 3. Consistent planner/runtime reservations, explicit local-compute consent,
    and placement informed by measured execution costs, not just RAM totals.
@@ -66,7 +66,12 @@ not a completed gate.
 
 1. PR #152 merged: approved layer-allocation view, named execution evidence,
    two-donor checks; physical two-computer oracle and timings still required.
-2. Pending: verified family sizing and checkpoint conformance.
+2. In progress: Qwen3.6 has an explicit CPU resident contract (float32 dense
+   and Edge, int8 expert slots even for packed int4 files, grouped scales,
+   per-layer attention/DeltaNet state). Real synthetic int8 and grouped-int4
+   fixtures exercise approval, two compute donors, generation and cleanup.
+   This does not close gate 2: GLM, GLM5.3, Inkling, Kimi and Qwen3.8 still
+   need their own verified memory contracts. Large checkpoints remain untested.
 3. PR #153: shared conservative resident admission for catalogue, request
    and launch, with a stat-only checkpoint preview and a signed-inventory
    recheck before offers. Edge and Segment budgets are separately MiB-aligned.
