@@ -68,7 +68,9 @@ if echo "$out" | grep -qE "[0-9]+([.,][0-9]+)? *tok/s"; then
     fail "a tok/s figure appeared for a plan nobody has measured"
 fi
 
-json=$(./lumabri models --models-dir "$T/models" --json)
+# The catalogue must not put its complete per-layer maps on the stack.
+# This caught a real regression when explicit hybrid memory contracts grew.
+json=$(ulimit -s 512; ./lumabri models --models-dir "$T/models" --json)
 python3 - "$json" <<'PY' || fail "the versioned JSON snapshot is invalid"
 import json, sys
 doc = json.loads(sys.argv[1])

@@ -5032,7 +5032,14 @@ static int catalog_inventory(LmbTuiState *st) {
 
 static int catalog_state_refresh(LmbTuiState *st, void *unused) {
     (void)unused;
-    CatalogEntry found[LMB_TUI_MAX_MODELS];
+    /* Per-layer contracts make each entry larger. Do not place the entire
+     * 64-model catalogue on a small native/thread stack. */
+    CatalogEntry *found = calloc(LMB_TUI_MAX_MODELS, sizeof *found);
+    if (!found) {
+        st->nmodels = 0;
+        st->inventory_ok = 0;
+        return -1;
+    }
     int n = catalog_scan(st->root, found, LMB_TUI_MAX_MODELS);
     st->nmodels = 0;
     (void)catalog_inventory(st);
@@ -5072,6 +5079,7 @@ static int catalog_state_refresh(LmbTuiState *st, void *unused) {
         m->calibration = NULL;
         st->nmodels++;
     }
+    free(found);
     return 0;
 }
 
