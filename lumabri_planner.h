@@ -47,6 +47,7 @@ typedef struct {
     uint64_t resident_bytes;
     uint64_t state_fixed_bytes;
     uint64_t state_token_bytes;
+    uint32_t state_context_limit; /* zero: full context; otherwise a sliding ring */
 } LmbLayerMemory;
 
 /* How a family's weights are laid out, in the terms the estimates need. All
@@ -160,9 +161,11 @@ static LmbRangeCost LMB_UNUSED lmb_estimate_segment(const LmbModelShape *m,
         c.resident_bytes = m->segment_fixed_bytes;
         for (uint32_t i = begin; i < end; i++) {
             const LmbLayerMemory *l = &m->memory[i];
+            uint32_t rows = l->state_context_limit && ctx > l->state_context_limit
+                ? l->state_context_limit : ctx;
             c.resident_bytes = lmb_size_add(c.resident_bytes, l->resident_bytes);
             c.state_bytes = lmb_size_add(c.state_bytes, lmb_size_add(l->state_fixed_bytes,
-                lmb_size_mul(l->state_token_bytes, ctx)));
+                lmb_size_mul(l->state_token_bytes, rows)));
         }
         c.state_bytes = lmb_size_mul(c.state_bytes, sessions ? sessions : 1);
         c.scratch_bytes = lmb_size_add(m->scratch_fixed_bytes,
@@ -324,6 +327,7 @@ static int LMB_UNUSED lmb_json_string(const char *object, const char *key,
 }
 
 #include "planner_adapters/qwen36.h"
+#include "planner_adapters/inkling.h"
 
 static LMB_UNUSED int lmb_shape_from_config(const char *model_dir,
                                             LmbModelShape *out) {
@@ -389,6 +393,8 @@ static LMB_UNUSED int lmb_shape_from_config(const char *model_dir,
                            !strcmp(fam->segment_id, "deepseek_v4");
     if (!strcmp(fam->segment_id, "qwen36"))
         out->sizing_verified = !lmb_qwen36_memory(model_dir, out);
+    if (!strcmp(fam->segment_id, "inkling"))
+        out->sizing_verified = !lmb_inkling_memory(model_dir, cfg, out);
     return out->layers && out->hidden ? 0 : -1;
 }
 

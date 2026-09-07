@@ -156,6 +156,20 @@ jobs:
           name: tiny-qwen36-checkpoint
           path: lumabri/build/qwen-int4/qwen36-tiny/*
           retention-days: 3
+      - name: Inkling memory contract — float oracle and packed int4
+        working-directory: lumabri
+        run: |
+          python3 -m pip install transformers==5.16.1
+          python3 tests/integration/prepare_inkling_fixture.py --engine ../colibri/c --out build/inkling-contract
+          INK_SEGMENT_BITS=0 OMP_NUM_THREADS=2 build/qwen-edge-oracle inkling build/inkling-contract/float/inkling-tiny build/inkling-contract/float/inkling-tiny/ref_inkling.json 24
+          INK_SEGMENT_BITS=0 python3 tests/integration/home_flow_test.py --models-dir build/inkling-contract/float
+          python3 tests/integration/home_flow_test.py --models-dir build/inkling-contract/int4 --kill-donor
+          SPLIT_MODEL_DIR=build/inkling-contract/int4/inkling-tiny SPLIT_ENGINE=inkling SPLIT_MODEL=inkling-int4 SPLIT_ROUNDS=1 SPLIT_THREADS=2 SPLIT_TOKENS=8 PORT=9340 bash tests/integration/segment_split_test.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tiny-inkling-checkpoint
+          path: lumabri/build/inkling-contract/int4/inkling-tiny/*
+          retention-days: 3
   macos-household:
     # Real native CPU engines + signed CAS + approvals + streaming. Loopback
     # coverage does not replace the macOS 12.6 / physical household LAN test.
@@ -212,6 +226,13 @@ jobs:
       - name: Native Qwen grouped-int4 request and execution
         working-directory: lumabri
         run: python3 tests/integration/home_flow_test.py --models-dir build/qwen-home-models
+      - uses: actions/download-artifact@v4
+        with:
+          name: tiny-inkling-checkpoint
+          path: lumabri/build/inkling-home-models/inkling-tiny
+      - name: Native Inkling packed-int4 request and execution
+        working-directory: lumabri
+        run: python3 tests/integration/home_flow_test.py --models-dir build/inkling-home-models
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

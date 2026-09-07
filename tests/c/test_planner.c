@@ -15,6 +15,7 @@ static int bad;
     fprintf(stderr, __VA_ARGS__); fputc('\n', stderr); bad = 1; } } while (0)
 
 #include "test_planner_qwen36.h"
+#include "test_planner_inkling.h"
 
 /* Roughly DeepSeek V4 Flash, at the numbers we measured on the real one. */
 static LmbModelShape v4(void) {
@@ -30,6 +31,7 @@ static LmbModelShape v4(void) {
 
 int main(void) {
     qwen36_contract_test();
+    inkling_contract_test();
     LmbModelShape m = v4();
 
     CHECK(lmb_size_add(UINT64_MAX - 2, 3) == UINT64_MAX,

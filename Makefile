@@ -444,7 +444,7 @@ test_residency_report: tests/c/test_residency_report.c lumabri_client.h lumabri_
 test_model_family: tests/c/test_model_family.c lumabri_families.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_model_family.c -o $@
 
-test_planner: tests/c/test_planner.c tests/c/test_planner_qwen36.h lumabri_planner.h lumabri_families.h
+test_planner: tests/c/test_planner.c tests/c/test_planner_qwen36.h tests/c/test_planner_inkling.h lumabri_planner.h lumabri_families.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_planner.c -o $@
 
 test_cluster: tests/c/test_cluster.c lumabri_cluster.h lumabri_memory_budget.h lumabri_planner.h lumabri_families.h lumabri_machine.h
