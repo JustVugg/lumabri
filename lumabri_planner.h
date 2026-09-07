@@ -73,6 +73,7 @@ typedef struct {
     uint64_t edge_resident_bytes;
     uint64_t edge_scratch_fixed_bytes;
     uint64_t segment_fixed_bytes;
+    uint64_t session_fixed_bytes, session_token_bytes; /* engine-wide session allocations */
     uint64_t scratch_fixed_bytes, scratch_token_bytes;
     LmbLayerMemory memory[LMB_PLAN_LAYER_MAX];
 } LmbModelShape;
@@ -161,6 +162,8 @@ static LmbRangeCost LMB_UNUSED lmb_estimate_segment(const LmbModelShape *m,
         if (m->memory_contract != 1 || m->layers > LMB_PLAN_LAYER_MAX ||
             !m->max_context || ctx > m->max_context) return c;
         c.resident_bytes = m->segment_fixed_bytes;
+        c.state_bytes = lmb_size_add(m->session_fixed_bytes,
+                                    lmb_size_mul(m->session_token_bytes, ctx));
         for (uint32_t i = begin; i < end; i++) {
             const LmbLayerMemory *l = &m->memory[i];
             uint32_t rows = l->state_context_limit && ctx > l->state_context_limit
@@ -332,6 +335,8 @@ static int LMB_UNUSED lmb_json_string(const char *object, const char *key,
 #include "planner_adapters/qwen36.h"
 #include "planner_adapters/inkling.h"
 #include "planner_adapters/kimi.h"
+#include "planner_adapters/glm.h"
+#include "planner_adapters/glm53.h"
 
 static LMB_UNUSED int lmb_shape_from_config(const char *model_dir,
                                             LmbModelShape *out) {
@@ -401,6 +406,10 @@ static LMB_UNUSED int lmb_shape_from_config(const char *model_dir,
         out->sizing_verified = !lmb_inkling_memory(model_dir, cfg, out);
     if (!strcmp(fam->segment_id, "kimi"))
         out->sizing_verified = !lmb_kimi_memory(model_dir, cfg, out);
+    if (!strcmp(fam->segment_id, "glm"))
+        out->sizing_verified = !lmb_glm_memory(model_dir, cfg, out);
+    if (!strcmp(fam->segment_id, "glm53"))
+        out->sizing_verified = !lmb_glm53_memory(model_dir, buf, cfg, out);
     return out->layers && out->hidden ? 0 : -1;
 }
 

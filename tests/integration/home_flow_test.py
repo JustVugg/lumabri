@@ -26,6 +26,9 @@ ROOT = Path(__file__).resolve().parents[2]
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--models-dir", required=True)
+    parser.add_argument("--donor-ram-gb", type=float, default=0.5)
+    parser.add_argument("--expect-no-fit", action="store_true",
+                        help="verify insufficient-memory admission, without starting engines")
     parser.add_argument("--kill-donor", action="store_true",
                         help="kill a donor TUI after generation; assert engines and leases are released")
     args = parser.parse_args()
@@ -43,7 +46,7 @@ def main():
         settings = home / ".lumabri" / "home.conf"
         if not settings.exists():
             settings.parent.mkdir(exist_ok=True)
-            settings.write_text(f"tracker={addr}\ntoken=household-test\nmodels={Path(args.models_dir).resolve()}\nram=0.5\n")
+            settings.write_text(f"tracker={addr}\ntoken=household-test\nmodels={Path(args.models_dir).resolve()}\nram={args.donor_ram_gb}\n")
             settings.chmod(0o600)
         return {**os.environ, "HOME": str(home), "LUMABRI_ENCRYPT": "1",
                 "LUMABRI_PEER_KEY": str(home / "peer.key"),
@@ -121,7 +124,7 @@ def main():
             unreachable = closed_port.getsockname()[1]
         with open(tmp / "offline-worker.log", "wb") as log:
             offline_worker = subprocess.Popen(["./lumabri", "worker", "--join", addr,
-                "--name", "offline-test-donor", "--ram-gb", "0.5", "--disk", str(tmp),
+                "--name", "offline-test-donor", "--ram-gb", str(args.donor_ram_gb), "--disk", str(tmp),
                 "--control-address", f"127.0.0.1:{unreachable}"], cwd=ROOT,
                 env=env("offline-worker"), stdout=log, stderr=subprocess.STDOUT)
         children.append(offline_worker)
@@ -131,7 +134,8 @@ def main():
         time.sleep(.5)
         offline.send("\r\r")
         until(lambda: offline.p.poll() is not None, message="unreachable donor did not fail preflight")
-        assert offline.p.returncode != 0 and offline.has("Cannot reach offline-test-donor")
+        failure = "No complete resident plan fits" if args.expect_no_fit else "Cannot reach offline-test-donor"
+        assert offline.p.returncode != 0 and offline.has(failure)
         assert not list((tmp / "offline-request").rglob("home-source-*.log")), "indexed before reachability check"
         offline_worker.terminate(); offline_worker.wait(timeout=5)
 
@@ -155,6 +159,16 @@ def main():
         until(lambda: reject.has("Nothing is selected automatically"))
         reject.send("\x1b[B\r\x1b[B\r\t")
         time.sleep(.5)
+        if args.expect_no_fit:
+            reject.send("\r")
+            until(lambda: reject.has("model plan") and reject.has("sizing available"),
+                  message="no valid sizing result in model detail")
+            assert reject.has("Plan: not runnable"), "undersized donors were admitted"
+            assert not a.has("Waiting for your approval") and not b.has("Waiting for your approval")
+            assert not engines_started("donor-a") and not engines_started("donor-b")
+            assert not list((tmp / "reject").rglob("home-source-*.log"))
+            print("HOME ADMISSION: PASS (native memory floor; no offers or engines)", flush=True)
+            return
         reject.send("\r\r")
         until(lambda: a.has("Waiting for your approval") and b.has("Waiting for your approval"),
               seconds=60, message="offers never reached both donor TUIs")

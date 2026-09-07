@@ -53,6 +53,12 @@ retags its synthetic `inkling_text` export as the pinned registry's `inkling`;
 this is not a new runtime alias or a claim about arbitrary exports. The tests
 do not certify large checkpoints or GPU performance.
 
+Fixture correction: the first version of the int4 test passed HF-named tensors
+straight to a converter that quantizes TML-named tensors only. That output was
+still float; those earlier runs are not packed-format evidence. The generator
+now uses the upstream reverse-mapping helper and checks U8 payload and F32 scale
+byte counts for every routed tensor before any engine test can run.
+
 ## Kimi CPU checkpoints with float dense source and MXFP4 experts
 
 The initial contract validates the complete MXFP4 expert tensor bank (packed
@@ -69,11 +75,58 @@ both boundary buffers and loading workspace are reserved. Expert capacity is
 an upper bound: native `K3_EXPERT_GB`/RAM policy can choose a smaller cache, so
 this contract does not certify that every admitted weight was warmed into RAM.
 
+Admission also reserves the pinned initializer's unconditional 3.7 GB policy
+floor, plus its whole-model KV projection. The policy is not measured tiny-model
+RSS, but ignoring it produces plans the native engine refuses to open. We do not
+enable `COLI_RAM_OVERCOMMIT` to bypass it. The standard macOS ARM CI runner tests
+insufficient-memory refusal; two-range Kimi execution needs a larger machine.
+
 The numpy-generated tiny fixture retains native MXFP4 experts. Its eight-token
 independent oracle comes from upstream's hash-pinned Moonshot reference, in the
 explicit exact numeric profile. Linux also checks whole/split equivalence and
 the household flow, including cleanup under the default numeric profile.
-macOS Intel/ARM CI runs household execution with and without OpenMP.
+macOS Intel CI runs household execution with and without OpenMP. Native ARM
+Kimi execution remains unverified on a sufficient-memory machine.
+
+## GLM CPU float-source checkpoints
+
+The initial contract accepts separate float/BF16/F16 expert matrices and dense
+weights. It reserves float32 plus a conservative scale/padding bound, latent MLA
+and rotary state, optional per-layer DSA state, and both loader temporaries and
+the native `ws[64]` miss slabs. Edge load quantization gets a separate temporary.
+Prepared `.qs` containers are not silently treated as ordinary tensors: their
+format stamps and mixed quantization layouts still need dedicated validation.
+This initial bound requires all matrix contraction dimensions to be at least
+32; smaller synthetic geometries need separate packed-row padding accounting.
+
+An incomplete DSA bank is rejected: Edge detects indexer support globally,
+whereas each Segment detects it for its interval. Admitting only part of that
+bank would give incompatible numerical classes after splitting.
+
+The generated float fixture matches 20 independent PyTorch oracle tokens with
+native `GLM_SEGMENT_EBITS=16 GLM_SEGMENT_DBITS=16`. Linux checks whole/split
+equivalence and approvals; default CPU quantization also exercises lost-donor
+cleanup. Native macOS Intel/ARM runs household execution in both OpenMP modes.
+
+## GLM5.3 text-only float-source checkpoints
+
+This contract counts hyper-connection boundary width, separate KDA and latent
+DSA state, conservative float/quantization workspace, and context-sized prefill.
+The pinned adapter allocates state for every model layer in every Segment
+session, even for a one-layer interval. That allocation is represented as
+engine-wide session state, not divided by the number of owned layers.
+
+The stateless Edge advertises a zero context limit (caller-selected). Lumabri
+uses its protocol ceiling in that case and still negotiates the actual Segment
+limits. It no longer rejects every GLM5.3 household chat at argument parsing.
+
+The initial contract rejects packed containers and vision-config checkpoints:
+the native loader replicates the vision tower on each process, even for text
+chat. It also refuses the pinned loader's incomplete pool=1 path. These need
+their own validated layouts; they are not promoted by the text-only oracle.
+The tiny fixture has four independent Transformers continuation tokens.
+Whole/split and household execution are separate tests in Linux and native
+macOS CI; they do not prove full-size memory or performance.
 
 Other families must supply their own retained-weight and state contracts.
 Do not promote them by changing `sizing_verified` alone, or reuse ordinary GQA

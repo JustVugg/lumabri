@@ -58,8 +58,8 @@ trap cleanup EXIT
 [[ -f "$MODEL_DIR/config.json" ]] ||
     { echo "SEGMENT SPLIT TEST: SKIP (no $MODEL_DIR)"; exit 0; }
 
-LAYERS=$(python3 -c "import json;print(json.load(open('$MODEL_DIR/config.json'))['num_hidden_layers'])")
-MTYPE=$(python3 -c "import json;print(json.load(open('$MODEL_DIR/config.json')).get('model_type',''))")
+LAYERS=$(python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); print(c.get("text_config",c)["num_hidden_layers"])' "$MODEL_DIR/config.json")
+MTYPE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("model_type",""))' "$MODEL_DIR/config.json")
 [[ "$LAYERS" -ge 2 ]] || { echo "SEGMENT SPLIT TEST: SKIP ($MODEL_DIR has $LAYERS layers)"; exit 0; }
 
 wait_port() {

@@ -1893,7 +1893,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     if (lmb_colibri_register_all()) {
-        fprintf(stderr, "cannot register all six Colibri adapters\n"); return 1;
+        fprintf(stderr, "cannot register the Colibri adapters\n"); return 1;
     }
     ColiEdgeEngineOptions edge_options = {
         .struct_size = sizeof edge_options,
@@ -1922,11 +1922,16 @@ int main(int argc, char **argv) {
                 engine_error(error));
         return 1;
     }
-    uint32_t context = cap.max_context_tokens < 4096 ? cap.max_context_tokens : 4096;
+    /* A stateless Edge (e.g. GLM5.3) can leave its context limit to the
+     * caller. Zero is not a ban on every prompt. Still enforce the protocol
+     * ceiling and negotiate against the actual Segment session limits. */
+    uint32_t context_limit = cap.max_context_tokens ? cap.max_context_tokens : LMB_SEG_MAX_CONTEXT;
+    if (context_limit > LMB_SEG_MAX_CONTEXT) context_limit = LMB_SEG_MAX_CONTEXT;
+    uint32_t context = context_limit < 4096 ? context_limit : 4096;
     uint32_t max_rows = cap.max_batch_rows < 64 ? cap.max_batch_rows : 64;
     uint32_t discovery_timeout_ms = serve_mode ? 2500u : 15000u;
     if (((value = arg_value(argc, argv, "--context")) &&
-         lmb_parse_u32(value, 1, cap.max_context_tokens, &context)) ||
+         lmb_parse_u32(value, 1, context_limit, &context)) ||
         ((value = arg_value(argc, argv, "--max-rows")) &&
          lmb_parse_u32(value, 1, cap.max_batch_rows, &max_rows)) ||
         ((value = arg_value(argc, argv, "--discovery-timeout-ms")) &&

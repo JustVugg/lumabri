@@ -163,9 +163,15 @@ static int LMB_UNUSED lmb_kimi_memory(const char *root, const char *json, LmbMod
     uint64_t wide = m->boundary_width + (uint64_t)heads * (nope + rope + 2u * vd) +
         proj * (kd + 8u) + (uint64_t)shared * inter + dense + latent + qrank + kvrank +
         (uint64_t)index * (index_heads + 1u) + experts + (uint64_t)topk * (latent + inter);
-    m->scratch_fixed_bytes = lmb_size_add(lmb_size_mul(wide, 128u * 16u * 4u),
-        lmb_size_mul(wide, 1024u * 4u)); /* conservative QCHUNK loading workspace */
-    m->scratch_token_bytes = 256u * 32u; /* score + DSA entries and selections per team */
+    /* The pinned native initializer refuses even tiny ranges below its
+     * unconditional 2.5 GB page-cache + 1.2 GB activation policy reserve.
+     * Keep this floor in admission; never bypass COLI_RAM_OVERCOMMIT to make
+     * an optimistic plan start. Its KV projection includes unowned layers. */
+    m->scratch_fixed_bytes = lmb_size_add(UINT64_C(3700000000),
+        lmb_size_add(lmb_size_mul(wide, 128u * 16u * 4u),
+                     lmb_size_mul(wide, 1024u * 4u)));
+    m->scratch_token_bytes = lmb_size_add(256u * 32u,
+        (uint64_t)layers * (kvrank + rope) * 4u);
     m->segment_fixed_bytes = (uint64_t)layers * (4096u + (uint64_t)experts * 512u);
     m->max_context = 1048576;
     m->experts = experts; m->experts_per_tok = topk; m->moe_intermediate = inter;

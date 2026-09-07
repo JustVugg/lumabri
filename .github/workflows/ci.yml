@@ -161,6 +161,8 @@ jobs:
         run: |
           python3 -m pip install transformers==5.16.1
           python3 tests/integration/prepare_inkling_fixture.py --engine ../colibri/c --out build/inkling-contract
+          make segment_budget_probe
+          python3 tests/integration/planner_tensor_contract_test.py --family inkling --model build/inkling-contract/int4/inkling-tiny
           INK_SEGMENT_BITS=0 OMP_NUM_THREADS=2 build/qwen-edge-oracle inkling build/inkling-contract/float/inkling-tiny build/inkling-contract/float/inkling-tiny/ref_inkling.json 24
           INK_SEGMENT_BITS=0 python3 tests/integration/home_flow_test.py --models-dir build/inkling-contract/float
           python3 tests/integration/home_flow_test.py --models-dir build/inkling-contract/int4 --kill-donor
@@ -175,14 +177,44 @@ jobs:
         run: |
           python3 ../colibri/c/tools/make_kimi_k3_tiny.py --output build/kimi-contract/kimi-tiny
           python3 ../colibri/c/tools/make_edge_tiny_tokenizer.py build/kimi-contract/kimi-tiny --vocab-size 320
+          python3 tests/integration/planner_tensor_contract_test.py --family kimi --model build/kimi-contract/kimi-tiny
           K3_BITS=32 K3_MLA_BITS=32 K3_HEAD_BITS=32 K3_IDOT=0 OMP_NUM_THREADS=2 build/qwen-edge-oracle kimi build/kimi-contract/kimi-tiny ../colibri/c/kimi_k3_tiny/ref.json 8
-          K3_BITS=32 K3_MLA_BITS=32 K3_HEAD_BITS=32 K3_IDOT=0 python3 tests/integration/home_flow_test.py --models-dir build/kimi-contract
-          python3 tests/integration/home_flow_test.py --models-dir build/kimi-contract --kill-donor
+          python3 tests/integration/home_flow_test.py --models-dir build/kimi-contract --expect-no-fit
+          K3_BITS=32 K3_MLA_BITS=32 K3_HEAD_BITS=32 K3_IDOT=0 python3 tests/integration/home_flow_test.py --models-dir build/kimi-contract --donor-ram-gb 4.5
+          python3 tests/integration/home_flow_test.py --models-dir build/kimi-contract --donor-ram-gb 4.5 --kill-donor
           SPLIT_MODEL_DIR=build/kimi-contract/kimi-tiny SPLIT_ENGINE=kimi SPLIT_MODEL=kimi-mxfp4 SPLIT_ROUNDS=1 SPLIT_THREADS=2 SPLIT_TOKENS=8 PORT=9740 K3_BITS=32 K3_MLA_BITS=32 K3_HEAD_BITS=32 K3_IDOT=0 bash tests/integration/segment_split_test.sh
       - uses: actions/upload-artifact@v4
         with:
           name: tiny-kimi-checkpoint
           path: lumabri/build/kimi-contract/kimi-tiny/*
+          retention-days: 3
+      - name: GLM memory contract — float source, MLA and DSA
+        working-directory: lumabri
+        run: |
+          python3 tests/integration/prepare_glm_fixture.py --engine ../colibri/c --out build/glm-contract
+          python3 tests/integration/planner_tensor_contract_test.py --family glm --model build/glm-contract/glm_tiny
+          GLM_SEGMENT_EBITS=16 GLM_SEGMENT_DBITS=16 OMP_NUM_THREADS=2 build/qwen-edge-oracle glm build/glm-contract/glm_tiny build/glm-contract/ref_glm.json 20
+          GLM_SEGMENT_EBITS=16 GLM_SEGMENT_DBITS=16 python3 tests/integration/home_flow_test.py --models-dir build/glm-contract
+          python3 tests/integration/home_flow_test.py --models-dir build/glm-contract --kill-donor
+          SPLIT_MODEL_DIR=build/glm-contract/glm_tiny SPLIT_ENGINE=glm SPLIT_MODEL=glm-float SPLIT_ROUNDS=1 SPLIT_THREADS=2 SPLIT_TOKENS=8 PORT=10140 GLM_SEGMENT_EBITS=16 GLM_SEGMENT_DBITS=16 bash tests/integration/segment_split_test.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tiny-glm-checkpoint
+          path: lumabri/build/glm-contract/glm_tiny/*
+          retention-days: 3
+      - name: GLM5.3 contract — replicated session state and stateless Edge
+        working-directory: lumabri
+        run: |
+          python3 tests/integration/prepare_glm53_fixture.py --engine ../colibri/c --out build/glm53-contract/glm53-tiny
+          python3 tests/integration/planner_tensor_contract_test.py --family glm53 --model build/glm53-contract/glm53-tiny
+          GLM53_BITS=32 OMP_NUM_THREADS=2 build/qwen-edge-oracle glm53 build/glm53-contract/glm53-tiny build/glm53-contract/glm53-tiny/edge_ref.json 4
+          GLM53_BITS=32 python3 tests/integration/home_flow_test.py --models-dir build/glm53-contract
+          python3 tests/integration/home_flow_test.py --models-dir build/glm53-contract --kill-donor
+          SPLIT_MODEL_DIR=build/glm53-contract/glm53-tiny SPLIT_ENGINE=glm53 SPLIT_MODEL=glm53-float SPLIT_ROUNDS=1 SPLIT_THREADS=2 SPLIT_TOKENS=8 PORT=10540 GLM53_BITS=32 bash tests/integration/segment_split_test.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tiny-glm53-checkpoint
+          path: lumabri/build/glm53-contract/glm53-tiny/*
           retention-days: 3
   macos-household:
     # Real native CPU engines + signed CAS + approvals + streaming. Loopback
@@ -251,9 +283,29 @@ jobs:
         with:
           name: tiny-kimi-checkpoint
           path: lumabri/build/kimi-home-models/kimi-tiny
-      - name: Native Kimi MXFP4 request and execution
+      - name: Native Kimi insufficient-memory admission
         working-directory: lumabri
-        run: python3 tests/integration/home_flow_test.py --models-dir build/kimi-home-models
+        run: python3 tests/integration/home_flow_test.py --models-dir build/kimi-home-models --expect-no-fit
+      # The standard ARM runner cannot provide two native Kimi 3.7 GB floors.
+      # Exercise refusal there; do not override the engine's RAM safeguard.
+      - name: Native Kimi MXFP4 execution on sufficient-memory runner
+        if: matrix.runner == 'macos-15-intel'
+        working-directory: lumabri
+        run: python3 tests/integration/home_flow_test.py --models-dir build/kimi-home-models --donor-ram-gb 4.5
+      - uses: actions/download-artifact@v4
+        with:
+          name: tiny-glm-checkpoint
+          path: lumabri/build/glm-home-models/glm_tiny
+      - name: Native GLM request and execution
+        working-directory: lumabri
+        run: python3 tests/integration/home_flow_test.py --models-dir build/glm-home-models
+      - uses: actions/download-artifact@v4
+        with:
+          name: tiny-glm53-checkpoint
+          path: lumabri/build/glm53-home-models/glm53-tiny
+      - name: Native GLM5.3 request and execution
+        working-directory: lumabri
+        run: python3 tests/integration/home_flow_test.py --models-dir build/glm53-home-models
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

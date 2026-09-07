@@ -12,6 +12,33 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import struct
+
+
+def verify_int4(model):
+    """A successful converter exit is not evidence of quantization."""
+    config = json.loads((model / "config.json").read_text())
+    headers = {}
+    for shard in model.glob("*.safetensors"):
+        with shard.open("rb") as f:
+            size, = struct.unpack("<Q", f.read(8))
+            headers.update(json.loads(f.read(size)))
+    experts = config["n_routed_experts"]
+    hidden, inter = config["hidden_size"], config["moe_intermediate_size"]
+    sparse = 0
+    for layer, kind in enumerate(config["mlp_layer_types"]):
+        if kind != "sparse":
+            continue
+        sparse += 1
+        for suffix, rows, cols in (("gate_up_proj", 2 * inter, hidden),
+                                   ("down_proj", hidden, inter)):
+            key = f"model.layers.{layer}.mlp.experts.{suffix}"
+            tensor, scale = headers[key], headers[key + ".qs"]
+            assert tensor["dtype"] == "U8", f"not packed int4: {key}"
+            assert tensor["data_offsets"][1] - tensor["data_offsets"][0] == experts * rows * cols // 2
+            assert scale["dtype"] == "F32"
+            assert scale["data_offsets"][1] - scale["data_offsets"][0] == experts * rows * 4
+    assert sparse > 0, "fixture must exercise routed experts"
 
 
 def main():
@@ -36,9 +63,17 @@ def main():
     config_path.write_text(json.dumps(config, indent=2) + "\n")
     subprocess.run([sys.executable, str(engine / "tools/make_edge_tiny_tokenizer.py"),
                     str(source), "--vocab-size", "256"], check=True, env=env)
+    # This converter quantizes original TML names, not HF expert names. Its
+    # upstream e2e fixture helper reverses the mapping before conversion.
+    converted = out / "converted"
     subprocess.run([sys.executable, str(engine / "tools/convert_inkling_int4.py"),
-                    "--indir", str(source), "--outdir", str(out / "int4" / "inkling-tiny"),
-                    "--xbits", "4"], check=True, env=env)
+                    "--selftest-e2e", str(source), str(converted)], check=True, env=env)
+    packed = out / "int4" / "inkling-tiny"
+    packed.parent.mkdir()
+    Path(str(converted) + "-i4").rename(packed)
+    verify_int4(packed)
+    subprocess.run([sys.executable, str(engine / "tools/make_edge_tiny_tokenizer.py"),
+                    str(packed), "--vocab-size", "256"], check=True, env=env)
 
 
 if __name__ == "__main__":

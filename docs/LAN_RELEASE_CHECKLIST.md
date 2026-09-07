@@ -20,7 +20,7 @@ execution, cross-platform numerical compatibility, or concurrent capacity.
    nodes. Mac deployment/approval is user-operated; CI loopback is separate.
 2. Complete verified sizing for every registered family and supported weight
    encoding. OLMoE, DeepSeek V4, converted Qwen3.6, Inkling and float-dense/MXFP4
-   Kimi enable conservative sizing. Require real
+   Kimi, float-source GLM and text-only float-source GLM5.3 enable conservative sizing. Require real
    checkpoint/adapter conformance before promoting support.
 3. Consistent planner/runtime reservations, explicit local-compute consent,
    and placement informed by measured execution costs, not just RAM totals.
@@ -78,8 +78,16 @@ not a completed gate.
    and the full AttnRes boundary width. Prepared U8 dense containers are not
    yet admitted by this contract. Native cache policy may reserve less than
    the upper bound; full warm residency still needs execution evidence.
-   This does not close gate 2: GLM, GLM5.3 and Qwen3.8 still
-   need their own verified memory contracts. Large checkpoints remain untested.
+   Its native 3.7 GB policy floor is included in admission. Standard ARM CI
+   validates low-memory refusal, not two-range Kimi execution; sufficient-RAM
+   native ARM execution remains open. No overcommit override is enabled.
+   GLM float source adds latent MLA/DSA state and separate miss/load workspace;
+   prepared quantized GLM containers remain unverified.
+   GLM5.3 accounts for its engine-wide replicated session state and context-sized
+   workspace. Its stateless Edge context convention is handled by the caller.
+   Packed/vision GLM5.3 and the native pool=1 path remain unverified.
+   This does not close gate 2: Qwen3.8 still needs its own memory contract;
+   additional encodings and large checkpoints remain untested.
 3. PR #153: shared conservative resident admission for catalogue, request
    and launch, with a stat-only checkpoint preview and a signed-inventory
    recheck before offers. Edge and Segment budgets are separately MiB-aligned.
