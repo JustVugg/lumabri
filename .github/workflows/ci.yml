@@ -170,6 +170,20 @@ jobs:
           name: tiny-inkling-checkpoint
           path: lumabri/build/inkling-contract/int4/inkling-tiny/*
           retention-days: 3
+      - name: Kimi memory contract — MXFP4 and AttnRes boundaries
+        working-directory: lumabri
+        run: |
+          python3 ../colibri/c/tools/make_kimi_k3_tiny.py --output build/kimi-contract/kimi-tiny
+          python3 ../colibri/c/tools/make_edge_tiny_tokenizer.py build/kimi-contract/kimi-tiny --vocab-size 320
+          K3_BITS=32 K3_MLA_BITS=32 K3_HEAD_BITS=32 K3_IDOT=0 OMP_NUM_THREADS=2 build/qwen-edge-oracle kimi build/kimi-contract/kimi-tiny ../colibri/c/kimi_k3_tiny/ref.json 8
+          K3_BITS=32 K3_MLA_BITS=32 K3_HEAD_BITS=32 K3_IDOT=0 python3 tests/integration/home_flow_test.py --models-dir build/kimi-contract
+          python3 tests/integration/home_flow_test.py --models-dir build/kimi-contract --kill-donor
+          SPLIT_MODEL_DIR=build/kimi-contract/kimi-tiny SPLIT_ENGINE=kimi SPLIT_MODEL=kimi-mxfp4 SPLIT_ROUNDS=1 SPLIT_THREADS=2 SPLIT_TOKENS=8 PORT=9740 K3_BITS=32 K3_MLA_BITS=32 K3_HEAD_BITS=32 K3_IDOT=0 bash tests/integration/segment_split_test.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tiny-kimi-checkpoint
+          path: lumabri/build/kimi-contract/kimi-tiny/*
+          retention-days: 3
   macos-household:
     # Real native CPU engines + signed CAS + approvals + streaming. Loopback
     # coverage does not replace the macOS 12.6 / physical household LAN test.
@@ -233,6 +247,13 @@ jobs:
       - name: Native Inkling packed-int4 request and execution
         working-directory: lumabri
         run: python3 tests/integration/home_flow_test.py --models-dir build/inkling-home-models
+      - uses: actions/download-artifact@v4
+        with:
+          name: tiny-kimi-checkpoint
+          path: lumabri/build/kimi-home-models/kimi-tiny
+      - name: Native Kimi MXFP4 request and execution
+        working-directory: lumabri
+        run: python3 tests/integration/home_flow_test.py --models-dir build/kimi-home-models
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

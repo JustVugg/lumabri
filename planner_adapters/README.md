@@ -53,6 +53,28 @@ retags its synthetic `inkling_text` export as the pinned registry's `inkling`;
 this is not a new runtime alias or a claim about arbitrary exports. The tests
 do not certify large checkpoints or GPU performance.
 
+## Kimi CPU checkpoints with float dense source and MXFP4 experts
+
+The initial contract validates the complete MXFP4 expert tensor bank (packed
+nibbles and byte exponent scales), including native per-slot alignment padding.
+Dense tensors reserve a conservative float32 upper bound plus scales, covering
+the native load-time quantization profiles; prepared U8 dense containers remain
+unverified rather than being mistaken for float tensors. Embedding row reads
+are conservatively covered by a whole-boundary reservation, not disk-mode admission.
+
+KDA recurrence and convolution state are fixed per session. MLA latent/rotary
+and optional DSA index caches grow with context. Edge/Segment exchange AttnRes
+state with width `hidden * (1 + ceil(layers / block_size))`, not just `hidden`;
+both boundary buffers and loading workspace are reserved. Expert capacity is
+an upper bound: native `K3_EXPERT_GB`/RAM policy can choose a smaller cache, so
+this contract does not certify that every admitted weight was warmed into RAM.
+
+The numpy-generated tiny fixture retains native MXFP4 experts. Its eight-token
+independent oracle comes from upstream's hash-pinned Moonshot reference, in the
+explicit exact numeric profile. Linux also checks whole/split equivalence and
+the household flow, including cleanup under the default numeric profile.
+macOS Intel/ARM CI runs household execution with and without OpenMP.
+
 Other families must supply their own retained-weight and state contracts.
 Do not promote them by changing `sizing_verified` alone, or reuse ordinary GQA
 KV arithmetic for recurrent/latent/hyper-connection architectures.

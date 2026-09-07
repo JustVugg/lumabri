@@ -69,7 +69,9 @@ typedef struct {
     int sizing_verified;        /* adapter-specific arithmetic was verified */
     uint32_t memory_contract;   /* 0: historical estimate, 1: explicit layer map */
     uint32_t max_context;
+    uint32_t boundary_width;    /* zero: hidden; otherwise the actual Edge/Segment state width */
     uint64_t edge_resident_bytes;
+    uint64_t edge_scratch_fixed_bytes;
     uint64_t segment_fixed_bytes;
     uint64_t scratch_fixed_bytes, scratch_token_bytes;
     LmbLayerMemory memory[LMB_PLAN_LAYER_MAX];
@@ -211,9 +213,10 @@ static LmbRangeCost LMB_UNUSED lmb_estimate_edge(const LmbModelShape *m,
         uint32_t ctx = context ? context : 4096;
         if (m->memory_contract != 1 || !m->max_context || ctx > m->max_context) return c;
         c.resident_bytes = c.working_set_bytes = m->edge_resident_bytes;
-        c.state_bytes = lmb_size_mul(lmb_size_mul((uint64_t)ctx * m->hidden, 4),
+        uint32_t width = m->boundary_width ? m->boundary_width : m->hidden;
+        c.state_bytes = lmb_size_mul(lmb_size_mul((uint64_t)ctx * width, 4),
                                      sessions ? sessions : 1);
-        c.scratch_bytes = lmb_size_mul(m->vocab, 16);
+        c.scratch_bytes = lmb_size_add(m->edge_scratch_fixed_bytes, lmb_size_mul(m->vocab, 16));
         c.ok = lmb_size_add(c.resident_bytes, lmb_size_add(c.state_bytes,
             c.scratch_bytes)) != UINT64_MAX;
         return c;
@@ -328,6 +331,7 @@ static int LMB_UNUSED lmb_json_string(const char *object, const char *key,
 
 #include "planner_adapters/qwen36.h"
 #include "planner_adapters/inkling.h"
+#include "planner_adapters/kimi.h"
 
 static LMB_UNUSED int lmb_shape_from_config(const char *model_dir,
                                             LmbModelShape *out) {
@@ -395,6 +399,8 @@ static LMB_UNUSED int lmb_shape_from_config(const char *model_dir,
         out->sizing_verified = !lmb_qwen36_memory(model_dir, out);
     if (!strcmp(fam->segment_id, "inkling"))
         out->sizing_verified = !lmb_inkling_memory(model_dir, cfg, out);
+    if (!strcmp(fam->segment_id, "kimi"))
+        out->sizing_verified = !lmb_kimi_memory(model_dir, cfg, out);
     return out->layers && out->hidden ? 0 : -1;
 }
 
