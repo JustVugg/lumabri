@@ -22,6 +22,7 @@
 
 #include "lumabri_machine.h"   /* LMB_GPU_* : the backends an engine can use */
 #include "lumabri_planner.h"
+#include "lumabri_memory_budget.h"
 
 #define LMB_CLUSTER_MAX_NODES 32
 
@@ -196,6 +197,51 @@ static LMB_UNUSED int lmb_plan_cluster(const LmbModelShape *m,
     const LmbClusterNode *nodes, uint32_t n, uint32_t context,
     uint32_t sessions, LmbPlanGoal goal, LmbClusterPlan *out) {
     return lmb_plan_cluster_source(m, nodes, n, context, sessions, goal, 0, out);
+}
+
+/* Household resident admission uses the same process budgets as launch.
+ * Keep this separate from adapter arithmetic: guard overhead is neither a
+ * tensor nor a measured working set. No speed/optimality claim is made. */
+static LMB_UNUSED int lmb_home_plan_budgets(const LmbModelShape *shape,
+    uint64_t checkpoint_bytes, const LmbClusterNode *nodes, uint32_t count,
+    uint32_t context, LmbClusterPlan *plan) {
+    if (!shape || !nodes || !plan || !count || count > LMB_CLUSTER_MAX_NODES ||
+        !plan->nslices || plan->nslices > count || plan->edge_node >= count ||
+        plan->sessions != 1 || !plan->data_available) return -1;
+    LmbClusterPlan updated = *plan;
+    LmbClusterPlan *destination = plan;
+    plan = &updated; /* Invalid input never leaves a partially updated plan. */
+    uint32_t next = 0, has_edge = 0;
+    uint64_t total_budget = 0, missing = 0;
+    for (uint32_t i = 0; i < count; i++)
+        total_budget = lmb_budget_add(total_budget, nodes[i].ram_budget_bytes);
+    for (uint32_t i = 0; i < plan->nslices; i++) {
+        LmbSlice *s = &plan->slices[i];
+        if (s->node >= count || s->layer_begin != next) return -1;
+        for (uint32_t j = 0; j < i; j++)
+            if (plan->slices[j].node == s->node) return -1;
+        LmbHomeReservation r;
+        int edge = s->node == plan->edge_node;
+        if (lmb_home_reservation(shape, checkpoint_bytes, s->layer_begin,
+                                s->layer_end, context, edge, &r)) return -1;
+        next = s->layer_end; has_edge += (uint32_t)edge;
+        s->bytes_resident = r.total_bytes;
+        s->state = r.total_bytes <= nodes[s->node].ram_budget_bytes ?
+                   LMB_PLAN_RESIDENT : LMB_PLAN_UNRUNNABLE;
+        if (s->state == LMB_PLAN_UNRUNNABLE)
+            missing = lmb_budget_add(missing, r.total_bytes - nodes[s->node].ram_budget_bytes);
+    }
+    if (next != shape->layers || has_edge != 1) return -1;
+    plan->missing_bytes = missing;
+    plan->missing_nodes = 0;
+    uint64_t average = total_budget / count;
+    if (missing && average) {
+        uint64_t additional = missing / average + (missing % average != 0);
+        plan->missing_nodes = additional > UINT32_MAX ? UINT32_MAX : (uint32_t)additional;
+    }
+    plan->state = missing ? LMB_PLAN_UNRUNNABLE : LMB_PLAN_RESIDENT;
+    *destination = updated;
+    return 0;
 }
 
 /* Would adding this machine help, and at what?

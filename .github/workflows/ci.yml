@@ -42,8 +42,9 @@ jobs:
           python-version: "3.12"
       - name: Build the C workspace with Apple Clang
         run: |
-          make lumabri tracker maintainer liblumabri.dylib test_shim test_machine test_chat_ui CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
+          make lumabri tracker maintainer liblumabri.dylib test_shim test_machine test_chat_ui test_memory_budget CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           ./test_machine
+          ./test_memory_budget
           make test-runtime-probe CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           python3 tests/integration/native_shim_test.py
           python3 tests/integration/household_network_test.py

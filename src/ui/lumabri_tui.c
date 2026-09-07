@@ -496,7 +496,7 @@ static void draw_workspace(const LmbTuiState *st, int tab, int sel, int detail,
         if (m->planned && m->plan.state != LMB_PLAN_UNRUNNABLE) {
             for (uint32_t i = 0; i < m->plan.nslices && 16 + (int)i * 2 < ui_h - 7; i++) {
                 const LmbSlice *s = &m->plan.slices[i];
-                ui_printf(16 + (int)i * 2, 5, UI_TEXT, "%s%s · layers %u–%u · %.2f GB resident",
+                ui_printf(16 + (int)i * 2, 5, UI_TEXT, "%s%s · layers %u–%u · %.2f GB reserved",
                     st->nodes[s->node].name, s->node == m->plan.edge_node ? " (chat host)" : "",
                     s->layer_begin, s->layer_end - 1, s->bytes_resident / 1e9);
             }
@@ -505,7 +505,9 @@ static void draw_workspace(const LmbTuiState *st, int tab, int sel, int detail,
             ui_printf(16, 5, UI_TEXT, "Missing: %.2f GB · sizing %s · local source weights %s",
                 m->plan.missing_bytes / 1e9, m->planned ? "available" : "unavailable",
                 m->weights_present ? "present" : "missing");
-            ui_text(19, 5, UI_MUTED, "Select computers in Share resources, then review the updated plan.");
+            ui_text(19, 5, UI_MUTED, m->checkpoint_inventory_ok ?
+                "Select computers in Share resources, then review the updated plan." :
+                "Checkpoint inventory unavailable. Check source files and refresh.");
         }
     } else if (tab) {
         int rows = (ui_h - 15) / 3; if (rows < 1) rows = 1;

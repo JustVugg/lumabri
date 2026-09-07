@@ -26,6 +26,8 @@ typedef struct {
     LmbClusterPlan plan;
     int planned;                    /* 0 when the cluster cannot be planned */
     int weights_present;
+    uint64_t checkpoint_bytes;
+    int checkpoint_inventory_ok;
     const LmbCalibration *calibration;   /* NULL until something is measured */
     LmbCalKey calibration_key;      /* exact current conditions */
     int calibration_key_valid;

@@ -605,6 +605,8 @@ static int home_request_chat(LmbTuiState *st, int selected) {
         !st->inventory_ok || home_private_network())
         return home_fail("Cannot prepare chat: refresh the household inventory and select a model.");
     LmbTuiModel *m = &st->models[selected];
+    if (!m->checkpoint_inventory_ok)
+        return home_fail("Cannot inventory the source checkpoint. Check its files and refresh the model list.");
     if (!m->weights_present || !m->shape.sizing_verified || st->sessions != 1) {
         return home_fail("This checkpoint needs verified sizing, local source weights and a one-session plan.");
     }
@@ -617,7 +619,9 @@ static int home_request_chat(LmbTuiState *st, int selected) {
     }
     LmbClusterPlan plan;
     if (!count || lmb_plan_cluster_source(&m->shape, nodes, count, st->context, 1,
-                                   LMB_GOAL_ONE_SESSION, 1, &plan) || plan.state != LMB_PLAN_RESIDENT) {
+                                   LMB_GOAL_ONE_SESSION, 1, &plan) ||
+        lmb_home_plan_budgets(&m->shape, m->checkpoint_bytes, nodes, count, st->context, &plan) ||
+        plan.state != LMB_PLAN_RESIDENT) {
         return home_fail("No complete resident plan fits the selected computers. Keep Share resources open and check their offered RAM.");
     }
     /* Discovery is not proof that inbound connections work. Authenticate the
@@ -691,8 +695,11 @@ static int home_request_chat(LmbTuiState *st, int selected) {
     }
     if (!found) goto done;
     stage = "validating the indexed plan";
-    LmbRangeCost edge_cost = lmb_estimate_edge(&m->shape, st->context, 1);
-    uint64_t edge_ram = edge_cost.resident_bytes + edge_cost.state_bytes + edge_cost.scratch_bytes + (64u << 20);
+    if (lmb_home_plan_budgets(&m->shape, swarm.total_bytes, nodes, count,
+                             st->context, &plan) || plan.state != LMB_PLAN_RESIDENT) {
+        home_fail("The indexed checkpoint does not fit the selected budgets. Refresh the plan; no allocation was committed.");
+        goto done;
+    }
     uint8_t edge_pk[32];
     if (lmb_unhex(edge_pk, st->identities[indices[plan.edge_node]], 32)) goto done;
     /* Each recipient gets one exact range, and only the selected Edge owner
@@ -710,17 +717,20 @@ static int home_request_chat(LmbTuiState *st, int selected) {
         o->context = st->context; o->threads = nodes[n].threads ? nodes[n].threads : 1;
         if (o->threads > 256) o->threads = 256;
         o->max_new = st->max_new ? st->max_new : 256; o->model_bytes = swarm.total_bytes;
-        o->runs_edge = n == plan.edge_node; o->edge_ram_bytes = o->runs_edge ? edge_ram : 0;
-        /* Use the runtime's conservative preflight, not the smaller generic
-         * shape estimate. Include state, Edge and a process overhead margin. */
-        uint64_t runtime = swarm.total_bytes / o->layers * (o->end - o->begin) +
-                           swarm.total_bytes / 20 + (128u << 20);
-        LmbRangeCost cost = lmb_estimate_segment(&m->shape, o->begin, o->end, o->context, 1);
-        runtime += cost.state_bytes + cost.scratch_bytes;
-        if (runtime < slice->bytes_resident) runtime = slice->bytes_resident;
-        o->ram_bytes = runtime + o->edge_ram_bytes;
-        o->ram_bytes = (o->ram_bytes + ((1u << 20) - 1)) & ~((uint64_t)(1u << 20) - 1);
-        o->disk_bytes = swarm.total_bytes * 2 + (256u << 20);
+        o->runs_edge = n == plan.edge_node;
+        LmbHomeReservation reservation;
+        if (lmb_home_reservation(&m->shape, swarm.total_bytes, o->begin, o->end,
+                                o->context, o->runs_edge, &reservation)) {
+            home_fail("The model's memory requirements cannot be represented safely.");
+            goto done;
+        }
+        o->ram_bytes = reservation.total_bytes;
+        o->edge_ram_bytes = reservation.edge_bytes;
+        o->disk_bytes = lmb_budget_add(lmb_budget_add(swarm.total_bytes, swarm.total_bytes), UINT64_C(256) << 20);
+        if (o->disk_bytes == UINT64_MAX) {
+            home_fail("The model's disk requirements exceed the supported size.");
+            goto done;
+        }
         if (o->ram_bytes > nodes[n].ram_budget_bytes) {
             home_fail("%.64s needs %.2f GB for this plan, but offers %.2f GB. No allocation was committed.",
                       nodes[n].name, o->ram_bytes / 1e9, nodes[n].ram_budget_bytes / 1e9);

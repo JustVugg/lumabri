@@ -34,7 +34,7 @@
 #include "lumabri_secure.h"
 #include "lumabri_home_net.h"
 
-#define MAX_FILES          4096
+#define MAX_FILES          LMB_CONTENT_MAX_FILES
 #define MAX_INCLUDES       64
 #define MAX_READ_LEN       LMB_MAX_PAY
 #define HEARTBEAT_S        10

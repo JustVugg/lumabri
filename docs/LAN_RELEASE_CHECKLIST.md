@@ -64,10 +64,14 @@ One PR per numbered gate above; all merges preserve commits (no squash), and
 require green checks on the exact reviewed head. Partial implementation is
 not a completed gate.
 
-1. In progress: approved layer-allocation view, named execution evidence,
+1. PR #152 merged: approved layer-allocation view, named execution evidence,
    two-donor checks; physical two-computer oracle and timings still required.
 2. Pending: verified family sizing and checkpoint conformance.
-3. Pending: planner/runtime budget and placement consistency.
+3. In progress: shared conservative resident admission for catalogue, request
+   and launch, with a stat-only checkpoint preview and a signed-inventory
+   recheck before offers. Edge and Segment budgets are separately MiB-aligned.
+   Measured-cost placement remains pending; this does not enable disk mode or
+   certify additional model families.
 4. Pending: connected, persisted lightweight calibration and advice.
 5. Pending: model acquisition, cache reuse and verified disk execution.
 6. Pending: upstream-only GPU capability integration, CPU otherwise.

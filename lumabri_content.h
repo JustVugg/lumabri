@@ -3,6 +3,8 @@
 
 #include <string.h>
 
+#define LMB_CONTENT_MAX_FILES 4096
+
 /* Files created and mutated by a running engine belong to that machine, not
  * to the signed model inventory. Publishing one makes its next heartbeat
  * look like a model-integrity violation. Keep the prefix future-proof: every

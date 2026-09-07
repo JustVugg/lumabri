@@ -7,6 +7,7 @@
 #include "lumabri_machine.h"
 #include "lumabri_run_gate.h"
 #include "lumabri_planner.h"
+#include "lumabri_memory_budget.h"
 #include "lumabri_sign.h"
 #include "lumabri_secure.h"
 #include "segment_colibri.h"
@@ -1369,14 +1370,7 @@ int main(int argc, char **argv) {
     if (!model_layers && shaped) model_layers = shape.layers;
     if (!model_bytes && model_dir) model_bytes = directory_bytes(model_dir, 0);
     if (process_limit && model_bytes && model_layers) {
-        uint64_t range_layers = end - begin;
-        uint64_t proportional = model_bytes / model_layers * range_layers;
-        uint64_t remainder = model_bytes % model_layers * range_layers /
-                             model_layers;
-        uint64_t overhead = model_bytes / 20u;
-        uint64_t estimated = proportional + remainder;
-        if (estimated <= UINT64_MAX - overhead) estimated += overhead;
-        else estimated = UINT64_MAX;
+        uint64_t estimated = lmb_checkpoint_floor(model_bytes, model_layers, begin, end);
         if (estimated > process_limit) {
             fprintf(stderr, "[segment-node] assigned range %u:%u needs about "
                     "%.1f GB but the donor budget is %.1f GB; releasing it "

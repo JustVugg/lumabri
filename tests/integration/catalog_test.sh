@@ -75,6 +75,9 @@ doc = json.loads(sys.argv[1])
 assert doc["schema"] == "lumabri.models.v1"
 assert {m["name"] for m in doc["models"]} >= {"huge", "tiny", "config-only"}
 assert next(m for m in doc["models"] if m["name"] == "config-only")["weights_present"] is False
+tiny = next(m for m in doc["models"] if m["name"] == "tiny")
+assert tiny["checkpoint_inventory_ok"] is True
+assert tiny["checkpoint_bytes"] > 4096  # includes config, not just weights
 PY
 
 # A directory with no checkpoints says so instead of printing an empty table.
