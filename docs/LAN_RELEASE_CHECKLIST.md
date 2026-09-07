@@ -67,9 +67,11 @@ not a completed gate.
 1. PR #152 merged: approved layer-allocation view, named execution evidence,
    two-donor checks; physical two-computer oracle and timings still required.
 2. Pending: verified family sizing and checkpoint conformance.
-3. In progress: shared conservative resident admission for catalogue, request
+3. PR #153: shared conservative resident admission for catalogue, request
    and launch, with a stat-only checkpoint preview and a signed-inventory
    recheck before offers. Edge and Segment budgets are separately MiB-aligned.
+   Follow-up: checked tensor/state arithmetic and aggregate budgets reject
+   overflow instead of wrapping into apparently small allocations.
    Measured-cost placement remains pending; this does not enable disk mode or
    certify additional model families.
 4. Pending: connected, persisted lightweight calibration and advice.

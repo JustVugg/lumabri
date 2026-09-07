@@ -32,6 +32,17 @@ int main(void) {
     LmbModelShape m = v4();
     LmbClusterPlan p;
 
+    LmbClusterNode overflow_nodes[2] = { node("a", 32, 0), node("b", 32, 0) };
+    overflow_nodes[0].ram_budget_bytes = UINT64_MAX - 1;
+    overflow_nodes[1].ram_budget_bytes = UINT64_MAX - 1;
+    CHECK(lmb_plan_cluster(&m, overflow_nodes, 2, 4096, 1, LMB_GOAL_ONE_SESSION, &p),
+          "overflowing aggregate machine budgets produced a plan");
+    overflow_nodes[0].ram_budget_bytes = UINT64_MAX / 2;
+    CHECK(lmb_plan_cluster(&m, overflow_nodes, 1, 4096, 1, LMB_GOAL_ONE_SESSION, &p),
+          "overflowing layer-share multiplication produced a plan");
+    CHECK(lmb_plan_cluster(NULL, overflow_nodes, 1, 4096, 1, LMB_GOAL_ONE_SESSION, &p),
+          "NULL shape accepted");
+
     /* A realistic house: four computers, 96 GB between them, against a model
      * that needs about 150. It does not fit, and the plan has to SAY it does
      * not fit rather than produce a split that would fail on first use. */

@@ -77,19 +77,21 @@ static LMB_UNUSED int lmb_plan_cluster_source(const LmbModelShape *m,
                                        LmbPlanGoal goal,
                                        int external_checkpoint,
                                        LmbClusterPlan *out) {
+    if (!out) return -1;
     memset(out, 0, sizeof *out);
     out->goal = goal;
     out->sessions = sessions ? sessions : 1;
     out->state = LMB_PLAN_UNRUNNABLE;
     out->data_available = external_checkpoint != 0;
-    if (!m->layers || !n || n > LMB_CLUSTER_MAX_NODES) return -1;
+    if (!m || !nodes || !m->layers || !n || n > LMB_CLUSTER_MAX_NODES) return -1;
 
     /* Until an adapter declares a working GPU backend, RAM and VRAM are not
      * interchangeable. Counting both can accept a plan no engine can load. */
     LmbRangeCost edge = lmb_estimate_edge(m, context, sessions);
     if (!edge.ok) return -1;
-    uint64_t edge_need = edge.resident_bytes + edge.state_bytes +
-                         edge.scratch_bytes;
+    uint64_t edge_need = lmb_size_add(edge.resident_bytes,
+                         lmb_size_add(edge.state_bytes, edge.scratch_bytes));
+    if (edge_need == UINT64_MAX) return -1;
     uint32_t best_edge = UINT32_MAX;
     uint64_t best_edge_room = 0;
     for (uint32_t i = 0; i < n; i++) {
@@ -107,10 +109,10 @@ static LMB_UNUSED int lmb_plan_cluster_source(const LmbModelShape *m,
     for (uint32_t i = 0; i < n; i++) {
         effective[i] = nodes[i].ram_budget_bytes;
         if (i == best_edge) effective[i] -= edge_need;
-        total_budget += effective[i];
+        total_budget = lmb_size_add(total_budget, effective[i]);
         if (nodes[i].has_checkpoint) out->data_available = 1;
     }
-    if (!total_budget) return -1;
+    if (!total_budget || total_budget == UINT64_MAX) return -1;
 
     /* Hand out layers in proportion to budget, in one pass, never leaving a
      * layer unassigned: the last node takes whatever rounding left over. */
@@ -118,10 +120,12 @@ static LMB_UNUSED int lmb_plan_cluster_source(const LmbModelShape *m,
     uint64_t whole_resident = 0;
     for (uint32_t i = 0; i < n && assigned < m->layers; i++) {
         uint64_t budget = effective[i];
-        uint32_t take = (uint32_t)((uint64_t)m->layers * budget / total_budget);
+        uint64_t scaled = lmb_size_mul(m->layers, budget);
+        if (scaled == UINT64_MAX) return -1;
+        uint32_t take = (uint32_t)(scaled / total_budget);
         if (i + 1 == n) take = m->layers - assigned;
         if (!take) continue;
-        if (assigned + take > m->layers) take = m->layers - assigned;
+        if (take > m->layers - assigned) take = m->layers - assigned;
 
         LmbSlice *s = &out->slices[out->nslices];
         s->node = i;
@@ -129,7 +133,8 @@ static LMB_UNUSED int lmb_plan_cluster_source(const LmbModelShape *m,
         s->layer_end = assigned + take;
         LmbRangeCost c = lmb_estimate_segment(m, s->layer_begin, s->layer_end,
                                               context, sessions);
-        uint64_t live = c.state_bytes + c.scratch_bytes;
+        if (!c.ok) return -1;
+        uint64_t live = lmb_size_add(c.state_bytes, c.scratch_bytes);
         s->state = lmb_plan_state(m, &c, budget);
         s->bytes_resident = s->state == LMB_PLAN_DISK
                           ? c.working_set_bytes + live
@@ -137,7 +142,7 @@ static LMB_UNUSED int lmb_plan_cluster_source(const LmbModelShape *m,
         uint64_t needed_weights = s->state == LMB_PLAN_DISK
                                 ? c.working_set_bytes : c.resident_bytes;
         s->bytes_to_fetch = nodes[i].has_checkpoint ? 0 : needed_weights;
-        whole_resident += c.resident_bytes + live;
+        whole_resident = lmb_size_add(whole_resident, c.resident_bytes + live);
         if (s->state == LMB_PLAN_UNRUNNABLE) {
             /* Missing is measured against what this node would ACTUALLY have
              * to hold, which is the resident cost unless the adapter has
@@ -148,9 +153,11 @@ static LMB_UNUSED int lmb_plan_cluster_source(const LmbModelShape *m,
              * tells a person nothing they can act on. */
             uint64_t need = m->disk_streaming ? c.working_set_bytes + live
                                               : c.resident_bytes + live;
-            out->missing_bytes += need > budget ? need - budget : 0;
+            out->missing_bytes = lmb_size_add(out->missing_bytes, need > budget ? need - budget : 0);
         }
-        out->fetch_bytes += s->bytes_to_fetch;
+        out->fetch_bytes = lmb_size_add(out->fetch_bytes, s->bytes_to_fetch);
+        if (whole_resident == UINT64_MAX || out->missing_bytes == UINT64_MAX ||
+            out->fetch_bytes == UINT64_MAX) return -1;
         out->nslices++;
         assigned += take;
     }
@@ -169,13 +176,15 @@ static LMB_UNUSED int lmb_plan_cluster_source(const LmbModelShape *m,
     }
     if (!out->data_available) {
         out->state = LMB_PLAN_UNRUNNABLE;
-        out->missing_bytes = whole_resident + edge.resident_bytes;
+        out->missing_bytes = lmb_size_add(whole_resident, edge.resident_bytes);
+        if (out->missing_bytes == UINT64_MAX) return -1;
     }
 
     if (out->state == LMB_PLAN_UNRUNNABLE && out->missing_bytes) {
         uint64_t median = total_budget / n;
-        out->missing_nodes = median ?
-            (uint32_t)((out->missing_bytes + median - 1) / median) : 0;
+        uint64_t additional = median ? out->missing_bytes / median +
+            (out->missing_bytes % median != 0) : 0;
+        out->missing_nodes = additional > UINT32_MAX ? UINT32_MAX : (uint32_t)additional;
     }
 
     /* How long before it can answer, which is bytes over measured bandwidth

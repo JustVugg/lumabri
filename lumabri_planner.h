@@ -68,19 +68,33 @@ typedef struct {
     int ok;                     /* 0 when the shape cannot answer */
 } LmbRangeCost;
 
+/* UINT64_MAX is an invalid-size sentinel, never an admissible allocation.
+ * Propagate it through all intermediate calculations instead of wrapping. */
+static uint64_t LMB_UNUSED lmb_size_add(uint64_t a, uint64_t b) {
+    return UINT64_MAX - a < b ? UINT64_MAX : a + b;
+}
+
+static uint64_t LMB_UNUSED lmb_size_mul(uint64_t a, uint64_t b) {
+    if (a == UINT64_MAX || b == UINT64_MAX) return UINT64_MAX;
+    return b && a > UINT64_MAX / b ? UINT64_MAX : a * b;
+}
+
 /* bits→bytes with the rounding the stores actually use: block scales and
  * alignment add roughly a fifth on the fp4 path, which is the figure
  * lmbe_expert_bytes has used since the expert store was written. */
 static uint64_t LMB_UNUSED lmb_weight_bytes(uint64_t elements, uint32_t bits) {
     if (!bits) bits = 16;
-    uint64_t raw = elements * bits / 8u;
-    return bits < 8 ? raw + raw / 5u : raw;
+    if (elements == UINT64_MAX) return UINT64_MAX;
+    uint64_t tail = (elements % 8u) * (uint64_t)bits;
+    uint64_t raw = lmb_size_add(lmb_size_mul(elements / 8u, bits),
+                                tail / 8u + (tail % 8u != 0));
+    return bits < 8 ? lmb_size_add(raw, raw / 5u) : raw;
 }
 
 static uint64_t LMB_UNUSED lmb_expert_bytes_of(const LmbModelShape *m) {
     if (!m->experts || !m->moe_intermediate) return 0;
     /* gate, up, down: three hidden × moe_intermediate matrices */
-    return lmb_weight_bytes((uint64_t)m->hidden * m->moe_intermediate * 3u,
+    return lmb_weight_bytes(lmb_size_mul((uint64_t)m->hidden * m->moe_intermediate, 3u),
                             m->bits_per_weight);
 }
 
@@ -90,18 +104,17 @@ static uint64_t LMB_UNUSED lmb_expert_bytes_of(const LmbModelShape *m) {
 static uint64_t LMB_UNUSED lmb_dense_layer_bytes(const LmbModelShape *m) {
     uint64_t head_dim = m->heads ? (uint64_t)m->hidden / m->heads : 0;
     uint64_t kv = m->kv_heads ? (uint64_t)m->kv_heads * head_dim : m->hidden;
-    uint64_t attn = (uint64_t)m->hidden * m->hidden      /* q */
-                  + (uint64_t)m->hidden * kv * 2u        /* k, v */
-                  + (uint64_t)m->hidden * m->hidden;     /* o */
+    uint64_t attn = lmb_size_add(lmb_size_mul((uint64_t)m->hidden * m->hidden, 2u),
+                                 lmb_size_mul(lmb_size_mul(m->hidden, kv), 2u));
     uint64_t ffn = m->experts ? 0u
-                 : (uint64_t)m->hidden * m->intermediate * 3u;
-    return lmb_weight_bytes(attn + ffn, m->bits_per_weight);
+                 : lmb_size_mul((uint64_t)m->hidden * m->intermediate, 3u);
+    return lmb_weight_bytes(lmb_size_add(attn, ffn), m->bits_per_weight);
 }
 
 /* Embedding and head, which live wherever Edge runs and nowhere else. */
 static uint64_t LMB_UNUSED lmb_edge_bytes(const LmbModelShape *m) {
     if (!m->vocab || !m->hidden) return 0;
-    return lmb_weight_bytes((uint64_t)m->vocab * m->hidden * 2u,
+    return lmb_weight_bytes(lmb_size_mul((uint64_t)m->vocab * m->hidden, 2u),
                             m->bits_per_weight);
 }
 
@@ -110,9 +123,10 @@ static uint64_t LMB_UNUSED lmb_edge_bytes(const LmbModelShape *m) {
 static uint64_t LMB_UNUSED lmb_kv_bytes(const LmbModelShape *m, uint32_t layers,
                              uint32_t context, uint32_t sessions) {
     uint64_t head_dim = m->heads ? (uint64_t)m->hidden / m->heads : 0;
-    uint64_t per_tok = m->kv_heads ? (uint64_t)m->kv_heads * head_dim * 2u
+    uint64_t per_tok = m->kv_heads ? lmb_size_mul((uint64_t)m->kv_heads * head_dim, 2u)
                                    : (uint64_t)m->hidden * 2u;
-    return per_tok * context * layers * (sessions ? sessions : 1) * 4u;
+    return lmb_size_mul(lmb_size_mul(lmb_size_mul(lmb_size_mul(per_tok, context),
+        layers), sessions ? sessions : 1), 4u);
 }
 
 /* What one node pays to hold layers [begin, end). */
@@ -125,24 +139,26 @@ static LmbRangeCost LMB_UNUSED lmb_estimate_segment(const LmbModelShape *m,
         end > m->layers || !m->hidden) return c;
     uint32_t n = end - begin;
 
-    uint64_t dense = lmb_dense_layer_bytes(m) * n;
+    uint64_t dense = lmb_size_mul(lmb_dense_layer_bytes(m), n);
     uint64_t expert = lmb_expert_bytes_of(m);
-    uint64_t all_experts = expert * m->experts * n;
+    uint64_t all_experts = lmb_size_mul(lmb_size_mul(expert, m->experts), n);
 
     /* The floor: the dense part, plus enough expert slots for the top-k of
      * every layer in the range. A cache below that thrashes on a single
      * token — it is not a slower mode, it is a broken one. */
     uint32_t topk = m->experts_per_tok ? m->experts_per_tok : 1;
     if (topk > m->experts && m->experts) topk = m->experts;
-    uint64_t floor_experts = expert * topk * n;
+    uint64_t floor_experts = lmb_size_mul(lmb_size_mul(expert, topk), n);
 
     c.state_bytes = lmb_kv_bytes(m, n, context ? context : 4096, sessions);
     /* scratch is dominated by the widest matmul the layer runs */
     uint64_t widest = m->experts ? m->moe_intermediate : m->intermediate;
     c.scratch_bytes = (uint64_t)widest * 4u * 8u;   /* f32, a few rows */
-    c.resident_bytes = dense + all_experts;
-    c.working_set_bytes = dense + floor_experts;
-    c.ok = 1;
+    c.resident_bytes = lmb_size_add(dense, all_experts);
+    c.working_set_bytes = lmb_size_add(dense, floor_experts);
+    uint64_t live = lmb_size_add(c.state_bytes, c.scratch_bytes);
+    c.ok = lmb_size_add(c.resident_bytes, live) != UINT64_MAX &&
+           lmb_size_add(c.working_set_bytes, live) != UINT64_MAX;
     return c;
 }
 
@@ -154,9 +170,9 @@ static LmbRangeCost LMB_UNUSED lmb_estimate_edge(const LmbModelShape *m,
     memset(&c, 0, sizeof c);
     if (!m->sizing_verified || !m->vocab || !m->hidden) return c;
     c.resident_bytes = c.working_set_bytes = lmb_edge_bytes(m);
-    c.state_bytes = (uint64_t)(context ? context : 4096) * m->hidden * 4u *
-                    (sessions ? sessions : 1);
-    c.ok = 1;
+    c.state_bytes = lmb_size_mul(lmb_size_mul((uint64_t)(context ? context : 4096) *
+                    m->hidden, 4u), sessions ? sessions : 1);
+    c.ok = lmb_size_add(c.resident_bytes, c.state_bytes) != UINT64_MAX;
     return c;
 }
 
@@ -173,9 +189,11 @@ static LmbPlanState LMB_UNUSED lmb_plan_state(const LmbModelShape *m,
                                    const LmbRangeCost *cost,
                                    uint64_t budget_bytes) {
     if (!cost->ok) return LMB_PLAN_UNRUNNABLE;
-    uint64_t live = cost->state_bytes + cost->scratch_bytes;
-    if (cost->resident_bytes + live <= budget_bytes) return LMB_PLAN_RESIDENT;
-    if (m->disk_streaming && cost->working_set_bytes + live <= budget_bytes)
+    uint64_t live = lmb_size_add(cost->state_bytes, cost->scratch_bytes);
+    uint64_t resident = lmb_size_add(cost->resident_bytes, live);
+    uint64_t working = lmb_size_add(cost->working_set_bytes, live);
+    if (resident != UINT64_MAX && resident <= budget_bytes) return LMB_PLAN_RESIDENT;
+    if (m->disk_streaming && working != UINT64_MAX && working <= budget_bytes)
         return LMB_PLAN_DISK;
     return LMB_PLAN_UNRUNNABLE;
 }

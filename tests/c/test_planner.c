@@ -29,6 +29,31 @@ static LmbModelShape v4(void) {
 int main(void) {
     LmbModelShape m = v4();
 
+    CHECK(lmb_size_add(UINT64_MAX - 2, 3) == UINT64_MAX,
+          "size addition wrapped");
+    CHECK(lmb_size_mul(UINT64_C(1) << 63, 2) == UINT64_MAX,
+          "size multiplication wrapped");
+    CHECK(lmb_size_mul(UINT64_MAX, 0) == UINT64_MAX,
+          "a later zero hid an invalid intermediate size");
+    CHECK(lmb_weight_bytes(3, 4) == 2, "partial packed byte was truncated");
+    CHECK(lmb_weight_bytes(UINT64_C(1) << 60, 16) == (UINT64_C(1) << 61),
+          "valid byte size was rejected because a bit-size intermediate overflowed");
+    LmbModelShape enormous = m;
+    enormous.hidden = enormous.vocab = UINT32_C(1) << 31;
+    enormous.bits_per_weight = 16;
+    CHECK(!lmb_estimate_edge(&enormous, 4096, 1).ok,
+          "overflowed Edge weights became a small allocation");
+    CHECK(!lmb_estimate_segment(&enormous, 0, 43, 4096, 1).ok,
+          "overflowed layer tensors became a small allocation");
+    CHECK(!lmb_estimate_segment(&m, 0, 43, UINT32_MAX, UINT32_MAX).ok,
+          "overflowed KV state became a small allocation");
+    CHECK(!lmb_estimate_edge(&m, UINT32_MAX, UINT32_MAX).ok,
+          "overflowed Edge session state became a small allocation");
+    LmbRangeCost invalid = { .resident_bytes = UINT64_MAX - 3,
+        .state_bytes = 4, .ok = 1 };
+    CHECK(lmb_plan_state(&m, &invalid, UINT64_MAX) == LMB_PLAN_UNRUNNABLE,
+          "state plus weights overflow was accepted by admission");
+
     /* An expert of this shape measured ~13.4 MB on the real checkpoint. The
      * estimate has to land near that or every figure built on it is wrong. */
     uint64_t e = lmb_expert_bytes_of(&m);
