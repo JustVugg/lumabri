@@ -129,6 +129,7 @@ jobs:
           test "$(OMP_NUM_THREADS=4 OMP_THREAD_LIMIT=1 ./segment_node --thread-capacity)" = 1
           mkdir -p build/home-flow-models
           cp -a ../colibri/c/olmoe_tiny_merged build/home-flow-models/olmoe-tiny
+          make segment_budget_probe
           python3 tests/integration/planner_tensor_contract_test.py --family olmoe --model build/home-flow-models/olmoe-tiny
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --kill-donor
