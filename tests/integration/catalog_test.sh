@@ -26,10 +26,10 @@ cat >"$T/models/tiny/config.json" <<'EOF'
  "intermediate_size":128,"num_experts":8,"num_experts_per_tok":2,
  "num_attention_heads":4,"num_key_value_heads":4,"vocab_size":256}
 EOF
-# A config is metadata, not a checkpoint. These files stand in for actual
-# model containers; a separate case below proves config-only is refused.
+# The historical V4 formula is still under audit. OLMoE now requires a
+# validated tensor inventory, not an arbitrary model.bin placeholder.
 truncate -s 4096 "$T/models/huge/model.bin"
-truncate -s 4096 "$T/models/tiny/model.bin"
+python3 tests/integration/prepare_olmoe_headers.py "$T/models/tiny"
 
 out=$(./lumabri models --models-dir "$T/models" 2>&1) || fail "the catalogue exited non-zero"
 echo "$out" | sed 's/^/    /'

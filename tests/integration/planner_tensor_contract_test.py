@@ -17,24 +17,30 @@ import tempfile
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", type=Path, required=True)
-    parser.add_argument("--family", choices=("inkling", "kimi", "glm", "glm53", "qwen38"), required=True)
+    parser.add_argument("--family", choices=("olmoe", "inkling", "kimi", "glm", "glm53", "qwen38"), required=True)
     parser.add_argument("--probe", type=Path, default=Path("./segment_budget_probe"))
     args = parser.parse_args()
     probe = args.probe.resolve()
-    files = list(args.model.glob("*.safetensors"))
-    assert len(files) == 1, "this small-fixture test requires one shard"
-    with files[0].open("rb") as f:
-        length, = struct.unpack("<Q", f.read(8))
-        assert length <= 8 * 1024 * 1024
-        original = json.loads(f.read(length))
-        metadata = {}
-        for name, tensor in original.items():
-            if name != "__metadata__" and tensor["dtype"] == "I64":
+    files = sorted(args.model.glob("*.safetensors"))
+    assert files, "fixture has no safetensors shards"
+    original, metadata, payload = {}, {}, 0
+    for path in files:
+        with path.open("rb") as f:
+            length, = struct.unpack("<Q", f.read(8))
+            assert length <= 8 * 1024 * 1024
+            shard = json.loads(f.read(length))
+            for name, tensor in shard.items():
+                if name == "__metadata__":
+                    continue
+                assert name not in original, f"duplicate source tensor {name}"
                 begin, end = tensor["data_offsets"]
-                assert end - begin <= 512
-                f.seek(8 + length + begin)
-                metadata[name] = f.read(end - begin)
-    payload = files[0].stat().st_size - 8 - length
+                if tensor["dtype"] == "I64":
+                    assert end - begin <= 512
+                    f.seek(8 + length + begin)
+                    metadata[name] = f.read(end - begin)
+                tensor["data_offsets"] = [payload + begin, payload + end]
+                original[name] = tensor
+            payload += path.stat().st_size - 8 - length
     config = json.loads((args.model / "config.json").read_text())
     layers = config.get("text_config", config)["num_hidden_layers"]
 
@@ -58,6 +64,7 @@ def main():
 
         check(original, True, "baseline header-only inventory")
         suffix = {
+            "olmoe": ".mlp.experts.0.qs",
             "inkling": ".mlp.experts.gate_up_proj.qs",
             "kimi": ".block_sparse_moe.experts.0.w1.weight_scale",
             "glm": ".mlp.experts.0.gate_proj.weight",

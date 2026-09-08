@@ -102,6 +102,11 @@ not a completed gate.
    generation and lost-donor cleanup pass locally. Streaming defers incomplete
    decoder prefixes but requires final decoding to succeed; it never rewrites
    already emitted bytes or reports a permanent decoder error as success.
+   The historical OLMoE formula is replaced with validated merged-int8 expert
+   payloads and row scales, f32-expanded dense/Edge weights and full-MHA state.
+   Unconverted HF experts and GQA geometry are not compatible with the pinned
+   runtime and are rejected before offers. Header-only negative fixtures are
+   explicitly separate from the real one/two-range token oracle.
    Additional encodings (including Qwen3.8 FP8), vision and large checkpoints
    remain untested; gate 2 is not complete merely because all families have
    an initial memory contract.

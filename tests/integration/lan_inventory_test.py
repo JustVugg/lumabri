@@ -50,9 +50,9 @@ def main():
         (models / "config.json").write_text(json.dumps({
             "model_type": "olmoe", "num_hidden_layers": 4, "hidden_size": 64,
             "intermediate_size": 128, "num_experts": 8, "num_experts_per_tok": 2,
-            "num_attention_heads": 4, "vocab_size": 256}))
-        with open(models / "model.bin", "wb") as f:
-            f.truncate(4096)  # container-presence fixture, no inference claimed
+            "num_attention_heads": 4, "num_key_value_heads": 4, "vocab_size": 256}))
+        subprocess.run([sys.executable, str(ROOT / "tests/integration/prepare_olmoe_headers.py"),
+                        str(models)], check=True)  # header-only, not an inference fixture
         base = ["./lumabri", "models", "--models-dir", str(models.parent), "--tracker", addr]
 
         def snapshot(identity="observer", success=True):

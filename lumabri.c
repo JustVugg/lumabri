@@ -5108,12 +5108,12 @@ static void catalog_row(const LmbTuiModel *m) {
     const char *mark = !ok || plan.state == LMB_PLAN_UNRUNNABLE ? "x"
                      : plan.state == LMB_PLAN_DISK ? "!" : "+";
     char detail[96] = "";
-    if (!m->shape.sizing_verified)
-        snprintf(detail, sizeof detail, "adapter sizing unavailable");
-    else if (!m->checkpoint_inventory_ok)
+    if (!m->checkpoint_inventory_ok)
         snprintf(detail, sizeof detail, "checkpoint inventory unavailable");
     else if (!m->weights_present)
         snprintf(detail, sizeof detail, "checkpoint weights missing");
+    else if (!m->shape.sizing_verified)
+        snprintf(detail, sizeof detail, "adapter sizing unavailable");
     else if (ok && plan.state == LMB_PLAN_UNRUNNABLE && plan.missing_bytes)
         snprintf(detail, sizeof detail, "%.0f GB short (~%u more machine%s)",
                  (double)plan.missing_bytes / 1e9, plan.missing_nodes,
