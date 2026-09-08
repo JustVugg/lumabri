@@ -1,6 +1,6 @@
 #ifndef LUMABRI_PLAN_QWEN38_H
 #define LUMABRI_PLAN_QWEN38_H
-/* Text-only float/BF16 Qwen4-Exp contract, pinned Colibri 12a5c464.
+/* Text-only float/BF16 and block-FP8-expert Qwen4-Exp contract, pinned Colibri 12a5c464.
  * PLE tables are row-read by the native engine: reserve their complete source
  * footprint as well as all expert slots, without advertising a disk mode or
  * claiming that admission has warmed the filesystem cache. */
@@ -13,7 +13,7 @@ typedef struct {
     uint32_t pd, pc, nh, nd, parts, ple;
     uint8_t full[LMB_PLAN_LAYER_MAX], kinds[LMB_PLAN_LAYER_MAX], prefix, edge;
     uint64_t seen[LMB_PLAN_LAYER_MAX], largest, rows[512], vocab[64], offsets[64];
-    uint8_t *experts;
+    uint16_t *experts; /* weights, fused layout, FP8 weights, scale sidecars */
     uint32_t ple_seen;
     int table_whole;
 } LmbQwen38Inventory;
@@ -95,16 +95,15 @@ static int lmb_q38_tensor(const LmbPlanTensor *t, void *opaque) {
     } else if (!strncmp(field,"mlp.experts.",12)) {
         const char *suffix=field+12;
         unsigned kind=lmb_q38_float(t->dtype);
-        if (!kind) return -1;
         uint64_t count=H*v->inter;
         if (!strcmp(suffix,"gate_up_proj") || !strcmp(suffix,"down_proj")) {
             unsigned up=!strcmp(suffix,"gate_up_proj");
             unsigned bit=up ? 1 : 2;
-            if (t->rank!=3 || t->shape[0]!=v->e || t->shape[1]!=(up ? 2u*v->inter : H) ||
+            if (!kind || t->rank!=3 || t->shape[0]!=v->e || t->shape[1]!=(up ? 2u*v->inter : H) ||
                 t->shape[2]!=(up ? H : v->inter)) return -1;
             for (unsigned e=0;e<v->e;e++) {
-                uint8_t *seen=&v->experts[layer*v->e+e];
-                if ((*seen&7) || (*seen&(bit<<3))) return -1;
+                uint16_t *seen=&v->experts[layer*v->e+e];
+                if ((*seen&~24u) || (*seen&(bit<<3))) return -1;
                 *seen|=bit<<3;
             }
             bytes=lmb_size_mul(lmb_size_mul(count,up ? 2 : 1),4u*v->e);
@@ -112,12 +111,34 @@ static int lmb_q38_tensor(const LmbPlanTensor *t, void *opaque) {
             uint64_t expert;
             const char *end=lmb_plan_uint(suffix,&expert);
             if (!end || *end++!='.' || expert>=v->e) return -1;
-            unsigned k=!strcmp(end,"gate_proj.weight") ? 0 : !strcmp(end,"up_proj.weight") ? 1 :
-                       !strcmp(end,"down_proj.weight") ? 2 : 3;
-            uint8_t *seen=&v->experts[layer*v->e+expert];
-            if (k==3 || (*seen&24) || (*seen&(1u<<k)) ||
-                !lmb_q38_shape(t,count,k==2 ? v->inter : H)) return -1;
-            *seen|=1u<<k; bytes=count*4;
+            static const char *const projection[]={"gate_proj.weight","up_proj.weight","down_proj.weight"};
+            unsigned k, scale=0;
+            for(k=0;k<3;k++) {
+                size_t n=strlen(projection[k]);
+                if(!strcmp(end,projection[k])) break;
+                if(!strncmp(end,projection[k],n) && !strcmp(end+n,"_scale_inv")) {scale=1;break;}
+            }
+            uint16_t *seen=&v->experts[layer*v->e+expert];
+            if(k==3 || (*seen&24)) return -1;
+            uint64_t rows=k==2 ? H : v->inter, cols=k==2 ? v->inter : H;
+            if(scale) {
+                unsigned bit=1u<<(8+k);
+                if(!kind || (*seen&bit) || t->rank!=2 ||
+                   t->shape[0]!=(rows+127)/128 || t->shape[1]!=(cols+127)/128) return -1;
+                /* A compact shared bank may coexist with per-slot scales
+                 * when the corresponding weight ranges are not compact. */
+                *seen|=bit; bytes=t->elements*8;
+                kind=0; /* scale encoding does not change expert arithmetic */
+            } else {
+                unsigned fp8=!strcmp(t->dtype,"F8_E4M3");
+                if((!kind && !fp8) || (*seen&(1u<<k)) || !lmb_q38_shape(t,count,cols)) return -1;
+                *seen|=(1u<<k) | (fp8 ? 1u<<(5+k) : 0);
+                kind=fp8 ? 8 : kind;
+                /* Bound both native FP8 slots and the supported opt-out that
+                 * expands them to f32. Scales are reserved independently,
+                 * including the optional shared resident scale bank. */
+                bytes=count*4;
+            }
         }
         v->kinds[layer]|=kind;
     } else {
@@ -228,7 +249,7 @@ static int LMB_UNUSED lmb_qwen38_memory(const char *root, const char *whole,
         types=lmb_plan_space(types);
         if(*types++!=(i+1==layers ? ']' : ',')) return -1;
     }
-    v.experts=calloc((size_t)layers*v.e,1);
+    v.experts=calloc((size_t)layers*v.e,sizeof(*v.experts));
     if(!v.experts) return -1;
     int rc=lmb_plan_tensors(root,lmb_q38_tensor,&v);
     if(v.edge!=31 || (v.ple_seen&511)!=511) rc=-1;
@@ -244,8 +265,12 @@ static int LMB_UNUSED lmb_qwen38_memory(const char *root, const char *whole,
         uint64_t need=8191u | (v.full[i] ? ((UINT64_C(1)<<22)-(UINT64_C(1)<<13)) :
                                             ((UINT64_C(1)<<31)-(UINT64_C(1)<<22)));
         if((v.seen[i]&need)!=need || v.kinds[i]!=v.kinds[0]) {rc=-1;break;}
-        uint8_t layout=v.experts[i*v.e];
-        for(unsigned e=0;e<v.e;e++) if((layout!=7 && layout!=24) || v.experts[i*v.e+e]!=layout) rc=-1;
+        unsigned layout=v.experts[i*v.e]&31;
+        for(unsigned e=0;e<v.e;e++) {
+            unsigned seen=v.experts[i*v.e+e];
+            if((layout!=7 && layout!=24) || (seen&31)!=layout ||
+               ((seen>>5)&7)!=((seen>>8)&7)) rc=-1;
+        }
         if(v.full[i]) m->memory[i].state_token_bytes=(2u*(uint64_t)v.kvh*v.hd+v.id)*4;
         else m->memory[i].state_fixed_bytes=((uint64_t)v.vh*v.kd*v.vd+cd*(v.conv-1u))*4;
     }

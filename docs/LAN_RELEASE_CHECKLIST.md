@@ -20,7 +20,7 @@ execution, cross-platform numerical compatibility, or concurrent capacity.
    nodes. Mac deployment/approval is user-operated; CI loopback is separate.
 2. Complete verified sizing for every registered family and supported weight
    encoding. OLMoE, DeepSeek V4, converted Qwen3.6, Inkling and float-dense/MXFP4
-   Kimi, float-source GLM, text-only float-source GLM5.3 and BF16/float-source
+   Kimi, float-source GLM, text-only float-source GLM5.3 and BF16/float/block-FP8-expert
    Qwen3.8 enable conservative sizing. Require real
    checkpoint/adapter conformance before promoting support.
 3. Consistent planner/runtime reservations, explicit local-compute consent,
@@ -118,7 +118,15 @@ not a completed gate.
    A separate byte-tokenizer copy exercises ordinary text through the TUI;
    the upstream special-token oracle fixture is preserved unchanged. Approvals,
    two actual ranges, generation and lost-donor cleanup pass locally.
-   Additional encodings (including Qwen3.8 FP8), vision and large checkpoints
+   Qwen3.8 block-FP8 experts additionally validate partial 128x128 scale
+   geometry and complete sidecars. Conservative admission bounds both native
+   FP8 and optional f32 expansion, including shared and per-slot scales.
+   A real quantized synthetic fixture is compared with a Transformers oracle
+   using the exact reconstructed weights, not the original BF16 model. Both
+   native and expanded paths pass one/two-range token tests; direct TCP split
+   and TUI approval/generation/lost-donor cleanup pass locally. Timing is
+   withheld on the loaded test host. Native macOS checks run in CI.
+   Additional encodings, vision and large checkpoints
    remain untested; gate 2 is not complete merely because all families have
    an initial memory contract.
 3. PR #153: shared conservative resident admission for catalogue, request

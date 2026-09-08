@@ -22,6 +22,26 @@ static void qwen38_contract_test(void) {
     snprintf(t.name,sizeof t.name,"model.layers.0.ple.norm_key.weight");
     snprintf(t.dtype,sizeof t.dtype,"I64");
     CHECK(lmb_q38_tensor(&t,&v)!=0,"metadata accepted as Qwen3.8 floating weight");
+    uint16_t expert_seen[4]={0};
+    v.e=1; v.inter=136; v.experts=expert_seen;
+    snprintf(t.name,sizeof t.name,"model.layers.0.mlp.experts.0.gate_proj.weight");
+    snprintf(t.dtype,sizeof t.dtype,"F8_E4M3");
+    t.rank=2; t.shape[0]=136; t.shape[1]=32; t.elements=136*32; t.bytes=t.elements;
+    CHECK(!lmb_q38_tensor(&t,&v) && expert_seen[0]==33 && v.kinds[0]==8,
+          "native FP8 expert was not tracked separately from float weights");
+    CHECK(m.memory[0].resident_bytes==136*32*4,"FP8 opt-out expansion not budgeted");
+    snprintf(t.name,sizeof t.name,"model.layers.0.mlp.experts.0.gate_proj.weight_scale_inv");
+    snprintf(t.dtype,sizeof t.dtype,"F32");
+    t.shape[0]=1; t.shape[1]=2; t.elements=2; t.bytes=8;
+    CHECK(lmb_q38_tensor(&t,&v)!=0,"transposed partial FP8 block scales admitted");
+    t.shape[0]=2; t.shape[1]=1;
+    CHECK(!lmb_q38_tensor(&t,&v) && expert_seen[0]==289 && v.kinds[0]==8,
+          "FP8 scale sidecar changed the arithmetic class");
+    CHECK(m.memory[0].resident_bytes==136*32*4+16,"shared and per-slot scales not both budgeted");
+    CHECK(lmb_q38_tensor(&t,&v)!=0,"duplicate FP8 sidecar admitted");
+    snprintf(t.name,sizeof t.name,"model.layers.0.mlp.experts.0.up_proj.weight");
+    snprintf(t.dtype,sizeof t.dtype,"F8_E8M0");
+    CHECK(lmb_q38_tensor(&t,&v)!=0,"scale-only FP8 type admitted as an expert weight");
     m.memory[0].state_fixed_bytes=4096;
     m.memory[1].state_token_bytes=144;
     LmbRangeCost dn=lmb_estimate_segment(&m,0,1,64,2), qsa=lmb_estimate_segment(&m,1,2,64,2);

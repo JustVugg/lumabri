@@ -234,6 +234,21 @@ jobs:
           name: tiny-qwen38-checkpoint
           path: lumabri/build/qwen38-contract/qwen38-tiny/*
           retention-days: 3
+      - name: Qwen3.8 real block-FP8 experts and independent dequantized oracle
+        working-directory: lumabri
+        run: |
+          python3 tests/integration/prepare_qwen38_fixture.py --engine ../colibri/c --out build/qwen38-fp8-contract/qwen38-tiny --fp8-experts
+          python3 tests/integration/planner_tensor_contract_test.py --family qwen38 --model build/qwen38-fp8-contract/qwen38-tiny
+          for native in 0 1; do
+            Q38_NATIVE_FP8=$native OMP_NUM_THREADS=2 build/qwen38-greedy-oracle qwen38 build/qwen38-fp8-contract/qwen38-tiny build/qwen38-fp8-contract/qwen38-tiny/ref.json
+          done
+          python3 tests/integration/home_flow_test.py --models-dir build/qwen38-fp8-contract --context 512 --expect-greedy --kill-donor
+          SPLIT_MODEL_DIR=build/qwen38-fp8-contract/qwen38-tiny SPLIT_ENGINE=qwen38 SPLIT_MODEL=qwen38-fp8 SPLIT_ROUNDS=1 SPLIT_THREADS=2 SPLIT_TOKENS=8 PORT=11040 bash tests/integration/segment_split_test.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tiny-qwen38-fp8-checkpoint
+          path: lumabri/build/qwen38-fp8-contract/qwen38-tiny/*
+          retention-days: 3
       - name: DeepSeek V4 native memory contract and compressed-state oracles
         working-directory: lumabri
         run: |
@@ -350,6 +365,13 @@ jobs:
       - name: Native Qwen3.8 request and execution
         working-directory: lumabri
         run: python3 tests/integration/home_flow_test.py --models-dir build/qwen38-home-models --context 512 --expect-greedy
+      - uses: actions/download-artifact@v4
+        with:
+          name: tiny-qwen38-fp8-checkpoint
+          path: lumabri/build/qwen38-fp8-home-models/qwen38-tiny
+      - name: Native Qwen3.8 FP8 request and execution
+        working-directory: lumabri
+        run: python3 tests/integration/home_flow_test.py --models-dir build/qwen38-fp8-home-models --context 512 --expect-greedy
       - uses: actions/download-artifact@v4
         with:
           name: tiny-v4-checkpoint

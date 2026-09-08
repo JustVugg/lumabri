@@ -106,6 +106,17 @@ def main():
             del changed["layers.0.ffn.gate.tid2eid"]
             check(changed, False, "missing token hash router")
         if args.family == "qwen38":
+            scale_key = expert_key + "_scale_inv"
+            if scale_key in original:
+                changed = copy.deepcopy(original)
+                del changed[scale_key]
+                check(changed, False, "FP8 expert without block scales")
+                changed = copy.deepcopy(original)
+                changed[scale_key]["shape"].reverse()
+                check(changed, False, "transposed partial-block scale geometry")
+                changed = copy.deepcopy(original)
+                changed[scale_key]["dtype"] = "I64"
+                check(changed, False, "non-floating FP8 scales")
             key = next(name for name in metadata if name.endswith("ngram_heads_offsets"))
             check(original, False, "negative PLE offset", {key: b"\xff" * len(metadata[key])})
             key = next(name for name in metadata if name.endswith("ngram_heads_vocab_sizes"))
