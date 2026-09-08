@@ -92,6 +92,7 @@ int main(int argc, char **argv) {
     int np=ids(root,"prompt_ids",prompt),nf=ids(root,"full_ids",full);
     REQUIRE(np>0 && nf>np && !memcmp(prompt,full,(size_t)np*sizeof(*prompt)));
     REQUIRE(!coli_qwen38_segment_adapter_register() && !coli_qwen38_edge_adapter_register());
+    REQUIRE(!coli_deepseek_v4_segment_adapter_register() && !coli_deepseek_v4_edge_adapter_register());
     ColiEdgeEngineOptions eo={.struct_size=sizeof(eo),.model_dir=argv[2]};
     REQUIRE(!coli_edge_engine_open(argv[1],&eo,&edge,error,sizeof error));
     ColiEdgeCapabilities ec={.struct_size=sizeof(ec)};

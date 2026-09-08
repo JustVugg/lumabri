@@ -212,7 +212,8 @@ def main():
         until(lambda: chat.has("Tab completes commands"), message="slash completion did not execute help")
         chat.send("hi\n")
         until(lambda: chat.has("tok/s") or chat.has("prompt plus output exceeds context") or
-              chat.has("logits are unavailable for sampling") or chat.p.poll() is not None, seconds=120,
+              chat.has("logits are unavailable for sampling") or chat.has("Segment generation failed") or
+              chat.has("invalid token count") or chat.p.poll() is not None, seconds=120,
               message="real model did not finish a response")
         assert chat.has("tok/s"), "engine failed during generation"
         assert "hosted stream · no local checkpoint" in chat.text

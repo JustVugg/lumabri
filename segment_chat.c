@@ -1317,9 +1317,12 @@ static int segment_generate(ColiEdgeEngine *edge,
     } else {
         if (!prompt ||
             coli_edge_tokenize(edge, prompt, prompt_bytes, NULL, 0,
-                               &prompt_count, error, error_size) ||
-            !prompt_count || prompt_count > SIZE_MAX / sizeof *prompt_tokens)
+                               &prompt_count, error, error_size))
             goto cleanup;
+        if(!prompt_count || prompt_count > SIZE_MAX / sizeof *prompt_tokens) {
+            snprintf(error,error_size,"Tokenizer produced an invalid token count; verify the checkpoint tokenizer");
+            goto cleanup;
+        }
         prompt_tokens = malloc(prompt_count * sizeof *prompt_tokens);
         size_t actual_count = 0;
         if (!prompt_tokens ||

@@ -155,15 +155,6 @@ static int lmb_q38_tensor(const LmbPlanTensor *t, void *opaque) {
     return bytes==UINT64_MAX || m->memory[layer].resident_bytes==UINT64_MAX ? -1 : 0;
 }
 
-static int lmb_q38_number(const char *json, const char *key, double def, double *out) {
-    const char *p=lmb_json_member(json,key);
-    *out=def;
-    if (!p) return 0;
-    if (*p!='-' && (*p<'0' || *p>'9')) return -1;
-    errno=0; char *end;
-    *out=strtod(p,&end); end=(char *)lmb_plan_space(end);
-    return errno || !isfinite(*out) || (*end!=',' && *end!='}') ? -1 : 0;
-}
 static int LMB_UNUSED lmb_qwen38_memory(const char *root, const char *whole,
                                         const char *json, LmbModelShape *m) {
     if (lmb_json_member(whole,"vision_config")) return -1;
@@ -215,10 +206,10 @@ static int LMB_UNUSED lmb_qwen38_memory(const char *root, const char *whole,
     if(rp && lmb_json_member(rp,"rope_type") &&
        (lmb_json_string(rp,"rope_type",str,sizeof str) || strcmp(str,"default"))) return -1;
     double partial, theta, eps;
-    if(lmb_q38_number(json,"partial_rotary_factor",1,&partial) ||
-       lmb_q38_number(rp ? rp : json,"partial_rotary_factor",partial,&partial) ||
-       lmb_q38_number(rp ? rp : json,"rope_theta",10000,&theta) ||
-       lmb_q38_number(json,"rms_norm_eps",1e-6,&eps) ||
+    if(lmb_plan_number(json,"partial_rotary_factor",1,&partial) ||
+       lmb_plan_number(rp ? rp : json,"partial_rotary_factor",partial,&partial) ||
+       lmb_plan_number(rp ? rp : json,"rope_theta",10000,&theta) ||
+       lmb_plan_number(json,"rms_norm_eps",1e-6,&eps) ||
        theta>FLT_MAX || eps>FLT_MAX || (float)theta<=0 || (float)eps<=0 || partial<=0 || partial>1) return -1;
     unsigned rotary=(unsigned)(v.hd*partial);
     if(!rotary || (rotary&1) || v.id<rotary) return -1;

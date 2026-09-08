@@ -3,11 +3,15 @@
 #ifndef LUMABRI_PLAN_TENSORS_H
 #define LUMABRI_PLAN_TENSORS_H
 #include <dirent.h>
+#include <math.h>
+#include <float.h>
 #include <sys/stat.h>
 
 typedef struct {
     char name[512], dtype[32];
     uint64_t elements, bytes, shape[8];
+    uint64_t offset;
+    uint32_t file_id;
     uint64_t meta_i64[64];
     unsigned rank;
 } LmbPlanTensor;
@@ -16,6 +20,14 @@ typedef int (*LmbPlanTensorVisit)(const LmbPlanTensor *, void *);
 static const char *lmb_plan_space(const char *p) {
     while (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t') p++;
     return p;
+}
+
+static int LMB_UNUSED lmb_plan_number(const char *json,const char *key,double def,double *out) {
+    const char *p=lmb_json_member(json,key); *out=def;
+    if(!p) return 0;
+    if(*p!='-' && (*p<'0' || *p>'9')) return -1;
+    errno=0; char *end; *out=strtod(p,&end); end=(char *)lmb_plan_space(end);
+    return errno || !isfinite(*out) || (*end!=',' && *end!='}') ? -1 : 0;
 }
 
 /* Header-generated names are plain ASCII. Reject escaped names rather than
@@ -83,8 +95,8 @@ static const char *lmb_plan_object_end(const char *p) {
     return p;
 }
 
-static int lmb_plan_tensor_file(const char *path, uint64_t *header_budget,
-                                LmbPlanTensorVisit visit, void *opaque) {
+static int lmb_plan_tensor_file_id(const char *path, uint64_t *header_budget,
+                                LmbPlanTensorVisit visit, void *opaque, uint32_t file_id) {
     FILE *f = fopen(path, "rb");
     if (!f) return -1;
     struct stat st;
@@ -105,7 +117,7 @@ static int lmb_plan_tensor_file(const char *path, uint64_t *header_budget,
     if (*p++ != '{') goto done;
     unsigned tensors = 0;
     for (;;) {
-        LmbPlanTensor t = {0};
+        LmbPlanTensor t = {.file_id=file_id};
         p = lmb_plan_space(p);
         if (*p == '}') { p++; break; }
         if (!(p = lmb_plan_string(p, t.name, sizeof t.name))) goto done;
@@ -126,13 +138,18 @@ static int lmb_plan_tensor_file(const char *path, uint64_t *header_budget,
             for (unsigned i = 0; i < t.rank; i++) t.elements = lmb_size_mul(t.elements, t.shape[i]);
             unsigned width = !strcmp(t.dtype, "F32") ? 4 :
                 (!strcmp(t.dtype, "BF16") || !strcmp(t.dtype, "F16")) ? 2 :
-                (!strcmp(t.dtype, "U8") || !strcmp(t.dtype, "I8")) ? 1 :
+                (!strcmp(t.dtype, "U8") || !strcmp(t.dtype, "I8") ||
+                 !strcmp(t.dtype, "F8_E4M3") || !strcmp(t.dtype, "F8_E8M0")) ? 1 :
                 !strcmp(t.dtype, "I64") ? 8 : 0;
             t.bytes = offsets[1] - offsets[0];
+            t.offset = offsets[0];
             if (!width || lmb_size_mul(t.elements, width) != t.bytes) goto done;
-            if (width == 8) {
+            /* Large I64 tensors (V4 token-to-expert router tables) are weights,
+             * not small layout metadata: validate their header, never read the
+             * payload in a catalogue scan. PLE layout banks are <=64 entries. */
+            if (width == 8 && t.elements <= 64) {
                 unsigned char metadata[512];
-                if (t.elements > 64 || t.bytes > *header_budget ||
+                if (t.bytes > *header_budget ||
                     fseeko(f, (off_t)(8 + bytes + offsets[0]), SEEK_SET) ||
                     fread(metadata, 1, (size_t)t.bytes, f) != t.bytes) goto done;
                 *header_budget -= t.bytes;
@@ -153,6 +170,11 @@ done:
     free(json); fclose(f); return rc;
 }
 
+static int LMB_UNUSED lmb_plan_tensor_file(const char *path, uint64_t *header_budget,
+                                LmbPlanTensorVisit visit, void *opaque) {
+    return lmb_plan_tensor_file_id(path,header_budget,visit,opaque,0);
+}
+
 static int lmb_plan_tensors(const char *root, LmbPlanTensorVisit visit, void *opaque) {
     DIR *dir = opendir(root);
     if (!dir) return -1;
@@ -168,7 +190,7 @@ static int lmb_plan_tensors(const char *root, LmbPlanTensorVisit visit, void *op
         char path[1024];
         int len = snprintf(path, sizeof path, "%s/%s", root, e->d_name);
         if (++files > 512 || len < 0 || (size_t)len >= sizeof path ||
-            lmb_plan_tensor_file(path, &budget, visit, opaque)) { rc = -1; break; }
+            lmb_plan_tensor_file_id(path, &budget, visit, opaque, files)) { rc = -1; break; }
     }
     closedir(dir);
     return files ? rc : -1;

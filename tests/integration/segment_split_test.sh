@@ -72,7 +72,9 @@ wait_port() {
 
 prompt=$(python3 - "$MODEL_DIR" <<'PY'
 import json,sys,os
-p=os.path.join(sys.argv[1],'ref.json')
+p=os.environ.get('SPLIT_REFERENCE') or os.path.join(sys.argv[1],'ref.json')
+if os.environ.get('SPLIT_REFERENCE') and not os.path.isfile(p):
+    raise RuntimeError('explicit split reference does not exist: '+p)
 print(','.join(map(str,json.load(open(p,encoding='utf-8'))['prompt_ids']))
       if os.path.exists(p) else '1,2,3,4')
 PY

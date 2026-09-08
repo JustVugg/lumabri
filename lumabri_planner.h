@@ -339,13 +339,18 @@ static LMB_UNUSED int lmb_shape_from_config(const char *model_dir,
     memset(out, 0, sizeof *out);
     if (!model_dir || !model_dir[0]) return -1;
     char path[1024];
-    snprintf(path, sizeof path, "%s/config.json", model_dir);
+    int path_len=snprintf(path, sizeof path, "%s/config.json", model_dir);
+    if(path_len<0 || (size_t)path_len>=sizeof path) return -1;
     FILE *f = fopen(path, "rb");
     if (!f) return -1;
     char buf[65536];
     size_t n = fread(buf, 1, sizeof buf - 1, f);
+    int invalid=ferror(f) || (n==sizeof buf-1 && fgetc(f)!=EOF);
     fclose(f);
+    if(invalid || memchr(buf,0,n)) return -1;
     buf[n] = 0;
+    const char *end=lmb_plan_object_end(lmb_plan_space(buf));
+    if(!end || *lmb_plan_space(end)) return -1;
 
     if (lmb_json_string(buf, "model_type", out->model_type,
                         sizeof out->model_type)) return -1;
@@ -389,11 +394,8 @@ static LMB_UNUSED int lmb_shape_from_config(const char *model_dir,
      * in the working set and make disk mode indistinguishable from resident. */
     if (out->experts && !out->moe_intermediate)
         out->moe_intermediate = out->intermediate;
-    /* The historical formula is verified only for the two fixtures against
-     * which it was written. Explicit per-adapter contracts follow below.
-     * Other adapters remain visible through the family table,
-     * but cannot produce a fit decision until their adapter-specific sizing
-     * callback lands. This is preferable to a confident under-allocation. */
+    /* A registered family is not proof that this checkpoint encoding is
+     * compatible. Only its explicit inspector may enable a fit decision. */
     out->sizing_verified = !lmb_describe_memory(fam->segment_id, model_dir, buf, cfg, out);
     return out->layers && out->hidden ? 0 : -1;
 }

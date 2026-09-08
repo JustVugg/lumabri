@@ -107,6 +107,17 @@ not a completed gate.
    Unconverted HF experts and GQA geometry are not compatible with the pinned
    runtime and are rejected before offers. Header-only negative fixtures are
    explicitly separate from the real one/two-range token oracle.
+   DeepSeek V4 now validates native FP8 dense/scale tensors, mHC boundaries,
+   packed FP4 expert geometry and the store's same-shard/two-contiguous-bank
+   layout. Large token-to-expert I64 router tables are header-inspected, not
+   read as metadata. Resident allowances distinguish raw expert scales from
+   expanded dense scales, window/compressor/indexer state, snapshot/growth
+   allowance and conservative native workspace. No disk or GPU mode is enabled.
+   Local synthetic short/compressed/long independent oracles pass with one
+   and two ranges and fresh sessions (8/4/4 generated tokens respectively).
+   A separate byte-tokenizer copy exercises ordinary text through the TUI;
+   the upstream special-token oracle fixture is preserved unchanged. Approvals,
+   two actual ranges, generation and lost-donor cleanup pass locally.
    Additional encodings (including Qwen3.8 FP8), vision and large checkpoints
    remain untested; gate 2 is not complete merely because all families have
    an initial memory contract.

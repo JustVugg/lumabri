@@ -234,6 +234,25 @@ jobs:
           name: tiny-qwen38-checkpoint
           path: lumabri/build/qwen38-contract/qwen38-tiny/*
           retention-days: 3
+      - name: DeepSeek V4 native memory contract and compressed-state oracles
+        working-directory: lumabri
+        run: |
+          python3 ../colibri/c/tools/make_deepseek_v4_tiny.py --output build/v4-contract/deepseek-v4-tiny
+          python3 tests/integration/prepare_v4_oracles.py build/v4-contract/deepseek-v4-tiny
+          python3 tests/integration/planner_tensor_contract_test.py --family deepseek_v4 --model build/v4-contract/deepseek-v4-tiny
+          for case in short compressed long; do
+            OMP_NUM_THREADS=2 build/qwen38-greedy-oracle deepseek_v4 build/v4-contract/deepseek-v4-tiny build/v4-contract/deepseek-v4-tiny/edge_ref_$case.json
+          done
+          mkdir -p build/v4-chat
+          cp -a build/v4-contract/deepseek-v4-tiny build/v4-chat/deepseek-v4-tiny
+          python3 ../colibri/c/tools/make_edge_tiny_tokenizer.py build/v4-chat/deepseek-v4-tiny --vocab-size 128
+          python3 tests/integration/home_flow_test.py --models-dir build/v4-chat --donor-ram-gb 1.0 --kill-donor
+          SPLIT_REFERENCE=build/v4-contract/deepseek-v4-tiny/edge_ref_short.json SPLIT_MODEL_DIR=build/v4-contract/deepseek-v4-tiny SPLIT_ENGINE=deepseek_v4 SPLIT_MODEL=v4-native SPLIT_ROUNDS=1 SPLIT_THREADS=2 SPLIT_TOKENS=8 PORT=10940 bash tests/integration/segment_split_test.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tiny-v4-checkpoint
+          path: lumabri/build/v4-chat/deepseek-v4-tiny/*
+          retention-days: 3
   macos-household:
     # Real native CPU engines + signed CAS + approvals + streaming. Loopback
     # coverage does not replace the macOS 12.6 / physical household LAN test.
@@ -331,6 +350,13 @@ jobs:
       - name: Native Qwen3.8 request and execution
         working-directory: lumabri
         run: python3 tests/integration/home_flow_test.py --models-dir build/qwen38-home-models --context 512 --expect-greedy
+      - uses: actions/download-artifact@v4
+        with:
+          name: tiny-v4-checkpoint
+          path: lumabri/build/v4-home-models/deepseek-v4-tiny
+      - name: Native V4 request and execution
+        working-directory: lumabri
+        run: python3 tests/integration/home_flow_test.py --models-dir build/v4-home-models --donor-ram-gb 1.0
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

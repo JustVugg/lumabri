@@ -17,7 +17,7 @@ import tempfile
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", type=Path, required=True)
-    parser.add_argument("--family", choices=("olmoe", "inkling", "kimi", "glm", "glm53", "qwen38"), required=True)
+    parser.add_argument("--family", choices=("deepseek_v4", "olmoe", "inkling", "kimi", "glm", "glm53", "qwen38"), required=True)
     parser.add_argument("--probe", type=Path, default=Path("./segment_budget_probe"))
     args = parser.parse_args()
     probe = args.probe.resolve()
@@ -34,8 +34,7 @@ def main():
                     continue
                 assert name not in original, f"duplicate source tensor {name}"
                 begin, end = tensor["data_offsets"]
-                if tensor["dtype"] == "I64":
-                    assert end - begin <= 512
+                if tensor["dtype"] == "I64" and end - begin <= 512:
                     f.seek(8 + length + begin)
                     metadata[name] = f.read(end - begin)
                 tensor["data_offsets"] = [payload + begin, payload + end]
@@ -64,6 +63,7 @@ def main():
 
         check(original, True, "baseline header-only inventory")
         suffix = {
+            "deepseek_v4": ".ffn.experts.0.w1.scale",
             "olmoe": ".mlp.experts.0.qs",
             "inkling": ".mlp.experts.gate_up_proj.qs",
             "kimi": ".block_sparse_moe.experts.0.w1.weight_scale",
@@ -73,12 +73,13 @@ def main():
         }[args.family]
         # Upstream generators describe their actual dense/sparse layout in
         # config; do not hard-code the first sparse layer into this test.
-        expert_key = next((name for name in original if name.startswith("model.")
-                           and name.endswith(suffix)), None)
+        expert_key = next((name for name in original if name.endswith(suffix)), None)
         assert expert_key is not None, f"fixture lacks the expected expert format: {suffix}"
         norm = "model.language_model.norm.weight" if "model.language_model.norm.weight" in original else "model.norm.weight"
         if args.family == "qwen38":
             norm = "model.hyper_connection_mixer.hc_norm.weight"
+        if args.family == "deepseek_v4":
+            norm = "norm.weight"
         for key in (norm, expert_key):
             changed = copy.deepcopy(original)
             assert key in changed, f"fixture changed: missing {key}"
@@ -94,6 +95,16 @@ def main():
             changed = copy.deepcopy(original)
             del changed["model.layers.0.self_attn.indexer.wk.weight"]
             check(changed, False, "partial DSA bank with wq still present")
+        if args.family == "deepseek_v4":
+            changed = copy.deepcopy(original)
+            changed[expert_key]["data_offsets"] = [n + 1 for n in changed[expert_key]["data_offsets"]]
+            check(changed, False, "non-contiguous native expert scale bank")
+            changed = copy.deepcopy(original)
+            changed[expert_key]["dtype"] = "U8"
+            check(changed, False, "wrong native expert scale format")
+            changed = copy.deepcopy(original)
+            del changed["layers.0.ffn.gate.tid2eid"]
+            check(changed, False, "missing token hash router")
         if args.family == "qwen38":
             key = next(name for name in metadata if name.endswith("ngram_heads_offsets"))
             check(original, False, "negative PLE offset", {key: b"\xff" * len(metadata[key])})

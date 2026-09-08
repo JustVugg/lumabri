@@ -39,6 +39,7 @@ static int lmb_inkling_tensor(const LmbPlanTensor *t, void *opaque) {
     LmbModelShape *m = v->model;
     uint64_t cost;
     int packed = !strcmp(t->dtype, "U8") || !strcmp(t->dtype, "I8");
+    if (!packed && strcmp(t->dtype,"F32") && strcmp(t->dtype,"BF16") && strcmp(t->dtype,"F16")) return -1;
     const char *name = t->name;
     int global = !strcmp(name, "model.embed_tokens.weight") ? 0 :
         !strcmp(name, "lm_head.weight") ? 1 : !strcmp(name, "model.norm.weight") ? 2 :
