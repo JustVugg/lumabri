@@ -172,8 +172,8 @@ if line() != b"\n" or line() != b"LUMABRI_SAMPLING LOGITS\n":
 if b"READY" not in line() or not line().startswith(b"STAT "):
     raise RuntimeError("Segment gateway did not become ready")
 
-def turn(request_id, prompt):
-    header = f"SUBMIT {request_id} 0 {len(prompt)} 1 0.7 0.95\n".encode()
+def turn(request_id, prompt, max_new=1):
+    header = f"SUBMIT {request_id} 0 {len(prompt)} {max_new} 0.7 0.95\n".encode()
     process.stdin.write(header + prompt + b"\n")
     process.stdin.flush()
     if line() != f"ACCEPT {request_id}\n".encode():
@@ -192,6 +192,18 @@ def turn(request_id, prompt):
                 raise RuntimeError("Segment DATA frame is truncated")
             seen_data = True
         elif frame.startswith(f"DONE {request_id} STAT ".encode()):
+            fields = frame.decode().split()
+            marker = fields.index("PERF1")
+            generated, steps = map(int, fields[marker+1:marker+3])
+            prefill, decode, total = map(float, fields[marker+3:])
+            assert generated == int(fields[3]) and 1 <= generated <= max_new
+            assert steps == generated - 1
+            assert all(0 <= seconds <= 1e9 for seconds in (prefill, decode, total))
+            assert total + 1e-6 >= prefill + decode
+            expected = steps / decode if steps and decode else 0
+            assert abs(float(fields[4]) - expected) < 0.001
+            if not steps:
+                assert decode == 0 and float(fields[4]) == 0
             break
         elif not frame.startswith(f"PROGRESS {request_id} ".encode()):
             raise RuntimeError("unexpected Segment frame: "+repr(frame))
@@ -199,7 +211,7 @@ def turn(request_id, prompt):
         raise RuntimeError("Segment response lacks streaming progress")
 
 turn(91, b"hi\n")
-turn(92, b"hi\nthere\n")
+turn(92, b"hi\nthere\n", max_new=4)
 process.stdin.close()
 if process.wait(timeout=15):
     raise RuntimeError("Segment gateway exited with an error")

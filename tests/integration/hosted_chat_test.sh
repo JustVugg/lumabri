@@ -64,7 +64,7 @@ int main(int argc, char **argv) {
             if (lmb_recv(fd, &stream) || stream.op != LMB_HOST_STREAM ||
                 !stream.pay_len) { lmb_msg_free(&stream); break; }
             lmb_msg_free(&stream);
-            const char *reply = "ACCEPT 0\nDATA 0 5\nhello\nDONE 0\n";
+            const char *reply = "ACCEPT 0\nDATA 0 5\nhello\nDONE 0 STAT 9 4 0 0 20 0 PERF1 9 8 15 2 17.2\n";
             if (lmb_send(fd, LMB_HOST_STREAM, NULL, 0,
                          reply, (uint32_t)strlen(reply))) break;
         }
@@ -104,6 +104,8 @@ grep -qi "not yet measured" "$T/client.log" ||
     fail "an unmeasured host did not say its speed is unknown"
 grep -q "hello" "$T/client.log" ||
     fail "the encrypted HOST_STREAM did not carry a generated reply"
+grep -q "host prefill 15.0s" "$T/client.log" || fail "host phase timing was lost"
+grep -q "decode 4.00 tok/s" "$T/client.log" || fail "decode rate included prefill or the first token"
 
 # Not one byte of model, mirror or CAS.
 (( after - before < 65536 )) ||

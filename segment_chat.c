@@ -45,6 +45,8 @@ typedef struct {
     size_t checkpoint_count;
 } SegmentConversation;
 
+#include "lumabri_metrics.h"
+
 typedef struct {
     char *text;
     size_t text_bytes;
@@ -53,6 +55,7 @@ typedef struct {
     size_t prompt_count;
     double elapsed_seconds;
     double decode_seconds;
+    LmbGenerationMetrics metrics;
 } GenerationResult;
 
 typedef enum {
@@ -1491,6 +1494,7 @@ static int segment_generate(ColiEdgeEngine *edge,
             goto cleanup;
         }
     } else if (coli_edge_select(edge, &select, error, error_size)) goto cleanup;
+    double first_selected_at=monotonic_seconds(), last_selected_at=first_selected_at;
     size_t generated_count = 1;
     if (event &&
         (generation_stream_prefix(edge, generated, generated_count,
@@ -1550,6 +1554,7 @@ static int segment_generate(ColiEdgeEngine *edge,
             }
         } else if (coli_edge_select(edge, &select, error, error_size))
             goto cleanup;
+        last_selected_at=monotonic_seconds();
         generated_count++;
         if (event &&
             (generation_stream_prefix(edge, generated, generated_count,
@@ -1626,8 +1631,13 @@ static int segment_generate(ColiEdgeEngine *edge,
     result->tokens = generated;
     result->token_count = generated_count;
     result->prompt_count = prompt_count;
-    result->elapsed_seconds = monotonic_seconds() - started;
-    result->decode_seconds = monotonic_seconds() - decode_started;
+    double finished_at=monotonic_seconds();
+    result->elapsed_seconds = finished_at - started;
+    result->decode_seconds = finished_at - decode_started; /* legacy JSON convention */
+    result->metrics=(LmbGenerationMetrics){
+        .generated_tokens=(uint32_t)generated_count,.decode_steps=(uint32_t)generated_count-1,
+        .prefill_seconds=first_selected_at-started,.decode_seconds=last_selected_at-first_selected_at,
+        .total_seconds=finished_at-started};
     generated = NULL;
     rc = 0;
 
@@ -1834,10 +1844,13 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
             fflush(stdout);
             continue;
         }
-        double rate = result.elapsed_seconds > 0.0
-            ? (double)result.token_count / result.elapsed_seconds : 0.0;
-        printf("DONE %u STAT %zu %.3f 0 0 %zu 0\n", request_id,
-               result.token_count, rate, result.prompt_count);
+        char metrics[192];
+        if(lmb_metrics_format(&result.metrics,metrics,sizeof metrics)) {
+            printf("ERROR %u Invalid generation timing\n",request_id);
+            fflush(stdout); generation_result_free(&result); continue;
+        }
+        printf("DONE %u STAT %zu %.3f 0 0 %zu 0 %s\n", request_id,
+               result.token_count, lmb_metrics_decode_rate(&result.metrics), result.prompt_count,metrics);
         fflush(stdout);
         generation_result_free(&result);
     }
@@ -2097,10 +2110,16 @@ int main(int argc, char **argv) {
             printf("%s%d", i ? "," : "", generated.tokens[i]);
         printf("],\"decode_tokens\":%zu,\"decode_seconds\":%.9f,"
                "\"prefill_decode_seconds\":%.9f,"
-               "\"bytes\":{\"segment\":%llu}}\n",
+               "\"bytes\":{\"segment\":%llu},"
+               "\"generation_metrics\":{\"version\":1,\"generated_tokens\":%u,"
+               "\"decode_steps\":%u,\"prefill_seconds\":%.9f,"
+               "\"decode_seconds\":%.9f,\"total_seconds\":%.9f}}\n",
                generated.token_count, generated.decode_seconds,
                generated.elapsed_seconds,
-               (unsigned long long)segment_wire_bytes);
+               (unsigned long long)segment_wire_bytes,
+               generated.metrics.generated_tokens,generated.metrics.decode_steps,
+               generated.metrics.prefill_seconds,generated.metrics.decode_seconds,
+               generated.metrics.total_seconds);
     }
     generation_result_free(&generated);
     lmb_seg_discovery_stop(discovery);
