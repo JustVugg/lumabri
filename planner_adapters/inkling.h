@@ -34,6 +34,7 @@ typedef struct {
 } LmbInklingInventory;
 
 static int lmb_inkling_tensor(const LmbPlanTensor *t, void *opaque) {
+    if (!strcmp(t->dtype, "I64")) return -1;
     LmbInklingInventory *v = opaque;
     LmbModelShape *m = v->model;
     uint64_t cost;

@@ -216,6 +216,22 @@ jobs:
           name: tiny-glm53-checkpoint
           path: lumabri/build/glm53-contract/glm53-tiny/*
           retention-days: 3
+      - name: Qwen3.8 contract — DeltaNet, QSA and checked PLE metadata
+        working-directory: lumabri
+        run: |
+          python3 tests/integration/prepare_qwen38_fixture.py --engine ../colibri/c --out build/qwen38-contract/qwen38-tiny
+          python3 tests/integration/planner_tensor_contract_test.py --family qwen38 --model build/qwen38-contract/qwen38-tiny
+          cc -I../colibri/c -O2 -Wall -Wextra -Werror -fopenmp -pthread tests/c/edge_segment_greedy.c build/segment-hybrid-colibri/build/segment/libcolibri_segment_edge.a -o build/qwen38-greedy-oracle -lm
+          cc -I. -I../colibri/c -O2 -Wall -Wextra -Werror -fopenmp -pthread tests/c/test_segment_stream.c lumabri_segment.c lumabri_segment_discovery.c lumabri_sampling.c build/segment-hybrid-colibri/build/segment/libcolibri_segment_edge.a -o build/test-segment-stream -lm
+          build/test-segment-stream
+          OMP_NUM_THREADS=2 build/qwen38-greedy-oracle qwen38 build/qwen38-contract/qwen38-tiny build/qwen38-contract/qwen38-tiny/ref.json
+          python3 tests/integration/home_flow_test.py --models-dir build/qwen38-contract --context 512 --expect-greedy --kill-donor
+          SPLIT_MODEL_DIR=build/qwen38-contract/qwen38-tiny SPLIT_ENGINE=qwen38 SPLIT_MODEL=qwen38-bf16 SPLIT_ROUNDS=1 SPLIT_THREADS=2 SPLIT_TOKENS=8 PORT=10740 bash tests/integration/segment_split_test.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tiny-qwen38-checkpoint
+          path: lumabri/build/qwen38-contract/qwen38-tiny/*
+          retention-days: 3
   macos-household:
     # Real native CPU engines + signed CAS + approvals + streaming. Loopback
     # coverage does not replace the macOS 12.6 / physical household LAN test.
@@ -306,6 +322,13 @@ jobs:
       - name: Native GLM5.3 request and execution
         working-directory: lumabri
         run: python3 tests/integration/home_flow_test.py --models-dir build/glm53-home-models
+      - uses: actions/download-artifact@v4
+        with:
+          name: tiny-qwen38-checkpoint
+          path: lumabri/build/qwen38-home-models/qwen38-tiny
+      - name: Native Qwen3.8 request and execution
+        working-directory: lumabri
+        run: python3 tests/integration/home_flow_test.py --models-dir build/qwen38-home-models --context 512 --expect-greedy
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

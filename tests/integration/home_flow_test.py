@@ -27,6 +27,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--models-dir", required=True)
     parser.add_argument("--donor-ram-gb", type=float, default=0.5)
+    parser.add_argument("--context", type=int, default=128,
+                        help="approved context, including the actual family chat template")
+    parser.add_argument("--expect-greedy", action="store_true")
     parser.add_argument("--expect-no-fit", action="store_true",
                         help="verify insufficient-memory admission, without starting engines")
     parser.add_argument("--kill-donor", action="store_true",
@@ -100,7 +103,7 @@ def main():
         return any((tmp / name).rglob("cache"))
 
     base = ["./lumabri", "models", "--models-dir", str(Path(args.models_dir).resolve()),
-            "--tracker", addr, "--context", "128", "--max-new", "8"]
+            "--tracker", addr, "--context", str(args.context), "--max-new", "8"]
 
     try:
         with open(tmp / "tracker.log", "wb") as log:
@@ -194,6 +197,8 @@ def main():
         until(lambda: chat.has("receives the text") or chat.p.poll() is not None, seconds=180,
               message="accepted plan did not reach real hosted chat")
         assert chat.p.poll() is None, "accepted plan failed; inspect donor engine logs"
+        if args.expect_greedy:
+            assert chat.has("greedy decoding"), "greedy-only capability was not shown to the client"
         until(lambda: chat.has("/experts shows tracker activity."),
               message="the accepted compute allocation is missing from chat")
         assert "Approved Segment plan: 2 compute donors" in chat.text
@@ -206,7 +211,8 @@ def main():
         chat.send("\t\n")
         until(lambda: chat.has("Tab completes commands"), message="slash completion did not execute help")
         chat.send("hi\n")
-        until(lambda: chat.has("tok/s") or chat.p.poll() is not None, seconds=120,
+        until(lambda: chat.has("tok/s") or chat.has("prompt plus output exceeds context") or
+              chat.has("logits are unavailable for sampling") or chat.p.poll() is not None, seconds=120,
               message="real model did not finish a response")
         assert chat.has("tok/s"), "engine failed during generation"
         assert "hosted stream · no local checkpoint" in chat.text

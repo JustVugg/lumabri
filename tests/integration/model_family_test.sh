@@ -71,6 +71,14 @@ expected = set(sys.argv[1].split())
 registry = runpy.run_path(sys.argv[2])
 official = {f.id: set(f.model_types) for f in registry["FAMILIES"]}
 bad = []
+planner = open("planner_adapters/registry.h", encoding="utf-8").read()
+planner = planner.split("LMB_MEMORY_CONTRACTS[] = {", 1)[1].split("\n};", 1)[0]
+memory_ids = re.findall(r'\{\s*"([^"]+)"\s*,', planner)
+if len(memory_ids) != len(set(memory_ids)):
+    bad.append("duplicate planner memory contracts")
+if set(memory_ids) != expected:
+    bad.append("planner contracts differ from Colibri: missing=%s extra=%s" %
+               (sorted(expected - set(memory_ids)), sorted(set(memory_ids) - expected)))
 if set(table) - expected:
     bad.append("LMB_FAMILIES names adapters Colibri does not expose: %s"
                % " ".join(sorted(set(table) - expected)))

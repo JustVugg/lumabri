@@ -2401,6 +2401,7 @@ typedef struct {
     Proto proto;
     EngKind kind;
     int segment;
+    int greedy_only; /* actual Edge capability, not a model-name assumption */
     EngineTransport transport;
 } Engine;
 
@@ -2468,6 +2469,7 @@ static char *read_until_prompt(int fd) {
 /* Wait for readiness in either dialect, and remember which one it was.
  * Returns 0, or -1 if the child died first. */
 static int engine_wait_ready(Engine *e) {
+    e->greedy_only = 0;
     size_t cap = 8192, len = 0;
     char *buf = malloc(cap);
     if (!buf) return -1;
@@ -2482,8 +2484,10 @@ static int engine_wait_ready(Engine *e) {
         if (r <= 0) { free(buf); return -1; }
         len += (size_t)r;
         buf[len] = 0;
-        if (memmem(buf, len, FRAME_READY, strlen(FRAME_READY)))
-            { e->proto = PROTO_FRAMED; free(buf); return 0; }
+        if (memmem(buf, len, FRAME_READY, strlen(FRAME_READY))) {
+            e->greedy_only = strstr(buf, "\nLUMABRI_SAMPLING GREEDY\n") != NULL;
+            e->proto = PROTO_FRAMED; free(buf); return 0;
+        }
         if ((len >= 3 && !memcmp(buf + len - 3, "\n> ", 3)) ||
             (len == 2 && !memcmp(buf, "> ", 2)))
             { e->proto = PROTO_LINE; free(buf); return 0; }
@@ -2821,8 +2825,8 @@ static int submit_serve2(Engine *e, const char *history, const char *prompt, int
     if (serve2_prefix(&c, e->kind) || cap_str(&c, history) ||
         serve2_turn(&c, e->kind, history[0] == 0, prompt, NULL)) { free(c.p); return -1; }
     char hdr[128];
-    int hn = snprintf(hdr, sizeof hdr, "SUBMIT %u 0 %zu %d 0.7 0.95\n",
-                      ++id, c.len, max_new < 1 ? 1 : max_new);
+    int hn = snprintf(hdr, sizeof hdr, "SUBMIT %u 0 %zu %d %.1f 0.95\n",
+                      ++id, c.len, max_new < 1 ? 1 : max_new, e->greedy_only ? 0.0 : 0.7);
     int ok = hn >= 0 && (size_t)hn < sizeof hdr &&
              !engine_write_full(e->to, hdr, (size_t)hn) &&
              !engine_write_full(e->to, c.p, c.len) &&
@@ -3220,6 +3224,9 @@ static int host_greet(int fd, const HostState *h, int busy) {
     lmb_buf_u32(&b, h->max_new);
     lmb_buf_u32(&b, h->max_frame);
     lmb_buf_u32(&b, 2);       /* SUBMIT/DATA/DONE, independent of model family */
+    /* Optional capability word after codec. Older clients reject the extra
+     * field rather than silently request unsupported stochastic sampling. */
+    if (h->engine->greedy_only) lmb_buf_u32(&b, 1);
     int rc = lmb_send(fd, LMB_HOST_HELLO_R, b.p, (uint32_t)b.len, NULL, 0);
     free(b.p);
     return rc;
@@ -3573,6 +3580,11 @@ static int host_connect(const char *addr, const char *model_type, const char *ex
         fprintf(stderr, "[lumabri] unsupported hosted codec\n");
         lmb_msg_free(&m); lmb_close(fd); return -1;
     }
+    uint32_t sampling_flags = 0;
+    if (c.off < c.len && (lmb_cur_u32(&c, &sampling_flags) || sampling_flags > 1)) {
+        fprintf(stderr, "[lumabri] unsupported host sampling capabilities\n");
+        lmb_msg_free(&m); lmb_close(fd); return -1;
+    }
     if (c.off != c.len || m.pay_len) { lmb_msg_free(&m); lmb_close(fd); return -1; }
     lmb_msg_free(&m);
     if (model_type && model_type[0] && strcmp(model_type, mtype)) {
@@ -3610,11 +3622,14 @@ static int host_connect(const char *addr, const char *model_type, const char *ex
     pthread_detach(thread);
     e->to = e->from = pair[0];
     e->kind = kind_id;
+    e->greedy_only = (int)sampling_flags;
     e->proto = codec == 2 || kind_is_serve2(e->kind) ? PROTO_SERVE2 : PROTO_FRAMED;
     g_signal_engine_fd = (sig_atomic_t)pair[0];
 
     printf("  %shost %s · %s · %s%s\n", C_DIM, addr, mtype,
            backend[0] ? backend : "cpu", C_R);
+    if (e->greedy_only)
+        printf("  greedy decoding · this backend does not expose sampling logits\n");
     /* Speed is shown only when the host has measured one. "unknown" is the
      * honest state for a host nobody has run yet, and a CPU host is slow
      * rather than broken — saying so before the first prompt is the whole
@@ -4334,6 +4349,8 @@ static int model_boot(const char *tracker, const char *model, const char *shim,
                            "/storage /reset /quit%s\n",
                            C_GRN, model, nowd() - segment_started, C_R,
                            C_DIM, C_R);
+                    if (e->greedy_only)
+                        printf("  greedy decoding · this backend does not expose sampling logits\n");
                     return 0;
                 }
                 engine_stop(e);

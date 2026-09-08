@@ -1,4 +1,5 @@
-/* Bounded safetensors-header inventory. No weight payload is read. */
+/* Bounded safetensors inventory. Weight payloads are never read; small I64
+ * layout buffers (e.g. PLE offsets) are metadata and are checked explicitly. */
 #ifndef LUMABRI_PLAN_TENSORS_H
 #define LUMABRI_PLAN_TENSORS_H
 #include <dirent.h>
@@ -7,6 +8,7 @@
 typedef struct {
     char name[512], dtype[32];
     uint64_t elements, bytes, shape[8];
+    uint64_t meta_i64[64];
     unsigned rank;
 } LmbPlanTensor;
 typedef int (*LmbPlanTensorVisit)(const LmbPlanTensor *, void *);
@@ -124,10 +126,21 @@ static int lmb_plan_tensor_file(const char *path, uint64_t *header_budget,
             for (unsigned i = 0; i < t.rank; i++) t.elements = lmb_size_mul(t.elements, t.shape[i]);
             unsigned width = !strcmp(t.dtype, "F32") ? 4 :
                 (!strcmp(t.dtype, "BF16") || !strcmp(t.dtype, "F16")) ? 2 :
-                (!strcmp(t.dtype, "U8") || !strcmp(t.dtype, "I8")) ? 1 : 0;
+                (!strcmp(t.dtype, "U8") || !strcmp(t.dtype, "I8")) ? 1 :
+                !strcmp(t.dtype, "I64") ? 8 : 0;
             t.bytes = offsets[1] - offsets[0];
-            if (!width || lmb_size_mul(t.elements, width) != t.bytes ||
-                visit(&t, opaque)) goto done;
+            if (!width || lmb_size_mul(t.elements, width) != t.bytes) goto done;
+            if (width == 8) {
+                unsigned char metadata[512];
+                if (t.elements > 64 || t.bytes > *header_budget ||
+                    fseeko(f, (off_t)(8 + bytes + offsets[0]), SEEK_SET) ||
+                    fread(metadata, 1, (size_t)t.bytes, f) != t.bytes) goto done;
+                *header_budget -= t.bytes;
+                for (uint64_t i=0; i<t.elements; i++)
+                    for (unsigned j=0; j<8; j++)
+                        t.meta_i64[i] |= (uint64_t)metadata[i*8+j] << (8*j);
+            }
+            if (visit(&t, opaque)) goto done;
         }
         p = lmb_plan_space(end);
         if (*p == '}') { p++; break; }

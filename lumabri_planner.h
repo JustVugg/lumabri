@@ -332,11 +332,7 @@ static int LMB_UNUSED lmb_json_string(const char *object, const char *key,
     return 0;
 }
 
-#include "planner_adapters/qwen36.h"
-#include "planner_adapters/inkling.h"
-#include "planner_adapters/kimi.h"
-#include "planner_adapters/glm.h"
-#include "planner_adapters/glm53.h"
+#include "planner_adapters/registry.h"
 
 static LMB_UNUSED int lmb_shape_from_config(const char *model_dir,
                                             LmbModelShape *out) {
@@ -398,18 +394,7 @@ static LMB_UNUSED int lmb_shape_from_config(const char *model_dir,
      * Other adapters remain visible through the family table,
      * but cannot produce a fit decision until their adapter-specific sizing
      * callback lands. This is preferable to a confident under-allocation. */
-    out->sizing_verified = !strcmp(fam->segment_id, "olmoe") ||
-                           !strcmp(fam->segment_id, "deepseek_v4");
-    if (!strcmp(fam->segment_id, "qwen36"))
-        out->sizing_verified = !lmb_qwen36_memory(model_dir, out);
-    if (!strcmp(fam->segment_id, "inkling"))
-        out->sizing_verified = !lmb_inkling_memory(model_dir, cfg, out);
-    if (!strcmp(fam->segment_id, "kimi"))
-        out->sizing_verified = !lmb_kimi_memory(model_dir, cfg, out);
-    if (!strcmp(fam->segment_id, "glm"))
-        out->sizing_verified = !lmb_glm_memory(model_dir, cfg, out);
-    if (!strcmp(fam->segment_id, "glm53"))
-        out->sizing_verified = !lmb_glm53_memory(model_dir, buf, cfg, out);
+    out->sizing_verified = !lmb_describe_memory(fam->segment_id, model_dir, buf, cfg, out);
     return out->layers && out->hidden ? 0 : -1;
 }
 

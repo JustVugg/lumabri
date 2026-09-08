@@ -16,7 +16,7 @@ static int lmb_glm53_tensor(const LmbPlanTensor *t, void *opaque) {
     LmbModelShape *m = v->model;
     const char *name = t->name;
     if (!strncmp(name, "model.visual.", 13)) return -1;
-    if (!strcmp(t->dtype, "U8") || !strcmp(t->dtype, "I8")) return -1;
+    if (strcmp(t->dtype, "F32") && strcmp(t->dtype, "BF16") && strcmp(t->dtype, "F16")) return -1;
     if (strncmp(name, "lm_head.weight", 14)) {
         uint8_t prefix = !strncmp(name, "model.language_model.", 21) ? 2 :
                          !strncmp(name, "model.", 6) ? 1 : 0;

@@ -20,7 +20,8 @@ execution, cross-platform numerical compatibility, or concurrent capacity.
    nodes. Mac deployment/approval is user-operated; CI loopback is separate.
 2. Complete verified sizing for every registered family and supported weight
    encoding. OLMoE, DeepSeek V4, converted Qwen3.6, Inkling and float-dense/MXFP4
-   Kimi, float-source GLM and text-only float-source GLM5.3 enable conservative sizing. Require real
+   Kimi, float-source GLM, text-only float-source GLM5.3 and BF16/float-source
+   Qwen3.8 enable conservative sizing. Require real
    checkpoint/adapter conformance before promoting support.
 3. Consistent planner/runtime reservations, explicit local-compute consent,
    and placement informed by measured execution costs, not just RAM totals.
@@ -86,8 +87,24 @@ not a completed gate.
    GLM5.3 accounts for its engine-wide replicated session state and context-sized
    workspace. Its stateless Edge context convention is handled by the caller.
    Packed/vision GLM5.3 and the native pool=1 path remain unverified.
-   This does not close gate 2: Qwen3.8 still needs its own memory contract;
-   additional encodings and large checkpoints remain untested.
+   Qwen3.8 adds DeltaNet/QSA state, hyper-connection boundaries, checked I64
+   PLE layout metadata and a full source-cache allowance for its row-read PLE
+   tables. This budget is not a claim of warm or pinned residency and does
+   not enable a smaller disk working set. Its greedy-only Edge is tested
+   through the public selection ABI, not an assumed LOGITS capability.
+   Segment now reports that capability before READY, and Hosted forwards an
+   optional sampling-capability word. The client explicitly displays greedy
+   decoding and sends temperature zero; explicit stochastic Segment CLI
+   requests still fail on backends without logits. Upgrade host and client
+   together: an older client rejects the extended greedy-only greeting.
+   Real BF16 fixture: one/two-range independent greedy oracle (8 tokens,
+   repeated with fresh sessions), direct TCP split equality, TUI approvals,
+   generation and lost-donor cleanup pass locally. Streaming defers incomplete
+   decoder prefixes but requires final decoding to succeed; it never rewrites
+   already emitted bytes or reports a permanent decoder error as success.
+   Additional encodings (including Qwen3.8 FP8), vision and large checkpoints
+   remain untested; gate 2 is not complete merely because all families have
+   an initial memory contract.
 3. PR #153: shared conservative resident admission for catalogue, request
    and launch, with a stat-only checkpoint preview and a signed-inventory
    recheck before offers. Edge and Segment budgets are separately MiB-aligned.
