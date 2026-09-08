@@ -1206,10 +1206,10 @@ static void generation_result_free(GenerationResult *result) {
     memset(result, 0, sizeof *result);
 }
 
-/* Detokenize the complete generated prefix and stream only bytes confirmed by
- * two consecutive prefixes. This one-token look-behind handles byte fallback
- * and tokenizers that rewrite their trailing whitespace: unstable tail bytes
- * remain buffered, while already displayed text is never contradicted. */
+/* Detokenize complete prefixes. Some adapters cannot yet decode a prefix that
+ * ends inside a byte-fallback character. A non-final failure only defers text;
+ * the final prefix MUST decode successfully. Never emit a partial UTF-8 scalar
+ * or a trailing replacement which another byte token could still complete. */
 static int generation_stream_prefix(ColiEdgeEngine *edge,
                                     const int32_t *tokens, size_t count,
                                     int32_t eos_token,
@@ -1221,12 +1221,17 @@ static int generation_stream_prefix(ColiEdgeEngine *edge,
     while (count && tokens[count - 1] == eos_token) count--;
     size_t bytes = 0;
     if (count && coli_edge_detokenize(edge, tokens, count, NULL, 0, &bytes,
-                                     error, error_size)) return -1;
+                                     error, error_size)) {
+        if (!flush) { if (error_size) error[0]=0; return 0; }
+        return -1;
+    }
     char *text = malloc(bytes + 1u);
     if (!text) { snprintf(error, error_size, "out of memory streaming token"); return -1; }
     if (count && coli_edge_detokenize(edge, tokens, count, text, bytes + 1u,
                                      &bytes, error, error_size)) {
-        free(text); return -1;
+        free(text);
+        if (!flush) { if (error_size) error[0]=0; return 0; }
+        return -1;
     }
     text[bytes] = 0;
     if (*emitted_bytes > bytes ||
@@ -1242,6 +1247,9 @@ static int generation_stream_prefix(ColiEdgeEngine *edge,
     else if (*previous) {
         size_t common = *previous_bytes < bytes ? *previous_bytes : bytes;
         while (stable < common && (*previous)[stable] == text[stable]) stable++;
+        while (stable && stable < bytes && ((unsigned char)text[stable] & 0xc0)==0x80) stable--;
+        if (stable==bytes)
+            while (stable>=3 && !memcmp(text+stable-3,"\xef\xbf\xbd",3)) stable-=3;
     }
     if (stable < *emitted_bytes) {
         free(text);
@@ -1722,7 +1730,11 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
                               const uint8_t tokenizer_root[32],
                               uint32_t context, uint32_t max_rows,
                               uint64_t seed) {
-    printf(SEGMENT_FRAME_READY "\nSTAT 0 0 0 0\n");
+    /* Report capabilities before READY, so a pipe reader cannot consume
+     * readiness first and lose a later capability line. Direct CLI requests
+     * for unavailable stochastic sampling still fail explicitly. */
+    printf("\nLUMABRI_SAMPLING %s\n" SEGMENT_FRAME_READY "\nSTAT 0 0 0 0\n",
+           cap->flags & COLI_EDGE_CAP_LOGITS ? "LOGITS" : "GREEDY");
     fflush(stdout);
     LmbSampler sampler;
     lmb_sampler_init(&sampler, seed);
