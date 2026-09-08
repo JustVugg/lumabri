@@ -8,6 +8,10 @@ The implementation under test is pinned by CI to Colibri
 ## Qwen3.6 converted CPU checkpoints
 
 `qwen36_meta.json` is authoritative for projection dimensions and layer kinds.
+It is not sufficient by itself: a bounded header inventory must also find every
+required dense/DeltaNet/attention tensor, both Edge boundaries, all merged
+experts and their exact row/group scales. The actual byte count distinguishes
+int4 from int8 even when the converter's `ebits` label is stale.
 The contract accounts separately for:
 
 - float32 dense matrices, norms and shared experts;
@@ -128,6 +132,56 @@ The tiny fixture has four independent Transformers continuation tokens.
 Whole/split and household execution are separate tests in Linux and native
 macOS CI; they do not prove full-size memory or performance.
 
-Other families must supply their own retained-weight and state contracts.
-Do not promote them by changing `sizing_verified` alone, or reuse ordinary GQA
-KV arithmetic for recurrent/latent/hyper-connection architectures.
+## Qwen3.8 text-only checkpoints
+
+The contract accepts float/BF16/F16 dense tensors and float or block-E4M3
+experts. It validates the hyper-connection boundary width, DeltaNet recurrence,
+QSA context state and the PLE table's I64 layout metadata. PLE row reads receive
+a whole-source cache allowance; this does not claim that pages are warm/pinned.
+FP8 experts require correctly shaped 128x128 scale sidecars, including partial
+blocks. Admission conservatively covers optional f32 expansion and coexistence
+of a compact shared scale bank with per-slot scales. Vision is not admitted.
+
+The greedy-only Edge capability is used through its actual public ABI and
+propagated to the client, which sends temperature zero. Tests compare BF16 and
+real FP8 fixtures with independent Transformers greedy tokens on one/two ranges
+and fresh sessions. The FP8 oracle uses reconstructed quantized weights, never
+the unquantized original. Native FP8 and expanded-f32 execution are tested
+separately. TCP split and household approval/generation/cleanup are additional
+tests, not substitutes for numerical comparison. Native macOS CI receives the
+same generated fixtures.
+
+## OLMoE merged-int8 CPU checkpoints
+
+The native runtime consumes merged int8 experts with row scales, not arbitrary
+unconverted HF expert matrices. Dense and Edge weights expand to f32; full-MHA
+state grows with context. GQA geometry is rejected because this pinned adapter
+does not implement that layout. Header-only sparse fixtures test admission
+errors and must never be presented as model execution. Independent real-model
+token tests and complete household tests remain separate.
+
+## DeepSeek V4 native CPU checkpoints
+
+FP8 dense weights and exponent scales expand to f32. Routed FP4 experts keep
+their encoded scales; every expert's three weight tensors and three scale
+tensors must form the two contiguous ranges in one shard expected by the
+native store. Token-to-expert I64 tables are header-inspected without loading
+large payloads as metadata. Boundary width includes mHC streams, not only the
+hidden dimension.
+
+State distinguishes the attention window, compressor/overlap state, growing
+compressed/indexer caches and snapshot/reallocation allowance. Scratch includes
+the native workspace floor and conservative loading/prefill temporaries. These
+resident allowances do not enable disk mode. Short/compressed/long independent
+oracles cover one/two ranges and fresh sessions. The upstream special-token
+math fixture is preserved; ordinary text tests use a separate tokenizer copy.
+
+## Support boundary
+
+Every registered family now has an initial contract, not every checkpoint
+encoding or full-size model a certification. New encodings must supply their
+own validated retained-weight and state descriptions. Do not promote them by
+changing `sizing_verified` alone, or reuse ordinary GQA KV arithmetic for
+recurrent/latent/hyper-connection architectures. All current contracts remain
+CPU/resident-only. GPU and smaller disk working sets need actual upstream
+capability and corresponding execution evidence.
