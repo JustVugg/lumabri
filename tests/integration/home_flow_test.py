@@ -38,9 +38,14 @@ def main():
     tmp = Path(tempfile.mkdtemp(prefix="lumabri-home-flow-"))
     children, terminals = [], []
     print(f"Household test logs: {tmp}", flush=True)
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
+    # Reserve and pass the actual listener, exactly as the household launcher
+    # does. Closing a port probe before exec races other ephemeral sockets
+    # (observed on the second native macOS run: EADDRINUSE).
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(64)
+    port = listener.getsockname()[1]
+    unreachable_socket = None
     addr = f"127.0.0.1:{port}"
 
     def env(name):
@@ -107,24 +112,31 @@ def main():
 
     try:
         with open(tmp / "tracker.log", "wb") as log:
+            tracker_env = {**env("tracker"), "LUMABRI_HOME_LISTEN_FD": str(listener.fileno())}
             tracker = subprocess.Popen(["./tracker", "--port", str(port), "--token", "household-test",
                 "--peer-bindings", str(tmp / "bindings")], cwd=ROOT,
-                env=env("tracker"), stdout=log, stderr=subprocess.STDOUT)
+                env=tracker_env, pass_fds=(listener.fileno(),), stdout=log, stderr=subprocess.STDOUT)
+        listener.close()
         children.append(tracker)
 
         def listening():
+            if tracker.poll() is not None:
+                raise AssertionError("tracker exited before readiness: " +
+                                     (tmp / "tracker.log").read_text(errors="replace"))
             try:
                 with socket.create_connection(("127.0.0.1", port), timeout=.2):
                     return True
             except OSError:
                 return False
-        until(listening)
+        until(listening, message="reserved tracker listener did not become reachable")
 
         # A signed inventory advert does not prove the donor port is reachable.
         # Fail before indexing or sending an allocation, with a useful reason.
-        with socket.socket() as closed_port:
-            closed_port.bind(("127.0.0.1", 0))
-            unreachable = closed_port.getsockname()[1]
+        # Bound but not listening: the negative case stays unreachable without
+        # allowing another process to acquire the address during this test.
+        unreachable_socket = socket.socket()
+        unreachable_socket.bind(("127.0.0.1", 0))
+        unreachable = unreachable_socket.getsockname()[1]
         with open(tmp / "offline-worker.log", "wb") as log:
             offline_worker = subprocess.Popen(["./lumabri", "worker", "--join", addr,
                 "--name", "offline-test-donor", "--ram-gb", str(args.donor_ram_gb), "--disk", str(tmp),
@@ -285,6 +297,9 @@ def main():
             print(f"\n{log.relative_to(tmp)}:\n{log.read_text(errors='replace')[-12000:]}", file=sys.stderr)
         raise
     finally:
+        listener.close()
+        if unreachable_socket is not None:
+            unreachable_socket.close()
         for p in reversed(children):
             if p.poll() is None:
                 p.send_signal(signal.SIGTERM)
