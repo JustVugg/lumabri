@@ -1,4 +1,5 @@
 #include "lumabri_proto.h"
+#include "lumabri_secure.h"
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -35,6 +36,7 @@ int main(int argc, char **argv) {
         return 2;
     }
 
+    if (lmb_secure_init()) return 1;
     LmbMsg message = {0};
     if (lmb_request(tracker, LMB_SWARM_DETAIL, NULL, 0, &message) ||
         message.op != LMB_SWARM_DETAIL_R || message.pay_len) {

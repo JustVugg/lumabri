@@ -80,6 +80,13 @@ static int home_listen(int *port) {
     return lmb_home_listen_service(port);
 }
 
+static int home_control_io_ms(int fallback) {
+    /* Respect the existing operator/test timeout, but a partial control
+     * frame must not block the donor UI for the general five-minute default. */
+    int ms = lmb_env_int("LUMABRI_IO_TIMEOUT_MS", fallback, 100, 600000);
+    return ms > 10000 ? 10000 : ms;
+}
+
 /* Consumes listener, including on failure; other child descriptors stay CLOEXEC. */
 static pid_t home_spawn(char *const argv[], char *const envv[], const char *log, int *ready_fd, int listener) {
     int ready[2] = {-1, -1};
@@ -183,17 +190,35 @@ static int home_status_send(int fd, const LmbHomeTransaction *t, int segment_por
 typedef struct {
     LmbHomeTransaction transaction;
     unsigned thread_capacity;
-    int client, lease, segment_port, host_port, segment_ready, host_ready;
+    int client, lease, weight_lease, segment_port, host_port, segment_ready, host_ready;
     pid_t segment, host;
     char bin_dir[1024], cache_base[1024], disk[512], ip[INET_ADDRSTRLEN];
     char log[1200];
 } HomeDonor;
+
+/* --disk can point two different homes at the same persistent weight cache.
+ * Their RAM leases are separate files, so also serialize mutable mirrors by
+ * cache directory. Fail immediately instead of blocking a second accepted
+ * plan behind the first model's lifetime-long shared mirror lock. */
+static int home_weight_lease(const char *base) {
+    char path[1200];
+    if (checked_printf(path, sizeof path, "%s/weights.lock", base)) return -1;
+    int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0) return -1;
+    struct stat st;
+    if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_nlink != 1 ||
+        flock(fd, LOCK_EX | LOCK_NB)) {
+        close(fd); return -1;
+    }
+    return fd;
+}
 
 static void home_donor_release(HomeDonor *d, LmbHomePhase why, const char *reason) {
     home_stop_child(&d->host); home_stop_child(&d->segment);
     if (d->segment_ready >= 0) { close(d->segment_ready); d->segment_ready = -1; }
     if (d->host_ready >= 0) { close(d->host_ready); d->host_ready = -1; }
     if (d->lease >= 0) { close(d->lease); d->lease = -1; }
+    if (d->weight_lease >= 0) { close(d->weight_lease); d->weight_lease = -1; }
     d->host_port = d->segment_port = 0;
     lmb_home_released(&d->transaction, why, reason);
 }
@@ -203,8 +228,14 @@ static void home_donor_disconnect(HomeDonor *d, const char *reason) {
     if (d->client >= 0) { lmb_close(d->client); d->client = -1; }
 }
 
-/* The scope is immutable after acceptance. Both processes use a root-pinned
- * mirror, a dedicated cache namespace and the request's fixed context. */
+/* The scope is immutable after acceptance. The virtual path remains private
+ * to this request, while verified weights survive it: one working mirror per
+ * adapter and one content-addressed store per donor. The protocol model root
+ * includes the session's routing name, so it is NOT a stable cache key.
+ * A mirror's name grants no trust: the loader resets its maps on every
+ * signed-identity change, then restores matching blocks from the shared CAS.
+ * Session/KV state never goes into these weight caches. The shim still checks
+ * current signed inventory, accepted root and each block hash on reuse. */
 static int home_donor_launch(HomeDonor *d, int edge) {
     const LmbHomeOffer *o = &d->transaction.offer;
     const LmbModelFamily *family = lmb_family_for(o->model_type);
@@ -220,8 +251,8 @@ static int home_donor_launch(HomeDonor *d, int edge) {
     if (checked_printf(shim, sizeof shim, "%s/" LMB_SHIM_NAME, d->bin_dir) ||
         checked_printf(binary, sizeof binary, "%s/%s", d->bin_dir, edge ? "lumabri" : "segment_node") ||
         checked_printf(vroot, sizeof vroot, "%s/%.16s/vroot", d->cache_base, id) ||
-        checked_printf(cache, sizeof cache, "%s/%.16s/cache", d->cache_base, id) ||
-        checked_printf(cas, sizeof cas, "%s/%.16s/cas", d->cache_base, id) ||
+        checked_printf(cache, sizeof cache, "%s/mirrors/%s/cache", d->cache_base, family->segment_id) ||
+        checked_printf(cas, sizeof cas, "%s/cas", d->cache_base) ||
         access(binary, X_OK)) return -1;
     if (access(shim, R_OK) &&
         (checked_printf(shim, sizeof shim, "%s/../lib/lumabri/" LMB_SHIM_NAME, d->bin_dir) ||
@@ -338,7 +369,7 @@ static void home_donor_screen(const HomeDonor *d, const char *name, uint64_t ram
 static int home_donor_offer(HomeDonor *d, int incoming, const char *tracker,
     uint64_t ram, uint64_t disk) {
     (void)fcntl(incoming, F_SETFD, FD_CLOEXEC);
-    lmb_set_io_timeout(incoming, 1000);
+    lmb_set_io_timeout(incoming, home_control_io_ms(1000));
     if (lmb_secure_server(incoming)) return -1;
     LmbMsg m = {0}; LmbHomeOffer offer;
     int rc = lmb_recv(incoming, &m);
@@ -415,7 +446,7 @@ static int cmd_donor(int argc, char **argv) {
     if (!tracker || !*tracker || strlen(tracker) >= 256 || !isatty(0) ||
         (name && (!*name || strlen(name) >= 64 || lmb_inventory_text(name))) || home_private_network())
         return 2;
-    HomeDonor d = {0}; d.client = d.lease = d.segment_ready = d.host_ready = -1;
+    HomeDonor d = {0}; d.client = d.lease = d.weight_lease = d.segment_ready = d.host_ready = -1;
     exe_dir(d.bin_dir, sizeof d.bin_dir);
     const char *services[] = {"segment_node", "segment_chat"};
     char service_path[1200];
@@ -507,11 +538,12 @@ static int cmd_donor(int argc, char **argv) {
                 char owner[256];
                 if (!lmb_governor_manual_paused() && d.transaction.offer.threads <= profile.logical_cpus)
                     d.lease = lmb_machine_compute_lease_acquire(d.transaction.offer.model, tracker, owner, sizeof owner);
+                if (d.lease >= 0) d.weight_lease = home_weight_lease(d.cache_base);
             }
-            if ((key == 'y' && d.lease < 0) ||
+            if ((key == 'y' && (d.lease < 0 || d.weight_lease < 0)) ||
                 lmb_home_decide(&d.transaction, key == 'y', free_ram,
                                 profile.disk_available_bytes, (uint64_t)(nowd() * 1000)))
-                home_donor_release(&d, LMB_HOME_FAILED, "Resources are no longer available or another plan owns this computer.");
+                home_donor_release(&d, LMB_HOME_FAILED, "Resources are unavailable or another plan owns this computer or weight cache.");
             if (d.client >= 0 && home_status_send(d.client, &d.transaction, 0, 0))
                 home_donor_disconnect(&d, "The requester disconnected.");
         }
@@ -631,14 +663,14 @@ static int home_request_chat(LmbTuiState *st, int selected) {
         uint8_t expected[32];
         if (lmb_unhex(expected, st->identities[indices[i]], 32))
             return home_fail("Invalid identity for %.64s. Refresh the computer list.", nodes[i].name);
-        int fd = lmb_connect_ms_io(nodes[i].addr, 2000, 2000);
+        int fd = lmb_connect_ms_io(nodes[i].addr, 2000, home_control_io_ms(2000));
         if (fd < 0) return home_fail("Cannot reach %.64s at %.64s: %s. Check inbound permissions on that computer; no model was loaded.",
                                     nodes[i].name, nodes[i].addr, lmb_connect_why());
         int matched = lmb_secure_peer_matches(fd, expected);
         int authenticated = matched && !lmb_auth(fd);
         lmb_close(fd);
         if (!authenticated) return home_fail("Cannot authenticate %.64s at %.64s. %s No model was loaded.",
-            nodes[i].name, nodes[i].addr, matched ? "Check the household key." : "The donor identity changed; refresh the computer list.");
+            nodes[i].name, nodes[i].addr, matched ? "Check the household key and whether the donor is responding in time." : "The donor identity changed; refresh the computer list.");
     }
     HomeSession s = {0};
     for (uint32_t i = 0; i < LMB_CLUSTER_MAX_NODES; i++) s.fd[i] = -1;
@@ -741,7 +773,7 @@ static int home_request_chat(LmbTuiState *st, int selected) {
         snprintf(s.addresses[s.count], sizeof s.addresses[0], "%s", nodes[n].addr);
         uint8_t recipient[32];
         if (lmb_unhex(recipient, st->identities[indices[n]], 32)) goto done;
-        int fd = lmb_connect_ms_io(nodes[n].addr, 1500, 1000);
+        int fd = lmb_connect_ms_io(nodes[n].addr, 1500, home_control_io_ms(1000));
         if (fd < 0) {
             home_fail("Cannot reach %.64s at %.64s while sending the request: %s.", nodes[n].name, nodes[n].addr, lmb_connect_why());
             goto done;

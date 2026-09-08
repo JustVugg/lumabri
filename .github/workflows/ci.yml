@@ -132,7 +132,8 @@ jobs:
           cp -a ../colibri/c/olmoe_tiny_merged build/home-flow-models/olmoe-tiny
           make segment_budget_probe
           python3 tests/integration/planner_tensor_contract_test.py --family olmoe --model build/home-flow-models/olmoe-tiny
-          python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models
+          make swarm_probe
+          python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --repeat-cached
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --kill-donor
       - name: Same greedy tokens with one and two real Segment ranges
         working-directory: lumabri
@@ -318,7 +319,8 @@ jobs:
         run: |
           test "$(OMP_NUM_THREADS=1 ./segment_node --thread-capacity)" = 1
           test "$(OMP_NUM_THREADS=4 OMP_THREAD_LIMIT=1 ./segment_node --thread-capacity)" = 1
-          python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models
+          make swarm_probe
+          python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --repeat-cached
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --kill-donor
       - uses: actions/download-artifact@v4
         with:
