@@ -1,4 +1,5 @@
-/* Check the resident contract without loading weights or importing Colibri. */
+/* Check metadata arithmetic separately from the production header guard.
+ * Real converted payloads and missing-tensor refusals run in integration. */
 static void qwen36_contract_test(void) {
     char dir[] = "/tmp/lmb-qwen-plan-XXXXXX", path[256];
     CHECK(mkdtemp(dir) != NULL, "cannot create Qwen contract fixture");
@@ -25,8 +26,32 @@ static void qwen36_contract_test(void) {
           "\"layer_types\":[\"linear_attention\",\"full_attention\"],\"ebits\":%u}",
           grouped ? 16 : 0, grouped ? 4 : 8);
         fclose(f);
-        CHECK(!lmb_shape_from_config(dir, &m) && m.sizing_verified && m.memory_contract == 1,
-              "valid Qwen metadata did not produce a memory contract");
+        CHECK(!lmb_shape_from_config(dir, &m) && !m.sizing_verified,
+              "Qwen metadata without actual tensor coverage was admitted");
+        LmbQwen36Inventory inventory;
+        CHECK(!lmb_qwen36_metadata(dir,&m,&inventory) && m.memory_contract==1,
+              "valid Qwen metadata did not produce base memory arithmetic");
+        m.sizing_verified=1; /* arithmetic-only fixture, not product admission */
+        uint8_t seen[16]={0}; inventory.experts=seen;
+        LmbPlanTensor tensor={.elements=6144,.bytes=6144,.rank=1,.shape={6144}};
+        snprintf(tensor.name,sizeof tensor.name,"model.layers.0.mlp.experts.0.merged_weight");
+        snprintf(tensor.dtype,sizeof tensor.dtype,"I8");
+        CHECK(!lmb_q36_tensor(&tensor,&inventory),"valid merged Qwen int8 header rejected");
+        CHECK(lmb_q36_tensor(&tensor,&inventory)!=0,"duplicate Qwen expert admitted");
+        snprintf(tensor.name,sizeof tensor.name,"model.layers.0.mlp.experts.1.merged_weight");
+        snprintf(tensor.dtype,sizeof tensor.dtype,"U8");
+        tensor.bytes=tensor.elements=tensor.shape[0]=3072;
+        CHECK(!lmb_q36_tensor(&tensor,&inventory),"actual packed Qwen int4 header rejected");
+        snprintf(tensor.name,sizeof tensor.name,"model.layers.0.mlp.experts.2.merged_weight");
+        tensor.bytes=tensor.elements=tensor.shape[0]=3071;
+        CHECK(lmb_q36_tensor(&tensor,&inventory)!=0,"short Qwen expert admitted");
+        snprintf(tensor.name,sizeof tensor.name,"model.layers.0.mlp.experts.0.qs");
+        snprintf(tensor.dtype,sizeof tensor.dtype,"F32");
+        tensor.elements=inventory.scale_elements; tensor.bytes=tensor.elements*4;
+        CHECK(!lmb_q36_tensor(&tensor,&inventory),"valid grouped Qwen scales rejected");
+        snprintf(tensor.name,sizeof tensor.name,"model.layers.0.mlp.experts.1.qs");
+        tensor.elements--;
+        CHECK(lmb_q36_tensor(&tensor,&inventory)!=0,"Qwen group count mismatch admitted");
         uint64_t scales = grouped ? 2u * 32 * 4 + 64 * 2 : 2u * 32 + 64;
         uint64_t common = 3u * 64 + 8u * 64 + 8 + 3u * 64 * 32 + 2u * 16;
         uint64_t attention = 4u * 32 * 64 + 2u * 32 * 64 + 64u * 64;

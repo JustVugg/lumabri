@@ -147,6 +147,8 @@ jobs:
           python3 ../colibri/c/tools/convert_qwen36.py --model build/qwen36-hf --out build/qwen-int4/qwen36-tiny --ebits 4 --gs 16 --no-readme
           python3 ../colibri/c/tools/make_edge_tiny_tokenizer.py build/qwen-int8/qwen36-tiny --vocab-size 320
           python3 ../colibri/c/tools/make_edge_tiny_tokenizer.py build/qwen-int4/qwen36-tiny --vocab-size 320
+          python3 tests/integration/planner_tensor_contract_test.py --family qwen36 --model build/qwen-int8/qwen36-tiny
+          python3 tests/integration/planner_tensor_contract_test.py --family qwen36 --model build/qwen-int4/qwen36-tiny
           cc -O2 -fopenmp -pthread ../colibri/c/tests/test_edge_adapters_real.c build/segment-hybrid-colibri/build/segment/libcolibri_segment_edge.a -o build/qwen-edge-oracle -lm
           OMP_NUM_THREADS=2 build/qwen-edge-oracle qwen36 build/qwen-int8/qwen36-tiny build/qwen36-ref.json 3
           python3 tests/integration/home_flow_test.py --models-dir build/qwen-int8

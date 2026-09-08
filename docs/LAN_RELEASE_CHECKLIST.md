@@ -72,6 +72,11 @@ not a completed gate.
    and Edge, int8 expert slots even for packed int4 files, grouped scales,
    per-layer attention/DeltaNet state). Real synthetic int8 and grouped-int4
    fixtures exercise approval, two compute donors, generation and cleanup.
+   Metadata alone is insufficient: the bounded header inspector requires Edge,
+   per-layer dense/attention/DeltaNet tensors, every merged expert and the exact
+   row/group scale count. Source payload sizes, not the potentially stale ebits
+   metadata flag, distinguish int8 from packed int4. Missing or mismatched
+   tensors are refused before any donor allocation.
    Inkling adds header-based retained weights, packed int4/int8 experts, and
    separate full/sliding attention and convolution state; float and int4
    fixtures cover the independent oracle and household path.

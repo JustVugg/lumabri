@@ -17,7 +17,7 @@ import tempfile
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", type=Path, required=True)
-    parser.add_argument("--family", choices=("deepseek_v4", "olmoe", "inkling", "kimi", "glm", "glm53", "qwen38"), required=True)
+    parser.add_argument("--family", choices=("deepseek_v4", "olmoe", "inkling", "kimi", "glm", "glm53", "qwen36", "qwen38"), required=True)
     parser.add_argument("--probe", type=Path, default=Path("./segment_budget_probe"))
     args = parser.parse_args()
     probe = args.probe.resolve()
@@ -46,6 +46,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix="lumabri-contract-headers-") as tmp:
         root = Path(tmp)
         shutil.copyfile(args.model / "config.json", root / "config.json")
+        if args.family == "qwen36":
+            shutil.copyfile(args.model / "qwen36_meta.json", root / "qwen36_meta.json")
 
         def check(header, accepted, label, override=None):
             raw = json.dumps(header, separators=(",", ":")).encode()
@@ -70,6 +72,7 @@ def main():
             "glm": ".mlp.experts.0.gate_proj.weight",
             "glm53": ".mlp.experts.0.gate_proj.weight",
             "qwen38": ".mlp.experts.0.gate_proj.weight",
+            "qwen36": ".mlp.experts.0.qs",
         }[args.family]
         # Upstream generators describe their actual dense/sparse layout in
         # config; do not hard-code the first sparse layer into this test.
@@ -95,6 +98,19 @@ def main():
             changed = copy.deepcopy(original)
             del changed["model.layers.0.self_attn.indexer.wk.weight"]
             check(changed, False, "partial DSA bank with wq still present")
+        if args.family == "qwen36":
+            changed = copy.deepcopy(original)
+            weight_key = expert_key[:-2] + "merged_weight"
+            del changed[weight_key]
+            check(changed, False, "missing native merged expert")
+            changed = copy.deepcopy(original)
+            changed[weight_key]["dtype"] = "F8_E4M3"
+            check(changed, False, "wrong one-byte expert encoding")
+            changed = copy.deepcopy(original)
+            key = "model.layers.0.linear_attn.in_proj_qkv.weight"
+            assert key in changed
+            del changed[key]
+            check(changed, False, "missing DeltaNet projection")
         if args.family == "deepseek_v4":
             changed = copy.deepcopy(original)
             changed[expert_key]["data_offsets"] = [n + 1 for n in changed[expert_key]["data_offsets"]]
