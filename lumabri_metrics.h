@@ -42,18 +42,21 @@ static inline int lmb_metrics_format(const LmbGenerationMetrics *m,char *out,siz
 /* 0 valid; 1 absent on a legacy engine; -1 malformed. Never interpret a
  * truncated/new-version observation as an exact historical calibration. */
 static inline int lmb_metrics_parse(const char *stat,LmbGenerationMetrics *out) {
+    if(!out) return -1;
     memset(out,0,sizeof *out);
+    if(!stat) return -1;
+    LmbGenerationMetrics parsed={0};
     const char *p=strstr(stat," PERF1 ");
     if(!p) return strstr(stat," PERF") ? -1 : 1;
     p+=7;
-    uint32_t *counts[]={&out->generated_tokens,&out->decode_steps};
+    uint32_t *counts[]={&parsed.generated_tokens,&parsed.decode_steps};
     for(unsigned i=0;i<2;i++) {
         if(*p<'0' || *p>'9') return -1;
         errno=0; char *end; unsigned long n=strtoul(p,&end,10);
         if(errno || n>1048576 || *end!=' ') return -1;
         *counts[i]=(uint32_t)n; p=end+1;
     }
-    double *times[]={&out->prefill_seconds,&out->decode_seconds,&out->total_seconds};
+    double *times[]={&parsed.prefill_seconds,&parsed.decode_seconds,&parsed.total_seconds};
     for(unsigned i=0;i<3;i++) {
         if(*p<'0' || *p>'9') return -1;
         errno=0; char *end; double value=strtod(p,&end);
@@ -63,7 +66,8 @@ static inline int lmb_metrics_parse(const char *stat,LmbGenerationMetrics *out) 
         else p=end;
     }
     while(*p==' ' || *p=='\r' || *p=='\n') p++;
-    if(*p || !lmb_metrics_valid(out)) {memset(out,0,sizeof *out);return -1;}
+    if(*p || !lmb_metrics_valid(&parsed)) return -1;
+    *out=parsed;
     return 0;
 }
 #endif

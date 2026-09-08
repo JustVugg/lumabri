@@ -17,7 +17,14 @@ int main(void) {
         " PERF1 9 8 15 inf 17.2", " PERF1 9 8 15 -2 17.2",
         " PERF1 9 8 15 2 16", " PERF1 9 8 15 2 17.2 trailing",
         " PERF1 1 0 1 0.1 1.1", " PERF1 0 0 0 0 0", " PERF1 9 8 15 2"};
-    for(size_t i=0;i<sizeof bad/sizeof *bad;i++) assert(lmb_metrics_parse(bad[i],&parsed)==-1);
+    for(size_t i=0;i<sizeof bad/sizeof *bad;i++) {
+        parsed=m;
+        assert(lmb_metrics_parse(bad[i],&parsed)==-1);
+        assert(!parsed.generated_tokens && !parsed.decode_steps &&
+               !parsed.prefill_seconds && !parsed.decode_seconds && !parsed.total_seconds);
+    }
+    assert(lmb_metrics_parse(NULL,&parsed)==-1);
+    assert(lmb_metrics_parse("STAT 1 0 0 0",NULL)==-1);
     m=(LmbGenerationMetrics){.generated_tokens=1,.prefill_seconds=1,.total_seconds=1.1};
     assert(lmb_metrics_valid(&m) && lmb_metrics_decode_rate(&m)==0);
     assert(!lmb_metrics_format(&m,extension,sizeof extension));
