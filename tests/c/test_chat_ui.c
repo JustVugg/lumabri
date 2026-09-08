@@ -5,6 +5,31 @@
 #include <assert.h>
 
 int main(int argc, char **argv) {
+    const char *io_env = getenv("LUMABRI_IO_TIMEOUT_MS");
+    char *saved_io = io_env ? strdup(io_env) : NULL;
+    unsetenv("LUMABRI_IO_TIMEOUT_MS");
+    assert(home_control_io_ms(1000) == 1000);
+    setenv("LUMABRI_IO_TIMEOUT_MS", "5000", 1);
+    assert(home_control_io_ms(1000) == 5000);
+    setenv("LUMABRI_IO_TIMEOUT_MS", "300000", 1);
+    assert(home_control_io_ms(1000) == 10000);
+    setenv("LUMABRI_IO_TIMEOUT_MS", "invalid", 1);
+    assert(home_control_io_ms(1000) == 1000);
+    if (saved_io) { setenv("LUMABRI_IO_TIMEOUT_MS", saved_io, 1); free(saved_io); }
+    else unsetenv("LUMABRI_IO_TIMEOUT_MS");
+    char cache_dir[] = "/tmp/lumabri-weight-lease-XXXXXX", lock_path[160];
+    assert(mkdtemp(cache_dir));
+    snprintf(lock_path, sizeof lock_path, "%s/weights.lock", cache_dir);
+    int weight_lease = home_weight_lease(cache_dir);
+    assert(weight_lease >= 0 && home_weight_lease(cache_dir) < 0);
+    assert(fcntl(weight_lease, F_GETFD) & FD_CLOEXEC);
+    close(weight_lease);
+    weight_lease = home_weight_lease(cache_dir);
+    assert(weight_lease >= 0); close(weight_lease);
+    assert(!unlink(lock_path));
+    assert(!symlink("missing", lock_path));
+    assert(home_weight_lease(cache_dir) < 0);
+    assert(!unlink(lock_path) && !rmdir(cache_dir));
     LmbExecutionView execution = { .count = 2, .layers = 4 };
     for (uint32_t i = 0; i < 2; i++) {
         snprintf(execution.nodes[i].name, 64, "donor-%u", i);
