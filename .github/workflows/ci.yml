@@ -244,7 +244,7 @@ jobs:
           for native in 0 1; do
             Q38_NATIVE_FP8=$native OMP_NUM_THREADS=2 build/qwen38-greedy-oracle qwen38 build/qwen38-fp8-contract/qwen38-tiny build/qwen38-fp8-contract/qwen38-tiny/ref.json
           done
-          python3 tests/integration/home_flow_test.py --models-dir build/qwen38-fp8-contract --context 512 --expect-greedy --kill-donor
+          python3 tests/integration/home_flow_test.py --models-dir build/qwen38-fp8-contract --context 512 --expect-greedy --expect-metrics --kill-donor
           SPLIT_MODEL_DIR=build/qwen38-fp8-contract/qwen38-tiny SPLIT_ENGINE=qwen38 SPLIT_MODEL=qwen38-fp8 SPLIT_ROUNDS=1 SPLIT_THREADS=2 SPLIT_TOKENS=8 PORT=11040 bash tests/integration/segment_split_test.sh
       - uses: actions/upload-artifact@v4
         with:
@@ -373,7 +373,7 @@ jobs:
           path: lumabri/build/qwen38-fp8-home-models/qwen38-tiny
       - name: Native Qwen3.8 FP8 request and execution
         working-directory: lumabri
-        run: python3 tests/integration/home_flow_test.py --models-dir build/qwen38-fp8-home-models --context 512 --expect-greedy
+        run: python3 tests/integration/home_flow_test.py --models-dir build/qwen38-fp8-home-models --context 512 --expect-greedy --expect-metrics
       - uses: actions/download-artifact@v4
         with:
           name: tiny-v4-checkpoint

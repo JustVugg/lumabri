@@ -30,6 +30,8 @@ def main():
     parser.add_argument("--context", type=int, default=128,
                         help="approved context, including the actual family chat template")
     parser.add_argument("--expect-greedy", action="store_true")
+    parser.add_argument("--expect-metrics", action="store_true",
+                        help="require versioned generation timings through Hosted into the TUI")
     parser.add_argument("--expect-no-fit", action="store_true",
                         help="verify insufficient-memory admission, without starting engines")
     parser.add_argument("--kill-donor", action="store_true",
@@ -228,6 +230,9 @@ def main():
               chat.has("invalid token count") or chat.p.poll() is not None, seconds=120,
               message="real model did not finish a response")
         assert chat.has("tok/s") or chat.has("generated tokens"), "engine failed during generation"
+        if args.expect_metrics:
+            assert chat.has("host prefill") and chat.has("generated tokens"), "versioned engine timings did not reach the TUI"
+            assert not chat.has("invalid timing report"), "inconsistent engine timings"
         assert "hosted stream · no local checkpoint" in chat.text
         executed_ranges = []
         for donor in ("donor-a", "donor-b"):
