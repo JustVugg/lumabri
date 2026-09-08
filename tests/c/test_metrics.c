@@ -11,7 +11,7 @@ int main(void) {
     assert(!lmb_metrics_parse(stat,&parsed) && parsed.generated_tokens==9 &&
            parsed.decode_steps==8 && lmb_metrics_decode_rate(&parsed)==4);
     assert(lmb_metrics_parse("STAT 9 0.5 0 0",&parsed)==1);
-    const char *bad[]={" PERF2 9 8 15 2 17.2", " PERF1 -1 0 0 0 0",
+    const char *bad[]={" PERF_UNAVAILABLE", " PERF2 9 8 15 2 17.2", " PERF1 -1 0 0 0 0",
         " PERF1 4294967297 0 0 0 0", " PERF1 9 -8 15 2 17.2",
         " PERF1 9 9 15 2 17.2", " PERF1 9 8 nan 2 17.2",
         " PERF1 9 8 15 inf 17.2", " PERF1 9 8 15 -2 17.2",

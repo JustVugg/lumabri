@@ -4805,7 +4805,7 @@ static int cmd_chat(int argc, char **argv) {
             else printf(" · decode speed not measured");
             if(first>r0) printf(" · first text %.1fs",first-r0);
         } else if(metric_status<0) {
-            printf("%s  %.1fs · invalid timing report; speed unavailable",C_DIM,end-r0);
+            printf("%s  %.1fs · timing unavailable; no speed recorded",C_DIM,end-r0);
         } else if (first > r0 && ntok > 0 && end > first) {
             /* prefill and decode are two different costs: the prompt crossing
              * every layer once, then one network round per layer per token */

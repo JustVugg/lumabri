@@ -20,6 +20,9 @@ tail adds `PERF1 generated_tokens decode_steps prefill_seconds decode_seconds
 total_seconds`. Non-finite, negative, inconsistent, truncated or unknown-version
 observations do not produce a speed. Legacy engines without the extension keep
 the previous display; their client-side timing is not an exact calibration.
+`PERF_UNAVAILABLE` explicitly suppresses a speed when the engine could not
+validate its clocks. This never discards a successfully completed reply or KV
+history: measurement failure is not generation failure.
 
 `segment_chat --json` adds a `generation_metrics` object with `version: 1` and
 the same fields. Historical top-level `decode_tokens`/`decode_seconds` fields

@@ -1846,8 +1846,9 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
         }
         char metrics[192];
         if(lmb_metrics_format(&result.metrics,metrics,sizeof metrics)) {
-            printf("ERROR %u Invalid generation timing\n",request_id);
-            fflush(stdout); generation_result_free(&result); continue;
+            /* Observability must not discard a completed reply or its KV
+             * history merely because timing could not be validated. */
+            snprintf(metrics,sizeof metrics,"PERF_UNAVAILABLE");
         }
         printf("DONE %u STAT %zu %.3f 0 0 %zu 0 %s\n", request_id,
                result.token_count, lmb_metrics_decode_rate(&result.metrics), result.prompt_count,metrics);

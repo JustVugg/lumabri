@@ -232,7 +232,7 @@ def main():
         assert chat.has("tok/s") or chat.has("generated tokens"), "engine failed during generation"
         if args.expect_metrics:
             assert chat.has("host prefill") and chat.has("generated tokens"), "versioned engine timings did not reach the TUI"
-            assert not chat.has("invalid timing report"), "inconsistent engine timings"
+            assert not chat.has("timing unavailable"), "inconsistent engine timings"
         assert "hosted stream · no local checkpoint" in chat.text
         executed_ranges = []
         for donor in ("donor-a", "donor-b"):
