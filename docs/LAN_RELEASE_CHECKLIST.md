@@ -68,7 +68,7 @@ not a completed gate.
 
 1. PR #152 merged: approved layer-allocation view, named execution evidence,
    two-donor checks; physical two-computer oracle and timings still required.
-2. In progress: Qwen3.6 has an explicit CPU resident contract (float32 dense
+2. PR #155 merged initial contracts; gate 2 remains open. Qwen3.6 has an explicit CPU resident contract (float32 dense
    and Edge, int8 expert slots even for packed int4 files, grouped scales,
    per-layer attention/DeltaNet state). Real synthetic int8 and grouped-int4
    fixtures exercise approval, two compute donors, generation and cleanup.
@@ -141,11 +141,15 @@ not a completed gate.
    overflow instead of wrapping into apparently small allocations.
    Measured-cost placement remains pending; this does not enable disk mode or
    certify additional model families.
-4. In progress: versioned measurements collected during ordinary Segment chat,
+4. PR #157 merged: versioned measurements collected during ordinary Segment chat,
    separating prefill, decode traversals and first visible text. No extra model
    run is required. Persisted exact-key calibration, stale-data handling and
    catalogue advice remain pending; timing collection alone does not close gate 4.
-5. Pending: model acquisition, cache reuse and verified disk execution.
+5. In progress: reusable adapter-scoped working mirrors and shared verified
+   CAS chunks, with separate approval and fresh engine sessions on reuse.
+   Cache-directory allocation is exclusive even across different homes.
+   Model acquisition, cache-aware disk admission/eviction and verified smaller
+   disk working sets remain pending. See `HOUSEHOLD_WEIGHT_CACHE.md`.
 6. Pending: upstream-only GPU capability integration, CPU otherwise.
 7. Pending: concurrent sessions and actual replay after failure.
 8. Pending: native releases, platform validation and dependency-backed cleanup.
