@@ -92,7 +92,7 @@ print(",".join(map(str,prompt))+"|"+",".join(map(str,full[len(prompt):len(prompt
     case "$family" in
         glm) run_env+=(GLM_SEGMENT_EBITS=16 GLM_SEGMENT_DBITS=16) ;;
         inkling) run_env+=(INK_SEGMENT_BITS=0) ;;
-        kimi) run_env+=(COLI_RAM_OVERCOMMIT=1 K3_BITS=32 K3_MLA_BITS=32
+        kimi) run_env+=(K3_BITS=32 K3_MLA_BITS=32
                         K3_HEAD_BITS=32 K3_IDOT=0) ;;
     esac
 
@@ -137,13 +137,29 @@ print(",".join(map(str,prompt))+"|"+",".join(map(str,full[len(prompt):len(prompt
         >"$serve_output"
     if ! grep -aq $'\001\001READY\001\001' "$serve_output" ||
        ! grep -aq '^DATA 1 ' "$serve_output" ||
-       [[ $(grep -ac '^DATA 1 ' "$serve_output") -lt 2 ]] ||
+       ! grep -aq '^PROGRESS 1 DECODE 2 2$' "$serve_output" ||
        ! grep -aq '^DONE 1 STAT ' "$serve_output"; then
         cat "$serve_output"
         cat "$TMP/$family-left.log" "$TMP/$family-right.log"
         echo "SEGMENT DIRECT $family: incremental serve-codec gate failed" >&2
         exit 1
     fi
+    # A token is not necessarily a complete UTF-8 prefix. Two decode events
+    # may legitimately result in one DATA frame; the final text is still
+    # mandatory and the token-ID oracle above is independent of framing.
+    python3 - "$serve_output" <<'PY'
+import math, sys
+lines = open(sys.argv[1], "rb").read().splitlines()
+done = next(line for line in lines if line.startswith(b"DONE 1 STAT "))
+fields = done.decode("ascii").split()
+marker = fields.index("PERF1")
+generated, steps = map(int, fields[marker+1:marker+3])
+prefill, decode, total = map(float, fields[marker+3:])
+assert generated == int(fields[3]) == 2 and steps == 1
+assert all(math.isfinite(s) and 0 <= s <= 1e9 for s in (prefill, decode, total))
+assert decode > 0 and total + 1e-6 >= prefill + decode
+assert abs(float(fields[4]) - steps / decode) < 0.001
+PY
     if [[ "$family" == olmoe ]]; then
         # A second request must reuse the remote state established by the
         # first one. Keep generation to one token so the committed prefix is
