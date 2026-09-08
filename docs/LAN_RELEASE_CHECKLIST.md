@@ -19,7 +19,9 @@ execution, cross-platform numerical compatibility, or concurrent capacity.
    Current physical trial has PC source and Mac computation, not two compute
    nodes. Mac deployment/approval is user-operated; CI loopback is separate.
 2. Complete verified sizing for every registered family and supported weight
-   encoding. Currently only OLMoE and DeepSeek V4 enable sizing. Require real
+   encoding. OLMoE, DeepSeek V4, converted Qwen3.6, Inkling and float-dense/MXFP4
+   Kimi, float-source GLM, text-only float-source GLM5.3 and BF16/float/block-FP8-expert
+   Qwen3.8 enable conservative sizing. Require real
    checkpoint/adapter conformance before promoting support.
 3. Consistent planner/runtime reservations, explicit local-compute consent,
    and placement informed by measured execution costs, not just RAM totals.
@@ -66,7 +68,72 @@ not a completed gate.
 
 1. PR #152 merged: approved layer-allocation view, named execution evidence,
    two-donor checks; physical two-computer oracle and timings still required.
-2. Pending: verified family sizing and checkpoint conformance.
+2. In progress: Qwen3.6 has an explicit CPU resident contract (float32 dense
+   and Edge, int8 expert slots even for packed int4 files, grouped scales,
+   per-layer attention/DeltaNet state). Real synthetic int8 and grouped-int4
+   fixtures exercise approval, two compute donors, generation and cleanup.
+   Metadata alone is insufficient: the bounded header inspector requires Edge,
+   per-layer dense/attention/DeltaNet tensors, every merged expert and the exact
+   row/group scale count. Source payload sizes, not the potentially stale ebits
+   metadata flag, distinguish int8 from packed int4. Missing or mismatched
+   tensors are refused before any donor allocation.
+   Inkling adds header-based retained weights, packed int4/int8 experts, and
+   separate full/sliding attention and convolution state; float and int4
+   fixtures cover the independent oracle and household path.
+   Kimi adds validated MXFP4 banks, fixed KDA and context-sized MLA/DSA state,
+   and the full AttnRes boundary width. Prepared U8 dense containers are not
+   yet admitted by this contract. Native cache policy may reserve less than
+   the upper bound; full warm residency still needs execution evidence.
+   Its native 3.7 GB policy floor is included in admission. Standard ARM CI
+   validates low-memory refusal, not two-range Kimi execution; sufficient-RAM
+   native ARM execution remains open. No overcommit override is enabled.
+   GLM float source adds latent MLA/DSA state and separate miss/load workspace;
+   prepared quantized GLM containers remain unverified.
+   GLM5.3 accounts for its engine-wide replicated session state and context-sized
+   workspace. Its stateless Edge context convention is handled by the caller.
+   Packed/vision GLM5.3 and the native pool=1 path remain unverified.
+   Qwen3.8 adds DeltaNet/QSA state, hyper-connection boundaries, checked I64
+   PLE layout metadata and a full source-cache allowance for its row-read PLE
+   tables. This budget is not a claim of warm or pinned residency and does
+   not enable a smaller disk working set. Its greedy-only Edge is tested
+   through the public selection ABI, not an assumed LOGITS capability.
+   Segment now reports that capability before READY, and Hosted forwards an
+   optional sampling-capability word. The client explicitly displays greedy
+   decoding and sends temperature zero; explicit stochastic Segment CLI
+   requests still fail on backends without logits. Upgrade host and client
+   together: an older client rejects the extended greedy-only greeting.
+   Real BF16 fixture: one/two-range independent greedy oracle (8 tokens,
+   repeated with fresh sessions), direct TCP split equality, TUI approvals,
+   generation and lost-donor cleanup pass locally. Streaming defers incomplete
+   decoder prefixes but requires final decoding to succeed; it never rewrites
+   already emitted bytes or reports a permanent decoder error as success.
+   The historical OLMoE formula is replaced with validated merged-int8 expert
+   payloads and row scales, f32-expanded dense/Edge weights and full-MHA state.
+   Unconverted HF experts and GQA geometry are not compatible with the pinned
+   runtime and are rejected before offers. Header-only negative fixtures are
+   explicitly separate from the real one/two-range token oracle.
+   DeepSeek V4 now validates native FP8 dense/scale tensors, mHC boundaries,
+   packed FP4 expert geometry and the store's same-shard/two-contiguous-bank
+   layout. Large token-to-expert I64 router tables are header-inspected, not
+   read as metadata. Resident allowances distinguish raw expert scales from
+   expanded dense scales, window/compressor/indexer state, snapshot/growth
+   allowance and conservative native workspace. No disk or GPU mode is enabled.
+   Local synthetic short/compressed/long independent oracles pass with one
+   and two ranges and fresh sessions (8/4/4 generated tokens respectively).
+   A separate byte-tokenizer copy exercises ordinary text through the TUI;
+   the upstream special-token oracle fixture is preserved unchanged. Approvals,
+   two actual ranges, generation and lost-donor cleanup pass locally.
+   Qwen3.8 block-FP8 experts additionally validate partial 128x128 scale
+   geometry and complete sidecars. Conservative admission bounds both native
+   FP8 and optional f32 expansion, including shared and per-slot scales.
+   A real quantized synthetic fixture is compared with a Transformers oracle
+   using the exact reconstructed weights, not the original BF16 model. Both
+   native and expanded paths pass one/two-range token tests; direct TCP split
+   and TUI approval/generation/lost-donor cleanup pass locally. Timing is
+   withheld on the loaded test host. Native macOS checks run in CI.
+   Additional encodings, vision and large checkpoints
+   remain untested; gate 2 is not complete merely because all families have
+   an initial memory contract.
 3. PR #153: shared conservative resident admission for catalogue, request
    and launch, with a stat-only checkpoint preview and a signed-inventory
    recheck before offers. Edge and Segment budgets are separately MiB-aligned.

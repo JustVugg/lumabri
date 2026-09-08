@@ -16,20 +16,19 @@ fail() { echo "CATALOG TEST: FAIL — $*" >&2; exit 1; }
 # A model far larger than any laptop, and one that fits anywhere.
 mkdir -p "$T/models/huge" "$T/models/tiny"
 cat >"$T/models/huge/config.json" <<'EOF'
-{"model_type":"deepseek_v4","num_hidden_layers":43,"hidden_size":4096,
- "intermediate_size":11264,"moe_intermediate_size":1408,"n_routed_experts":256,
- "num_experts_per_tok":6,"num_attention_heads":32,"num_key_value_heads":8,
- "vocab_size":129280}
+{"model_type":"olmoe","num_hidden_layers":32,"hidden_size":4096,
+ "intermediate_size":4096,"num_experts":128,
+ "num_experts_per_tok":6,"num_attention_heads":32,"num_key_value_heads":32,
+ "vocab_size":32768}
 EOF
 cat >"$T/models/tiny/config.json" <<'EOF'
 {"model_type":"olmoe","num_hidden_layers":4,"hidden_size":64,
  "intermediate_size":128,"num_experts":8,"num_experts_per_tok":2,
  "num_attention_heads":4,"num_key_value_heads":4,"vocab_size":256}
 EOF
-# A config is metadata, not a checkpoint. These files stand in for actual
-# model containers; a separate case below proves config-only is refused.
-truncate -s 4096 "$T/models/huge/model.bin"
-truncate -s 4096 "$T/models/tiny/model.bin"
+# Sparse header-only files, never a numerical oracle or arbitrary placeholder.
+python3 tests/integration/prepare_olmoe_headers.py "$T/models/huge"
+python3 tests/integration/prepare_olmoe_headers.py "$T/models/tiny"
 
 out=$(./lumabri models --models-dir "$T/models" 2>&1) || fail "the catalogue exited non-zero"
 echo "$out" | sed 's/^/    /'
@@ -68,7 +67,9 @@ if echo "$out" | grep -qE "[0-9]+([.,][0-9]+)? *tok/s"; then
     fail "a tok/s figure appeared for a plan nobody has measured"
 fi
 
-json=$(./lumabri models --models-dir "$T/models" --json)
+# The catalogue must not put its complete per-layer maps on the stack.
+# This caught a real regression when explicit hybrid memory contracts grew.
+json=$(ulimit -s 512; ./lumabri models --models-dir "$T/models" --json)
 python3 - "$json" <<'PY' || fail "the versioned JSON snapshot is invalid"
 import json, sys
 doc = json.loads(sys.argv[1])

@@ -75,6 +75,19 @@ output=$(env OMP_NUM_THREADS=2 LUMABRI_PEER_KEY="$TMP/client.key" \
 grep -q 'relay-left.*transport=2' <<<"$output"
 grep -q 'relay-right.*transport=2' <<<"$output"
 
+# A LAN-only measurement must fail closed on this deliberately relay-only
+# chain. A successful response would mean the policy was silently ignored.
+if env OMP_NUM_THREADS=2 LUMABRI_PEER_KEY="$TMP/direct-client.key" \
+    LUMABRI_KNOWN_HOSTS="$TMP/direct-known" \
+    "$SEGMENT_CHAT_BIN" --direct-only --engine olmoe --model-dir "$OLMOE_EDGE_MODEL" \
+    --model tiny-relay --tracker 127.0.0.1:7968 \
+    --model-root "$model_root" --tokenizer-root "$tokenizer_root" \
+    --prompt-ids "$prompt_ids" --tokens 3 --context 64 --max-rows 16 \
+    >"$TMP/direct-only.log" 2>&1; then
+    echo "direct-only silently used a relay" >&2; exit 1
+fi
+grep -q 'direct-only policy forbids' "$TMP/direct-only.log"
+
 # Persistent mode forces a real checkpoint through the relay after generation.
 serve=$(printf 'SUBMIT 1 0 2 2 0.7 0.95\nhi\n' | \
     env OMP_NUM_THREADS=2 LUMABRI_PEER_KEY="$TMP/client2.key" \

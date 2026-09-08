@@ -68,6 +68,7 @@ typedef int (*GenerationEventFn)(void *opaque, GenerationEventKind kind,
                                  const void *data, size_t data_bytes);
 
 static int retry_first_run;
+static int segment_direct_only;
 static const char *segment_tracker;
 static uint64_t segment_wire_bytes;
 
@@ -97,7 +98,7 @@ static void usage(const char *program) {
         "((--prompt TEXT | --prompt-ids CSV) | --serve) "
         "[--expect-ids CSV] [--tokens N] [--context N] [--max-rows N] "
         "[--temperature F --top-p F --seed N] "
-        "[--discovery-timeout-ms N] [--retry-first-run] [--json]\n",
+        "[--discovery-timeout-ms N] [--retry-first-run] [--direct-only] [--json]\n",
         program);
 }
 
@@ -380,7 +381,7 @@ static int remote_relay_request(RemoteSegment *remote, uint32_t op,
                                 const void *body, uint32_t body_len,
                                 const void *pay, uint32_t pay_len,
                                 LmbMsg *response) {
-    if (!segment_tracker ||
+    if (segment_direct_only || !segment_tracker ||
         !(remote->route.transport & LMB_SEG_TRANSPORT_RELAY)) return -1;
     LmbBuf envelope = {0};
     if (lmb_buf_str(&envelope, remote->route.advert.peer_name) ||
@@ -459,6 +460,14 @@ static int remote_request(RemoteSegment *remote, uint32_t op,
         if (remote->fd >= 0) lmb_close(remote->fd);
         remote->fd = -1;
         remote->direct_failed = 1;
+    }
+    if (segment_direct_only) {
+        size_t used = strlen(remote->transport_error);
+        snprintf(remote->transport_error + used,
+                 sizeof remote->transport_error - used,
+                 "%sdirect-only policy forbids tracker relay for %s",
+                 used ? "; " : "", remote->route.advert.peer_name);
+        return -1;
     }
     if (!(remote->route.transport & LMB_SEG_TRANSPORT_RELAY)) return -1;
     if (!remote_relay_request(remote, op, body, body_len,
@@ -1197,10 +1206,10 @@ static void generation_result_free(GenerationResult *result) {
     memset(result, 0, sizeof *result);
 }
 
-/* Detokenize the complete generated prefix and stream only bytes confirmed by
- * two consecutive prefixes. This one-token look-behind handles byte fallback
- * and tokenizers that rewrite their trailing whitespace: unstable tail bytes
- * remain buffered, while already displayed text is never contradicted. */
+/* Detokenize complete prefixes. Some adapters cannot yet decode a prefix that
+ * ends inside a byte-fallback character. A non-final failure only defers text;
+ * the final prefix MUST decode successfully. Never emit a partial UTF-8 scalar
+ * or a trailing replacement which another byte token could still complete. */
 static int generation_stream_prefix(ColiEdgeEngine *edge,
                                     const int32_t *tokens, size_t count,
                                     int32_t eos_token,
@@ -1212,12 +1221,17 @@ static int generation_stream_prefix(ColiEdgeEngine *edge,
     while (count && tokens[count - 1] == eos_token) count--;
     size_t bytes = 0;
     if (count && coli_edge_detokenize(edge, tokens, count, NULL, 0, &bytes,
-                                     error, error_size)) return -1;
+                                     error, error_size)) {
+        if (!flush) { if (error_size) error[0]=0; return 0; }
+        return -1;
+    }
     char *text = malloc(bytes + 1u);
     if (!text) { snprintf(error, error_size, "out of memory streaming token"); return -1; }
     if (count && coli_edge_detokenize(edge, tokens, count, text, bytes + 1u,
                                      &bytes, error, error_size)) {
-        free(text); return -1;
+        free(text);
+        if (!flush) { if (error_size) error[0]=0; return 0; }
+        return -1;
     }
     text[bytes] = 0;
     if (*emitted_bytes > bytes ||
@@ -1233,6 +1247,9 @@ static int generation_stream_prefix(ColiEdgeEngine *edge,
     else if (*previous) {
         size_t common = *previous_bytes < bytes ? *previous_bytes : bytes;
         while (stable < common && (*previous)[stable] == text[stable]) stable++;
+        while (stable && stable < bytes && ((unsigned char)text[stable] & 0xc0)==0x80) stable--;
+        if (stable==bytes)
+            while (stable>=3 && !memcmp(text+stable-3,"\xef\xbf\xbd",3)) stable-=3;
     }
     if (stable < *emitted_bytes) {
         free(text);
@@ -1300,9 +1317,12 @@ static int segment_generate(ColiEdgeEngine *edge,
     } else {
         if (!prompt ||
             coli_edge_tokenize(edge, prompt, prompt_bytes, NULL, 0,
-                               &prompt_count, error, error_size) ||
-            !prompt_count || prompt_count > SIZE_MAX / sizeof *prompt_tokens)
+                               &prompt_count, error, error_size))
             goto cleanup;
+        if(!prompt_count || prompt_count > SIZE_MAX / sizeof *prompt_tokens) {
+            snprintf(error,error_size,"Tokenizer produced an invalid token count; verify the checkpoint tokenizer");
+            goto cleanup;
+        }
         prompt_tokens = malloc(prompt_count * sizeof *prompt_tokens);
         size_t actual_count = 0;
         if (!prompt_tokens ||
@@ -1713,7 +1733,11 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
                               const uint8_t tokenizer_root[32],
                               uint32_t context, uint32_t max_rows,
                               uint64_t seed) {
-    printf(SEGMENT_FRAME_READY "\nSTAT 0 0 0 0\n");
+    /* Report capabilities before READY, so a pipe reader cannot consume
+     * readiness first and lose a later capability line. Direct CLI requests
+     * for unavailable stochastic sampling still fail explicitly. */
+    printf("\nLUMABRI_SAMPLING %s\n" SEGMENT_FRAME_READY "\nSTAT 0 0 0 0\n",
+           cap->flags & COLI_EDGE_CAP_LOGITS ? "LOGITS" : "GREEDY");
     fflush(stdout);
     LmbSampler sampler;
     lmb_sampler_init(&sampler, seed);
@@ -1836,6 +1860,7 @@ int main(int argc, char **argv) {
     const char *expect_ids_text = arg_value(argc, argv, "--expect-ids");
     int serve_mode = has_arg(argc, argv, "--serve");
     int json_output = has_arg(argc, argv, "--json");
+    segment_direct_only = has_arg(argc, argv, "--direct-only");
     segment_tracker = tracker;
     for (int i = 1; i < argc; i++)
         if (!strcmp(argv[i], "--retry-first-run")) retry_first_run = 1;
@@ -1883,7 +1908,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     if (lmb_colibri_register_all()) {
-        fprintf(stderr, "cannot register all six Colibri adapters\n"); return 1;
+        fprintf(stderr, "cannot register the Colibri adapters\n"); return 1;
     }
     ColiEdgeEngineOptions edge_options = {
         .struct_size = sizeof edge_options,
@@ -1912,11 +1937,16 @@ int main(int argc, char **argv) {
                 engine_error(error));
         return 1;
     }
-    uint32_t context = cap.max_context_tokens < 4096 ? cap.max_context_tokens : 4096;
+    /* A stateless Edge (e.g. GLM5.3) can leave its context limit to the
+     * caller. Zero is not a ban on every prompt. Still enforce the protocol
+     * ceiling and negotiate against the actual Segment session limits. */
+    uint32_t context_limit = cap.max_context_tokens ? cap.max_context_tokens : LMB_SEG_MAX_CONTEXT;
+    if (context_limit > LMB_SEG_MAX_CONTEXT) context_limit = LMB_SEG_MAX_CONTEXT;
+    uint32_t context = context_limit < 4096 ? context_limit : 4096;
     uint32_t max_rows = cap.max_batch_rows < 64 ? cap.max_batch_rows : 64;
     uint32_t discovery_timeout_ms = serve_mode ? 2500u : 15000u;
     if (((value = arg_value(argc, argv, "--context")) &&
-         lmb_parse_u32(value, 1, cap.max_context_tokens, &context)) ||
+         lmb_parse_u32(value, 1, context_limit, &context)) ||
         ((value = arg_value(argc, argv, "--max-rows")) &&
          lmb_parse_u32(value, 1, cap.max_batch_rows, &max_rows)) ||
         ((value = arg_value(argc, argv, "--discovery-timeout-ms")) &&

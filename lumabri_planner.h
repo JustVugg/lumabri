@@ -41,6 +41,15 @@
 #endif
 #include "lumabri_families.h"
 
+#define LMB_PLAN_LAYER_MAX 512
+
+typedef struct {
+    uint64_t resident_bytes;
+    uint64_t state_fixed_bytes;
+    uint64_t state_token_bytes;
+    uint32_t state_context_limit; /* zero: full context; otherwise a sliding ring */
+} LmbLayerMemory;
+
 /* How a family's weights are laid out, in the terms the estimates need. All
  * of it comes out of config.json; a field the checkpoint does not carry is
  * zero, and an estimate that needs a zero field says it cannot answer. */
@@ -58,6 +67,15 @@ typedef struct {
     uint32_t bits_per_weight;   /* 16 bf16, 8, 4 for fp4 checkpoints */
     int disk_streaming;         /* the adapter has DEMONSTRATED disk mode */
     int sizing_verified;        /* adapter-specific arithmetic was verified */
+    uint32_t memory_contract;   /* 0: historical estimate, 1: explicit layer map */
+    uint32_t max_context;
+    uint32_t boundary_width;    /* zero: hidden; otherwise the actual Edge/Segment state width */
+    uint64_t edge_resident_bytes;
+    uint64_t edge_scratch_fixed_bytes;
+    uint64_t segment_fixed_bytes;
+    uint64_t session_fixed_bytes, session_token_bytes; /* engine-wide session allocations */
+    uint64_t scratch_fixed_bytes, scratch_token_bytes;
+    LmbLayerMemory memory[LMB_PLAN_LAYER_MAX];
 } LmbModelShape;
 
 typedef struct {
@@ -139,6 +157,31 @@ static LmbRangeCost LMB_UNUSED lmb_estimate_segment(const LmbModelShape *m,
         end > m->layers || !m->hidden) return c;
     uint32_t n = end - begin;
 
+    if (m->memory_contract) {
+        uint32_t ctx = context ? context : 4096;
+        if (m->memory_contract != 1 || m->layers > LMB_PLAN_LAYER_MAX ||
+            !m->max_context || ctx > m->max_context) return c;
+        c.resident_bytes = m->segment_fixed_bytes;
+        c.state_bytes = lmb_size_add(m->session_fixed_bytes,
+                                    lmb_size_mul(m->session_token_bytes, ctx));
+        for (uint32_t i = begin; i < end; i++) {
+            const LmbLayerMemory *l = &m->memory[i];
+            uint32_t rows = l->state_context_limit && ctx > l->state_context_limit
+                ? l->state_context_limit : ctx;
+            c.resident_bytes = lmb_size_add(c.resident_bytes, l->resident_bytes);
+            c.state_bytes = lmb_size_add(c.state_bytes, lmb_size_add(l->state_fixed_bytes,
+                lmb_size_mul(l->state_token_bytes, rows)));
+        }
+        c.state_bytes = lmb_size_mul(c.state_bytes, sessions ? sessions : 1);
+        c.scratch_bytes = lmb_size_add(m->scratch_fixed_bytes,
+            lmb_size_mul(m->scratch_token_bytes, ctx));
+        /* No disk capability is inferred from a resident contract. */
+        c.working_set_bytes = c.resident_bytes;
+        c.ok = lmb_size_add(c.resident_bytes, lmb_size_add(c.state_bytes,
+            c.scratch_bytes)) != UINT64_MAX;
+        return c;
+    }
+
     uint64_t dense = lmb_size_mul(lmb_dense_layer_bytes(m), n);
     uint64_t expert = lmb_expert_bytes_of(m);
     uint64_t all_experts = lmb_size_mul(lmb_size_mul(expert, m->experts), n);
@@ -169,6 +212,18 @@ static LmbRangeCost LMB_UNUSED lmb_estimate_edge(const LmbModelShape *m,
     LmbRangeCost c;
     memset(&c, 0, sizeof c);
     if (!m->sizing_verified || !m->vocab || !m->hidden) return c;
+    if (m->memory_contract) {
+        uint32_t ctx = context ? context : 4096;
+        if (m->memory_contract != 1 || !m->max_context || ctx > m->max_context) return c;
+        c.resident_bytes = c.working_set_bytes = m->edge_resident_bytes;
+        uint32_t width = m->boundary_width ? m->boundary_width : m->hidden;
+        c.state_bytes = lmb_size_mul(lmb_size_mul((uint64_t)ctx * width, 4),
+                                     sessions ? sessions : 1);
+        c.scratch_bytes = lmb_size_add(m->edge_scratch_fixed_bytes, lmb_size_mul(m->vocab, 16));
+        c.ok = lmb_size_add(c.resident_bytes, lmb_size_add(c.state_bytes,
+            c.scratch_bytes)) != UINT64_MAX;
+        return c;
+    }
     c.resident_bytes = c.working_set_bytes = lmb_edge_bytes(m);
     c.state_bytes = lmb_size_mul(lmb_size_mul((uint64_t)(context ? context : 4096) *
                     m->hidden, 4u), sessions ? sessions : 1);
@@ -277,18 +332,25 @@ static int LMB_UNUSED lmb_json_string(const char *object, const char *key,
     return 0;
 }
 
+#include "planner_adapters/registry.h"
+
 static LMB_UNUSED int lmb_shape_from_config(const char *model_dir,
                                             LmbModelShape *out) {
     memset(out, 0, sizeof *out);
     if (!model_dir || !model_dir[0]) return -1;
     char path[1024];
-    snprintf(path, sizeof path, "%s/config.json", model_dir);
+    int path_len=snprintf(path, sizeof path, "%s/config.json", model_dir);
+    if(path_len<0 || (size_t)path_len>=sizeof path) return -1;
     FILE *f = fopen(path, "rb");
     if (!f) return -1;
     char buf[65536];
     size_t n = fread(buf, 1, sizeof buf - 1, f);
+    int invalid=ferror(f) || (n==sizeof buf-1 && fgetc(f)!=EOF);
     fclose(f);
+    if(invalid || memchr(buf,0,n)) return -1;
     buf[n] = 0;
+    const char *end=lmb_plan_object_end(lmb_plan_space(buf));
+    if(!end || *lmb_plan_space(end)) return -1;
 
     if (lmb_json_string(buf, "model_type", out->model_type,
                         sizeof out->model_type)) return -1;
@@ -332,12 +394,9 @@ static LMB_UNUSED int lmb_shape_from_config(const char *model_dir,
      * in the working set and make disk mode indistinguishable from resident. */
     if (out->experts && !out->moe_intermediate)
         out->moe_intermediate = out->intermediate;
-    /* The current formula is verified only for the two fixtures against which
-     * it was written. Other adapters remain visible through the family table,
-     * but cannot produce a fit decision until their adapter-specific sizing
-     * callback lands. This is preferable to a confident under-allocation. */
-    out->sizing_verified = !strcmp(fam->segment_id, "olmoe") ||
-                           !strcmp(fam->segment_id, "deepseek_v4");
+    /* A registered family is not proof that this checkpoint encoding is
+     * compatible. Only its explicit inspector may enable a fit decision. */
+    out->sizing_verified = !lmb_describe_memory(fam->segment_id, model_dir, buf, cfg, out);
     return out->layers && out->hidden ? 0 : -1;
 }
 

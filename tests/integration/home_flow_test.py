@@ -1,6 +1,6 @@
 """Real encrypted tracker, two donor TUIs, Segment engines and hosted chat.
 
-Requires an actual converted small OLMoE checkpoint (not a mock engine).
+Requires one actual small planner-supported checkpoint (not a mock engine).
 This loopback integration gate is not a physical LAN or native-platform test.
 """
 import argparse
@@ -26,15 +26,26 @@ ROOT = Path(__file__).resolve().parents[2]
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--models-dir", required=True)
+    parser.add_argument("--donor-ram-gb", type=float, default=0.5)
+    parser.add_argument("--context", type=int, default=128,
+                        help="approved context, including the actual family chat template")
+    parser.add_argument("--expect-greedy", action="store_true")
+    parser.add_argument("--expect-no-fit", action="store_true",
+                        help="verify insufficient-memory admission, without starting engines")
     parser.add_argument("--kill-donor", action="store_true",
                         help="kill a donor TUI after generation; assert engines and leases are released")
     args = parser.parse_args()
     tmp = Path(tempfile.mkdtemp(prefix="lumabri-home-flow-"))
     children, terminals = [], []
     print(f"Household test logs: {tmp}", flush=True)
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
+    # Reserve and pass the actual listener, exactly as the household launcher
+    # does. Closing a port probe before exec races other ephemeral sockets
+    # (observed on the second native macOS run: EADDRINUSE).
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(64)
+    port = listener.getsockname()[1]
+    unreachable_socket = None
     addr = f"127.0.0.1:{port}"
 
     def env(name):
@@ -43,7 +54,7 @@ def main():
         settings = home / ".lumabri" / "home.conf"
         if not settings.exists():
             settings.parent.mkdir(exist_ok=True)
-            settings.write_text(f"tracker={addr}\ntoken=household-test\nmodels={Path(args.models_dir).resolve()}\nram=0.5\n")
+            settings.write_text(f"tracker={addr}\ntoken=household-test\nmodels={Path(args.models_dir).resolve()}\nram={args.donor_ram_gb}\n")
             settings.chmod(0o600)
         return {**os.environ, "HOME": str(home), "LUMABRI_ENCRYPT": "1",
                 "LUMABRI_PEER_KEY": str(home / "peer.key"),
@@ -97,31 +108,38 @@ def main():
         return any((tmp / name).rglob("cache"))
 
     base = ["./lumabri", "models", "--models-dir", str(Path(args.models_dir).resolve()),
-            "--tracker", addr, "--context", "128", "--max-new", "8"]
+            "--tracker", addr, "--context", str(args.context), "--max-new", "8"]
 
     try:
         with open(tmp / "tracker.log", "wb") as log:
+            tracker_env = {**env("tracker"), "LUMABRI_HOME_LISTEN_FD": str(listener.fileno())}
             tracker = subprocess.Popen(["./tracker", "--port", str(port), "--token", "household-test",
                 "--peer-bindings", str(tmp / "bindings")], cwd=ROOT,
-                env=env("tracker"), stdout=log, stderr=subprocess.STDOUT)
+                env=tracker_env, pass_fds=(listener.fileno(),), stdout=log, stderr=subprocess.STDOUT)
+        listener.close()
         children.append(tracker)
 
         def listening():
+            if tracker.poll() is not None:
+                raise AssertionError("tracker exited before readiness: " +
+                                     (tmp / "tracker.log").read_text(errors="replace"))
             try:
                 with socket.create_connection(("127.0.0.1", port), timeout=.2):
                     return True
             except OSError:
                 return False
-        until(listening)
+        until(listening, message="reserved tracker listener did not become reachable")
 
         # A signed inventory advert does not prove the donor port is reachable.
         # Fail before indexing or sending an allocation, with a useful reason.
-        with socket.socket() as closed_port:
-            closed_port.bind(("127.0.0.1", 0))
-            unreachable = closed_port.getsockname()[1]
+        # Bound but not listening: the negative case stays unreachable without
+        # allowing another process to acquire the address during this test.
+        unreachable_socket = socket.socket()
+        unreachable_socket.bind(("127.0.0.1", 0))
+        unreachable = unreachable_socket.getsockname()[1]
         with open(tmp / "offline-worker.log", "wb") as log:
             offline_worker = subprocess.Popen(["./lumabri", "worker", "--join", addr,
-                "--name", "offline-test-donor", "--ram-gb", "0.5", "--disk", str(tmp),
+                "--name", "offline-test-donor", "--ram-gb", str(args.donor_ram_gb), "--disk", str(tmp),
                 "--control-address", f"127.0.0.1:{unreachable}"], cwd=ROOT,
                 env=env("offline-worker"), stdout=log, stderr=subprocess.STDOUT)
         children.append(offline_worker)
@@ -131,7 +149,8 @@ def main():
         time.sleep(.5)
         offline.send("\r\r")
         until(lambda: offline.p.poll() is not None, message="unreachable donor did not fail preflight")
-        assert offline.p.returncode != 0 and offline.has("Cannot reach offline-test-donor")
+        failure = "No complete resident plan fits" if args.expect_no_fit else "Cannot reach offline-test-donor"
+        assert offline.p.returncode != 0 and offline.has(failure)
         assert not list((tmp / "offline-request").rglob("home-source-*.log")), "indexed before reachability check"
         offline_worker.terminate(); offline_worker.wait(timeout=5)
 
@@ -155,6 +174,16 @@ def main():
         until(lambda: reject.has("Nothing is selected automatically"))
         reject.send("\x1b[B\r\x1b[B\r\t")
         time.sleep(.5)
+        if args.expect_no_fit:
+            reject.send("\r")
+            until(lambda: reject.has("model plan") and reject.has("sizing available"),
+                  message="no valid sizing result in model detail")
+            assert reject.has("Plan: not runnable"), "undersized donors were admitted"
+            assert not a.has("Waiting for your approval") and not b.has("Waiting for your approval")
+            assert not engines_started("donor-a") and not engines_started("donor-b")
+            assert not list((tmp / "reject").rglob("home-source-*.log"))
+            print("HOME ADMISSION: PASS (native memory floor; no offers or engines)", flush=True)
+            return
         reject.send("\r\r")
         until(lambda: a.has("Waiting for your approval") and b.has("Waiting for your approval"),
               seconds=60, message="offers never reached both donor TUIs")
@@ -180,6 +209,8 @@ def main():
         until(lambda: chat.has("receives the text") or chat.p.poll() is not None, seconds=180,
               message="accepted plan did not reach real hosted chat")
         assert chat.p.poll() is None, "accepted plan failed; inspect donor engine logs"
+        if args.expect_greedy:
+            assert chat.has("greedy decoding"), "greedy-only capability was not shown to the client"
         until(lambda: chat.has("/experts shows tracker activity."),
               message="the accepted compute allocation is missing from chat")
         assert "Approved Segment plan: 2 compute donors" in chat.text
@@ -192,7 +223,9 @@ def main():
         chat.send("\t\n")
         until(lambda: chat.has("Tab completes commands"), message="slash completion did not execute help")
         chat.send("hi\n")
-        until(lambda: chat.has("tok/s") or chat.p.poll() is not None, seconds=120,
+        until(lambda: chat.has("tok/s") or chat.has("prompt plus output exceeds context") or
+              chat.has("logits are unavailable for sampling") or chat.has("Segment generation failed") or
+              chat.has("invalid token count") or chat.p.poll() is not None, seconds=120,
               message="real model did not finish a response")
         assert chat.has("tok/s"), "engine failed during generation"
         assert "hosted stream · no local checkpoint" in chat.text
@@ -264,6 +297,9 @@ def main():
             print(f"\n{log.relative_to(tmp)}:\n{log.read_text(errors='replace')[-12000:]}", file=sys.stderr)
         raise
     finally:
+        listener.close()
+        if unreachable_socket is not None:
+            unreachable_socket.close()
         for p in reversed(children):
             if p.poll() is None:
                 p.send_signal(signal.SIGTERM)

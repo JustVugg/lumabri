@@ -129,6 +129,8 @@ jobs:
           test "$(OMP_NUM_THREADS=4 OMP_THREAD_LIMIT=1 ./segment_node --thread-capacity)" = 1
           mkdir -p build/home-flow-models
           cp -a ../colibri/c/olmoe_tiny_merged build/home-flow-models/olmoe-tiny
+          make segment_budget_probe
+          python3 tests/integration/planner_tensor_contract_test.py --family olmoe --model build/home-flow-models/olmoe-tiny
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --kill-donor
       - name: Same greedy tokens with one and two real Segment ranges
@@ -137,6 +139,137 @@ jobs:
           SPLIT_MODEL_DIR=build/home-flow-models/olmoe-tiny \
           SPLIT_THREADS=2 SPLIT_CONTEXT=128 SPLIT_ROUNDS=2 \
             bash tests/integration/segment_split_test.sh
+      - name: Qwen hybrid memory contract — real int8 and grouped int4
+        working-directory: lumabri
+        run: |
+          python3 ../colibri/c/tools/make_qwen36_tiny.py --out build/qwen36-hf --ref-mode full --emit-ref build/qwen36-ref.json
+          python3 ../colibri/c/tools/convert_qwen36.py --model build/qwen36-hf --out build/qwen-int8/qwen36-tiny --ebits 8 --no-readme
+          python3 ../colibri/c/tools/convert_qwen36.py --model build/qwen36-hf --out build/qwen-int4/qwen36-tiny --ebits 4 --gs 16 --no-readme
+          python3 ../colibri/c/tools/make_edge_tiny_tokenizer.py build/qwen-int8/qwen36-tiny --vocab-size 320
+          python3 ../colibri/c/tools/make_edge_tiny_tokenizer.py build/qwen-int4/qwen36-tiny --vocab-size 320
+          python3 tests/integration/planner_tensor_contract_test.py --family qwen36 --model build/qwen-int8/qwen36-tiny
+          python3 tests/integration/planner_tensor_contract_test.py --family qwen36 --model build/qwen-int4/qwen36-tiny
+          cc -O2 -fopenmp -pthread ../colibri/c/tests/test_edge_adapters_real.c build/segment-hybrid-colibri/build/segment/libcolibri_segment_edge.a -o build/qwen-edge-oracle -lm
+          OMP_NUM_THREADS=2 build/qwen-edge-oracle qwen36 build/qwen-int8/qwen36-tiny build/qwen36-ref.json 3
+          python3 tests/integration/home_flow_test.py --models-dir build/qwen-int8
+          python3 tests/integration/home_flow_test.py --models-dir build/qwen-int4 --kill-donor
+          SPLIT_MODEL_DIR=build/qwen-int4/qwen36-tiny SPLIT_ENGINE=qwen36 SPLIT_MODEL=qwen-int4 SPLIT_ROUNDS=1 SPLIT_THREADS=2 SPLIT_TOKENS=8 PORT=8940 bash tests/integration/segment_split_test.sh
+          OLMOE_EDGE_MODEL=build/home-flow-models/olmoe-tiny OLMOE_EDGE_REF=../colibri/c/olmoe_tiny_src/ref_olmoe.json bash tests/integration/segment_relay_test.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tiny-qwen36-checkpoint
+          path: lumabri/build/qwen-int4/qwen36-tiny/*
+          retention-days: 3
+      - name: Inkling memory contract — float oracle and packed int4
+        working-directory: lumabri
+        run: |
+          python3 -m pip install transformers==5.16.1
+          python3 tests/integration/prepare_inkling_fixture.py --engine ../colibri/c --out build/inkling-contract
+          make segment_budget_probe
+          python3 tests/integration/planner_tensor_contract_test.py --family inkling --model build/inkling-contract/int4/inkling-tiny
+          INK_SEGMENT_BITS=0 OMP_NUM_THREADS=2 build/qwen-edge-oracle inkling build/inkling-contract/float/inkling-tiny build/inkling-contract/float/inkling-tiny/ref_inkling.json 24
+          INK_SEGMENT_BITS=0 python3 tests/integration/home_flow_test.py --models-dir build/inkling-contract/float
+          python3 tests/integration/home_flow_test.py --models-dir build/inkling-contract/int4 --kill-donor
+          SPLIT_MODEL_DIR=build/inkling-contract/int4/inkling-tiny SPLIT_ENGINE=inkling SPLIT_MODEL=inkling-int4 SPLIT_ROUNDS=1 SPLIT_THREADS=2 SPLIT_TOKENS=8 PORT=9340 bash tests/integration/segment_split_test.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tiny-inkling-checkpoint
+          path: lumabri/build/inkling-contract/int4/inkling-tiny/*
+          retention-days: 3
+      - name: Kimi memory contract — MXFP4 and AttnRes boundaries
+        working-directory: lumabri
+        run: |
+          python3 ../colibri/c/tools/make_kimi_k3_tiny.py --output build/kimi-contract/kimi-tiny
+          python3 ../colibri/c/tools/make_edge_tiny_tokenizer.py build/kimi-contract/kimi-tiny --vocab-size 320
+          python3 tests/integration/planner_tensor_contract_test.py --family kimi --model build/kimi-contract/kimi-tiny
+          K3_BITS=32 K3_MLA_BITS=32 K3_HEAD_BITS=32 K3_IDOT=0 OMP_NUM_THREADS=2 build/qwen-edge-oracle kimi build/kimi-contract/kimi-tiny ../colibri/c/kimi_k3_tiny/ref.json 8
+          python3 tests/integration/home_flow_test.py --models-dir build/kimi-contract --expect-no-fit
+          K3_BITS=32 K3_MLA_BITS=32 K3_HEAD_BITS=32 K3_IDOT=0 python3 tests/integration/home_flow_test.py --models-dir build/kimi-contract --donor-ram-gb 4.5
+          python3 tests/integration/home_flow_test.py --models-dir build/kimi-contract --donor-ram-gb 4.5 --kill-donor
+          SPLIT_MODEL_DIR=build/kimi-contract/kimi-tiny SPLIT_ENGINE=kimi SPLIT_MODEL=kimi-mxfp4 SPLIT_ROUNDS=1 SPLIT_THREADS=2 SPLIT_TOKENS=8 PORT=9740 K3_BITS=32 K3_MLA_BITS=32 K3_HEAD_BITS=32 K3_IDOT=0 bash tests/integration/segment_split_test.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tiny-kimi-checkpoint
+          path: lumabri/build/kimi-contract/kimi-tiny/*
+          retention-days: 3
+      - name: GLM memory contract — float source, MLA and DSA
+        working-directory: lumabri
+        run: |
+          python3 tests/integration/prepare_glm_fixture.py --engine ../colibri/c --out build/glm-contract
+          python3 tests/integration/planner_tensor_contract_test.py --family glm --model build/glm-contract/glm_tiny
+          GLM_SEGMENT_EBITS=16 GLM_SEGMENT_DBITS=16 OMP_NUM_THREADS=2 build/qwen-edge-oracle glm build/glm-contract/glm_tiny build/glm-contract/ref_glm.json 20
+          GLM_SEGMENT_EBITS=16 GLM_SEGMENT_DBITS=16 python3 tests/integration/home_flow_test.py --models-dir build/glm-contract
+          python3 tests/integration/home_flow_test.py --models-dir build/glm-contract --kill-donor
+          SPLIT_MODEL_DIR=build/glm-contract/glm_tiny SPLIT_ENGINE=glm SPLIT_MODEL=glm-float SPLIT_ROUNDS=1 SPLIT_THREADS=2 SPLIT_TOKENS=8 PORT=10140 GLM_SEGMENT_EBITS=16 GLM_SEGMENT_DBITS=16 bash tests/integration/segment_split_test.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tiny-glm-checkpoint
+          path: lumabri/build/glm-contract/glm_tiny/*
+          retention-days: 3
+      - name: GLM5.3 contract — replicated session state and stateless Edge
+        working-directory: lumabri
+        run: |
+          python3 tests/integration/prepare_glm53_fixture.py --engine ../colibri/c --out build/glm53-contract/glm53-tiny
+          python3 tests/integration/planner_tensor_contract_test.py --family glm53 --model build/glm53-contract/glm53-tiny
+          GLM53_BITS=32 OMP_NUM_THREADS=2 build/qwen-edge-oracle glm53 build/glm53-contract/glm53-tiny build/glm53-contract/glm53-tiny/edge_ref.json 4
+          GLM53_BITS=32 python3 tests/integration/home_flow_test.py --models-dir build/glm53-contract
+          python3 tests/integration/home_flow_test.py --models-dir build/glm53-contract --kill-donor
+          SPLIT_MODEL_DIR=build/glm53-contract/glm53-tiny SPLIT_ENGINE=glm53 SPLIT_MODEL=glm53-float SPLIT_ROUNDS=1 SPLIT_THREADS=2 SPLIT_TOKENS=8 PORT=10540 GLM53_BITS=32 bash tests/integration/segment_split_test.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tiny-glm53-checkpoint
+          path: lumabri/build/glm53-contract/glm53-tiny/*
+          retention-days: 3
+      - name: Qwen3.8 contract — DeltaNet, QSA and checked PLE metadata
+        working-directory: lumabri
+        run: |
+          python3 tests/integration/prepare_qwen38_fixture.py --engine ../colibri/c --out build/qwen38-contract/qwen38-tiny
+          python3 tests/integration/planner_tensor_contract_test.py --family qwen38 --model build/qwen38-contract/qwen38-tiny
+          cc -I../colibri/c -O2 -Wall -Wextra -Werror -fopenmp -pthread tests/c/edge_segment_greedy.c build/segment-hybrid-colibri/build/segment/libcolibri_segment_edge.a -o build/qwen38-greedy-oracle -lm
+          cc -I. -I../colibri/c -O2 -Wall -Wextra -Werror -fopenmp -pthread tests/c/test_segment_stream.c lumabri_segment.c lumabri_segment_discovery.c lumabri_sampling.c build/segment-hybrid-colibri/build/segment/libcolibri_segment_edge.a -o build/test-segment-stream -lm
+          build/test-segment-stream
+          OMP_NUM_THREADS=2 build/qwen38-greedy-oracle qwen38 build/qwen38-contract/qwen38-tiny build/qwen38-contract/qwen38-tiny/ref.json
+          python3 tests/integration/home_flow_test.py --models-dir build/qwen38-contract --context 512 --expect-greedy --kill-donor
+          SPLIT_MODEL_DIR=build/qwen38-contract/qwen38-tiny SPLIT_ENGINE=qwen38 SPLIT_MODEL=qwen38-bf16 SPLIT_ROUNDS=1 SPLIT_THREADS=2 SPLIT_TOKENS=8 PORT=10740 bash tests/integration/segment_split_test.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tiny-qwen38-checkpoint
+          path: lumabri/build/qwen38-contract/qwen38-tiny/*
+          retention-days: 3
+      - name: Qwen3.8 real block-FP8 experts and independent dequantized oracle
+        working-directory: lumabri
+        run: |
+          python3 tests/integration/prepare_qwen38_fixture.py --engine ../colibri/c --out build/qwen38-fp8-contract/qwen38-tiny --fp8-experts
+          python3 tests/integration/planner_tensor_contract_test.py --family qwen38 --model build/qwen38-fp8-contract/qwen38-tiny
+          for native in 0 1; do
+            Q38_NATIVE_FP8=$native OMP_NUM_THREADS=2 build/qwen38-greedy-oracle qwen38 build/qwen38-fp8-contract/qwen38-tiny build/qwen38-fp8-contract/qwen38-tiny/ref.json
+          done
+          python3 tests/integration/home_flow_test.py --models-dir build/qwen38-fp8-contract --context 512 --expect-greedy --kill-donor
+          SPLIT_MODEL_DIR=build/qwen38-fp8-contract/qwen38-tiny SPLIT_ENGINE=qwen38 SPLIT_MODEL=qwen38-fp8 SPLIT_ROUNDS=1 SPLIT_THREADS=2 SPLIT_TOKENS=8 PORT=11040 bash tests/integration/segment_split_test.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tiny-qwen38-fp8-checkpoint
+          path: lumabri/build/qwen38-fp8-contract/qwen38-tiny/*
+          retention-days: 3
+      - name: DeepSeek V4 native memory contract and compressed-state oracles
+        working-directory: lumabri
+        run: |
+          python3 ../colibri/c/tools/make_deepseek_v4_tiny.py --output build/v4-contract/deepseek-v4-tiny
+          python3 tests/integration/prepare_v4_oracles.py build/v4-contract/deepseek-v4-tiny
+          python3 tests/integration/planner_tensor_contract_test.py --family deepseek_v4 --model build/v4-contract/deepseek-v4-tiny
+          for case in short compressed long; do
+            OMP_NUM_THREADS=2 build/qwen38-greedy-oracle deepseek_v4 build/v4-contract/deepseek-v4-tiny build/v4-contract/deepseek-v4-tiny/edge_ref_$case.json
+          done
+          mkdir -p build/v4-chat
+          cp -a build/v4-contract/deepseek-v4-tiny build/v4-chat/deepseek-v4-tiny
+          python3 ../colibri/c/tools/make_edge_tiny_tokenizer.py build/v4-chat/deepseek-v4-tiny --vocab-size 128
+          python3 tests/integration/home_flow_test.py --models-dir build/v4-chat --donor-ram-gb 1.0 --kill-donor
+          SPLIT_REFERENCE=build/v4-contract/deepseek-v4-tiny/edge_ref_short.json SPLIT_MODEL_DIR=build/v4-contract/deepseek-v4-tiny SPLIT_ENGINE=deepseek_v4 SPLIT_MODEL=v4-native SPLIT_ROUNDS=1 SPLIT_THREADS=2 SPLIT_TOKENS=8 PORT=10940 bash tests/integration/segment_split_test.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tiny-v4-checkpoint
+          path: lumabri/build/v4-chat/deepseek-v4-tiny/*
+          retention-days: 3
   macos-household:
     # Real native CPU engines + signed CAS + approvals + streaming. Loopback
     # coverage does not replace the macOS 12.6 / physical household LAN test.
@@ -186,6 +319,68 @@ jobs:
           test "$(OMP_NUM_THREADS=4 OMP_THREAD_LIMIT=1 ./segment_node --thread-capacity)" = 1
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --kill-donor
+      - uses: actions/download-artifact@v4
+        with:
+          name: tiny-qwen36-checkpoint
+          path: lumabri/build/qwen-home-models/qwen36-tiny
+      - name: Native Qwen grouped-int4 request and execution
+        working-directory: lumabri
+        run: python3 tests/integration/home_flow_test.py --models-dir build/qwen-home-models
+      - uses: actions/download-artifact@v4
+        with:
+          name: tiny-inkling-checkpoint
+          path: lumabri/build/inkling-home-models/inkling-tiny
+      - name: Native Inkling packed-int4 request and execution
+        working-directory: lumabri
+        run: python3 tests/integration/home_flow_test.py --models-dir build/inkling-home-models
+      - uses: actions/download-artifact@v4
+        with:
+          name: tiny-kimi-checkpoint
+          path: lumabri/build/kimi-home-models/kimi-tiny
+      - name: Native Kimi insufficient-memory admission
+        working-directory: lumabri
+        run: python3 tests/integration/home_flow_test.py --models-dir build/kimi-home-models --expect-no-fit
+      # The standard ARM runner cannot provide two native Kimi 3.7 GB floors.
+      # Exercise refusal there; do not override the engine's RAM safeguard.
+      - name: Native Kimi MXFP4 execution on sufficient-memory runner
+        if: matrix.runner == 'macos-15-intel'
+        working-directory: lumabri
+        run: python3 tests/integration/home_flow_test.py --models-dir build/kimi-home-models --donor-ram-gb 4.5
+      - uses: actions/download-artifact@v4
+        with:
+          name: tiny-glm-checkpoint
+          path: lumabri/build/glm-home-models/glm_tiny
+      - name: Native GLM request and execution
+        working-directory: lumabri
+        run: python3 tests/integration/home_flow_test.py --models-dir build/glm-home-models
+      - uses: actions/download-artifact@v4
+        with:
+          name: tiny-glm53-checkpoint
+          path: lumabri/build/glm53-home-models/glm53-tiny
+      - name: Native GLM5.3 request and execution
+        working-directory: lumabri
+        run: python3 tests/integration/home_flow_test.py --models-dir build/glm53-home-models
+      - uses: actions/download-artifact@v4
+        with:
+          name: tiny-qwen38-checkpoint
+          path: lumabri/build/qwen38-home-models/qwen38-tiny
+      - name: Native Qwen3.8 request and execution
+        working-directory: lumabri
+        run: python3 tests/integration/home_flow_test.py --models-dir build/qwen38-home-models --context 512 --expect-greedy
+      - uses: actions/download-artifact@v4
+        with:
+          name: tiny-qwen38-fp8-checkpoint
+          path: lumabri/build/qwen38-fp8-home-models/qwen38-tiny
+      - name: Native Qwen3.8 FP8 request and execution
+        working-directory: lumabri
+        run: python3 tests/integration/home_flow_test.py --models-dir build/qwen38-fp8-home-models --context 512 --expect-greedy
+      - uses: actions/download-artifact@v4
+        with:
+          name: tiny-v4-checkpoint
+          path: lumabri/build/v4-home-models/deepseek-v4-tiny
+      - name: Native V4 request and execution
+        working-directory: lumabri
+        run: python3 tests/integration/home_flow_test.py --models-dir build/v4-home-models --donor-ram-gb 1.0
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

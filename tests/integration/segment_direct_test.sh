@@ -167,6 +167,8 @@ def line():
         raise RuntimeError("Segment gateway closed unexpectedly")
     return value
 
+if line() != b"\n" or line() != b"LUMABRI_SAMPLING LOGITS\n":
+    raise RuntimeError("missing OLMoE sampling capability")
 if b"READY" not in line() or not line().startswith(b"STAT "):
     raise RuntimeError("Segment gateway did not become ready")
 

@@ -97,6 +97,8 @@ def line():
         raise RuntimeError("Segment gateway closed:\n"+
                            p.stderr.read().decode("utf-8", "replace"))
     return value
+if line() != b"\n" or line() != b"LUMABRI_SAMPLING LOGITS\n":
+    raise RuntimeError("missing OLMoE sampling capability")
 if b"READY" not in line() or not line().startswith(b"STAT "):
     raise RuntimeError("gateway not ready")
 def turn(rid, prompt, kill_after_accept=None):

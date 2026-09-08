@@ -131,12 +131,13 @@ cat >"$T/qwen36.c" <<'EOF'
 #include <string.h>
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
-    fputs("\1\1READY\1\1\nSTAT 0 0 0 0\n", stdout);
+    fputs("\nLUMABRI_SAMPLING GREEDY\n\1\1READY\1\1\nSTAT 0 0 0 0\n", stdout);
     char line[512];
     while (fgets(line, sizeof line, stdin)) {
         char id[64]; unsigned slot, max_new; size_t bytes; float t, p;
         if (sscanf(line, "SUBMIT %63s %u %zu %u %f %f",
                    id, &slot, &bytes, &max_new, &t, &p) != 6) continue;
+        if (t != 0.0f) return 3; /* client must consume the actual capability */
         char *payload = malloc(bytes + 2);
         if (!payload || fread(payload, 1, bytes + 1, stdin) != bytes + 1)
             return 1;
@@ -161,7 +162,7 @@ for _ in $(seq 1 200); do
 done
 grep -q "host ready" "$T/real-host.log" || fail "the real host did not start"
 
-( sleep 3; printf '/quit\n' ) | timeout 20 ./lumabri chat \
+( printf 'hi\n'; sleep 3; printf '/quit\n' ) | timeout 20 ./lumabri chat \
     --host "127.0.0.1:$REAL_PORT" --plain >"$T/held.log" 2>&1 & held=$!
 sleep .5
 started=$(date +%s)
@@ -172,5 +173,10 @@ grep -qi "busy (0 sessions free)" "$T/real-busy.log" ||
     fail "the real host did not refuse its second client with BUSY"
 (( elapsed < 3 )) || fail "BUSY was queued for $elapsed seconds instead of immediate"
 wait "$held" || true
+
+grep -q "greedy decoding" "$T/held.log" ||
+    fail "greedy-only capability did not reach the client"
+grep -q "hello" "$T/held.log" ||
+    fail "client requested sampling from a greedy-only engine"
 
 echo "HOSTED CHAT TEST: PASS (zero checkpoint bytes, authenticated encrypted stream, real BUSY)"

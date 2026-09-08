@@ -59,6 +59,11 @@ SECURE_DEPS = lumabri_secure.h lumabri_crypto.h
 HOME_NET_DEPS = lumabri_home_net.h lumabri_home_discovery.h lumabri_platform.h lumabri_wakeup.h lumabri_runtime_probe.h
 MACHINE_SRC = lumabri_machine.c
 MACHINE_DEPS = lumabri_machine.h $(MACHINE_SRC)
+PLANNER_ADAPTER_DEPS = $(wildcard planner_adapters/*.h)
+
+# Adapter contracts are included transitively by the planner. Rebuild every
+# consumer when one changes, including when a new contract is introduced.
+lumabri test_chat_ui test_planner test_cluster test_memory_budget test_calibration segment_budget_probe segment_node: $(PLANNER_ADAPTER_DEPS)
 
 lumabri: $(HOME_NET_DEPS) lumabri.c src/ui/lumabri_tui.c src/ui/lumabri_tui.h src/ui/lumabri_visual.h src/ui/lumabri_chat_editor.h src/ui/lumabri_execution_view.h lumabri_proto.h lumabri_sign.h \
 		lumabri_inventory.h lumabri_home.h lumabri_home_runtime.h src/ui/lumabri_home_ui.h lumabri_ready.h \
@@ -439,7 +444,7 @@ test_residency_report: tests/c/test_residency_report.c lumabri_client.h lumabri_
 test_model_family: tests/c/test_model_family.c lumabri_families.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_model_family.c -o $@
 
-test_planner: tests/c/test_planner.c lumabri_planner.h lumabri_families.h
+test_planner: tests/c/test_planner.c $(wildcard tests/c/test_planner_*.h) lumabri_planner.h lumabri_families.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_planner.c -o $@
 
 test_cluster: tests/c/test_cluster.c lumabri_cluster.h lumabri_memory_budget.h lumabri_planner.h lumabri_families.h lumabri_machine.h
