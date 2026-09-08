@@ -13,10 +13,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-make -s lumabri tracker maintainer
+make -s lumabri tracker maintainer swarm_probe
 
 T=$(mktemp -d /tmp/lumabri-role.XXXXXX)
 export LUMABRI_PEER_BINDINGS="$T/peer-bindings"
+export HOME="$T/services-home"
+mkdir -p "$HOME"
 PIDS=()
 cleanup() { kill "${PIDS[@]}" 2>/dev/null || true; rm -rf "$T"; }
 trap cleanup EXIT
@@ -32,7 +34,22 @@ for _ in $(seq 1 100); do
 done
 ./maintainer --root "$T/src" --port 7599 --tracker 127.0.0.1:7598 \
              --name origin --model-name fx > "$T/origin.log" 2>&1 & PIDS+=($!)
-sleep 1.5
+# A listening tracker does not imply the source has finished indexing and
+# registered. Fixed sleeps failed on a loaded validation host before the
+# role parser could run, falsely reporting that `disk` meant `chat`.
+ready=0
+for _ in $(seq 1 200); do
+    if ./swarm_probe --tracker 127.0.0.1:7598 --model fx > "$T/ready.json" 2> "$T/ready.err" &&
+       python3 -c 'import json,sys; rows=json.load(open(sys.argv[1]))["peers"]; sys.exit(not any(p["storage"]["files"] == 2 and p["storage"]["bytes_held"] >= 65536 for p in rows))' "$T/ready.json"; then
+        ready=1; break
+    fi
+    sleep .1
+done
+if [[ "$ready" != 1 ]]; then
+    echo "ROLE TEST: source did not become ready" >&2
+    cat "$T/tracker.log" "$T/origin.log" "$T/ready.err" >&2
+    exit 1
+fi
 
 # role → does it become a donor?
 try() {                       # try ROLE EXPECT_DONOR EXPECT_RC

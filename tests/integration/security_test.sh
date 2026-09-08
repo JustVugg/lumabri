@@ -26,6 +26,18 @@ PIDS=()
 cleanup() { kill "${PIDS[@]}" 2>/dev/null || true; rm -rf "$T"; }
 trap cleanup EXIT
 
+wait_tracker() {
+    local port=$1
+    for _ in $(seq 1 200); do
+        if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+            exec 3<&-; exec 3>&-; return 0
+        fi
+        sleep .05
+    done
+    echo "SECURITY TEST: tracker on $port did not become ready" >&2
+    return 1
+}
+
 CANARY="$T/precious.txt"
 echo "do not touch me" > "$CANARY"
 CANARY_SUM=$(sha256sum "$CANARY" | cut -d' ' -f1)
@@ -128,7 +140,7 @@ echo "   ✓ refused, and the file outside the mirror is untouched"
 
 echo "· 3) the real tracker refuses to carry such a name at all"
 ./tracker --port 7553 > "$T/tracker.log" 2>&1 & PIDS+=($!)
-sleep 0.4
+wait_tracker 7553
 cat > "$T/evil_reg.c" <<'EOF'
 #include "lumabri_proto.h"
 int main(int argc, char **argv) {
@@ -162,7 +174,7 @@ echo "   ✓ refused at the index, so it never reaches a client"
 echo "· 4) oversized control frames are rejected before their body is read"
 env LUMABRI_MAX_CONNECTIONS=2 LUMABRI_IO_TIMEOUT_MS=5000 \
     ./tracker --port 7554 > "$T/limits.log" 2>&1 & LIMIT_PID=$!; PIDS+=($LIMIT_PID)
-sleep 0.4
+wait_tracker 7554
 python3 - 7554 <<'PY'
 import socket, struct, sys
 port = int(sys.argv[1])
@@ -242,7 +254,7 @@ cc -O2 -w -I. "$T/authreg.c" -o "$T/authreg" -lpthread
 
 env LUMABRI_STALE_MS=100 LUMABRI_MAX_NAMES_PER_SOURCE=64 \
     ./tracker --port 7555 > "$T/reuse.log" 2>&1 & PIDS+=($!)
-sleep 0.3
+wait_tracker 7555
 for i in $(seq 0 63); do
     "$T/authreg" 127.0.0.1:7555 "gone-$i" "$T/jk-$i" || {
         echo "   authenticated peer $i was refused a slot in an empty table"; exit 1; }
@@ -254,7 +266,7 @@ echo "   ✓ stale slot recycled; the cap applies to live peers, not history"
 
 echo "· 7) one key cannot monopolise the table with many names"
 env LUMABRI_STALE_MS=600000 ./tracker --port 7556 > "$T/cap.log" 2>&1 & PIDS+=($!)
-sleep 0.3
+wait_tracker 7556
 ok=0
 for i in $(seq 1 8); do
     "$T/authreg" 127.0.0.1:7556 "mine-$i" "$T/onekey" && ok=$((ok+1))
@@ -267,7 +279,7 @@ echo "   ✓ 8 names held, the 9th refused; anonymous junk cannot exhaust the ta
 echo "· 8) one source address cannot bypass the cap with many identity keys"
 env LUMABRI_STALE_MS=600000 LUMABRI_MAX_NAMES_PER_SOURCE=8 \
     ./tracker --port 7557 > "$T/source-cap.log" 2>&1 & PIDS+=($!)
-sleep 0.3
+wait_tracker 7557
 ok=0
 for i in $(seq 1 8); do
     "$T/authreg" 127.0.0.1:7557 "source-$i" "$T/source-key-$i" && ok=$((ok+1))

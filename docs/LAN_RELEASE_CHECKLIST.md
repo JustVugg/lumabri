@@ -141,7 +141,10 @@ not a completed gate.
    overflow instead of wrapping into apparently small allocations.
    Measured-cost placement remains pending; this does not enable disk mode or
    certify additional model families.
-4. Pending: connected, persisted lightweight calibration and advice.
+4. PR #157 merged: versioned measurements collected during ordinary Segment chat,
+   separating prefill, decode traversals and first visible text. No extra model
+   run is required. Persisted exact-key calibration, stale-data handling and
+   catalogue advice remain pending; timing collection alone does not close gate 4.
 5. In progress: reusable adapter-scoped working mirrors and shared verified
    CAS chunks, with separate approval and fresh engine sessions on reuse.
    Cache-directory allocation is exclusive even across different homes.
