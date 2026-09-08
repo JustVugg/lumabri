@@ -19,6 +19,7 @@
 #define LUMABRI_CALIBRATION_H
 
 #include <stdint.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include "lumabri_planner.h"
@@ -29,14 +30,14 @@ typedef struct {
     char model_root[65];        /* the checkpoint's signed identity */
     char adapter[32];
     uint32_t adapter_abi;
-    char numeric_class[48];     /* what the nodes agreed to compute in */
+    char numeric_class[97];     /* Segment numeric class, including terminator */
     char commit_lumabri[41];
     char commit_colibri[41];
     char build_id[65];          /* compiler, flags, engine configuration */
     char plan_kind[16];         /* segment or expert */
     uint32_t goal;              /* LmbPlanGoal without including cluster.h */
     uint32_t nodes;
-    char node_id[LMB_CAL_NODES_MAX][64];
+    char node_id[LMB_CAL_NODES_MAX][65]; /* 32-byte identity in hex + NUL */
     char node_hardware_id[LMB_CAL_NODES_MAX][65];
     char node_build_id[LMB_CAL_NODES_MAX][65];
     char node_backend[LMB_CAL_NODES_MAX][16];
@@ -56,11 +57,45 @@ typedef struct {
     uint32_t samples;           /* how many runs the median came from */
 } LmbCalibration;
 
+/* Never compare unterminated fields or let two equally incomplete records
+ * establish a match. These checks also bound data loaded from disk. */
+static LMB_UNUSED int lmb_cal_text(const char *s, size_t cap) {
+    const char *end = memchr(s, 0, cap);
+    if (!end || end == s) return 0;
+    for (; s != end; s++) if ((unsigned char)*s < 32 || (unsigned char)*s > 126) return 0;
+    return 1;
+}
+
+static LMB_UNUSED int lmb_cal_key_valid(const LmbCalKey *k) {
+    if (!k || !k->nodes || k->nodes > LMB_CAL_NODES_MAX ||
+        !k->adapter_abi || !k->context || !k->sessions || k->goal > 1) return 0;
+#define CAL_TEXT(f) if (!lmb_cal_text(k->f, sizeof k->f)) return 0
+    CAL_TEXT(model_root); CAL_TEXT(adapter); CAL_TEXT(numeric_class);
+    CAL_TEXT(commit_lumabri); CAL_TEXT(commit_colibri); CAL_TEXT(build_id); CAL_TEXT(plan_kind);
+    if (strcmp(k->plan_kind, "segment") && strcmp(k->plan_kind, "expert")) return 0;
+    for (uint32_t i = 0; i < k->nodes; i++) {
+        CAL_TEXT(node_id[i]); CAL_TEXT(node_hardware_id[i]);
+        CAL_TEXT(node_build_id[i]); CAL_TEXT(node_backend[i]);
+        if (!k->threads[i] || k->layer_begin[i] >= k->layer_end[i] ||
+            k->from_disk[i] > 1) return 0;
+    }
+#undef CAL_TEXT
+    return 1;
+}
+
+static LMB_UNUSED int lmb_cal_valid(const LmbCalibration *c) {
+    return c && lmb_cal_key_valid(&c->key) && c->samples &&
+           isfinite(c->decode_tok_s) && c->decode_tok_s > 0 &&
+           isfinite(c->ttft_seconds) && c->ttft_seconds >= 0 &&
+           isfinite(c->measured_at) && c->measured_at > 0;
+}
+
 /* Everything in the key, in order, and nothing outside it. Deliberately not
  * a hash: a mismatch has to be able to say WHICH field moved, because "your
  * measurement is stale" without a reason is how people learn to ignore it. */
 static LMB_UNUSED const char *lmb_cal_mismatch(const LmbCalKey *a,
                                                const LmbCalKey *b) {
+    if (!lmb_cal_key_valid(a) || !lmb_cal_key_valid(b)) return "incomplete measurement conditions";
     if (strcmp(a->model_root, b->model_root))       return "the checkpoint";
     if (strcmp(a->adapter, b->adapter))             return "the adapter";
     if (a->adapter_abi != b->adapter_abi)           return "the adapter ABI";
@@ -107,6 +142,7 @@ static LMB_UNUSED void lmb_cal_speed_text(const LmbCalibration *have,
                                           const LmbCalKey *want,
                                           char *out, size_t cap) {
     if (!have) { snprintf(out, cap, "not calibrated"); return; }
+    if (!lmb_cal_valid(have)) { snprintf(out, cap, "invalid measurement — recalibrate"); return; }
     const char *moved = lmb_cal_mismatch(&have->key, want);
     if (moved) {
         snprintf(out, cap, "stale (%.20s changed) — recalibrate", moved);

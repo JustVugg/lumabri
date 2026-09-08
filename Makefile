@@ -454,7 +454,7 @@ test_cluster: tests/c/test_cluster.c lumabri_cluster.h lumabri_memory_budget.h l
 test_memory_budget: tests/c/test_memory_budget.c lumabri_memory_budget.h lumabri_checkpoint_inventory.h lumabri_content.h lumabri_cluster.h lumabri_planner.h lumabri_families.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_memory_budget.c -o $@
 
-test_calibration: tests/c/test_calibration.c lumabri_calibration.h lumabri_planner.h
+test_calibration: tests/c/test_calibration.c lumabri_calibration.h lumabri_calibration_store.h lumabri_planner.h $(SECURE_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_calibration.c -o $@
 
 test_metrics: tests/c/test_metrics.c lumabri_metrics.h

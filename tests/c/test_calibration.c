@@ -6,7 +6,7 @@
  * or a two-machine number for a four-machine plan, and be believed. */
 #include <stdio.h>
 #include <string.h>
-#include "lumabri_calibration.h"
+#include "lumabri_calibration_store.h"
 
 static int bad;
 #define CHECK(c, ...) do { if (!(c)) { fprintf(stderr, __VA_ARGS__); \
@@ -35,6 +35,59 @@ static LmbCalKey base(void) {
         k.from_disk[i] = 0;
     }
     return k;
+}
+
+static void record_tests(void) {
+    LmbCalibration r = { .key = base(), .decode_tok_s = 12.5,
+        .ttft_seconds = 1.25, .measured_at = 1234567, .samples = 3 }, got;
+    memset(r.key.model_root, 'a', 64); r.key.model_root[64] = 0;
+    LmbBuf encoded = {0};
+    CHECK(!lmb_cal_encode(&r, &encoded), "record encoding failed");
+    if (!encoded.p) return;
+    CHECK(!lmb_cal_decode(encoded.p, encoded.len, &got) && lmb_cal_matches(&r.key, &got.key) &&
+          r.decode_tok_s == got.decode_tok_s && r.ttft_seconds == got.ttft_seconds &&
+          r.measured_at == got.measured_at && r.samples == got.samples, "record round trip failed");
+    for (size_t i = 0; i < encoded.len; i++) {
+        got = r;
+        CHECK(lmb_cal_decode(encoded.p, i, &got) && !got.samples, "truncated record accepted at %zu", i);
+    }
+    encoded.p[12] ^= 1; got = r;
+    CHECK(lmb_cal_decode(encoded.p, encoded.len, &got) && !got.samples, "corrupt record accepted");
+    encoded.p[12] ^= 1;
+    char tmp[] = "/tmp/lumabri-cal-record-XXXXXX", directory[256], path[384], link_path[256];
+    char *created = mkdtemp(tmp);
+    CHECK(created != NULL, "cannot create private test directory");
+    if (!created) { free(encoded.p); return; }
+    snprintf(directory, sizeof directory, "%s/records", tmp);
+    snprintf(path, sizeof path, "%s/%s.cal", directory, r.key.model_root);
+    snprintf(link_path, sizeof link_path, "%s/link", tmp);
+    CHECK(!lmb_cal_store(directory, &r), "record store failed");
+    CHECK(!lmb_cal_load(directory, r.key.model_root, &got) && lmb_cal_matches(&r.key, &got.key), "record load failed");
+    r.decode_tok_s = 7.25;
+    CHECK(!lmb_cal_store(directory, &r) && !lmb_cal_load(directory, r.key.model_root, &got) &&
+          got.decode_tok_s == 7.25, "atomic replacement failed");
+    struct stat st;
+    CHECK(!stat(path, &st) && !(st.st_mode & 077), "record is not private");
+    CHECK(lmb_cal_load(directory, "../../elsewhere", &got) && !got.samples, "unsafe filename accepted");
+    CHECK(!symlink(directory, link_path), "cannot prepare directory symlink test");
+    CHECK(lmb_cal_load(link_path, r.key.model_root, &got) && !got.samples, "directory symlink accepted");
+    CHECK(!unlink(link_path), "cannot remove test directory symlink");
+    CHECK(!chmod(path, 0644), "cannot prepare exposed record test");
+    CHECK(lmb_cal_load(directory, r.key.model_root, &got) && !got.samples, "non-private record accepted");
+    CHECK(!unlink(path) && !symlink("missing", path), "cannot prepare record symlink test");
+    CHECK(lmb_cal_load(directory, r.key.model_root, &got) && !got.samples, "record symlink accepted");
+    CHECK(!unlink(path) && !mkfifo(path, 0600), "cannot prepare FIFO test");
+    CHECK(lmb_cal_load(directory, r.key.model_root, &got) && !got.samples, "FIFO accepted or blocked");
+    CHECK(!unlink(path), "cannot remove test FIFO");
+    CHECK(!lmb_cal_store(directory, &r), "cannot prepare truncated disk record");
+    char linked[384]; snprintf(linked, sizeof linked, "%s/linked", directory);
+    CHECK(!link(path, linked), "cannot prepare hardlink test");
+    CHECK(lmb_cal_load(directory, r.key.model_root, &got) && !got.samples, "hardlinked record accepted");
+    CHECK(!unlink(linked), "cannot remove test hardlink");
+    CHECK(!truncate(path, 20), "cannot truncate test record");
+    CHECK(lmb_cal_load(directory, r.key.model_root, &got) && !got.samples, "truncated disk record accepted");
+    CHECK(!unlink(path) && !rmdir(directory) && !rmdir(tmp), "test record cleanup failed");
+    free(encoded.p);
 }
 
 int main(void) {
@@ -82,7 +135,7 @@ int main(void) {
     /* What the screen actually prints, which is where this either helps or
      * misleads. */
     LmbCalibration have; memset(&have, 0, sizeof have);
-    have.key = base(); have.decode_tok_s = 12.5; have.samples = 3;
+    have.key = base(); have.decode_tok_s = 12.5; have.samples = 3; have.measured_at = 1;
     char text[128];
 
     lmb_cal_speed_text(NULL, &a, text, sizeof text);
@@ -118,6 +171,33 @@ int main(void) {
     LmbCalKey invalid = base(); invalid.nodes = LMB_CAL_NODES_MAX + 1;
     CHECK(!lmb_cal_matches(&invalid, &invalid),
           "an out-of-bounds machine count was accepted as a calibration key");
+
+    LmbCalKey empty = {0};
+    CHECK(!lmb_cal_matches(&empty, &empty), "two empty keys matched");
+    CHECK(!lmb_cal_matches(NULL, &a) && !lmb_cal_matches(&a, NULL), "null keys matched");
+    invalid = base(); memset(invalid.node_id[0], 'a', sizeof invalid.node_id[0]);
+    CHECK(!lmb_cal_matches(&invalid, &invalid), "unterminated identity matched");
+    invalid = base(); invalid.numeric_class[0] = '\033';
+    CHECK(!lmb_cal_matches(&invalid, &invalid), "terminal controls accepted");
+    invalid = base(); invalid.threads[0] = 0;
+    CHECK(!lmb_cal_key_valid(&invalid), "unknown thread count accepted");
+    invalid = base(); invalid.layer_end[0] = invalid.layer_begin[0];
+    CHECK(!lmb_cal_key_valid(&invalid), "empty range accepted");
+    invalid = base(); memset(invalid.node_id[0], 'a', 64); invalid.node_id[0][64] = 0;
+    memset(invalid.numeric_class, 'x', 96); invalid.numeric_class[96] = 0;
+    CHECK(lmb_cal_key_valid(&invalid), "full identity or numeric class did not fit");
+    const double invalid_rates[] = {0, -1, NAN, INFINITY};
+    for (size_t i = 0; i < sizeof invalid_rates / sizeof invalid_rates[0]; i++) {
+        have.decode_tok_s = invalid_rates[i];
+        lmb_cal_speed_text(&have, &a, text, sizeof text);
+        CHECK(strstr(text, "invalid") && !strstr(text, "tok/s"), "invalid speed printed: %s", text);
+    }
+    have.decode_tok_s = 12.5; have.samples = 0;
+    CHECK(!lmb_cal_valid(&have), "zero samples accepted");
+    have.samples = 1; have.measured_at = NAN;
+    CHECK(!lmb_cal_valid(&have), "invalid measurement date accepted");
+
+    record_tests();
 
     printf("CALIBRATION KEY: %s\n", bad ? "FAIL" : "PASS");
     return bad ? 1 : 0;

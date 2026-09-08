@@ -5104,8 +5104,8 @@ static int catalog_state_refresh(LmbTuiState *st, void *unused) {
             for (uint32_t j = 0; j < m->plan.nslices; j++)
                 m->plan.slices[j].node = mapping[m->plan.slices[j].node];
         }
-        /* A calibration store is not implemented yet. Never manufacture a
-         * partial key in the renderer: no record means no speed. */
+        /* Runtime/checkpoint binding to the record store is not connected
+         * yet. Never manufacture a partial key in the renderer. */
         m->calibration = NULL;
         st->nmodels++;
     }
