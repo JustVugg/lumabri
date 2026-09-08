@@ -2665,6 +2665,7 @@ static int sr_take(SReader *s, size_t n, int emit, Cap *cap) {   /* copy/discard
 /* When the first token of the current reply arrived: everything before it
  * is prefill (the prompt crossing the layers), everything after is decode.
  * One number for both hid a 60 s prefill inside "0.2 tok/s". */
+#include "lumabri_metrics.h"
 static volatile double g_first_token_at;
 
 static int stream_serve2(Engine *e, char *statline, size_t scap, char **captured) {
@@ -4707,7 +4708,7 @@ static int cmd_chat(int argc, char **argv) {
         }
 
         double m0 = g_eng.net_mb, r0 = nowd();
-        char stat[128] = "";
+        char stat[512] = "";
 
         if (eng.proto == PROTO_SERVE2) {
             char *reply = NULL;
@@ -4793,7 +4794,19 @@ static int cmd_chat(int argc, char **argv) {
         int nstat = sscanf(stat, "STAT %d %lf %lf %lf", &ntok, &tps, &hit, &rss);
         double dmb = g_eng.net_mb - m0;
         double end = nowd(), first = g_first_token_at;
-        if (first > r0 && ntok > 0 && end > first) {
+        LmbGenerationMetrics metrics;
+        int metric_status=lmb_metrics_parse(stat,&metrics);
+        if(metric_status==0 && metrics.generated_tokens!=(uint32_t)ntok) metric_status=-1;
+        if(metric_status==0) {
+            printf("%s  host prefill %.1fs · %u generated tokens",C_DIM,
+                   metrics.prefill_seconds,metrics.generated_tokens);
+            double rate=lmb_metrics_decode_rate(&metrics);
+            if(rate>0) printf(" · decode %.2f tok/s",rate);
+            else printf(" · decode speed not measured");
+            if(first>r0) printf(" · first text %.1fs",first-r0);
+        } else if(metric_status<0) {
+            printf("%s  %.1fs · timing unavailable; no speed recorded",C_DIM,end-r0);
+        } else if (first > r0 && ntok > 0 && end > first) {
             /* prefill and decode are two different costs: the prompt crossing
              * every layer once, then one network round per layer per token */
             double decode_s = end - first;

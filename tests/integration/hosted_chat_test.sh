@@ -64,7 +64,7 @@ int main(int argc, char **argv) {
             if (lmb_recv(fd, &stream) || stream.op != LMB_HOST_STREAM ||
                 !stream.pay_len) { lmb_msg_free(&stream); break; }
             lmb_msg_free(&stream);
-            const char *reply = "ACCEPT 0\nDATA 0 5\nhello\nDONE 0\n";
+            const char *reply = "ACCEPT 0\nDATA 0 5\nhello\nDONE 0 STAT 9 4 0 0 20 0 PERF1 9 8 15 2 17.2\n";
             if (lmb_send(fd, LMB_HOST_STREAM, NULL, 0,
                          reply, (uint32_t)strlen(reply))) break;
         }
@@ -104,6 +104,8 @@ grep -qi "not yet measured" "$T/client.log" ||
     fail "an unmeasured host did not say its speed is unknown"
 grep -q "hello" "$T/client.log" ||
     fail "the encrypted HOST_STREAM did not carry a generated reply"
+grep -q "host prefill 15.0s" "$T/client.log" || fail "host phase timing was lost"
+grep -q "decode 4.00 tok/s" "$T/client.log" || fail "decode rate included prefill or the first token"
 
 # Not one byte of model, mirror or CAS.
 (( after - before < 65536 )) ||
@@ -132,7 +134,7 @@ cat >"$T/qwen36.c" <<'EOF'
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     fputs("\nLUMABRI_SAMPLING GREEDY\n\1\1READY\1\1\nSTAT 0 0 0 0\n", stdout);
-    char line[512];
+    char line[512]; unsigned turns = 0;
     while (fgets(line, sizeof line, stdin)) {
         char id[64]; unsigned slot, max_new; size_t bytes; float t, p;
         if (sscanf(line, "SUBMIT %63s %u %zu %u %f %f",
@@ -143,8 +145,13 @@ int main(void) {
             return 1;
         payload[bytes] = 0;
         if (!strstr(payload, "<|im_start|>assistant\n<think>\n")) return 2;
+        if (turns && !strstr(payload, "hello")) return 4;
         free(payload);
-        printf("ACCEPT %s\nDATA %s 5\nhello\nDONE %s\n", id, id, id);
+        printf("ACCEPT %s\nDATA %s 5\nhello\nDONE %s", id, id, id);
+        if (!turns) fputs(" STAT 1 0 0 0 20 0 PERF_UNAVAILABLE", stdout);
+        else if (turns == 1) fputs(" STAT 1 0 0 0 20 0 PERF1 1 0 0.2 0 0.2", stdout);
+        /* Third turn deliberately remains a legacy engine response. */
+        fputc('\n', stdout); turns++;
     }
     return 0;
 }
@@ -162,7 +169,7 @@ for _ in $(seq 1 200); do
 done
 grep -q "host ready" "$T/real-host.log" || fail "the real host did not start"
 
-( printf 'hi\n'; sleep 3; printf '/quit\n' ) | timeout 20 ./lumabri chat \
+( printf 'hi\nagain\nlegacy\n'; sleep 3; printf '/quit\n' ) | timeout 20 ./lumabri chat \
     --host "127.0.0.1:$REAL_PORT" --plain >"$T/held.log" 2>&1 & held=$!
 sleep .5
 started=$(date +%s)
@@ -178,5 +185,9 @@ grep -q "greedy decoding" "$T/held.log" ||
     fail "greedy-only capability did not reach the client"
 grep -q "hello" "$T/held.log" ||
     fail "client requested sampling from a greedy-only engine"
+grep -q "timing unavailable; no speed recorded" "$T/held.log" ||
+    fail "an unavailable observation produced a speed"
+grep -q "decode speed not measured" "$T/held.log" ||
+    fail "a one-token reply manufactured a decode rate or lost its history"
 
 echo "HOSTED CHAT TEST: PASS (zero checkpoint bytes, authenticated encrypted stream, real BUSY)"
