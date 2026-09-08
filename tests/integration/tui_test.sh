@@ -16,18 +16,18 @@ fail() { echo "TUI TEST: FAIL — $*" >&2; exit 1; }
 
 mkdir -p "$T/models/huge" "$T/models/small"
 cat >"$T/models/huge/config.json" <<'EOF'
-{"model_type":"deepseek_v4","num_hidden_layers":43,"hidden_size":4096,
- "intermediate_size":11264,"moe_intermediate_size":1408,"n_routed_experts":256,
- "num_experts_per_tok":6,"num_attention_heads":32,"num_key_value_heads":8,
- "vocab_size":129280}
+{"model_type":"olmoe","num_hidden_layers":32,"hidden_size":4096,
+ "intermediate_size":4096,"num_experts":128,
+ "num_experts_per_tok":6,"num_attention_heads":32,"num_key_value_heads":32,
+ "vocab_size":32768}
 EOF
 cat >"$T/models/small/config.json" <<'EOF'
 {"model_type":"olmoe","num_hidden_layers":4,"hidden_size":64,
  "intermediate_size":128,"num_experts":8,"num_experts_per_tok":2,
  "num_attention_heads":4,"num_key_value_heads":4,"vocab_size":256}
 EOF
-truncate -s 4096 "$T/models/huge/model.bin"
-truncate -s 4096 "$T/models/small/model.bin"
+python3 tests/integration/prepare_olmoe_headers.py "$T/models/huge"
+python3 tests/integration/prepare_olmoe_headers.py "$T/models/small"
 
 snap() { ./lumabri models --models-dir "$T/models" --snapshot "$@" 2>&1; }
 
