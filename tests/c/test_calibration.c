@@ -54,6 +54,30 @@ static void record_tests(void) {
     encoded.p[12] ^= 1; got = r;
     CHECK(lmb_cal_decode(encoded.p, encoded.len, &got) && !got.samples, "corrupt record accepted");
     encoded.p[12] ^= 1;
+    /* Exercise parsing, not just the checksum: re-sign truncated payloads
+     * and malformed length/count fields so integrity does not hide bugs. */
+    uint8_t *candidate = malloc(encoded.len);
+    CHECK(candidate != NULL, "cannot allocate malformed record fixture");
+    if (candidate) {
+        for (size_t len = 40; len < encoded.len; len++) {
+            memcpy(candidate, encoded.p, len);
+            LmbSha sha; lmb_sha_init(&sha); lmb_sha_update(&sha, candidate, len - 32);
+            lmb_sha_final(&sha, candidate + len - 32);
+            got = r;
+            CHECK(lmb_cal_decode(candidate, len, &got) && !got.samples,
+                  "checksummed truncated payload accepted at %zu", len);
+        }
+        for (size_t i = 8; i < encoded.len - 32; i++) {
+            memcpy(candidate, encoded.p, encoded.len); candidate[i] ^= 0x80;
+            LmbSha sha; lmb_sha_init(&sha); lmb_sha_update(&sha, candidate, encoded.len - 32);
+            lmb_sha_final(&sha, candidate + encoded.len - 32);
+            got = r;
+            int result = lmb_cal_decode(candidate, encoded.len, &got);
+            CHECK(result ? !got.samples : lmb_cal_valid(&got),
+                  "mutated record returned invalid data at %zu", i);
+        }
+        free(candidate);
+    }
     char tmp[] = "/tmp/lumabri-cal-record-XXXXXX", directory[256], path[384], link_path[256];
     char *created = mkdtemp(tmp);
     CHECK(created != NULL, "cannot create private test directory");
