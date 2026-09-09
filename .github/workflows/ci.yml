@@ -42,9 +42,11 @@ jobs:
           python-version: "3.12"
       - name: Build the C workspace with Apple Clang
         run: |
-          make lumabri tracker maintainer liblumabri.dylib test_shim test_machine test_chat_ui test_memory_budget test_planner test_cluster test_calibration test_inventory CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
+          make lumabri tracker maintainer liblumabri.dylib test_shim test_machine test_chat_ui test_memory_budget test_planner test_cluster test_calibration test_inventory test_weight_cache CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           ./test_machine
           ./test_memory_budget
+          ./test_weight_cache
+          python3 tests/integration/storage_ui_test.py
           ./test_planner
           ./test_cluster
           ./test_calibration

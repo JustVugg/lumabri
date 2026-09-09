@@ -209,17 +209,9 @@ typedef struct {
  * Their RAM leases are separate files, so also serialize mutable mirrors by
  * cache directory. Fail immediately instead of blocking a second accepted
  * plan behind the first model's lifetime-long shared mirror lock. */
+#include "src/runtime/lumabri_weight_cache.h"
 static int home_weight_lease(const char *base) {
-    char path[1200];
-    if (checked_printf(path, sizeof path, "%s/weights.lock", base)) return -1;
-    int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
-    if (fd < 0) return -1;
-    struct stat st;
-    if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_nlink != 1 ||
-        flock(fd, LOCK_EX | LOCK_NB)) {
-        close(fd); return -1;
-    }
-    return fd;
+    return lmb_weight_cache_lock(base);
 }
 
 static void home_donor_release(HomeDonor *d, LmbHomePhase why, const char *reason) {

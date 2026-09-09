@@ -281,6 +281,108 @@ static void home_network_setup(char *notice, size_t cap) {
     }
 }
 
+typedef struct {
+    double painted;
+    int clearing;
+} HomeStorageProgress;
+
+static int home_storage_progress(void *arg, const LmbWeightCacheUsage *usage, int erase) {
+    HomeStorageProgress *p = arg;
+    int key = home_key();
+    if (key == 3) g_stopping = 1;
+    if (g_stopping || key == 27) return 1;
+    double now = nowd();
+    if (p->painted && now - p->painted < .1) return 0;
+    p->painted = now;
+    ui_begin("storage");
+    ui_text(5, 5, UI_TEXT, erase ? "Clearing unused household weights..." :
+        p->clearing ? "Checking both cache trees before clearing..." :
+        "Inspecting household weight caches...");
+    ui_printf(8, 5, UI_MUTED, "%llu files visited   %.2f GiB allocated blocks counted",
+        (unsigned long long)usage->files, usage->allocated_bytes / 1073741824.0);
+    ui_text(11, 5, UI_MUTED, "Cancellation is checked between filesystem operations.");
+    ui_footer(p->clearing ? "If clearing has started, removed weights are not restored." :
+              "Inspection does not remove any weights.", "Esc cancel   Ctrl-C exit");
+    ui_present();
+    return 0;
+}
+
+static void home_storage_screen(void) {
+    char base[1200], message[200] = "";
+    if (checked_printf(base, sizeof base, "%s/.lumabri/home",
+                       getenv("HOME") ? getenv("HOME") : ".")) return;
+    LmbWeightCacheUsage usage = {0};
+    int refresh = 1, bad = 0, busy = 0, confirm = 0, choice = 0;
+    HomeTerminal term; home_terminal_begin(&term);
+    while (!g_stopping) {
+        if (refresh) {
+            HomeStorageProgress progress = {0};
+            bad = lmb_weight_cache_inspect_progress(base, &usage, home_storage_progress, &progress);
+            if (bad && errno == ECANCELED) break;
+            int lease = home_weight_lease(base);
+            busy = lease < 0 && (errno == EWOULDBLOCK || errno == EAGAIN);
+            if (lease >= 0) close(lease);
+            refresh = 0;
+        }
+        ui_begin("storage");
+        ui_text(5, 5, UI_TEXT, confirm ? "Clear unused household weights?" : "Household weight storage");
+        ui_printf(7, 5, UI_MUTED, "%.110s", base);
+        if (bad) ui_text(9, 5, UI_SAND, "Cannot safely inspect this cache. Nothing has been removed.");
+        else ui_printf(9, 5, UI_TEXT, "Approx. allocated: %.2f GiB   Files: %llu",
+            usage.allocated_bytes / 1073741824.0, (unsigned long long)usage.files);
+        ui_text(11, 5, busy ? UI_SAND : UI_MUTED, busy ?
+            "Weights are in use. Clearing is blocked until the plan releases them." :
+            "Only household cas/ and mirrors/ are included; no source model folders.");
+        ui_text(13, 5, UI_MUTED, "Keys, settings, conversations and engine logs are kept.");
+        ui_text(14, 5, UI_MUTED, "Cleared weights must be fetched again. This does not compact a WSL disk.");
+        if (confirm) {
+            ui_item(17, choice == 0, "Keep cached weights", "Return without deleting anything.");
+            ui_item(20, choice == 1, "Clear unused weights", "Permanent removal; no move to Trash.");
+        } else {
+            ui_item(17, choice == 0, "Refresh storage", "Recount allocated file blocks; hardlinked entries may be counted twice.");
+            ui_item(20, choice == 1, "Clear unused weights", "Review and confirm first; active caches cannot be cleared.");
+            ui_item(23, choice == 2, "Back to workspace", "Keep all cached weights.");
+        }
+        ui_footer(message[0] ? message : "This view covers this user's default household cache only.",
+                  "↑ ↓ move   Enter select   Esc back   Ctrl-C exit");
+        int compact = ui_h < 28 || ui_w < 60;
+        if (compact) {
+            ui_begin("storage");
+            ui_text(5, 4, UI_SAND, "Resize the terminal to at least 60 × 28.");
+            ui_text(7, 4, UI_MUTED, "Esc returns without clearing weights.");
+        }
+        ui_present();
+        int key = home_key(), choices = confirm ? 2 : 3;
+        if (key == 3 || key == 27) { if (confirm && key == 27) { confirm = 0; choice = 0; } else break; }
+        if (key == 1001) choice = (choice + choices - 1) % choices;
+        if (key == 1002) choice = (choice + 1) % choices;
+        if (!compact && (key == '\r' || key == '\n')) {
+            if (confirm) {
+                if (choice == 1) {
+                    HomeStorageProgress progress = { .clearing = 1 };
+                    int rc = lmb_weight_cache_clear_progress(base, home_storage_progress, &progress);
+                    int cancelled = rc == -1 && errno == ECANCELED;
+                    snprintf(message, sizeof message, "%s", !rc ?
+                        "Household weights cleared. Source checkpoints and settings were preserved." :
+                        rc == -2 ?
+                        "A plan is using this cache. No cleanup was started." :
+                        cancelled ?
+                        "Cleanup cancelled. Already removed weights are not restored; remaining weights are kept." :
+                        "Cleanup could not finish. Some weights may remain; refresh or check permissions.");
+                    refresh = 1;
+                }
+                confirm = 0; choice = 0;
+            } else if (choice == 0) refresh = 1;
+            else if (choice == 2) break;
+            else if (busy || bad) snprintf(message, sizeof message,
+                "Cleanup is unavailable while the cache is active or cannot be inspected safely.");
+            else { confirm = 1; choice = 0; }
+        }
+        (void)poll(NULL, 0, 100);
+    }
+    home_terminal_end(&term);
+}
+
 static int cmd_home(void) {
     if (!isatty(0) || home_private_network()) return 1;
     HomeSettings s; home_settings_load(&s);
@@ -308,11 +410,12 @@ static int cmd_home(void) {
             static const char *titles[] = {"Start a conversation", "Explore models", "Your computers", "Share resources"};
             static const char *help[] = {"Choose a model and ask your selected donors.", "Memory needs, plans and measured speed.",
                 "See resources. Choose who participates.", "Review a request before anything is loaded."};
-            static const char *commands[] = {"/create", "/join", "/settings", "/quit", "/network"};
+            static const char *commands[] = {"/create", "/join", "/settings", "/quit", "/network", "/storage"};
             static const char *command_help[] = {"Create or show this household", "Find your household on the LAN and pair with its key",
-                "Model folder and maximum RAM to share", "Close Lumabri", "Set up trusted LAN access once (Windows/WSL)"};
+                "Model folder and maximum RAM to share", "Close Lumabri", "Set up trusted LAN access once (Windows/WSL)",
+                "Inspect and clear unused household weight caches"};
             ui_text(top, 5, UI_TEXT, actions ? "Workspace actions" : "What would you like to do?");
-            for (int i = 0; i < (actions ? 5 : 4); i++) ui_item(top + 2 + i * 3, selected == i,
+            for (int i = 0; i < (actions ? 6 : 4); i++) ui_item(top + 2 + i * 3, selected == i,
                 actions ? commands[i] : titles[i], actions ? command_help[i] : help[i]);
             ui_footer(notice[0] ? notice : s.tracker[0] ? s.tracker : "Create or join a household with / actions.",
                       "↑ ↓ move   Enter select   / actions   Esc back   Ctrl-C exit");
@@ -326,11 +429,11 @@ static int cmd_home(void) {
             if (key == 3 || (key == 27 && !actions)) break;
             if (key == 27) { actions = 0; selected = 0; }
             if (key == '/') { actions = !actions; selected = 0; }
-            int choices = actions ? 5 : 4;
+            int choices = actions ? 6 : 4;
             if (key == 1001) selected = (selected + choices - 1) % choices;
             if (key == 1002) selected = (selected + 1) % choices;
             if ((key == '\r' || key == '\n') && ui_h >= 28 && ui_w >= 60) {
-                key = actions ? "njsqf"[selected] : "ccpd"[selected];
+                key = actions ? "njsqfk"[selected] : "ccpd"[selected];
                 actions = 0; selected = 0; break;
             }
             (void)poll(NULL, 0, 100);
@@ -338,7 +441,9 @@ static int cmd_home(void) {
         home_terminal_end(&term);
         if (key == 'q' || key == 3 || key == 27 || g_stopping) break;
         notice[0] = 0;
-        if (key == 'f') {
+        if (key == 'k') {
+            home_storage_screen();
+        } else if (key == 'f') {
             home_network_setup(notice, sizeof notice);
         } else if (key == 'j') {
             if (tracker_child > 0) {
