@@ -24,10 +24,10 @@ static LMB_UNUSED int lmb_cal_get_double(LmbCur *c, double *value) {
 }
 static LMB_UNUSED int lmb_cal_get_text(LmbCur *c, char *out, size_t cap) {
     uint16_t n;
-    if (lmb_cur_u16(c, &n) || !n || n >= cap || c->off > c->len ||
+    if (lmb_cur_u16(c, &n) || n >= cap || c->off > c->len ||
         n > c->len - c->off || memchr(c->p + c->off, 0, n)) return -1;
     memcpy(out, c->p + c->off, n); out[n] = 0; c->off += n;
-    return lmb_cal_text(out, cap) ? 0 : -1;
+    return !n || lmb_cal_text(out, cap) ? 0 : -1;
 }
 
 static LMB_UNUSED int lmb_cal_encode(const LmbCalibration *r, LmbBuf *out) {
@@ -40,7 +40,7 @@ static LMB_UNUSED int lmb_cal_encode(const LmbCalibration *r, LmbBuf *out) {
     PUT(lmb_buf_bytes(&b, "LMB-CAL1", 8));
     STR(model_root); STR(adapter); U32(adapter_abi); STR(numeric_class);
     STR(commit_lumabri); STR(commit_colibri); STR(build_id); STR(plan_kind);
-    U32(goal); U32(nodes); U32(context); U32(sessions);
+    U32(goal); U32(nodes); U32(edge_node); U32(context); U32(sessions);
     for (uint32_t i = 0; i < k->nodes; i++) {
         STR(node_id[i]); STR(node_hardware_id[i]); STR(node_build_id[i]); STR(node_backend[i]);
         U32(layer_begin[i]); U32(layer_end[i]); U32(threads[i]); U32(from_disk[i]);
@@ -49,6 +49,8 @@ static LMB_UNUSED int lmb_cal_encode(const LmbCalibration *r, LmbBuf *out) {
     PUT(lmb_cal_put_double(&b, r->ttft_seconds));
     PUT(lmb_cal_put_double(&b, r->measured_at));
     PUT(lmb_buf_u32(&b, r->samples));
+    PUT(lmb_buf_u32(&b, r->prompt_tokens));
+    PUT(lmb_buf_u32(&b, r->generated_tokens));
     lmb_sha_init(&sha); lmb_sha_update(&sha, b.p, b.len); lmb_sha_final(&sha, digest);
     PUT(lmb_buf_bytes(&b, digest, sizeof digest));
     if (b.len > LMB_CAL_RECORD_MAX) goto bad;
@@ -74,7 +76,7 @@ static LMB_UNUSED int lmb_cal_decode(const void *data, size_t len, LmbCalibratio
 #define U32(f) GET(lmb_cur_u32(&c, &k->f))
     STR(model_root); STR(adapter); U32(adapter_abi); STR(numeric_class);
     STR(commit_lumabri); STR(commit_colibri); STR(build_id); STR(plan_kind);
-    U32(goal); U32(nodes); U32(context); U32(sessions);
+    U32(goal); U32(nodes); U32(edge_node); U32(context); U32(sessions);
     if (!k->nodes || k->nodes > LMB_CAL_NODES_MAX) return -1;
     for (uint32_t i = 0; i < k->nodes; i++) {
         STR(node_id[i]); STR(node_hardware_id[i]); STR(node_build_id[i]); STR(node_backend[i]);
@@ -87,6 +89,8 @@ static LMB_UNUSED int lmb_cal_decode(const void *data, size_t len, LmbCalibratio
     GET(lmb_cal_get_double(&c, &r.ttft_seconds));
     GET(lmb_cal_get_double(&c, &r.measured_at));
     GET(lmb_cur_u32(&c, &r.samples));
+    GET(lmb_cur_u32(&c, &r.prompt_tokens));
+    GET(lmb_cur_u32(&c, &r.generated_tokens));
     if (c.off != c.len || !lmb_cal_valid(&r)) return -1;
     *out = r; return 0;
 #undef GET

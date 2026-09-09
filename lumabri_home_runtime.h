@@ -194,6 +194,8 @@ typedef struct {
     pid_t segment, host;
     char bin_dir[1024], cache_base[1024], disk[512], ip[INET_ADDRSTRLEN];
     char log[1200];
+    char runtime_epoch[65], runtime_id[65];
+    LmbRuntimeIdentityCache runtime_cache;
 } HomeDonor;
 
 /* --disk can point two different homes at the same persistent weight cache.
@@ -237,6 +239,12 @@ static void home_donor_disconnect(HomeDonor *d, const char *reason) {
  * Session/KV state never goes into these weight caches. The shim still checks
  * current signed inventory, accepted root and each block hash on reuse. */
 static int home_donor_launch(HomeDonor *d, int edge) {
+    char current_runtime[65];
+    if (lmb_runtime_identity(d->bin_dir, d->runtime_epoch, &d->runtime_cache, current_runtime) ||
+        strcmp(current_runtime, d->runtime_id)) {
+        fprintf(stderr, "The installed runtime changed. Restart Share resources before accepting a new plan.\n");
+        return -1;
+    }
     const LmbHomeOffer *o = &d->transaction.offer;
     const LmbModelFamily *family = lmb_family_for(o->model_type);
     if (!family) return -1;
@@ -463,6 +471,9 @@ static int cmd_donor(int argc, char **argv) {
     if (checked_printf(service_path, sizeof service_path, "%s/segment_node", d.bin_dir) ||
         lmb_runtime_thread_capacity(service_path, &d.thread_capacity))
         return home_fail("Cannot query the installed Segment runtime. Rebuild the complete household runtime; no resources were shared.");
+    uint8_t epoch[32]; lmb_random(epoch, sizeof epoch); lmb_hex(d.runtime_epoch, epoch, sizeof epoch);
+    if (lmb_runtime_identity(d.bin_dir, d.runtime_epoch, &d.runtime_cache, d.runtime_id))
+        return home_fail("Cannot identify the installed household runtime. No resources were shared.");
     if (checked_printf(d.cache_base, sizeof d.cache_base, "%s/%s", disk ? disk :
                        (getenv("HOME") ? getenv("HOME") : "."), disk ? "lumabri-home" : ".lumabri/home") ||
         home_local_ip(tracker, d.ip))
@@ -491,7 +502,7 @@ static int cmd_donor(int argc, char **argv) {
     snprintf(report_log, sizeof report_log, "%s/inventory.log", d.cache_base);
     char *worker_argv[] = {own_bin, "worker", "--join", (char *)tracker,
         "--name", (char *)name, "--ram-gb", budget, "--disk", d.cache_base,
-        "--control-address", addr, NULL};
+        "--control-address", addr, "--runtime-epoch", d.runtime_epoch, NULL};
     pid_t reporter = home_spawn(worker_argv, NULL, report_log, NULL, -1);
     if (reporter <= 0) { close(listener); return home_fail("Cannot start the inventory reporter: %s.", strerror(errno)); }
     g_stopping = 0; install_chat_signal_handlers(); signal(SIGPIPE, SIG_IGN);
@@ -726,6 +737,9 @@ static int home_request_chat(LmbTuiState *st, int selected) {
         (void)poll(NULL, 0, 200);
     }
     if (!found) goto done;
+    uint8_t indexed_root[32];
+    if (lmb_checkpoint_identity(m->dir, m->content_id, model, indexed_root) ||
+        memcmp(indexed_root, identity.root, sizeof indexed_root)) m->content_id[0] = 0;
     stage = "validating the indexed plan";
     if (lmb_home_plan_budgets(&m->shape, swarm.total_bytes, nodes, count,
                              st->context, &plan) || plan.state != LMB_PLAN_RESIDENT) {
@@ -852,7 +866,42 @@ static int home_request_chat(LmbTuiState *st, int selected) {
                                  "--role", "chat", "--max-new", token_limit, "--host-key", expected_host,
                                  "--tracker", st->tracker};
             g_execution_view = &execution;
+            LmbCalibration measurement = {0}; char measurement_dir[1200];
+            LmbTuiModel measured = *m;
+            measured.plan = plan;
+            measured.planned = 1; /* the actual revalidated plan, not an earlier UI snapshot */
+            measured.plan.edge_node = indices[plan.edge_node];
+            for (uint32_t j = 0; j < measured.plan.nslices; j++)
+                measured.plan.slices[j].node = indices[plan.slices[j].node];
+            int can_record = !catalog_calibration_dir(measurement_dir) &&
+                !catalog_calibration_key(st, &measured, 0, NULL, &measurement.key);
+            if (can_record) {
+                LmbMachineReport current[LMB_INVENTORY_MAX]; uint32_t current_count = 0;
+                can_record = !lmb_inventory_fetch(st->tracker, current, &current_count);
+                for (uint32_t j = 0; can_record && j < measurement.key.nodes; j++) {
+                    int matched = 0;
+                    for (uint32_t k = 0; k < current_count; k++) {
+                        char peer[65], hardware[65]; lmb_hex(peer, current[k].identity, 32);
+                        catalog_hardware_id(&current[k].machine, current[k].control_addr, hardware);
+                        if (!strcmp(peer, measurement.key.node_id[j]) &&
+                            !strcmp(hardware, measurement.key.node_hardware_id[j]) &&
+                            !strcmp(current[k].runtime_id, measurement.key.node_build_id[j])) matched = 1;
+                    }
+                    if (!matched) {
+                        fprintf(stderr, "[calibration] Donor %u no longer matches the approved runtime inventory.\n", j + 1);
+                        can_record = 0;
+                    }
+                }
+            }
+            g_recording_calibration = can_record ? &measurement : NULL;
+            g_calibration_directory = can_record ? measurement_dir : NULL;
+            if (!can_record)
+                fprintf(stderr, "[calibration] No speed will be saved: %s.\n",
+                        !m->content_id[0] ? "checkpoint content identity is unavailable" :
+                        !st->build_id[0] ? "client binary identity is unavailable" :
+                        "the approved plan's runtime identities are incomplete or changed");
             result = cmd_chat(14, chat_argv);
+            g_recording_calibration = NULL; g_calibration_directory = NULL;
             g_execution_view = NULL;
             atomic_store(&s.stop, 1); pthread_join(heartbeat, NULL);
             if (atomic_load(&s.failed)) result = -1;

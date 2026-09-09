@@ -68,6 +68,15 @@
 #include "lumabri_secure.h"
 #include "lumabri_inventory.h"
 #include "lumabri_home.h"
+#include "lumabri_runtime_identity.h"
+#include "lumabri_runtime_probe.h"
+#include "lumabri_checkpoint_identity.h"
+#include "lumabri_calibration_store.h"
+
+/* Borrowed by the synchronous household chat only. Ordinary/legacy hosts
+ * cannot create an entry without an approved plan and actual numeric metadata. */
+static LmbCalibration *g_recording_calibration;
+static const char *g_calibration_directory;
 
 /* ---- terminal ----------------------------------------------------------- */
 
@@ -2403,6 +2412,8 @@ typedef struct {
     int segment;
     int greedy_only; /* actual Edge capability, not a model-name assumption */
     EngineTransport transport;
+    uint32_t numeric_abi;
+    char numeric_class[97];
 } Engine;
 
 static int artifact_is(const char *value, const char *name) {
@@ -2470,6 +2481,7 @@ static char *read_until_prompt(int fd) {
  * Returns 0, or -1 if the child died first. */
 static int engine_wait_ready(Engine *e) {
     e->greedy_only = 0;
+    e->numeric_abi = 0; e->numeric_class[0] = 0;
     size_t cap = 8192, len = 0;
     char *buf = malloc(cap);
     if (!buf) return -1;
@@ -2486,6 +2498,15 @@ static int engine_wait_ready(Engine *e) {
         buf[len] = 0;
         if (memmem(buf, len, FRAME_READY, strlen(FRAME_READY))) {
             e->greedy_only = strstr(buf, "\nLUMABRI_SAMPLING GREEDY\n") != NULL;
+            const char *numeric = strstr(buf, "\nLUMABRI_NUMERIC ");
+            if (numeric) {
+                unsigned abi = 0; char value[97] = ""; int consumed = 0;
+                if (sscanf(numeric, "\nLUMABRI_NUMERIC %u %96[^\n]%n", &abi, value, &consumed) == 2 && abi &&
+                    consumed > 0 && numeric[consumed] == '\n' &&
+                    lmb_cal_text(value, sizeof value)) {
+                    e->numeric_abi = abi; snprintf(e->numeric_class, sizeof e->numeric_class, "%s", value);
+                }
+            }
             e->proto = PROTO_FRAMED; free(buf); return 0;
         }
         if ((len >= 3 && !memcmp(buf + len - 3, "\n> ", 3)) ||
@@ -3227,7 +3248,12 @@ static int host_greet(int fd, const HostState *h, int busy) {
     lmb_buf_u32(&b, 2);       /* SUBMIT/DATA/DONE, independent of model family */
     /* Optional capability word after codec. Older clients reject the extra
      * field rather than silently request unsupported stochastic sampling. */
-    if (h->engine->greedy_only) lmb_buf_u32(&b, 1);
+    if (h->engine->greedy_only || h->engine->numeric_abi) lmb_buf_u32(&b, (uint32_t)h->engine->greedy_only);
+    if (h->engine->numeric_abi) {
+        lmb_buf_u32(&b, 0x314d554e); /* NUM1, optional measured runtime metadata */
+        lmb_buf_u32(&b, h->engine->numeric_abi);
+        lmb_buf_str(&b, h->engine->numeric_class);
+    }
     int rc = lmb_send(fd, LMB_HOST_HELLO_R, b.p, (uint32_t)b.len, NULL, 0);
     free(b.p);
     return rc;
@@ -3586,6 +3612,14 @@ static int host_connect(const char *addr, const char *model_type, const char *ex
         fprintf(stderr, "[lumabri] unsupported host sampling capabilities\n");
         lmb_msg_free(&m); lmb_close(fd); return -1;
     }
+    uint32_t numeric_tag = 0, numeric_abi = 0;
+    char numeric_class[97] = "";
+    if (c.off < c.len && (lmb_cur_u32(&c, &numeric_tag) || numeric_tag != 0x314d554e ||
+        lmb_cur_u32(&c, &numeric_abi) || !numeric_abi ||
+        lmb_inventory_string(&c, numeric_class, sizeof numeric_class) || !numeric_class[0])) {
+        fprintf(stderr, "[lumabri] unsupported host numeric metadata\n");
+        lmb_msg_free(&m); lmb_close(fd); return -1;
+    }
     if (c.off != c.len || m.pay_len) { lmb_msg_free(&m); lmb_close(fd); return -1; }
     lmb_msg_free(&m);
     if (model_type && model_type[0] && strcmp(model_type, mtype)) {
@@ -3624,6 +3658,8 @@ static int host_connect(const char *addr, const char *model_type, const char *ex
     e->to = e->from = pair[0];
     e->kind = kind_id;
     e->greedy_only = (int)sampling_flags;
+    e->numeric_abi = numeric_abi;
+    snprintf(e->numeric_class, sizeof e->numeric_class, "%s", numeric_class);
     e->proto = codec == 2 || kind_is_serve2(e->kind) ? PROTO_SERVE2 : PROTO_FRAMED;
     g_signal_engine_fd = (sig_atomic_t)pair[0];
 
@@ -4791,13 +4827,29 @@ static int cmd_chat(int argc, char **argv) {
         /* STAT <tokens> <tok/s> <cache hit%> <rss GB> */
         double tps = 0, hit = 0, rss = 0;
         int ntok = 0;
-        int nstat = sscanf(stat, "STAT %d %lf %lf %lf", &ntok, &tps, &hit, &rss);
+        unsigned prompt_count = 0;
+        int nstat = sscanf(stat, "STAT %d %lf %lf %lf %u", &ntok, &tps, &hit, &rss, &prompt_count);
         double dmb = g_eng.net_mb - m0;
         double end = nowd(), first = g_first_token_at;
         LmbGenerationMetrics metrics;
         int metric_status=lmb_metrics_parse(stat,&metrics);
         if(metric_status==0 && metrics.generated_tokens!=(uint32_t)ntok) metric_status=-1;
         if(metric_status==0) {
+            if (g_recording_calibration && g_calibration_directory && eng.numeric_abi &&
+                nstat >= 5 && prompt_count && lmb_metrics_decode_rate(&metrics) > 0) {
+                LmbCalibration record = *g_recording_calibration;
+                record.key.adapter_abi = eng.numeric_abi;
+                snprintf(record.key.numeric_class, sizeof record.key.numeric_class, "%s", eng.numeric_class);
+                record.decode_tok_s = lmb_metrics_decode_rate(&metrics);
+                record.ttft_seconds = first > r0 ? first - r0 : metrics.prefill_seconds;
+                record.measured_at = (double)time(NULL); record.samples = 1;
+                record.prompt_tokens = prompt_count; record.generated_tokens = metrics.generated_tokens;
+                if (!lmb_cal_store(g_calibration_directory, &record))
+                    *g_recording_calibration = record;
+                else fprintf(stderr, "[lumabri] Could not save this measurement; the reply is unaffected.\n");
+            }
+            if (g_recording_calibration && !eng.numeric_abi)
+                fprintf(stderr, "[calibration] No speed saved: the host did not supply its numeric ABI.\n");
             printf("%s  host prefill %.1fs · %u generated tokens",C_DIM,
                    metrics.prefill_seconds,metrics.generated_tokens);
             double rate=lmb_metrics_decode_rate(&metrics);
@@ -5017,6 +5069,7 @@ static void inventory_id_text(const uint8_t id[32], char out[65]) {
 static int catalog_inventory(LmbTuiState *st) {
     memset(st->nodes, 0, sizeof st->nodes);
     memset(st->identities, 0, sizeof st->identities);
+    memset(st->runtime_ids, 0, sizeof st->runtime_ids);
     memset(st->ages_ms, 0, sizeof st->ages_ms);
     catalog_self(&st->nodes[0], &st->profiles[0], st->disk[0] ? st->disk : ".");
     st->nnodes = 1;
@@ -5049,6 +5102,8 @@ static int catalog_inventory(LmbTuiState *st) {
         node->ram_budget_bytes = r->ram_budget_bytes;
         node->vram_budget_bytes = r->machine.vram_available_bytes;
         node->threads = r->machine.logical_cpus;
+        if (r->runtime_threads && node->threads > r->runtime_threads) node->threads = r->runtime_threads;
+        snprintf(st->runtime_ids[at], sizeof st->runtime_ids[at], "%s", r->runtime_id);
         /* Resource reporting is not executable Segment capability. No remote
          * card is promoted to a supported backend by an inventory advert. */
         node->gpu_backends = 0;
@@ -5058,6 +5113,51 @@ static int catalog_inventory(LmbTuiState *st) {
         inventory_id_text(r->identity, st->identities[at]);
     }
     return 0;
+}
+
+static int catalog_calibration_dir(char out[1200]) {
+    const char *home = getenv("HOME");
+    return !home || checked_printf(out, 1200, "%s/.lumabri/calibrations", home);
+}
+
+static void catalog_hardware_id(const LmbMachineProfile *p, const char *address, char out[65]) {
+    LmbSha sha; uint8_t digest[32]; lmb_sha_init(&sha);
+    const char *fields[] = {p->os, p->arch, p->cpu_model, p->isa, address};
+    for (unsigned i = 0; i < sizeof fields / sizeof *fields; i++)
+        lmb_sha_update(&sha, fields[i], strlen(fields[i]) + 1);
+    lmb_sha_le32(&sha, p->logical_cpus); lmb_sha_le32(&sha, p->physical_cores);
+    lmb_sha_le32(&sha, p->numa_nodes); lmb_sha_le64(&sha, p->ram_total_bytes);
+    lmb_sha_le32(&sha, p->gpu_count); lmb_sha_le64(&sha, p->vram_total_bytes);
+    lmb_sha_final(&sha, digest); lmb_hex(out, digest, sizeof digest);
+}
+
+static int catalog_calibration_key(const LmbTuiState *st, const LmbTuiModel *m,
+    uint32_t abi, const char *numeric, LmbCalKey *key) {
+    memset(key, 0, sizeof *key);
+    if (!m->planned || m->plan.state != LMB_PLAN_RESIDENT || !m->content_id[0] ||
+        !st->build_id[0] || !m->plan.nslices || m->plan.nslices > LMB_CAL_NODES_MAX) return -1;
+    snprintf(key->model_root, sizeof key->model_root, "%s", m->content_id);
+    snprintf(key->adapter, sizeof key->adapter, "%s", m->shape.segment_id);
+    snprintf(key->build_id, sizeof key->build_id, "%s", st->build_id);
+    snprintf(key->plan_kind, sizeof key->plan_kind, "segment");
+    snprintf(key->numeric_class, sizeof key->numeric_class, "%s", numeric ? numeric : "");
+    key->adapter_abi = abi; key->goal = m->plan.goal;
+    key->context = st->context; key->sessions = st->sessions; key->nodes = m->plan.nslices;
+    int edge = 0;
+    for (uint32_t i = 0; i < key->nodes; i++) {
+        const LmbSlice *slice = &m->plan.slices[i]; uint32_t n = slice->node;
+        if (n >= st->nnodes || !st->identities[n][0] || !st->runtime_ids[n][0]) return -1;
+        if (n == m->plan.edge_node) { key->edge_node = i; edge = 1; }
+        snprintf(key->node_id[i], sizeof key->node_id[i], "%s", st->identities[n]);
+        snprintf(key->node_build_id[i], sizeof key->node_build_id[i], "%s", st->runtime_ids[n]);
+        snprintf(key->node_backend[i], sizeof key->node_backend[i], "cpu");
+        catalog_hardware_id(&st->profiles[n], st->nodes[n].addr, key->node_hardware_id[i]);
+        key->layer_begin[i] = slice->layer_begin; key->layer_end[i] = slice->layer_end;
+        key->threads[i] = st->nodes[n].threads > 256 ? 256 : st->nodes[n].threads;
+    }
+    /* ABI/numeric may be unknown until the real Edge greeting. All other
+     * fields must already be bound; the writer validates the completed key. */
+    return edge ? 0 : -1;
 }
 
 static int catalog_state_refresh(LmbTuiState *st, void *unused) {
@@ -5073,6 +5173,12 @@ static int catalog_state_refresh(LmbTuiState *st, void *unused) {
     int n = catalog_scan(st->root, found, LMB_TUI_MAX_MODELS);
     st->nmodels = 0;
     (void)catalog_inventory(st);
+    static LmbBinaryDigest self_digest;
+    char bin_dir[1024], binary[1200], calibration_dir[1200]; uint8_t digest[32];
+    exe_dir(bin_dir, sizeof bin_dir); st->build_id[0] = 0;
+    if (!checked_printf(binary, sizeof binary, "%s/lumabri", bin_dir) &&
+        !lmb_binary_digest(binary, &self_digest, digest)) lmb_hex(st->build_id, digest, 32);
+    int have_cal_dir = !catalog_calibration_dir(calibration_dir);
     for (int i = 0; i < n; i++) {
         LmbTuiModel *m = &st->models[st->nmodels];
         memset(m, 0, sizeof *m);
@@ -5104,9 +5210,12 @@ static int catalog_state_refresh(LmbTuiState *st, void *unused) {
             for (uint32_t j = 0; j < m->plan.nslices; j++)
                 m->plan.slices[j].node = mapping[m->plan.slices[j].node];
         }
-        /* Runtime/checkpoint binding to the record store is not connected
-         * yet. Never manufacture a partial key in the renderer. */
-        m->calibration = NULL;
+        if (have_cal_dir && !lmb_checkpoint_identity(m->dir, m->content_id, NULL, NULL) &&
+            !lmb_cal_load(calibration_dir, m->content_id, &m->calibration)) {
+            m->has_calibration = 1;
+            m->calibration_key_valid = !catalog_calibration_key(st, m, m->calibration.key.adapter_abi,
+                m->calibration.key.numeric_class, &m->calibration_key) && lmb_cal_key_valid(&m->calibration_key);
+        }
         st->nmodels++;
     }
     free(found);
@@ -5140,9 +5249,12 @@ static void catalog_row(const LmbTuiModel *m) {
     /* The speed column is deliberately not a number. It becomes one when a
      * calibration exists for THIS model on THIS cluster with THIS plan, and
      * not one moment earlier. */
+    char speed[128] = "not calibrated";
+    if (m->has_calibration) lmb_cal_speed_text(&m->calibration,
+        m->calibration_key_valid ? &m->calibration_key : NULL, speed, sizeof speed);
     printf("  %s%-2s%s %-22s %-14s %-28s %s\n",
            mark[0] == 'x' ? C_RED : mark[0] == '!' ? C_CORAL : C_GRN,
-           mark, C_R, m->name, state, detail, "not calibrated");
+           mark, C_R, m->name, state, detail, speed);
 }
 
 static void json_string(FILE *out, const char *s) {
@@ -5205,8 +5317,19 @@ static void catalog_json(const LmbTuiState *st) {
                planned ? "true" : "false");
         json_string(stdout, planned ? lmb_plan_state_name(plan->state) :
                                      "cannot plan");
-        printf(",\"missing_bytes\":%llu,\"calibration\":null}",
+        printf(",\"missing_bytes\":%llu,\"calibration\":",
                (unsigned long long)(planned ? plan->missing_bytes : 0));
+        if (!model->has_calibration) fputs("null", stdout);
+        else {
+            int current = model->calibration_key_valid &&
+                lmb_cal_matches(&model->calibration.key, &model->calibration_key);
+            printf("{\"state\":\"%s\",\"measured_at\":%.0f,\"samples\":%u,\"prompt_tokens\":%u,\"generated_tokens\":%u,\"decode_tok_s\":",
+                current ? "measured" : "stale", model->calibration.measured_at, model->calibration.samples,
+                model->calibration.prompt_tokens, model->calibration.generated_tokens);
+            if (current) printf("%.6f", model->calibration.decode_tok_s); else fputs("null", stdout);
+            fputc('}', stdout);
+        }
+        fputc('}', stdout);
     }
     fputs("]}\n", stdout);
 }
@@ -5297,12 +5420,14 @@ static int cmd_models(int argc, char **argv) {
  * does not reserve RAM, launch engines or download checkpoint blocks. */
 static int cmd_worker(int argc, char **argv) {
     const char *tracker = NULL, *name = NULL, *disk = ".", *control = "";
+    const char *runtime_epoch = NULL;
     uint64_t limit = UINT64_MAX;
     for (int i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "--join") && i + 1 < argc) tracker = argv[++i];
         else if (!strcmp(argv[i], "--name") && i + 1 < argc) name = argv[++i];
         else if (!strcmp(argv[i], "--disk") && i + 1 < argc) disk = argv[++i];
         else if (!strcmp(argv[i], "--control-address") && i + 1 < argc) control = argv[++i];
+        else if (!strcmp(argv[i], "--runtime-epoch") && i + 1 < argc) runtime_epoch = argv[++i];
         else if (!strcmp(argv[i], "--ram-gb") && i + 1 < argc) {
             char *end;
             double gb = strtod(argv[++i], &end);
@@ -5326,6 +5451,15 @@ static int cmd_worker(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN);
     LmbMachineProfile profile;
     if (lmb_machine_probe(&profile, disk, NULL)) return 1;
+    LmbRuntimeIdentityCache runtime_cache = {0};
+    char runtime_dir[1024], runtime_binary[1200], runtime_id[65] = "";
+    unsigned runtime_threads = 0;
+    if (runtime_epoch) {
+        exe_dir(runtime_dir, sizeof runtime_dir);
+        if (!control[0] || checked_printf(runtime_binary, sizeof runtime_binary, "%s/segment_node", runtime_dir) ||
+            lmb_runtime_thread_capacity(runtime_binary, &runtime_threads) ||
+            lmb_runtime_identity(runtime_dir, runtime_epoch, &runtime_cache, runtime_id)) return 1;
+    }
     printf("worker: reporting this computer to %s; waiting for a model plan\n", tracker);
     fflush(stdout);
     while (!g_stopping) {
@@ -5342,6 +5476,10 @@ static int cmd_worker(int argc, char **argv) {
             LmbMachineReport report = {0};
             memcpy(report.identity, pk, sizeof pk);
             snprintf(report.control_addr, sizeof report.control_addr, "%s", control);
+            if (runtime_epoch && !lmb_runtime_identity(runtime_dir, runtime_epoch, &runtime_cache, runtime_id)) {
+                snprintf(report.runtime_id, sizeof report.runtime_id, "%s", runtime_id);
+                report.runtime_threads = runtime_threads;
+            }
             lmb_machine_refresh_resources(&profile, disk);
             report.machine = profile;
             if (name) snprintf(report.machine.hostname, sizeof report.machine.hostname, "%s", name);

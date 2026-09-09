@@ -28,7 +28,9 @@ typedef struct {
     int weights_present;
     uint64_t checkpoint_bytes;
     int checkpoint_inventory_ok;
-    const LmbCalibration *calibration;   /* NULL until something is measured */
+    LmbCalibration calibration;    /* owned by the snapshot, never a borrowed pointer */
+    int has_calibration;
+    char content_id[65];
     LmbCalKey calibration_key;      /* exact current conditions */
     int calibration_key_valid;
 } LmbTuiModel;
@@ -39,9 +41,11 @@ typedef struct LmbTuiState {
     LmbClusterNode nodes[LMB_CLUSTER_MAX_NODES];
     LmbMachineProfile profiles[LMB_CLUSTER_MAX_NODES];
     char identities[LMB_CLUSTER_MAX_NODES][65];
+    char runtime_ids[LMB_CLUSTER_MAX_NODES][65];
     uint32_t ages_ms[LMB_CLUSTER_MAX_NODES];
     uint32_t nnodes;
     int inventory_ok;
+    char build_id[65];
     int action_model;
     int initial_tab;
     char selected_nodes[LMB_CLUSTER_MAX_NODES][65];
@@ -54,6 +58,15 @@ typedef struct LmbTuiState {
 } LmbTuiState;
 
 enum { LMB_TUI_REQUEST_CHAT = 10 };
+
+/* Selection changes precede asynchronous planning. Never render a speed
+ * attached to the previous selection during that refresh window. */
+static inline void lmb_tui_invalidate_plans(LmbTuiState *st) {
+    for (int i = 0; i < st->nmodels; i++) {
+        st->models[i].planned = 0;
+        st->models[i].calibration_key_valid = 0;
+    }
+}
 
 static inline int lmb_tui_node_enabled(const LmbTuiState *st, uint32_t node) {
     if (node >= st->nnodes || !st->nodes[node].addr[0]) return 0;

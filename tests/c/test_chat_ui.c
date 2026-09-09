@@ -5,6 +5,22 @@
 #include <assert.h>
 
 int main(int argc, char **argv) {
+    const char *boot[] = {
+        "\nLUMABRI_SAMPLING LOGITS\nLUMABRI_NUMERIC 2 cpu-test\n" FRAME_READY "\n",
+        "\nLUMABRI_SAMPLING GREEDY\nLUMABRI_NUMERIC 2 cpu-test\n" FRAME_READY "\n",
+        "\nLUMABRI_NUMERIC 0 cpu-test\n" FRAME_READY "\n",
+        "\n" FRAME_READY "\n",
+        "\nLUMABRI_NUMERIC 2 abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz\n" FRAME_READY "\n"
+    };
+    for (unsigned i = 0; i < sizeof boot / sizeof *boot; i++) {
+        int ready[2]; assert(!pipe(ready));
+        assert(write(ready[1], boot[i], strlen(boot[i])) == (ssize_t)strlen(boot[i]));
+        close(ready[1]); Engine engine = {.from = ready[0], .numeric_abi = 99};
+        assert(!engine_wait_ready(&engine)); close(ready[0]);
+        assert(engine.numeric_abi == (i < 2 ? 2u : 0u));
+        assert(engine.greedy_only == (i == 1));
+        assert(i < 2 ? !strcmp(engine.numeric_class, "cpu-test") : !engine.numeric_class[0]);
+    }
     const char *io_env = getenv("LUMABRI_IO_TIMEOUT_MS");
     char *saved_io = io_env ? strdup(io_env) : NULL;
     unsetenv("LUMABRI_IO_TIMEOUT_MS");
@@ -62,6 +78,10 @@ int main(int argc, char **argv) {
     g_slash_completion = 1;
     signal(SIGPIPE, SIG_IGN);
     static LmbTuiState selection;
+    selection.nmodels = 1;
+    selection.models[0].planned = selection.models[0].calibration_key_valid = 1;
+    lmb_tui_invalidate_plans(&selection);
+    assert(!selection.models[0].planned && !selection.models[0].calibration_key_valid);
     selection.nnodes = 3;
     for (int i = 0; i < 3; i++) {
         snprintf(selection.identities[i], sizeof selection.identities[i], "peer-%d", i);
