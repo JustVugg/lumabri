@@ -5223,12 +5223,13 @@ static int catalog_state_refresh(LmbTuiState *st, void *unused) {
             selected[nselected] = st->nodes[j];
             mapping[nselected++] = j;
         }
-        m->planned = st->inventory_ok && !lmb_plan_cluster_source(&m->shape, selected, nselected,
-                                       st->context, st->sessions,
-                                       LMB_GOAL_ONE_SESSION, household && found[i].has_weights, &m->plan);
-        if (m->planned && household && m->weights_present)
-            m->planned = m->checkpoint_inventory_ok && !lmb_home_plan_budgets(
-                &m->shape, m->checkpoint_bytes, selected, nselected, st->context, &m->plan);
+        if (household && m->weights_present)
+            m->planned = st->inventory_ok && m->checkpoint_inventory_ok &&
+                !lmb_home_plan_source(&m->shape, m->checkpoint_bytes, selected,
+                    nselected, st->context, st->sessions, LMB_GOAL_ONE_SESSION, 1, &m->plan);
+        else
+            m->planned = st->inventory_ok && !lmb_plan_cluster_source(&m->shape, selected,
+                nselected, st->context, st->sessions, LMB_GOAL_ONE_SESSION, 0, &m->plan);
         if (m->planned) {
             m->plan.edge_node = mapping[m->plan.edge_node];
             for (uint32_t j = 0; j < m->plan.nslices; j++)

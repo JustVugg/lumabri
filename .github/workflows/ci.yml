@@ -142,6 +142,7 @@ jobs:
           make swarm_probe
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --repeat-cached --expect-metrics --expect-calibration
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --kill-donor
+          python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --expect-unused-donor
       - name: Same greedy tokens with one and two real Segment ranges
         working-directory: lumabri
         run: |
@@ -347,6 +348,7 @@ jobs:
           make swarm_probe
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --repeat-cached --expect-metrics --expect-calibration
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --kill-donor
+          python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --expect-unused-donor
       - uses: actions/download-artifact@v4
         with:
           name: tiny-qwen36-checkpoint

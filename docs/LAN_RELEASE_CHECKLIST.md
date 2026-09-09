@@ -139,6 +139,12 @@ not a completed gate.
    recheck before offers. Edge and Segment budgets are separately MiB-aligned.
    Follow-up: checked tensor/state arithmetic and aggregate budgets reject
    overflow instead of wrapping into apparently small allocations.
+   Household placement now retains successful proportional plans and searches
+   alternative resident assignments when fixed process floors or an empty Edge
+   interval invalidate that split. Only planned participants receive offers;
+   every alternative is checked against the unchanged launch reservations.
+   This bounded search is not an exhaustive feasibility or speed solver.
+   See `HOUSEHOLD_PLACEMENT.md`.
    Measured-cost placement remains pending; this does not enable disk mode or
    certify additional model families.
 4. PR #157 merged: versioned measurements collected during ordinary Segment chat,
