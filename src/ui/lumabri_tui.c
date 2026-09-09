@@ -231,6 +231,7 @@ static void draw_models(const LmbTuiState *st, Size sz, int sel, int top) {
                      m->plan.nslices, m->plan.nslices == 1 ? "" : "s",
                      computers, computers == 1 ? "" : "s");
         }
+        if (m->advice_flags) snprintf(detail, sizeof detail, "%s", lmb_advice_text(m->advice_flags));
         speed_text(m, speed, sizeof speed);
         printf("%s", idx == sel ? c(INV) : "");
         printf("%s", idx == sel ? "▸" : " ");
@@ -405,6 +406,10 @@ static void draw_detail(const LmbTuiState *st, Size sz, int sel) {
     speed_text(m, speed, sizeof speed);
     at(row++, 1);
     printf("  %sSPEED%s   %s", c(DIM), c(OFF), speed);
+    if (m->advice_flags) {
+        at(row++, 1);
+        printf("  Advice: %s (not an answer-quality ranking)", lmb_advice_text(m->advice_flags));
+    }
     if (!m->has_calibration) {
         at(row++, 1);
         printf("  %sa number appears here after a calibration on these "
@@ -493,6 +498,8 @@ static void draw_workspace(const LmbTuiState *st, int tab, int sel, int detail,
         ui_printf(11, 5, UI_MUTED, "%s · %u layers · %u context · %u session(s)",
                   m->shape.model_type, m->shape.layers, st->context, st->sessions);
         ui_printf(13, 5, UI_TEXT, "Plan: %s    Speed: %s", state_word(m), speed);
+        if (m->advice_flags)
+            ui_printf(15, 5, UI_SAND, "Resource advice: %s (not an answer-quality ranking)", lmb_advice_text(m->advice_flags));
         if (m->has_calibration && m->calibration_key_valid &&
             lmb_cal_matches(&m->calibration.key, &m->calibration_key))
             ui_printf(14, 5, UI_MUTED, "Last turn: %u prompt / %u generated tokens. Longer chats or other load may be slower.",
@@ -537,7 +544,9 @@ static void draw_workspace(const LmbTuiState *st, int tab, int sel, int detail,
         }
         for (int i = top; i < st->nmodels && i < top + rows; i++) {
             char speed[96], description[256]; speed_text(&st->models[i], speed, sizeof speed);
-            snprintf(description, sizeof description, "%s · %s · %u layers", state_word(&st->models[i]), speed, st->models[i].shape.layers);
+            const char *advice = lmb_advice_text(st->models[i].advice_flags);
+            snprintf(description, sizeof description, "%s · %s · %u layers%s%s", state_word(&st->models[i]), speed,
+                st->models[i].shape.layers, *advice ? " · " : "", advice);
             ui_item(10 + (i - top) * 3, i == sel, st->models[i].name, description);
         }
         ui_text(ui_h - 6, 5, UI_MUTED, "A plan before a download. Speed appears only with a matching calibration.");

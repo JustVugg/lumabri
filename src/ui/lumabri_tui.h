@@ -16,6 +16,7 @@
 #include "lumabri_cluster.h"
 #include "lumabri_calibration.h"
 #include "lumabri_machine.h"
+#include "src/planner/lumabri_catalogue_advice.h"
 
 #define LMB_TUI_MAX_MODELS 64
 
@@ -33,6 +34,7 @@ typedef struct {
     char content_id[65];
     LmbCalKey calibration_key;      /* exact current conditions */
     int calibration_key_valid;
+    uint32_t advice_flags;
 } LmbTuiModel;
 
 typedef struct LmbTuiState {
@@ -65,6 +67,7 @@ static inline void lmb_tui_invalidate_plans(LmbTuiState *st) {
     for (int i = 0; i < st->nmodels; i++) {
         st->models[i].planned = 0;
         st->models[i].calibration_key_valid = 0;
+        st->models[i].advice_flags = 0;
     }
 }
 

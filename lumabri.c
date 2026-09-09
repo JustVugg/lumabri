@@ -5160,6 +5160,29 @@ static int catalog_calibration_key(const LmbTuiState *st, const LmbTuiModel *m,
     return edge ? 0 : -1;
 }
 
+static void catalog_advice_refresh(LmbTuiState *st) {
+    LmbAdviceCandidate candidates[LMB_TUI_MAX_MODELS] = {0};
+    uint32_t advice[LMB_TUI_MAX_MODELS];
+    for (int i = 0; i < st->nmodels; i++) {
+        const LmbTuiModel *m = &st->models[i];
+        LmbAdviceCandidate *c = &candidates[i];
+        c->eligible = st->inventory_ok && m->planned && m->shape.sizing_verified &&
+            m->weights_present && m->checkpoint_inventory_ok &&
+            m->plan.state == LMB_PLAN_RESIDENT && m->plan.nslices;
+        for (uint32_t j = 0; c->eligible && j < m->plan.nslices; j++) {
+            uint32_t node = m->plan.slices[j].node;
+            if (node >= st->nnodes || !lmb_tui_node_enabled(st, node)) c->eligible = 0;
+            c->reserved_bytes = lmb_budget_add(c->reserved_bytes, m->plan.slices[j].bytes_resident);
+        }
+        c->checkpoint_bytes = m->checkpoint_bytes;
+        if (m->has_calibration && m->calibration_key_valid && lmb_cal_valid(&m->calibration) &&
+            lmb_cal_matches(&m->calibration.key, &m->calibration_key))
+            c->measured_tok_s = m->calibration.decode_tok_s;
+    }
+    lmb_catalogue_advice(candidates, (size_t)st->nmodels, advice);
+    for (int i = 0; i < st->nmodels; i++) st->models[i].advice_flags = advice[i];
+}
+
 static int catalog_state_refresh(LmbTuiState *st, void *unused) {
     (void)unused;
     /* Per-layer contracts make each entry larger. Do not place the entire
@@ -5218,6 +5241,7 @@ static int catalog_state_refresh(LmbTuiState *st, void *unused) {
         }
         st->nmodels++;
     }
+    catalog_advice_refresh(st);
     free(found);
     return 0;
 }
@@ -5329,6 +5353,7 @@ static void catalog_json(const LmbTuiState *st) {
             if (current) printf("%.6f", model->calibration.decode_tok_s); else fputs("null", stdout);
             fputc('}', stdout);
         }
+        fputs(",\"advice\":", stdout); json_string(stdout, lmb_advice_text(model->advice_flags));
         fputc('}', stdout);
     }
     fputs("]}\n", stdout);

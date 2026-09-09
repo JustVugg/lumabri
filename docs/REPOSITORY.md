@@ -16,6 +16,7 @@ ready for household use. The public README documents the tested TUI path.
 | `segment_*.c`, `lumabri_segment*`, `segment_colibri.h` | Segment workers, Edge chat, discovery and Colibri integration |
 | `tracker.c`, `maintainer.c`, `lumashim.c` | Discovery/control, checkpoint distribution and block mirror |
 | `lumabri_planner.h`, `lumabri_cluster.h`, `lumabri_calibration.h` | Model sizing, placement and calibration records |
+| `src/planner/` | Model-independent catalogue advice; no UI rendering or weight loading |
 | `lumabri_machine.*`, scheduler and governor headers | Hardware inventory, resource budgets and admission |
 | `expert_engines/`, `engine_patches/`, Expert bridge files | Optional Expert/Hybrid and upstream compatibility |
 | `deploy/`, root deployment/release documents | Existing deployment and release tooling |

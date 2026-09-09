@@ -80,8 +80,10 @@ int main(int argc, char **argv) {
     static LmbTuiState selection;
     selection.nmodels = 1;
     selection.models[0].planned = selection.models[0].calibration_key_valid = 1;
+    selection.models[0].advice_flags = LMB_ADVICE_FASTEST_OBSERVED;
     lmb_tui_invalidate_plans(&selection);
     assert(!selection.models[0].planned && !selection.models[0].calibration_key_valid);
+    assert(!selection.models[0].advice_flags);
     selection.nnodes = 3;
     for (int i = 0; i < 3; i++) {
         snprintf(selection.identities[i], sizeof selection.identities[i], "peer-%d", i);
@@ -91,6 +93,28 @@ int main(int argc, char **argv) {
     strcpy(selection.selected_nodes[0], selection.identities[1]);
     assert(lmb_tui_node_enabled(&selection, 1));
     assert(!lmb_tui_node_enabled(&selection, 0) && !lmb_tui_node_enabled(&selection, 2));
+    selection.nmodels = 2; selection.inventory_ok = 1;
+    for (int i = 0; i < 2; i++) {
+        LmbTuiModel *m = &selection.models[i];
+        snprintf(m->name, sizeof m->name, "advice-fixture-%d", i);
+        m->shape.layers = 1; m->plan.edge_node = 1; m->plan.slices[0].layer_end = 1;
+        m->planned = m->shape.sizing_verified = m->weights_present = m->checkpoint_inventory_ok = 1;
+        m->plan.state = LMB_PLAN_RESIDENT; m->plan.nslices = 1; m->plan.slices[0].node = 1;
+        m->plan.slices[0].bytes_resident = 20u * (i + 1); m->checkpoint_bytes = 10u * (i + 1);
+    }
+    catalog_advice_refresh(&selection);
+    assert(selection.models[0].advice_flags == LMB_ADVICE_LOWEST_RAM);
+    assert(selection.models[1].advice_flags == LMB_ADVICE_LARGEST_CHECKPOINT);
+    if (argc > 1 && !strcmp(argv[1], "advice")) {
+        catalog_json(&selection);
+        return lmb_tui_run(&selection, 1, "");
+    }
+    selection.models[1].shape.sizing_verified = 0;
+    catalog_advice_refresh(&selection);
+    assert(!selection.models[0].advice_flags && !selection.models[1].advice_flags);
+    selection.models[1].shape.sizing_verified = 1; selection.selected_nodes[0][0] = 0;
+    catalog_advice_refresh(&selection);
+    assert(!selection.models[0].advice_flags && !selection.models[1].advice_flags);
     if (argc > 1 && !strcmp(argv[1], "editor")) {
         char line[128];
         printf("USER-PREVIOUS\nASSISTANT-PREVIOUS\n\n│ › "); fflush(stdout);

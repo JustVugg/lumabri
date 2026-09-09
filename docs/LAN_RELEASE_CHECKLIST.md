@@ -143,12 +143,15 @@ not a completed gate.
    certify additional model families.
 4. PR #157 merged: versioned measurements collected during ordinary Segment chat,
    separating prefill, decode traversals and first visible text. No extra model
-   run is required. PR #159 connects completed household turns to private
+   run is required. PR #159 merged: completed household turns connect to private
    content/runtime-bound records and catalogue lookup. Context, selected
    computers and donor restarts invalidate old speeds; the last observed
    workload is shown separately from the configured context limit. Placement
-   cost calibration and catalogue advice remain pending; this is not the
-   entire gate 4. See `CALIBRATION_RECORDS.md` for its exact contract.
+   cost calibration remains pending. The catalogue advice follow-up highlights
+   lowest RAM reservation, largest resident checkpoint and fastest observed
+   run among eligible plans; it does not rank answer quality or invent speed
+   before a first measurement. See `CALIBRATION_RECORDS.md` and
+   `CATALOGUE_ADVICE.md` for the exact contracts.
 5. PR #158 merged: reusable adapter-scoped working mirrors and shared verified
    CAS chunks, with separate approval and fresh engine sessions on reuse.
    Cache-directory allocation is exclusive even across different homes.
