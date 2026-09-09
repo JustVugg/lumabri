@@ -24,7 +24,10 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def main():
+    global ROOT
     parser = argparse.ArgumentParser()
+    parser.add_argument("--runtime-dir", type=Path, default=ROOT,
+                        help="directory containing the installed household binaries; no source tree fallback")
     parser.add_argument("--models-dir", required=True)
     parser.add_argument("--donor-ram-gb", type=float, default=0.5)
     parser.add_argument("--context", type=int, default=128,
@@ -41,6 +44,10 @@ def main():
     parser.add_argument("--kill-donor", action="store_true",
                         help="kill a donor TUI after generation; assert engines and leases are released")
     args = parser.parse_args()
+    ROOT = args.runtime_dir.resolve(strict=True)
+    for binary in ("lumabri", "tracker", "maintainer", "segment_node", "segment_chat"):
+        if not (ROOT / binary).is_file() or not os.access(ROOT / binary, os.X_OK):
+            parser.error(f"missing executable in runtime directory: {binary}")
     if args.repeat_cached and (args.kill_donor or args.expect_no_fit):
         parser.error("--repeat-cached requires a normal completed first session")
     if args.expect_calibration and (args.kill_donor or args.expect_no_fit):

@@ -19,7 +19,8 @@ ready for household use. The public README documents the tested TUI path.
 | `src/planner/` | Model-independent catalogue advice; no UI rendering or weight loading |
 | `lumabri_machine.*`, scheduler and governor headers | Hardware inventory, resource budgets and admission |
 | `expert_engines/`, `engine_patches/`, Expert bridge files | Optional Expert/Hybrid and upstream compatibility |
-| `deploy/`, root deployment/release documents | Existing deployment and release tooling |
+| `deploy/`, root deployment/release documents | Existing deployment tooling and the minimal household launcher |
+| `tools/package_household.py` | Allowlisted native candidate assembly; never copies models or credentials |
 | `build/`, local executables, `__pycache__/`, tiny fixtures | Generated/ignored artifacts, not production source files |
 
 The root Makefile remains the supported build entry point. Test executable

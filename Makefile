@@ -66,6 +66,7 @@ PLANNER_ADAPTER_DEPS = $(wildcard planner_adapters/*.h)
 lumabri test_chat_ui test_planner test_cluster test_memory_budget test_calibration segment_budget_probe segment_node: $(PLANNER_ADAPTER_DEPS)
 lumabri test_chat_ui: lumabri_runtime_identity.h lumabri_checkpoint_identity.h lumabri_calibration_store.h lumabri_calibration.h
 lumabri test_chat_ui: src/planner/lumabri_catalogue_advice.h
+lumabri test_chat_ui: src/runtime/lumabri_preload.h
 lumabri segment_chat test_chat_ui: lumabri_metrics.h
 
 lumabri: $(HOME_NET_DEPS) lumabri.c src/ui/lumabri_tui.c src/ui/lumabri_tui.h src/ui/lumabri_visual.h src/ui/lumabri_chat_editor.h src/ui/lumabri_execution_view.h lumabri_proto.h lumabri_sign.h \
@@ -762,6 +763,8 @@ test: all test_key_rotation test_hedge test_local_fallback test_nat_adopt test_v
 	$(MAKE) test-ready-pipe
 	$(MAKE) test-home-network
 	python3 ./tests/integration/chat_ui_test.py
+	python3 ./tests/integration/package_household_test.py
+	python3 ./tests/integration/preload_path_test.py
 	python3 tests/ui_text_test.py
 	python3 tests/integration/workspace_navigation_test.py
 	python3 ./tests/integration/lan_inventory_test.py
@@ -799,6 +802,15 @@ test: all test_key_rotation test_hedge test_local_fallback test_nat_adopt test_v
 # and the shim in PREFIX/lib/lumabri. Phase-2 binaries are installed when
 # they have been built (make phase2 ENGINE=...).
 PREFIX ?= /usr/local
+
+# Deliberately small, complete household install. Unlike the historical
+# optional loop below, a missing Segment service is a build/install failure.
+install-household: household swarm_probe
+	install -d "$(DESTDIR)$(PREFIX)/bin" "$(DESTDIR)$(PREFIX)/lib/lumabri"
+	install -m 755 lumabri tracker maintainer swarm_probe segment_node segment_chat "$(DESTDIR)$(PREFIX)/bin/"
+	install -m 644 $(SHIM_LIB) tools/setup-household-firewall.ps1 "$(DESTDIR)$(PREFIX)/lib/lumabri/"
+
+.PHONY: install-household
 
 install: all
 	install -d $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(PREFIX)/lib/lumabri

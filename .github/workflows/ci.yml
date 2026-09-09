@@ -62,6 +62,10 @@ jobs:
         run: make test-home-network CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
       - name: Native workspace navigation and terminal restoration
         run: python3 tests/integration/workspace_navigation_test.py
+      - name: Native candidate packaging contracts
+        run: |
+          python3 tests/integration/package_household_test.py
+          python3 tests/integration/preload_path_test.py
   linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -275,10 +279,28 @@ jobs:
           name: tiny-v4-checkpoint
           path: lumabri/build/v4-chat/deepseek-v4-tiny/*
           retention-days: 3
+      - name: Assemble and test the Linux candidate outside the checkout layout
+        working-directory: lumabri
+        run: |
+          python3 tests/integration/package_household_test.py
+          python3 tools/package_household.py --colibri-root ../colibri --output 'build/native candidate'
+          python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --repeat-cached --expect-metrics --expect-calibration
+          python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --kill-donor
+          python3 tools/package_household.py --verify 'build/native candidate'
+          tar -czf build/lumabri-linux-candidate.tar.gz -C 'build/native candidate' .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: household-candidate-linux
+          path: lumabri/build/lumabri-linux-candidate.tar.gz
+          retention-days: 7
   macos-household:
     # Real native CPU engines + signed CAS + approvals + streaming. Loopback
     # coverage does not replace the macOS 12.6 / physical household LAN test.
     needs: linux
+    env:
+      # A native macOS 15 test is not a macOS 12 test, but do not ship a binary
+      # whose load commands already forbid the user's macOS 12.6 machine.
+      MACOSX_DEPLOYMENT_TARGET: '12.0'
     strategy:
       fail-fast: false
       matrix:
@@ -387,6 +409,21 @@ jobs:
       - name: Native V4 request and execution
         working-directory: lumabri
         run: python3 tests/integration/home_flow_test.py --models-dir build/v4-home-models --donor-ram-gb 1.0
+      - name: Assemble and test a system-libraries-only native macOS candidate
+        if: matrix.openmp == 'disabled'
+        working-directory: lumabri
+        run: |
+          python3 tools/package_household.py --colibri-root ../colibri --output 'build/native candidate'
+          python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --repeat-cached --expect-metrics --expect-calibration
+          python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --kill-donor
+          python3 tools/package_household.py --verify 'build/native candidate'
+          tar -czf build/lumabri-macos-candidate.tar.gz -C 'build/native candidate' .
+      - uses: actions/upload-artifact@v4
+        if: matrix.openmp == 'disabled'
+        with:
+          name: household-candidate-${{ matrix.runner }}
+          path: lumabri/build/lumabri-macos-candidate.tar.gz
+          retention-days: 7
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
