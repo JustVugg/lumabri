@@ -41,9 +41,14 @@ def main():
                         help="require saved real timings, matching catalogue speed and changed-context invalidation")
     parser.add_argument("--expect-no-fit", action="store_true",
                         help="verify insufficient-memory admission, without starting engines")
+    parser.add_argument("--expect-unused-donor", action="store_true",
+                        help="select a donor below the process floor; require a valid plan on the other donor only")
     parser.add_argument("--kill-donor", action="store_true",
                         help="kill a donor TUI after generation; assert engines and leases are released")
     args = parser.parse_args()
+    if args.expect_unused_donor and (args.repeat_cached or args.expect_no_fit or
+                                    args.kill_donor or args.expect_calibration):
+        parser.error("--expect-unused-donor is a separate single-session admission test")
     ROOT = args.runtime_dir.resolve(strict=True)
     for binary in ("lumabri", "tracker", "maintainer", "segment_node", "segment_chat"):
         if not (ROOT / binary).is_file() or not os.access(ROOT / binary, os.X_OK):
@@ -80,7 +85,8 @@ def main():
         settings = home / ".lumabri" / "home.conf"
         if not settings.exists():
             settings.parent.mkdir(exist_ok=True)
-            settings.write_text(f"tracker={addr}\ntoken=household-test\nmodels={Path(args.models_dir).resolve()}\nram={args.donor_ram_gb}\n")
+            ram = 0.1 if args.expect_unused_donor and name == "donor-b" else args.donor_ram_gb
+            settings.write_text(f"tracker={addr}\ntoken=household-test\nmodels={Path(args.models_dir).resolve()}\nram={ram}\n")
             settings.chmod(0o600)
         return {**os.environ, "HOME": str(home), "LUMABRI_ENCRYPT": "1",
                 "LUMABRI_HOME_PORT_BASE": str(service_base + 16 * service_slots.get(name, 0)),
@@ -201,7 +207,7 @@ def main():
         time.sleep(.5)
         offline.send("\r\r")
         until(lambda: offline.p.poll() is not None, message="unreachable donor did not fail preflight")
-        failure = "No complete resident plan fits" if args.expect_no_fit else "Cannot reach offline-test-donor"
+        failure = "No complete resident plan found" if args.expect_no_fit else "Cannot reach offline-test-donor"
         assert offline.p.returncode != 0 and offline.has(failure)
         assert not list((tmp / "offline-request").rglob("home-source-*.log")), "indexed before reachability check"
         offline_worker.terminate(); offline_worker.wait(timeout=5)
@@ -237,6 +243,34 @@ def main():
             print("HOME ADMISSION: PASS (native memory floor; no offers or engines)", flush=True)
             return
         reject.send("\r\r")
+        if args.expect_unused_donor:
+            until(lambda: a.has("Waiting for your approval"), seconds=60,
+                  message="feasible alternative did not reach its donor")
+            assert not b.has("Waiting for your approval"), "unused donor received an offer"
+            assert not engines_started("donor-a") and not engines_started("donor-b")
+            a.send("\x1b[A\r")
+            until(lambda: reject.has("/experts shows tracker activity.") or reject.p.poll() is not None,
+                  seconds=180, message="alternative plan did not reach hosted chat")
+            assert reject.p.poll() is None, "accepted alternative failed"
+            assert "Approved Segment plan: 1 compute donor" in reject.text
+            reject.send("hi\n")
+            until(lambda: reject.has("hosted stream · no local checkpoint") or reject.p.poll() is not None,
+                  seconds=120, message="alternative plan did not finish real generation")
+            assert reject.p.poll() is None
+            log = (tmp / "donor-a/.lumabri/home/engines.log").read_text(errors="replace")
+            commits = re.findall(r"\[segment-node [^\]\n]+ (\d+):(\d+)\] committed_runs=(\d+)", log)
+            assert any(int(begin) == 0 and int(end) > 0 and int(runs) > 0
+                       for begin, end, runs in commits), "no actual full-range execution"
+            assert not b.has("Waiting for your approval") and not engines_started("donor-b")
+            reject.send("/quit\n")
+            until(lambda: reject.p.poll() is not None, message="alternative quit blocked")
+            assert reject.p.returncode == 0
+            until(lambda: a.has("Released"), message="alternative donor lease leaked")
+            for lock in ("compute-donor.lock", "home/weights.lock"):
+                with open(tmp / "donor-a/.lumabri" / lock, "r") as lease:
+                    fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            print("HOME ALTERNATIVE PLAN: PASS (two selected, one used; real generation, no unused-donor offer, cleanup)", flush=True)
+            return
         until(lambda: a.has("Waiting for your approval") and b.has("Waiting for your approval"),
               seconds=60, message="offers never reached both donor TUIs")
         assert not engines_started("donor-a") and not engines_started("donor-b")

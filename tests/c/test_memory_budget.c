@@ -12,7 +12,101 @@ static void sized_file(const char *path, off_t size) {
     assert(!close(fd));
 }
 
+static void feasible_plans(void) {
+    const uint64_t mib = UINT64_C(1) << 20;
+    LmbModelShape m = {0};
+    strcpy(m.model_type, "olmoe");
+    m.layers = 4; m.hidden = 64; m.vocab = 128;
+    m.sizing_verified = m.memory_contract = 1; m.max_context = 4096;
+    m.edge_resident_bytes = 8 * mib;
+    for (uint32_t i = 0; i < m.layers; i++) m.memory[i].resident_bytes = 100 * mib;
+    LmbClusterNode nodes[LMB_CLUSTER_MAX_NODES] = {0};
+    nodes[0].ram_budget_bytes = 500 * mib;
+    nodes[1].ram_budget_bytes = 100 * mib;
+    LmbClusterPlan p, old;
+    assert(!lmb_plan_cluster_source(&m, nodes, 2, 128, 1, LMB_GOAL_ONE_SESSION, 1, &old));
+    assert(!lmb_home_plan_budgets(&m, 1, nodes, 2, 128, &old));
+    assert(old.state == LMB_PLAN_UNRUNNABLE);
+    assert(!lmb_home_plan_source(&m, 1, nodes, 2, 128, 1, LMB_GOAL_ONE_SESSION, 1, &p));
+    assert(p.state == LMB_PLAN_RESIDENT && p.nslices == 1 && p.edge_node == 0);
+    assert(p.slices[0].node == 0 && p.slices[0].layer_end == 4);
+    assert(p.fetch_bytes == 408 * mib && !p.ready_known);
+    nodes[0].lan_bps = mib;
+    assert(!lmb_home_plan_source(&m, 1, nodes, 2, 128, 1, LMB_GOAL_ONE_SESSION, 1, &p));
+    assert(p.ready_known && p.ready_seconds == 408);
+    nodes[0].has_checkpoint = 1;
+    assert(!lmb_home_plan_source(&m, 1, nodes, 2, 128, 1, LMB_GOAL_ONE_SESSION, 0, &p));
+    assert(!p.fetch_bytes && p.ready_known && !p.ready_seconds);
+    nodes[0].has_checkpoint = 0;
+
+    /* Successful legacy placements (and thus calibration keys) are stable. */
+    nodes[1].ram_budget_bytes = 500 * mib;
+    assert(!lmb_plan_cluster_source(&m, nodes, 2, 128, 1, LMB_GOAL_ONE_SESSION, 1, &old));
+    assert(!lmb_home_plan_budgets(&m, 1, nodes, 2, 128, &old));
+    assert(old.state == LMB_PLAN_RESIDENT && old.nslices == 2);
+    assert(!lmb_home_plan_source(&m, 1, nodes, 2, 128, 1, LMB_GOAL_ONE_SESSION, 1, &p));
+    assert(!memcmp(&p, &old, sizeof p));
+
+    /* More selected donors than layers used to strand Edge without a slice.
+     * Neither donor can hold both layers with Edge; two are genuinely needed. */
+    m.layers = 2;
+    for (uint32_t i = 0; i < LMB_CLUSTER_MAX_NODES; i++) nodes[i].ram_budget_bytes = 250 * mib;
+    assert(!lmb_plan_cluster_source(&m, nodes, 8, 128, 1, LMB_GOAL_ONE_SESSION, 1, &old));
+    assert(lmb_home_plan_budgets(&m, 1, nodes, 8, 128, &old));
+    assert(!lmb_home_plan_source(&m, 1, nodes, 8, 128, 1, LMB_GOAL_ONE_SESSION, 1, &p));
+    assert(p.state == LMB_PLAN_RESIDENT && p.nslices == 2);
+    assert(p.edge_node == p.slices[0].node && p.slices[0].layer_end == 1);
+    assert(!lmb_home_plan_budgets(&m, 1, nodes, 8, 128, &p));
+
+    /* No sources, extra sessions, invalid context/geometry and overflow
+     * must never become approved plans through the alternative search. */
+    assert(lmb_home_plan_source(&m, 1, nodes, 8, 128, 1, LMB_GOAL_ONE_SESSION, 0, &p));
+    assert(lmb_home_plan_source(&m, 1, nodes, 8, 128, 2, LMB_GOAL_ONE_SESSION, 1, &p));
+    assert(lmb_home_plan_source(&m, 1, nodes, 8, 8192, 1, LMB_GOAL_ONE_SESSION, 1, &p));
+    assert(lmb_home_plan_source(&m, 0, nodes, 8, 128, 1, LMB_GOAL_ONE_SESSION, 1, &p));
+    assert(lmb_home_plan_source(NULL, 1, nodes, 8, 128, 1, LMB_GOAL_ONE_SESSION, 1, &p));
+    assert(lmb_home_plan_source(&m, 1, nodes, LMB_CLUSTER_MAX_NODES + 1,
+        128, 1, LMB_GOAL_ONE_SESSION, 1, &p));
+    m.layers = 0;
+    assert(lmb_home_plan_source(&m, 1, nodes, 8, 128, 1, LMB_GOAL_ONE_SESSION, 1, &p));
+    m.layers = 4;
+    for (uint32_t i = 0; i < 8; i++) {
+        nodes[i].ram_budget_bytes = 100 * mib;
+        nodes[i].vram_budget_bytes = UINT64_C(100) << 30;
+    }
+    int rc = lmb_home_plan_source(&m, 1, nodes, 8, 128, 1, LMB_GOAL_ONE_SESSION, 1, &p);
+    assert(rc || p.state == LMB_PLAN_UNRUNNABLE); /* No RAM/VRAM pooling. */
+
+    /* Deterministic heterogeneous sweeps: every accepted interval is checked
+     * independently against the same budget launch will actually enforce. */
+    for (uint32_t trial = 0; trial < 500; trial++) {
+        uint32_t count = 1 + trial % 8;
+        m.layers = 1 + trial % 11;
+        for (uint32_t i = 0; i < m.layers; i++)
+            m.memory[i].resident_bytes = (10 + (trial * 7 + i * 53) % 200) * mib;
+        for (uint32_t i = 0; i < count; i++)
+            nodes[i].ram_budget_bytes = (40 + (trial * 47 + i * 71) % 700) * mib;
+        rc = lmb_home_plan_source(&m, 1234567, nodes, count, 128, 1,
+            LMB_GOAL_ONE_SESSION, 1, &p);
+        if (rc || p.state != LMB_PLAN_RESIDENT) continue;
+        uint32_t next = 0, edge = 0, seen = 0;
+        for (uint32_t i = 0; i < p.nslices; i++) {
+            const LmbSlice *s = &p.slices[i];
+            assert(s->node < count && !(seen & (1u << s->node)));
+            seen |= 1u << s->node;
+            assert(s->layer_begin == next && s->layer_end > next);
+            next = s->layer_end; edge += s->node == p.edge_node;
+            LmbHomeReservation r;
+            assert(!lmb_home_reservation(&m, 1234567, s->layer_begin,
+                s->layer_end, 128, s->node == p.edge_node, &r));
+            assert(r.total_bytes == s->bytes_resident && r.total_bytes <= nodes[s->node].ram_budget_bytes);
+        }
+        assert(next == m.layers && edge == 1);
+    }
+}
+
 int main(void) {
+    feasible_plans();
     LmbModelShape m = {0};
     strcpy(m.model_type, "olmoe");
     m.layers = 4; m.hidden = 64; m.intermediate = 32;

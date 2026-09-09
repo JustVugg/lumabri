@@ -253,6 +253,113 @@ static LMB_UNUSED int lmb_home_plan_budgets(const LmbModelShape *shape,
     return 0;
 }
 
+/* A failed proportional split is not proof that the selected computers cannot
+ * hold the model. Fixed per-process floors and Edge can make that split fail
+ * even when another contiguous assignment fits. Preserve successful plans;
+ * otherwise try each Edge owner first, followed by descending/ascending RAM.
+ * This bounded greedy search is NOT an exhaustive solver or a speed optimizer.
+ * Only the selected nodes are candidates; an unused selection receives no
+ * offer. Edge must own at least one layer in the household protocol. */
+static LMB_UNUSED int lmb_home_plan_source(const LmbModelShape *shape,
+    uint64_t checkpoint_bytes, const LmbClusterNode *nodes, uint32_t count,
+    uint32_t context, uint32_t sessions, LmbPlanGoal goal,
+    int external_checkpoint, LmbClusterPlan *out) {
+    if (!out) return -1;
+    memset(out, 0, sizeof *out);
+    out->state = LMB_PLAN_UNRUNNABLE;
+    out->goal = goal; out->sessions = sessions;
+    if (!shape || !nodes || !checkpoint_bytes || !count ||
+        count > LMB_CLUSTER_MAX_NODES || sessions != 1) return -1;
+    LmbClusterPlan proportional;
+    int original = lmb_plan_cluster_source(shape, nodes, count, context,
+        sessions, goal, external_checkpoint, &proportional);
+    if (!original) original = lmb_home_plan_budgets(shape, checkpoint_bytes,
+        nodes, count, context, &proportional);
+    if (!original) {
+        *out = proportional;
+        if (out->state == LMB_PLAN_RESIDENT) return 0;
+    }
+    int available = external_checkpoint != 0;
+    for (uint32_t i = 0; i < count; i++) available |= nodes[i].has_checkpoint != 0;
+    if (!available || !shape->layers || !shape->sizing_verified) return -1;
+
+    for (uint32_t owner = 0; owner < count; owner++) {
+        for (int ascending = 0; ascending < 2; ascending++) {
+            uint32_t order[LMB_CLUSTER_MAX_NODES], used = 1;
+            order[0] = owner;
+            for (uint32_t i = 0; i < count; i++) if (i != owner) {
+                uint32_t pos = used++;
+                while (pos > 1 && (ascending ?
+                    nodes[order[pos - 1]].ram_budget_bytes > nodes[i].ram_budget_bytes :
+                    nodes[order[pos - 1]].ram_budget_bytes < nodes[i].ram_budget_bytes)) {
+                    order[pos] = order[pos - 1]; pos--;
+                }
+                order[pos] = i;
+            }
+            LmbClusterPlan candidate = {0};
+            candidate.goal = goal; candidate.sessions = 1;
+            candidate.edge_node = owner; candidate.data_available = 1;
+            uint32_t next = 0;
+            for (uint32_t j = 0; j < count && next < shape->layers; j++) {
+                uint32_t nd = order[j], lo = next, hi = shape->layers;
+                /* All current resident contracts have nonnegative layer
+                 * costs and fixed scratch. Their cost for [next,end) is
+                 * monotone; an overflow is not a fit. The final shared
+                 * validator independently checks every chosen reservation. */
+                while (lo < hi) {
+                    uint32_t mid = lo + (hi - lo) / 2 + (hi - lo) % 2;
+                    LmbHomeReservation r;
+                    int fits = !lmb_home_reservation(shape, checkpoint_bytes,
+                        next, mid, context, nd == owner, &r) &&
+                        r.total_bytes <= nodes[nd].ram_budget_bytes;
+                    if (fits) lo = mid; else hi = mid - 1;
+                }
+                if (lo == next) {
+                    if (nd == owner) break; /* Edge cannot be an empty slice. */
+                    continue;
+                }
+                LmbSlice *s = &candidate.slices[candidate.nslices++];
+                s->node = nd; s->layer_begin = next; s->layer_end = lo;
+                next = lo;
+            }
+            if (next != shape->layers || lmb_home_plan_budgets(shape,
+                checkpoint_bytes, nodes, count, context, &candidate) ||
+                candidate.state != LMB_PLAN_RESIDENT) continue;
+            /* Preparation metadata follows this candidate, not the rejected
+             * proportional plan. These are adapter weight estimates, not
+             * measured wire bytes or a generation speed. */
+            candidate.ready_known = 1;
+            for (uint32_t j = 0; j < candidate.nslices; j++) {
+                LmbSlice *s = &candidate.slices[j];
+                const LmbClusterNode *nd = &nodes[s->node];
+                if (nd->has_checkpoint) continue;
+                LmbRangeCost cost = lmb_estimate_segment(shape, s->layer_begin,
+                    s->layer_end, context, 1);
+                if (!cost.ok) return -1;
+                s->bytes_to_fetch = cost.resident_bytes;
+                if (s->node == owner) {
+                    LmbRangeCost edge = lmb_estimate_edge(shape, context, 1);
+                    if (!edge.ok) return -1;
+                    s->bytes_to_fetch = lmb_size_add(s->bytes_to_fetch, edge.resident_bytes);
+                }
+                candidate.fetch_bytes = lmb_size_add(candidate.fetch_bytes, s->bytes_to_fetch);
+                if (candidate.fetch_bytes == UINT64_MAX) return -1;
+                if (!s->bytes_to_fetch) continue;
+                if (!nd->lan_bps) candidate.ready_known = 0;
+                else {
+                    double seconds = (double)s->bytes_to_fetch / nd->lan_bps;
+                    if (seconds > candidate.ready_seconds) candidate.ready_seconds = seconds;
+                }
+            }
+            *out = candidate;
+            return 0;
+        }
+    }
+    /* Retain a valid unsuccessful proportional plan for deficit display.
+     * A failed search means "no plan found", never a feasibility proof. */
+    return original;
+}
+
 /* Would adding this machine help, and at what?
  *
  * Three different answers, and collapsing them is how a cluster tells

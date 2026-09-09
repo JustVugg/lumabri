@@ -668,16 +668,16 @@ static int home_request_chat(LmbTuiState *st, int selected) {
         count++;
     }
     LmbClusterPlan plan;
-    if (!count || lmb_plan_cluster_source(&m->shape, nodes, count, st->context, 1,
-                                   LMB_GOAL_ONE_SESSION, 1, &plan) ||
-        lmb_home_plan_budgets(&m->shape, m->checkpoint_bytes, nodes, count, st->context, &plan) ||
+    if (!count || lmb_home_plan_source(&m->shape, m->checkpoint_bytes, nodes, count,
+        st->context, 1, LMB_GOAL_ONE_SESSION, 1, &plan) ||
         plan.state != LMB_PLAN_RESIDENT) {
-        return home_fail("No complete resident plan fits the selected computers. Keep Share resources open and check their offered RAM.");
+        return home_fail("No complete resident plan found for the selected computers. Keep Share resources open and check their offered RAM.");
     }
     /* Discovery is not proof that inbound connections work. Authenticate the
-     * selected donors before indexing/starting a source, without any OFFER,
+     * planned donors before indexing/starting a source, without any OFFER,
      * reservation or engine launch. Recheck again when actually sending. */
-    for (uint32_t i = 0; i < count; i++) {
+    for (uint32_t j = 0; j < plan.nslices; j++) {
+        uint32_t i = plan.slices[j].node;
         uint8_t expected[32];
         if (lmb_unhex(expected, st->identities[indices[i]], 32))
             return home_fail("Invalid identity for %.64s. Refresh the computer list.", nodes[i].name);
