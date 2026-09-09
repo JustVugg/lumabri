@@ -66,6 +66,7 @@
 #include "lumabri_segment_discovery.h"
 #include "lumabri_sign.h"
 #include "lumabri_secure.h"
+#include "src/runtime/lumabri_preload.h"
 #include "lumabri_inventory.h"
 #include "lumabri_home.h"
 #include "lumabri_runtime_identity.h"
@@ -2919,7 +2920,7 @@ static int engine_spawn(const char *engine, const char *shim, const char *tracke
         if (local_dir) {
             setenv("SNAP", local_dir, 1);
         } else {
-            setenv(LMB_PRELOAD_ENV, shim, 1);
+            if (lmb_preload_file(shim)) { perror("Cannot load household weight loader"); _exit(125); }
             setenv("LUMABRI_VROOT", vroot, 1);
             setenv("LUMABRI_CACHE", cache, 1);
             setenv("LUMABRI_CAS", cas, 0);       /* shared across model mirrors */
@@ -3027,7 +3028,7 @@ static int segment_engine_spawn(const char *engine, const char *shim,
     if (pid == 0) {
         dup2(in_pipe[0], 0); dup2(out_pipe[1], 1); dup2(err_pipe[1], 2);
         close(in_pipe[1]); close(out_pipe[0]); close(err_pipe[0]);
-        setenv(LMB_PRELOAD_ENV, shim, 1);
+        if (lmb_preload_file(shim)) { perror("Cannot load household weight loader"); _exit(125); }
         setenv("LUMABRI_VROOT", vroot, 1);
         setenv("LUMABRI_CACHE", cache, 1);
         setenv("LUMABRI_CAS", cas, 0);

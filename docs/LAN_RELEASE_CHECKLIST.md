@@ -159,4 +159,10 @@ not a completed gate.
    disk working sets remain pending. See `HOUSEHOLD_WEIGHT_CACHE.md`.
 6. Pending: upstream-only GPU capability integration, CPU otherwise.
 7. Pending: concurrent sessions and actual replay after failure.
-8. Pending: native releases, platform validation and dependency-backed cleanup.
+8. Native candidate assembly now has an explicit binary allowlist, retained
+   upstream notices, exact file hashes and dependency reports. The installed
+   `bin`/`lib` layout is exercised by the same two-donor approval, generation,
+   cache/calibration and lost-donor tests. macOS candidates use system libraries
+   only (no OpenMP). Native Windows, older/clean-machine compatibility,
+   physical LAN acceptance and dependency-backed repository cleanup remain
+   pending. Candidate artifacts are not a completed release gate.

@@ -123,7 +123,14 @@ static pid_t home_spawn(char *const argv[], char *const envv[], const char *log,
         dup2(nullfd, 0); dup2(logfd, 1); dup2(logfd, 2);
         if (nullfd > 2) close(nullfd);
         if (logfd > 2) close(logfd);
-        for (int i = 0; envv && envv[i]; i++) putenv(envv[i]);
+        for (int i = 0; envv && envv[i]; i++) {
+            const size_t preload_prefix = sizeof(LMB_PRELOAD_ENV "=") - 1;
+            if (!strncmp(envv[i], LMB_PRELOAD_ENV "=", preload_prefix)) {
+                if (lmb_preload_file(envv[i] + preload_prefix)) {
+                    perror("Cannot load household weight loader"); _exit(125);
+                }
+            } else if (putenv(envv[i])) _exit(125);
+        }
         if (listener >= 0) {
             char descriptor[32];
             if (fcntl(listener, F_SETFD, 0)) _exit(125);
