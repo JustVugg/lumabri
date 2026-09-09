@@ -48,6 +48,8 @@ jobs:
           ./test_planner
           ./test_cluster
           ./test_calibration
+          make test_catalogue_advice CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
+          ./test_catalogue_advice
           ./test_inventory
           make test-runtime-probe CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           python3 tests/integration/native_shim_test.py

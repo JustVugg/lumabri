@@ -65,6 +65,7 @@ PLANNER_ADAPTER_DEPS = $(wildcard planner_adapters/*.h)
 # consumer when one changes, including when a new contract is introduced.
 lumabri test_chat_ui test_planner test_cluster test_memory_budget test_calibration segment_budget_probe segment_node: $(PLANNER_ADAPTER_DEPS)
 lumabri test_chat_ui: lumabri_runtime_identity.h lumabri_checkpoint_identity.h lumabri_calibration_store.h lumabri_calibration.h
+lumabri test_chat_ui: src/planner/lumabri_catalogue_advice.h
 lumabri segment_chat test_chat_ui: lumabri_metrics.h
 
 lumabri: $(HOME_NET_DEPS) lumabri.c src/ui/lumabri_tui.c src/ui/lumabri_tui.h src/ui/lumabri_visual.h src/ui/lumabri_chat_editor.h src/ui/lumabri_execution_view.h lumabri_proto.h lumabri_sign.h \
@@ -458,6 +459,9 @@ test_memory_budget: tests/c/test_memory_budget.c lumabri_memory_budget.h lumabri
 test_calibration: tests/c/test_calibration.c lumabri_calibration.h lumabri_calibration_store.h lumabri_runtime_identity.h lumabri_checkpoint_identity.h lumabri_checkpoint_inventory.h lumabri_planner.h $(SECURE_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_calibration.c -o $@
 
+test_catalogue_advice: tests/c/test_catalogue_advice.c src/planner/lumabri_catalogue_advice.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_catalogue_advice.c -o $@
+
 test_metrics: tests/c/test_metrics.c lumabri_metrics.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_metrics.c -o $@
 
@@ -722,7 +726,7 @@ test-segment-discovery: tracker test_segment_discovery
 	bash ./tests/integration/segment_discovery_test.sh
 
 test: all test_key_rotation test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 test_accum_order test_residency_report test_model_family test_planner test_cluster test_memory_budget \
-		test_inventory test_home test_chat_ui test_calibration test_metrics \
+		test_inventory test_home test_chat_ui test_calibration test_catalogue_advice test_metrics \
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
 		test_meminfo test_compute_lease test_content_filter \
 		test_scheduler test_run_gate
@@ -768,6 +772,7 @@ test: all test_key_rotation test_hedge test_local_fallback test_nat_adopt test_v
 	./test_cluster
 	./test_memory_budget
 	./test_calibration
+	./test_catalogue_advice
 	./test_metrics
 	./test_nat_adopt
 	bash ./tests/integration/rtt_refresh_test.sh
@@ -811,7 +816,7 @@ clean:
 	rm -f tracker maintainer liblumabri.so liblumabri.dylib test_shim swarm_probe lumabri \
 	      test_relay_exec test_swarm_fed test_key_rotation test_hedge \
 	      test_local_fallback test_accum_order test_residency_report \
-	      test_model_family test_planner test_cluster test_memory_budget test_calibration test_metrics test_inventory test_home test_chat_ui segment_budget_probe \
+	      test_model_family test_planner test_cluster test_memory_budget test_calibration test_catalogue_advice test_metrics test_inventory test_home test_chat_ui segment_budget_probe \
 	      test_nat_adopt test_rtt_refresh \
 	      test_verify_failover test_segment_v2 test_segment_discovery test_sampling \
 	      test_swarm_detail test_relay_rate test_machine test_meminfo \

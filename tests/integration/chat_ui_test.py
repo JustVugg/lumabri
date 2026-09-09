@@ -5,6 +5,7 @@ scroll regions and scrollback. No model, network or Python UI dependency.
 """
 import codecs
 import fcntl
+import json
 import os
 from pathlib import Path
 import pty
@@ -23,6 +24,14 @@ assert "layers [0,2)" in plan and "layers [2,4)" in plan
 assert "This chat process runs no model layers" in plan
 assert "No approved household plan" in plan
 assert "\x1b" not in plan, "a peer name injected terminal controls"
+
+advice = subprocess.check_output(["./test_chat_ui", "advice"], cwd=ROOT, text=True)
+document, screen_text = advice.split("\n", 1)
+models = json.loads(document)["models"]
+assert models[0]["advice"] == "lowest RAM reservation"
+assert models[1]["advice"] == "largest resident checkpoint"
+assert "lowest RAM reservation" in screen_text and "largest resident checkpoint" in screen_text
+assert "tok/s" not in screen_text, "resource advice invented a speed"
 
 
 class Screen:
