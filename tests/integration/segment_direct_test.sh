@@ -167,7 +167,7 @@ PY
         # executor's explicit reuse diagnostic.
         "${run_env[@]}" python3 - "$SEGMENT_CHAT_BIN" "$model_dir" "$model" \
             "$model_root" "$tokenizer_root" <<'PY'
-import subprocess, sys
+import re, subprocess, sys
 
 binary, model_dir, model, model_root, tokenizer_root = sys.argv[1:]
 process = subprocess.Popen([
@@ -185,6 +185,8 @@ def line():
 
 if line() != b"\n" or line() != b"LUMABRI_SAMPLING LOGITS\n":
     raise RuntimeError("missing OLMoE sampling capability")
+if not re.fullmatch(rb"LUMABRI_NUMERIC [1-9][0-9]* [\x20-\x7e]{1,96}\n", line()):
+    raise RuntimeError("missing or invalid numeric ABI metadata")
 if b"READY" not in line() or not line().startswith(b"STAT "):
     raise RuntimeError("Segment gateway did not become ready")
 
