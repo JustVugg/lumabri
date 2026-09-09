@@ -38,6 +38,30 @@ int main(int argc, char **argv) {
     assert(!lmb_inventory_pack(&b, &r));
     b.p[4 + 32 + 2] = 0; /* embedded NUL in the declared machine name */
     assert(decode(&b)); free(b.p);
+    /* V3 runtime identity must describe an actual, addressable donor. A
+     * partial or non-canonical identity cannot bind a speed measurement. */
+    r = fixture();
+    snprintf(r.control_addr, sizeof r.control_addr, "127.0.0.1:47301");
+    memset(r.runtime_id, 'a', 64); r.runtime_id[64] = 0;
+    r.runtime_threads = 2;
+    b = (LmbBuf){0}; assert(!lmb_inventory_pack(&b, &r)); assert(!decode(&b));
+    LmbCur cur = {b.p, b.len, 0}; LmbMachineReport got;
+    assert(!lmb_inventory_unpack(&cur, &got) && got.runtime_threads == 2 &&
+           !strcmp(got.runtime_id, r.runtime_id));
+    for (size_t i = 0; i < b.len; i++) {
+        LmbBuf cut = b; cut.len = i; assert(decode(&cut));
+    }
+    b.p[0] = 2; assert(decode(&b)); free(b.p);
+    for (unsigned i = 0; i < 5; i++) {
+        LmbMachineReport invalid = r;
+        if (i == 0) invalid.runtime_threads = 0;
+        if (i == 1) invalid.runtime_threads = 257;
+        if (i == 2) invalid.runtime_id[0] = 'G';
+        if (i == 3) invalid.runtime_id[63] = 0;
+        if (i == 4) invalid.control_addr[0] = 0;
+        b = (LmbBuf){0}; assert(!lmb_inventory_pack(&b, &invalid));
+        assert(decode(&b)); free(b.p);
+    }
     if (argc == 2) {
         assert(!lmb_secure_init());
         int fd = lmb_connect(argv[1]); assert(fd >= 0); assert(!lmb_auth(fd));

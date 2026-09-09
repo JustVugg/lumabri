@@ -82,7 +82,7 @@ env OMP_NUM_THREADS=2 LUMABRI_PEER_KEY="$TMP/client.key" \
     LUMABRI_SEGMENT_DISCOVERY_MS=60000 \
     python3 - "$DONOR_PID" "$SEGMENT_CHAT_BIN" "$OLMOE_EDGE_MODEL" \
         "$root" "$tok" "$TMP" <<'PY'
-import os, socket, subprocess, sys, time
+import os, re, socket, subprocess, sys, time
 donor, binary, model_dir, root, tok, tmp = sys.argv[1:]
 p = subprocess.Popen([
     binary, "--serve", "--engine", "olmoe",
@@ -99,6 +99,8 @@ def line():
     return value
 if line() != b"\n" or line() != b"LUMABRI_SAMPLING LOGITS\n":
     raise RuntimeError("missing OLMoE sampling capability")
+if not re.fullmatch(rb"LUMABRI_NUMERIC [1-9][0-9]* [\x20-\x7e]{1,96}\n", line()):
+    raise RuntimeError("missing or invalid numeric ABI metadata")
 if b"READY" not in line() or not line().startswith(b"STAT "):
     raise RuntimeError("gateway not ready")
 def turn(rid, prompt, kill_after_accept=None):

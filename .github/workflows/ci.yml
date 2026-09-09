@@ -42,11 +42,13 @@ jobs:
           python-version: "3.12"
       - name: Build the C workspace with Apple Clang
         run: |
-          make lumabri tracker maintainer liblumabri.dylib test_shim test_machine test_chat_ui test_memory_budget test_planner test_cluster CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
+          make lumabri tracker maintainer liblumabri.dylib test_shim test_machine test_chat_ui test_memory_budget test_planner test_cluster test_calibration test_inventory CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           ./test_machine
           ./test_memory_budget
           ./test_planner
           ./test_cluster
+          ./test_calibration
+          ./test_inventory
           make test-runtime-probe CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           python3 tests/integration/native_shim_test.py
           python3 tests/integration/household_network_test.py
@@ -132,7 +134,7 @@ jobs:
           make segment_budget_probe
           python3 tests/integration/planner_tensor_contract_test.py --family olmoe --model build/home-flow-models/olmoe-tiny
           make swarm_probe
-          python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --repeat-cached
+          python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --repeat-cached --expect-metrics --expect-calibration
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --kill-donor
       - name: Same greedy tokens with one and two real Segment ranges
         working-directory: lumabri
@@ -319,7 +321,7 @@ jobs:
           test "$(OMP_NUM_THREADS=1 ./segment_node --thread-capacity)" = 1
           test "$(OMP_NUM_THREADS=4 OMP_THREAD_LIMIT=1 ./segment_node --thread-capacity)" = 1
           make swarm_probe
-          python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --repeat-cached
+          python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --repeat-cached --expect-metrics --expect-calibration
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --kill-donor
       - uses: actions/download-artifact@v4
         with:

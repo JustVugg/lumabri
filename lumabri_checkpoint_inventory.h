@@ -15,8 +15,10 @@ typedef struct {
     int has_weights;
 } LmbCheckpointInventory;
 
+typedef int (*LmbCheckpointVisitor)(const char *, const char *, const struct stat *, void *);
+
 static int lmb_checkpoint_walk(const char *root, const char *rel, unsigned depth,
-                                LmbCheckpointInventory *out) {
+                                LmbCheckpointInventory *out, LmbCheckpointVisitor visit, void *arg) {
     if (depth > 32) return -1;
     char directory[1024];
     int len = snprintf(directory, sizeof directory, "%s%s%s", root, *rel ? "/" : "", rel);
@@ -41,7 +43,7 @@ static int lmb_checkpoint_walk(const char *root, const char *rel, unsigned depth
         if (S_ISDIR(st.st_mode)) {
             /* Weight-file symlinks (HF caches) work; directory symlinks may
              * form cycles and are not accepted by this bounded preview. */
-            if (S_ISLNK(link.st_mode) || lmb_checkpoint_walk(root, child, depth + 1, out)) {
+            if (S_ISLNK(link.st_mode) || lmb_checkpoint_walk(root, child, depth + 1, out, visit, arg)) {
                 rc = -1; break;
             }
         } else if (S_ISREG(st.st_mode)) {
@@ -49,6 +51,7 @@ static int lmb_checkpoint_walk(const char *root, const char *rel, unsigned depth
                 UINT64_MAX - out->bytes < (uint64_t)st.st_size) { rc = -1; break; }
             out->files++;
             out->bytes += (uint64_t)st.st_size;
+            if (visit && visit(root, child, &st, arg)) { rc = -1; break; }
             const char *dot = strrchr(name, '.');
             if (st.st_size >= 4096 && dot && (!strcmp(dot, ".safetensors") ||
                 !strcmp(dot, ".bin") || !strcmp(dot, ".gguf") || !strcmp(dot, ".coli")))
@@ -59,10 +62,10 @@ static int lmb_checkpoint_walk(const char *root, const char *rel, unsigned depth
     return rc;
 }
 
-static int lmb_checkpoint_inventory(const char *root, LmbCheckpointInventory *out) {
+static inline int lmb_checkpoint_inventory(const char *root, LmbCheckpointInventory *out) {
     if (!out) return -1;
     memset(out, 0, sizeof *out);
-    if (!root || !*root || lmb_checkpoint_walk(root, "", 0, out)) {
+    if (!root || !*root || lmb_checkpoint_walk(root, "", 0, out, NULL, NULL)) {
         memset(out, 0, sizeof *out);
         return -1;
     }

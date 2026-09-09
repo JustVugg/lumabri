@@ -142,12 +142,12 @@ static const char *state_word(const LmbTuiModel *m) {
 /* What the SPEED column says, and the rule it obeys: a number only when a
  * calibration exists for this exact plan. */
 static void speed_text(const LmbTuiModel *m, char *out, size_t cap) {
-    if (!m->calibration) { snprintf(out, cap, "not calibrated"); return; }
+    if (!m->has_calibration) { snprintf(out, cap, "not calibrated"); return; }
     if (!m->calibration_key_valid) {
         snprintf(out, cap, "stale (plan key unavailable)");
         return;
     }
-    lmb_cal_speed_text(m->calibration, &m->calibration_key, out, cap);
+    lmb_cal_speed_text(&m->calibration, &m->calibration_key, out, cap);
 }
 
 static void human_bytes(uint64_t b, char *out, size_t cap) {
@@ -405,7 +405,7 @@ static void draw_detail(const LmbTuiState *st, Size sz, int sel) {
     speed_text(m, speed, sizeof speed);
     at(row++, 1);
     printf("  %sSPEED%s   %s", c(DIM), c(OFF), speed);
-    if (!m->calibration) {
+    if (!m->has_calibration) {
         at(row++, 1);
         printf("  %sa number appears here after a calibration on these "
                "machines with this plan%s", c(DIM), c(OFF));
@@ -493,6 +493,10 @@ static void draw_workspace(const LmbTuiState *st, int tab, int sel, int detail,
         ui_printf(11, 5, UI_MUTED, "%s · %u layers · %u context · %u session(s)",
                   m->shape.model_type, m->shape.layers, st->context, st->sessions);
         ui_printf(13, 5, UI_TEXT, "Plan: %s    Speed: %s", state_word(m), speed);
+        if (m->has_calibration && m->calibration_key_valid &&
+            lmb_cal_matches(&m->calibration.key, &m->calibration_key))
+            ui_printf(14, 5, UI_MUTED, "Last turn: %u prompt / %u generated tokens. Longer chats or other load may be slower.",
+                m->calibration.prompt_tokens, m->calibration.generated_tokens);
         if (m->planned && m->plan.state != LMB_PLAN_UNRUNNABLE) {
             for (uint32_t i = 0; i < m->plan.nslices && 16 + (int)i * 2 < ui_h - 7; i++) {
                 const LmbSlice *s = &m->plan.slices[i];
@@ -625,8 +629,7 @@ int lmb_tui_run(LmbTuiState *st, int snapshot, const char *keys) {
             int selection_changed = memcmp(job.next->selected_nodes, st->selected_nodes,
                                              sizeof st->selected_nodes) != 0;
             memcpy(job.next->selected_nodes, st->selected_nodes, sizeof st->selected_nodes);
-            if (selection_changed)
-                for (int i = 0; i < job.next->nmodels; i++) job.next->models[i].planned = 0;
+            if (selection_changed) lmb_tui_invalidate_plans(job.next);
             char selected_dir[512] = "";
             if (!tab && sel < st->nmodels)
                 snprintf(selected_dir, sizeof selected_dir, "%s", st->models[sel].dir);
@@ -692,6 +695,7 @@ int lmb_tui_run(LmbTuiState *st, int snapshot, const char *keys) {
                         if (!st->selected_nodes[i][0]) {
                             memmove(st->selected_nodes[i], st->identities[sel], sizeof st->selected_nodes[i]); break;
                         }
+                lmb_tui_invalidate_plans(st);
                 refresh_start(&job, st);
             }
             break;

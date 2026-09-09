@@ -1746,8 +1746,8 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
     /* Report capabilities before READY, so a pipe reader cannot consume
      * readiness first and lose a later capability line. Direct CLI requests
      * for unavailable stochastic sampling still fail explicitly. */
-    printf("\nLUMABRI_SAMPLING %s\n" SEGMENT_FRAME_READY "\nSTAT 0 0 0 0\n",
-           cap->flags & COLI_EDGE_CAP_LOGITS ? "LOGITS" : "GREEDY");
+    printf("\nLUMABRI_SAMPLING %s\nLUMABRI_NUMERIC %u %s\n" SEGMENT_FRAME_READY "\nSTAT 0 0 0 0\n",
+           cap->flags & COLI_EDGE_CAP_LOGITS ? "LOGITS" : "GREEDY", cap->abi_version, cap->numeric_class);
     fflush(stdout);
     LmbSampler sampler;
     lmb_sampler_init(&sampler, seed);

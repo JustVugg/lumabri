@@ -34,6 +34,8 @@ def main():
                         help="run a separately approved second plan; verify shared weight reuse and source byte counters")
     parser.add_argument("--expect-metrics", action="store_true",
                         help="require versioned generation timings through Hosted into the TUI")
+    parser.add_argument("--expect-calibration", action="store_true",
+                        help="require saved real timings, matching catalogue speed and changed-context invalidation")
     parser.add_argument("--expect-no-fit", action="store_true",
                         help="verify insufficient-memory admission, without starting engines")
     parser.add_argument("--kill-donor", action="store_true",
@@ -41,6 +43,8 @@ def main():
     args = parser.parse_args()
     if args.repeat_cached and (args.kill_donor or args.expect_no_fit):
         parser.error("--repeat-cached requires a normal completed first session")
+    if args.expect_calibration and (args.kill_donor or args.expect_no_fit):
+        parser.error("--expect-calibration requires a normally completed session")
     if args.repeat_cached and not (ROOT / "swarm_probe").is_file():
         parser.error("build swarm_probe before running --repeat-cached")
     tmp = Path(tempfile.mkdtemp(prefix="lumabri-home-flow-"))
@@ -80,12 +84,12 @@ def main():
                 "OMP_NUM_THREADS": "2", "COLI_NO_OMP_TUNE": "1", "PIN": "off"}
 
     class Terminal:
-        def __init__(self, name, argv):
+        def __init__(self, name, argv, environment_name=None):
             self.name, self.text = name, ""
             self.master, slave = pty.openpty()
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 35, 140, 0, 0))
             self.log = open(tmp / f"{name}.terminal.log", "wb")
-            self.p = subprocess.Popen(argv, cwd=ROOT, env=env(name),
+            self.p = subprocess.Popen(argv, cwd=ROOT, env=env(environment_name or name),
                                       stdin=slave, stdout=slave, stderr=slave)
             os.close(slave)
             terminals.append(self)
@@ -323,6 +327,37 @@ def main():
                             return False
             return True
         until(leases_released, message="a child retained a donor resource lease after closing chat")
+        if args.expect_calibration:
+            records = list((tmp / "chatter/.lumabri/calibrations").glob("*.cal"))
+            assert len(records) == 1, "completed real generation did not save a bound measurement"
+            assert records[0].stat().st_mode & 0o077 == 0, "calibration record is not private"
+            for condition in ("current", "context", "selection", "runtime"):
+                changed = condition != "current"
+                if condition == "runtime":
+                    a.text = ""; a.send("\x1b")
+                    until(lambda: a.has("your workspace"), message="donor did not stop sharing")
+                    a.send("\x1b")  # exit the workspace; this PTY has no foreground signal group
+                    until(lambda: a.p.poll() is not None, message="donor workspace did not close")
+                    a = Terminal("donor-a-restarted", ["./lumabri"], "donor-a")
+                    until(lambda: a.has("your workspace"))
+                    a.send("\x1b[B\x1b[B\x1b[B\r")
+                    until(lambda: a.has("Available"))
+                argv = base + (["--context", str(args.context * 2)] if condition == "context" else [])
+                view = Terminal("calibration-" + condition, argv, "chatter")
+                until(lambda: view.has("3 computers"))
+                view.send("\t")
+                until(lambda: view.has("Nothing is selected automatically"))
+                view.send("\x1b[B\r\t" if condition == "selection" else "\x1b[B\r\x1b[B\r\t")
+                until(lambda: view.has("A plan before a download."), message="catalogue did not reopen")
+                time.sleep(1); view.text = ""
+                until(lambda: view.has("stale") if changed else view.has("tok/s"), seconds=30,
+                      message=f"changed {condition} did not invalidate the speed" if changed else "matching plan did not recover its measured speed")
+                if changed:
+                    assert "tok/s" not in view.text, "stale catalogue retained a numerical speed"
+                view.send("q")
+                until(lambda: view.p.poll() is not None)
+                assert view.p.returncode == 0
+            print("HOME CALIBRATION: PASS (real timing saved, catalogue reopened; context, selection and donor restart invalidate speed)", flush=True)
         if args.repeat_cached:
             before = cached_weights()
             a.text = b.text = ""

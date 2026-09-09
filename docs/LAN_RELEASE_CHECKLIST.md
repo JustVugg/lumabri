@@ -143,9 +143,13 @@ not a completed gate.
    certify additional model families.
 4. PR #157 merged: versioned measurements collected during ordinary Segment chat,
    separating prefill, decode traversals and first visible text. No extra model
-   run is required. Persisted exact-key calibration, stale-data handling and
-   catalogue advice remain pending; timing collection alone does not close gate 4.
-5. In progress: reusable adapter-scoped working mirrors and shared verified
+   run is required. PR #159 connects completed household turns to private
+   content/runtime-bound records and catalogue lookup. Context, selected
+   computers and donor restarts invalidate old speeds; the last observed
+   workload is shown separately from the configured context limit. Placement
+   cost calibration and catalogue advice remain pending; this is not the
+   entire gate 4. See `CALIBRATION_RECORDS.md` for its exact contract.
+5. PR #158 merged: reusable adapter-scoped working mirrors and shared verified
    CAS chunks, with separate approval and fresh engine sessions on reuse.
    Cache-directory allocation is exclusive even across different homes.
    Model acquisition, cache-aware disk admission/eviction and verified smaller

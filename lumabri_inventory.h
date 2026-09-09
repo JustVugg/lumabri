@@ -5,7 +5,7 @@
 #include "lumabri_proto.h"
 #include "lumabri_machine.h"
 
-#define LMB_INVENTORY_VERSION 2u
+#define LMB_INVENTORY_VERSION 3u
 #define LMB_INVENTORY_MAX 32u
 #define LMB_INVENTORY_TTL_MS 15000u
 #define LMB_INVENTORY_HEARTBEAT_MS 5000u
@@ -16,6 +16,8 @@ typedef struct {
     uint64_t ram_budget_bytes;
     uint32_t age_ms;
     char control_addr[64];      /* empty for an inventory-only worker */
+    char runtime_id[65];        /* executable hashes + active donor epoch; empty = unknown */
+    uint32_t runtime_threads;   /* queried installed engine, not detected CPU cores */
 } LmbMachineReport;
 
 /* Lengths and control characters are checked before any field reaches a
@@ -51,7 +53,8 @@ static LMB_MAYBE_UNUSED int lmb_inventory_pack(LmbBuf *b,
     INV_U64(vram_total_bytes); INV_U64(vram_available_bytes);
     INV_U64(disk_available_bytes); INV_U64(disk_read_bps);
 #undef INV_U64
-    return lmb_buf_u64(b, r->ram_budget_bytes) || lmb_buf_str(b, r->control_addr);
+    return lmb_buf_u64(b, r->ram_budget_bytes) || lmb_buf_str(b, r->control_addr) ||
+           lmb_buf_str(b, r->runtime_id) || lmb_buf_u32(b, r->runtime_threads);
 }
 
 static LMB_MAYBE_UNUSED int lmb_inventory_unpack(LmbCur *c,
@@ -76,7 +79,16 @@ static LMB_MAYBE_UNUSED int lmb_inventory_unpack(LmbCur *c,
     INV_U64(disk_available_bytes); INV_U64(disk_read_bps);
 #undef INV_U64
     if (lmb_cur_u64(c, &r->ram_budget_bytes) ||
-        lmb_inventory_string(c, r->control_addr, sizeof r->control_addr)) return -1;
+        lmb_inventory_string(c, r->control_addr, sizeof r->control_addr) ||
+        lmb_inventory_string(c, r->runtime_id, sizeof r->runtime_id) ||
+        lmb_cur_u32(c, &r->runtime_threads)) return -1;
+    if (r->runtime_threads > 256 || (!!r->runtime_threads != !!r->runtime_id[0])) return -1;
+    if (r->runtime_id[0]) {
+        if (strlen(r->runtime_id) != 64 || !r->control_addr[0]) return -1;
+        for (unsigned i = 0; i < 64; i++)
+            if (!((r->runtime_id[i] >= '0' && r->runtime_id[i] <= '9') ||
+                  (r->runtime_id[i] >= 'a' && r->runtime_id[i] <= 'f'))) return -1;
+    }
     uint8_t nonzero = 0;
     for (size_t i = 0; i < sizeof r->identity; i++) nonzero |= r->identity[i];
     if (!nonzero || !m->hostname[0] || !m->logical_cpus ||
