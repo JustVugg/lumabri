@@ -125,7 +125,7 @@ jobs:
       - name: Segment failover gate — run
         working-directory: lumabri
         run: |
-          make tracker segment_node segment_chat ENGINE=../colibri/c -j"$(nproc)"
+          make tracker segment_node segment_chat test_backend_routes ENGINE=../colibri/c -j"$(nproc)"
           OLMOE_EDGE_MODEL=../colibri/c/olmoe_tiny_merged \
           SEGMENT_NODE_BIN=./segment_node SEGMENT_CHAT_BIN=./segment_chat \
             bash ./tests/integration/segment_failover_test.sh
@@ -135,6 +135,8 @@ jobs:
       - name: Household TUI — approvals through real Segment generation
         working-directory: lumabri
         run: |
+          ./test_backend_routes
+          python3 tests/integration/backend_policy_test.py
           test "$(OMP_NUM_THREADS=1 ./segment_node --thread-capacity)" = 1
           test "$(OMP_NUM_THREADS=4 OMP_THREAD_LIMIT=1 ./segment_node --thread-capacity)" = 1
           mkdir -p build/home-flow-models
@@ -333,10 +335,10 @@ jobs:
           OPENMP_MODE: ${{ matrix.openmp }}
         run: |
           if [ "$OPENMP_MODE" = disabled ]; then
-            make household ENGINE=../colibri/c CC=clang OMP_FLAGS= OMP_LIBS= -j3
+            make household test_backend_routes ENGINE=../colibri/c CC=clang OMP_FLAGS= OMP_LIBS= -j3
             test "$(./segment_node --thread-capacity)" = 1
           else
-            make household ENGINE=../colibri/c CC=clang -j3
+            make household test_backend_routes ENGINE=../colibri/c CC=clang -j3
           fi
       - uses: actions/download-artifact@v4
         with:
@@ -347,6 +349,8 @@ jobs:
         env:
           TMPDIR: ${{ runner.temp }}
         run: |
+          ./test_backend_routes
+          python3 tests/integration/backend_policy_test.py
           test "$(OMP_NUM_THREADS=1 ./segment_node --thread-capacity)" = 1
           test "$(OMP_NUM_THREADS=4 OMP_THREAD_LIMIT=1 ./segment_node --thread-capacity)" = 1
           make swarm_probe
