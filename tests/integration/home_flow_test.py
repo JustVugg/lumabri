@@ -446,10 +446,14 @@ def main():
                 a.send("\x1b[A\r"); b.send("\x1b[A\r")
                 until(lambda: repeat.has("receives the text") or repeat.p.poll() is not None, seconds=180)
                 assert repeat.p.poll() is None, "cache reuse/refetch plan failed to start"
+                # A returning user's catalogue can already contain a measured
+                # tok/s value. Only this new turn's Hosted footer proves that
+                # generation finished; old catalogue output is not a response.
+                repeat.text = ""
                 repeat.send("hi\n")
-                until(lambda: repeat.has("tok/s") or repeat.has("generated tokens") or repeat.p.poll() is not None,
+                until(lambda: (repeat.has("hosted stream") and repeat.has("no local checkpoint")) or repeat.p.poll() is not None,
                       seconds=120, message="model did not finish a response after cache reuse/refetch")
-                assert repeat.p.poll() is None and "no local checkpoint" in repeat.text
+                assert repeat.p.poll() is None and (repeat.has("tok/s") or repeat.has("generated tokens"))
                 stats = source_stats(repeat)
                 if cleared:
                     assert stats["bytes_served"] > metadata_bytes, stats
