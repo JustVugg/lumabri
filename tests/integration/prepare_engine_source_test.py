@@ -2,6 +2,8 @@
 import importlib.util
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -31,6 +33,82 @@ class Preparation(unittest.TestCase):
     def assert_no_temporary_copy(self):
         self.assertFalse(list(self.root.glob(".lumabri-source-*")))
         self.assertFalse(list(self.root.glob(".lumabri-old-source-*")))
+
+    def test_fingerprint_tracks_all_sources_not_weights(self):
+        for name in ("glm53.c", "qwen38.c", "extra.h"):
+            source = self.source / name
+            source.write_text("original\n")
+            before = engine_source.fingerprint(self.source)
+            times = source.stat()
+            source.write_text("modified\n")
+            os.utime(source, ns=(times.st_atime_ns, times.st_mtime_ns))
+            self.assertNotEqual(before, engine_source.fingerprint(self.source))
+        before = engine_source.fingerprint(self.source)
+        (self.source / "weights.safetensors").write_bytes(b"never read model data")
+        (self.source / "tokenizer.json").write_text("not a build input")
+        (self.source / "build").mkdir()
+        (self.source / "build/generated.h").write_text("not an upstream input")
+        with mock.patch.object(engine_source, "read_source", wraps=engine_source.read_source) as read:
+            self.assertEqual(before, engine_source.fingerprint(self.source))
+            self.assertTrue(all(call.args[0].name not in
+                {"weights.safetensors", "tokenizer.json", "generated.h"} for call in read.call_args_list))
+        self.assertEqual((self.source / "weights.safetensors").read_bytes(), b"never read model data")
+
+    def test_fingerprint_tracks_add_delete_rename_and_mode(self):
+        before = engine_source.fingerprint(self.source)
+        source = self.source / "new_adapter.c"
+        source.write_text("adapter\n")
+        added = engine_source.fingerprint(self.source)
+        self.assertNotEqual(before, added)
+        renamed = self.source / "another_adapter.c"
+        source.rename(renamed)
+        moved = engine_source.fingerprint(self.source)
+        self.assertNotEqual(added, moved)
+        renamed.chmod(0o755)
+        self.assertNotEqual(moved, engine_source.fingerprint(self.source))
+        renamed.unlink()
+        self.assertEqual(before, engine_source.fingerprint(self.source))
+
+    def test_stamp_is_stable_and_failed_inspection_preserves_it(self):
+        stamp = self.root / "stamp"
+        command = [sys.executable, str(ROOT / "tools/prepare_engine_source.py"),
+                   "--source", str(self.source), "--stamp", str(stamp)]
+        subprocess.run(command, check=True)
+        before, timestamp = stamp.read_bytes(), stamp.stat().st_mtime_ns
+        subprocess.run(command, check=True)
+        self.assertEqual(timestamp, stamp.stat().st_mtime_ns)
+        (self.source / "nested.h").write_text("new input")
+        subprocess.run(command, check=True)
+        self.assertNotEqual(before, stamp.read_bytes())
+        before, timestamp = stamp.read_bytes(), stamp.stat().st_mtime_ns
+        (self.source / "escaped.h").symlink_to(stamp)
+        failed = subprocess.run(command, capture_output=True, text=True)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("not a regular file", failed.stderr)
+        self.assertEqual(before, stamp.read_bytes())
+        self.assertEqual(timestamp, stamp.stat().st_mtime_ns)
+        self.assertEqual(sorted(p.name for p in self.root.iterdir()), ["source with spaces", "stamp"])
+
+    def test_stamp_cannot_overwrite_an_input_or_follow_link(self):
+        command = [sys.executable, str(ROOT / "tools/prepare_engine_source.py"),
+                   "--source", str(self.source), "--stamp"]
+        source = self.source / "model.c"
+        original = source.read_bytes()
+        link = self.root / "stamp-link"
+        link.symlink_to(source)
+        for destination in (source, link):
+            result = subprocess.run(command + [str(destination)], capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(source.read_bytes(), original)
+
+    def test_fingerprint_obeys_source_safety_limits(self):
+        for limit in (mock.patch.object(engine_source, "MAX_BYTES", 1),
+                      mock.patch.object(engine_source, "MAX_ENTRIES", 1)):
+            with limit, self.assertRaises(ValueError):
+                engine_source.fingerprint(self.source)
+        (self.source / "include").symlink_to(self.root, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "directory symlink"):
+            engine_source.fingerprint(self.source)
 
     def test_archive_sources_only(self):
         (self.source / "include").mkdir()
