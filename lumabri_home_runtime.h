@@ -330,8 +330,8 @@ static void home_donor_screen(const HomeDonor *d, const char *name, uint64_t ram
             ui_printf(12, 5, UI_MUTED, "Requester identity: %.24s…", who);
             ui_printf(14, 5, UI_TEXT, "Layers %u–%u of %u · %.2f GB RAM · %.2f GB disk headroom",
                 t->offer.begin, t->offer.end - 1, t->offer.layers, t->offer.ram_bytes / 1e9, t->offer.disk_bytes / 1e9);
-            ui_printf(16, 5, UI_MUTED, "%u context · one session · %u execution threads", t->offer.context,
-                      t->offer.threads < d->thread_capacity ? t->offer.threads : d->thread_capacity);
+            ui_printf(16, 5, UI_MUTED, "%u context · one session · %u threads · up to %u new tokens per turn", t->offer.context,
+                      t->offer.threads < d->thread_capacity ? t->offer.threads : d->thread_capacity, t->offer.max_new);
             ui_text(18, 5, UI_MUTED, t->offer.runs_edge ?
                 "This computer hosts chat and receives the conversation text." :
                 "This computer processes activations and keeps state for its layers.");
@@ -357,11 +357,11 @@ static void home_donor_screen(const HomeDonor *d, const char *name, uint64_t ram
         char who[65]; lmb_hex(who, t->offer.requester, 32);
         printf("\nRequester identity: %.24s…\nModel: %s (%s)\nLayers: %u–%u of %u\n"
                "RAM budget: %.2f GB · estimated disk headroom: %.2f GB\n"
-               "Context: %u · one session · %u threads\n",
+               "Context: %u · one session · %u threads · up to %u new tokens per turn\n",
                who, t->offer.model, t->offer.model_type, t->offer.begin,
                t->offer.end - 1, t->offer.layers, t->offer.ram_bytes / 1e9,
                t->offer.disk_bytes / 1e9, t->offer.context,
-               t->offer.threads < d->thread_capacity ? t->offer.threads : d->thread_capacity);
+               t->offer.threads < d->thread_capacity ? t->offer.threads : d->thread_capacity, t->offer.max_new);
         if (t->offer.runs_edge)
             puts("This computer also hosts chat and receives the conversation text.");
         else puts("This computer processes activations and keeps state for its layers.");
@@ -772,7 +772,8 @@ static int home_request_chat(LmbTuiState *st, int selected) {
         o->begin = slice->layer_begin; o->end = slice->layer_end; o->layers = m->shape.layers;
         o->context = st->context; o->threads = nodes[n].threads ? nodes[n].threads : 1;
         if (o->threads > 256) o->threads = 256;
-        o->max_new = st->max_new ? st->max_new : 256; o->model_bytes = swarm.total_bytes;
+        o->max_new = st->quick_calibration ? LMB_QUICK_PROBE_TOKENS : (st->max_new ? st->max_new : 256);
+        o->model_bytes = swarm.total_bytes;
         o->runs_edge = n == plan.edge_node;
         LmbHomeReservation reservation;
         if (lmb_home_reservation(&m->shape, swarm.total_bytes, o->begin, o->end,
@@ -886,7 +887,7 @@ static int home_request_chat(LmbTuiState *st, int selected) {
             char expected_host[65]; lmb_hex(expected_host, edge_pk, 32);
             char *chat_argv[] = {"--host", host, "--model", model, "--ctx", ctx,
                                  "--role", "chat", "--max-new", token_limit, "--host-key", expected_host,
-                                 "--tracker", st->tracker};
+                                 "--tracker", st->tracker, "--calibrate"};
             g_execution_view = &execution;
             LmbCalibration measurement = {0}; char measurement_dir[1200];
             LmbTuiModel measured = *m;
@@ -922,7 +923,7 @@ static int home_request_chat(LmbTuiState *st, int selected) {
                         !m->content_id[0] ? "checkpoint content identity is unavailable" :
                         !st->build_id[0] ? "client binary identity is unavailable" :
                         "the approved plan's runtime identities are incomplete or changed");
-            result = cmd_chat(14, chat_argv);
+            result = cmd_chat(st->quick_calibration ? 15 : 14, chat_argv);
             g_recording_calibration = NULL; g_calibration_directory = NULL;
             g_execution_view = NULL;
             atomic_store(&s.stop, 1); pthread_join(heartbeat, NULL);

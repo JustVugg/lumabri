@@ -49,6 +49,7 @@ typedef struct LmbTuiState {
     int inventory_ok;
     char build_id[65];
     int action_model;
+    int quick_calibration;
     int initial_tab;
     char selected_nodes[LMB_CLUSTER_MAX_NODES][65];
     uint32_t context, sessions, max_new;
@@ -59,7 +60,7 @@ typedef struct LmbTuiState {
     void *refresh_context;
 } LmbTuiState;
 
-enum { LMB_TUI_REQUEST_CHAT = 10 };
+enum { LMB_TUI_REQUEST_CHAT = 10, LMB_TUI_REQUEST_CALIBRATION = 11 };
 
 /* Selection changes precede asynchronous planning. Never render a speed
  * attached to the previous selection during that refresh window. */

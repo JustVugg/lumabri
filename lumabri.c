@@ -73,6 +73,7 @@
 #include "lumabri_runtime_probe.h"
 #include "lumabri_checkpoint_identity.h"
 #include "lumabri_calibration_store.h"
+#include "src/runtime/lumabri_probe_deadline.h"
 
 /* Borrowed by the synchronous household chat only. Ordinary/legacy hosts
  * cannot create an entry without an approved plan and actual numeric metadata. */
@@ -4494,7 +4495,7 @@ static int cmd_chat(int argc, char **argv) {
     const char *role_arg = NULL, *model_dir_arg = NULL;
     const char *donor_name_arg = NULL, *host_addr = NULL, *host_key = NULL;
     double donate_gb = 0;
-    int max_new = 256, ctx = 2048, cap_experts = 64;
+    int max_new = 256, ctx = 2048, cap_experts = 64, quick_probe = 0;
     for (int i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "--tracker") && i + 1 < argc) tracker = argv[++i];
         else if (!strcmp(argv[i], "--engine") && i + 1 < argc) engine_path = argv[++i];
@@ -4510,6 +4511,7 @@ static int cmd_chat(int argc, char **argv) {
         else if (!strcmp(argv[i], "--donor-name") && i + 1 < argc) donor_name_arg = argv[++i];
         else if (!strcmp(argv[i], "--host") && i + 1 < argc) host_addr = argv[++i];
         else if (!strcmp(argv[i], "--host-key") && i + 1 < argc) host_key = argv[++i];
+        else if (!strcmp(argv[i], "--calibrate")) quick_probe = 1;
         else if (!strcmp(argv[i], "--plain")) g_tty = 0;
         else { fprintf(stderr, "usage: lumabri chat [--tracker H:P] [--model NAME] "
                                "[--local DIR] [--engine BIN] [--engines-dir DIR]\n"
@@ -4518,6 +4520,10 @@ static int cmd_chat(int argc, char **argv) {
                                "                    [--role chat|disk|compute|all] "
                                "[--donate GB] [--model-dir DIR] [--donor-name S]\n");
                return 2; }
+    }
+    if (quick_probe && (!host_addr || !g_recording_calibration || !g_calibration_directory)) {
+        fprintf(stderr, "Quick calibration requires an approved Hosted plan. No local engine was started.\n");
+        return 2;
     }
     g_chat_term_valid = g_tty && isatty(STDIN_FILENO) &&
                         tcgetattr(STDIN_FILENO, &g_chat_term) == 0;
@@ -4640,17 +4646,27 @@ static int cmd_chat(int argc, char **argv) {
     } else if (model_boot(tracker, model, shim, engines_dir, engine_path,
                           local_dir, ctx, max_new, cap_experts, &eng, &sw))
         return 1;
+    if (quick_probe) {
+        if (eng.proto != PROTO_SERVE2 || !eng.numeric_abi) {
+            fprintf(stderr, "This host cannot provide a verified quick measurement.\n");
+            engine_stop(&eng); return 1;
+        }
+        if (max_new > (int)LMB_QUICK_PROBE_TOKENS) max_new = (int)LMB_QUICK_PROBE_TOKENS;
+        printf("  Quick calibration: at most %u tokens, %.0f seconds of inference. Ctrl-C cancels.\n",
+               LMB_QUICK_PROBE_TOKENS, LMB_QUICK_PROBE_SECONDS);
+    }
     if (!host_addr && (role.disk || role.compute)) {
         role_start(&role, tracker, model, sw.model_type, eng.segment, ctx,
                    sw.total_bytes);
     }
 
     char *conv = calloc(1, 1);   /* serve-codec conversation history (after bos) */
-    int chat_failed = 0;
+    int chat_failed = 0, probe_recorded = 0;
+    LmbProbeDeadline probe_deadline = {0};
     char line[4096];
     for (;;) {
         if (g_stopping) break;
-        int queued = live_take_pending(line, sizeof line);
+        int queued = quick_probe ? 0 : live_take_pending(line, sizeof line);
         int w = term_w() - 2;
         if (g_tty) {
             printf("\n");
@@ -4663,7 +4679,11 @@ static int cmd_chat(int argc, char **argv) {
             printf("\n> ");
         fflush(stdout);
         int got;
-        if (queued) {
+        if (quick_probe) {
+            snprintf(line, sizeof line, "Describe a calm sea in one sentence.");
+            printf("%s\r\n", line);
+            got = 1; /* a disclosed synthetic turn, never added to editor history */
+        } else if (queued) {
             printf("%s\r\n", line);
             le_hist_push(line);
             got = 1;
@@ -4719,6 +4739,10 @@ static int cmd_chat(int argc, char **argv) {
             continue;
         }
         int is_reset = !strcmp(line, "/reset");
+        if (quick_probe && lmb_probe_start(&probe_deadline, eng.to, LMB_QUICK_PROBE_SECONDS)) {
+            fprintf(stderr, "Cannot start the calibration deadline; no measurement was submitted.\n");
+            chat_failed = 1; break;
+        }
         if (eng.proto == PROTO_SERVE2) {
             /* the serve codec has no reset command; dropping the local history
              * (and starting a fresh bos) is the conversation reset. */
@@ -4757,6 +4781,10 @@ static int cmd_chat(int argc, char **argv) {
             int dead = stream_serve2(&eng, stat, sizeof stat, &reply);
             g_eng.streaming = 0;
             live_end();
+            if (quick_probe && lmb_probe_stop(&probe_deadline)) {
+                fprintf(stderr, "Quick calibration reached its time limit. No new speed was saved.\n");
+                free(reply); chat_failed = 1; break;
+            }
             if (g_stopping) {
                 free(reply);
                 printf("\n  %sinference interrupted%s\n", C_DIM, C_R);
@@ -4835,6 +4863,11 @@ static int cmd_chat(int argc, char **argv) {
         LmbGenerationMetrics metrics;
         int metric_status=lmb_metrics_parse(stat,&metrics);
         if(metric_status==0 && metrics.generated_tokens!=(uint32_t)ntok) metric_status=-1;
+        if (quick_probe && (metric_status || metrics.generated_tokens > LMB_QUICK_PROBE_TOKENS ||
+                            lmb_metrics_decode_rate(&metrics) <= 0)) {
+            fprintf(stderr, "Quick calibration did not produce enough valid timing data. No new speed was saved.\n");
+            chat_failed = 1; break;
+        }
         if(metric_status==0) {
             if (g_recording_calibration && g_calibration_directory && eng.numeric_abi &&
                 nstat >= 5 && prompt_count && lmb_metrics_decode_rate(&metrics) > 0) {
@@ -4845,9 +4878,10 @@ static int cmd_chat(int argc, char **argv) {
                 record.ttft_seconds = first > r0 ? first - r0 : metrics.prefill_seconds;
                 record.measured_at = (double)time(NULL); record.samples = 1;
                 record.prompt_tokens = prompt_count; record.generated_tokens = metrics.generated_tokens;
-                if (!lmb_cal_store(g_calibration_directory, &record))
+                if (!lmb_cal_store(g_calibration_directory, &record)) {
                     *g_recording_calibration = record;
-                else fprintf(stderr, "[lumabri] Could not save this measurement; the reply is unaffected.\n");
+                    probe_recorded = 1;
+                } else fprintf(stderr, "[lumabri] Could not save this measurement; the reply is unaffected.\n");
             }
             if (g_recording_calibration && !eng.numeric_abi)
                 fprintf(stderr, "[calibration] No speed saved: the host did not supply its numeric ABI.\n");
@@ -4875,8 +4909,17 @@ static int cmd_chat(int argc, char **argv) {
         else if (dmb > 0.5) printf(" · %.0f MB from swarm · mirror %.0f MB", dmb, g_eng.net_mb);
         else                printf(" · warm mirror, no weight transfers");
         printf("%s\n", C_R);
+        if (quick_probe) {
+            if (!probe_recorded) {
+                fprintf(stderr, "Quick calibration could not save its measurement. The catalogue was not updated.\n");
+                chat_failed = 1; break;
+            }
+            puts("  Quick calibration complete. Short-run indication, not a long-chat speed guarantee.");
+            break;
+        }
     }
 
+    (void)lmb_probe_stop(&probe_deadline);
     free(conv);
     engine_stop(&eng);
     /* The picker promises the donation lasts as long as the chat. That was
@@ -5411,7 +5454,9 @@ static int cmd_models(int argc, char **argv) {
     catalog_state_refresh(&st, NULL);
     if (!plain) {
         int action = lmb_tui_run(&st, snapshot, keys);
-        return action == LMB_TUI_REQUEST_CHAT ? home_request_chat(&st, st.action_model) : action;
+        if (action == LMB_TUI_REQUEST_CALIBRATION) st.quick_calibration = 1;
+        return action == LMB_TUI_REQUEST_CHAT || action == LMB_TUI_REQUEST_CALIBRATION ?
+            home_request_chat(&st, st.action_model) : action;
     }
     if (json) { catalog_json(&st); return st.inventory_ok ? 0 : 1; }
 

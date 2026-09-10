@@ -153,7 +153,11 @@ not a completed gate.
    content/runtime-bound records and catalogue lookup. Context, selected
    computers and donor restarts invalidate old speeds; the last observed
    workload is shown separately from the configured context limit. Placement
-   cost calibration remains pending. The catalogue advice follow-up highlights
+   cost calibration remains pending. An optional quick-calibration action now
+   requests normal donor approval, generates at most eight test tokens with a
+   20-second inference deadline, saves only valid complete metrics and releases
+   its plan. Transfer/loading comes first and is not covered by that deadline.
+   The catalogue advice follow-up highlights
    lowest RAM reservation, largest resident checkpoint and fastest observed
    run among eligible plans; it does not rank answer quality or invent speed
    before a first measurement. See `CALIBRATION_RECORDS.md` and

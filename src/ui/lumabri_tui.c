@@ -491,7 +491,15 @@ static void draw_workspace(const LmbTuiState *st, int tab, int sel, int detail,
     ui_text(7, 5, UI_MUTED, "Models     /     Computers     ·     Tab switches views");
     const char *status = st->inventory_ok ? "Donors must approve the allocation before anything is loaded." :
         "TRACKER OFFLINE · No requests can start; check the household address.";
-    if (detail && sel < st->nmodels) {
+    if (detail == 2 && sel < st->nmodels) {
+        ui_text(9, 5, UI_SAND, "Quick calibration");
+        ui_printf(11, 5, UI_TEXT, "%s · the selected, approved Segment plan", st->models[sel].name);
+        ui_text(14, 5, UI_TEXT, "One short test: at most 8 generated tokens, 20 seconds of inference.");
+        ui_text(16, 5, UI_MUTED, "Donors must approve. Missing weights still need transfer and loading first.");
+        ui_text(18, 5, UI_MUTED, "Preparation is not included in the 20-second limit and may take much longer.");
+        ui_text(20, 5, UI_MUTED, "Saves a short-run measurement for this plan, then releases its resources.");
+        ui_text(ui_h - 6, 5, UI_SAND, "Enter starts the request. Esc goes back without loading anything.");
+    } else if (detail && sel < st->nmodels) {
         const LmbTuiModel *m = &st->models[sel];
         char speed[96]; speed_text(m, speed, sizeof speed);
         ui_text(9, 5, UI_SAND, m->name);
@@ -553,10 +561,10 @@ static void draw_workspace(const LmbTuiState *st, int tab, int sel, int detail,
     }
     if (palette) {
         ui_begin("actions");
-        static const char *names[] = {"/models", "/computers", "/refresh", "/request", "/back"};
+        static const char *names[] = {"/models", "/computers", "/refresh", "/request", "/calibrate", "/back"};
         static const char *helps[] = {"Browse this model folder", "Choose participating donors", "Refresh inventory and plans",
-            "Review the selected model before requesting chat", "Return to the workspace"};
-        for (int i = 0; i < 5; i++) ui_item(6 + i * 3, action_sel == i, names[i], helps[i]);
+            "Review the selected model before requesting chat", "Review an optional 8-token measurement", "Return to the workspace"};
+        for (int i = 0; i < 6; i++) ui_item(6 + i * 3, action_sel == i, names[i], helps[i]);
     }
     ui_footer(status, "↑ ↓ move   Enter select / confirm   Tab switch   / actions   Esc back");
     if (ui_w < 60 || ui_h < 28) {
@@ -672,21 +680,21 @@ int lmb_tui_run(LmbTuiState *st, int snapshot, const char *keys) {
         if (k == '/') { palette = !palette; action_sel = 0; continue; }
         if (palette) {
             if (k == 27) { palette = 0; continue; }
-            if (k == 'j') action_sel = (action_sel + 1) % 5;
-            if (k == 'k') action_sel = (action_sel + 4) % 5;
+            if (k == 'j') action_sel = (action_sel + 1) % 6;
+            if (k == 'k') action_sel = (action_sel + 5) % 6;
             if (k != '\r' && k != '\n') continue;
             palette = 0;
-            if (action_sel == 4) break;
+            if (action_sel == 5) break;
             if (action_sel < 2) { tab = action_sel; sel = top = detail = 0; continue; }
             if (action_sel == 2) { refresh_start(&job, st); continue; }
-            if (!tab && st->nmodels) detail = 1;
+            if (!tab && st->nmodels) detail = action_sel == 4 ? 2 : 1;
             continue;
         }
         if (k == 27 && !detail) break;
         if (ui_w < 60 || ui_h < 28) continue;
         if ((k == 'c' || (detail && (k == '\r' || k == '\n'))) && !tab && st->nmodels && st->tracker[0]) {
             st->action_model = sel;
-            action = LMB_TUI_REQUEST_CHAT;
+            action = detail == 2 ? LMB_TUI_REQUEST_CALIBRATION : LMB_TUI_REQUEST_CHAT;
             break;
         }
         if (detail) { if (k == 0x1b) detail = 0; continue; }
