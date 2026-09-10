@@ -1888,9 +1888,9 @@ static int ensure_block(RFile *f, uint32_t blk) {
      * sends people to look at their network for hours. The bytes arrived; it
      * is the mirror that failed. */
     if (!ok && werr == ENOSPC)
-        fprintf(stderr, "[lumabri] DISCO PIENO scrivendo il mirror in %s — "
-                        "il peer aveva i byte, non c'e' spazio per tenerli "
-                        "(blocco %u di %s)\n", g.data_dir, blk, f->rel);
+        fprintf(stderr, "[lumabri] Disk full while writing the mirror in %s: "
+                        "the peer delivered the bytes, but there is no space to keep them "
+                        "(block %u of %s)\n", g.data_dir, blk, f->rel);
     else if (!ok && werr)
         fprintf(stderr, "[lumabri] mirror write failed (%s): block %u of %s\n",
                 strerror(werr), blk, f->rel);

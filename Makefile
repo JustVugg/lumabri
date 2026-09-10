@@ -23,6 +23,11 @@ endif
 
 all: tracker maintainer $(SHIM_LIB) test_shim swarm_probe lumabri
 
+lumabri test_chat_ui: src/runtime/lumabri_weight_cache.h
+
+test_weight_cache: tests/c/test_weight_cache.c src/runtime/lumabri_weight_cache.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_weight_cache.c -o $@
+
 # Native household runtime (Colibri sources are a build-time dependency).
 household: tracker maintainer $(SHIM_LIB) lumabri segment_node segment_chat
 
@@ -52,7 +57,7 @@ check-warnings:
 		test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 test_exec2 test_accum_order test_residency_report test_model_family test_planner test_cluster test_memory_budget test_calibration test_metrics \
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
 		test_meminfo test_compute_lease test_content_filter \
-		test_scheduler test_run_gate test_inventory test_home test_chat_ui \
+		test_scheduler test_run_gate test_inventory test_home test_chat_ui test_weight_cache \
 		CFLAGS='$(CFLAGS) -Werror'
 
 SECURE_DEPS = lumabri_secure.h lumabri_crypto.h
@@ -726,7 +731,7 @@ test-adapters: tracker segment_node segment_chat
 test-segment-discovery: tracker test_segment_discovery
 	bash ./tests/integration/segment_discovery_test.sh
 
-test: all test_key_rotation test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 test_accum_order test_residency_report test_model_family test_planner test_cluster test_memory_budget \
+test: all test_weight_cache test_key_rotation test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 test_accum_order test_residency_report test_model_family test_planner test_cluster test_memory_budget \
 		test_inventory test_home test_chat_ui test_calibration test_catalogue_advice test_metrics \
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
 		test_meminfo test_compute_lease test_content_filter \
@@ -767,6 +772,7 @@ test: all test_key_rotation test_hedge test_local_fallback test_nat_adopt test_v
 	python3 ./tests/integration/preload_path_test.py
 	python3 tests/ui_text_test.py
 	python3 tests/integration/workspace_navigation_test.py
+	python3 tests/integration/storage_ui_test.py
 	python3 ./tests/integration/lan_inventory_test.py
 	python3 tests/integration/household_network_test.py
 	bash ./tests/integration/hosted_chat_test.sh
@@ -774,6 +780,7 @@ test: all test_key_rotation test_hedge test_local_fallback test_nat_adopt test_v
 	./test_planner
 	./test_cluster
 	./test_memory_budget
+	./test_weight_cache
 	./test_calibration
 	./test_catalogue_advice
 	./test_metrics
@@ -828,7 +835,7 @@ clean:
 	rm -f tracker maintainer liblumabri.so liblumabri.dylib test_shim swarm_probe lumabri \
 	      test_relay_exec test_swarm_fed test_key_rotation test_hedge \
 	      test_local_fallback test_accum_order test_residency_report \
-	      test_model_family test_planner test_cluster test_memory_budget test_calibration test_catalogue_advice test_metrics test_inventory test_home test_chat_ui segment_budget_probe \
+	      test_model_family test_planner test_cluster test_memory_budget test_calibration test_catalogue_advice test_metrics test_inventory test_home test_chat_ui test_weight_cache segment_budget_probe \
 	      test_nat_adopt test_rtt_refresh \
 	      test_verify_failover test_segment_v2 test_segment_discovery test_sampling \
 	      test_swarm_detail test_relay_rate test_machine test_meminfo \

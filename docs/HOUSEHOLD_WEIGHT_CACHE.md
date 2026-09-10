@@ -33,9 +33,42 @@ execution mode: the resident memory checks remain unchanged.
 
 ## Verification
 
+### Inspecting and clearing storage in the TUI
+
+Open the workspace command list with `/` and select `/storage`. This view
+counts allocated file blocks, not sparse files' apparent lengths, below the
+current user's default `~/.lumabri/home/cas` and `mirrors` directories.
+Hardlinked entries can be counted more than once, so the value is approximate.
+It does not include source model folders, legacy caches, custom `--disk`
+locations, logs or other applications' storage.
+
+Clearing requires a second, explicit confirmation; the default is to keep
+the weights. A plan holding the shared weight lease prevents clearing, even
+if it starts after the overview was displayed. The lease inode is retained.
+The operation validates both cache trees before deleting any entries, rejects
+cross-filesystem trees and special files, and never follows symlinks. Leaf
+links are removed without deleting their targets. Original checkpoint folders,
+keys, settings, conversations and engine logs are not cleanup targets.
+
+Scanning and clearing show progress and accept Escape between filesystem
+operations. Cancellation during inspection deletes nothing; cancellation or
+an I/O error during clearing can leave a partially cleared cache. Removed
+weights are permanently deleted, not moved to Trash, and must be fetched
+again. Clearing Linux files does not itself compact a WSL virtual disk.
+
+This is manual cache management, not a maximum growth quota or automatic
+eviction. The conservative admission reserve remains in force.
+
+`test_weight_cache` covers lease exclusion, sparse accounting, symlinks and
+hardlinks, unsafe-tree refusal, cancellation and lease release. The real PTY
+test `tests/integration/storage_ui_test.py` checks the storage action, busy
+refusal, the non-destructive default, confirmed cleanup and terminal restoration.
+
+### Reuse between approved sessions
+
 ```sh
 make household swarm_probe
-python3 tests/integration/home_flow_test.py --models-dir /path/to/one-fixture-parent --repeat-cached
+python3 tests/integration/home_flow_test.py --models-dir /path/to/one-fixture-parent --repeat-cached --clear-cached
 ```
 
 The test executes two separately approved plans on two real Segment
@@ -44,6 +77,12 @@ the source's published byte/read counters, generation in the second plan,
 and release of RAM/cache locks. The repeated synthetic OLMoE request must
 leave only the two direct `config.json` reads at the source. Native macOS CI
 runs the same test; loopback is not a physical LAN certification.
+
+With `--clear-cached`, the test then opens each donor's real workspace storage
+view, explicitly clears its released weight cache and starts a third approved
+plan. The source must serve weights again, both caches must be rebuilt and
+generation and lease release must succeed. The same check runs against the
+installed native candidate layout.
 
 ## Still outside this change
 
