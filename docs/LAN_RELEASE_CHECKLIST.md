@@ -161,6 +161,10 @@ not a completed gate.
 5. PR #158 merged: reusable adapter-scoped working mirrors and shared verified
    CAS chunks, with separate approval and fresh engine sessions on reuse.
    Cache-directory allocation is exclusive even across different homes.
+   Workspace `/storage` adds allocated-block inspection and explicitly confirmed
+   clearing of unused default household caches. Clearing shares the runtime
+   lease, preserves source folders/settings, refuses unsafe trees and supports
+   cooperative cancellation. It is not a total cache quota or automatic eviction.
    Model acquisition, cache-aware disk admission/eviction and verified smaller
    disk working sets remain pending. See `HOUSEHOLD_WEIGHT_CACHE.md`.
 6. Pending: upstream-only GPU capability integration, CPU otherwise.
