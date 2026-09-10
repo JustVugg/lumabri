@@ -6,6 +6,9 @@
 #include <math.h>
 #include <float.h>
 #include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
 
 typedef struct {
     char name[512], dtype[32];
@@ -95,22 +98,41 @@ static const char *lmb_plan_object_end(const char *p) {
     return p;
 }
 
+/* Use descriptor reads, not stdio: the virtual checkpoint's fopen contract
+ * materializes the entire file before returning. A sizing scan must fetch
+ * only authenticated header blocks and explicitly bounded layout metadata.
+ * Keep short reads/EINTR distinct from EOF or transport errors. */
+static int lmb_plan_read_at(int fd, void *buffer, size_t size, uint64_t offset) {
+    unsigned char *p = buffer;
+    while (size) {
+        off_t at = (off_t)offset;
+        if (at < 0 || (uint64_t)at != offset) { errno = EOVERFLOW; return -1; }
+        size_t chunk = size > 1048576 ? 1048576 : size;
+        ssize_t n = pread(fd, p, chunk, at);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { if (!n) errno = EIO; return -1; }
+        if ((uint64_t)n > UINT64_MAX - offset) { errno = EOVERFLOW; return -1; }
+        p += n; size -= (size_t)n; offset += (uint64_t)n;
+    }
+    return 0;
+}
+
 static int lmb_plan_tensor_file_id(const char *path, uint64_t *header_budget,
                                 LmbPlanTensorVisit visit, void *opaque, uint32_t file_id) {
-    FILE *f = fopen(path, "rb");
-    if (!f) return -1;
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
     struct stat st;
     unsigned char prefix[8];
     uint64_t bytes = 0;
     int rc = -1;
     char *json = NULL;
-    if (fstat(fileno(f), &st) || !S_ISREG(st.st_mode) || st.st_size < 10 ||
-        fread(prefix, 1, 8, f) != 8) goto done;
+    if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_size < 10 ||
+        lmb_plan_read_at(fd, prefix, 8, 0)) goto done;
     for (unsigned i = 0; i < 8; i++) bytes |= (uint64_t)prefix[i] << (8 * i);
     if (bytes > *header_budget || bytes > (uint64_t)st.st_size - 8 || bytes < 2) goto done;
     *header_budget -= bytes;
     json = malloc((size_t)bytes + 1);
-    if (!json || fread(json, 1, (size_t)bytes, f) != bytes) goto done;
+    if (!json || lmb_plan_read_at(fd, json, (size_t)bytes, 8)) goto done;
     json[bytes] = 0;
     if (memchr(json, 0, (size_t)bytes)) goto done;
     const char *p = lmb_plan_space(json);
@@ -150,8 +172,7 @@ static int lmb_plan_tensor_file_id(const char *path, uint64_t *header_budget,
             if (width == 8 && t.elements <= 64) {
                 unsigned char metadata[512];
                 if (t.bytes > *header_budget ||
-                    fseeko(f, (off_t)(8 + bytes + offsets[0]), SEEK_SET) ||
-                    fread(metadata, 1, (size_t)t.bytes, f) != t.bytes) goto done;
+                    lmb_plan_read_at(fd, metadata, (size_t)t.bytes, 8 + bytes + offsets[0])) goto done;
                 *header_budget -= t.bytes;
                 for (uint64_t i=0; i<t.elements; i++)
                     for (unsigned j=0; j<8; j++)
@@ -167,7 +188,7 @@ static int lmb_plan_tensor_file_id(const char *path, uint64_t *header_budget,
     if (*lmb_plan_space(p) || !tensors) goto done;
     rc = 0;
 done:
-    free(json); fclose(f); return rc;
+    free(json); close(fd); return rc;
 }
 
 static int LMB_UNUSED lmb_plan_tensor_file(const char *path, uint64_t *header_budget,

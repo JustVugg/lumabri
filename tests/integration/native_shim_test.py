@@ -4,6 +4,8 @@ Compares bytes through the actual .so/.dylib, then rebuilds a fresh mirror
 with the origin offline. All keys, ports and cache files are test-owned.
 """
 import os
+import json
+import struct
 from pathlib import Path
 import socket
 import subprocess
@@ -88,6 +90,46 @@ def main():
                         raise AssertionError(f"{name}: {out}\n{err}")
             assert any((tmp / "cas").rglob("*")), "CAS was not populated"
             print("NATIVE SHIM: PASS (encrypted byte-exact libc reads, cold transfer, fresh mirror with origin offline)")
+
+            # A real virtual checkpoint, not a mocked read counter. Inspection
+            # needs the header and a small layout at the far end of a 64-MiB
+            # payload. fopen used to fetch the entire payload here, even on a
+            # donor assigned only a few layers. Keep the unused middle cold.
+            header_source = tmp / "header-source"
+            header_source.mkdir()
+            payload = 64 * 1024 * 1024
+            header = json.dumps({
+                "weights": {"dtype": "U8", "shape": [payload-16], "data_offsets": [0,payload-16]},
+                "layout": {"dtype": "I64", "shape": [2], "data_offsets": [payload-16,payload]},
+            }, separators=(",", ":")).encode()
+            middle = 8 + len(header) + payload // 2
+            with (header_source / "weights.safetensors").open("wb") as f:
+                f.write(struct.pack("<Q", len(header))); f.write(header)
+                f.seek(middle); f.write(b"MUST_NOT_BE_FETCHED")
+                f.seek(8 + len(header) + payload - 16); f.write(struct.pack("<QQ",17,29))
+            header_port = free_port()
+            header_origin = launch("header-origin", ["./maintainer", "--root", str(header_source),
+                "--port", str(header_port), "--tracker", f"127.0.0.1:{port}",
+                "--name", "header-origin", "--model-name", "header-only"])
+            ready(header_origin, header_port)
+            env = {**environment("header-client"), loader: str(ROOT / library),
+                   "LUMABRI_MODEL": "header-only", "LUMABRI_TRACKER": f"127.0.0.1:{port}",
+                   "LUMABRI_CAS": str(tmp / "header-cas"), "LUMABRI_BLOCK_MIB": "1",
+                   "LUMABRI_PREFETCH": "0", "LUMABRI_CACHE": str(tmp / "header-cache"),
+                   "LUMABRI_VROOT": str(tmp / "header-vroot")}
+            p = subprocess.run([str(ROOT / "test_planner_io"),
+                                str(tmp / "header-vroot/weights.safetensors")],
+                               cwd=ROOT, env=env, capture_output=True, text=True, timeout=45)
+            assert p.returncode == 0, p.stdout + p.stderr
+            mirror = tmp / "header-cache/data/weights.safetensors"
+            with mirror.open("rb") as f:
+                f.seek(middle)
+                assert f.read(19) == bytes(19), "planner materialized unused weight payload"
+                f.seek(8 + len(header) + payload - 16)
+                assert f.read(16) == struct.pack("<QQ",17,29)
+            allocated = mirror.stat().st_blocks * 512
+            assert allocated <= 4 * 1024 * 1024, f"header inspection allocated {allocated} bytes"
+            print(f"BOUNDED PLANNER SHIM: PASS (64-MiB payload, {allocated} allocated bytes, unused middle cold)")
         except Exception:
             for log in tmp.glob("*.log"):
                 print(log.name, log.read_text(errors="replace"), file=sys.stderr)
