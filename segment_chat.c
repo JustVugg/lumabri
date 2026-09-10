@@ -74,6 +74,7 @@ static int retry_first_run;
 static int segment_direct_only;
 static const char *segment_tracker;
 static uint64_t segment_wire_bytes;
+static uint64_t segment_backend_mask;
 
 #define SEGMENT_FRAME_READY "\x01\x01" "READY" "\x01\x01"
 #define REMOTE_SNAPSHOT_CHUNK (1u << 20)
@@ -202,7 +203,8 @@ static int select_chain(const LmbSegRouteSnapshot *snapshot, uint32_t layers,
         int changed = 0;
         for (uint32_t i = 0; i < snapshot->count; i++) {
             const LmbSegRouteEntry *entry = &snapshot->entries[i];
-            if (!(entry->transport & (LMB_SEG_TRANSPORT_DIRECT |
+            if (!lmb_backend_matches(segment_backend_mask, entry->advert.capabilities) ||
+                !(entry->transport & (LMB_SEG_TRANSPORT_DIRECT |
                                       LMB_SEG_TRANSPORT_RELAY)) ||
                 entry->advert.layer_begin >= entry->advert.layer_end ||
                 entry->advert.layer_end > layers ||
@@ -892,7 +894,8 @@ static int conversation_checkpoint(SegmentConversation *conversation,
 static int route_same_range(const LmbSegRouteEntry *a,
                             const LmbSegRouteEntry *b,
                             uint32_t context, uint32_t max_rows) {
-    return a->advert.layer_begin == b->advert.layer_begin &&
+    return lmb_backend_matches(segment_backend_mask, a->advert.capabilities) &&
+           a->advert.layer_begin == b->advert.layer_begin &&
            a->advert.layer_end == b->advert.layer_end &&
            a->advert.max_context >= context &&
            a->advert.max_rows >= max_rows &&
@@ -1860,6 +1863,10 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
 }
 
 int main(int argc, char **argv) {
+    if (lmb_backend_request(getenv("LUMABRI_ENGINE_BACKEND"), &segment_backend_mask)) {
+        fprintf(stderr, "unsupported execution backend policy; use cpu or auto\n");
+        return 2;
+    }
     /* lmb_random shares the header-only signing implementation; retain the
      * primitive in warning-clean builds even though the chatter does not sign. */
     (void)lmb_sign;
@@ -1927,6 +1934,7 @@ int main(int argc, char **argv) {
     ColiEdgeEngineOptions edge_options = {
         .struct_size = sizeof edge_options,
         .model_dir = model_dir,
+        .backend_mask = segment_backend_mask,
     };
     const char *edge_limit = getenv("LUMABRI_EDGE_RAM_BYTES");
     if (edge_limit && (parse_u64(edge_limit, &edge_options.memory_limit_bytes) ||
@@ -1951,6 +1959,14 @@ int main(int argc, char **argv) {
                 engine_error(error));
         return 1;
     }
+    if (!lmb_backend_matches(segment_backend_mask, cap.flags)) {
+        fprintf(stderr, "Edge backend does not match the approved CPU policy\n");
+        coli_edge_engine_close(edge);
+        return 1;
+    }
+    fprintf(stderr, "[segment-chat] backend policy=%s adapter_mask=0x%llx\n",
+            segment_backend_mask ? "cpu" : "auto",
+            (unsigned long long)(cap.flags & LMB_EXEC_BACKEND_MASK));
     /* A stateless Edge (e.g. GLM5.3) can leave its context limit to the
      * caller. Zero is not a ban on every prompt. Still enforce the protocol
      * ceiling and negotiate against the actual Segment session limits. */
@@ -1982,7 +1998,7 @@ int main(int argc, char **argv) {
     query.state_width = cap.state_width;
     query.required_capabilities = LMB_SEG_CAP_RANGE_NATIVE |
                                   LMB_SEG_CAP_MULTI_SESSION |
-                                  LMB_SEG_CAP_SNAPSHOT;
+                                  LMB_SEG_CAP_SNAPSHOT | segment_backend_mask;
     snprintf(query.engine_id, sizeof query.engine_id, "%s", cap.engine_id);
     snprintf(query.state_schema, sizeof query.state_schema, "%s", cap.state_schema);
     snprintf(query.numeric_class, sizeof query.numeric_class, "%s", cap.numeric_class);

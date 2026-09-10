@@ -176,7 +176,11 @@ not a completed gate.
    cooperative cancellation. It is not a total cache quota or automatic eviction.
    Model acquisition, cache-aware disk admission/eviction and verified smaller
    disk working sets remain pending. See `HOUSEHOLD_WEIGHT_CACHE.md`.
-6. Pending: upstream-only GPU capability integration, CPU otherwise.
+6. Household CPU approval is now explicit in both Colibri engine opens, rather
+   than leaving backend selection automatic. Returned capabilities and selected
+   routes must match; an inherited GPU preference cannot expand an accepted RAM
+   budget. See `HOUSEHOLD_BACKENDS.md`. Actual upstream GPU integration, VRAM
+   budgeting and native execution proof remain pending; no GPU kernel is added.
 7. Two independent household chats on disjoint donors now have an end-to-end
    gate: simultaneous generation, separate engines and leases, closing one
    while continuing the other, and explicit `BUSY` for an overlapping request.

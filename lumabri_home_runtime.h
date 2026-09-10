@@ -281,7 +281,8 @@ static int home_donor_launch(HomeDonor *d, int edge) {
     snprintf(e_omp_limit, sizeof e_omp_limit, "OMP_THREAD_LIMIT=%u", usable_threads);
     char *envv[] = {e_shim, e_vroot, e_cache, e_cas, e_tracker, e_model, e_root,
                    e_key, "LUMABRI_SEGMENT_REQUIRED=1", "LUMABRI_VERIFY=0",
-                   "LUMABRI_PREFETCH=0", "LUMABRI_NO_EXEC=1", e_log,
+                   "LUMABRI_PREFETCH=0", "LUMABRI_NO_EXEC=1",
+                   "LUMABRI_ENGINE_BACKEND=cpu", e_log,
                    edge ? e_limit : "LUMABRI_HOME_SEGMENT=1", e_omp, e_omp_limit, NULL};
     int chosen_port = 0, listener = home_listen(&chosen_port);
     if (listener < 0) return -1;
