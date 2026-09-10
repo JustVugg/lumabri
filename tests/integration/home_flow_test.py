@@ -254,11 +254,15 @@ def main():
             assert not a.has("Waiting for your approval") and not b.has("Waiting for your approval")
             assert not list((tmp / "chatter").rglob("home-source-*.log"))
             # Reviewing or dismissing the measurement is not consent to load.
-            chat.send("\x1b")
-            time.sleep(.2)
+            chat.text = ""; chat.send("\x1b")
+            until(lambda: chat.has("A plan before a download."))
             assert not engines_started("donor-a") and not engines_started("donor-b")
+            chat.send("/")
+            until(lambda: chat.has("/calibrate"))
             chat.text = ""
-            chat.send("/" + "\x1b[B" * 4 + "\r")
+            # One burst, intentionally: close/reopen actions without a sleep.
+            # The catalogue used to swallow '/' while decoding the prior Esc.
+            chat.send("\x1b/" + "\x1b[B" * 4 + "\r")
             until(lambda: chat.has("Preparation is not included"))
             chat.send("\r")
             until(lambda: a.has("Waiting for your approval") and b.has("Waiting for your approval"), seconds=60)

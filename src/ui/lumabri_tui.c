@@ -34,6 +34,7 @@ static struct termios g_saved;
 static int g_saved_valid;
 static volatile sig_atomic_t g_resized;
 static volatile sig_atomic_t g_quit;
+static int g_pending_key = -1;
 
 static void on_winch(int sig) { (void)sig; g_resized = 1; }
 static void on_int(int sig)   { (void)sig; g_quit = 1; }
@@ -42,6 +43,7 @@ static void on_int(int sig)   { (void)sig; g_quit = 1; }
  * shell that outlives it, so the restore runs from the normal exit path, from
  * a signal, and from atexit. Three routes to one idempotent function. */
 static void cooked(void) {
+    g_pending_key = -1;
     if (!g_saved_valid) return;
     tcsetattr(STDIN_FILENO, TCSANOW, &g_saved);
     g_saved_valid = 0;
@@ -50,6 +52,7 @@ static void cooked(void) {
 }
 
 static int raw(void) {
+    g_pending_key = -1;
     if (!isatty(STDIN_FILENO)) return -1;
     if (tcgetattr(STDIN_FILENO, &g_saved)) return -1;
     struct termios t = g_saved;
@@ -424,20 +427,26 @@ static void draw_detail(const LmbTuiState *st, Size sz, int sel) {
 /* ---- input and the loop ------------------------------------------------- */
 
 /* One key, or 0 when nothing arrived before the timeout. Arrow keys arrive
- * as three bytes; anything else unrecognised is dropped rather than acted
- * on, because a stray escape sequence must not move a selection. */
+ * as three bytes. Unknown CSI sequences are dropped; an ordinary key after
+ * Esc is retained as a separate action rather than silently consumed. */
 static int read_key(int timeout_ms) {
-    struct pollfd p = { STDIN_FILENO, POLLIN, 0 };
-    int r = poll(&p, 1, timeout_ms);
-    if (r <= 0) return 0;
     unsigned char ch;
-    if (read(STDIN_FILENO, &ch, 1) != 1) return 0;
+    if (g_pending_key >= 0) {
+        ch = (unsigned char)g_pending_key; g_pending_key = -1;
+    } else {
+        struct pollfd p = { STDIN_FILENO, POLLIN, 0 };
+        int r = poll(&p, 1, timeout_ms);
+        if (r <= 0) return 0;
+        if (read(STDIN_FILENO, &ch, 1) != 1) return 0;
+    }
     if (ch != 0x1b) return ch;
     unsigned char seq[2];
     struct pollfd q = { STDIN_FILENO, POLLIN, 0 };
     if (poll(&q, 1, 20) <= 0) return 0x1b;
     if (read(STDIN_FILENO, seq, 1) != 1) return 0x1b;
-    if (seq[0] != '[') return 0x1b;
+    /* Esc followed quickly by '/' is two actions, not a malformed CSI.
+     * Keep the following key (including another Esc) for the next read. */
+    if (seq[0] != '[') { g_pending_key = seq[0]; return 0x1b; }
     if (poll(&q, 1, 20) <= 0) return 0x1b;
     if (read(STDIN_FILENO, seq + 1, 1) != 1) return 0x1b;
     switch (seq[1]) {
