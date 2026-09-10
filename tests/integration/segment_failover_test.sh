@@ -82,7 +82,7 @@ env OMP_NUM_THREADS=2 LUMABRI_PEER_KEY="$TMP/client.key" \
     LUMABRI_SEGMENT_DISCOVERY_MS=60000 \
     python3 - "$DONOR_PID" "$SEGMENT_CHAT_BIN" "$OLMOE_EDGE_MODEL" \
         "$root" "$tok" "$TMP" <<'PY'
-import os, re, socket, subprocess, sys, time
+import json, os, re, socket, subprocess, sys, time
 donor, binary, model_dir, root, tok, tmp = sys.argv[1:]
 p = subprocess.Popen([
     binary, "--serve", "--engine", "olmoe",
@@ -125,6 +125,7 @@ def turn(rid, prompt, kill_after_accept=None):
             raise RuntimeError("unexpected frame: "+repr(frame))
     if not seen_data: raise RuntimeError("no streamed data")
 turn(1, b"hi\n")
+turn(9, b"hi\nthere\n")  # same chain/KV, new per-turn counters
 open(os.path.join(tmp, "start-generation-bump"), "wb").close()
 deadline=time.monotonic()+10
 while True:
@@ -137,7 +138,7 @@ while True:
 # Existing executors heartbeat every two seconds and now fence the owner's old
 # generation. The chat worker intentionally retains its turn-one snapshot.
 time.sleep(2.5)
-turn(2, b"hi\nthere\n", donor)
+turn(2, b"hi\nthere\nagain\n", donor)
 p.stdin.close()
 if p.wait(timeout=30): raise RuntimeError("gateway failed")
 diagnostics=p.stderr.read().decode("utf-8", "replace")
@@ -146,5 +147,15 @@ if ("Segment failover: recovered through origin-left; restored checkpoint"
     raise RuntimeError("checkpoint failover did not run:\n"+diagnostics)
 if "Segment recovery route generation" not in diagnostics:
     raise RuntimeError("recovery did not refresh the stale route generation:\n"+diagnostics)
+profiles={int(rid):json.loads(payload) for rid,payload in
+          re.findall(r'\[segment-stage\] request=(\d+) (\{[^\n]+\})',diagnostics)}
+assert set(profiles)=={1,9,2}, profiles
+assert profiles[1]['valid'] and len(profiles[1]['stages'])==2, profiles
+assert all(s['decode_calls']==0 and s['prefill_rows']>0 for s in profiles[1]['stages']), profiles
+assert profiles[9]['valid'] and len(profiles[9]['stages'])==2, profiles
+reused,total=map(int,re.search(r'Segment KV reuse: (\d+)/(\d+)',diagnostics).groups())
+assert all(s['prefill_rows']==reused for s in profiles[1]['stages']), profiles
+assert all(s['prefill_rows']==total-reused and s['decode_calls']==0 for s in profiles[9]['stages']), profiles
+assert not profiles[2]['valid'] and profiles[2]['stages']==[], profiles
 PY
 echo "SEGMENT FAILOVER: PASS (fresh fencing + checkpoint replay after peer death)"

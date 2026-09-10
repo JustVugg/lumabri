@@ -147,7 +147,21 @@ run_chat() {                 # $1 = threads, $2 = log name
     python3 - "$TMP/$log.json" "$t0" "$t1" <<'PY'
 import json,sys
 lines=[l for l in open(sys.argv[1],encoding='utf-8') if l.startswith('{')]
-ids=json.loads(lines[-1])['token_ids']
+reply=json.loads(lines[-1])
+ids=reply['token_ids']
+profile=reply['stage_observations']
+assert profile['version']==1 and profile['scope']=='client_run_round_trip' and profile['valid'], profile
+stages=profile['stages']
+assert stages and stages[0]['begin']==0
+assert all(a['end']==b['begin'] for a,b in zip(stages,stages[1:]))
+for s in stages:
+    assert s['begin'] < s['end'] and len(s['lease'])==32
+    assert s['decode_calls']==len(ids)-1
+    assert s['prefill_rows']>0 and s['prefill_calls']>0
+    assert 0 <= s['decode_min_seconds'] <= s['decode_max_seconds']
+    assert s['decode_min_seconds']*s['decode_calls'] <= s['decode_seconds']+1e-6
+    assert s['decode_seconds'] <= s['decode_max_seconds']*s['decode_calls']+1e-6
+assert sum(s['decode_seconds'] for s in stages) <= reply['generation_metrics']['decode_seconds']+1e-5
 print("%.3f %s" % (float(sys.argv[3])-float(sys.argv[2]), ','.join(map(str,ids))))
 PY
 }

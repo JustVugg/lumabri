@@ -468,7 +468,7 @@ test_calibration: tests/c/test_calibration.c lumabri_calibration.h lumabri_calib
 test_catalogue_advice: tests/c/test_catalogue_advice.c src/planner/lumabri_catalogue_advice.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_catalogue_advice.c -o $@
 
-test_metrics: tests/c/test_metrics.c lumabri_metrics.h
+test_metrics: tests/c/test_metrics.c lumabri_metrics.h lumabri_stage_metrics.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_metrics.c -o $@
 
 test_inventory: tests/c/test_inventory.c lumabri_inventory.h lumabri_machine.h lumabri_proto.h lumabri_sign.h $(SECURE_DEPS)
@@ -640,13 +640,13 @@ segment_node: segment_node.c $(HOME_NET_DEPS) lumabri_planner.h lumabri_memory_b
 		lumabri_segment_discovery.c $(MACHINE_SRC) lumabri_run_gate.c \
 		$(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
 
-segment_chat: segment_chat.c lumabri_sampling.c lumabri_sampling.h \
+segment_chat: segment_chat.c lumabri_metrics.h lumabri_stage_metrics.h lumabri_sampling.c lumabri_sampling.h \
 		$(SEGMENT_COMMON) $(COLIBRI_SEGMENT_LIB)
 	$(CC) $(CPPFLAGS) $(SEGMENT_CFLAGS) -pthread segment_chat.c lumabri_segment.c \
 		lumabri_segment_discovery.c lumabri_sampling.c \
 		$(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
 
-test_backend_routes: tests/c/test_backend_routes.c segment_chat.c lumabri_metrics.h \
+test_backend_routes: tests/c/test_backend_routes.c segment_chat.c lumabri_metrics.h lumabri_stage_metrics.h \
 		lumabri_sampling.c lumabri_sampling.h $(SEGMENT_COMMON) $(COLIBRI_SEGMENT_LIB)
 	$(CC) $(CPPFLAGS) $(SEGMENT_CFLAGS) -pthread tests/c/test_backend_routes.c lumabri_segment.c \
 		lumabri_segment_discovery.c lumabri_sampling.c \

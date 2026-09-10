@@ -5,6 +5,31 @@
 #include <assert.h>
 
 int main(int argc, char **argv) {
+    /* The real engine stderr consumer must preserve long JSON lines, blank
+     * lines, CRLF and a final unterminated fragment in the saved log. */
+    char log_path[] = "/tmp/lumabri-engine-log-test.XXXXXX";
+    int log_fd = mkstemp(log_path); assert(log_fd >= 0); close(log_fd);
+    const char *previous_log = getenv("LUMABRI_ENGINE_LOG");
+    char *saved_log = previous_log ? strdup(previous_log) : NULL;
+    assert(!previous_log || saved_log);
+    assert(!setenv("LUMABRI_ENGINE_LOG", log_path, 1));
+    char payload[4096], actual[4096];
+    memset(payload, 'x', sizeof payload);
+    memcpy(payload, "[segment-stage] ", 16);
+    memcpy(payload + sizeof payload - 12, "\n\n\r\nfragment", 12);
+    FILE *input_log = tmpfile(); assert(input_log);
+    assert(fwrite(payload, 1, sizeof payload, input_log) == sizeof payload);
+    rewind(input_log);
+    int input_fd = dup(fileno(input_log)); assert(input_fd >= 0);
+    (void)stderr_thread((void *)(intptr_t)input_fd);
+    fclose(input_log);
+    FILE *saved_stream = fopen(log_path, "rb"); assert(saved_stream);
+    assert(fread(actual, 1, sizeof actual, saved_stream) == sizeof actual);
+    assert(fgetc(saved_stream) == EOF && !memcmp(payload, actual, sizeof payload));
+    fclose(saved_stream); assert(!unlink(log_path));
+    if (saved_log) { assert(!setenv("LUMABRI_ENGINE_LOG", saved_log, 1)); free(saved_log); }
+    else assert(!unsetenv("LUMABRI_ENGINE_LOG"));
+    g_eng.ntail = 0;
     int probe_pair[2];
     assert(!socketpair(AF_UNIX, SOCK_STREAM, 0, probe_pair));
     LmbProbeDeadline deadline = {0};

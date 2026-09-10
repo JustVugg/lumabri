@@ -46,6 +46,13 @@ typedef struct {
 } SegmentConversation;
 
 #include "lumabri_metrics.h"
+#include "lumabri_stage_metrics.h"
+
+typedef struct {
+    uint32_t begin, end;
+    LmbSegOwner owner;
+    LmbStageMetrics timing;
+} StageObservation;
 
 typedef struct {
     char *text;
@@ -56,6 +63,9 @@ typedef struct {
     double elapsed_seconds;
     double decode_seconds;
     LmbGenerationMetrics metrics;
+    int stages_valid;
+    size_t stage_count;
+    StageObservation stages[LMB_SEG_ROUTE_MAX];
 } GenerationResult;
 
 typedef enum {
@@ -75,6 +85,7 @@ static int segment_direct_only;
 static const char *segment_tracker;
 static uint64_t segment_wire_bytes;
 static uint64_t segment_backend_mask;
+static double monotonic_seconds(void);
 
 #define SEGMENT_FRAME_READY "\x01\x01" "READY" "\x01\x01"
 #define REMOTE_SNAPSHOT_CHUNK (1u << 20)
@@ -852,18 +863,35 @@ static int conversation_route_equal(const SegmentConversation *conversation,
     return 1;
 }
 
-static int chain_run(RemoteSegment *chain, size_t count,
+static int chain_run_observed(RemoteSegment *chain, size_t count,
                      const int32_t *tokens, uint32_t rows,
-                     uint8_t **first, uint8_t **second, size_t bytes) {
+                     uint8_t **first, uint8_t **second, size_t bytes,
+                     GenerationResult *observation, int decode) {
     uint8_t *input = *first, *output = *second;
     for (size_t i = 0; i < count; i++) {
-        if (remote_run(&chain[i], tokens, rows, input, bytes, output))
+        double started = observation ? monotonic_seconds() : 0;
+        if (remote_run(&chain[i], tokens, rows, input, bytes, output)) {
+            if (observation) observation->stages_valid = 0;
             return -(int)i - 1;
+        }
+        if (observation && observation->stages_valid &&
+            (i >= observation->stage_count ||
+             lmb_stage_metrics_add(&observation->stages[i].timing, decode, rows,
+                                   monotonic_seconds() - started)))
+            observation->stages_valid = 0;
         uint8_t *swap = input; input = output; output = swap;
     }
     *first = input;
     *second = output;
     return 0;
+}
+
+/* Recovery replay is intentionally not mixed into steady-route observations.
+ * The failed original call already invalidated the entire turn profile. */
+static int chain_run(RemoteSegment *chain, size_t count,
+                     const int32_t *tokens, uint32_t rows,
+                     uint8_t **first, uint8_t **second, size_t bytes) {
+    return chain_run_observed(chain, count, tokens, rows, first, second, bytes, NULL, 0);
 }
 
 static int conversation_checkpoint(SegmentConversation *conversation,
@@ -1201,7 +1229,7 @@ static int conversation_recover(
 
 static double monotonic_seconds(void) {
     struct timespec value;
-    clock_gettime(CLOCK_MONOTONIC, &value);
+    if (clock_gettime(CLOCK_MONOTONIC, &value)) return NAN;
     return (double)value.tv_sec + (double)value.tv_nsec * 1e-9;
 }
 
@@ -1380,6 +1408,13 @@ static int segment_generate(ColiEdgeEngine *edge,
     } else {
         opened = active_count;
     }
+    result->stages_valid = active_count > 0 && active_count <= LMB_SEG_ROUTE_MAX;
+    result->stage_count = result->stages_valid ? active_count : 0;
+    for (size_t i = 0; i < result->stage_count; i++) {
+        result->stages[i].begin = active_chain[i].route.advert.layer_begin;
+        result->stages[i].end = active_chain[i].route.advert.layer_end;
+        result->stages[i].owner = active_chain[i].open.owner;
+    }
     if (prompt_count > context || wanted_tokens > context - prompt_count) {
         snprintf(error, error_size, "prompt plus output exceeds context (%u)",
                  context);
@@ -1433,9 +1468,9 @@ static int segment_generate(ColiEdgeEngine *edge,
         };
         if (coli_edge_embed(edge, &embed, error, error_size)) goto cleanup;
         uint8_t *first = buffer_a, *second = buffer_b;
-        int failed = chain_run(active_chain, active_count,
+        int failed = chain_run_observed(active_chain, active_count,
                                prompt_tokens + offset, rows,
-                               &first, &second, bytes);
+                               &first, &second, bytes, result, 0);
         if (failed && event) {
             size_t failed_index = (size_t)(-failed - 1);
             const char *peer = active_chain[failed_index].route.advert.peer_name;
@@ -1518,8 +1553,8 @@ static int segment_generate(ColiEdgeEngine *edge,
         };
         if (coli_edge_embed(edge, &embed, error, error_size)) goto cleanup;
         uint8_t *first = buffer_a, *second = buffer_b;
-        int failed = chain_run(active_chain, active_count, &token, 1,
-                               &first, &second, bytes);
+        int failed = chain_run_observed(active_chain, active_count, &token, 1,
+                               &first, &second, bytes, result, 1);
         if (failed && event) {
             size_t failed_index = (size_t)(-failed - 1);
             const char *peer = active_chain[failed_index].route.advert.peer_name;
@@ -1641,10 +1676,16 @@ static int segment_generate(ColiEdgeEngine *edge,
         .generated_tokens=(uint32_t)generated_count,.decode_steps=(uint32_t)generated_count-1,
         .prefill_seconds=first_selected_at-started,.decode_seconds=last_selected_at-first_selected_at,
         .total_seconds=finished_at-started};
+    /* A one-token answer has no decode observation. Completed turns must
+     * have one measured RUN per decode step at EVERY range. */
+    for (size_t i = 0; i < result->stage_count; i++)
+        if (result->stages[i].timing.decode_calls != result->metrics.decode_steps)
+            result->stages_valid = 0;
     generated = NULL;
     rc = 0;
 
 cleanup:
+    if (rc) result->stages_valid = 0;
     if (rc && error && error_size && !error[0])
         snprintf(error, error_size, "Segment generation failed and the engine "
                  "reported no reason");
@@ -1661,6 +1702,30 @@ cleanup:
     free(buffer_b);
     free(stream_text);
     return rc;
+}
+
+/* JSON is also used as one bounded line in the engine log. Only fixed hex
+ * identifiers and numbers are emitted; no prompt, token or peer-name bytes. */
+static void stage_observations_print(FILE *stream, const GenerationResult *result) {
+    fprintf(stream, "{\"version\":1,\"scope\":\"client_run_round_trip\",\"valid\":%s,\"stages\":[",
+            result->stages_valid ? "true" : "false");
+    for (size_t i = 0; result->stages_valid && i < result->stage_count; i++) {
+        const StageObservation *s = &result->stages[i];
+        const LmbStageMetrics *m = &s->timing;
+        char lease[33]; lmb_hex(lease, s->owner.lease_id.bytes, sizeof s->owner.lease_id.bytes);
+        fprintf(stream, "%s{\"begin\":%u,\"end\":%u,\"lease\":\"%s\","
+                "\"route_generation\":%llu,\"fencing_epoch\":%llu,"
+                "\"prefill_calls\":%llu,\"prefill_rows\":%llu,\"prefill_seconds\":%.9f,"
+                "\"decode_calls\":%llu,\"decode_seconds\":%.9f,"
+                "\"decode_min_seconds\":%.9f,\"decode_max_seconds\":%.9f}",
+                i ? "," : "", s->begin, s->end, lease,
+                (unsigned long long)s->owner.route_generation,
+                (unsigned long long)s->owner.fencing_epoch,
+                (unsigned long long)m->prefill_calls, (unsigned long long)m->prefill_rows,
+                m->prefill_seconds, (unsigned long long)m->decode_calls, m->decode_seconds,
+                m->decode_min_seconds, m->decode_max_seconds);
+    }
+    fprintf(stream, "]}");
 }
 
 static void route_print(FILE *stream, const char *prefix,
@@ -1853,6 +1918,9 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
              * history merely because timing could not be validated. */
             snprintf(metrics,sizeof metrics,"PERF_UNAVAILABLE");
         }
+        fprintf(stderr, "[segment-stage] request=%u ", request_id);
+        stage_observations_print(stderr, &result);
+        fputc('\n', stderr); fflush(stderr);
         printf("DONE %u STAT %zu %.3f 0 0 %zu 0 %s\n", request_id,
                result.token_count, lmb_metrics_decode_rate(&result.metrics), result.prompt_count,metrics);
         fflush(stdout);
@@ -2130,13 +2198,15 @@ int main(int argc, char **argv) {
                "\"bytes\":{\"segment\":%llu},"
                "\"generation_metrics\":{\"version\":1,\"generated_tokens\":%u,"
                "\"decode_steps\":%u,\"prefill_seconds\":%.9f,"
-               "\"decode_seconds\":%.9f,\"total_seconds\":%.9f}}\n",
+               "\"decode_seconds\":%.9f,\"total_seconds\":%.9f},\"stage_observations\":",
                generated.token_count, generated.decode_seconds,
                generated.elapsed_seconds,
                (unsigned long long)segment_wire_bytes,
                generated.metrics.generated_tokens,generated.metrics.decode_steps,
                generated.metrics.prefill_seconds,generated.metrics.decode_seconds,
                generated.metrics.total_seconds);
+        stage_observations_print(stdout, &generated);
+        printf("}\n");
     }
     generation_result_free(&generated);
     lmb_seg_discovery_stop(discovery);

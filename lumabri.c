@@ -1645,10 +1645,12 @@ static void *stderr_thread(void *arg) {
     FILE *keep = getenv("LUMABRI_ENGINE_LOG") ? fopen(getenv("LUMABRI_ENGINE_LOG"), "a") : NULL;
     char line[512];
     while (fgets(line, sizeof line, f)) {
+        /* The on-screen tail is bounded, the saved stream is not a sequence
+         * of 511-byte lines. Preserve real newlines before trimming for UI. */
+        if (keep) { fputs(line, keep); fflush(keep); }
         size_t n = strlen(line);
         while (n && (line[n-1] == '\n' || line[n-1] == '\r')) line[--n] = 0;
         if (!n) continue;
-        if (keep) { fputs(line, keep); fputc('\n', keep); fflush(keep); }
         tail_push(line);
         g_eng.last_out = nowd();
 
@@ -1701,6 +1703,7 @@ static void *stderr_thread(void *arg) {
             fprintf(stderr, "%s  %s%s\n", C_DIM, line, C_R);
         }
     }
+    if (keep) fclose(keep);
     fclose(f);
     return NULL;
 }
