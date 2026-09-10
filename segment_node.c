@@ -1172,6 +1172,11 @@ int main(int argc, char **argv) {
 #endif
         return 0;
     }
+    uint64_t backend_mask = 0;
+    if (lmb_backend_request(getenv("LUMABRI_ENGINE_BACKEND"), &backend_mask)) {
+        fprintf(stderr, "unsupported execution backend policy; use cpu or auto\n");
+        return 2;
+    }
     const char *engine_id = arg_value(argc, argv, "--engine");
     const char *model_dir = arg_value(argc, argv, "--model-dir");
     const char *model = arg_value(argc, argv, "--model");
@@ -1413,6 +1418,7 @@ int main(int argc, char **argv) {
         .layer_end = end,
         .context_tokens = context,
         .memory_limit_bytes = process_limit,
+        .backend_mask = backend_mask,
     };
     char error[256] = "";
     if (coli_segment_engine_open(engine_id, &options, &node.engine,
@@ -1435,6 +1441,17 @@ int main(int argc, char **argv) {
                                      resolved_model_root);
         return 1;
     }
+    if (!lmb_backend_matches(backend_mask, node.cap.flags)) {
+        fprintf(stderr, "Segment backend does not match the approved CPU policy\n");
+        (void)coli_segment_engine_close(node.engine, error, sizeof error);
+        if (auto_range)
+            (void)auto_range_release(tracker, model, name, engine_id,
+                                     resolved_model_root);
+        return 1;
+    }
+    fprintf(stderr, "[segment-node] backend policy=%s adapter_mask=0x%llx\n",
+            backend_mask ? "cpu" : "auto",
+            (unsigned long long)(node.cap.flags & LMB_EXEC_BACKEND_MASK));
     uint64_t engine_rss = resident_memory_bytes();
     if (process_limit && engine_rss && engine_rss >= process_limit) {
         fprintf(stderr, "[segment-node] engine RSS %.1f GB exhausted the "

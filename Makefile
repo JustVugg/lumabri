@@ -32,7 +32,7 @@ test_weight_cache: tests/c/test_weight_cache.c src/runtime/lumabri_weight_cache.
 household: tracker maintainer $(SHIM_LIB) lumabri segment_node segment_chat
 
 .PHONY: test-runtime-probe
-test-runtime-probe: tests/c/test_runtime_probe.c lumabri_runtime_probe.h
+test-runtime-probe: tests/c/test_runtime_probe.c lumabri_runtime_probe.h src/runtime/lumabri_backend_policy.h lumabri_segment.h
 	mkdir -p build/tests
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_runtime_probe.c -o build/tests/runtime-probe
 	./build/tests/runtime-probe
@@ -592,7 +592,7 @@ HYBRID_ENGINE_DIR = build/segment-hybrid-colibri
 COLIBRI_SEGMENT_LIB = $(HYBRID_ENGINE_DIR)/build/segment/libcolibri_segment_edge.a
 HYBRID_ROOT = $(abspath .)
 SEGMENT_CFLAGS = $(CFLAGS) -I. -I$(ENGINE) $(OMP_FLAGS)
-SEGMENT_COMMON = segment_colibri.h lumabri_segment.c lumabri_segment.h \
+SEGMENT_COMMON = segment_colibri.h src/runtime/lumabri_backend_policy.h lumabri_segment.c lumabri_segment.h \
 		lumabri_segment_discovery.c lumabri_segment_discovery.h \
 		lumabri_proto.h lumabri_sign.h lumabri_sha.h $(SECURE_DEPS)
 
@@ -643,6 +643,12 @@ segment_node: segment_node.c $(HOME_NET_DEPS) lumabri_planner.h lumabri_memory_b
 segment_chat: segment_chat.c lumabri_sampling.c lumabri_sampling.h \
 		$(SEGMENT_COMMON) $(COLIBRI_SEGMENT_LIB)
 	$(CC) $(CPPFLAGS) $(SEGMENT_CFLAGS) -pthread segment_chat.c lumabri_segment.c \
+		lumabri_segment_discovery.c lumabri_sampling.c \
+		$(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
+
+test_backend_routes: tests/c/test_backend_routes.c segment_chat.c lumabri_metrics.h \
+		lumabri_sampling.c lumabri_sampling.h $(SEGMENT_COMMON) $(COLIBRI_SEGMENT_LIB)
+	$(CC) $(CPPFLAGS) $(SEGMENT_CFLAGS) -pthread tests/c/test_backend_routes.c lumabri_segment.c \
 		lumabri_segment_discovery.c lumabri_sampling.c \
 		$(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
 
@@ -839,7 +845,7 @@ clean:
 	      test_swarm_detail test_relay_rate test_machine test_meminfo \
 	      test_compute_lease test_content_filter test_scheduler test_run_gate \
 	      test_segment_v2_tsan tracker_tsan \
-	      segment_node segment_chat segment_node_asan segment_chat_asan \
+	      segment_node segment_chat test_backend_routes segment_node_asan segment_chat_asan \
 	      segment_node_tsan segment_chat_tsan \
 	      olmoe_p2p colibri_p2p inkling_p2p kimi_k3_p2p deepseek_p2p qwen36_p2p \
 	      expert_node expert_node_glm expert_node_inkling expert_node_kimi \

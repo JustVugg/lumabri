@@ -109,6 +109,8 @@ def main():
                 "LUMABRI_PEER_KEY": str(home / "peer.key"),
                 "LUMABRI_KNOWN_HOSTS": str(home / "known.hosts"),
                 "LUMABRI_TOKEN": "household-test", "LUMABRI_NO_DISK_PROBE": "1",
+                # An inherited preference must not override CPU-only approval.
+                "LUMABRI_ENGINE_BACKEND": "cuda",
                 "LUMABRI_RAM_RESERVE_MB": "256", "LUMABRI_IO_TIMEOUT_MS": "10000",
                 "OMP_NUM_THREADS": "2", "COLI_NO_OMP_TUNE": "1", "PIN": "off"}
 
@@ -482,14 +484,21 @@ def main():
             assert not chat.has("timing unavailable"), "inconsistent engine timings"
         assert "hosted stream · no local checkpoint" in chat.text
         executed_ranges = []
+        edge_policies = 0
         for donor in ("donor-a", "donor-b"):
             log = (tmp / donor / ".lumabri/home/engines.log").read_text(errors="replace")
+            assert "[segment-node] backend policy=cpu adapter_mask=0x100" in log, \
+                f"{donor} did not enforce the approved CPU policy"
+            edge_log = tmp / donor / ".lumabri/home/edge.log"
+            if edge_log.exists():
+                edge_policies += "[segment-chat] backend policy=cpu adapter_mask=0x100" in edge_log.read_text(errors="replace")
             commits = re.findall(r"\[segment-node [^\]\n]+ (\d+):(\d+)\] committed_runs=(\d+)", log)
             assert commits, f"{donor} did not report any committed model execution"
             ranges = {(int(begin), int(end)) for begin, end, _ in commits}
             assert len(ranges) == 1, ranges
             executed_ranges.extend(ranges)
         assert sorted(executed_ranges) == announced_ranges, (executed_ranges, announced_ranges)
+        assert edge_policies == 1, "the approved Edge host did not enforce CPU execution"
         chat.send("/plan\n")
         until(lambda: chat.text.count("Approved Segment plan: 2 compute donors") >= 2,
               message="/plan did not show the same accepted allocation")

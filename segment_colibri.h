@@ -6,6 +6,14 @@
 #include "edge_runtime.h"
 #include "segment_adapters.h"
 #include "segment_runtime.h"
+#include "src/runtime/lumabri_backend_policy.h"
+
+_Static_assert((uint64_t)COLI_SEGMENT_CAP_CPU == (uint64_t)LMB_SEG_CAP_CPU &&
+               (uint64_t)COLI_EDGE_CAP_CPU == (uint64_t)LMB_SEG_CAP_CPU,
+               "Colibri CPU backend bits must match the approved contract");
+_Static_assert(COLI_SEGMENT_CAP_BACKEND_MASK == LMB_EXEC_BACKEND_MASK &&
+               COLI_EDGE_CAP_BACKEND_MASK == LMB_EXEC_BACKEND_MASK,
+               "New upstream backends require an explicit resource contract");
 
 #include <errno.h>
 #include <stddef.h>
