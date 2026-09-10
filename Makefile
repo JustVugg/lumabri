@@ -610,13 +610,10 @@ segment-options-force:
 build/segment-options: segment-options-force tools/update_build_stamp.py
 	python3 tools/update_build_stamp.py $@ '$(CC)' '$(CPPFLAGS)' '$(CFLAGS)' '$(OMP_FLAGS)' '$(OMP_LIBS)' '$(abspath $(ENGINE))'
 
-$(HYBRID_ENGINE_DIR)/.prepared: Makefile build/segment-options $(HYBRID_PATCH_INPUTS) \
+$(HYBRID_ENGINE_DIR)/.prepared: Makefile build/segment-options tools/prepare_engine_source.py $(HYBRID_PATCH_INPUTS) \
 		$(ENGINE)/colibri.c $(ENGINE)/inkling.c $(ENGINE)/kimi_k3.c \
 		$(ENGINE)/olmoe.c $(ENGINE)/qwen36.c $(ENGINE)/deepseek_v4.c
-	rm -rf $(HYBRID_ENGINE_DIR)
-	mkdir -p $(HYBRID_ENGINE_DIR)
-	cp -a $(ENGINE)/. $(HYBRID_ENGINE_DIR)/
-	rm -rf $(HYBRID_ENGINE_DIR)/build
+	python3 tools/prepare_engine_source.py --source '$(ENGINE)' --output '$(HYBRID_ENGINE_DIR)'
 	python3 engine_patches/make_patches.py --engine-dir $(ENGINE) --apply-one colibri.c --out $(HYBRID_ENGINE_DIR)/colibri.c
 	python3 engine_patches/make_patches.py --engine-dir $(ENGINE) --apply-one inkling.c --out $(HYBRID_ENGINE_DIR)/inkling.c
 	python3 engine_patches/make_patches.py --engine-dir $(ENGINE) --apply-one kimi_k3.c --out $(HYBRID_ENGINE_DIR)/kimi_k3.c
@@ -775,6 +772,7 @@ test: all test_weight_cache test_key_rotation test_hedge test_local_fallback tes
 	$(MAKE) test-home-network
 	python3 ./tests/integration/chat_ui_test.py
 	python3 ./tests/integration/package_household_test.py
+	python3 ./tests/integration/prepare_engine_source_test.py
 	python3 ./tests/integration/preload_path_test.py
 	python3 tests/ui_text_test.py
 	python3 tests/integration/workspace_navigation_test.py

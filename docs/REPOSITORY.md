@@ -21,6 +21,7 @@ ready for household use. The public README documents the tested TUI path.
 | `expert_engines/`, `engine_patches/`, Expert bridge files | Optional Expert/Hybrid and upstream compatibility |
 | `deploy/`, root deployment/release documents | Existing deployment tooling and the minimal household launcher |
 | `tools/package_household.py` | Allowlisted native candidate assembly; never copies models or credentials |
+| `tools/prepare_engine_source.py` | Bounded source-only Colibri build copy; excludes checkpoints and generated outputs |
 | `build/`, local executables, `__pycache__/`, tiny fixtures | Generated/ignored artifacts, not production source files |
 
 The root Makefile remains the supported build entry point. Test executable
