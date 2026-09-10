@@ -29,3 +29,20 @@ files or checkpoints. An arbitrary destination is never recursively erased.
 Colibri itself stays unchanged. The existing Lumabri hooks are applied only to
 the generated build copy, as before. This is build-storage hygiene, not automatic
 eviction or a quota for runtime model caches.
+
+## Incremental builds track every copied input
+
+`build/segment-sources` records a SHA-256 fingerprint of the same bounded source
+set used by preparation. Names, contents and copied permission bits participate;
+adding, removing or changing an adapter, header or build script invalidates the
+generated tree and therefore its archive and linked Segment binaries. This
+replaces the historical dependency list of six model C files, which omitted
+GLM5.3, Qwen3.8 and headers. Edits with a preserved mtime are still detected.
+
+An unchanged fingerprint preserves the stamp's mtime and does not force another
+copy or compilation. Build options still have their separate stamp. Weights,
+tokenizer JSON and generated outputs neither enter this hash nor trigger a
+rebuild. Computing it reads only the source inputs (about 9 MB at the pin),
+never a model checkpoint. Invalid source inputs fail the build before the old
+stamp or prepared tree is replaced. This does not make the upstream checkout
+transactional: do not edit it concurrently with compilation.

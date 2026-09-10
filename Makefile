@@ -610,9 +610,12 @@ segment-options-force:
 build/segment-options: segment-options-force tools/update_build_stamp.py
 	python3 tools/update_build_stamp.py $@ '$(CC)' '$(CPPFLAGS)' '$(CFLAGS)' '$(OMP_FLAGS)' '$(OMP_LIBS)' '$(abspath $(ENGINE))'
 
-$(HYBRID_ENGINE_DIR)/.prepared: Makefile build/segment-options tools/prepare_engine_source.py $(HYBRID_PATCH_INPUTS) \
-		$(ENGINE)/colibri.c $(ENGINE)/inkling.c $(ENGINE)/kimi_k3.c \
-		$(ENGINE)/olmoe.c $(ENGINE)/qwen36.c $(ENGINE)/deepseek_v4.c
+# Track every copied adapter/header/build input, including new upstream files,
+# deletions and preserved-mtime edits. This reads sources only, never weights.
+build/segment-sources: segment-options-force tools/prepare_engine_source.py tools/update_build_stamp.py
+	python3 tools/prepare_engine_source.py --source '$(ENGINE)' --stamp '$@'
+
+$(HYBRID_ENGINE_DIR)/.prepared: Makefile build/segment-options build/segment-sources tools/prepare_engine_source.py $(HYBRID_PATCH_INPUTS)
 	python3 tools/prepare_engine_source.py --source '$(ENGINE)' --output '$(HYBRID_ENGINE_DIR)'
 	python3 engine_patches/make_patches.py --engine-dir $(ENGINE) --apply-one colibri.c --out $(HYBRID_ENGINE_DIR)/colibri.c
 	python3 engine_patches/make_patches.py --engine-dir $(ENGINE) --apply-one inkling.c --out $(HYBRID_ENGINE_DIR)/inkling.c
