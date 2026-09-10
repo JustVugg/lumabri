@@ -50,7 +50,8 @@ runs the same test; loopback is not a physical LAN certification.
 - Importing old per-request caches: existing directories are left untouched.
 - Automatic eviction, a total disk-cache quota and cache-aware free-space admission.
 - Remote checkpoint selection, authorized acquisition and model-license handling.
-- A verified smaller disk working set, concurrent sessions and KV replay.
+- A verified smaller disk working set, sessions sharing one donor/cache and KV replay.
+  Independent plans on disjoint donors hold separate cache leases and can coexist.
 
 The requester still supplies a local checkpoint. Gate 5 is not complete just
 because verified weight blocks are reused.

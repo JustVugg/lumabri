@@ -408,7 +408,16 @@ static int home_donor_offer(HomeDonor *d, int incoming, const char *tracker,
              !lmb_secure_peer_matches(incoming, offer.requester);
     }
     lmb_msg_free(&m);
-    if (!rc && d->client >= 0) rc = -1;
+    if (!rc && d->client >= 0) {
+        /* Reply against the NEW request ID without changing the admitted
+         * transaction, its leases, or its controller connection. An EOF is
+         * not a useful capacity signal to a second household chatter. */
+        LmbHomeTransaction busy = { .offer = offer, .phase = LMB_HOME_REJECTED };
+        snprintf(busy.reason, sizeof busy.reason,
+                 "BUSY: this computer already has an active household request.");
+        (void)home_status_send(incoming, &busy, 0, 0);
+        return -1; /* caller closes only this unadmitted connection */
+    }
     if (!rc) rc = lmb_home_offer_begin(&d->transaction, &offer, tracker,
                                        ram, disk, (uint64_t)(nowd() * 1000));
     if (rc) return -1;
@@ -528,7 +537,9 @@ static int cmd_donor(int argc, char **argv) {
         if (ready[0].revents & POLLIN) {
             int incoming = accept(listener, NULL, NULL);
             if (incoming >= 0) {
-                donor_choice = 1;
+                /* An unrelated preflight/offer must not reset the choice
+                 * the owner is making on an existing pending request. */
+                if (d.client < 0) donor_choice = 1;
                 lmb_machine_refresh_resources(&profile, d.cache_base);
                 uint64_t free_ram = profile.ram_available_bytes > reserve ? profile.ram_available_bytes - reserve : 0;
                 if (free_ram > ram) free_ram = ram;
@@ -811,6 +822,18 @@ static int home_request_chat(LmbTuiState *st, int selected) {
         s.fd[s.count] = fd; s.phase[s.count] = LMB_HOME_PENDING;
         if (o->runs_edge) { s.edge = s.count; have_edge = 1; }
         s.count++;
+        /* Drain the initial acknowledgement before starting heartbeats. A
+         * busy donor replies then closes; sending PULSE first can replace its
+         * queued rejection with a write error and hide the actual reason. */
+        if (home_session_receive(&s, s.count - 1)) {
+            if (!s.reason[s.count - 1][0])
+                home_fail("No valid allocation acknowledgement from %.64s. Check its connection; no plan was committed.", nodes[n].name);
+            goto done;
+        }
+        if (s.phase[s.count - 1] != LMB_HOME_PENDING) {
+            home_fail("Unexpected initial allocation status from %.64s. No plan was committed.", nodes[n].name);
+            goto done;
+        }
     }
     if (!have_edge || !s.count) goto done;
     int committed = 0, host_started = 0;

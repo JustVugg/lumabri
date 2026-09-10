@@ -43,7 +43,9 @@ The latest measured speed is historical, not a guarantee for the next turn.
 - Neither a GPU detector nor a manifest entry proves accelerated execution.
   These candidates use the verified CPU path. Each participating machine
   must permit the household's fixed LAN ports in its own firewall.
-- One household chat plan at a time. Losing a participating donor stops the
+- One household chat plan per participating computer and cache directory.
+  Disjoint donor groups can serve independent chats concurrently; this is
+  not multi-session inference on a shared donor. Losing a participating donor stops the
   current chat and releases resources; automatic household replay is pending.
 
 ## Building and testing a candidate

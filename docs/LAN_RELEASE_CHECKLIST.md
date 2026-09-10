@@ -164,7 +164,12 @@ not a completed gate.
    Model acquisition, cache-aware disk admission/eviction and verified smaller
    disk working sets remain pending. See `HOUSEHOLD_WEIGHT_CACHE.md`.
 6. Pending: upstream-only GPU capability integration, CPU otherwise.
-7. Pending: concurrent sessions and actual replay after failure.
+7. Two independent household chats on disjoint donors now have an end-to-end
+   gate: simultaneous generation, separate engines and leases, closing one
+   while continuing the other, and explicit `BUSY` for an overlapping request.
+   An unrelated request must not reset an owner's pending approval choice.
+   Shared-donor multi-session scheduling, 1/2/4/8 capacity measurements and
+   actual replay after failure remain pending. See `HOUSEHOLD_ADMISSION.md`.
 8. Native candidate assembly now has an explicit binary allowlist, retained
    upstream notices, exact file hashes and dependency reports. The installed
    `bin`/`lib` layout is exercised by the same two-donor approval, generation,
