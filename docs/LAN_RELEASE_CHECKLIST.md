@@ -68,6 +68,11 @@ not a completed gate.
 
 1. PR #152 merged: approved layer-allocation view, named execution evidence,
    two-donor checks; physical two-computer oracle and timings still required.
+   The loopback split rehearsal explicitly disables remote Expert hooks,
+   matching the household runtime; Segment's `--direct-only` alone would not
+   constrain a Hybrid archive's optional Expert transport. Reported seconds
+   cover whole chat invocations, not a decode-speed measurement. Edge thread
+   count remains fixed while Segment thread budgets change between phases.
 2. PR #155 merged initial contracts; gate 2 remains open. Qwen3.6 has an explicit CPU resident contract (float32 dense
    and Edge, int8 expert slots even for packed int4 files, grouped scales,
    per-layer attention/DeltaNet state). Real synthetic int8 and grouped-int4
