@@ -66,11 +66,15 @@ offered RAM, detected hardware, placement and missing resources. **Not
 calibrated** means there is no matching speed measurement—not zero speed.
 A detected GPU is not a promise that this execution path uses it.
 
-The household path currently admits **one CPU, resident Segment plan** with
+Each participating computer currently admits **one CPU, resident Segment plan** with
 verified model sizing and source weights on the requesting computer. It
 distributes contiguous layer ranges, not isolated experts. Each donor keeps
 the state for its layers; the chosen chat host receives the conversation text.
 The chat connection itself does not mount or download a checkpoint.
+Separate donor groups can run independent chats at the same time, provided
+each group can hold its model. An occupied computer returns `BUSY`; it does
+not replace its existing request or chat. Sharing one donor between sessions
+and automatic recovery after a donor failure are not implemented yet.
 
 The donor queries its installed Segment runtime before sharing. A runtime
 built without OpenMP uses one execution thread; CPU core count is not a

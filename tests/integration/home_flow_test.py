@@ -29,6 +29,8 @@ def main():
     parser.add_argument("--runtime-dir", type=Path, default=ROOT,
                         help="directory containing the installed household binaries; no source tree fallback")
     parser.add_argument("--models-dir", required=True)
+    parser.add_argument("--expect-disjoint-plans", action="store_true",
+                        help="verify two simultaneous household chats using different approved compute donors")
     parser.add_argument("--donor-ram-gb", type=float, default=0.5)
     parser.add_argument("--context", type=int, default=128,
                         help="approved context, including the actual family chat template")
@@ -48,6 +50,10 @@ def main():
     parser.add_argument("--kill-donor", action="store_true",
                         help="kill a donor TUI after generation; assert engines and leases are released")
     args = parser.parse_args()
+    if args.expect_disjoint_plans and any((args.repeat_cached, args.expect_no_fit,
+        args.expect_unused_donor, args.kill_donor, args.expect_calibration,
+        args.expect_metrics, args.expect_greedy)):
+        parser.error("--expect-disjoint-plans is a separate concurrency test")
     if args.clear_cached and not args.repeat_cached:
         parser.error("--clear-cached requires --repeat-cached")
     if args.expect_unused_donor and (args.repeat_cached or args.expect_no_fit or
@@ -81,7 +87,7 @@ def main():
     # TOFU authentication; do not erase known_hosts to make a repeat pass.
     service_base = 12000 + (port % 200) * 160
     service_slots = {"donor-a": 1, "donor-b": 2, "reject": 3,
-                     "chatter": 4, "chatter-repeat": 5}
+                     "chatter": 4, "chatter-repeat": 5, "chatter-parallel": 6}
 
     def env(name):
         home = tmp / name
@@ -230,6 +236,103 @@ def main():
                                capture_output=True, text=True, timeout=15)
             return p.returncode == 0 and len(json.loads(p.stdout)["nodes"]) == 3
         until(inventory_ready)
+        if args.expect_disjoint_plans:
+            chats, owners = [], []
+
+            def lease_is_held(donor, lock):
+                with open(tmp / donor.name / ".lumabri" / lock, "r") as lease:
+                    try:
+                        fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        return True
+                return False
+
+            def completed_turn(chat):
+                return chat.has("hosted stream") and chat.has("no local checkpoint")
+
+            def reject_busy(label):
+                collision = Terminal(label, base, "reject")
+                until(lambda: collision.has("3 computers"))
+                collision.send("\t")
+                until(lambda: collision.has("Nothing is selected automatically"))
+                collision.send("\x1b[B\r\t")
+                time.sleep(.5); collision.send("\r\r")
+                until(lambda: collision.p.poll() is not None, seconds=60,
+                      message="an occupied donor did not refuse the conflicting plan")
+                assert collision.p.returncode != 0 and collision.has("BUSY:"), collision.text[-1500:]
+                assert not collision.has("receives the text")
+
+            for index, name in enumerate(("chatter", "chatter-parallel"), 1):
+                chat = Terminal(name, base)
+                chats.append(chat)
+                until(lambda: chat.has("3 computers"))
+                chat.send("\t")
+                until(lambda: chat.has("Nothing is selected automatically"))
+                chat.send("\x1b[B" * index + "\r\t")
+                time.sleep(.5)
+                chat.send("\r\r")
+                available = [donor for donor in (a, b) if donor not in owners]
+                until(lambda: any(donor.has("Waiting for your approval") for donor in available)
+                      or chat.p.poll() is not None, seconds=60,
+                      message="a disjoint plan did not reach its unused donor")
+                assert chat.p.poll() is None
+                pending = [donor for donor in available if donor.has("Waiting for your approval")]
+                assert len(pending) == 1, "single-donor selection was not preserved"
+                owner = pending[0]; owners.append(owner)
+                assert not chat.has("receives the text"), "a plan started without its owner's approval"
+                owner.send("\x1b[A")
+                if index == 1:
+                    # The owner has selected Accept but has not confirmed it.
+                    # Another client's preflight and offer must neither replace
+                    # that request nor silently reset Accept to Decline.
+                    time.sleep(.3)
+                    reject_busy("reject-pending")
+                owner.send("\r")
+                until(lambda: chat.has("Approved Segment plan: 1 compute donor") or chat.p.poll() is not None,
+                      seconds=180, message="an approved independent plan failed to start")
+                assert chat.p.poll() is None
+            # Both actual hosted sessions and both independent resource/cache
+            # leases must coexist. This is not two serial requests relabelled
+            # as concurrency, nor two sessions sharing one compute process.
+            assert len(set(owner.name for owner in owners)) == 2
+            reject_busy("reject-active")
+            for owner in owners:
+                for lock in ("compute-donor.lock", "home/weights.lock"):
+                    assert lease_is_held(owner, lock), "a live plan did not own its reservation"
+            for chat, prompt in zip(chats, ("hi", "hello")):
+                chat.text = ""; chat.send(prompt + "\n")
+            until(lambda: all(completed_turn(chat) for chat in chats)
+                  or any(chat.p.poll() is not None for chat in chats), seconds=120,
+                  message="simultaneous independent chats did not both generate")
+            assert all(chat.p.poll() is None and completed_turn(chat) for chat in chats)
+            chats[0].send("/quit\n")
+            until(lambda: chats[0].p.poll() is not None and owners[0].has("Released"))
+            assert chats[0].p.returncode == 0
+            for lock in ("compute-donor.lock", "home/weights.lock"):
+                assert not lease_is_held(owners[0], lock)
+                assert lease_is_held(owners[1], lock), "closing one plan released the other plan's lease"
+            chats[1].text = ""; chats[1].send("again\n")
+            until(lambda: completed_turn(chats[1]) or chats[1].p.poll() is not None,
+                  seconds=120, message="the surviving chat could not continue")
+            assert chats[1].p.poll() is None and completed_turn(chats[1])
+            chats[1].send("/quit\n")
+            until(lambda: chats[1].p.poll() is not None and owners[1].has("Released"))
+            assert chats[1].p.returncode == 0
+            ranges = []
+            for owner in owners:
+                for lock in ("compute-donor.lock", "home/weights.lock"):
+                    assert not lease_is_held(owner, lock)
+                log = (tmp / owner.name / ".lumabri/home/engines.log").read_text(errors="replace")
+                runs = re.findall(r"\[segment-node [^\]\n]+ (\d+):(\d+)\] committed_runs=(\d+)", log)
+                assert runs, "a selected compute donor did not execute"
+                executed = {(int(begin), int(end)) for begin, end, _ in runs}
+                assert len(executed) == 1
+                ranges.append(next(iter(executed)))
+            assert ranges[0] == ranges[1] and ranges[0][0] == 0 and ranges[0][1] > 0
+            for chat in chats:
+                assert not list((tmp / chat.name).rglob("*.safetensors"))
+            print("HOME DISJOINT PLANS: PASS (two simultaneous approved chats, independent engines and leases, closing one preserves the other)", flush=True)
+            return
         reject = Terminal("reject", base)
         until(lambda: reject.has("3 computers"))
         reject.send("\t")

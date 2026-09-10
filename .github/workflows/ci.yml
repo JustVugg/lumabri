@@ -289,6 +289,7 @@ jobs:
           python3 tools/package_household.py --colibri-root ../colibri --output 'build/native candidate'
           python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --repeat-cached --clear-cached --expect-metrics --expect-calibration
           python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --kill-donor
+          python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --expect-disjoint-plans --context 256
           python3 tools/package_household.py --verify 'build/native candidate'
           tar -czf build/lumabri-linux-candidate.tar.gz -C 'build/native candidate' .
       - uses: actions/upload-artifact@v4
@@ -420,6 +421,7 @@ jobs:
           python3 tools/package_household.py --colibri-root ../colibri --output 'build/native candidate'
           python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --repeat-cached --clear-cached --expect-metrics --expect-calibration
           python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --kill-donor
+          python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --expect-disjoint-plans --context 256
           python3 tools/package_household.py --verify 'build/native candidate'
           tar -czf build/lumabri-macos-candidate.tar.gz -C 'build/native candidate' .
       - uses: actions/upload-artifact@v4
