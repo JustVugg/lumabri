@@ -25,7 +25,9 @@ static void *echo_records(void *arg) {
 static int nodelay(int fd) {
     int value = -1; socklen_t size = sizeof value;
     assert(!getsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &value, &size));
-    return value;
+    /* Socket booleans are zero/nonzero, not necessarily zero/one. Darwin
+     * returns the underlying TCP flag mask for TCP_NODELAY. */
+    return value != 0;
 }
 
 static double seconds(void) {

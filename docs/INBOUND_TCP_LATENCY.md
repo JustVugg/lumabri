@@ -14,6 +14,8 @@ Framing, encryption, authentication, approval and model arithmetic are unchanged
 
 `test_tcp_latency` checks the outbound and inbound socket options, Unix sockets,
 invalid descriptors and byte equality through real AEAD record send/receive.
+Socket option assertions interpret enabled as nonzero: Darwin may return its
+internal flag mask rather than the literal integer one.
 Fixed test keys cover record transport only, not identity authentication; the
 household integration test covers the real authenticated path.
 
