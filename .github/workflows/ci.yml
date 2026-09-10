@@ -142,7 +142,7 @@ jobs:
           make segment_budget_probe
           python3 tests/integration/planner_tensor_contract_test.py --family olmoe --model build/home-flow-models/olmoe-tiny
           make swarm_probe
-          python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --repeat-cached --expect-metrics --expect-calibration
+          python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --repeat-cached --clear-cached --expect-metrics --expect-calibration
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --kill-donor
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --expect-unused-donor
       - name: Same greedy tokens with one and two real Segment ranges
@@ -287,7 +287,7 @@ jobs:
         run: |
           python3 tests/integration/package_household_test.py
           python3 tools/package_household.py --colibri-root ../colibri --output 'build/native candidate'
-          python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --repeat-cached --expect-metrics --expect-calibration
+          python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --repeat-cached --clear-cached --expect-metrics --expect-calibration
           python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --kill-donor
           python3 tools/package_household.py --verify 'build/native candidate'
           tar -czf build/lumabri-linux-candidate.tar.gz -C 'build/native candidate' .
@@ -348,7 +348,7 @@ jobs:
           test "$(OMP_NUM_THREADS=1 ./segment_node --thread-capacity)" = 1
           test "$(OMP_NUM_THREADS=4 OMP_THREAD_LIMIT=1 ./segment_node --thread-capacity)" = 1
           make swarm_probe
-          python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --repeat-cached --expect-metrics --expect-calibration
+          python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --repeat-cached --clear-cached --expect-metrics --expect-calibration
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --kill-donor
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --expect-unused-donor
       - uses: actions/download-artifact@v4
@@ -418,7 +418,7 @@ jobs:
         working-directory: lumabri
         run: |
           python3 tools/package_household.py --colibri-root ../colibri --output 'build/native candidate'
-          python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --repeat-cached --expect-metrics --expect-calibration
+          python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --repeat-cached --clear-cached --expect-metrics --expect-calibration
           python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --kill-donor
           python3 tools/package_household.py --verify 'build/native candidate'
           tar -czf build/lumabri-macos-candidate.tar.gz -C 'build/native candidate' .

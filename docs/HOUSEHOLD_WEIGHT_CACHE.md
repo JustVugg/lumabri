@@ -68,7 +68,7 @@ refusal, the non-destructive default, confirmed cleanup and terminal restoration
 
 ```sh
 make household swarm_probe
-python3 tests/integration/home_flow_test.py --models-dir /path/to/one-fixture-parent --repeat-cached
+python3 tests/integration/home_flow_test.py --models-dir /path/to/one-fixture-parent --repeat-cached --clear-cached
 ```
 
 The test executes two separately approved plans on two real Segment
@@ -77,6 +77,12 @@ the source's published byte/read counters, generation in the second plan,
 and release of RAM/cache locks. The repeated synthetic OLMoE request must
 leave only the two direct `config.json` reads at the source. Native macOS CI
 runs the same test; loopback is not a physical LAN certification.
+
+With `--clear-cached`, the test then opens each donor's real workspace storage
+view, explicitly clears its released weight cache and starts a third approved
+plan. The source must serve weights again, both caches must be rebuilt and
+generation and lease release must succeed. The same check runs against the
+installed native candidate layout.
 
 ## Still outside this change
 

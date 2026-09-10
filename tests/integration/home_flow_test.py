@@ -35,6 +35,8 @@ def main():
     parser.add_argument("--expect-greedy", action="store_true")
     parser.add_argument("--repeat-cached", action="store_true",
                         help="run a separately approved second plan; verify shared weight reuse and source byte counters")
+    parser.add_argument("--clear-cached", action="store_true",
+                        help="after reuse, clear weights from the donor workspace and verify an approved cold restart")
     parser.add_argument("--expect-metrics", action="store_true",
                         help="require versioned generation timings through Hosted into the TUI")
     parser.add_argument("--expect-calibration", action="store_true",
@@ -46,6 +48,8 @@ def main():
     parser.add_argument("--kill-donor", action="store_true",
                         help="kill a donor TUI after generation; assert engines and leases are released")
     args = parser.parse_args()
+    if args.clear_cached and not args.repeat_cached:
+        parser.error("--clear-cached requires --repeat-cached")
     if args.expect_unused_donor and (args.repeat_cached or args.expect_no_fit or
                                     args.kill_donor or args.expect_calibration):
         parser.error("--expect-unused-donor is a separate single-session admission test")
@@ -401,41 +405,68 @@ def main():
             print("HOME CALIBRATION: PASS (real timing saved, catalogue reopened; context, selection and donor restart invalidate speed)", flush=True)
         if args.repeat_cached:
             before = cached_weights()
-            a.text = b.text = ""
-            repeat = Terminal("chatter-repeat", base)
-            until(lambda: repeat.has("3 computers"))
-            repeat.send("\t")
-            until(lambda: repeat.has("Nothing is selected automatically"))
-            repeat.send("\x1b[B\r\x1b[B\r\t")
-            time.sleep(.5)
-            repeat.send("\r\r")
-            until(lambda: a.has("Waiting for your approval") and b.has("Waiting for your approval"), seconds=60)
-            # Cached weights do not confer permission to execute again.
-            assert not repeat.has("receives the text")
-            a.send("\x1b[A\r"); b.send("\x1b[A\r")
-            until(lambda: repeat.has("receives the text") or repeat.p.poll() is not None, seconds=180)
-            assert repeat.p.poll() is None, "cached plan failed to start"
-            repeat.send("hi\n")
-            until(lambda: repeat.has("tok/s") or repeat.has("generated tokens") or repeat.p.poll() is not None,
-                  seconds=120, message="cached model did not finish a response")
-            assert repeat.p.poll() is None and "no local checkpoint" in repeat.text
-            warm = source_stats(repeat)
             # The requester and host each inspect config.json directly to
             # select the engine. These metadata reads still cross the wire;
             # do not misreport a warm weight cache as zero network traffic.
             configs = list(Path(args.models_dir).glob("*/config.json"))
             assert len(configs) == 1, "cache counter gate requires one fixture model"
             metadata_bytes = 2 * configs[0].stat().st_size
-            assert warm["reads"] == 2 and warm["bytes_served"] == metadata_bytes, (cold_bytes, warm)
             assert cold_bytes > metadata_bytes
-            assert cached_weights() == before, "the same checkpoint duplicated its persistent weight cache"
-            repeat.send("/quit\n")
-            until(lambda: repeat.p.poll() is not None)
-            assert repeat.p.returncode == 0
-            until(lambda: a.has("Released") and b.has("Released"))
-            until(leases_released)
-            assert not list((tmp / "chatter-repeat").rglob("*.safetensors"))
-            print(f"HOME CACHE: PASS (new approval, same checkpoint cache, source bytes {cold_bytes} -> {warm['bytes_served']}, two config reads remain)", flush=True)
+            for cleared in ([False, True] if args.clear_cached else [False]):
+                if cleared:
+                    for donor in ("donor-a", "donor-b"):
+                        storage = Terminal("storage-" + donor, ["./lumabri"], donor)
+                        until(lambda: storage.has("What would you like to do?"))
+                        storage.send("/")
+                        until(lambda: storage.has("/storage"))
+                        storage.send("\x1b[A\r")
+                        until(lambda: storage.has("Household weight storage"))
+                        storage.send("\x1b[B\r")
+                        until(lambda: storage.has("Clear unused household weights?"))
+                        storage.send("\x1b[B\r")
+                        until(lambda: storage.has("Household weights cleared"))
+                        for tree in ("cas", "mirrors"):
+                            assert not list((tmp / donor / ".lumabri/home" / tree).iterdir())
+                        storage.text = ""; storage.send("\x1b")
+                        until(lambda: storage.has("What would you like to do?"))
+                        storage.send("\x1b")
+                        until(lambda: storage.p.poll() is not None)
+                        assert storage.p.returncode == 0
+                a.text = b.text = ""
+                repeat = Terminal("chatter-refetch" if cleared else "chatter-repeat", base, "chatter-repeat")
+                until(lambda: repeat.has("3 computers"))
+                repeat.send("\t")
+                until(lambda: repeat.has("Nothing is selected automatically"))
+                repeat.send("\x1b[B\r\x1b[B\r\t")
+                time.sleep(.5)
+                repeat.send("\r\r")
+                until(lambda: a.has("Waiting for your approval") and b.has("Waiting for your approval"), seconds=60)
+                # Cached weights do not confer permission to execute again.
+                assert not repeat.has("receives the text")
+                a.send("\x1b[A\r"); b.send("\x1b[A\r")
+                until(lambda: repeat.has("receives the text") or repeat.p.poll() is not None, seconds=180)
+                assert repeat.p.poll() is None, "cache reuse/refetch plan failed to start"
+                repeat.send("hi\n")
+                until(lambda: repeat.has("tok/s") or repeat.has("generated tokens") or repeat.p.poll() is not None,
+                      seconds=120, message="model did not finish a response after cache reuse/refetch")
+                assert repeat.p.poll() is None and "no local checkpoint" in repeat.text
+                stats = source_stats(repeat)
+                if cleared:
+                    assert stats["bytes_served"] > metadata_bytes, stats
+                    assert cached_weights(), "cleared cache was not rebuilt"
+                else:
+                    assert stats["reads"] == 2 and stats["bytes_served"] == metadata_bytes, (cold_bytes, stats)
+                    assert cached_weights() == before, "the same checkpoint duplicated its persistent weight cache"
+                repeat.send("/quit\n")
+                until(lambda: repeat.p.poll() is not None)
+                assert repeat.p.returncode == 0
+                until(lambda: a.has("Released") and b.has("Released"))
+                until(leases_released)
+                assert not list((tmp / "chatter-repeat").rglob("*.safetensors"))
+                if cleared:
+                    print("HOME STORAGE: PASS (TUI cleanup, renewed approval, weight refetch, real generation, released leases)", flush=True)
+                else:
+                    print(f"HOME CACHE: PASS (new approval, same checkpoint cache, source bytes {cold_bytes} -> {stats['bytes_served']}, two config reads remain)", flush=True)
         def no_owned_processes():
             rows = subprocess.check_output(["ps", "-axo", "pgid=,stat="], text=True)
             return not any(int(row.split()[0]) in owned_groups and not row.split()[1].startswith("Z")
