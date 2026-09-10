@@ -35,7 +35,7 @@ with tempfile.TemporaryDirectory(prefix="lumabri-storage-ui-") as temp:
                            stdin=slave, stdout=slave, stderr=slave)
     output = bytearray()
 
-    def wait_for(text):
+    def until(predicate):
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             while select.select([master], [], [], .02)[0]:
@@ -46,10 +46,13 @@ with tempfile.TemporaryDirectory(prefix="lumabri-storage-ui-") as temp:
                 if not data:
                     break
                 output.extend(data)
-            if text.encode() in output:
+            if predicate():
                 return
             time.sleep(.02)
         raise AssertionError(output.decode(errors="replace")[-4000:])
+
+    def wait_for(text):
+        until(lambda: text.encode() in output)
 
     def send(keys):
         output.clear()
@@ -73,7 +76,10 @@ with tempfile.TemporaryDirectory(prefix="lumabri-storage-ui-") as temp:
         assert source.read_bytes() == b"original model" and log.read_bytes() == b"keep log"
         assert (cache / "weights.lock").exists(), "cleanup removed the lease inode"
         send(b"\x1b"); wait_for("What would you like to do?")
-        send(b"\x1b"); app.wait(timeout=10)
+        # Keep consuming terminal output while waiting for exit. Darwin PTYs
+        # have a smaller output queue; blocking in wait() can strand the app
+        # in its final repaint before it reads Escape or restores termios.
+        send(b"\x1b"); until(lambda: app.poll() is not None)
         assert app.returncode == 0
         after = termios.tcgetattr(slave)
         mask = termios.ICANON | termios.ECHO
@@ -82,7 +88,11 @@ with tempfile.TemporaryDirectory(prefix="lumabri-storage-ui-") as temp:
         lease.close()
         if app.poll() is None:
             app.terminate()
-        app.wait(timeout=10)
+            try:
+                until(lambda: app.poll() is not None)
+            except AssertionError:
+                app.kill()
+        app.wait(timeout=5)
         os.close(master); os.close(slave)
 
 print("STORAGE UI: PASS (busy refusal, safe default, confirmed cleanup, sources/logs preserved, terminal restored)")
