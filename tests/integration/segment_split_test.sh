@@ -23,6 +23,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
+# The archive may also include optional Expert/Hybrid hooks. --direct-only
+# constrains Segment transport, not those hooks: without this, a nominal
+# Segment-only baseline still discovers Expert peers and can use their relay.
+# Match home_donor_launch(); Hybrid needs a separately named benchmark.
+export LUMABRI_NO_EXEC=1
+
 ENGINE="${ENGINE:-../colibri/c}"
 PORT="${PORT:-7920}"
 MODEL_DIR="${SPLIT_MODEL_DIR:-tiny_olmoe}"
@@ -170,6 +176,8 @@ best_of() {                  # $1 = threads, $2 = tag; prints "<best s> <ids>"
 }
 
 echo "model $MODEL_NAME ($MTYPE) · $LAYERS layers · $TOKENS tokens · best of $ROUNDS"
+echo "  Segment only: remote Expert hooks disabled; Edge threads stay at $THREADS_TOTAL."
+echo "  Times below cover each complete chat invocation, not decode tok/s."
 echo "  (one warm-up run per phase is discarded: the first read of a"
 echo "   checkpoint is disk, every later one is page cache)"
 
