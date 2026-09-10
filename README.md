@@ -66,6 +66,13 @@ offered RAM, detected hardware, placement and missing resources. **Not
 calibrated** means there is no matching speed measurement—not zero speed.
 A detected GPU is not a promise that this execution path uses it.
 
+For an optional short measurement, select your computers and model, open
+**/ actions → /calibrate**, then review and confirm. Donors still approve the
+plan. Lumabri generates at most 8 test tokens, with a 20-second inference
+limit, saves the observed speed and releases the plan. Transferring and
+loading missing weights happens first and can take much longer. This is a
+short-run indication, not a guarantee for long conversations.
+
 Each participating computer currently admits **one CPU, resident Segment plan** with
 verified model sizing and source weights on the requesting computer. It
 distributes contiguous layer ranges, not isolated experts. Each donor keeps

@@ -5,6 +5,39 @@
 #include <assert.h>
 
 int main(int argc, char **argv) {
+    int probe_pair[2];
+    assert(!socketpair(AF_UNIX, SOCK_STREAM, 0, probe_pair));
+    LmbProbeDeadline deadline = {0};
+    assert(lmb_probe_start(NULL, probe_pair[0], 1));
+    assert(lmb_probe_start(&deadline, -1, 1));
+    assert(lmb_probe_start(&deadline, probe_pair[0], NAN));
+    assert(lmb_probe_start(&deadline, probe_pair[0], 0));
+    assert(lmb_probe_start(&deadline, probe_pair[0], 61));
+    assert(!lmb_probe_start(&deadline, probe_pair[0], 2));
+    assert(lmb_probe_start(&deadline, probe_pair[0], 2));
+    assert(!lmb_probe_stop(&deadline));
+    assert(!lmb_probe_stop(&deadline));
+    assert(write(probe_pair[1], "a", 1) == 1);
+    char probe_byte;
+    assert(read(probe_pair[0], &probe_byte, 1) == 1 && probe_byte == 'a');
+    assert(!lmb_probe_start(&deadline, probe_pair[0], .02));
+    struct pollfd probe_wait = {probe_pair[0], POLLIN, 0};
+    assert(poll(&probe_wait, 1, 5000) > 0);
+    assert(read(probe_pair[0], &probe_byte, 1) == 0);
+    assert(lmb_probe_stop(&deadline));
+    assert(fcntl(probe_pair[0], F_GETFD) >= 0); /* timer does not own/close it */
+    close(probe_pair[0]); close(probe_pair[1]);
+    /* A partial real codec frame must not make the bounded probe wait for
+     * a payload forever, nor produce a usable STAT result on expiry. */
+    assert(!socketpair(AF_UNIX, SOCK_STREAM, 0, probe_pair));
+    Engine stalled = {.from = probe_pair[0], .to = probe_pair[0], .proto = PROTO_SERVE2};
+    const char *partial = "DATA 1 100\n";
+    assert(write(probe_pair[1], partial, strlen(partial)) == (ssize_t)strlen(partial));
+    assert(!lmb_probe_start(&deadline, probe_pair[0], .02));
+    char probe_stat[512]; char *probe_reply = NULL;
+    assert(stream_serve2(&stalled, probe_stat, sizeof probe_stat, &probe_reply) < 0);
+    assert(lmb_probe_stop(&deadline) && !probe_stat[0] && !probe_reply);
+    close(probe_pair[0]); close(probe_pair[1]);
     const char *boot[] = {
         "\nLUMABRI_SAMPLING LOGITS\nLUMABRI_NUMERIC 2 cpu-test\n" FRAME_READY "\n",
         "\nLUMABRI_SAMPLING GREEDY\nLUMABRI_NUMERIC 2 cpu-test\n" FRAME_READY "\n",

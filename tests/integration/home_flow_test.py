@@ -31,6 +31,8 @@ def main():
     parser.add_argument("--models-dir", required=True)
     parser.add_argument("--expect-disjoint-plans", action="store_true",
                         help="verify two simultaneous household chats using different approved compute donors")
+    parser.add_argument("--expect-quick-calibration", action="store_true",
+                        help="request the optional 8-token probe through the TUI and verify its saved measurement")
     parser.add_argument("--donor-ram-gb", type=float, default=0.5)
     parser.add_argument("--context", type=int, default=128,
                         help="approved context, including the actual family chat template")
@@ -50,6 +52,10 @@ def main():
     parser.add_argument("--kill-donor", action="store_true",
                         help="kill a donor TUI after generation; assert engines and leases are released")
     args = parser.parse_args()
+    if args.expect_quick_calibration and any((args.expect_disjoint_plans, args.repeat_cached,
+        args.expect_no_fit, args.expect_unused_donor, args.kill_donor,
+        args.expect_calibration, args.expect_metrics, args.expect_greedy)):
+        parser.error("--expect-quick-calibration is a separate measurement test")
     if args.expect_disjoint_plans and any((args.repeat_cached, args.expect_no_fit,
         args.expect_unused_donor, args.kill_donor, args.expect_calibration,
         args.expect_metrics, args.expect_greedy)):
@@ -236,6 +242,56 @@ def main():
                                capture_output=True, text=True, timeout=15)
             return p.returncode == 0 and len(json.loads(p.stdout)["nodes"]) == 3
         until(inventory_ready)
+        if args.expect_quick_calibration:
+            chat = Terminal("chatter", base)
+            until(lambda: chat.has("3 computers"))
+            chat.send("\t")
+            until(lambda: chat.has("Nothing is selected automatically"))
+            chat.send("\x1b[B\r\x1b[B\r\t")
+            time.sleep(.5)
+            chat.send("/" + "\x1b[B" * 4 + "\r")
+            until(lambda: chat.has("Quick calibration") and chat.has("Preparation is not included"))
+            assert not a.has("Waiting for your approval") and not b.has("Waiting for your approval")
+            assert not list((tmp / "chatter").rglob("home-source-*.log"))
+            # Reviewing or dismissing the measurement is not consent to load.
+            chat.text = ""; chat.send("\x1b")
+            until(lambda: chat.has("A plan before a download."))
+            assert not engines_started("donor-a") and not engines_started("donor-b")
+            chat.send("/")
+            until(lambda: chat.has("/calibrate"))
+            chat.text = ""
+            # One burst, intentionally: close/reopen actions without a sleep.
+            # The catalogue used to swallow '/' while decoding the prior Esc.
+            chat.send("\x1b/" + "\x1b[B" * 4 + "\r")
+            until(lambda: chat.has("Preparation is not included"))
+            chat.send("\r")
+            until(lambda: a.has("Waiting for your approval") and b.has("Waiting for your approval"), seconds=60)
+            assert not engines_started("donor-a") and not engines_started("donor-b")
+            a.send("\x1b[A\r"); b.send("\x1b[A\r")
+            until(lambda: chat.p.poll() is not None, seconds=180,
+                  message="quick measurement did not return after its one bounded turn")
+            assert chat.p.returncode == 0 and chat.has("Quick calibration complete"), chat.text[-2500:]
+            assert chat.has("at most 8 tokens, 20 seconds")
+            generated = re.findall(r"host prefill [\d.]+s · (\d+) generated tokens", chat.text)
+            assert len(generated) == 1 and 2 <= int(generated[0]) <= 8, generated
+            assert chat.has("hosted stream") and chat.has("no local checkpoint")
+            records = list((tmp / "chatter/.lumabri/calibrations").glob("*.cal"))
+            assert len(records) == 1 and records[0].stat().st_mode & 0o077 == 0
+            until(lambda: a.has("Released") and b.has("Released"))
+            for name in ("donor-a", "donor-b"):
+                for lock in ("compute-donor.lock", "home/weights.lock"):
+                    with open(tmp / name / ".lumabri" / lock, "r") as lease:
+                        fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            assert not list((tmp / "chatter").rglob("*.safetensors"))
+            reopened = Terminal("probe-catalogue", base, "chatter")
+            until(lambda: reopened.has("3 computers"))
+            reopened.send("\t\x1b[B\r\x1b[B\r\t")
+            until(lambda: reopened.has("tok/s (last)"), seconds=30,
+                  message="the short measurement did not reappear for the same selected plan")
+            reopened.send("\r")
+            until(lambda: reopened.has("Last turn:") and reopened.has(" / " + generated[0] + " generated tokens"))
+            print("HOME QUICK CALIBRATION: PASS (explicit TUI confirmation and donor approval, one <=8-token turn, real timing saved and reopened, released leases)", flush=True)
+            return
         if args.expect_disjoint_plans:
             chats, owners = [], []
 
