@@ -468,6 +468,9 @@ test_calibration: tests/c/test_calibration.c lumabri_calibration.h lumabri_calib
 test_catalogue_advice: tests/c/test_catalogue_advice.c src/planner/lumabri_catalogue_advice.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_catalogue_advice.c -o $@
 
+test_tcp_latency: tests/c/test_tcp_latency.c $(SECURE_DEPS) lumabri_proto.h lumabri_sign.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_tcp_latency.c -o $@
+
 test_metrics: tests/c/test_metrics.c lumabri_metrics.h lumabri_stage_metrics.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_metrics.c -o $@
 
@@ -741,7 +744,7 @@ test: all test_weight_cache test_key_rotation test_hedge test_local_fallback tes
 		test_inventory test_home test_chat_ui test_calibration test_catalogue_advice test_metrics \
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
 		test_meminfo test_compute_lease test_content_filter \
-		test_scheduler test_run_gate
+		test_scheduler test_run_gate test_tcp_latency
 	bash ./tests/integration/selftest.sh
 	bash ./tests/integration/donate_test.sh
 	bash ./tests/integration/signed_donor_test.sh
@@ -791,6 +794,7 @@ test: all test_weight_cache test_key_rotation test_hedge test_local_fallback tes
 	./test_calibration
 	./test_catalogue_advice
 	./test_metrics
+	./test_tcp_latency
 	./test_nat_adopt
 	bash ./tests/integration/rtt_refresh_test.sh
 	./test_segment_v2
@@ -848,7 +852,7 @@ clean:
 	      test_swarm_detail test_relay_rate test_machine test_meminfo \
 	      test_compute_lease test_content_filter test_scheduler test_run_gate \
 	      test_segment_v2_tsan tracker_tsan \
-	      segment_node segment_chat test_backend_routes segment_node_asan segment_chat_asan \
+	      segment_node segment_chat test_backend_routes test_tcp_latency segment_node_asan segment_chat_asan \
 	      segment_node_tsan segment_chat_tsan \
 	      olmoe_p2p colibri_p2p inkling_p2p kimi_k3_p2p deepseek_p2p qwen36_p2p \
 	      expert_node expert_node_glm expert_node_inkling expert_node_kimi \
