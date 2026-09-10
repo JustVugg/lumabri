@@ -66,6 +66,7 @@ jobs:
         run: python3 tests/integration/workspace_navigation_test.py
       - name: Native candidate packaging contracts
         run: |
+          python3 tests/integration/prepare_engine_source_test.py
           python3 tests/integration/package_household_test.py
           python3 tests/integration/preload_path_test.py
   linux:

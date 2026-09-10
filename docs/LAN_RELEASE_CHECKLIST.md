@@ -187,6 +187,9 @@ not a completed gate.
    upstream notices, exact file hashes and dependency reports. The installed
    `bin`/`lib` layout is exercised by the same two-donor approval, generation,
    cache/calibration and lost-donor tests. macOS candidates use system libraries
-   only (no OpenMP). Native Windows, older/clean-machine compatibility,
+   only (no OpenMP). Engine build preparation now copies only recognized source
+   inputs rather than every checkpoint/output in the Colibri checkout; failures
+   preserve the previous generated tree. See `ENGINE_SOURCE_BUILD.md`.
+   Native Windows, older/clean-machine compatibility,
    physical LAN acceptance and dependency-backed repository cleanup remain
    pending. Candidate artifacts are not a completed release gate.
