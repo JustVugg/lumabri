@@ -6,6 +6,18 @@
 #include <assert.h>
 
 int main(void) {
+    /* Invalid or recovered profiles expose no partially measured ranges. */
+    GenerationResult observed = {.stages_valid = 0, .stage_count = 1};
+    observed.stages[0].timing.decode_seconds = NAN;
+    FILE *profile_file = tmpfile(); assert(profile_file);
+    stage_observations_print(profile_file, &observed);
+    rewind(profile_file);
+    char output[4096]; size_t length = fread(output, 1, sizeof output - 1, profile_file);
+    output[length] = 0; fclose(profile_file);
+    assert(strstr(output, "\"valid\":false,\"stages\":[]"));
+    assert(!strstr(output, "nan"));
+    generation_result_free(&observed);
+    assert(!observed.stage_count && !observed.stages_valid);
     LmbSegRouteSnapshot snapshot = {0};
     RemoteSegment chain[LMB_SEG_ROUTE_MAX];
     size_t count = 0;

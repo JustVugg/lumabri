@@ -1,7 +1,39 @@
 #include "lumabri_metrics.h"
+#include "lumabri_stage_metrics.h"
 #include <assert.h>
+#include <float.h>
 
 int main(void) {
+    LmbStageMetrics stage = {0};
+    assert(!lmb_stage_metrics_add(&stage, 0, 8, .25));
+    assert(!lmb_stage_metrics_add(&stage, 0, 1, .125)); /* one-row PREFILL, not decode */
+    assert(!stage.decode_calls && stage.prefill_calls == 2 && stage.prefill_rows == 9);
+    assert(!lmb_stage_metrics_add(&stage, 1, 1, .125));
+    assert(!lmb_stage_metrics_add(&stage, 1, 1, .5));
+    assert(!lmb_stage_metrics_add(&stage, 1, 1, 0));
+    assert(stage.decode_calls == 3 && stage.decode_seconds == .625 &&
+           stage.decode_min_seconds == 0 && stage.decode_max_seconds == .5 &&
+           stage.prefill_seconds == .375);
+    LmbStageMetrics saved = stage;
+    assert(lmb_stage_metrics_add(&stage, 1, 2, .25));
+    assert(lmb_stage_metrics_add(&stage, 0, 0, .25));
+    assert(lmb_stage_metrics_add(&stage, 2, 1, .25));
+    assert(lmb_stage_metrics_add(&stage, 0, 1, -1));
+    assert(lmb_stage_metrics_add(&stage, 0, 1, NAN));
+    assert(lmb_stage_metrics_add(&stage, 1, 1, INFINITY));
+    assert(lmb_stage_metrics_add(NULL, 1, 1, .25));
+    assert(!memcmp(&stage, &saved, sizeof stage));
+    stage.decode_calls = UINT64_MAX;
+    assert(lmb_stage_metrics_add(&stage, 1, 1, 0));
+    stage = saved; stage.prefill_calls = UINT64_MAX;
+    assert(lmb_stage_metrics_add(&stage, 0, 1, 0));
+    stage = saved; stage.prefill_rows = UINT64_MAX;
+    assert(lmb_stage_metrics_add(&stage, 0, 1, 0));
+    stage = saved; stage.decode_seconds = DBL_MAX;
+    assert(lmb_stage_metrics_add(&stage, 1, 1, DBL_MAX));
+    assert(stage.decode_seconds == DBL_MAX && stage.decode_calls == saved.decode_calls);
+    stage = saved; stage.prefill_seconds = DBL_MAX;
+    assert(lmb_stage_metrics_add(&stage, 0, 1, DBL_MAX));
     LmbGenerationMetrics m={.generated_tokens=9,.decode_steps=8,
         .prefill_seconds=15,.decode_seconds=2,.total_seconds=17.2}, parsed;
     assert(lmb_metrics_decode_rate(&m)==4);

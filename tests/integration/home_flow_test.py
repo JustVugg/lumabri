@@ -492,6 +492,19 @@ def main():
             edge_log = tmp / donor / ".lumabri/home/edge.log"
             if edge_log.exists():
                 edge_policies += "[segment-chat] backend policy=cpu adapter_mask=0x100" in edge_log.read_text(errors="replace")
+                observations = re.findall(r"\[segment-stage\] request=\d+ (\{[^\n]+\})", edge_log.read_text(errors="replace"))
+                assert observations, "the Edge host did not report per-range RUN observations"
+                profile = json.loads(observations[-1])
+                assert profile["version"] == 1 and profile["valid"], profile
+                assert profile["scope"] == "client_run_round_trip"
+                assert [(s["begin"], s["end"]) for s in profile["stages"]] == announced_ranges
+                counts = {s["decode_calls"] for s in profile["stages"]}
+                assert len(counts) == 1 and min(counts) > 0, counts
+                for s in profile["stages"]:
+                    assert s["prefill_calls"] > 0 and s["prefill_rows"] > 0
+                    assert 0 <= s["decode_min_seconds"] <= s["decode_max_seconds"]
+                    assert s["decode_min_seconds"] * s["decode_calls"] <= s["decode_seconds"] + 1e-6
+                    assert s["decode_seconds"] <= s["decode_max_seconds"] * s["decode_calls"] + 1e-6
             commits = re.findall(r"\[segment-node [^\]\n]+ (\d+):(\d+)\] committed_runs=(\d+)", log)
             assert commits, f"{donor} did not report any committed model execution"
             ranges = {(int(begin), int(end)) for begin, end, _ in commits}

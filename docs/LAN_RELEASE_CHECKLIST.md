@@ -150,7 +150,11 @@ not a completed gate.
    every alternative is checked against the unchanged launch reservations.
    This bounded search is not an exhaustive feasibility or speed solver.
    See `HOUSEHOLD_PLACEMENT.md`.
-   Measured-cost placement remains pending; this does not enable disk mode or
+   Per-turn Segment RUN observations now separate prefill/decode counts and
+   client round-trip times for each approved range, without additional tokens.
+   Recovered turns invalidate the per-range profile rather than mixing owners
+   and replay costs. See `SEGMENT_STAGE_OBSERVATIONS.md`.
+   Persisted measured-cost placement remains pending; this does not enable disk mode or
    certify additional model families.
 4. PR #157 merged: versioned measurements collected during ordinary Segment chat,
    separating prefill, decode traversals and first visible text. No extra model
