@@ -407,6 +407,18 @@ static int lmb_sec_reject_wrap(int fd, int is_client, const char *addr) {
 /* handshake an accepted (inbound) fd; 0 when encryption is off or the wrap
  * succeeds, -1 when an enabled handshake fails and the caller must drop it */
 static LMB_MAYBE_UNUSED int lmb_secure_server(int fd) {
+    /* Replies use separate header/payload/tag writes just like requests.
+     * Outbound TCP already disables Nagle; accepted sockets must too, before
+     * the handshake and also in plaintext mode. Do not depend on listener
+     * option inheritance (launchers may pass an already-bound descriptor).
+     * Unix socketpairs used by local transports/tests have no TCP option. */
+    struct sockaddr_storage address;
+    socklen_t address_size = sizeof address;
+    if (getsockname(fd, (struct sockaddr *)&address, &address_size)) return -1;
+    if (address.ss_family == AF_INET || address.ss_family == AF_INET6) {
+        int one = 1;
+        if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one)) return -1;
+    }
     if (!lmb_enc_wrap) return 0;
     return lmb_enc_wrap(fd, 0, NULL);
 }
