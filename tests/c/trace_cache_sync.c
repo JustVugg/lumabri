@@ -30,7 +30,14 @@ static void observe(int fd) {
 }
 
 static int traced_fsync(int fd) {
+#ifdef __APPLE__
+    /* As in lumashim's native interposer, references in this image retain
+     * the original libc binding. RTLD_NEXT can resolve an interposed symbol
+     * again on Darwin and recurse before the client can print diagnostics. */
+    int (*actual)(int) = fsync;
+#else
     int (*actual)(int) = (int (*)(int))dlsym(RTLD_NEXT, "fsync");
+#endif
     if (!actual) { errno = ENOSYS; return -1; }
     observe(fd);
     return actual(fd);

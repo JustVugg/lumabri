@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def main():
     with tempfile.TemporaryDirectory(prefix="lumabri-native-shim-") as directory:
-        tmp = Path(directory)
+        tmp = Path(directory).resolve()  # F_GETPATH uses /private/var on Darwin
         source = tmp / "source"
         source.mkdir()
         (source / "weights.bin").write_bytes(os.urandom(2 * 1024 * 1024 + 777))
@@ -113,7 +113,7 @@ def main():
                         assert "test_shim: PASS" not in out
                         continue
                     if client.returncode:
-                        raise AssertionError(f"{name}: {out}\n{err}")
+                        raise AssertionError(f"{name} exited {client.returncode}: {out}\n{err}")
                     assert "TEST_CAS_SYNC" not in err, "per-chunk CAS fsync is in the inference path"
                     assert "TEST_MIRROR_SYNC" in err, "durable mirror synchronization disappeared"
                     assert cached_chunk.is_file() and cached_chunk.read_bytes() == chunk, name
