@@ -312,7 +312,7 @@ jobs:
         run: |
           python3 tests/integration/package_household_test.py
           python3 tools/package_household.py --colibri-root ../colibri --output 'build/native candidate'
-          python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --resident-default --expect-metrics
+          python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --resident-default --expect-metrics --stall-preparation-ui
           python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --repeat-cached --clear-cached --expect-metrics --expect-calibration
           python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --kill-donor
           python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --expect-disjoint-plans --context 256
@@ -448,6 +448,8 @@ jobs:
         env:
           LUMABRI_RESIDENT_REQUIRED: '1'
         run: |
+          make test-home-monitor
+          python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --resident-default --stall-preparation-ui --expect-metrics
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --expect-metrics --crash-requester --resident-default
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --resident-default --kill-donor
           python3 tests/integration/home_flow_test.py --models-dir build/qwen-home-models --expect-metrics

@@ -487,6 +487,12 @@ test_home: tests/c/test_home.c lumabri_home.h lumabri_inventory.h lumabri_famili
 test_chat_ui: $(HOME_NET_DEPS) $(SECURE_DEPS) src/runtime/lumabri_probe_deadline.h tests/c/test_chat_ui.c lumabri.c src/ui/lumabri_tui.c src/ui/lumabri_tui.h src/ui/lumabri_visual.h src/ui/lumabri_chat_editor.h src/ui/lumabri_execution_view.h lumabri_home_runtime.h src/ui/lumabri_home_ui.h lumabri_ready.h lumabri_cluster.h lumabri_memory_budget.h lumabri_checkpoint_inventory.h lumabri_content.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_chat_ui.c src/ui/lumabri_tui.c lumabri_machine.c -o $@
 
+.PHONY: test-home-monitor
+test-home-monitor: $(HOME_NET_DEPS) $(SECURE_DEPS) tests/c/test_home_monitor.c lumabri.c lumabri_home_runtime.h
+	mkdir -p build/tests
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_home_monitor.c src/ui/lumabri_tui.c lumabri_machine.c -o build/tests/home-monitor
+	./build/tests/home-monitor
+
 test-ready-pipe: tests/c/test_ready_pipe.c lumabri_ready.h
 	mkdir -p build/tests
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_ready_pipe.c -o build/tests/ready-pipe
@@ -782,6 +788,7 @@ test: all test_weight_cache test_key_rotation test_hedge test_local_fallback tes
 	bash ./tests/integration/catalog_test.sh
 	./test_inventory
 	./test_home
+	$(MAKE) test-home-monitor
 	$(MAKE) test-ready-pipe
 	$(MAKE) test-home-network
 	python3 ./tests/integration/chat_ui_test.py

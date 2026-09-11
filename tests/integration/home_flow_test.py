@@ -55,6 +55,8 @@ def main():
                         help="resident contract: lose the chatter, retain weights beyond the control lease, reconnect")
     parser.add_argument("--resident-default", action="store_true",
                         help="exercise resident household without setting a resident environment flag")
+    parser.add_argument("--stall-preparation-ui", action="store_true",
+                        help="stop reading requester output beyond the lease interval")
     parser.add_argument("--prepare-timeout", type=int, default=180,
                         help="bounded indexing/loading deadline for a large-checkpoint diagnostic (max 900 seconds)")
     args = parser.parse_args()
@@ -480,6 +482,16 @@ def main():
         chat.send("\r\r")
         until(lambda: a.has("Waiting for your approval") and b.has("Waiting for your approval"), seconds=args.prepare_timeout)
         a.send("\x1b[A\r"); b.send("\x1b[A\r")
+        if args.stall_preparation_ui:
+            # Keep donor terminals draining but let requester output block.
+            # Do not call until()/chat.has(): those would drain its PTY.
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                a.drain(); b.drain()
+                assert "lease expired" not in a.text.lower() + b.text.lower(), "render backpressure expired a healthy donor"
+                assert chat.p.poll() is None, "requester died while its terminal was paused"
+                time.sleep(.05)
+            print("HOME PREPARATION MONITOR: terminal paused 20s; donor leases stayed alive", flush=True)
         until(lambda: chat.has("receives the text") or chat.p.poll() is not None, seconds=args.prepare_timeout,
               message="accepted plan did not reach real hosted chat")
         assert chat.p.poll() is None, "accepted plan failed; inspect donor engine logs"

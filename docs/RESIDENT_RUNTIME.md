@@ -106,6 +106,31 @@ The full `make test` regression suite passed. The native resident-runtime
 matrix at commit `2f0c556` passed on macOS Intel/Apple Silicon with and without
 OpenMP; the later TUI/packaging commits require their own green run.
 
+## Preparation lease monitor
+
+A physical PC/Mac attempt reached resident READY on the PC but the Mac
+reported `Request lease expired before preparation completed`. Preparation
+previously sent heartbeats from the same loop that rendered the terminal.
+Blocking that terminal for longer than the 15-second lease reproduces the
+failure on the prior packaged build; the new regression is
+`home_flow_test.py --resident-default --stall-preparation-ui --expect-metrics`.
+
+The connection monitor now runs from donor approval through loading and chat,
+independently of foreground rendering. It exclusively reads donor statuses;
+the UI consumes synchronized snapshots, and command writes are serialized.
+Preparation redraws are capped at ten per second. Control I/O bounds are
+reapplied after the encryption handshake, which otherwise restores the
+general timeout. Donor closure reasons are forwarded when possible; transport
+failures identify the affected donor address. The lease remains finite and
+incomplete allocations still roll back when the requester is truly lost.
+
+The paused-terminal regression fails on `b0156a6` and passes with this fix:
+two real local donors retain their leases during a 20-second output pause,
+then complete resident inference and reopen a second conversation without
+weight reloading. This proves the rendering/heartbeat bug, not that every
+possible physical-network interruption is resolved. Physical retesting remains
+required. No planner allocation change is included in this fix.
+
 ## Outstanding release gates
 
 - Native CI on the final commit and the physical PC/Mac

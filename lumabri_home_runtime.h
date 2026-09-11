@@ -237,7 +237,12 @@ static void home_donor_release(HomeDonor *d, LmbHomePhase why, const char *reaso
 
 static void home_donor_disconnect(HomeDonor *d, const char *reason) {
     home_donor_release(d, LMB_HOME_CLOSED, reason);
-    if (d->client >= 0) { lmb_close(d->client); d->client = -1; }
+    if (d->client >= 0) {
+        /* Best effort: the requester must see the lease/owner-stop reason,
+         * not just EOF after the reservation has disappeared. */
+        (void)home_status_send(d->client, &d->transaction, 0, 0);
+        lmb_close(d->client); d->client = -1;
+    }
 }
 
 static int home_donor_can_retain(const HomeDonor *d) {
@@ -413,6 +418,9 @@ static int home_donor_offer(HomeDonor *d, int incoming, const char *tracker,
     (void)fcntl(incoming, F_SETFD, FD_CLOEXEC);
     lmb_set_io_timeout(incoming, home_control_io_ms(1000));
     if (lmb_secure_server(incoming)) return -1;
+    /* Handshake restores the general I/O timeout. Control messages need
+     * their own bound again, including idle preflight connections. */
+    lmb_set_io_timeout(incoming, home_control_io_ms(1000));
     LmbMsg m = {0}; LmbHomeOffer offer;
     int rc = lmb_recv(incoming, &m);
     const char *token = getenv("LUMABRI_TOKEN");
@@ -645,23 +653,63 @@ typedef struct {
     uint32_t count, edge;
     pid_t source;
     _Atomic int stop, failed;
+    pthread_mutex_t status_lock, send_lock;
 } HomeSession;
+
+#define HOME_SESSION_INIT { .status_lock = PTHREAD_MUTEX_INITIALIZER, \
+                            .send_lock = PTHREAD_MUTEX_INITIALIZER }
+
+static int home_session_error(HomeSession *s, uint32_t i, const char *operation, int error) {
+    char detail[160] = {0};
+    snprintf(detail, sizeof detail, "%s at %.64s: %s (errno %d).",
+             operation, s->addresses[i], error ? strerror(error) : "connection closed", error);
+    pthread_mutex_lock(&s->status_lock);
+    if (!s->reason[i][0])
+        memcpy(s->reason[i], detail, sizeof detail);
+    pthread_mutex_unlock(&s->status_lock);
+    return -1;
+}
+
+/* One complete frame at a time, including plaintext diagnostic fixtures.
+ * The preparation UI may send COMMIT while the monitor sends a heartbeat. */
+static int home_session_send(HomeSession *s, uint32_t i, uint32_t op) {
+    pthread_mutex_lock(&s->send_lock);
+    int rc = lmb_send(s->fd[i], op, s->offers[i].id, 32, NULL, 0);
+    int error = errno;
+    pthread_mutex_unlock(&s->send_lock);
+    return rc ? home_session_error(s, i, "Cannot send control message", error) : 0;
+}
+
+static void home_session_snapshot(HomeSession *s, LmbHomePhase *phases, uint32_t *ports) {
+    pthread_mutex_lock(&s->status_lock);
+    memcpy(phases, s->phase, s->count * sizeof *phases);
+    memcpy(ports, s->host_port, s->count * sizeof *ports);
+    pthread_mutex_unlock(&s->status_lock);
+}
 
 static int home_session_receive(HomeSession *s, uint32_t i) {
     LmbMsg m = {0};
-    if (lmb_recv(s->fd[i], &m)) { lmb_msg_free(&m); return -1; }
+    errno = 0;
+    if (lmb_recv(s->fd[i], &m)) {
+        int error = errno; lmb_msg_free(&m);
+        return home_session_error(s, i, "Cannot receive donor status", error);
+    }
     LmbCur c = {m.body, m.body_len, 0};
     uint32_t version = 0, phase = 0, segment_port = 0, host_port = 0;
     int bad = m.op != LMB_HOME_STATUS || m.pay_len ||
         lmb_cur_u32(&c, &version) || version != LMB_HOME_VERSION || c.len - c.off < 32;
     if (!bad) { bad = memcmp(c.p + c.off, s->offers[i].id, 32); c.off += 32; }
+    char reason[160] = {0};
     if (!bad) bad = lmb_cur_u32(&c, &phase) || phase > LMB_HOME_CLOSED ||
         lmb_cur_u32(&c, &segment_port) || segment_port > 65535 ||
         lmb_cur_u32(&c, &host_port) || host_port > 65535 ||
-        lmb_inventory_string(&c, s->reason[i], sizeof s->reason[i]) || c.off != c.len;
+        lmb_inventory_string(&c, reason, sizeof reason) || c.off != c.len;
     lmb_msg_free(&m);
-    if (bad) return -1;
+    if (bad) return home_session_error(s, i, "Invalid donor status", EPROTO);
+    pthread_mutex_lock(&s->status_lock);
     s->phase[i] = (LmbHomePhase)phase; s->host_port[i] = host_port;
+    snprintf(s->reason[i], sizeof s->reason[i], "%s", reason);
+    pthread_mutex_unlock(&s->status_lock);
     return phase >= LMB_HOME_REJECTED ? -1 : 0;
 }
 
@@ -669,7 +717,7 @@ static int home_session_poll(HomeSession *s, int pulse) {
     struct pollfd fds[LMB_CLUSTER_MAX_NODES];
     for (uint32_t i = 0; i < s->count; i++) {
         fds[i] = (struct pollfd){s->fd[i], POLLIN, 0};
-        if (pulse && lmb_send(s->fd[i], LMB_HOME_PULSE, s->offers[i].id, 32, NULL, 0)) return -1;
+        if (pulse && home_session_send(s, i, LMB_HOME_PULSE)) return -1;
     }
     int n = poll(fds, s->count, 50);
     if (n < 0 && errno != EINTR) return -1;
@@ -748,7 +796,7 @@ static int home_request_chat(LmbTuiState *st, int selected) {
         if (!authenticated) return home_fail("Cannot authenticate %.64s at %.64s. %s No model was loaded.",
             nodes[i].name, nodes[i].addr, matched ? "Check the household key and whether the donor is responding in time." : "The donor identity changed; refresh the computer list.");
     }
-    HomeSession s = {0};
+    HomeSession s = HOME_SESSION_INIT;
     for (uint32_t i = 0; i < LMB_CLUSTER_MAX_NODES; i++) s.fd[i] = -1;
     char kp[1024], pkhex[65], idhex[65];
     uint8_t sk[64], pk[32], id[32];
@@ -777,12 +825,13 @@ static int home_request_chat(LmbTuiState *st, int selected) {
     HomeTerminal term; home_terminal_begin(&term);
     g_stopping = 0; install_chat_signal_handlers(); signal(SIGPIPE, SIG_IGN);
     s.source = home_spawn(source_argv, NULL, logfile, NULL, source_listener);
-    int result = -1, prepared = 0;
+    int result = -1, prepared = 0, heartbeat_started = 0;
+    pthread_t heartbeat;
     const char *stage = "starting the checkpoint source";
     if (s.source <= 0) goto done;
     LmbModelIdentity identity;
     Swarm swarm = {0};
-    double started = nowd(), pulse = 0;
+    double started = nowd();
     LmbPrepareProgress progress = {0};
     int found = 0;
     stage = "indexing and verifying the checkpoint source";
@@ -871,6 +920,7 @@ static int home_request_chat(LmbTuiState *st, int selected) {
             home_fail("Cannot reach %.64s at %.64s while sending the request: %s.", nodes[n].name, nodes[n].addr, lmb_connect_why());
             goto done;
         }
+        lmb_set_io_timeout(fd, home_control_io_ms(1000));
         (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
         if (!lmb_secure_peer_matches(fd, recipient) || lmb_auth(fd)) {
             home_fail("Authentication failed while requesting %.64s. Refresh the household identity and key.", nodes[n].name);
@@ -897,14 +947,27 @@ static int home_request_chat(LmbTuiState *st, int selected) {
         }
     }
     if (!have_edge || !s.count) goto done;
+    /* Preparation must keep leases alive even if terminal output blocks or
+     * progress rendering is slow. The monitor is the sole status reader
+     * from approval through chat; the UI consumes mutex-protected snapshots. */
+    if (pthread_create(&heartbeat, NULL, home_session_keepalive, &s)) {
+        home_fail("Cannot start the household connection monitor."); goto done;
+    }
+    heartbeat_started = 1;
     int committed = 0, host_started = 0, first_visible = 0;
+    double last_draw = 0;
     started = nowd();
     while (!g_stopping && nowd() - started < 900) {
         stage = !committed ? "waiting for donor approval" :
                 !host_started ? "loading the approved segments" : "starting the chat host";
-        int send_pulse = nowd() - pulse >= 1;
-        if (send_pulse) pulse = nowd();
-        if (home_session_poll(&s, send_pulse)) goto done;
+        if (atomic_load(&s.failed)) goto done;
+        LmbHomePhase phases[LMB_CLUSTER_MAX_NODES];
+        uint32_t host_ports[LMB_CLUSTER_MAX_NODES];
+        home_session_snapshot(&s, phases, host_ports);
+        /* Never repaint thousands of full frames per second while socket
+         * statuses arrive. Terminal backpressure is independent of leases. */
+        if (nowd() - last_draw < .1) { (void)poll(NULL, 0, 10); continue; }
+        last_draw = nowd();
         lmb_prepare_read(&progress, logfile, nowd());
         if (term.active) {
             ui_begin("prepare chat");
@@ -938,10 +1001,10 @@ static int home_request_chat(LmbTuiState *st, int selected) {
             if (term.active) {
                 if ((int)i >= first_visible && (int)i < first_visible + visible)
                     ui_printf(first_row + ((int)i - first_visible) * 2, 5, UI_TEXT,
-                              "%s · %s", s.names[i], lmb_home_phase_name(s.phase[i]));
-            } else printf("%-20s %s\n", s.names[i], lmb_home_phase_name(s.phase[i]));
-            if (s.phase[i] != LMB_HOME_ACCEPTED) accepted = 0;
-            if (s.phase[i] < LMB_HOME_SEGMENT_READY) ready = 0;
+                              "%s · %s", s.names[i], lmb_home_phase_name(phases[i]));
+            } else printf("%-20s %s\n", s.names[i], lmb_home_phase_name(phases[i]));
+            if (phases[i] != LMB_HOME_ACCEPTED) accepted = 0;
+            if (phases[i] < LMB_HOME_SEGMENT_READY) ready = 0;
         }
         if (!term.active) { puts("\nNothing loads until every selected computer accepts.\n[q] Cancel and release all computers"); fflush(stdout); }
         if (term.active) { ui_footer("Chat starts only when the entire approved chain is ready.",
@@ -951,14 +1014,14 @@ static int home_request_chat(LmbTuiState *st, int selected) {
         if (key == 1002 && first_visible + visible < (int)s.count) first_visible++;
         if (!committed && accepted) {
             for (uint32_t i = 0; i < s.count; i++)
-                if (lmb_send(s.fd[i], LMB_HOME_COMMIT, id, 32, NULL, 0)) goto done;
+                if (home_session_send(&s, i, LMB_HOME_COMMIT)) goto done;
             committed = 1;
         }
         if (committed && !host_started && ready) {
-            if (lmb_send(s.fd[s.edge], LMB_HOME_START_HOST, id, 32, NULL, 0)) goto done;
+            if (home_session_send(&s, s.edge, LMB_HOME_START_HOST)) goto done;
             host_started = 1;
         }
-        if (host_started && s.phase[s.edge] == LMB_HOME_READY && s.host_port[s.edge]) {
+        if (host_started && phases[s.edge] == LMB_HOME_READY && host_ports[s.edge]) {
             LmbExecutionView execution = { .count = s.count, .layers = m->shape.layers };
             for (uint32_t i = 0; i < s.count; i++) {
                 LmbExecutionNode *node = &execution.nodes[i];
@@ -976,12 +1039,10 @@ static int home_request_chat(LmbTuiState *st, int selected) {
             const char *colon = strrchr(s.addresses[s.edge], ':');
             if (!colon) goto done;
             snprintf(host, sizeof host, "%.*s:%u", (int)(colon - s.addresses[s.edge]),
-                     s.addresses[s.edge], s.host_port[s.edge]);
+                     s.addresses[s.edge], host_ports[s.edge]);
             snprintf(ctx, sizeof ctx, "%u", st->context);
             snprintf(token_limit, sizeof token_limit, "%u", s.offers[s.edge].max_new);
             home_terminal_end(&term);
-            pthread_t heartbeat;
-            if (pthread_create(&heartbeat, NULL, home_session_keepalive, &s)) goto done;
             char expected_host[65]; lmb_hex(expected_host, edge_pk, 32);
             char expected_root[65]; lmb_hex(expected_root, identity.root, 32);
             char *chat_argv[] = {"--host", host, "--model", model, "--ctx", ctx,
@@ -1040,12 +1101,13 @@ static int home_request_chat(LmbTuiState *st, int selected) {
             result = cmd_chat(st->quick_calibration ? 17 : 16, chat_argv);
             g_recording_calibration = NULL; g_calibration_directory = NULL;
             g_execution_view = NULL;
-            atomic_store(&s.stop, 1); pthread_join(heartbeat, NULL);
             if (atomic_load(&s.failed)) result = -1;
             break;
         }
     }
 done:
+    if (heartbeat_started) { atomic_store(&s.stop, 1); pthread_join(heartbeat, NULL); }
+    if (atomic_load(&s.failed)) result = -1;
     home_terminal_end(&term);
     home_session_close(&s, prepared && home_resident_required());
     if (result) {
@@ -1063,6 +1125,8 @@ done:
         for (uint32_t i = 0; i < s.count; i++) if (s.reason[i][0])
             fprintf(stderr, "%s: %s\n", s.names[i], s.reason[i]);
     }
+    pthread_mutex_destroy(&s.send_lock);
+    pthread_mutex_destroy(&s.status_lock);
     return result;
 }
 #endif
