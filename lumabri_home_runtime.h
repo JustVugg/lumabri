@@ -390,10 +390,11 @@ static void home_donor_screen(const HomeDonor *d, const char *name, uint64_t ram
     if (t->phase != LMB_HOME_IDLE) {
         char who[65]; lmb_hex(who, t->offer.requester, 32);
         printf("\nRequester identity: %.24s…\nModel: %s (%s)\nLayers: %u–%u of %u\n"
-               "RAM budget: %.2f GB · estimated disk headroom: %.2f GB\n"
+               "RAM budget: %.2f GB · %s headroom: %.2f GB\n"
                "Context: %u · one session · %u threads · up to %u new tokens per turn\n",
                who, t->offer.model, t->offer.model_type, t->offer.begin,
                t->offer.end - 1, t->offer.layers, t->offer.ram_bytes / 1e9,
+               home_resident_required() ? "metadata" : "estimated disk",
                t->offer.disk_bytes / 1e9, t->offer.context,
                t->offer.threads < d->thread_capacity ? t->offer.threads : d->thread_capacity, t->offer.max_new);
         if (t->offer.runs_edge)

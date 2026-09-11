@@ -69,16 +69,42 @@ checkpoint root on the correct host. It checks no engine reboot, no allocated we
 blocks, retained allocation leases, and release on explicit owner Stop.
 
 `--crash-requester` additionally tests retention beyond the old 15-second
-control lease. The loader unit/integration test checks byte-exact retained
+control lease and the source's 30-second tracker-advert TTL. The loader unit/integration test checks byte-exact retained
 range reads after sealing, denied undeclared reads, and denied file mappings.
 Native CI runs these checks separately from legacy disk-cache tests.
 
-These are synthetic checkpoints, not the production OLMoE checkpoint or a
-physical PC/Mac LAN. Passing them does not establish production readiness.
+### Real OLMoE checkpoint, September 11, 2026
+
+The 7,417,133,727-byte OLMoE checkpoint also passed the household test with
+two loopback donors, each offering 8 GB, CPU execution and context 128:
+
+- approved ranges `[0,7)` and `[7,16)`; all 64 experts of each layer prepared;
+- first chat, requester exit, source shutdown, and second chat from the TUI;
+- unchanged engine boot counts; no allocated safetensors mirror blocks;
+- memory reservations held until explicit donor-owner Stop;
+- 4.4 MiB and 328 KiB of metadata/log/cache-directory storage on the donors,
+  not two copies of the 7.4 GB checkpoint.
+
+The two short turns displayed 8.30 and 8.56 tok/s (eight generated tokens),
+with 1.2 and 1.1 seconds of prefill. These are short CPU loopback observations,
+not a sustained-speed claim, a physical LAN measurement, or a Mac benchmark.
+Preparation served about 25.6 GB because bounded transport blocks can be
+requested repeatedly. This initial-transfer overhead is not inference disk
+I/O; it remains an optimization opportunity, not a hidden zero-download claim.
+
+Separately, `segment_split_test.sh` on the same real checkpoint produced
+identical greedy token IDs across one and two nodes (eight tokens, two rounds,
+plus warm-up). At four total threads, complete invocations took 1.811 versus
+1.859 seconds. This is a split-equivalence check using local source files,
+not a claim that that separate benchmark exercised sealed resident loading.
+
+The full `make test` regression suite passed. The native resident-runtime
+matrix at commit `2f0c556` passed on macOS Intel/Apple Silicon with and without
+OpenMP; the later TUI/packaging commits require their own green run.
 
 ## Outstanding release gates
 
-- Native CI, real-checkpoint numerical comparison, and the physical PC/Mac
+- Native CI on the final commit and the physical PC/Mac
   transfer/prepare/generate/reconnect/Stop test.
 - Measured memory-pressure/pageout policy, not a claim based on malloc alone.
 

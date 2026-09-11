@@ -233,8 +233,12 @@ def main():
         unreachable_socket.bind(("127.0.0.1", 0))
         unreachable = unreachable_socket.getsockname()[1]
         with open(tmp / "offline-worker.log", "wb") as log:
+            # This unreachable advert must fit the *whole* model, unlike
+            # each real donor below, which only owns a slice. No resources
+            # can be allocated on this socket; never increase real budgets.
+            offline_ram = args.donor_ram_gb * (1 if args.expect_no_fit else 2)
             offline_worker = subprocess.Popen(["./lumabri", "worker", "--join", addr,
-                "--name", "offline-test-donor", "--ram-gb", str(args.donor_ram_gb), "--disk", str(tmp),
+                "--name", "offline-test-donor", "--ram-gb", str(offline_ram), "--disk", str(tmp),
                 "--control-address", f"127.0.0.1:{unreachable}"], cwd=ROOT,
                 env=env("offline-worker"), stdout=log, stderr=subprocess.STDOUT)
         children.append(offline_worker)
@@ -588,7 +592,9 @@ def main():
         if resident and not args.kill_donor:
             assert not leases_released(), "resident allocation lost its memory reservation"
             if args.crash_requester:
-                deadline = time.monotonic() + 17
+                # Outlive both the old 15-second control lease and the
+                # tracker's 30-second checkpoint-source advert TTL.
+                deadline = time.monotonic() + 35
                 while time.monotonic() < deadline:
                     for terminal in terminals:
                         terminal.drain()
