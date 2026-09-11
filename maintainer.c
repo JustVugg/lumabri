@@ -139,11 +139,19 @@ static double hash_now(void) {
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
 
+static void prepare_progress(const char *phase, uint64_t done, uint64_t total) {
+    printf("LMB_PREPARE_V1 %s %llu %llu %llu\n", phase,
+           (unsigned long long)done, (unsigned long long)total,
+           (unsigned long long)((hash_now() - g_hash_t0) * 1000));
+    fflush(stdout);
+}
+
 static void hash_tick(uint64_t bytes, const char *rel) {
     g_hash_done += bytes;
     double t = hash_now();
     if (t - g_hash_last < 2.0 || !g_hash_total) return;
     g_hash_last = t;
+    prepare_progress("INDEX", g_hash_done, g_hash_total);
     double dt = t - g_hash_t0, rate = dt > 0 ? (double)g_hash_done / dt : 0;
     double left = rate > 0 ? (double)(g_hash_total - g_hash_done) / rate : 0;
     printf("[maintainer %s] hashing %.1f/%.1f GB (%.0f%%) · %.0f MB/s · "
@@ -994,6 +1002,7 @@ static void *stats_thread(void *arg) {
         sleep(5);
         uint64_t b = atomic_load(&g.served_bytes), r = atomic_load(&g.served_reads);
         if (b != last) {
+            prepare_progress("TRANSFER", b, 0);
             printf("[maintainer %s] served %.1f MB in %llu reads\n",
                    g.name, (double)b / 1e6, (unsigned long long)r);
             fflush(stdout);
@@ -1097,6 +1106,7 @@ int main(int argc, char **argv) {
     g_hash_done = 0;
     g_hash_t0 = g_hash_last = hash_now();
     double h0 = g_hash_t0;
+    prepare_progress("INDEX", 0, total);
     if (total > 4e9)
         printf("[maintainer %s] integrity: hashing %d files, %.1f GB. "
                "Only the first start pays this — the result is cached in "
@@ -1126,6 +1136,8 @@ int main(int argc, char **argv) {
                 g.name);
         return 1;
     }
+    prepare_progress("INDEX", g_hash_done, total);
+    prepare_progress("TRANSFER", 0, 0);
     if (g.have_key) {
         char pub[70];
         lmb_hex(pub, g.sk + 32, 32);
