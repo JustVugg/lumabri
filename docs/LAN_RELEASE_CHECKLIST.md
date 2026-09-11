@@ -50,6 +50,17 @@ execution, cross-platform numerical compatibility, or concurrent capacity.
 
 ## Evidence already obtained
 
+- Household preparation now observes bounded, versioned source progress
+  records. Indexing has a byte denominator, percentage and measured-rate ETA;
+  stale estimates become unavailable. Transfer shows an activity bar and
+  cumulative MB served by the requester, explicitly without a percentage or
+  remaining-time estimate: demand-loaded tensors, reused donor caches and
+  retries mean the checkpoint size is not a transfer denominator. Loading
+  segments and starting Edge remain separate phases; indexing at 100% is not
+  chat READY. This does not yet provide per-donor received-byte accounting or
+  an end-to-end download ETA. No household wire change or Colibri patch is
+  required for this observer.
+
 - Real OLMoE (7.42 GB) passed household selection/approval for PC [0,13)
   and Mac [13,16), but the cold-start trial was cancelled before generation.
   The runtime sizing inspector used `fopen` for safetensors headers; the shim

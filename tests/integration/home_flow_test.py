@@ -460,6 +460,10 @@ def main():
         until(lambda: chat.has("receives the text") or chat.p.poll() is not None, seconds=180,
               message="accepted plan did not reach real hosted chat")
         assert chat.p.poll() is None, "accepted plan failed; inspect donor engine logs"
+        assert "Transferring weights and loading approved segments" in chat.text
+        assert "MB served from this computer" in chat.text
+        assert "remaining time unavailable" in chat.text, "on-demand transfer invented a denominator"
+        assert "Loading the chat host; segments are ready" in chat.text
         if args.expect_greedy:
             assert chat.has("greedy decoding"), "greedy-only capability was not shown to the client"
         until(lambda: chat.has("/experts shows tracker activity."),

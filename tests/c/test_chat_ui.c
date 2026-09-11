@@ -5,6 +5,52 @@
 #include <assert.h>
 
 int main(int argc, char **argv) {
+    LmbPrepareProgress prep = {0};
+    char prep_bar[29], prep_detail[180];
+    lmb_prepare_display(&prep.index, 1, 0, prep_bar, prep_detail, sizeof prep_detail);
+    assert(strstr(prep_detail, "estimating...") && !strchr(prep_detail, '%'));
+    lmb_prepare_record(&prep, "LMB_PREPARE_V1 INDEX 0 64000000 0", 0);
+    lmb_prepare_record(&prep, "LMB_PREPARE_V1 INDEX 16000000 64000000 2000", 2);
+    lmb_prepare_display(&prep.index, 1, 2, prep_bar, prep_detail, sizeof prep_detail);
+    assert(strstr(prep_detail, "25%") && strstr(prep_detail, "6 s remaining"));
+    lmb_prepare_display(&prep.index, 1, 20, prep_bar, prep_detail, sizeof prep_detail);
+    assert(strstr(prep_detail, "ETA unavailable") && !strstr(prep_detail, "6 s"));
+    lmb_prepare_record(&prep, "LMB_PREPARE_V1 INDEX 64000000 64000000 4000", 4);
+    lmb_prepare_display(&prep.index, 1, 4, prep_bar, prep_detail, sizeof prep_detail);
+    assert(strstr(prep_detail, "100%") && strstr(prep_detail, "identity checks finishing"));
+    lmb_prepare_record(&prep, "LMB_PREPARE_V1 INDEX -1 64000000 5000", 5);
+    lmb_prepare_record(&prep, "LMB_PREPARE_V1 INDEX 64000001 64000000 5000", 5);
+    assert(prep.index.done == 64000000);
+    lmb_prepare_record(&prep, "LMB_PREPARE_V1 INDEX 0 32000000 0", 6);
+    assert(prep.index.rate == 0 && prep.index.samples == 1);
+    lmb_prepare_record(&prep, "LMB_PREPARE_V1 TRANSFER 128000000 0 1000", 7);
+    lmb_prepare_display(&prep.transfer, 0, 7, prep_bar, prep_detail, sizeof prep_detail);
+    assert(strstr(prep_detail, "128.0 MB served") && strstr(prep_detail, "remaining time unavailable"));
+    assert(!strchr(prep_detail, '%')); /* repeated reads cannot produce >100% */
+    char prep_path[] = "/tmp/lumabri-preparation-log.XXXXXX";
+    int prep_fd = mkstemp(prep_path); assert(prep_fd >= 0);
+    FILE *prep_log = fdopen(prep_fd, "w"); assert(prep_log);
+    LmbPrepareProgress observed = {0};
+    fputs("LMB_PREPARE_V1 INDEX 10 100 ", prep_log); fflush(prep_log);
+    lmb_prepare_read(&observed, prep_path, 1); assert(!observed.index.samples);
+    fputs("1000\n", prep_log); fflush(prep_log);
+    lmb_prepare_read(&observed, prep_path, 2); assert(observed.index.done == 10);
+    for (int i = 0; i < 10000; i++) fputc('x', prep_log);
+    fputs("LMB_PREPARE_V1 INDEX 100 100 2000\nLMB_PREPARE_V1 INDEX 20 100 3000\n", prep_log);
+    fflush(prep_log);
+    off_t prev_offset = observed.offset;
+    lmb_prepare_read(&observed, prep_path, 3);
+    assert(observed.offset - prev_offset <= 8192 && observed.index.done == 10);
+    lmb_prepare_read(&observed, prep_path, 4); assert(observed.index.done == 20);
+    assert(!ftruncate(prep_fd, 0)); rewind(prep_log);
+    fputs("LMB_PREPARE_V1 INDEX 1 2 0\n", prep_log); fflush(prep_log);
+    lmb_prepare_read(&observed, prep_path, 5);
+    assert(observed.index.done == 1 && observed.index.samples == 1 && observed.index.rate == 0);
+    fclose(prep_log); assert(!unlink(prep_path));
+    if (argc > 1 && !strcmp(argv[1], "prepare-progress")) {
+        puts("PREPARATION PROGRESS: PASS (bounded logs, counters, ETA, unknown totals, stale/reset)");
+        return 0;
+    }
     /* Hosted inactivity is not an inference deadline. Even an engine which
      * emits no progress during prefill must retain its accepted session. */
     HostState host_limits = {.idle_seconds = 1, .request_seconds = 10,

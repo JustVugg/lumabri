@@ -4,6 +4,7 @@
 #define LUMABRI_HOME_RUNTIME_H
 #include "lumabri_home_net.h"
 #include "lumabri_runtime_probe.h"
+#include "src/runtime/lumabri_prepare_progress.h"
 
 static char home_error[512];
 static int home_fail(const char *fmt, ...) {
@@ -729,16 +730,23 @@ static int home_request_chat(LmbTuiState *st, int selected) {
     LmbModelIdentity identity;
     Swarm swarm = {0};
     double started = nowd(), pulse = 0;
+    LmbPrepareProgress progress = {0};
     int found = 0;
     stage = "indexing and verifying the checkpoint source";
     while (!g_stopping && nowd() - started < 600) {
+        char bar[29], detail[180];
+        lmb_prepare_read(&progress, logfile, nowd());
+        lmb_prepare_display(&progress.index, 1, nowd(), bar, detail, sizeof detail);
         if (term.active) { ui_begin("prepare chat");
             ui_printf(7, 5, UI_TEXT, "Indexing %s", m->name);
             ui_text(10, 5, UI_MUTED, "Verifying checkpoint identity before requesting allocations.");
+            ui_text(12, 5, UI_SAND, bar);
+            ui_text(14, 5, UI_TEXT, detail);
             ui_footer("No donor starts without approval.", "Esc cancels"); ui_present();
         } else {
             printf("LUMABRI / PREPARE CHAT\n\nIndexing %s and verifying its checkpoint identity.\n"
                    "No donor engine is running yet.\n\n[q] Cancel\n", m->name);
+            printf("%s\n%s\n", bar, detail);
         }
         fflush(stdout);
         if (!lmb_model_identity_get(st->tracker, model, &identity) &&
@@ -830,7 +838,7 @@ static int home_request_chat(LmbTuiState *st, int selected) {
         }
     }
     if (!have_edge || !s.count) goto done;
-    int committed = 0, host_started = 0;
+    int committed = 0, host_started = 0, first_visible = 0;
     started = nowd();
     while (!g_stopping && nowd() - started < 900) {
         stage = !committed ? "waiting for donor approval" :
@@ -838,20 +846,48 @@ static int home_request_chat(LmbTuiState *st, int selected) {
         int send_pulse = nowd() - pulse >= 1;
         if (send_pulse) pulse = nowd();
         if (home_session_poll(&s, send_pulse)) goto done;
+        lmb_prepare_read(&progress, logfile, nowd());
         if (term.active) {
             ui_begin("prepare chat");
             ui_printf(6, 5, UI_TEXT, "%s · %u computer(s) · one session", m->name, s.count);
         } else printf("LUMABRI / PREPARE CHAT\n\n%s · %u computer(s) · one session\n\n", m->name, s.count);
+        char bar[29], detail[180];
+        lmb_prepare_display(&progress.transfer, 0, nowd(), bar, detail, sizeof detail);
+        const char *loading = !committed ? "Waiting for approval; no weights are loading" :
+                              !host_started ? "Transferring weights and loading approved segments" :
+                                              "Loading the chat host; segments are ready";
+        if (term.active) {
+            ui_text(8, 5, UI_SAND, loading);
+            if (committed) {
+                ui_text(10, 5, UI_SAND, bar);
+                ui_text(12, 5, UI_TEXT, detail);
+                ui_text(13, 5, UI_MUTED, "Weights load on demand; cache reuse and retries change transfer totals.");
+            }
+        } else {
+            printf("%s\n", loading);
+            if (committed) printf("%s\n%s\n", bar, detail);
+        }
+        int first_row = committed ? 15 : 10;
+        int visible = term.active ? (ui_h - 5 - first_row) / 2 : (int)s.count;
+        if (visible < 1) visible = 1;
+        if (first_visible > (int)s.count - visible) first_visible = (int)s.count - visible;
+        if (first_visible < 0) first_visible = 0;
         int accepted = 1, ready = 1;
         for (uint32_t i = 0; i < s.count; i++) {
-            if (term.active) ui_printf(10 + (int)i * 2, 5, UI_TEXT, "%s · %s", s.names[i], lmb_home_phase_name(s.phase[i]));
-            else printf("%-20s %s\n", s.names[i], lmb_home_phase_name(s.phase[i]));
+            if (term.active) {
+                if ((int)i >= first_visible && (int)i < first_visible + visible)
+                    ui_printf(first_row + ((int)i - first_visible) * 2, 5, UI_TEXT,
+                              "%s · %s", s.names[i], lmb_home_phase_name(s.phase[i]));
+            } else printf("%-20s %s\n", s.names[i], lmb_home_phase_name(s.phase[i]));
             if (s.phase[i] != LMB_HOME_ACCEPTED) accepted = 0;
             if (s.phase[i] < LMB_HOME_SEGMENT_READY) ready = 0;
         }
         if (!term.active) { puts("\nNothing loads until every selected computer accepts.\n[q] Cancel and release all computers"); fflush(stdout); }
-        if (term.active) { ui_footer("Chat starts only when the entire approved chain is ready.", "Esc cancels and releases the plan"); ui_present(); }
+        if (term.active) { ui_footer("Chat starts only when the entire approved chain is ready.",
+            "↑ ↓ scroll computers   Esc cancels and releases"); ui_present(); }
         int key = home_key(); if (key == 'q' || key == 27 || key == 3) goto done;
+        if (key == 1001 && first_visible > 0) first_visible--;
+        if (key == 1002 && first_visible + visible < (int)s.count) first_visible++;
         if (!committed && accepted) {
             for (uint32_t i = 0; i < s.count; i++)
                 if (lmb_send(s.fd[i], LMB_HOME_COMMIT, id, 32, NULL, 0)) goto done;

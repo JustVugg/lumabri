@@ -24,6 +24,7 @@ endif
 all: tracker maintainer $(SHIM_LIB) test_shim swarm_probe lumabri
 
 lumabri test_chat_ui: src/runtime/lumabri_weight_cache.h
+lumabri test_chat_ui: src/runtime/lumabri_prepare_progress.h
 
 test_weight_cache: tests/c/test_weight_cache.c src/runtime/lumabri_weight_cache.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_weight_cache.c -o $@
