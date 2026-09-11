@@ -31,7 +31,24 @@ This is not zero network traffic. Discovery, authentication, manifests and
 direct configuration reads still use the network. It is also not a disk
 execution mode: the resident memory checks remain unchanged.
 
+CAS chunks are a reconstructible cache. A complete chunk is written to a
+private temporary file and atomically renamed, without forcing a file and
+directory synchronization for each MiB in the inference thread. An abrupt
+power loss can therefore lose recent CAS writes. On every use, size and hash
+are checked against the accepted truth; missing or torn chunks require a
+verified source, and fail with EIO if no valid copy is reachable. A bad cached
+chunk is replaced rather than trusted because its hash-shaped filename exists.
+This is not a durability guarantee for newly cached chunks. The mirror's
+separate data-before-map synchronization and signed-truth checks are unchanged.
+
 ## Verification
+
+`tests/integration/native_shim_test.py` observes native synchronization calls:
+none target CAS during publication, while mirror synchronization still occurs.
+It tests truncated and same-size corrupt chunks, nonblocking refusal/repair of
+FIFO entries, symlink replacement without touching the target, and rejection
+of corrupt CAS when the origin is offline. This simulates damaged cache state,
+not a physical power-cut certification.
 
 ### Inspecting and clearing storage in the TUI
 

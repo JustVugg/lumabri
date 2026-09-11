@@ -5,6 +5,7 @@ with the origin offline. All keys, ports and cache files are test-owned.
 """
 import os
 import json
+import hashlib
 import struct
 from pathlib import Path
 import socket
@@ -65,12 +66,33 @@ def main():
             ready(origin, origin_port)
             loader, library = (("DYLD_INSERT_LIBRARIES", "liblumabri.dylib") if sys.platform == "darwin"
                                else ("LD_PRELOAD", "liblumabri.so"))
-            for name in ("cold", "offline-origin"):
+            observer = tmp / ("trace-sync.dylib" if sys.platform == "darwin" else "trace-sync.so")
+            flags = ["-dynamiclib"] if sys.platform == "darwin" else ["-shared", "-fPIC", "-ldl"]
+            subprocess.run([os.environ.get("CC", "cc"), "-O2", "-Wall", "-Wextra", "-Werror",
+                            str(ROOT / "tests/c/trace_cache_sync.c"), "-o", str(observer), *flags],
+                           check=True, timeout=30)
+            tested_library = os.environ.get("LUMABRI_TEST_SHIM_LIBRARY", str(ROOT / library))
+            chunk = (source / "weights.bin").read_bytes()[:1024*1024]
+            digest = hashlib.sha256(chunk).hexdigest()
+            cached_chunk = tmp / "cas" / digest[:2] / digest
+            outside = tmp / "not-a-cache-entry"
+            outside.write_bytes(b"must stay unchanged")
+            for name in ("cold", "repair-truncated", "repair-corrupt", "repair-fifo",
+                         "repair-symlink", "offline-origin", "offline-corrupt"):
                 if name == "offline-origin":
                     origin.terminate(); origin.wait(timeout=10)
-                env = {**environment(name), loader: str(ROOT / library),
+                if name in ("repair-truncated", "repair-corrupt", "offline-corrupt"):
+                    cached_chunk.chmod(0o600)
+                    cached_chunk.write_bytes(b"torn" if name == "repair-truncated" else
+                                             bytes([chunk[0] ^ 1]) + chunk[1:])
+                if name == "repair-fifo":
+                    cached_chunk.unlink(); os.mkfifo(cached_chunk)
+                if name == "repair-symlink":
+                    cached_chunk.unlink(); cached_chunk.symlink_to(outside)
+                env = {**environment(name), loader: tested_library + ":" + str(observer),
                        "LUMABRI_MODEL": "native-cas", "LUMABRI_TRACKER": f"127.0.0.1:{port}",
                        "LUMABRI_CAS": str(tmp / "cas"), "LUMABRI_BLOCK_MIB": "1",
+                       "LUMABRI_PREFETCH": "0", "LUMABRI_IO_TIMEOUT_MS": "1000",
                        "LUMABRI_CACHE": str(tmp / f"cache-{name}"),
                        "LUMABRI_VROOT": str(tmp / f"vroot-{name}")}
                 with subprocess.Popen([str(ROOT / "test_shim"), env["LUMABRI_VROOT"], str(source)],
@@ -86,10 +108,19 @@ def main():
                         client.kill()
                         out, err = client.communicate(timeout=5)
                         raise AssertionError(f"{name} reader blocked: {out}\n{err}")
+                    if name == "offline-corrupt":
+                        assert client.returncode != 0, "offline corrupt CAS reached the engine"
+                        assert "test_shim: PASS" not in out
+                        continue
                     if client.returncode:
                         raise AssertionError(f"{name}: {out}\n{err}")
+                    assert "TEST_CAS_SYNC" not in err, "per-chunk CAS fsync is in the inference path"
+                    assert "TEST_MIRROR_SYNC" in err, "durable mirror synchronization disappeared"
+                    assert cached_chunk.is_file() and cached_chunk.read_bytes() == chunk, name
+                    assert outside.read_bytes() == b"must stay unchanged"
             assert any((tmp / "cas").rglob("*")), "CAS was not populated"
             print("NATIVE SHIM: PASS (encrypted byte-exact libc reads, cold transfer, fresh mirror with origin offline)")
+            print("CAS PUBLICATION: PASS (zero CAS sync calls, mirror sync preserved, torn/corrupt/FIFO/symlink repair, offline corruption refused)")
 
             # A real virtual checkpoint, not a mocked read counter. Inspection
             # needs the header and a small layout at the far end of a 64-MiB

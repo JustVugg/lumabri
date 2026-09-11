@@ -50,6 +50,19 @@ execution, cross-platform numerical compatibility, or concurrent capacity.
 
 ## Evidence already obtained
 
+- The next physical OLMoE trial used PC [0,11) and Mac [11,16). Both segments
+  reached READY and Edge started in 49.3 seconds with cache reuse. The host
+  no longer expired the active request, but the first prompt failed after
+  304.4 seconds at the Segment RUN timeout; recovery found the original RUN
+  still busy. The PC thread was observed waiting for filesystem journal
+  commits, with a CAS directory descriptor open. CAS publication previously
+  forced file and directory sync for every MiB before returning the weights.
+  Publication now remains atomic and hash-verified without those per-chunk
+  sync calls; the durable mirror ordering is untouched. Native regression
+  reproduces the old calls and checks their absence plus damaged-cache repair.
+  Physical OLMoE generation and the measured speedup remain open; this change
+  does not extend the Segment timeout or certify timeout recovery.
+
 - Household preparation now observes bounded, versioned source progress
   records. Indexing has a byte denominator, percentage and measured-rate ETA;
   stale estimates become unavailable. Transfer shows an activity bar and

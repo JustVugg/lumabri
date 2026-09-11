@@ -1687,7 +1687,7 @@ static uint8_t *cas_load(RFile *f, uint64_t off, uint32_t len) {
         if (cas_path(path, sizeof path, f->hash + (size_t)ci * 32)) {
             free(data); return NULL;
         }
-        int fd = real_open(path, O_RDONLY | O_NOFOLLOW);
+        int fd = real_open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
         struct stat st;
         uint8_t got[32];
         int bad = fd < 0 || fstat(fd, &st) || !S_ISREG(st.st_mode) ||
@@ -1701,6 +1701,27 @@ static uint8_t *cas_load(RFile *f, uint64_t off, uint32_t len) {
     return data;
 }
 
+/* A hash filename is only a hint. Compare with the already verified incoming
+ * chunk before skipping publication, so a torn/truncated cache is repairable.
+ * The bounded buffer does not duplicate a model block in memory. */
+static int cas_matches(const char *path, const uint8_t *data, uint32_t n) {
+    int fd = real_open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) return 0;
+    struct stat st;
+    int same = !fstat(fd, &st) && S_ISREG(st.st_mode) && st.st_size == (off_t)n;
+    uint8_t buf[4096];
+    uint32_t at = 0;
+    while (same && at < n) {
+        size_t take = n - at < sizeof buf ? n - at : sizeof buf;
+        ssize_t got = real_pread(fd, buf, take, at);
+        if (got < 0 && errno == EINTR) continue;
+        if (got <= 0 || memcmp(buf, data + at, (size_t)got)) same = 0;
+        else at += (uint32_t)got;
+    }
+    real_close(fd);
+    return same;
+}
+
 static void cas_publish(RFile *f, uint64_t off, const uint8_t *data, uint32_t len) {
     if (!g.cas_dir[0] || f->hstate != 1 || off % LMB_HASH_CHUNK) return;
     for (uint32_t o = 0; o < len; o += LMB_HASH_CHUNK) {
@@ -1709,7 +1730,7 @@ static void cas_publish(RFile *f, uint64_t off, const uint8_t *data, uint32_t le
         if (ci >= f->nh) return;
         char path[LMB_CACHE_PATH_MAX], tmp[LMB_CACHE_PATH_MAX];
         if (cas_path(path, sizeof path, f->hash + (size_t)ci * 32)) return;
-        if (!access(path, R_OK)) continue;
+        if (cas_matches(path, data + o, n)) continue;
         mkdir_parent(path);
         if (path_printf(tmp, sizeof tmp, "%s.tmp.%ld.%lu", path, (long)getpid(),
                         (unsigned long)pthread_self())) return;
@@ -1718,14 +1739,18 @@ static void cas_publish(RFile *f, uint64_t off, const uint8_t *data, uint32_t le
         uint32_t put = 0;
         while (put < n) {
             ssize_t w = write(fd, data + o + put, n - put);
-            if (w < 0) { if (errno == EINTR) continue; break; }
+            if (w <= 0) { if (w < 0 && errno == EINTR) continue; break; }
             put += (uint32_t)w;
         }
-        int ok = put == n && fsync(fd) == 0;
-        if (ok) fchmod(fd, 0444);
-        close(fd);
-        if (ok && !rename(tmp, path)) fsync_parent_dir(path);
-        else unlink(tmp);
+        /* CAS is a reconstructible cache, not the durable mirror map or the
+         * signed truth. Publish complete immutable bytes atomically, without
+         * forcing a file + directory journal commit per MiB in the inference
+         * thread. After power loss a missing/torn chunk is rejected by size
+         * and hash on read, then replaced from verified source bytes. The
+         * mirror's data-before-map fdatasync ordering stays unchanged. */
+        int ok = put == n && fchmod(fd, 0444) == 0;
+        if (real_close(fd)) ok = 0;
+        if (!ok || rename(tmp, path)) unlink(tmp);
     }
 }
 
