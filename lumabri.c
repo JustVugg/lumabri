@@ -1142,7 +1142,7 @@ static int cmd_serve(int argc, char **argv) {
 
 typedef struct {
     char peers[8][64]; int npeers;
-    uint64_t total_bytes; int nfiles;
+    uint64_t total_bytes, metadata_bytes; int nfiles;
     char config_peer[64];
     char model_type[64];
 } Swarm;
@@ -1163,7 +1163,11 @@ static int swarm_inspect(const char *tracker, const char *model, Swarm *s) {
         uint64_t size; uint16_t np;
         if (lmb_cur_str(&c, rel, sizeof rel) || lmb_cur_u64(&c, &size) ||
             lmb_cur_u16(&c, &np)) { lmb_msg_free(&m); return -1; }
+        if (UINT64_MAX - s->total_bytes < size) { lmb_msg_free(&m); return -1; }
         s->nfiles++; s->total_bytes += size;
+        size_t rel_len = strlen(rel);
+        if (rel_len < 12 || strcmp(rel + rel_len - 12, ".safetensors"))
+            s->metadata_bytes += size;
         int is_cfg = !strcmp(rel, "config.json");
         for (uint16_t p = 0; p < np; p++) {
             if (lmb_cur_str(&c, addr, sizeof addr)) { lmb_msg_free(&m); return -1; }
@@ -3219,6 +3223,7 @@ typedef struct {
     uint32_t idle_seconds;
     uint32_t request_seconds; /* absolute bound for an active inference */
     const uint8_t *client_key; /* optional identity bound by an accepted home plan */
+    const char *model_root; /* authenticated accepted checkpoint, not a peer's label */
 } HostState;
 
 static int host_read_hello(int fd, const HostState *h) {
@@ -3262,6 +3267,10 @@ static int host_greet(int fd, const HostState *h, int busy) {
         lmb_buf_u32(&b, 0x314d554e); /* NUM1, optional measured runtime metadata */
         lmb_buf_u32(&b, h->engine->numeric_abi);
         lmb_buf_str(&b, h->engine->numeric_class);
+        if (h->model_root && h->model_root[0]) {
+            lmb_buf_u32(&b, 0x31544f52); /* ROT1, accepted household root */
+            lmb_buf_str(&b, h->model_root);
+        }
     }
     int rc = lmb_send(fd, LMB_HOST_HELLO_R, b.p, (uint32_t)b.len, NULL, 0);
     free(b.p);
@@ -3605,7 +3614,8 @@ static int cmd_host(int argc, char **argv) {
     if (!host_engine) { close(lfd); engine_stop(&eng); return 1; }
     HostState h = { &eng, mtype, host_engine, 0, max_frame,
                     (uint32_t)max_new, idle_seconds, request_seconds,
-                    client_key ? allowed_client : NULL };
+                    client_key ? allowed_client : NULL,
+                    getenv("LUMABRI_EXPECT_MODEL_ROOT") };
 
     printf("  %shost ready on port %d · %s · one session at a time%s\n",
            C_DIM, port, mtype[0] ? mtype : "?", C_R);
@@ -3707,7 +3717,8 @@ static void *host_client_pump(void *arg) {
     return NULL;
 }
 
-static int host_connect(const char *addr, const char *model_type, const char *expected_key, Engine *e,
+static int host_connect(const char *addr, const char *model_type, const char *expected_key,
+                        const char *expected_root, Engine *e,
                         int *requested_max_new) {
     memset(e, 0, sizeof *e);
     e->to = e->from = -1;
@@ -3772,8 +3783,21 @@ static int host_connect(const char *addr, const char *model_type, const char *ex
         fprintf(stderr, "[lumabri] unsupported host numeric metadata\n");
         lmb_msg_free(&m); lmb_close(fd); return -1;
     }
+    uint32_t root_tag = 0;
+    char model_root[65] = ""; uint8_t root_bytes[32];
+    if (c.off < c.len && (lmb_cur_u32(&c, &root_tag) || root_tag != 0x31544f52 ||
+        lmb_inventory_string(&c, model_root, sizeof model_root) ||
+        strlen(model_root) != 64 || lmb_unhex(root_bytes, model_root, 32))) {
+        fprintf(stderr, "[lumabri] invalid host checkpoint identity\n");
+        lmb_msg_free(&m); lmb_close(fd); return -1;
+    }
     if (c.off != c.len || m.pay_len) { lmb_msg_free(&m); lmb_close(fd); return -1; }
     lmb_msg_free(&m);
+    if (expected_root && (!expected_key || strlen(expected_root) != 64 ||
+        lmb_unhex(root_bytes, expected_root, 32) || strcmp(expected_root, model_root))) {
+        fprintf(stderr, "[lumabri] host checkpoint differs from the accepted resident plan; no text sent\n");
+        lmb_close(fd); return -1;
+    }
     if (model_type && model_type[0] && strcmp(model_type, mtype)) {
         fprintf(stderr, "[lumabri] %s serves %s, not %s\n", addr, mtype,
                 model_type);
@@ -3868,6 +3892,11 @@ static int resolve_engine(const char *engines_dir, const char *engine_path,
  * block it touches, so a 300 GB model needs 300 GB here — the single most
  * common way this goes wrong, and it goes wrong hours in, silently. */
 static void disk_preflight(const char *model, uint64_t model_bytes) {
+    const char *resident = getenv("LUMABRI_RESIDENT_REQUIRED");
+    if (resident && !strcmp(resident, "1")) {
+        printf("  Resident preparation: weights go to donor RAM, not the disk mirror.\n");
+        return;
+    }
     const char *home = getenv("HOME") ? getenv("HOME") : ".";
     char cache[1024];
     snprintf(cache, sizeof cache, "%s/.lumabri", home);
@@ -4534,10 +4563,12 @@ static int model_boot(const char *tracker, const char *model, const char *shim,
                 if (!segment_ready) {
                     e->proto = PROTO_SERVE2;
                     printf("  %s\xe2\x9c\x93 %s ready via Segment in %.1fs%s%s "
-                           "\xc2\xb7 Edge in CAS \xc2\xb7 /swarm /experts /model /debug "
+                           "\xc2\xb7 %s \xc2\xb7 /swarm /experts /model /debug "
                            "/storage /reset /quit%s\n",
                            C_GRN, model, nowd() - segment_started, C_R,
-                           C_DIM, C_R);
+                           C_DIM, getenv("LUMABRI_RESIDENT_REQUIRED") &&
+                               !strcmp(getenv("LUMABRI_RESIDENT_REQUIRED"), "1") ?
+                               "Edge weights resident in RAM" : "Edge in CAS", C_R);
                     if (e->greedy_only)
                         printf("  greedy decoding · this backend does not expose sampling logits\n");
                     return 0;
@@ -4643,7 +4674,7 @@ static int cmd_chat(int argc, char **argv) {
     const char *engine_path = NULL, *engines_dir = getenv("LUMABRI_ENGINES");
     const char *want_model = NULL, *local_dir = NULL;
     const char *role_arg = NULL, *model_dir_arg = NULL;
-    const char *donor_name_arg = NULL, *host_addr = NULL, *host_key = NULL;
+    const char *donor_name_arg = NULL, *host_addr = NULL, *host_key = NULL, *host_root = NULL;
     double donate_gb = 0;
     int max_new = 256, ctx = 2048, cap_experts = 64, quick_probe = 0;
     for (int i = 0; i < argc; i++) {
@@ -4661,6 +4692,7 @@ static int cmd_chat(int argc, char **argv) {
         else if (!strcmp(argv[i], "--donor-name") && i + 1 < argc) donor_name_arg = argv[++i];
         else if (!strcmp(argv[i], "--host") && i + 1 < argc) host_addr = argv[++i];
         else if (!strcmp(argv[i], "--host-key") && i + 1 < argc) host_key = argv[++i];
+        else if (!strcmp(argv[i], "--host-root") && i + 1 < argc) host_root = argv[++i];
         else if (!strcmp(argv[i], "--calibrate")) quick_probe = 1;
         else if (!strcmp(argv[i], "--plain")) g_tty = 0;
         else { fprintf(stderr, "usage: lumabri chat [--tracker H:P] [--model NAME] "
@@ -4791,7 +4823,7 @@ static int cmd_chat(int argc, char **argv) {
      * and the only way to actually mean it. */
     if (host_addr) {
         memset(&sw, 0, sizeof sw);
-        if (host_connect(host_addr, NULL, host_key, &eng, &max_new)) return 1;
+        if (host_connect(host_addr, NULL, host_key, host_root, &eng, &max_new)) return 1;
         if (g_execution_view) lmb_execution_print(stdout, g_execution_view);
     } else if (model_boot(tracker, model, shim, engines_dir, engine_path,
                           local_dir, ctx, max_new, cap_experts, &eng, &sw))

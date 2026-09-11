@@ -45,6 +45,7 @@ jobs:
           make lumabri tracker maintainer liblumabri.dylib test_shim test_machine test_chat_ui test_memory_budget test_planner test_cluster test_calibration test_inventory test_weight_cache CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           ./test_machine
           ./test_chat_ui host-codec
+          ./test_chat_ui resident-plan
           ./test_chat_ui prepare-progress
           make test_tcp_latency CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           ./test_tcp_latency
@@ -296,7 +297,7 @@ jobs:
         env:
           LUMABRI_RESIDENT_REQUIRED: '1'
         run: |
-          python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --expect-metrics --crash-requester
+          python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --expect-metrics --crash-requester --resident-default
           python3 tests/integration/home_flow_test.py --models-dir build/qwen-int4 --expect-metrics
           python3 tests/integration/home_flow_test.py --models-dir build/inkling-contract/int4 --expect-metrics
           python3 tests/integration/home_flow_test.py --models-dir build/kimi-contract --donor-ram-gb 4.5 --expect-metrics
@@ -445,7 +446,7 @@ jobs:
         env:
           LUMABRI_RESIDENT_REQUIRED: '1'
         run: |
-          python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --expect-metrics --crash-requester
+          python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --expect-metrics --crash-requester --resident-default
           python3 tests/integration/home_flow_test.py --models-dir build/qwen-home-models --expect-metrics
           python3 tests/integration/home_flow_test.py --models-dir build/inkling-home-models --expect-metrics
           python3 tests/integration/home_flow_test.py --models-dir build/glm-home-models --expect-metrics

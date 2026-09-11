@@ -59,7 +59,7 @@ static void lmb_execution_print(FILE *out, const LmbExecutionView *view) {
                 n->edge ? " · Edge / chat host" : "");
     }
     fputs("  Each Segment executes attention and experts for its own layers.\n"
-          "  This chat process runs no model layers; it supplies checkpoint files.\n"
+          "  This chat process runs no model layers.\n"
           "  A separate approved donor may run on the same computer.\n"
           "  /plan shows this allocation; /experts shows tracker activity.\n", out);
 }

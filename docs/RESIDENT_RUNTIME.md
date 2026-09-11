@@ -1,9 +1,21 @@
 # Resident runtime: implementation and release gates
 
-This is an implementation record, not a production-support claim. The new
-path is currently opt-in with `LUMABRI_RESIDENT_REQUIRED=1` on the requester
-and donors. The ordinary household path is not switched over until its UI,
-admission and native release gates are complete.
+This is an implementation record, not a production-support claim. Household
+requests and donors now select resident loading by default. An explicit
+`LUMABRI_RESIDENT_REQUIRED=0` is retained for legacy cache regression tests;
+the product never falls back to it when resident preparation fails.
+
+The workspace's first action reopens the last accepted resident model after
+chat or requester restart. The private, versioned `resident-plan` file contains
+the approved allocation, host key and checkpoint root, not weights or chat
+text. Reconnection verifies the encrypted peer identity and the host's root
+before sending any conversation text. Missing or changed hosts are reported;
+they never silently trigger a download or replace a donor's allocation.
+
+Use Explore models to prepare a different model. Donor owners explicitly
+unload their existing allocation first (`x`, while continuing to share).
+Only metadata, sparse maps, signed hashes and logs require disk headroom;
+household admission no longer reserves two full checkpoints on every donor.
 
 ## Weight lifetime is not conversation lifetime
 
@@ -52,7 +64,8 @@ The local nine-fixture matrix covers eight families plus Qwen3.8 FP8:
 OLMoE, Qwen3.6, Inkling, Kimi, GLM, GLM5.3, Qwen3.8 and DeepSeek V4.
 It prepares two real adapter ranges, generates a reply, exits the requester
 and its checkpoint source, and reconnects with the accepted identity for a
-second conversation. It checks no engine reboot, no allocated weight-mirror
+second conversation through the normal workspace. It also rejects a wrong
+checkpoint root on the correct host. It checks no engine reboot, no allocated weight-mirror
 blocks, retained allocation leases, and release on explicit owner Stop.
 
 `--crash-requester` additionally tests retention beyond the old 15-second
@@ -63,11 +76,8 @@ Native CI runs these checks separately from legacy disk-cache tests.
 These are synthetic checkpoints, not the production OLMoE checkpoint or a
 physical PC/Mac LAN. Passing them does not establish production readiness.
 
-## Still required before enabling the normal household path
+## Outstanding release gates
 
-- Reuse/discovery of retained allocations from the normal catalogue/TUI,
-  with explicit approval for allocation changes and no stale host binding.
-- Resident-only disk admission and UI: metadata storage is not weight storage.
 - Native CI, real-checkpoint numerical comparison, and the physical PC/Mac
   transfer/prepare/generate/reconnect/Stop test.
 - Measured memory-pressure/pageout policy, not a claim based on malloc alone.

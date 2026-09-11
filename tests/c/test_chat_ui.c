@@ -228,6 +228,39 @@ int main(int argc, char **argv) {
     execution.nodes[1].edge = 0;
     execution.count = LMB_CLUSTER_MAX_NODES + 1; assert(!lmb_execution_valid(&execution));
     execution.count = 2;
+    if (argc > 1 && !strcmp(argv[1], "resident-plan")) {
+        LmbResidentPlan plan = {.context = 2048, .max_new = 256, .execution = execution}, loaded;
+        snprintf(plan.tracker, sizeof plan.tracker, "127.0.0.1:47300");
+        snprintf(plan.host, sizeof plan.host, "127.0.0.1:47303");
+        snprintf(plan.model, sizeof plan.model, "approved-model");
+        memset(plan.root, 'a', 64); memset(plan.host_key, 'b', 64);
+        assert(home_resident_plan_valid(&plan));
+        plan.execution.nodes[0].edge = 0; assert(!home_resident_plan_valid(&plan));
+        plan.execution.nodes[0].edge = 1;
+        char test_dir[] = "/tmp/lumabri-resident-plan-XXXXXX", private_dir[160], record[200];
+        assert(mkdtemp(test_dir));
+        snprintf(private_dir, sizeof private_dir, "%s/.lumabri", test_dir);
+        assert(!mkdir(private_dir, 0700));
+        const char *previous = getenv("HOME"); char *saved_home = previous ? strdup(previous) : NULL;
+        assert(!setenv("HOME", test_dir, 1));
+        assert(!home_resident_plan_save(&plan));
+        assert(!home_resident_plan_load(plan.tracker, &loaded));
+        assert(!strcmp(loaded.root, plan.root) && loaded.execution.count == 2 && loaded.max_new == 256);
+        assert(home_resident_plan_load("other-household:47300", &loaded));
+        assert(!home_resident_plan_path(record, sizeof record));
+        struct stat metadata; assert(!stat(record, &metadata) && !(metadata.st_mode & 077));
+        assert(!chmod(record, 0644)); assert(home_resident_plan_load(plan.tracker, &loaded));
+        assert(!home_resident_plan_save(&plan)); /* atomically replace, reset private permissions */
+        int corrupt = open(record, O_WRONLY | O_APPEND); assert(corrupt >= 0);
+        assert(write(corrupt, "x", 1) == 1); close(corrupt);
+        assert(home_resident_plan_load(plan.tracker, &loaded));
+        assert(!unlink(record)); assert(!symlink("missing", record));
+        assert(home_resident_plan_load(plan.tracker, &loaded));
+        assert(!unlink(record) && !rmdir(private_dir) && !rmdir(test_dir));
+        if (saved_home) { setenv("HOME", saved_home, 1); free(saved_home); } else unsetenv("HOME");
+        puts("RESIDENT PLAN: PASS (private atomic persistence, exact household, malformed and linked records rejected)");
+        return 0;
+    }
     assert(!lmb_execution_valid(NULL));
     if (argc > 1 && !strcmp(argv[1], "plan")) {
         snprintf(execution.nodes[1].name, 64, "donor-1\033[2J");

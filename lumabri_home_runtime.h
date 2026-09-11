@@ -9,6 +9,9 @@
 static char home_error[512];
 static int home_resident_required(void) {
     const char *value = getenv("LUMABRI_RESIDENT_REQUIRED");
+    /* Household is resident by default. Explicit zero remains available to
+     * the legacy cache regression harness, not as an automatic fallback. */
+    if (!value) { setenv("LUMABRI_RESIDENT_REQUIRED", "1", 0); return 1; }
     return value && !strcmp(value, "1");
 }
 static int home_fail(const char *fmt, ...) {
@@ -18,6 +21,7 @@ static int home_fail(const char *fmt, ...) {
     fprintf(stderr, "%s\n", home_error);
     return 1;
 }
+#include "src/runtime/lumabri_resident_plan.h"
 
 typedef struct {
     struct termios saved;
@@ -353,8 +357,9 @@ static void home_donor_screen(const HomeDonor *d, const char *name, uint64_t ram
             char who[65]; lmb_hex(who, t->offer.requester, 32);
             ui_printf(10, 5, UI_TEXT, "Model: %s (%s)", t->offer.model, t->offer.model_type);
             ui_printf(12, 5, UI_MUTED, "Requester identity: %.24s…", who);
-            ui_printf(14, 5, UI_TEXT, "Layers %u–%u of %u · %.2f GB RAM · %.2f GB disk headroom",
-                t->offer.begin, t->offer.end - 1, t->offer.layers, t->offer.ram_bytes / 1e9, t->offer.disk_bytes / 1e9);
+            ui_printf(14, 5, UI_TEXT, "Layers %u–%u of %u · %.2f GB RAM · %.2f GB %s",
+                t->offer.begin, t->offer.end - 1, t->offer.layers, t->offer.ram_bytes / 1e9,
+                t->offer.disk_bytes / 1e9, home_resident_required() ? "metadata headroom" : "disk headroom");
             ui_printf(16, 5, UI_MUTED, "%u context · one session · %u threads · up to %u new tokens per turn", t->offer.context,
                       t->offer.threads < d->thread_capacity ? t->offer.threads : d->thread_capacity, t->offer.max_new);
             ui_text(18, 5, UI_MUTED, t->offer.runs_edge ?
@@ -369,9 +374,12 @@ static void home_donor_screen(const HomeDonor *d, const char *name, uint64_t ram
             ui_item(y, choice == 0, "Accept this request", home_resident_required() ?
                 "Keep these weights in RAM until you stop sharing." : "Reserve only the displayed resources for this plan.");
             ui_item(y + 3, choice == 1, "Decline", "No weights or model state will be loaded.");
-        } else ui_item(y, 0, "Keep this window open to share", "Press Esc to stop sharing and release resources.");
+        } else ui_item(y, 0, "Keep this window open to share", d->retained ?
+            "Weights stay in RAM. Unload only to accept a different plan." :
+            "Press Esc to stop sharing and release resources.");
         ui_footer(t->reason[0] ? t->reason : d->log, t->phase == LMB_HOME_PENDING ?
-            "↑ ↓ choose   Enter confirm   Esc stop and return" : "Esc stop sharing and return");
+            "↑ ↓ choose   Enter confirm   Esc stop and return" :
+            d->retained ? "x unload model, keep sharing   Esc stop sharing" : "Esc stop sharing and return");
         if (ui_w < 60 || ui_h < 28) {
             ui_begin("share resources"); ui_text(5, 4, UI_SAND, "Resize to at least 60 × 28. Esc stops sharing.");
         }
@@ -487,6 +495,7 @@ static int home_donor_message(HomeDonor *d) {
 }
 
 static int cmd_donor(int argc, char **argv) {
+    (void)home_resident_required();
     home_error[0] = 0;
     const char *tracker = NULL, *name = NULL, *disk = NULL;
     uint64_t limit = UINT64_MAX;
@@ -835,7 +844,13 @@ static int home_request_chat(LmbTuiState *st, int selected) {
         }
         o->ram_bytes = reservation.total_bytes;
         o->edge_ram_bytes = reservation.edge_bytes;
-        o->disk_bytes = lmb_budget_add(lmb_budget_add(swarm.total_bytes, swarm.total_bytes), UINT64_C(256) << 20);
+        /* Resident weights never occupy the file mirror. Keep a bounded
+         * allowance for metadata, signed block hashes, sparse-file maps and
+         * logs; do not reserve two complete checkpoints on each donor. */
+        uint64_t disk_input = home_resident_required() ? swarm.metadata_bytes : swarm.total_bytes;
+        o->disk_bytes = lmb_budget_add(lmb_budget_add(disk_input, disk_input), UINT64_C(256) << 20);
+        if (home_resident_required())
+            o->disk_bytes = lmb_budget_add(o->disk_bytes, swarm.total_bytes / 1024);
         if (o->disk_bytes == UINT64_MAX) {
             home_fail("The model's disk requirements exceed the supported size.");
             goto done;
@@ -904,7 +919,9 @@ static int home_request_chat(LmbTuiState *st, int selected) {
             if (committed) {
                 ui_text(10, 5, UI_SAND, bar);
                 ui_text(12, 5, UI_TEXT, detail);
-                ui_text(13, 5, UI_MUTED, "Weights load on demand; cache reuse and retries change transfer totals.");
+                ui_text(13, 5, UI_MUTED, home_resident_required() ?
+                    "All assigned weights load into RAM before chat. They stay until you stop sharing." :
+                    "Weights load on demand; cache reuse and retries change transfer totals.");
             }
         } else {
             printf("%s\n", loading);
@@ -965,9 +982,24 @@ static int home_request_chat(LmbTuiState *st, int selected) {
             pthread_t heartbeat;
             if (pthread_create(&heartbeat, NULL, home_session_keepalive, &s)) goto done;
             char expected_host[65]; lmb_hex(expected_host, edge_pk, 32);
+            char expected_root[65]; lmb_hex(expected_root, identity.root, 32);
             char *chat_argv[] = {"--host", host, "--model", model, "--ctx", ctx,
                                  "--role", "chat", "--max-new", token_limit, "--host-key", expected_host,
-                                 "--tracker", st->tracker, "--calibrate"};
+                                 "--tracker", st->tracker, "--host-root", expected_root, "--calibrate"};
+            if (home_resident_required()) {
+                LmbResidentPlan saved = {.context = st->context, .max_new = s.offers[s.edge].max_new,
+                    .execution = execution};
+                snprintf(saved.tracker, sizeof saved.tracker, "%s", st->tracker);
+                snprintf(saved.host, sizeof saved.host, "%s", host);
+                snprintf(saved.host_key, sizeof saved.host_key, "%s", expected_host);
+                snprintf(saved.root, sizeof saved.root, "%s", expected_root);
+                snprintf(saved.model, sizeof saved.model, "%s", model);
+                if (home_resident_plan_save(&saved)) {
+                    atomic_store(&s.stop, 1); pthread_join(heartbeat, NULL);
+                    home_fail("Cannot save the approved resident plan. Check home-directory permissions; no chat was started.");
+                    goto done;
+                }
+            }
             g_execution_view = &execution;
             LmbCalibration measurement = {0}; char measurement_dir[1200];
             LmbTuiModel measured = *m;
@@ -1003,7 +1035,7 @@ static int home_request_chat(LmbTuiState *st, int selected) {
                         !m->content_id[0] ? "checkpoint content identity is unavailable" :
                         !st->build_id[0] ? "client binary identity is unavailable" :
                         "the approved plan's runtime identities are incomplete or changed");
-            result = cmd_chat(st->quick_calibration ? 15 : 14, chat_argv);
+            result = cmd_chat(st->quick_calibration ? 17 : 16, chat_argv);
             g_recording_calibration = NULL; g_calibration_directory = NULL;
             g_execution_view = NULL;
             atomic_store(&s.stop, 1); pthread_join(heartbeat, NULL);

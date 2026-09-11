@@ -62,7 +62,7 @@ check-warnings:
 		CFLAGS='$(CFLAGS) -Werror'
 
 SECURE_DEPS = lumabri_secure.h lumabri_crypto.h
-HOME_NET_DEPS = lumabri_home_net.h lumabri_home_discovery.h lumabri_platform.h lumabri_wakeup.h lumabri_runtime_probe.h
+HOME_NET_DEPS = lumabri_home_net.h lumabri_home_discovery.h lumabri_platform.h lumabri_wakeup.h lumabri_runtime_probe.h src/runtime/lumabri_resident_plan.h
 MACHINE_SRC = lumabri_machine.c
 MACHINE_DEPS = lumabri_machine.h $(MACHINE_SRC)
 PLANNER_ADAPTER_DEPS = $(wildcard planner_adapters/*.h)
@@ -504,6 +504,7 @@ test-home-network: tests/c/test_home_network.c $(HOME_NET_DEPS) src/ui/lumabri_v
 .PHONY: test-home-network
 
 test-chat-ui: lumabri test_chat_ui test-ready-pipe
+	./test_chat_ui resident-plan
 	python3 tests/integration/chat_ui_test.py
 	python3 tests/ui_text_test.py
 	python3 tests/integration/workspace_navigation_test.py

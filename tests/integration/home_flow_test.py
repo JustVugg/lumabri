@@ -53,8 +53,14 @@ def main():
                         help="kill a donor TUI after generation; assert engines and leases are released")
     parser.add_argument("--crash-requester", action="store_true",
                         help="resident contract: lose the chatter, retain weights beyond the control lease, reconnect")
+    parser.add_argument("--resident-default", action="store_true",
+                        help="exercise resident household without setting a resident environment flag")
+    parser.add_argument("--prepare-timeout", type=int, default=180,
+                        help="bounded indexing/loading deadline for a large-checkpoint diagnostic (max 900 seconds)")
     args = parser.parse_args()
-    resident = os.environ.get("LUMABRI_RESIDENT_REQUIRED") == "1"
+    if not 30 <= args.prepare_timeout <= 900:
+        parser.error("--prepare-timeout must be between 30 and 900 seconds")
+    resident = args.resident_default or os.environ.get("LUMABRI_RESIDENT_REQUIRED") == "1"
     if resident and args.repeat_cached:
         parser.error("resident weights persist in RAM; --repeat-cached exercises the legacy disk cache")
     if args.crash_requester and (not resident or args.kill_donor or args.repeat_cached):
@@ -111,7 +117,10 @@ def main():
             ram = 0.1 if args.expect_unused_donor and name == "donor-b" else args.donor_ram_gb
             settings.write_text(f"tracker={addr}\ntoken=household-test\nmodels={Path(args.models_dir).resolve()}\nram={ram}\n")
             settings.chmod(0o600)
-        return {**os.environ, "HOME": str(home), "LUMABRI_ENCRYPT": "1",
+        result = {**os.environ, "HOME": str(home), "LUMABRI_ENCRYPT": "1",
+                # The default product path is resident. Keep legacy cache
+                # regressions explicit; resident tests exercise the TUI too.
+                "LUMABRI_RESIDENT_REQUIRED": "1" if resident else "0",
                 "LUMABRI_HOME_PORT_BASE": str(service_base + 16 * service_slots.get(name, 0)),
                 "LUMABRI_PEER_KEY": str(home / "peer.key"),
                 "LUMABRI_KNOWN_HOSTS": str(home / "known.hosts"),
@@ -120,6 +129,9 @@ def main():
                 "LUMABRI_ENGINE_BACKEND": "cuda",
                 "LUMABRI_RAM_RESERVE_MB": "256", "LUMABRI_IO_TIMEOUT_MS": "10000",
                 "OMP_NUM_THREADS": "2", "COLI_NO_OMP_TUNE": "1", "PIN": "off"}
+        if args.resident_default:
+            result.pop("LUMABRI_RESIDENT_REQUIRED", None)
+        return result
 
     class Terminal:
         def __init__(self, name, argv, environment_name=None):
@@ -444,7 +456,7 @@ def main():
             print("HOME ALTERNATIVE PLAN: PASS (two selected, one used; real generation, no unused-donor offer, cleanup)", flush=True)
             return
         until(lambda: a.has("Waiting for your approval") and b.has("Waiting for your approval"),
-              seconds=60, message="offers never reached both donor TUIs")
+              seconds=args.prepare_timeout, message="offers never reached both donor TUIs")
         assert not engines_started("donor-a") and not engines_started("donor-b")
         a.send("\x1b[A\r")
         until(lambda: a.has("Accepted; waiting"))
@@ -462,15 +474,18 @@ def main():
         chat.send("\x1b[B\r\x1b[B\r\t")
         time.sleep(.5)
         chat.send("\r\r")
-        until(lambda: a.has("Waiting for your approval") and b.has("Waiting for your approval"), seconds=60)
+        until(lambda: a.has("Waiting for your approval") and b.has("Waiting for your approval"), seconds=args.prepare_timeout)
         a.send("\x1b[A\r"); b.send("\x1b[A\r")
-        until(lambda: chat.has("receives the text") or chat.p.poll() is not None, seconds=180,
+        until(lambda: chat.has("receives the text") or chat.p.poll() is not None, seconds=args.prepare_timeout,
               message="accepted plan did not reach real hosted chat")
         assert chat.p.poll() is None, "accepted plan failed; inspect donor engine logs"
-        assert "Transferring weights and loading approved segments" in chat.text
-        assert "MB served from this computer" in chat.text
-        assert "remaining time unavailable" in chat.text, "on-demand transfer invented a denominator"
-        assert "Loading the chat host; segments are ready" in chat.text
+        # Terminal.text is a bounded tail; repeated redraws during a slower
+        # native load may legitimately remove an earlier progress phase.
+        preparation = (tmp / "chatter.terminal.log").read_text(errors="replace")
+        assert "Transferring weights and loading approved segments" in preparation
+        assert "MB served from this computer" in preparation
+        assert "remaining time unavailable" in preparation, "transfer invented a denominator"
+        assert "Loading the chat host; segments are ready" in preparation
         if args.expect_greedy:
             assert chat.has("greedy decoding"), "greedy-only capability was not shown to the client"
         until(lambda: chat.has("/experts shows tracker activity."),
@@ -587,21 +602,47 @@ def main():
             boot_counts = {path: path.read_text(errors="replace").count("weight input sealed") for path in engine_logs}
             endpoint = re.search(r"host (127\.0\.0\.1:[0-9]+) ·", chat.text)
             assert endpoint, "the original host endpoint is missing"
+            # A persisted address is not proof of the same checkpoint. Reuse
+            # must reject a stale root even with the correct pinned peer key.
+            record = (tmp / "chatter/.lumabri/resident-plan").read_bytes()
+            offset = 4
+            strings = []
+            for _ in range(5):
+                length = struct.unpack_from("<H", record, offset)[0]
+                offset += 2
+                strings.append(record[offset:offset+length].decode())
+                offset += length
+            assert strings[1] == endpoint.group(1)
+            wrong_root = ("1" if strings[3][0] == "0" else "0") + strings[3][1:]
+            refused = subprocess.run(["./lumabri", "chat", "--host", strings[1],
+                "--host-key", strings[2], "--host-root", wrong_root, "--max-new", "4"],
+                cwd=ROOT, env=env("chatter"), input="must not reach the engine\n", text=True,
+                capture_output=True, timeout=20)
+            assert refused.returncode and "checkpoint differs" in refused.stderr, refused.stderr
+            # This rejected connection creates no conversation; the host may
+            # complete its harmless reset before the next accepted client.
+            until(lambda: reset_count() >= 2, message="rejected stale-root client left the host busy")
+            resets_before_resume = reset_count()
             # The original requester and its checkpoint-serving child have
             # exited. Reconnect with the same accepted identity: no source,
             # no donor restart and no checkpoint download are available.
-            resume = Terminal("resident-resume", ["./lumabri", "chat", "--host", endpoint.group(1),
-                "--tracker", addr, "--ctx", str(args.context), "--max-new", "4"], "chatter")
+            resume = Terminal("resident-resume", ["./lumabri"], "chatter")
+            until(lambda: resume.has("New conversation · retained model"),
+                  message="TUI did not recover the approved resident plan after restart")
+            resume.send("\r")
             until(lambda: resume.has("receives the text") or resume.p.poll() is not None)
             assert resume.p.poll() is None, "retained host cannot accept a second conversation"
             resume.send("hi\n")
             until(lambda: resume.has("hosted stream · no local checkpoint") or resume.p.poll() is not None,
                   seconds=120, message="resident generation failed with the weight source offline")
             assert resume.p.poll() is None and resume.has("generated tokens"), "resident second turn did not generate"
+            resume.text = ""
             resume.send("/quit\n")
+            until(lambda: resume.has("your workspace"), message="chat did not return to the workspace")
+            resume.send("\x1b")
             until(lambda: resume.p.poll() is not None)
             assert resume.p.returncode == 0
-            until(lambda: reset_count() >= 2, message="second conversation was not reset in place")
+            until(lambda: reset_count() > resets_before_resume, message="second conversation was not reset in place")
             for path, count in boot_counts.items():
                 assert path.read_text(errors="replace").count("weight input sealed") == count, "resident engine rebooted"
             for donor in ("donor-a", "donor-b"):

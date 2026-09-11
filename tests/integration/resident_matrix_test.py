@@ -44,7 +44,7 @@ def main():
             print(f"RESIDENT MATRIX: {name}", flush=True)
             result = subprocess.run(
                 [sys.executable, str(root / "tests/integration/home_flow_test.py"),
-                 "--models-dir", str(catalog), "--expect-metrics", *extra],
+                 "--models-dir", str(catalog), "--expect-metrics", "--resident-default", *extra],
                 cwd=root, env={**os.environ, "LUMABRI_RESIDENT_REQUIRED": "1", **overrides},
                 timeout=600, check=False)
             if result.returncode:
