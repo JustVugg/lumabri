@@ -63,6 +63,20 @@ execution, cross-platform numerical compatibility, or concurrent capacity.
   memory estimate as the local source (6,264,782,848 bytes, context 512).
   This is not yet a successful real-model LAN generation.
 
+- The subsequent physical OLMoE trial passed preflight on both donors and
+  started Edge, with PC [0,13) and Mac [13,16). Its first 26-token prompt
+  did not complete: the host logged `idle session expired` during the silent
+  cold prefill. Source shutdown and subsequent block EIO were consequences
+  of that cancellation, not evidence that the Mac rejected the request.
+  Hosted now tracks complete SUBMIT through matching DONE/ERROR, parsing DATA
+  lengths so generated text cannot imitate a terminal frame. Idle expiry is
+  rearmed after completion; active work has a separate absolute deadline
+  (`--request-seconds`, default 1800), never extended by progress or client
+  traffic. The default idle limit remains 300 seconds. A real encrypted
+  bridge regression tests silent prefill beyond idle, BUSY while active,
+  post-DONE expiry and an independently bounded stalled request. Successful
+  real-model LAN generation and the cause of slow cold loading remain open.
+
 - PR #150: native Intel/ARM macOS CI, Linux regression gates, Windows firewall
   helper contracts; Tiny signed CAS, all-party approval, generation and cleanup.
 - User household trial: macOS 12.6 Intel Mac with 8 GiB RAM, Windows/WSL source;

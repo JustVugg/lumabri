@@ -131,6 +131,7 @@ cat >"$T/qwen36.c" <<'EOF'
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     fputs("\nLUMABRI_SAMPLING GREEDY\n\1\1READY\1\1\nSTAT 0 0 0 0\n", stdout);
@@ -147,6 +148,8 @@ int main(void) {
         if (!strstr(payload, "<|im_start|>assistant\n<think>\n")) return 2;
         if (turns && !strstr(payload, "hello")) return 4;
         free(payload);
+        const char *delay = getenv("TEST_HOST_PREFILL_SECONDS");
+        if (delay) sleep((unsigned)atoi(delay));
         printf("ACCEPT %s\nDATA %s 5\nhello\nDONE %s", id, id, id);
         if (!turns) fputs(" STAT 1 0 0 0 20 0 PERF_UNAVAILABLE", stdout);
         else if (turns == 1) fputs(" STAT 1 0 0 0 20 0 PERF1 1 0 0.2 0 0.2", stdout);
@@ -190,4 +193,48 @@ grep -q "timing unavailable; no speed recorded" "$T/held.log" ||
 grep -q "decode speed not measured" "$T/held.log" ||
     fail "a one-token reply manufactured a decode rate or lost its history"
 
-echo "HOSTED CHAT TEST: PASS (zero checkpoint bytes, authenticated encrypted stream, real BUSY)"
+# A silent prefill longer than the idle limit is still active work. Exercise
+# the real bridge and encrypted client, not just its state-machine helpers.
+start_slow_host() {
+    local label=$1 port=$2 idle=$3 request=$4
+    mkdir -p "$T/$label-home"
+    HOME="$T/$label-home" LUMABRI_PEER_KEY="$T/$label.key" \
+    LUMABRI_KNOWN_HOSTS="$T/$label.hosts" TEST_HOST_PREFILL_SECONDS=3 \
+        ./lumabri host --local "$T/model" --engine "$T/qwen36" \
+        --port "$port" --max-new 8 --idle-seconds "$idle" \
+        --request-seconds "$request" >"$T/$label.log" 2>&1 & PIDS+=("$!")
+    for _ in $(seq 1 200); do
+        grep -q "host ready" "$T/$label.log" 2>/dev/null && break
+        sleep .05
+    done
+    grep -q "host ready" "$T/$label.log" || fail "$label did not start"
+}
+SLOW_PORT=$(( PORT + 2 ))
+export LUMABRI_KNOWN_HOSTS="$T/slow-client.hosts"
+start_slow_host slow-host "$SLOW_PORT" 1 10
+( printf 'hi\n'; sleep 7; printf '/quit\n' ) | timeout 15 ./lumabri chat \
+    --host "127.0.0.1:$SLOW_PORT" --plain >"$T/slow-client.log" 2>&1 & slow_client=$!
+sleep .5
+printf '/quit\n' | timeout 5 ./lumabri chat --host "127.0.0.1:$SLOW_PORT" \
+    --plain >"$T/slow-busy.log" 2>&1 || true
+grep -qi "busy (0 sessions free)" "$T/slow-busy.log" ||
+    fail "an active prefill lost its reserved session"
+wait "$slow_client" || true
+grep -q hello "$T/slow-client.log" || fail "idle timeout interrupted active prefill"
+grep -q 'idle session expired' "$T/slow-host.log" ||
+    fail "idle expiry was not rearmed after DONE"
+! grep -q 'active request deadline exceeded' "$T/slow-host.log" ||
+    fail "successful slow prefill hit the request deadline"
+
+# Distinct, absolute request deadline bounds a genuinely stalled engine.
+DEADLINE_PORT=$(( PORT + 3 ))
+export LUMABRI_KNOWN_HOSTS="$T/deadline-client.hosts"
+start_slow_host deadline-host "$DEADLINE_PORT" 10 1
+printf 'hi\n/quit\n' | timeout 10 ./lumabri chat \
+    --host "127.0.0.1:$DEADLINE_PORT" --plain >"$T/deadline-client.log" 2>&1 || true
+grep -q 'active request deadline exceeded' "$T/deadline-host.log" ||
+    fail "active inference was not bounded by its own deadline"
+! grep -q 'idle session expired' "$T/deadline-host.log" ||
+    fail "request deadline was mislabeled as inactivity"
+
+echo "HOSTED CHAT TEST: PASS (zero checkpoint bytes, encrypted stream, BUSY, active/idle deadlines)"
