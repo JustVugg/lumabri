@@ -601,11 +601,11 @@ HYBRID_ENGINE_DIR = build/segment-hybrid-colibri
 COLIBRI_SEGMENT_LIB = $(HYBRID_ENGINE_DIR)/build/segment/libcolibri_segment_edge.a
 HYBRID_ROOT = $(abspath .)
 SEGMENT_CFLAGS = $(CFLAGS) -I. -I$(ENGINE) $(OMP_FLAGS)
-SEGMENT_COMMON = segment_colibri.h src/runtime/lumabri_backend_policy.h lumabri_segment.c lumabri_segment.h \
+SEGMENT_COMMON = segment_colibri.h src/runtime/lumabri_resident.h src/runtime/lumabri_backend_policy.h lumabri_segment.c lumabri_segment.h \
 		lumabri_segment_discovery.c lumabri_segment_discovery.h \
 		lumabri_proto.h lumabri_sign.h lumabri_sha.h $(SECURE_DEPS)
 
-HYBRID_PATCH_INPUTS = engine_patches/make_patches.py \
+HYBRID_PATCH_INPUTS = tools/prepare_resident_adapters.py engine_patches/make_patches.py \
 	engine_patches/deepseek_v4_p2p.py $(wildcard engine_patches/*-p2p.diff) \
 	lumabri_client.h lumibri_client.h lumi_v4_ext.h lumi_v4_bridge.c \
 	lumabri_proto.h lumabri_sign.h lumabri_secure.h lumabri_crypto.h \
@@ -632,6 +632,7 @@ $(HYBRID_ENGINE_DIR)/.prepared: Makefile build/segment-options build/segment-sou
 	python3 engine_patches/make_patches.py --engine-dir $(ENGINE) --apply-one olmoe.c --out $(HYBRID_ENGINE_DIR)/olmoe.c
 	python3 engine_patches/make_patches.py --engine-dir $(ENGINE) --apply-one qwen36.c --out $(HYBRID_ENGINE_DIR)/qwen36.c
 	python3 engine_patches/deepseek_v4_p2p.py $(ENGINE)/deepseek_v4.c $(HYBRID_ENGINE_DIR)/deepseek_v4.c
+	python3 tools/prepare_resident_adapters.py --copy $(HYBRID_ENGINE_DIR)
 	touch $@
 
 build/segment_hybrid_bridge.o: build/segment-options lumi_v4_bridge.c $(HYBRID_PATCH_INPUTS)

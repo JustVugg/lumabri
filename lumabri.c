@@ -2415,6 +2415,7 @@ typedef struct {
     Proto proto;
     EngKind kind;
     int segment;
+    int reset_supported; /* explicit gateway capability; never assume from family */
     int greedy_only; /* actual Edge capability, not a model-name assumption */
     EngineTransport transport;
     uint32_t numeric_abi;
@@ -2485,6 +2486,7 @@ static char *read_until_prompt(int fd) {
 /* Wait for readiness in either dialect, and remember which one it was.
  * Returns 0, or -1 if the child died first. */
 static int engine_wait_ready(Engine *e) {
+    e->reset_supported = 0;
     e->greedy_only = 0;
     e->numeric_abi = 0; e->numeric_class[0] = 0;
     size_t cap = 8192, len = 0;
@@ -2502,6 +2504,7 @@ static int engine_wait_ready(Engine *e) {
         len += (size_t)r;
         buf[len] = 0;
         if (memmem(buf, len, FRAME_READY, strlen(FRAME_READY))) {
+            e->reset_supported = strstr(buf, "\nLUMABRI_RESET 1\n") != NULL;
             e->greedy_only = strstr(buf, "\nLUMABRI_SAMPLING GREEDY\n") != NULL;
             const char *numeric = strstr(buf, "\nLUMABRI_NUMERIC ");
             if (numeric) {
@@ -3354,6 +3357,8 @@ typedef struct {
     size_t header_len;
     uint64_t payload_left;
     int need_terminator, overflow;
+    char reset_expected[65];
+    int reset_done;
 } HostOutput;
 
 static int host_output(HostOutput *out, HostInput *in, const char *data,
@@ -3393,6 +3398,10 @@ static int host_output(HostOutput *out, HostInput *in, const char *data,
             if (errno || *end) return -1;
             out->payload_left = n;
             out->need_terminator = 1;
+        } else if (!out->overflow && out->reset_expected[0] &&
+                   sscanf(out->header, "RESET_DONE %63s %c", id, &extra) == 1 &&
+                   !strcmp(id, out->reset_expected)) {
+            out->reset_done = 1;
         } else if (((!strncmp(out->header, "DONE ", 5) &&
                      sscanf(out->header, "DONE %63s", id) == 1) ||
                     (!strncmp(out->header, "ERROR ", 6) &&
@@ -3416,21 +3425,23 @@ static int host_expired(const HostInput *in, const HostState *h,
 
 /* Both directions remain inside LMB_HOST_STREAM frames (authenticated and
  * encrypted whenever the transport's strict mode is enabled). */
-static void host_bridge(int fd, Engine *e, const HostState *h) {
+static int host_bridge(int fd, Engine *e, const HostState *h,
+                       HostInput *remaining_input, HostOutput *remaining_output) {
     char buf[16384];
     HostInput input = {0};
     HostOutput output = {0};
     double last_input = nowd();
+    int broken = 0;
     for (;;) {
         struct pollfd p[2] = { { fd, POLLIN, 0 }, { e->from, POLLIN, 0 } };
         int n = poll(p, 2, 1000);
-        if (g_stopping) return;
-        if (n < 0) { if (errno == EINTR) continue; return; }
+        if (g_stopping) break;
+        if (n < 0) { if (errno == EINTR) continue; broken = 1; break; }
         int expired = host_expired(&input, h, last_input, nowd());
         if (expired) {
             fprintf(stderr, "[host] %s\n", expired == 2 ?
                     "active request deadline exceeded" : "idle session expired");
-            return;
+            break;
         }
         if (p[0].revents & POLLIN) {
             LmbMsg m = {0};
@@ -3438,24 +3449,63 @@ static void host_bridge(int fd, Engine *e, const HostState *h) {
                 !m.pay_len || host_input(&input, e, h, m.pay, m.pay_len)) {
                 lmb_msg_free(&m);
                 fprintf(stderr, "[host] invalid or oversized client frame\n");
-                return;
+                break;
             }
             last_input = nowd();
             lmb_msg_free(&m);
         }
         if (p[1].revents & POLLIN) {
             ssize_t got = read(e->from, buf, sizeof buf);
-            if (got <= 0) return;                 /* engine died: so does this */
+            if (got <= 0) { broken = 1; break; }
             int completed;
             if (host_output(&output, &input, buf, (size_t)got, &completed)) {
                 fprintf(stderr, "[host] invalid engine codec frame\n");
-                return;
+                broken = 1; break;
             }
             if (completed) last_input = nowd();
             if (lmb_send(fd, LMB_HOST_STREAM, NULL, 0, buf, (uint32_t)got))
-                return;
+                break;
         }
-        if ((p[0].revents | p[1].revents) & (POLLERR | POLLHUP)) return;
+        if ((p[0].revents | p[1].revents) & (POLLERR | POLLHUP)) break;
+    }
+    *remaining_input = input;
+    *remaining_output = output;
+    return broken ? -1 : 0;
+}
+
+/* Close the conversation, not its resident weights. Drain an already
+ * accepted request before resetting; incomplete client payloads cannot be
+ * repaired by injecting a command into their bytes. A fresh unpredictable
+ * acknowledgement is recognized only at codec boundaries, never in DATA. */
+static int host_reset_conversation(Engine *e, const HostState *h,
+                                   HostInput *in, HostOutput *out) {
+    if (!e->segment || !e->reset_supported || in->payload_left ||
+        in->need_terminator || g_stopping) return -1;
+    char bytes[16384];
+    double deadline = in->active ? in->started + h->request_seconds : nowd();
+    int reset_sent = 0;
+    for (;;) {
+        if (g_stopping) return -1;
+        if (!in->active && !reset_sent) {
+            uint8_t nonce[16];
+            lmb_random(nonce, sizeof nonce);
+            lmb_hex(out->reset_expected, nonce, sizeof nonce);
+            char command[96];
+            int n = snprintf(command, sizeof command, "RESET %s\n", out->reset_expected);
+            if (engine_write_full(e->to, command, (size_t)n)) return -1;
+            reset_sent = 1;
+            deadline = nowd() + 30;
+        }
+        if (out->reset_done) return 0;
+        if (nowd() >= deadline) return -1;
+        struct pollfd p = {e->from, POLLIN, 0};
+        int ready = poll(&p, 1, 100);
+        if (ready < 0) { if (errno == EINTR) continue; return -1; }
+        if (!ready) continue;
+        if (!(p.revents & POLLIN)) return -1;
+        ssize_t n = read(e->from, bytes, sizeof bytes);
+        int completed;
+        if (n <= 0 || host_output(out, in, bytes, (size_t)n, &completed)) return -1;
     }
 }
 
@@ -3576,14 +3626,22 @@ static int cmd_host(int argc, char **argv) {
         pthread_t busy_thread;
         int watching = pthread_create(&busy_thread, NULL,
                                       host_busy_acceptor, &busy) == 0;
-        host_bridge(fd, &eng, &h);
+        HostInput remaining_input = {0};
+        HostOutput remaining_output = {0};
+        int exchange_broken = host_bridge(fd, &eng, &h,
+                                         &remaining_input, &remaining_output);
+        lmb_close(fd);
+        int reset = !exchange_broken &&
+                    !host_reset_conversation(&eng, &h, &remaining_input, &remaining_output);
         atomic_store(&busy.stop, 1);
         if (watching) pthread_join(busy_thread, NULL);
-        lmb_close(fd);
-        /* Between two clients the engine keeps the previous conversation in
-         * its KV, so the next client would continue somebody else's chat.
-         * Restart it: with one session there is nothing cheaper that is also
-         * correct, and correctness here is somebody else's private text. */
+        if (reset) {
+            fprintf(stderr, "[host] conversation reset; resident weights retained\n");
+            continue;
+        }
+        if (g_stopping) break;
+        /* Older or damaged gateways cannot acknowledge a clean session.
+         * Never hand their KV to the next client. */
         fprintf(stderr, "[host] session closed; restarting the engine so the "
                 "next client starts clean\n");
         engine_stop(&eng);

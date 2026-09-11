@@ -183,7 +183,7 @@ def line():
         raise RuntimeError("Segment gateway closed unexpectedly")
     return value
 
-if line() != b"\n" or line() != b"LUMABRI_SAMPLING LOGITS\n":
+if line() != b"\n" or line() != b"LUMABRI_RESET 1\n" or line() != b"LUMABRI_SAMPLING LOGITS\n":
     raise RuntimeError("missing OLMoE sampling capability")
 if not re.fullmatch(rb"LUMABRI_NUMERIC [1-9][0-9]* [\x20-\x7e]{1,96}\n", line()):
     raise RuntimeError("missing or invalid numeric ABI metadata")
@@ -230,6 +230,10 @@ def turn(request_id, prompt, max_new=1):
 
 turn(91, b"hi\n")
 turn(92, b"hi\nthere\n", max_new=4)
+process.stdin.write(b"RESET test-session-boundary\n")
+process.stdin.flush()
+assert line() == b"RESET_DONE test-session-boundary\n"
+turn(93, b"a new conversation\n")
 process.stdin.close()
 if process.wait(timeout=15):
     raise RuntimeError("Segment gateway exited with an error")

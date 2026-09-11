@@ -97,6 +97,16 @@ int main(int argc, char **argv) {
     assert(completed && !host_in.active);
     HostOutput bad_output = {0};
     assert(host_output(&bad_output, &host_in, "DATA 7 -1\n", 10, &completed));
+    HostOutput reset_output = {0};
+    snprintf(reset_output.reset_expected, sizeof reset_output.reset_expected, "private-reset");
+    const char *fake_reset = "DATA 7 26\nRESET_DONE private-reset\nX\nRESET_DONE wrong\n";
+    for (size_t i = 0; fake_reset[i]; i++) {
+        assert(!host_output(&reset_output, &host_in, fake_reset+i, 1, &completed));
+        assert(!reset_output.reset_done);
+    }
+    const char *real_reset = "RESET_DONE private-reset\n";
+    assert(!host_output(&reset_output, &host_in, real_reset, strlen(real_reset), &completed));
+    assert(reset_output.reset_done);
     fclose(codec_sink);
     if (argc > 1 && !strcmp(argv[1], "host-codec")) {
         puts("HOST CODEC: PASS (fragmentation, payload boundaries, request/idle deadlines)");

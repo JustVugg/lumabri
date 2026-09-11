@@ -51,7 +51,14 @@ def main():
                         help="select a donor below the process floor; require a valid plan on the other donor only")
     parser.add_argument("--kill-donor", action="store_true",
                         help="kill a donor TUI after generation; assert engines and leases are released")
+    parser.add_argument("--crash-requester", action="store_true",
+                        help="resident contract: lose the chatter, retain weights beyond the control lease, reconnect")
     args = parser.parse_args()
+    resident = os.environ.get("LUMABRI_RESIDENT_REQUIRED") == "1"
+    if resident and args.repeat_cached:
+        parser.error("resident weights persist in RAM; --repeat-cached exercises the legacy disk cache")
+    if args.crash_requester and (not resident or args.kill_donor or args.repeat_cached):
+        parser.error("--crash-requester requires the resident path and no other termination mode")
     if args.expect_quick_calibration and any((args.expect_disjoint_plans, args.repeat_cached,
         args.expect_no_fit, args.expect_unused_donor, args.kill_donor,
         args.expect_calibration, args.expect_metrics, args.expect_greedy)):
@@ -480,7 +487,7 @@ def main():
         chat.send("hi\n")
         until(lambda: chat.has("tok/s") or chat.has("generated tokens") or chat.has("prompt plus output exceeds context") or
               chat.has("logits are unavailable for sampling") or chat.has("Segment generation failed") or
-              chat.has("invalid token count") or chat.p.poll() is not None, seconds=120,
+              chat.has("invalid token count") or chat.has("cannot read DeepSeek V4 embedding") or chat.p.poll() is not None, seconds=120,
               message="real model did not finish a response")
         assert chat.has("tok/s") or chat.has("generated tokens"), "engine failed during generation"
         if args.expect_metrics:
@@ -543,10 +550,17 @@ def main():
                   message="lost donor left hosted chat blocked")
             until(lambda: b.has("Released"), message="surviving donor was not released")
         else:
-            chat.send("/quit\n")
+            if args.crash_requester:
+                chat.p.kill()
+            else:
+                chat.send("/quit\n")
             until(lambda: chat.p.poll() is not None, message="quit left hosted chat blocked")
-            assert chat.p.returncode == 0
-            until(lambda: a.has("Released") and b.has("Released"), message="donor leases were not released")
+            assert chat.p.returncode == (-signal.SIGKILL if args.crash_requester else 0)
+            if resident:
+                until(lambda: a.has("Weights retained in RAM") and b.has("Weights retained in RAM"),
+                      message="closing chat unloaded the resident donor allocation")
+            else:
+                until(lambda: a.has("Released") and b.has("Released"), message="donor leases were not released")
         def leases_released():
             for name in ("donor-a", "donor-b"):
                 for lock in ("compute-donor.lock", "home/weights.lock"):
@@ -556,7 +570,49 @@ def main():
                         except BlockingIOError:
                             return False
             return True
-        until(leases_released, message="a child retained a donor resource lease after closing chat")
+        if resident and not args.kill_donor:
+            assert not leases_released(), "resident allocation lost its memory reservation"
+            if args.crash_requester:
+                deadline = time.monotonic() + 17
+                while time.monotonic() < deadline:
+                    for terminal in terminals:
+                        terminal.drain()
+                    assert not leases_released(), "control lease expiration evicted resident weights"
+                    time.sleep(.1)
+            engine_logs = [tmp / name / ".lumabri/home/engines.log" for name in ("donor-a", "donor-b")]
+            def reset_count():
+                return sum(path.read_text(errors="replace").count("conversation reset; resident weights retained")
+                           for path in engine_logs)
+            until(lambda: reset_count() >= 1, message="host reloaded weights instead of resetting its conversation")
+            boot_counts = {path: path.read_text(errors="replace").count("weight input sealed") for path in engine_logs}
+            endpoint = re.search(r"host (127\.0\.0\.1:[0-9]+) ·", chat.text)
+            assert endpoint, "the original host endpoint is missing"
+            # The original requester and its checkpoint-serving child have
+            # exited. Reconnect with the same accepted identity: no source,
+            # no donor restart and no checkpoint download are available.
+            resume = Terminal("resident-resume", ["./lumabri", "chat", "--host", endpoint.group(1),
+                "--tracker", addr, "--ctx", str(args.context), "--max-new", "4"], "chatter")
+            until(lambda: resume.has("receives the text") or resume.p.poll() is not None)
+            assert resume.p.poll() is None, "retained host cannot accept a second conversation"
+            resume.send("hi\n")
+            until(lambda: resume.has("hosted stream · no local checkpoint") or resume.p.poll() is not None,
+                  seconds=120, message="resident generation failed with the weight source offline")
+            assert resume.p.poll() is None and resume.has("generated tokens"), "resident second turn did not generate"
+            resume.send("/quit\n")
+            until(lambda: resume.p.poll() is not None)
+            assert resume.p.returncode == 0
+            until(lambda: reset_count() >= 2, message="second conversation was not reset in place")
+            for path, count in boot_counts.items():
+                assert path.read_text(errors="replace").count("weight input sealed") == count, "resident engine rebooted"
+            for donor in ("donor-a", "donor-b"):
+                for weight in (tmp / donor).rglob("*.safetensors"):
+                    assert weight.stat().st_blocks == 0, f"weight payload reached disk: {weight}"
+            assert not leases_released(), "second chat released the resident reservation"
+            print("HOME RESIDENT PASS: second private conversation, source offline, no reload, no weight mirror writes", flush=True)
+            a.text = b.text = ""
+            a.send("x"); b.send("x")
+            until(lambda: a.has("Released") and b.has("Released"), message="owner Stop did not unload weights")
+        until(leases_released, message="an allocation retained its lease after explicit release")
         if args.expect_calibration:
             records = list((tmp / "chatter/.lumabri/calibrations").glob("*.cal"))
             assert len(records) == 1, "completed real generation did not save a bound measurement"

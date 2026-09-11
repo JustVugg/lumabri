@@ -5,6 +5,29 @@
 #define LUMABRI_P2P
 #define LUMIBRI_P2P
 #include "lumabri_client.h"
+#include <sys/resource.h>
+#include <dlfcn.h>
+
+static int resident_prepared;
+void lmb_resident_adapter_prepared(void) { resident_prepared = 1; }
+int lmb_resident_adapter_is_prepared(void) { return resident_prepared; }
+int lmb_resident_budget_exceeded(unsigned long long limit) {
+    struct rusage use;
+    if (!limit || getrusage(RUSAGE_SELF, &use)) return 1;
+#ifdef __APPLE__
+    return (unsigned long long)use.ru_maxrss > limit;
+#else
+    return (unsigned long long)use.ru_maxrss * 1024u > limit;
+#endif
+}
+
+int lmb_resident_retain(int fd, unsigned long long offset,
+                        unsigned long long length, unsigned long long limit) {
+    if (!length || length >= limit || lmb_resident_budget_exceeded(limit - length)) return -1;
+    int (*retain)(int, uint64_t, uint64_t) =
+        (int (*)(int, uint64_t, uint64_t))dlsym(RTLD_DEFAULT, "lmb_weights_retain");
+    return !retain || retain(fd, offset, length) || lmb_resident_budget_exceeded(limit) ? -1 : 0;
+}
 
 void lumi_v4_bridge_init(int n_layers, int n_experts, int hidden) {
     static int done = 0;                 /* several engine-open paths may call */

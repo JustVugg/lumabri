@@ -5,6 +5,11 @@
 #ifndef LUMI_V4_EXT_H
 #define LUMI_V4_EXT_H
 #ifdef LUMABRI_P2P
+extern void lmb_resident_adapter_prepared(void);
+extern int lmb_resident_adapter_is_prepared(void);
+extern int lmb_resident_budget_exceeded(unsigned long long limit);
+extern int lmb_resident_retain(int fd, unsigned long long offset,
+                               unsigned long long length, unsigned long long limit);
 extern void lumi_v4_bridge_init(int n_layers, int n_experts, int hidden);
 extern int  lumi_v4_bridge_on(int layer);
 extern int  lumi_v4_bridge_apply(int layer, const int *indices,

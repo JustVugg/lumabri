@@ -291,6 +291,20 @@ jobs:
           name: tiny-v4-checkpoint
           path: lumabri/build/v4-chat/deepseek-v4-tiny/*
           retention-days: 3
+      - name: Resident RAM — every adapter, second conversation without the source
+        working-directory: lumabri
+        env:
+          LUMABRI_RESIDENT_REQUIRED: '1'
+        run: |
+          python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --expect-metrics --crash-requester
+          python3 tests/integration/home_flow_test.py --models-dir build/qwen-int4 --expect-metrics
+          python3 tests/integration/home_flow_test.py --models-dir build/inkling-contract/int4 --expect-metrics
+          python3 tests/integration/home_flow_test.py --models-dir build/kimi-contract --donor-ram-gb 4.5 --expect-metrics
+          python3 tests/integration/home_flow_test.py --models-dir build/glm-contract --expect-metrics
+          python3 tests/integration/home_flow_test.py --models-dir build/glm53-contract --expect-metrics
+          python3 tests/integration/home_flow_test.py --models-dir build/qwen38-contract --context 512 --expect-greedy --expect-metrics
+          python3 tests/integration/home_flow_test.py --models-dir build/qwen38-fp8-contract --context 512 --expect-greedy --expect-metrics
+          python3 tests/integration/home_flow_test.py --models-dir build/v4-chat --donor-ram-gb 1.0 --expect-metrics
       - name: Assemble and test the Linux candidate outside the checkout layout
         working-directory: lumabri
         run: |
@@ -426,6 +440,25 @@ jobs:
       - name: Native V4 request and execution
         working-directory: lumabri
         run: python3 tests/integration/home_flow_test.py --models-dir build/v4-home-models --donor-ram-gb 1.0
+      - name: Native resident RAM — retain weights after chat, then release on owner Stop
+        working-directory: lumabri
+        env:
+          LUMABRI_RESIDENT_REQUIRED: '1'
+        run: |
+          python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --expect-metrics --crash-requester
+          python3 tests/integration/home_flow_test.py --models-dir build/qwen-home-models --expect-metrics
+          python3 tests/integration/home_flow_test.py --models-dir build/inkling-home-models --expect-metrics
+          python3 tests/integration/home_flow_test.py --models-dir build/glm-home-models --expect-metrics
+          python3 tests/integration/home_flow_test.py --models-dir build/glm53-home-models --expect-metrics
+          python3 tests/integration/home_flow_test.py --models-dir build/qwen38-home-models --context 512 --expect-greedy --expect-metrics
+          python3 tests/integration/home_flow_test.py --models-dir build/qwen38-fp8-home-models --context 512 --expect-greedy --expect-metrics
+          python3 tests/integration/home_flow_test.py --models-dir build/v4-home-models --donor-ram-gb 1.0 --expect-metrics
+      - name: Native resident Kimi on sufficient-memory runner
+        if: matrix.runner == 'macos-15-intel'
+        working-directory: lumabri
+        env:
+          LUMABRI_RESIDENT_REQUIRED: '1'
+        run: python3 tests/integration/home_flow_test.py --models-dir build/kimi-home-models --donor-ram-gb 4.5 --expect-metrics
       - name: Assemble and test a system-libraries-only native macOS candidate
         if: matrix.openmp == 'disabled'
         working-directory: lumabri

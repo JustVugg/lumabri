@@ -7,6 +7,8 @@
 #include "segment_adapters.h"
 #include "segment_runtime.h"
 #include "src/runtime/lumabri_backend_policy.h"
+#include "src/runtime/lumabri_resident.h"
+extern int lmb_resident_adapter_is_prepared(void);
 
 _Static_assert((uint64_t)COLI_SEGMENT_CAP_CPU == (uint64_t)LMB_SEG_CAP_CPU &&
                (uint64_t)COLI_EDGE_CAP_CPU == (uint64_t)LMB_SEG_CAP_CPU,

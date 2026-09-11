@@ -1814,7 +1814,7 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
     /* Report capabilities before READY, so a pipe reader cannot consume
      * readiness first and lose a later capability line. Direct CLI requests
      * for unavailable stochastic sampling still fail explicitly. */
-    printf("\nLUMABRI_SAMPLING %s\nLUMABRI_NUMERIC %u %s\n" SEGMENT_FRAME_READY "\nSTAT 0 0 0 0\n",
+    printf("\nLUMABRI_RESET 1\nLUMABRI_SAMPLING %s\nLUMABRI_NUMERIC %u %s\n" SEGMENT_FRAME_READY "\nSTAT 0 0 0 0\n",
            cap->flags & COLI_EDGE_CAP_LOGITS ? "LOGITS" : "GREEDY", cap->abi_version, cap->numeric_class);
     fflush(stdout);
     LmbSampler sampler;
@@ -1823,6 +1823,14 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
     memset(&conversation, 0, sizeof conversation);
     char header[512];
     while (fgets(header, sizeof header, stdin)) {
+        char reset_id[65], reset_extra;
+        if (sscanf(header, "RESET %64s %c", reset_id, &reset_extra) == 1) {
+            conversation_reset(&conversation);
+            lmb_sampler_init(&sampler, seed);
+            printf("RESET_DONE %s\n", reset_id);
+            fflush(stdout);
+            continue;
+        }
         unsigned request_id = 0, slot = 0, max_tokens = 0;
         size_t prompt_bytes = 0;
         double temperature = 0.0, top_p = 0.0;
@@ -2021,6 +2029,10 @@ int main(int argc, char **argv) {
         return 1;
     }
     ColiEdgeCapabilities cap = { .struct_size = sizeof cap };
+    if (lmb_resident_seal()) {
+        coli_edge_engine_close(edge);
+        return 1;
+    }
     error[0] = 0;
     if (coli_edge_engine_capabilities(edge, &cap, error, sizeof error)) {
         fprintf(stderr, "cannot read Edge capabilities: %s\n",

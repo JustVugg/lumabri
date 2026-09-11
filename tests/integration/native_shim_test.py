@@ -23,6 +23,7 @@ def main():
         source = tmp / "source"
         source.mkdir()
         (source / "weights.bin").write_bytes(os.urandom(2 * 1024 * 1024 + 777))
+        (source / "weights.safetensors").write_bytes((source / "weights.bin").read_bytes())
         (source / "config.json").write_text('{"model":"native-cas"}\n')
         children = []
 
@@ -72,6 +73,23 @@ def main():
                             str(ROOT / "tests/c/trace_cache_sync.c"), "-o", str(observer), *flags],
                            check=True, timeout=30)
             tested_library = os.environ.get("LUMABRI_TEST_SHIM_LIBRARY", str(ROOT / library))
+            resident_client = tmp / "resident-client"
+            subprocess.run([os.environ.get("CC", "cc"), "-O2", "-Wall", "-Wextra", "-Werror",
+                            str(ROOT / "tests/c/test_resident_input.c"), "-o", str(resident_client),
+                            *([] if sys.platform == "darwin" else ["-ldl"])], check=True, timeout=30)
+            resident_env = {**environment("resident-reader"), loader: tested_library,
+                "LUMABRI_MODEL": "native-cas", "LUMABRI_TRACKER": f"127.0.0.1:{port}",
+                "LUMABRI_CAS": str(tmp / "resident-cas"), "LUMABRI_BLOCK_MIB": "1",
+                "LUMABRI_RESIDENT_REQUIRED": "1", "LUMABRI_PREFETCH": "0",
+                "LUMABRI_CACHE": str(tmp / "resident-cache"),
+                "LUMABRI_VROOT": str(tmp / "resident-vroot")}
+            checked = subprocess.run([str(resident_client),
+                str(tmp / "resident-vroot/weights.safetensors"), str(source / "weights.safetensors")],
+                env=resident_env, capture_output=True, text=True, timeout=45)
+            assert checked.returncode == 0, checked.stdout + checked.stderr
+            assert (tmp / "resident-cache/data/weights.safetensors").stat().st_blocks == 0
+            assert not any(p.is_file() for p in (tmp / "resident-cas").rglob("*"))
+            print(checked.stdout.strip())
             chunk = (source / "weights.bin").read_bytes()[:1024*1024]
             digest = hashlib.sha256(chunk).hexdigest()
             cached_chunk = tmp / "cas" / digest[:2] / digest

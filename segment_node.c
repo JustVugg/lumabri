@@ -1431,6 +1431,15 @@ int main(int argc, char **argv) {
         return 1;
     }
     node.cap.struct_size = sizeof node.cap;
+    if (lmb_resident_required() &&
+        (!lmb_resident_adapter_is_prepared() || lmb_resident_seal())) {
+        fprintf(stderr, "[resident] adapter has not prepared all assigned weights; refusing READY\n");
+        (void)coli_segment_engine_close(node.engine, error, sizeof error);
+        if (auto_range)
+            (void)auto_range_release(tracker, model, name, engine_id,
+                                     resolved_model_root);
+        return 1;
+    }
     error[0] = 0;
     if (coli_segment_engine_capabilities(node.engine, &node.cap,
                                          error, sizeof error)) {
