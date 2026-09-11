@@ -16,8 +16,9 @@ execution, cross-platform numerical compatibility, or concurrent capacity.
 
 1. Actual two-compute-node physical LAN chain: local oracle, split oracle,
    per-node layer ranges and memory, fixed-thread and full-hardware timings.
-   Current physical trial has PC source and Mac computation, not two compute
-   nodes. Mac deployment/approval is user-operated; CI loopback is separate.
+   Physical Tiny chat has now run with PC [0,2) and Mac [2,4) computing.
+   Exact physical local/split token comparison remains pending. Mac deployment
+   and approval are user-operated; CI loopback is separate.
 2. Complete verified sizing for every registered family and supported weight
    encoding. OLMoE, DeepSeek V4, converted Qwen3.6, Inkling and float-dense/MXFP4
    Kimi, float-source GLM, text-only float-source GLM5.3 and BF16/float/block-FP8-expert
@@ -48,6 +49,19 @@ execution, cross-platform numerical compatibility, or concurrent capacity.
    tests. Keep public-network trust/credits separate from the LAN product.
 
 ## Evidence already obtained
+
+- Real OLMoE (7.42 GB) passed household selection/approval for PC [0,13)
+  and Mac [13,16), but the cold-start trial was cancelled before generation.
+  The runtime sizing inspector used `fopen` for safetensors headers; the shim
+  materialized whole files for stdio, causing unintended full-weight transfer
+  on each donor before engine initialization. Bounded descriptor `pread` now
+  preserves header/layout checks without triggering that stdio policy.
+  Regression coverage includes short reads, EINTR, EOF/EIO, truncation and
+  native encrypted CAS inspection of a 64-MiB payload whose unused middle
+  must remain cold. A fresh isolated mirror of the actual 7.42-GB OLMoE
+  materialized 41,947,136 bytes for preflight and returned the same [0,13)
+  memory estimate as the local source (6,264,782,848 bytes, context 512).
+  This is not yet a successful real-model LAN generation.
 
 - PR #150: native Intel/ARM macOS CI, Linux regression gates, Windows firewall
   helper contracts; Tiny signed CAS, all-party approval, generation and cleanup.

@@ -50,6 +50,8 @@ jobs:
           ./test_weight_cache
           python3 tests/integration/storage_ui_test.py
           ./test_planner
+          make test_planner_io CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
+          ./test_planner_io
           ./test_cluster
           ./test_calibration
           make test_catalogue_advice CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
