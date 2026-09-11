@@ -3214,6 +3214,7 @@ typedef struct {
     uint32_t max_frame;
     uint32_t max_new;
     uint32_t idle_seconds;
+    uint32_t request_seconds; /* absolute bound for an active inference */
     const uint8_t *client_key; /* optional identity bound by an accepted home plan */
 } HostState;
 
@@ -3269,6 +3270,9 @@ typedef struct {
     size_t header_len;
     uint64_t payload_left;
     int need_terminator;
+    char request_id[64];
+    int active;
+    double started;
 } HostInput;
 
 static int host_header(HostInput *in, Engine *e, const HostState *h) {
@@ -3280,13 +3284,14 @@ static int host_header(HostInput *in, Engine *e, const HostState *h) {
     int fields = sscanf(in->header, "SUBMIT %63s %u %llu %u %f %f %c",
                         id, &slot, &bytes, &max_new, &temp, &top_p, &extra);
     if (fields == 6) {
-        if (slot != 0 || bytes > h->max_frame || max_new < 1 ||
+        if (in->active || slot != 0 || bytes > h->max_frame || max_new < 1 ||
             max_new > h->max_new || !isfinite(temp) || !isfinite(top_p) ||
             temp < 0 || top_p <= 0 || top_p > 1) {
             fprintf(stderr, "[host] refused SUBMIT limits (slot=%u bytes=%llu max_new=%u/%u)\n", slot, bytes, max_new, h->max_new);
             return -1;
         }
         if (engine_write_full(e->to, in->header, in->header_len)) return -1;
+        snprintf(in->request_id, sizeof in->request_id, "%s", id);
         in->payload_left = bytes;
         in->need_terminator = bytes == 0;
         in->header_len = 0;
@@ -3326,6 +3331,8 @@ static int host_input(HostInput *in, Engine *e, const HostState *h,
             if (data[at++] != '\n' || engine_write_full(e->to, "\n", 1))
                 return -1;
             in->need_terminator = 0;
+            in->active = 1;
+            in->started = nowd();
             continue;
         }
         const uint8_t *nl = memchr(data + at, '\n', bytes - at);
@@ -3339,19 +3346,90 @@ static int host_input(HostInput *in, Engine *e, const HostState *h,
     return 0;
 }
 
+/* Observe codec boundaries, never generated text: a DATA payload may itself
+ * contain "DONE <id>". Pipes can split a header or combine several frames.
+ * Long telemetry lines are ignored without allocating unbounded memory. */
+typedef struct {
+    char header[512];
+    size_t header_len;
+    uint64_t payload_left;
+    int need_terminator, overflow;
+} HostOutput;
+
+static int host_output(HostOutput *out, HostInput *in, const char *data,
+                       size_t bytes, int *completed) {
+    *completed = 0;
+    for (size_t at = 0; at < bytes;) {
+        if (out->payload_left) {
+            size_t take = bytes - at;
+            if (out->payload_left < take) take = (size_t)out->payload_left;
+            out->payload_left -= take;
+            at += take;
+            continue;
+        }
+        if (out->need_terminator) {
+            if (data[at++] != '\n') return -1;
+            out->need_terminator = 0;
+            continue;
+        }
+        char ch = data[at++];
+        if (ch != '\n') {
+            if (out->header_len < sizeof out->header - 1)
+                out->header[out->header_len++] = ch;
+            else out->overflow = 1;
+            continue;
+        }
+        out->header[out->header_len] = 0;
+        char id[64], extra;
+        if (!strncmp(out->header, "DATA ", 5)) {
+            char count[32];
+            if (out->overflow || sscanf(out->header, "DATA %63s %31s %c",
+                                        id, count, &extra) != 2) return -1;
+            for (size_t i = 0; count[i]; ++i)
+                if (count[i] < '0' || count[i] > '9') return -1;
+            errno = 0;
+            char *end;
+            unsigned long long n = strtoull(count, &end, 10);
+            if (errno || *end) return -1;
+            out->payload_left = n;
+            out->need_terminator = 1;
+        } else if (((!strncmp(out->header, "DONE ", 5) &&
+                     sscanf(out->header, "DONE %63s", id) == 1) ||
+                    (!strncmp(out->header, "ERROR ", 6) &&
+                     sscanf(out->header, "ERROR %63s", id) == 1)) &&
+                   in->active && !strcmp(id, in->request_id)) {
+            in->active = 0;
+            *completed = 1;
+        }
+        out->header_len = 0;
+        out->overflow = 0;
+    }
+    return 0;
+}
+
+static int host_expired(const HostInput *in, const HostState *h,
+                        double last_input, double now) {
+    if (in->active)
+        return h->request_seconds && now - in->started > h->request_seconds ? 2 : 0;
+    return h->idle_seconds && now - last_input > h->idle_seconds ? 1 : 0;
+}
+
 /* Both directions remain inside LMB_HOST_STREAM frames (authenticated and
  * encrypted whenever the transport's strict mode is enabled). */
 static void host_bridge(int fd, Engine *e, const HostState *h) {
     char buf[16384];
     HostInput input = {0};
+    HostOutput output = {0};
     double last_input = nowd();
     for (;;) {
         struct pollfd p[2] = { { fd, POLLIN, 0 }, { e->from, POLLIN, 0 } };
         int n = poll(p, 2, 1000);
         if (g_stopping) return;
         if (n < 0) { if (errno == EINTR) continue; return; }
-        if (!n && h->idle_seconds && nowd() - last_input > h->idle_seconds) {
-            fprintf(stderr, "[host] idle session expired\n");
+        int expired = host_expired(&input, h, last_input, nowd());
+        if (expired) {
+            fprintf(stderr, "[host] %s\n", expired == 2 ?
+                    "active request deadline exceeded" : "idle session expired");
             return;
         }
         if (p[0].revents & POLLIN) {
@@ -3368,6 +3446,12 @@ static void host_bridge(int fd, Engine *e, const HostState *h) {
         if (p[1].revents & POLLIN) {
             ssize_t got = read(e->from, buf, sizeof buf);
             if (got <= 0) return;                 /* engine died: so does this */
+            int completed;
+            if (host_output(&output, &input, buf, (size_t)got, &completed)) {
+                fprintf(stderr, "[host] invalid engine codec frame\n");
+                return;
+            }
+            if (completed) last_input = nowd();
             if (lmb_send(fd, LMB_HOST_STREAM, NULL, 0, buf, (uint32_t)got))
                 return;
         }
@@ -3407,6 +3491,7 @@ static int cmd_host(int argc, char **argv) {
     int port = 7350, ctx = 2048, max_new = 256, cap_experts = 64;
     uint32_t max_frame = 1u << 20;
     uint32_t idle_seconds = 300;
+    uint32_t request_seconds = 1800;
     for (int i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "--port") && i + 1 < argc) port = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--tracker") && i + 1 < argc) tracker = argv[++i];
@@ -3421,11 +3506,13 @@ static int cmd_host(int argc, char **argv) {
             max_frame = (uint32_t)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--idle-seconds") && i + 1 < argc)
             idle_seconds = (uint32_t)atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--request-seconds") && i + 1 < argc)
+            request_seconds = (uint32_t)atoi(argv[++i]);
         else {
             fprintf(stderr, "usage: lumabri host --model NAME [--port N] "
                             "[--tracker H:P] [--local DIR]\n"
                             "                   [--ctx N] [--max-new N] "
-                            "[--max-frame BYTES] [--idle-seconds N]\n");
+                            "[--max-frame BYTES] [--idle-seconds N] [--request-seconds N]\n");
             return 2;
         }
     }
@@ -3436,7 +3523,8 @@ static int cmd_host(int argc, char **argv) {
         return 2;
     }
     if (max_new < 1 || max_new > (1 << 20) || max_frame < 1 ||
-        max_frame > LMB_MAX_PAY || idle_seconds < 1) {
+        max_frame > LMB_MAX_PAY || idle_seconds < 1 || request_seconds < 1 ||
+        request_seconds > 86400) {
         fprintf(stderr, "invalid host limit\n");
         return 2;
     }
@@ -3466,7 +3554,8 @@ static int cmd_host(int argc, char **argv) {
     const char *host_engine = engine_for(mtype);
     if (!host_engine) { close(lfd); engine_stop(&eng); return 1; }
     HostState h = { &eng, mtype, host_engine, 0, max_frame,
-                    (uint32_t)max_new, idle_seconds, client_key ? allowed_client : NULL };
+                    (uint32_t)max_new, idle_seconds, request_seconds,
+                    client_key ? allowed_client : NULL };
 
     printf("  %shost ready on port %d · %s · one session at a time%s\n",
            C_DIM, port, mtype[0] ? mtype : "?", C_R);

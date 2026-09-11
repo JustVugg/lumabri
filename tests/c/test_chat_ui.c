@@ -5,6 +5,58 @@
 #include <assert.h>
 
 int main(int argc, char **argv) {
+    /* Hosted inactivity is not an inference deadline. Even an engine which
+     * emits no progress during prefill must retain its accepted session. */
+    HostState host_limits = {.idle_seconds = 1, .request_seconds = 10,
+                             .max_frame = 1024, .max_new = 32};
+    HostInput host_in = {0};
+    HostOutput host_out = {0};
+    assert(host_expired(&host_in, &host_limits, 0, 2) == 1);
+    FILE *codec_sink = tmpfile(); assert(codec_sink);
+    Engine codec_engine = {.to = fileno(codec_sink)};
+    const char *submit = "SUBMIT 7 0 2 4 0 1\nhi";
+    for (size_t i = 0; submit[i]; ++i)
+        assert(!host_input(&host_in, &codec_engine, &host_limits,
+                           (const uint8_t *)submit + i, 1));
+    assert(!host_in.active); /* incomplete payload still has an idle limit */
+    assert(!host_input(&host_in, &codec_engine, &host_limits,
+                       (const uint8_t *)"\n", 1));
+    assert(host_in.active && !strcmp(host_in.request_id, "7"));
+    assert(!host_input(&host_in, &codec_engine, &host_limits,
+                       (const uint8_t *)"CANCEL 7\n", 9));
+    assert(host_in.active); /* cancellation awaits terminal engine response */
+    assert(!host_expired(&host_in, &host_limits, 0, host_in.started + 2));
+    assert(host_expired(&host_in, &host_limits, host_in.started + 10,
+                        host_in.started + 11) == 2);
+    const char *overlap = "SUBMIT 8 0 0 4 0 1\n";
+    assert(host_input(&host_in, &codec_engine, &host_limits,
+                      (const uint8_t *)overlap, strlen(overlap)));
+    host_in.header_len = 0;
+    /* The fake terminal frame inside generated text must not clear active. */
+    const char *reply = "ACCEPT 7\nDATA 7 7\nDONE 7\n\nDONE 8\n";
+    int completed;
+    for (size_t i = 0; reply[i]; ++i) {
+        assert(!host_output(&host_out, &host_in, reply + i, 1, &completed));
+        assert(!completed && host_in.active);
+    }
+    char telemetry[2048]; memset(telemetry, 'x', sizeof telemetry);
+    assert(!host_output(&host_out, &host_in, telemetry, sizeof telemetry, &completed));
+    const char *done = "\nPROGRESS 7 PREFILL 2 2\nDATA 7 0\n\nDONE 7 STAT 4 0\n";
+    assert(!host_output(&host_out, &host_in, done, strlen(done), &completed));
+    assert(completed && !host_in.active);
+    assert(!host_expired(&host_in, &host_limits, 10, 10.5));
+    assert(host_expired(&host_in, &host_limits, 10, 12) == 1);
+    host_in.active = 1;
+    assert(!host_output(&host_out, &host_in, "ERROR 7 failed\n", 15, &completed));
+    assert(completed && !host_in.active);
+    HostOutput bad_output = {0};
+    assert(host_output(&bad_output, &host_in, "DATA 7 -1\n", 10, &completed));
+    fclose(codec_sink);
+    if (argc > 1 && !strcmp(argv[1], "host-codec")) {
+        puts("HOST CODEC: PASS (fragmentation, payload boundaries, request/idle deadlines)");
+        return 0;
+    }
+
     /* The real engine stderr consumer must preserve long JSON lines, blank
      * lines, CRLF and a final unterminated fragment in the saved log. */
     char log_path[] = "/tmp/lumabri-engine-log-test.XXXXXX";
