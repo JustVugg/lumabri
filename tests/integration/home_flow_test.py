@@ -567,7 +567,18 @@ def main():
             a.p.kill(); a.p.wait(timeout=5)
             until(lambda: chat.p.poll() is not None, seconds=45,
                   message="lost donor left hosted chat blocked")
-            until(lambda: b.has("Released"), message="surviving donor was not released")
+            if resident:
+                until(lambda: b.has("Weights retained in RAM"), message="a failed chat evicted the healthy donor")
+                for lock in ("compute-donor.lock", "home/weights.lock"):
+                    with open(tmp / "donor-b/.lumabri" / lock, "r") as lease:
+                        try:
+                            fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        except BlockingIOError:
+                            pass
+                        else:
+                            raise AssertionError("the healthy donor lost its resident reservation")
+                b.text = ""; b.send("x")
+            until(lambda: b.has("Released"), message="surviving donor was not released after owner Stop")
         else:
             if args.crash_requester:
                 chat.p.kill()

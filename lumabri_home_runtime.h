@@ -777,7 +777,7 @@ static int home_request_chat(LmbTuiState *st, int selected) {
     HomeTerminal term; home_terminal_begin(&term);
     g_stopping = 0; install_chat_signal_handlers(); signal(SIGPIPE, SIG_IGN);
     s.source = home_spawn(source_argv, NULL, logfile, NULL, source_listener);
-    int result = -1;
+    int result = -1, prepared = 0;
     const char *stage = "starting the checkpoint source";
     if (s.source <= 0) goto done;
     LmbModelIdentity identity;
@@ -1036,6 +1036,7 @@ static int home_request_chat(LmbTuiState *st, int selected) {
                         !m->content_id[0] ? "checkpoint content identity is unavailable" :
                         !st->build_id[0] ? "client binary identity is unavailable" :
                         "the approved plan's runtime identities are incomplete or changed");
+            prepared = 1; /* From here on, conversation failure is not allocation rollback. */
             result = cmd_chat(st->quick_calibration ? 17 : 16, chat_argv);
             g_recording_calibration = NULL; g_calibration_directory = NULL;
             g_execution_view = NULL;
@@ -1046,7 +1047,7 @@ static int home_request_chat(LmbTuiState *st, int selected) {
     }
 done:
     home_terminal_end(&term);
-    home_session_close(&s, !result && home_resident_required());
+    home_session_close(&s, prepared && home_resident_required());
     if (result) {
         if (!home_error[0]) {
             for (uint32_t i = 0; i < s.count; i++) if (s.reason[i][0]) {
@@ -1054,8 +1055,11 @@ done:
                 break;
             }
         }
-        if (!home_error[0]) home_fail("Chat stopped while %s. Resources were released. Source log: %.240s", stage, logfile);
-        fprintf(stderr, "Household plan did not complete; allocations have been cancelled. Source log: %s\n", logfile);
+        const char *outcome = prepared && home_resident_required() ?
+            "Healthy resident allocations remain loaded until their owner stops sharing." :
+            "Incomplete allocations have been cancelled.";
+        if (!home_error[0]) home_fail("Chat stopped while %s. %s Source log: %.240s", stage, outcome, logfile);
+        fprintf(stderr, "Household chat stopped. %s Source log: %s\n", outcome, logfile);
         for (uint32_t i = 0; i < s.count; i++) if (s.reason[i][0])
             fprintf(stderr, "%s: %s\n", s.names[i], s.reason[i]);
     }

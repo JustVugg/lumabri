@@ -298,6 +298,7 @@ jobs:
           LUMABRI_RESIDENT_REQUIRED: '1'
         run: |
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --expect-metrics --crash-requester --resident-default
+          python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --resident-default --kill-donor
           python3 tests/integration/home_flow_test.py --models-dir build/qwen-int4 --expect-metrics
           python3 tests/integration/home_flow_test.py --models-dir build/inkling-contract/int4 --expect-metrics
           python3 tests/integration/home_flow_test.py --models-dir build/kimi-contract --donor-ram-gb 4.5 --expect-metrics
@@ -448,6 +449,7 @@ jobs:
           LUMABRI_RESIDENT_REQUIRED: '1'
         run: |
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --expect-metrics --crash-requester --resident-default
+          python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --resident-default --kill-donor
           python3 tests/integration/home_flow_test.py --models-dir build/qwen-home-models --expect-metrics
           python3 tests/integration/home_flow_test.py --models-dir build/inkling-home-models --expect-metrics
           python3 tests/integration/home_flow_test.py --models-dir build/glm-home-models --expect-metrics
