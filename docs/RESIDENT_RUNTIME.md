@@ -131,6 +131,19 @@ weight reloading. This proves the rendering/heartbeat bug, not that every
 possible physical-network interruption is resolved. Physical retesting remains
 required. No planner allocation change is included in this fix.
 
+The subsequent physical attempt (`ba216e20515b1190`) used requester
+`29f7732` but the prior donor packages. It still failed: the PC reached
+READY, the Mac closed its control connection and displayed lease expiry.
+This is a failed physical gate, not a successful resolution. A no-allocation
+probe then authenticated to both live donors and observed each still waiting
+for an OFFER after four seconds. The new `test-home-monitor` regression also
+exercises a real encrypted handshake and AUTH followed by an idle connection;
+with default settings the updated donor bounds that wait to one second.
+That verifies the timeout correction, not the cause of the physical failure.
+Both donor applications must be updated before the next comparison. The
+native/Linux CI for `29f7732` passed; native macOS 12.6 and physical LAN
+completion remain unverified.
+
 ## Outstanding release gates
 
 - Native CI on the final commit and the physical PC/Mac

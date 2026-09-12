@@ -9,6 +9,56 @@ typedef struct {
     LmbHomeTransaction transaction;
 } MonitorDonor;
 
+typedef struct {
+    HomeDonor donor;
+    int fd, rc;
+    _Atomic int done;
+} IdleOffer;
+
+static void *idle_offer_server(void *arg) {
+    IdleOffer *offer = arg;
+    offer->rc = home_donor_offer(&offer->donor, offer->fd, "127.0.0.1:1", 0, 0);
+    atomic_store(&offer->done, 1);
+    return NULL;
+}
+
+static void test_authenticated_idle_offer(void) {
+    /* Real encrypted handshake and AUTH, then no OFFER. An abandoned
+     * catalogue preflight must not monopolize the donor's control loop
+     * for the bulk-transfer timeout. No files, weights or LAN are used. */
+    unsetenv("LUMABRI_IO_TIMEOUT_MS");
+    setenv("LUMABRI_TOKEN", "monitor-test-only", 1);
+    uint8_t seed[32] = {0x35};
+    lmb_sign_keypair(g_sec_pk, g_sec_sk, seed);
+    lmb_enc_wrap = lmb_sec_wrap_hook;
+    lmb_enc_send = lmb_sec_send_hook;
+    lmb_enc_recv = lmb_sec_recv_hook;
+    lmb_enc_forget = lmb_sec_forget_hook;
+    int pair[2]; assert(!socketpair(AF_UNIX, SOCK_STREAM, 0, pair));
+    IdleOffer offer = {.fd = pair[1], .donor = {.client = -1}};
+    pthread_t server;
+    assert(!pthread_create(&server, NULL, idle_offer_server, &offer));
+    LmbSecure client;
+    assert(!lmb_secure_handshake(pair[0], 1, g_sec_sk, g_sec_pk, &client));
+    lmb_set_io_timeout(pair[0], 3000);
+    LmbBuf auth = {0}; assert(!lmb_buf_str(&auth, "monitor-test-only"));
+    assert(!lmb_secure_send(&client, pair[0], LMB_AUTH, auth.p, (uint32_t)auth.len, NULL, 0));
+    free(auth.p);
+    LmbMsg ack = {0}; assert(!lmb_secure_recv(&client, pair[0], &ack));
+    assert(ack.op == LMB_OK); lmb_msg_free(&ack);
+    double deadline = nowd() + 4;
+    while (!atomic_load(&offer.done) && nowd() < deadline) (void)poll(NULL, 0, 20);
+    int bounded = atomic_load(&offer.done);
+    if (!bounded) shutdown(pair[0], SHUT_RDWR); /* bounded failing test too */
+    pthread_join(server, NULL);
+    struct timeval timeout; socklen_t size = sizeof timeout;
+    assert(!getsockopt(pair[1], SOL_SOCKET, SO_RCVTIMEO, &timeout, &size));
+    assert(bounded && offer.rc && offer.donor.client == -1);
+    assert(timeout.tv_sec <= 2); /* allow platform timeout rounding */
+    lmb_close(pair[0]); lmb_close(pair[1]);
+    puts("HOME IDLE OFFER: PASS (encrypted authenticated preflight bounded; no weights)");
+}
+
 static void *monitor_donor(void *arg) {
     MonitorDonor *d = arg;
     while (!atomic_load(&d->stop)) {
@@ -71,5 +121,6 @@ int main(void) {
     close(donors[0].fd); close(s.fd[0]); close(s.fd[1]);
     pthread_mutex_destroy(&s.status_lock); pthread_mutex_destroy(&s.send_lock);
     puts("HOME MONITOR: PASS (two leases survive a paused UI; terminal reasons preserved)");
+    test_authenticated_idle_offer();
     return 0;
 }
