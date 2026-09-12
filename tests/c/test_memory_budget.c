@@ -5,6 +5,65 @@
 #include <unistd.h>
 #include "lumabri_cluster.h"
 #include "lumabri_checkpoint_inventory.h"
+#include "src/planner/lumabri_stage_placement.h"
+
+static void timed_plans(void) {
+    const uint64_t mib = UINT64_C(1) << 20;
+    LmbModelShape shape = {0}; strcpy(shape.model_type, "olmoe");
+    shape.layers = 16; shape.hidden = 64; shape.vocab = 128;
+    shape.sizing_verified = shape.memory_contract = 1; shape.max_context = 4096;
+    shape.edge_resident_bytes = 8 * mib;
+    for (uint32_t i = 0; i < shape.layers; i++) shape.memory[i].resident_bytes = 100 * mib;
+    LmbClusterNode nodes[2] = {{.ram_budget_bytes = 2200 * mib}, {.ram_budget_bytes = 1000 * mib}};
+    LmbClusterPlan seed, got, before;
+    assert(!lmb_home_plan_source(&shape, 1, nodes, 2, 128, 1, LMB_GOAL_ONE_SESSION, 1, &seed));
+    assert(seed.state == LMB_PLAN_RESIDENT && seed.nslices == 2);
+    strcpy(shape.segment_id, "olmoe"); shape.experts_per_tok = 2;
+    shape.moe_intermediate = 32;
+    assert(!lmb_home_plan_hybrid(&shape, 1, nodes, 2, 128, &seed, &got));
+    assert(got.hybrid && got.nslices == 2 && got.slices[0].layer_begin == 0 && got.slices[0].layer_end == 16);
+    assert(got.slices[1].layer_begin == seed.slices[1].layer_begin);
+    for (unsigned i = 0; i < 2; i++) {
+        LmbHomeReservation r;
+        assert(!lmb_home_reservation(&shape, 1, got.slices[i].layer_begin,
+            got.slices[i].layer_end, 128, i == 0, &r));
+        assert(got.slices[i].bytes_resident == r.total_bytes + lmb_home_hybrid_extra(&shape));
+    }
+    before = got; nodes[0].ram_budget_bytes = got.slices[0].bytes_resident - 1;
+    assert(lmb_home_plan_hybrid(&shape, 1, nodes, 2, 128, &seed, &got));
+    assert(!memcmp(&before, &got, sizeof got)); /* duplication is not free */
+    nodes[0].ram_budget_bytes = 2200 * mib;
+    got.slices[1].node = got.edge_node; before = got;
+    assert(lmb_home_plan_budgets(&shape, 1, nodes, 2, 128, &got));
+    assert(!memcmp(&before, &got, sizeof got));
+    shape.experts_per_tok = 1;
+    assert(lmb_home_plan_hybrid(&shape, 1, nodes, 2, 128, &seed, &got));
+    shape.experts_per_tok = 2;
+    double costs[2] = {.01, .08};
+    assert(!lmb_home_plan_selected(&shape, 1, nodes, 2, 128, &seed, costs, &got));
+    assert(got.nslices == 2 && got.slices[0].layer_end == 15 && got.slices[1].layer_begin == 15);
+    nodes[0].ram_budget_bytes = 1500 * mib;
+    assert(!lmb_home_plan_selected(&shape, 1, nodes, 2, 128, &seed, costs, &got));
+    assert(got.slices[0].layer_end == 14 && got.slices[1].layer_begin == 14);
+    nodes[0].ram_budget_bytes = 2200 * mib;
+    seed.goal = LMB_GOAL_THROUGHPUT;
+    costs[0] = .04;
+    assert(!lmb_home_plan_selected(&shape, 1, nodes, 2, 128, &seed, costs, &got));
+    double best = 1e9; unsigned split = 0;
+    for (unsigned s = 1; s < 16; s++) {
+        double a = costs[0] * s, b = costs[1] * (16 - s), value = a > b ? a : b;
+        if (value < best) { best = value; split = s; }
+    }
+    assert(got.slices[0].layer_end == split);
+    before = got; costs[0] = NAN;
+    assert(lmb_home_plan_selected(&shape, 1, nodes, 2, 128, &seed, costs, &got));
+    assert(!memcmp(&got, &before, sizeof got));
+    costs[0] = .01; nodes[1].ram_budget_bytes = 100 * mib;
+    assert(lmb_home_plan_selected(&shape, 1, nodes, 2, 128, &seed, costs, &got));
+    assert(!memcmp(&got, &before, sizeof got));
+    shape.layers = 1;
+    assert(lmb_home_plan_selected(&shape, 1, nodes, 2, 128, &seed, NULL, &got));
+}
 
 static void sized_file(const char *path, off_t size) {
     int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
@@ -106,6 +165,7 @@ static void feasible_plans(void) {
 }
 
 int main(void) {
+    timed_plans();
     feasible_plans();
     LmbModelShape m = {0};
     strcpy(m.model_type, "olmoe");

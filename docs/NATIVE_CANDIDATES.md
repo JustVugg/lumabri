@@ -30,9 +30,13 @@ The latest measured speed is historical, not a guarantee for the next turn.
   CI targets macOS 12.0, and packaging checks the minimum OS recorded in
   every Mach-O binary. This necessary compatibility check is not a substitute
   for running the candidate on macOS 12.6.
-- macOS candidates intentionally use the no-OpenMP build, with only system
-  libraries. This avoids requiring Homebrew on every helper but runs one
-  engine thread. It is not the performance release. A Mac downloaded archive
+- macOS CI builds both a single-thread variant and a multicore candidate.
+  The latter bundles LLVM OpenMP 20.1.8 from pinned source at
+  `87f0227cb60147a26a1eeb4fb06e3b505e9c7261`, built for the macOS floor.
+  It does not require Homebrew on the helper. Copies are relocated to
+  package-relative library paths and ad-hoc signed after relocation; source
+  binaries are not modified. Actual performance still needs a LAN comparison.
+  A Mac downloaded archive
   can require approval in macOS security settings; it is not notarized.
   Spaces in the install folder are tested; colons in macOS library paths are
   rejected because the loader treats them as a library-list separator.
@@ -52,7 +56,12 @@ The latest measured speed is historical, not a guarantee for the next turn.
 
 Build Colibri from the pinned checkout used by CI, without editing it. Build
 `make household swarm_probe ENGINE=/path/to/colibri/c`. For a macOS candidate,
-pass `OMP_FLAGS= OMP_LIBS=` to that build.
+pass `OMP_FLAGS= OMP_LIBS=` for the single-thread variant. For multicore,
+`tools/build_macos_openmp.py` takes a clean pinned LLVM checkout and new
+build/install directories; supply its install prefix as `OMP_PREFIX` to make
+and `--openmp-prefix` to the packager. CI demonstrates the full sequence and
+tests both Intel and Apple Silicon installed layouts. The archive is still
+not Developer-ID signed or notarized.
 
 Then assemble a **new** directory:
 

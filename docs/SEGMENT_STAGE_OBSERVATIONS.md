@@ -7,8 +7,8 @@ The first generated token comes from prefill and is not a decode call.
 
 The standalone `--json` result contains `stage_observations` version 1.
 Hosted writes the same object as a `[segment-stage] request=N` line in the
-Edge engine log. The existing Hosted wire format and calibration records are
-unchanged. Each range carries its exclusive layer end, lease identifier,
+Edge engine log. Hosted also emits optional `STAGES1` fields before `PERF1`
+in DONE/STAT. Each logged range carries its exclusive layer end, lease identifier,
 route generation, fencing epoch, call counts, accumulated seconds and
 minimum/maximum decode-call duration. No conversation or activation bytes
 are logged. Counters reset on every turn, including a turn that reuses KV.
@@ -27,9 +27,12 @@ recovery may still produce a complete reply, but its range profile is
 `valid:false, stages:[]`: replay and old/new owners must not be conflated.
 The end-to-end generation measurement continues to include recovery costs.
 
-These observations diagnose the chain that actually ran. They are not yet
-persisted placement costs and must not predict an unseen range, hardware,
-context or concurrency level. Gate 3's measured-cost placement remains open.
+The bounded wire extension carries only ranges, decode counts and accumulated
+seconds. The requester stores per-RUN averages only for a complete chain
+matching the approved ranges and decode step count. Old hosts remain usable
+without stage costs. One-token replies supply no decode cost. These historical
+averages can guide a new split under unchanged execution conditions, but the
+new split must be measured before showing its speed.
 
 Tests cover bounded accumulation, bad times and overflow; the standalone
 whole/split oracle validates per-range counts against generated tokens and

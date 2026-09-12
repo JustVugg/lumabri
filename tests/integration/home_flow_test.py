@@ -7,6 +7,8 @@ import argparse
 import codecs
 import fcntl
 import json
+import hashlib
+import math
 import os
 from pathlib import Path
 import pty
@@ -40,6 +42,23 @@ def hosted_turn_complete(text):
     return re.search(r" · hosted stream · no local checkpoint(?:\x1b\[[0-9;]*m)*\r?\n", text) is not None
 
 
+def current_frame(terminal):
+    # Historical frames can legitimately say stale while a new selection's
+    # refresh is in flight. Assertions about the visible plan use the latest.
+    return terminal.text.rsplit("\x1b[H", 1)[-1]
+
+
+def assert_stage_record(path, stages=2):
+    record = path.read_bytes()
+    assert record[:8] == b"LMB-CAL2", "new per-stage record was not written"
+    assert hashlib.sha256(record[:-32]).digest() == record[-32:], "record checksum mismatch"
+    offset = len(record) - 32 - stages * 8 - 4
+    assert offset >= 8 and struct.unpack_from("<I", record, offset)[0] == stages, \
+        "the complete approved stage profile did not reach the calibration store"
+    values = struct.unpack_from("<" + "d" * stages, record, offset + 4)
+    assert all(math.isfinite(value) and value > 0 for value in values), values
+
+
 def main():
     global ROOT
     parser = argparse.ArgumentParser()
@@ -60,12 +79,14 @@ def main():
                         help="after reuse, clear weights from the donor workspace and verify an approved cold restart")
     parser.add_argument("--expect-metrics", action="store_true",
                         help="require versioned generation timings through Hosted into the TUI")
+    parser.add_argument("--expect-hybrid", action="store_true",
+                        help="approve a full resident coordinator and an authenticated expert accelerator")
     parser.add_argument("--expect-calibration", action="store_true",
                         help="require saved real timings, matching catalogue speed and changed-context invalidation")
     parser.add_argument("--expect-no-fit", action="store_true",
                         help="verify insufficient-memory admission, without starting engines")
-    parser.add_argument("--expect-unused-donor", action="store_true",
-                        help="select a donor below the process floor; require a valid plan on the other donor only")
+    parser.add_argument("--expect-selected-no-fit", "--expect-unused-donor", dest="expect_unused_donor", action="store_true",
+                        help="select a donor below the process floor; refuse without silently excluding it")
     parser.add_argument("--kill-donor", action="store_true",
                         help="kill a donor TUI after generation; assert engines and leases are released")
     parser.add_argument("--crash-requester", action="store_true",
@@ -80,6 +101,8 @@ def main():
     if not 30 <= args.prepare_timeout <= 900:
         parser.error("--prepare-timeout must be between 30 and 900 seconds")
     resident = args.resident_default or os.environ.get("LUMABRI_RESIDENT_REQUIRED") == "1"
+    if args.expect_hybrid and not resident:
+        parser.error("--expect-hybrid requires resident weights")
     if resident and args.repeat_cached:
         parser.error("resident weights persist in RAM; --repeat-cached exercises the legacy disk cache")
     if args.crash_requester and (not resident or args.kill_donor or args.repeat_cached):
@@ -137,6 +160,7 @@ def main():
             settings.write_text(f"tracker={addr}\ntoken=household-test\nmodels={Path(args.models_dir).resolve()}\nram={ram}\n")
             settings.chmod(0o600)
         result = {**os.environ, "HOME": str(home), "LUMABRI_ENCRYPT": "1",
+                "LUMABRI_HOME_HYBRID": "1" if args.expect_hybrid else "0",
                 # The default product path is resident. Keep legacy cache
                 # regressions explicit; resident tests exercise the TUI too.
                 "LUMABRI_RESIDENT_REQUIRED": "1" if resident else "0",
@@ -265,10 +289,21 @@ def main():
         until(lambda: offline.has("2 computers"), message="offline worker advert missing")
         offline.send("\t\x1b[B\r\t")
         time.sleep(.5)
-        offline.send("\r\r")
-        until(lambda: offline.p.poll() is not None, message="unreachable donor did not fail preflight")
-        failure = "No complete resident plan found" if args.expect_no_fit else "Cannot reach offline-test-donor"
-        assert offline.p.returncode != 0 and offline.has(failure)
+        offline.send("\r")
+        if args.expect_no_fit:
+            until(lambda: offline.has("Plan: not runnable"), message="undersized offline donor was admitted")
+            offline.send("\r")
+            time.sleep(.2); offline.drain()
+            assert offline.p.poll() is None, "an unfit preview attempted execution"
+            assert not offline.has("Cannot reach offline-test-donor"), "unfit plan reached network preflight"
+            offline.send("q")
+            until(lambda: offline.p.poll() is not None)
+            assert offline.p.returncode == 0
+        else:
+            until(lambda: offline.has("Plan: resident"), message="offline-donor preview did not settle")
+            offline.send("\r")
+            until(lambda: offline.p.poll() is not None, message="unreachable donor did not fail preflight")
+            assert offline.p.returncode != 0 and offline.has("Cannot reach offline-test-donor")
         assert not list((tmp / "offline-request").rglob("home-source-*.log")), "indexed before reachability check"
         offline_worker.terminate(); offline_worker.wait(timeout=5)
 
@@ -321,6 +356,7 @@ def main():
             assert chat.has("hosted stream") and chat.has("no local checkpoint")
             records = list((tmp / "chatter/.lumabri/calibrations").glob("*.cal"))
             assert len(records) == 1 and records[0].stat().st_mode & 0o077 == 0
+            assert_stage_record(records[0])
             until(lambda: a.has("Released") and b.has("Released"))
             for name in ("donor-a", "donor-b"):
                 for lock in ("compute-donor.lock", "home/weights.lock"):
@@ -330,10 +366,15 @@ def main():
             reopened = Terminal("probe-catalogue", base, "chatter")
             until(lambda: reopened.has("3 computers"))
             reopened.send("\t\x1b[B\r\x1b[B\r\t")
-            until(lambda: reopened.has("tok/s (last)"), seconds=30,
-                  message="the short measurement did not reappear for the same selected plan")
+            until(lambda: reopened.has("tok/s (last)") or reopened.has("stale"), seconds=30,
+                  message="the short measurement or revised-range status did not reappear")
             reopened.send("\r")
-            until(lambda: reopened.has("Last turn:") and reopened.has(" / " + generated[0] + " generated tokens"))
+            until(lambda: reopened.has("Last turn:") or reopened.has("Placement guided by previous stage timings"))
+            if "stale" in current_frame(reopened):
+                assert reopened.has("Placement guided by previous stage timings")
+                assert "tok/s (last)" not in current_frame(reopened), "revised ranges retained the old speed"
+            else:
+                assert reopened.has(" / " + generated[0] + " generated tokens")
             print("HOME QUICK CALIBRATION: PASS (explicit TUI confirmation and donor approval, one <=8-token turn, real timing saved and reopened, released leases)", flush=True)
             return
         if args.expect_disjoint_plans:
@@ -356,7 +397,9 @@ def main():
                 collision.send("\t")
                 until(lambda: collision.has("Nothing is selected automatically"))
                 collision.send("\x1b[B\r\t")
-                time.sleep(.5); collision.send("\r\r")
+                collision.send("\r")
+                until(lambda: collision.has("Plan: resident"), message="collision preview did not settle")
+                collision.send("\r")
                 until(lambda: collision.p.poll() is not None, seconds=60,
                       message="an occupied donor did not refuse the conflicting plan")
                 assert collision.p.returncode != 0 and collision.has("BUSY:"), collision.text[-1500:]
@@ -370,7 +413,9 @@ def main():
                 until(lambda: chat.has("Nothing is selected automatically"))
                 chat.send("\x1b[B" * index + "\r\t")
                 time.sleep(.5)
-                chat.send("\r\r")
+                chat.send("\r")
+                until(lambda: chat.has("Plan: resident"), message="disjoint preview did not settle")
+                chat.send("\r")
                 available = [donor for donor in (a, b) if donor not in owners]
                 until(lambda: any(donor.has("Waiting for your approval") for donor in available)
                       or chat.p.poll() is not None, seconds=60,
@@ -406,6 +451,10 @@ def main():
                   message="simultaneous independent chats did not both generate")
             assert all(chat.p.poll() is None and completed_turn(chat) for chat in chats)
             chats[0].send("/quit\n")
+            if resident:
+                until(lambda: chats[0].p.poll() is not None and owners[0].has("Weights retained in RAM"))
+                assert lease_is_held(owners[0], "compute-donor.lock")
+                owners[0].send("x")  # only the owner's Stop releases resident weights
             until(lambda: chats[0].p.poll() is not None and owners[0].has("Released"))
             assert chats[0].p.returncode == 0
             for lock in ("compute-donor.lock", "home/weights.lock"):
@@ -416,6 +465,10 @@ def main():
                   seconds=120, message="the surviving chat could not continue")
             assert chats[1].p.poll() is None and completed_turn(chats[1])
             chats[1].send("/quit\n")
+            if resident:
+                until(lambda: chats[1].p.poll() is not None and owners[1].has("Weights retained in RAM"))
+                assert lease_is_held(owners[1], "compute-donor.lock")
+                owners[1].send("x")
             until(lambda: chats[1].p.poll() is not None and owners[1].has("Released"))
             assert chats[1].p.returncode == 0
             ranges = []
@@ -449,35 +502,18 @@ def main():
             assert not list((tmp / "reject").rglob("home-source-*.log"))
             print("HOME ADMISSION: PASS (native memory floor; no offers or engines)", flush=True)
             return
-        reject.send("\r\r")
         if args.expect_unused_donor:
-            until(lambda: a.has("Waiting for your approval"), seconds=60,
-                  message="feasible alternative did not reach its donor")
-            assert not b.has("Waiting for your approval"), "unused donor received an offer"
+            reject.send("\r")
+            until(lambda: reject.has("Plan: not runnable"), seconds=30,
+                  message="selected undersized donor was silently excluded")
+            assert not a.has("Waiting for your approval") and not b.has("Waiting for your approval")
             assert not engines_started("donor-a") and not engines_started("donor-b")
-            a.send("\x1b[A\r")
-            until(lambda: reject.has("/experts shows tracker activity.") or reject.p.poll() is not None,
-                  seconds=180, message="alternative plan did not reach hosted chat")
-            assert reject.p.poll() is None, "accepted alternative failed"
-            assert "Approved Segment plan: 1 compute donor" in reject.text
-            reject.send("hi\n")
-            until(lambda: hosted_turn_complete(reject.text) or reject.p.poll() is not None,
-                  seconds=120, message="alternative plan did not finish real generation")
-            assert reject.p.poll() is None
-            log = (tmp / "donor-a/.lumabri/home/engines.log").read_text(errors="replace")
-            commits = re.findall(r"\[segment-node [^\]\n]+ (\d+):(\d+)\] committed_runs=(\d+)", log)
-            assert any(int(begin) == 0 and int(end) > 0 and int(runs) > 0
-                       for begin, end, runs in commits), "no actual full-range execution"
-            assert not b.has("Waiting for your approval") and not engines_started("donor-b")
-            reject.send("/quit\n")
-            until(lambda: reject.p.poll() is not None, message="alternative quit blocked")
-            assert reject.p.returncode == 0
-            until(lambda: a.has("Released"), message="alternative donor lease leaked")
-            for lock in ("compute-donor.lock", "home/weights.lock"):
-                with open(tmp / "donor-a/.lumabri" / lock, "r") as lease:
-                    fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            print("HOME ALTERNATIVE PLAN: PASS (two selected, one used; real generation, no unused-donor offer, cleanup)", flush=True)
+            assert not list((tmp / "reject").rglob("home-source-*.log"))
+            print("HOME SELECTED ADMISSION: PASS (all selected donors required; no silent exclusion, offers or engines)", flush=True)
             return
+        reject.send("\r")
+        until(lambda: reject.has("Plan: resident"), message="rejection preview did not settle")
+        reject.send("\r")
         until(lambda: a.has("Waiting for your approval") and b.has("Waiting for your approval"),
               seconds=args.prepare_timeout, message="offers never reached both donor TUIs")
         assert not engines_started("donor-a") and not engines_started("donor-b")
@@ -496,7 +532,9 @@ def main():
         until(lambda: chat.has("Nothing is selected automatically"))
         chat.send("\x1b[B\r\x1b[B\r\t")
         time.sleep(.5)
-        chat.send("\r\r")
+        chat.send("\r")
+        until(lambda: chat.has("Plan: resident"), message="chat preview did not settle")
+        chat.send("\r")
         until(lambda: a.has("Waiting for your approval") and b.has("Waiting for your approval"), seconds=args.prepare_timeout)
         a.send("\x1b[A\r"); b.send("\x1b[A\r")
         if args.stall_preparation_ui:
@@ -523,7 +561,8 @@ def main():
             assert chat.has("greedy decoding"), "greedy-only capability was not shown to the client"
         until(lambda: chat.has("/experts shows tracker activity."),
               message="the accepted compute allocation is missing from chat")
-        assert "Approved Segment plan: 2 compute donors" in chat.text
+        plan_label = "Approved Hybrid plan: 2 compute donors" if args.expect_hybrid else "Approved Segment plan: 2 compute donors"
+        assert plan_label in chat.text
         assert "This chat process runs no model layers" in chat.text
         announced_ranges = sorted((int(begin), int(end)) for begin, end in
                                   re.findall(r"layers \[(\d+),(\d+)\)", chat.text))
@@ -556,15 +595,26 @@ def main():
                 profile = json.loads(observations[-1])
                 assert profile["version"] == 1 and profile["valid"], profile
                 assert profile["scope"] == "client_run_round_trip"
-                assert [(s["begin"], s["end"]) for s in profile["stages"]] == announced_ranges
+                assert [(s["begin"], s["end"]) for s in profile["stages"]] == (announced_ranges[:1] if args.expect_hybrid else announced_ranges)
                 counts = {s["decode_calls"] for s in profile["stages"]}
-                assert len(counts) == 1 and min(counts) > 0, counts
+                generated = re.findall(r"host prefill [\d.]+s · (\d+) generated tokens", chat.text)
+                assert generated, "missing token count for stage-profile validation"
+                # EOS on the first sampled token is a valid prefill-only turn.
+                # It must not fabricate a decode traversal or a speed sample.
+                assert counts == {int(generated[-1]) - 1}, (counts, generated[-1])
                 for s in profile["stages"]:
                     assert s["prefill_calls"] > 0 and s["prefill_rows"] > 0
                     assert 0 <= s["decode_min_seconds"] <= s["decode_max_seconds"]
                     assert s["decode_min_seconds"] * s["decode_calls"] <= s["decode_seconds"] + 1e-6
                     assert s["decode_seconds"] <= s["decode_max_seconds"] * s["decode_calls"] + 1e-6
             commits = re.findall(r"\[segment-node [^\]\n]+ (\d+):(\d+)\] committed_runs=(\d+)", log)
+            if args.expect_hybrid and not edge_log.exists():
+                commits = re.findall(r"resident_expert_calls=(\d+) range=(\d+):(\d+)", log)
+                commits = [(begin, end, calls) for calls, begin, end in commits]
+                assert "weight input sealed" in log and "resident_expert_calls=" in log, log
+            elif args.expect_hybrid:
+                assert "[home-hybrid] committed_rounds=" in log, "coordinator never ran concurrent local/remote work"
+                assert "public discovery disabled" in log, "unapproved discovery was not disabled"
             assert commits, f"{donor} did not report any committed model execution"
             ranges = {(int(begin), int(end)) for begin, end, _ in commits}
             assert len(ranges) == 1, ranges
@@ -572,7 +622,7 @@ def main():
         assert sorted(executed_ranges) == announced_ranges, (executed_ranges, announced_ranges)
         assert edge_policies == 1, "the approved Edge host did not enforce CPU execution"
         chat.send("/plan\n")
-        until(lambda: chat.text.count("Approved Segment plan: 2 compute donors") >= 2,
+        until(lambda: chat.text.count(plan_label) >= 2,
               message="/plan did not show the same accepted allocation")
         chat.send("/experts\n")
         until(lambda: chat.has("executor activity"),
@@ -704,6 +754,7 @@ def main():
             records = list((tmp / "chatter/.lumabri/calibrations").glob("*.cal"))
             assert len(records) == 1, "completed real generation did not save a bound measurement"
             assert records[0].stat().st_mode & 0o077 == 0, "calibration record is not private"
+            assert_stage_record(records[0])
             for condition in ("current", "context", "selection", "runtime"):
                 changed = condition != "current"
                 if condition == "runtime":
@@ -723,10 +774,16 @@ def main():
                 view.send("\x1b[B\r\t" if condition == "selection" else "\x1b[B\r\x1b[B\r\t")
                 until(lambda: view.has("A plan before a download."), message="catalogue did not reopen")
                 time.sleep(1); view.text = ""
-                until(lambda: view.has("stale") if changed else view.has("tok/s"), seconds=30,
+                until(lambda: "stale" in current_frame(view) if changed else ("tok/s" in current_frame(view) or "stale" in current_frame(view)), seconds=30,
                       message=f"changed {condition} did not invalidate the speed" if changed else "matching plan did not recover its measured speed")
                 if changed:
-                    assert "tok/s" not in view.text, "stale catalogue retained a numerical speed"
+                    assert "tok/s" not in current_frame(view), "stale catalogue retained a numerical speed"
+                elif "stale" in current_frame(view):
+                    view.send("\r")
+                    until(lambda: "Placement guided by previous stage timings" in current_frame(view) or "tok/s (last)" in current_frame(view),
+                          message="current runtime was marked stale without a revised placement")
+                    assert "stale" not in current_frame(view) or "tok/s (last)" not in current_frame(view)
+                    view.send("\x1b")
                 view.send("q")
                 until(lambda: view.p.poll() is not None)
                 assert view.p.returncode == 0
@@ -767,7 +824,9 @@ def main():
                 until(lambda: repeat.has("Nothing is selected automatically"))
                 repeat.send("\x1b[B\r\x1b[B\r\t")
                 time.sleep(.5)
-                repeat.send("\r\r")
+                repeat.send("\r")
+                until(lambda: repeat.has("Plan: resident"), message="repeat preview did not settle")
+                repeat.send("\r")
                 until(lambda: a.has("Waiting for your approval") and b.has("Waiting for your approval"), seconds=60)
                 # Cached weights do not confer permission to execute again.
                 assert not repeat.has("receives the text")
@@ -814,7 +873,8 @@ def main():
             until(lambda: donor.has("your workspace"))
             donor.send("\x1b")
         until(lambda: a.p.poll() is not None and b.p.poll() is not None)
-        print(f"HOME FLOW: PASS (consent, two executing ranges match the plan, real Segment generation, {'killed donor cleanup' if args.kill_donor else 'normal cleanup'})", flush=True)
+        execution_kind = "concurrent resident Hybrid" if args.expect_hybrid else "real Segment generation"
+        print(f"HOME FLOW: PASS (consent, approved ranges executed, {execution_kind}, {'killed donor cleanup' if args.kill_donor else 'normal cleanup'})", flush=True)
     except Exception:
         # Only test-owned engine logs: no shell environment or real keys.
         for log in tmp.rglob("engines.log"):

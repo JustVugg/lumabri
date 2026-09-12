@@ -12,7 +12,7 @@ ifeq ($(PLATFORM),Darwin)
 override CPPFLAGS += -D_DARWIN_C_SOURCE
 SHIM_LIB = liblumabri.dylib
 SHIM_FLAGS = -dynamiclib -fPIC
-OMP_PREFIX := $(shell brew --prefix libomp 2>/dev/null)
+OMP_PREFIX ?= $(shell brew --prefix libomp 2>/dev/null)
 ifneq ($(wildcard $(OMP_PREFIX)/include/omp.h),)
 OMP_FLAGS = -Xclang -fopenmp -I$(OMP_PREFIX)/include
 OMP_LIBS = -L$(OMP_PREFIX)/lib -Wl,-rpath,$(OMP_PREFIX)/lib -lomp
@@ -25,6 +25,7 @@ all: tracker maintainer $(SHIM_LIB) test_shim swarm_probe lumabri
 
 lumabri test_chat_ui: src/runtime/lumabri_weight_cache.h
 lumabri test_chat_ui: src/runtime/lumabri_prepare_progress.h
+lumabri test_chat_ui test_home test_hybrid_parallel test_accum_order test_local_fallback test_verify_failover test_nat_adopt: lumabri_home_hybrid.h
 
 test_weight_cache: tests/c/test_weight_cache.c src/runtime/lumabri_weight_cache.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_weight_cache.c -o $@
@@ -70,7 +71,7 @@ PLANNER_ADAPTER_DEPS = $(wildcard planner_adapters/*.h)
 # Adapter contracts are included transitively by the planner. Rebuild every
 # consumer when one changes, including when a new contract is introduced.
 lumabri test_chat_ui test_planner test_planner_io test_cluster test_memory_budget test_calibration segment_budget_probe segment_node: $(PLANNER_ADAPTER_DEPS)
-lumabri test_chat_ui: lumabri_runtime_identity.h lumabri_checkpoint_identity.h lumabri_calibration_store.h lumabri_calibration.h
+lumabri test_chat_ui: lumabri_runtime_identity.h lumabri_checkpoint_identity.h lumabri_calibration_store.h lumabri_calibration.h lumabri_stage_metrics.h src/planner/lumabri_stage_placement.h
 lumabri test_chat_ui: src/planner/lumabri_catalogue_advice.h
 lumabri test_chat_ui: src/runtime/lumabri_preload.h
 lumabri segment_chat test_chat_ui: lumabri_metrics.h
@@ -463,10 +464,10 @@ test_planner_io: tests/c/test_planner_io.c lumabri_planner.h lumabri_families.h
 test_cluster: tests/c/test_cluster.c lumabri_cluster.h lumabri_memory_budget.h lumabri_planner.h lumabri_families.h lumabri_machine.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_cluster.c -o $@
 
-test_memory_budget: tests/c/test_memory_budget.c lumabri_memory_budget.h lumabri_checkpoint_inventory.h lumabri_content.h lumabri_cluster.h lumabri_planner.h lumabri_families.h
+test_memory_budget: tests/c/test_memory_budget.c lumabri_memory_budget.h lumabri_checkpoint_inventory.h lumabri_content.h lumabri_cluster.h lumabri_planner.h lumabri_families.h src/planner/lumabri_stage_placement.h lumabri_calibration.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_memory_budget.c -o $@
 
-test_calibration: tests/c/test_calibration.c lumabri_calibration.h lumabri_calibration_store.h lumabri_runtime_identity.h lumabri_checkpoint_identity.h lumabri_checkpoint_inventory.h lumabri_planner.h $(SECURE_DEPS)
+test_calibration: tests/c/test_calibration.c lumabri_calibration.h lumabri_calibration_store.h lumabri_runtime_identity.h lumabri_checkpoint_identity.h lumabri_checkpoint_inventory.h lumabri_planner.h src/planner/lumabri_stage_placement.h lumabri_cluster.h $(SECURE_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_calibration.c -o $@
 
 test_catalogue_advice: tests/c/test_catalogue_advice.c src/planner/lumabri_catalogue_advice.h
@@ -477,6 +478,9 @@ test_tcp_latency: tests/c/test_tcp_latency.c $(SECURE_DEPS) lumabri_proto.h luma
 
 test_metrics: tests/c/test_metrics.c lumabri_metrics.h lumabri_stage_metrics.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_metrics.c -o $@
+
+test_hybrid_parallel: tests/c/test_hybrid_parallel.c lumabri_client.h lumabri_proto.h lumabri_sign.h $(SECURE_DEPS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_hybrid_parallel.c -o $@ -lm
 
 test_inventory: tests/c/test_inventory.c lumabri_inventory.h lumabri_machine.h lumabri_proto.h lumabri_sign.h $(SECURE_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_inventory.c -o $@
@@ -613,6 +617,7 @@ SEGMENT_COMMON = segment_colibri.h src/runtime/lumabri_resident.h src/runtime/lu
 		lumabri_proto.h lumabri_sign.h lumabri_sha.h $(SECURE_DEPS)
 
 HYBRID_PATCH_INPUTS = tools/prepare_resident_adapters.py engine_patches/make_patches.py \
+	lumabri_home_hybrid.h \
 	engine_patches/deepseek_v4_p2p.py $(wildcard engine_patches/*-p2p.diff) \
 	lumabri_client.h lumibri_client.h lumi_v4_ext.h lumi_v4_bridge.c \
 	lumabri_proto.h lumabri_sign.h lumabri_secure.h lumabri_crypto.h \
@@ -664,6 +669,11 @@ segment_chat: segment_chat.c lumabri_metrics.h lumabri_stage_metrics.h lumabri_s
 		$(SEGMENT_COMMON) $(COLIBRI_SEGMENT_LIB)
 	$(CC) $(CPPFLAGS) $(SEGMENT_CFLAGS) -pthread segment_chat.c lumabri_segment.c \
 		lumabri_segment_discovery.c lumabri_sampling.c \
+		$(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
+
+test_home_expert: tests/c/test_home_expert.c segment_node.c $(SEGMENT_COMMON) $(COLIBRI_SEGMENT_LIB) $(MACHINE_DEPS) lumabri_run_gate.c
+	$(CC) $(CPPFLAGS) $(SEGMENT_CFLAGS) -pthread tests/c/test_home_expert.c lumabri_segment.c \
+		lumabri_segment_discovery.c $(MACHINE_SRC) lumabri_run_gate.c \
 		$(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
 
 test_backend_routes: tests/c/test_backend_routes.c segment_chat.c lumabri_metrics.h lumabri_stage_metrics.h \
@@ -754,7 +764,7 @@ test-adapters: tracker segment_node segment_chat
 test-segment-discovery: tracker test_segment_discovery
 	bash ./tests/integration/segment_discovery_test.sh
 
-test: all test_weight_cache test_key_rotation test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 test_accum_order test_residency_report test_model_family test_planner test_cluster test_memory_budget \
+test: all test_weight_cache test_key_rotation test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 test_accum_order test_hybrid_parallel test_residency_report test_model_family test_planner test_cluster test_memory_budget \
 		test_inventory test_home test_chat_ui test_calibration test_catalogue_advice test_metrics \
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
 		test_meminfo test_compute_lease test_content_filter \
@@ -812,6 +822,7 @@ test: all test_weight_cache test_key_rotation test_hedge test_local_fallback tes
 	./test_calibration
 	./test_catalogue_advice
 	./test_metrics
+	./test_hybrid_parallel
 	./test_tcp_latency
 	./test_nat_adopt
 	bash ./tests/integration/rtt_refresh_test.sh
@@ -863,8 +874,8 @@ install: all
 clean:
 	rm -f tracker maintainer liblumabri.so liblumabri.dylib test_shim swarm_probe lumabri \
 	      test_relay_exec test_swarm_fed test_key_rotation test_hedge \
-	      test_local_fallback test_accum_order test_residency_report \
-	      test_model_family test_planner test_planner_io test_cluster test_memory_budget test_calibration test_catalogue_advice test_metrics test_inventory test_home test_chat_ui test_weight_cache segment_budget_probe \
+	      test_local_fallback test_accum_order test_hybrid_parallel test_residency_report \
+	      test_model_family test_planner test_planner_io test_cluster test_memory_budget test_calibration test_catalogue_advice test_metrics test_inventory test_home test_home_expert test_chat_ui test_weight_cache segment_budget_probe \
 	      test_nat_adopt test_rtt_refresh \
 	      test_verify_failover test_segment_v2 test_segment_discovery test_sampling \
 	      test_swarm_detail test_relay_rate test_machine test_meminfo \
