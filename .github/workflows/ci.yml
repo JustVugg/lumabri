@@ -117,7 +117,9 @@ jobs:
         run: make test-sanitize
       - name: Resident Segment Hybrid gate
         working-directory: lumabri
-        run: make test-segment-hybrid ENGINE=../colibri/c
+        run: |
+          make test-segment-hybrid test_home_expert ENGINE=../colibri/c
+          ./test_home_expert
       - name: Segment failover gate (fresh fencing, checkpoint replay)
         working-directory: colibri/c
         run: |
@@ -315,6 +317,7 @@ jobs:
           python3 tests/integration/package_household_test.py
           python3 tools/package_household.py --colibri-root ../colibri --output 'build/native candidate'
           python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --resident-default --expect-metrics --stall-preparation-ui
+          python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --resident-default --expect-hybrid --expect-metrics
           python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --repeat-cached --clear-cached --expect-metrics --expect-calibration
           python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --kill-donor
           python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --expect-disjoint-plans --context 256
@@ -467,6 +470,8 @@ jobs:
           LUMABRI_RESIDENT_REQUIRED: '1'
         run: |
           make test-home-monitor
+          make test_home_expert ENGINE=../colibri/c
+          ./test_home_expert
           python3 tests/integration/home_flow_output_test.py
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --resident-default --stall-preparation-ui --expect-metrics
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --expect-metrics --crash-requester --resident-default
@@ -497,6 +502,7 @@ jobs:
             test "$('build/native candidate/bin/segment_node' --thread-capacity)" = 1
           fi
           python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --resident-default --expect-metrics
+          python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --resident-default --expect-hybrid --expect-metrics
           python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --repeat-cached --clear-cached --expect-metrics --expect-calibration
           python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --kill-donor
           python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --expect-disjoint-plans --context 256

@@ -329,10 +329,39 @@ static int lmb_olmoe_local(void *opaque, int layer, int expert,
     float *g = ctx->g, *u = ctx->u;
 """ + kernel + """    return 0;
 }
+static int lmb_olmoe_provider(void *opaque, int layer, int expert,
+                              const float *x, int D, float *out) {
+    Model *m = opaque;
+    LmbOlmoeLocal ctx = {m, malloc((size_t)m->c.inter * sizeof(float)),
+                           malloc((size_t)m->c.inter * sizeof(float))};
+    int rc = !ctx.g || !ctx.u ? -1 : lmb_olmoe_local(&ctx, layer, expert, x, D, out);
+    free(ctx.g); free(ctx.u); return rc;
+}
 #endif
 
 """
-    return src.replace(anchor, callback + anchor, 1)
+    out = src.replace(anchor, callback + anchor, 1)
+    begin = out.index("static int olmoe_segment_engine_open(")
+    end = out.index("static void olmoe_segment_engine_destroy(", begin)
+    portion = out[begin:end]
+    mark = "    *engine_impl = engine;\n"
+    if portion.count(mark) != 1:
+        raise SystemExit("olmoe.c: Segment provider open anchor changed")
+    portion = portion.replace(mark, """#ifdef LUMIBRI_P2P
+    const char *accelerator = getenv("LUMABRI_HOME_ACCELERATOR");
+    if (accelerator && *accelerator)
+        lmb_home_expert_provider(&engine->model, lmb_olmoe_provider);
+    if (lumi_home_init(config.n_layers, config.n_experts, config.hidden, capabilities->numeric_class)) {
+        olmoe_segment_model_destroy(engine);
+        pthread_mutex_destroy(&engine->run_lock); free(engine);
+        return coli_segment_adapter_error(error, error_size, "invalid approved Hybrid routes");
+    }
+#endif
+""" + mark, 1)
+    out = out[:begin] + portion + out[end:]
+    mark = "    olmoe_segment_model_destroy(engine);\n    pthread_mutex_destroy(&engine->run_lock);"
+    # Clear after connections have drained, before freeing the provider model.
+    return out.replace(mark, "#ifdef LUMIBRI_P2P\n    lmb_home_expert_provider(NULL, NULL);\n#endif\n" + mark, 1)
 
 
 def apply_hooks(src, hooks, name):

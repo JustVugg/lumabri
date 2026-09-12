@@ -25,6 +25,7 @@ all: tracker maintainer $(SHIM_LIB) test_shim swarm_probe lumabri
 
 lumabri test_chat_ui: src/runtime/lumabri_weight_cache.h
 lumabri test_chat_ui: src/runtime/lumabri_prepare_progress.h
+lumabri test_chat_ui test_home test_hybrid_parallel test_accum_order test_local_fallback test_verify_failover test_nat_adopt: lumabri_home_hybrid.h
 
 test_weight_cache: tests/c/test_weight_cache.c src/runtime/lumabri_weight_cache.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_weight_cache.c -o $@
@@ -616,6 +617,7 @@ SEGMENT_COMMON = segment_colibri.h src/runtime/lumabri_resident.h src/runtime/lu
 		lumabri_proto.h lumabri_sign.h lumabri_sha.h $(SECURE_DEPS)
 
 HYBRID_PATCH_INPUTS = tools/prepare_resident_adapters.py engine_patches/make_patches.py \
+	lumabri_home_hybrid.h \
 	engine_patches/deepseek_v4_p2p.py $(wildcard engine_patches/*-p2p.diff) \
 	lumabri_client.h lumibri_client.h lumi_v4_ext.h lumi_v4_bridge.c \
 	lumabri_proto.h lumabri_sign.h lumabri_secure.h lumabri_crypto.h \
@@ -667,6 +669,11 @@ segment_chat: segment_chat.c lumabri_metrics.h lumabri_stage_metrics.h lumabri_s
 		$(SEGMENT_COMMON) $(COLIBRI_SEGMENT_LIB)
 	$(CC) $(CPPFLAGS) $(SEGMENT_CFLAGS) -pthread segment_chat.c lumabri_segment.c \
 		lumabri_segment_discovery.c lumabri_sampling.c \
+		$(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
+
+test_home_expert: tests/c/test_home_expert.c segment_node.c $(SEGMENT_COMMON) $(COLIBRI_SEGMENT_LIB) $(MACHINE_DEPS) lumabri_run_gate.c
+	$(CC) $(CPPFLAGS) $(SEGMENT_CFLAGS) -pthread tests/c/test_home_expert.c lumabri_segment.c \
+		lumabri_segment_discovery.c $(MACHINE_SRC) lumabri_run_gate.c \
 		$(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
 
 test_backend_routes: tests/c/test_backend_routes.c segment_chat.c lumabri_metrics.h lumabri_stage_metrics.h \
@@ -868,7 +875,7 @@ clean:
 	rm -f tracker maintainer liblumabri.so liblumabri.dylib test_shim swarm_probe lumabri \
 	      test_relay_exec test_swarm_fed test_key_rotation test_hedge \
 	      test_local_fallback test_accum_order test_hybrid_parallel test_residency_report \
-	      test_model_family test_planner test_planner_io test_cluster test_memory_budget test_calibration test_catalogue_advice test_metrics test_inventory test_home test_chat_ui test_weight_cache segment_budget_probe \
+	      test_model_family test_planner test_planner_io test_cluster test_memory_budget test_calibration test_catalogue_advice test_metrics test_inventory test_home test_home_expert test_chat_ui test_weight_cache segment_budget_probe \
 	      test_nat_adopt test_rtt_refresh \
 	      test_verify_failover test_segment_v2 test_segment_discovery test_sampling \
 	      test_swarm_detail test_relay_rate test_machine test_meminfo \

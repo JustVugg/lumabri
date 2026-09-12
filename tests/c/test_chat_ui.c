@@ -270,6 +270,11 @@ int main(int argc, char **argv) {
         assert(!home_resident_plan_save(&plan));
         assert(!home_resident_plan_load(plan.tracker, &loaded));
         assert(!strcmp(loaded.root, plan.root) && loaded.execution.count == 2 && loaded.max_new == 256);
+        plan.execution.hybrid = 1;
+        plan.execution.nodes[0].end = plan.execution.layers;
+        assert(!home_resident_plan_save(&plan));
+        assert(!home_resident_plan_load(plan.tracker, &loaded));
+        assert(loaded.execution.hybrid && lmb_execution_valid(&loaded.execution));
         assert(home_resident_plan_load("other-household:47300", &loaded));
         assert(!home_resident_plan_path(record, sizeof record));
         struct stat metadata; assert(!stat(record, &metadata) && !(metadata.st_mode & 077));

@@ -41,18 +41,45 @@ then stops the donor and requires the same token IDs through bounded fallback.
 `MODEL_DIR` can select an existing compatible test fixture without copying its
 weights. This is a kernel/protocol test, not a physical LAN speed benchmark.
 
-## Household boundary — not enabled yet
+## Approved household Hybrid
 
-Household offers currently approve disjoint whole-layer Segment allocations.
-Those allocations do **not** authorize the additional overlapping expert
-residency needed for this Hybrid experiment. Household launch therefore keeps
-`LUMABRI_NO_EXEC=1`; this diagnostic setting cannot bypass donor approval.
+For OLMoE with top-k >= 2 and at least two selected computers, the planner
+offers Hybrid when the coordinator can hold the **complete resident model**,
+Edge, session state and extra execution buffers. Other selected computers
+keep their assigned ranges as resident expert accelerators. Duplicate weights
+and extra scratch/transport memory are charged to the reviewed reservations.
+If this does not fit, ordinary disjoint Segment remains the plan: no borrowing
+of unapproved RAM and no weight streaming from disk.
 
-Before enabling household Hybrid, the reviewed plan and immutable offers must
-describe accelerator roles and expert ownership, charge duplicate weights and
-scratch to each computer's budget, pin RPCs to approved participant identities
-and checkpoint roots, prepare and seal those weights before READY, and retain
-the matching full local fallback. Older packages must reject that allocation
-mode rather than silently interpreting it as a disjoint Segment plan.
-The two-donor approval/loading/chat test must exercise this new mode before
-calling it available from the TUI or measuring PC+Mac speedup.
+The TUI labels the full coordinator and expert accelerators before consent.
+Every participating owner approves an immutable offer. Version-2 coordinator
+offers bind allocation ID, checkpoint root, participant public keys and ranges.
+Accelerators load and seal their weights first. Their actual endpoints are then
+checked against that map before starting the coordinator. Every connection pins
+the recipient key; the readiness probe also checks allocation, checkpoint and
+numeric class. Public expert discovery, relay, hedges and implicit peer adoption
+remain disabled. Older packages fail capability preflight before preparation.
+
+For each covered layer, one selected expert is sent remotely while the other
+top-k minus one execute locally, with unchanged router-order accumulation.
+Uncovered layers stay local. Bounded RPC failures can recompute from the full
+resident local copy. This is not a speedup guarantee: latency or a slow donor
+can still dominate. `LUMABRI_HOME_HYBRID=0` selects normal Segment for A/B tests.
+Other families keep their existing Segment implementation.
+
+Closing the chat retains approved RAM for another conversation. Owner Stop
+unloads it. The private restart hint preserves the Hybrid label, but grants no
+new authority: reconnection still checks host identity and checkpoint. Owner
+revocation or household donor loss retains the existing stop/cleanup policy;
+transparent household failover is not promised.
+
+Installed-package CI uses `home_flow_test.py --resident-default --expect-hybrid
+--expect-metrics`: actual remote calls, concurrent coordinator rounds, reviewed
+ranges, second conversation with the weight source offline, no reload and no
+weight mirror writes. `test_home_expert` exercises the production RPC handler's
+scope/shape/numeric checks before the kernel; offer and memory unit tests cover
+immutable permissions and duplicate-weight charging.
+
+PC + Intel Mac speed is a separate physical-LAN measurement. Compare identical
+model, prompt, context, output length and thread budgets. Report observed
+per-chat tok/s, not the sum of the participating machines' standalone speeds.

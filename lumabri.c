@@ -5379,7 +5379,7 @@ static int catalog_calibration_key(const LmbTuiState *st, const LmbTuiModel *m,
     snprintf(key->model_root, sizeof key->model_root, "%s", m->content_id);
     snprintf(key->adapter, sizeof key->adapter, "%s", m->shape.segment_id);
     snprintf(key->build_id, sizeof key->build_id, "%s", st->build_id);
-    snprintf(key->plan_kind, sizeof key->plan_kind, "segment");
+    snprintf(key->plan_kind, sizeof key->plan_kind, "%s", m->plan.hybrid ? "hybrid" : "segment");
     snprintf(key->numeric_class, sizeof key->numeric_class, "%s", numeric ? numeric : "");
     key->adapter_abi = abi; key->goal = m->plan.goal;
     key->context = st->context; key->sessions = st->sessions; key->nodes = m->plan.nslices;
@@ -5471,6 +5471,14 @@ static int catalog_state_refresh(LmbTuiState *st, void *unused) {
                 m->plan.state = LMB_PLAN_UNRUNNABLE;
                 m->plan.nslices = 0;
             }
+            const char *hybrid = getenv("LUMABRI_HOME_HYBRID");
+            const char *resident = getenv("LUMABRI_RESIDENT_REQUIRED");
+            if (m->planned && (!resident || !strcmp(resident, "1")) &&
+                (!hybrid || strcmp(hybrid, "0"))) {
+                LmbClusterPlan candidate;
+                if (!lmb_home_plan_hybrid(&m->shape, m->checkpoint_bytes, selected,
+                    nselected, st->context, &m->plan, &candidate)) m->plan = candidate;
+            }
         } else
             m->planned = st->inventory_ok && !lmb_plan_cluster_source(&m->shape, selected,
                 nselected, st->context, st->sessions, LMB_GOAL_ONE_SESSION, 0, &m->plan);
@@ -5485,7 +5493,7 @@ static int catalog_state_refresh(LmbTuiState *st, void *unused) {
             m->calibration_key_valid = !catalog_calibration_key(st, m, m->calibration.key.adapter_abi,
                 m->calibration.key.numeric_class, &m->calibration_key) && lmb_cal_key_valid(&m->calibration_key);
             double stage_costs[LMB_CAL_NODES_MAX], node_costs[LMB_CLUSTER_MAX_NODES] = {0};
-            if (household && m->calibration_key_valid &&
+            if (household && !m->plan.hybrid && m->calibration_key_valid &&
                 !lmb_cal_stage_costs(&m->calibration, &m->calibration_key, stage_costs)) {
                 LmbClusterPlan local = m->plan, candidate;
                 for (uint32_t a = 0; a < nselected; a++) {

@@ -205,6 +205,8 @@ static int home_status_send(int fd, const LmbHomeTransaction *t, int segment_por
 
 typedef struct {
     LmbHomeTransaction transaction;
+    LmbHybridRoutes hybrid_routes;
+    int hybrid_routes_ready;
     unsigned thread_capacity;
     int retained; /* owner's sharing lifetime, independent of any chat */
     int client, lease, weight_lease, segment_port, host_port, segment_ready, host_ready;
@@ -225,6 +227,7 @@ static int home_weight_lease(const char *base) {
 }
 
 static void home_donor_release(HomeDonor *d, LmbHomePhase why, const char *reason) {
+    d->hybrid_routes_ready = 0; memset(&d->hybrid_routes, 0, sizeof d->hybrid_routes);
     d->retained = 0;
     home_stop_child(&d->host); home_stop_child(&d->segment);
     if (d->segment_ready >= 0) { close(d->segment_ready); d->segment_ready = -1; }
@@ -278,6 +281,7 @@ static int home_donor_launch(HomeDonor *d, int edge) {
         return -1;
     }
     const LmbHomeOffer *o = &d->transaction.offer;
+    if (o->hybrid_role == LMB_HYBRID_COORDINATOR && !d->hybrid_routes_ready) return -1;
     const LmbModelFamily *family = lmb_family_for(o->model_type);
     if (!family) return -1;
     char root[65], requester[65], edge_peer[65], id[65];
@@ -312,11 +316,23 @@ static int home_donor_launch(HomeDonor *d, int edge) {
     if (!usable_threads) return -1;
     snprintf(e_omp, sizeof e_omp, "OMP_NUM_THREADS=%u", usable_threads);
     snprintf(e_omp_limit, sizeof e_omp_limit, "OMP_THREAD_LIMIT=%u", usable_threads);
+    char e_hybrid[LMB_HOME_HYBRID_ENV + 40] = "LUMABRI_HOME_HYBRID_ROUTES=";
+    char e_accelerator[100] = "LUMABRI_HOME_ACCELERATOR=";
+    if (!edge && o->hybrid_role == LMB_HYBRID_COORDINATOR) {
+        LmbBuf b = {0};
+        if (!lmb_hybrid_routes_match(&o->hybrid, &d->hybrid_routes) ||
+            lmb_hybrid_routes_pack(&b, &d->hybrid_routes, 1) || b.len * 2 >= LMB_HOME_HYBRID_ENV) {
+            free(b.p); return -1;
+        }
+        lmb_hex(e_hybrid + strlen(e_hybrid), b.p, b.len); free(b.p);
+    }
+    if (!edge && o->hybrid_role == LMB_HYBRID_ACCELERATOR)
+        snprintf(e_accelerator, sizeof e_accelerator, "LUMABRI_HOME_ACCELERATOR=%s", id);
     char *envv[] = {e_shim, e_vroot, e_cache, e_cas, e_tracker, e_model, e_root,
                    e_key, "LUMABRI_SEGMENT_REQUIRED=1", "LUMABRI_VERIFY=0",
                    "LUMABRI_PREFETCH=0", "LUMABRI_NO_EXEC=1",
                    "LUMABRI_ENGINE_BACKEND=cpu", e_log,
-                   edge ? e_limit : "LUMABRI_HOME_SEGMENT=1", e_omp, e_omp_limit, NULL};
+                   edge ? e_limit : "LUMABRI_HOME_SEGMENT=1", e_omp, e_omp_limit, e_hybrid, e_accelerator, NULL};
     int chosen_port = 0, listener = home_listen(&chosen_port);
     if (listener < 0) return -1;
     snprintf(port, sizeof port, "%d", chosen_port);
@@ -367,7 +383,8 @@ static void home_donor_screen(const HomeDonor *d, const char *name, uint64_t ram
                 t->offer.disk_bytes / 1e9, home_resident_required() ? "metadata headroom" : "disk headroom");
             ui_printf(16, 5, UI_MUTED, "%u context · one session · %u threads · up to %u new tokens per turn", t->offer.context,
                       t->offer.threads < d->thread_capacity ? t->offer.threads : d->thread_capacity, t->offer.max_new);
-            ui_text(18, 5, UI_MUTED, t->offer.runs_edge ?
+            ui_text(18, 5, UI_MUTED, t->offer.hybrid_role == LMB_HYBRID_ACCELERATOR ?
+                "Expert accelerator: approved layers only; weights remain in RAM." : t->offer.runs_edge ?
                 "This computer hosts chat and receives the conversation text." :
                 "This computer processes activations and keeps state for its layers.");
         } else {
@@ -437,9 +454,15 @@ static int home_donor_offer(HomeDonor *d, int incoming, const char *tracker,
         if (!rc) rc = lmb_send(incoming, LMB_OK, NULL, 0, NULL, 0) || lmb_recv(incoming, &m);
     }
     if (!rc) {
+        if (m.op == LMB_HOME_FEATURES && !m.body_len && !m.pay_len) {
+            uint8_t version[4]; lmb_put32(version, home_resident_required() ? 2 : 1);
+            (void)lmb_send(incoming, LMB_OK, version, sizeof version, NULL, 0);
+            lmb_msg_free(&m); return -1; /* capability probe grants no lease */
+        }
         LmbCur c = {m.body, m.body_len, 0};
         rc = m.op != LMB_HOME_OFFER || m.pay_len ||
              lmb_home_offer_unpack(&c, &offer) ||
+             (offer.hybrid_role && !home_resident_required()) ||
              !lmb_secure_peer_matches(incoming, offer.requester);
     }
     lmb_msg_free(&m);
@@ -466,10 +489,20 @@ static int home_donor_message(HomeDonor *d) {
     LmbMsg m = {0};
     if (lmb_recv(d->client, &m)) { lmb_msg_free(&m); return -1; }
     LmbHomeTransaction *t = &d->transaction;
-    int rc = m.pay_len || m.body_len != 32 || memcmp(m.body, t->offer.id, 32);
+    int rc = m.pay_len || m.body_len < 32 || memcmp(m.body, t->offer.id, 32) ||
+        (m.op != LMB_HOME_HYBRID_ROUTES && m.body_len != 32);
     if (!rc) {
         t->last_seen_ms = (uint64_t)(nowd() * 1000);
         switch (m.op) {
+        case LMB_HOME_HYBRID_ROUTES: {
+            LmbCur c = {m.body, m.body_len, 0}; LmbHybridRoutes routes;
+            rc = t->phase != LMB_HOME_ACCEPTED || d->hybrid_routes_ready ||
+                t->offer.hybrid_role != LMB_HYBRID_COORDINATOR ||
+                lmb_hybrid_routes_unpack(&c, &routes, 1) || c.off != c.len ||
+                !lmb_hybrid_routes_match(&t->offer.hybrid, &routes);
+            if (!rc) { d->hybrid_routes = routes; d->hybrid_routes_ready = 1; }
+            break;
+        }
         case LMB_HOME_PULSE: break;
         case LMB_HOME_DETACH:
             if (!home_donor_can_retain(d)) {
@@ -482,7 +515,8 @@ static int home_donor_message(HomeDonor *d) {
         case LMB_HOME_CANCEL:
             home_donor_release(d, LMB_HOME_CLOSED, "The requester cancelled the plan."); break;
         case LMB_HOME_COMMIT:
-            rc = lmb_home_commit(t, m.body);
+            rc = (t->offer.hybrid_role == LMB_HYBRID_COORDINATOR && !d->hybrid_routes_ready) ||
+                 lmb_home_commit(t, m.body);
             if (!rc && home_donor_launch(d, 0))
                 home_donor_release(d, LMB_HOME_FAILED, "Cannot start the accepted Segment engine.");
             break;
@@ -648,6 +682,8 @@ typedef struct {
     LmbHomeOffer offers[LMB_CLUSTER_MAX_NODES];
     LmbHomePhase phase[LMB_CLUSTER_MAX_NODES];
     uint32_t host_port[LMB_CLUSTER_MAX_NODES];
+    uint32_t segment_port[LMB_CLUSTER_MAX_NODES];
+    uint8_t peer_keys[LMB_CLUSTER_MAX_NODES][32];
     char names[LMB_CLUSTER_MAX_NODES][64], addresses[LMB_CLUSTER_MAX_NODES][64];
     char reason[LMB_CLUSTER_MAX_NODES][160];
     uint32_t count, edge;
@@ -708,6 +744,7 @@ static int home_session_receive(HomeSession *s, uint32_t i) {
     if (bad) return home_session_error(s, i, "Invalid donor status", EPROTO);
     pthread_mutex_lock(&s->status_lock);
     s->phase[i] = (LmbHomePhase)phase; s->host_port[i] = host_port;
+    s->segment_port[i] = segment_port;
     snprintf(s->reason[i], sizeof s->reason[i], "%s", reason);
     pthread_mutex_unlock(&s->status_lock);
     return phase >= LMB_HOME_REJECTED ? -1 : 0;
@@ -753,6 +790,32 @@ static void home_session_close(HomeSession *s, int retain_weights) {
         shutdown(s->fd[i], SHUT_RDWR); lmb_close(s->fd[i]); s->fd[i] = -1;
     }
     home_stop_child(&s->source);
+}
+
+static int home_session_hybrid_routes(HomeSession *s) {
+    LmbHybridRoutes routes = s->offers[s->edge].hybrid;
+    int bad = 0;
+    pthread_mutex_lock(&s->status_lock);
+    for (uint32_t i = 0; i < routes.count; i++) {
+        int found = 0;
+        for (uint32_t j = 0; j < s->count; j++) {
+            if (memcmp(routes.peers[i].key, s->peer_keys[j], 32)) continue;
+            char ip[64]; snprintf(ip, sizeof ip, "%s", s->addresses[j]);
+            char *colon = strrchr(ip, ':');
+            if (!colon || !s->segment_port[j] || s->phase[j] != LMB_HOME_SEGMENT_READY) { bad = 1; break; }
+            *colon = 0;
+            int n = snprintf(routes.peers[i].addr, sizeof routes.peers[i].addr, "%s:%u", ip, s->segment_port[j]);
+            if (n < 0 || (size_t)n >= sizeof routes.peers[i].addr) bad = 1;
+            found = 1; break;
+        }
+        if (!found) bad = 1;
+    }
+    pthread_mutex_unlock(&s->status_lock);
+    LmbBuf b = {0};
+    if (bad || lmb_hybrid_routes_pack(&b, &routes, 1)) { free(b.p); return -1; }
+    pthread_mutex_lock(&s->send_lock);
+    int rc = lmb_send(s->fd[s->edge], LMB_HOME_HYBRID_ROUTES, b.p, (uint32_t)b.len, NULL, 0);
+    pthread_mutex_unlock(&s->send_lock); free(b.p); return rc;
 }
 
 static int home_request_chat(LmbTuiState *st, int selected) {
@@ -804,6 +867,17 @@ static int home_request_chat(LmbTuiState *st, int selected) {
                                     nodes[i].name, nodes[i].addr, lmb_connect_why());
         int matched = lmb_secure_peer_matches(fd, expected);
         int authenticated = matched && !lmb_auth(fd);
+        if (authenticated && plan.hybrid) {
+            LmbMsg reply = {0};
+            authenticated = !lmb_send(fd, LMB_HOME_FEATURES, NULL, 0, NULL, 0) &&
+                !lmb_recv(fd, &reply) && reply.op == LMB_OK && reply.body_len == 4 &&
+                !reply.pay_len && lmb_get32(reply.body) == 2;
+            lmb_msg_free(&reply);
+            if (!authenticated) {
+                lmb_close(fd);
+                return home_fail("Update Lumabri on %.64s: this plan needs approved resident Hybrid support. No resources were shared.", nodes[i].name);
+            }
+        }
         lmb_close(fd);
         if (!authenticated) return home_fail("Cannot authenticate %.64s at %.64s. %s No model was loaded.",
             nodes[i].name, nodes[i].addr, matched ? "Check the household key and whether the donor is responding in time." : "The donor identity changed; refresh the computer list.");
@@ -898,6 +972,19 @@ static int home_request_chat(LmbTuiState *st, int selected) {
         o->max_new = st->quick_calibration ? LMB_QUICK_PROBE_TOKENS : (st->max_new ? st->max_new : 256);
         o->model_bytes = swarm.total_bytes;
         o->runs_edge = n == plan.edge_node;
+        if (plan.hybrid) {
+            o->hybrid_role = o->runs_edge ? LMB_HYBRID_COORDINATOR : LMB_HYBRID_ACCELERATOR;
+            if (o->runs_edge) {
+                memcpy(o->hybrid.allocation, id, 32); memcpy(o->hybrid.root, identity.root, 32);
+                for (uint32_t k = 0; k < plan.nslices; k++) {
+                    const LmbSlice *a = &plan.slices[k];
+                    if (a->node == plan.edge_node) continue;
+                    LmbHybridPeer *p = &o->hybrid.peers[o->hybrid.count++];
+                    p->begin = a->layer_begin; p->end = a->layer_end;
+                    if (lmb_unhex(p->key, st->identities[indices[a->node]], 32)) goto done;
+                }
+            }
+        }
         LmbHomeReservation reservation;
         if (lmb_home_reservation(&m->shape, swarm.total_bytes, o->begin, o->end,
                                 o->context, o->runs_edge, &reservation)) {
@@ -905,6 +992,7 @@ static int home_request_chat(LmbTuiState *st, int selected) {
             goto done;
         }
         o->ram_bytes = reservation.total_bytes;
+        if (plan.hybrid) o->ram_bytes = lmb_budget_add(o->ram_bytes, lmb_home_hybrid_extra(&m->shape));
         o->edge_ram_bytes = reservation.edge_bytes;
         /* Resident weights never occupy the file mirror. Keep a bounded
          * allowance for metadata, signed block hashes, sparse-file maps and
@@ -927,6 +1015,7 @@ static int home_request_chat(LmbTuiState *st, int selected) {
         snprintf(s.addresses[s.count], sizeof s.addresses[0], "%s", nodes[n].addr);
         uint8_t recipient[32];
         if (lmb_unhex(recipient, st->identities[indices[n]], 32)) goto done;
+        memcpy(s.peer_keys[s.count], recipient, 32);
         int fd = lmb_connect_ms_io(nodes[n].addr, 1500, home_control_io_ms(1000));
         if (fd < 0) {
             home_fail("Cannot reach %.64s at %.64s while sending the request: %s.", nodes[n].name, nodes[n].addr, lmb_connect_why());
@@ -966,7 +1055,7 @@ static int home_request_chat(LmbTuiState *st, int selected) {
         home_fail("Cannot start the household connection monitor."); goto done;
     }
     heartbeat_started = 1;
-    int committed = 0, host_started = 0, first_visible = 0;
+    int committed = 0, coordinator_started = 0, host_started = 0, first_visible = 0;
     double last_draw = 0;
     started = nowd();
     while (!g_stopping && nowd() - started < 900) {
@@ -1026,15 +1115,24 @@ static int home_request_chat(LmbTuiState *st, int selected) {
         if (key == 1002 && first_visible + visible < (int)s.count) first_visible++;
         if (!committed && accepted) {
             for (uint32_t i = 0; i < s.count; i++)
-                if (home_session_send(&s, i, LMB_HOME_COMMIT)) goto done;
+                if ((!plan.hybrid || i != s.edge) && home_session_send(&s, i, LMB_HOME_COMMIT)) goto done;
             committed = 1;
+        }
+        if (plan.hybrid && committed && !coordinator_started) {
+            int accelerators_ready = 1;
+            for (uint32_t i = 0; i < s.count; i++)
+                if (i != s.edge && phases[i] != LMB_HOME_SEGMENT_READY) accelerators_ready = 0;
+            if (accelerators_ready) {
+                if (home_session_hybrid_routes(&s) || home_session_send(&s, s.edge, LMB_HOME_COMMIT)) goto done;
+                coordinator_started = 1;
+            }
         }
         if (committed && !host_started && ready) {
             if (home_session_send(&s, s.edge, LMB_HOME_START_HOST)) goto done;
             host_started = 1;
         }
         if (host_started && phases[s.edge] == LMB_HOME_READY && host_ports[s.edge]) {
-            LmbExecutionView execution = { .count = s.count, .layers = m->shape.layers };
+            LmbExecutionView execution = { .count = s.count, .layers = m->shape.layers, .hybrid = plan.hybrid };
             for (uint32_t i = 0; i < s.count; i++) {
                 LmbExecutionNode *node = &execution.nodes[i];
                 snprintf(node->name, sizeof node->name, "%s", s.names[i]);

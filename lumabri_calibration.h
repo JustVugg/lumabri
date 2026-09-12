@@ -34,7 +34,7 @@ typedef struct {
     char commit_lumabri[41];    /* optional provenance; exact binary IDs remain required */
     char commit_colibri[41];
     char build_id[65];          /* compiler, flags, engine configuration */
-    char plan_kind[16];         /* segment or expert */
+    char plan_kind[16];         /* segment, expert or approved household hybrid */
     uint32_t goal;              /* LmbPlanGoal without including cluster.h */
     uint32_t nodes;
     uint32_t edge_node;         /* index in this key's ordered ranges */
@@ -81,7 +81,7 @@ static LMB_UNUSED int lmb_cal_key_valid(const LmbCalKey *k) {
     if (k->commit_lumabri[0]) { CAL_TEXT(commit_lumabri); }
     if (k->commit_colibri[0]) { CAL_TEXT(commit_colibri); }
     CAL_TEXT(build_id); CAL_TEXT(plan_kind);
-    if (strcmp(k->plan_kind, "segment") && strcmp(k->plan_kind, "expert")) return 0;
+    if (strcmp(k->plan_kind, "segment") && strcmp(k->plan_kind, "expert") && strcmp(k->plan_kind, "hybrid")) return 0;
     for (uint32_t i = 0; i < k->nodes; i++) {
         CAL_TEXT(node_id[i]); CAL_TEXT(node_hardware_id[i]);
         CAL_TEXT(node_build_id[i]); CAL_TEXT(node_backend[i]);

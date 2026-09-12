@@ -11,7 +11,49 @@ static LmbHomeOffer fixture(void) {
     return o;
 }
 
+static void hybrid_permissions(void) {
+    assert(lmb_frame_shape_ok(LMB_HOME_EXPERT, 80, 4096 * 4));
+    assert(!lmb_frame_shape_ok(LMB_HOME_EXPERT, 81, 256));
+    assert(!lmb_frame_shape_ok(LMB_HOME_EXPERT, 80, (256u << 10) + 1));
+    assert(!lmb_frame_shape_ok(LMB_HOME_HYBRID_ROUTES, 128, 1));
+    LmbHomeOffer o = fixture(), decoded;
+    o.runs_edge = 1; o.edge_ram_bytes = 32u << 20; o.end = o.layers;
+    o.hybrid_role = LMB_HYBRID_COORDINATOR;
+    memcpy(o.hybrid.allocation, o.id, 32); memcpy(o.hybrid.root, o.model_root, 32);
+    o.hybrid.count = 1; o.hybrid.peers[0].key[0] = 7;
+    o.hybrid.peers[0].begin = 2; o.hybrid.peers[0].end = 4;
+    LmbBuf b = {0}; assert(!lmb_home_offer_pack(&b, &o));
+    for (size_t n = 0; n < b.len; n++) {
+        LmbCur c = {b.p, n, 0}; assert(lmb_home_offer_unpack(&c, &decoded));
+    }
+    LmbCur c = {b.p, b.len, 0}; assert(!lmb_home_offer_unpack(&c, &decoded));
+    assert(!memcmp(&o, &decoded, sizeof o)); free(b.p);
+    LmbHybridRoutes ready = o.hybrid, bad;
+    strcpy(ready.peers[0].addr, "127.0.0.1:47302");
+    assert(lmb_hybrid_routes_match(&o.hybrid, &ready));
+    bad = ready; bad.root[0] ^= 1; assert(!lmb_hybrid_routes_match(&o.hybrid, &bad));
+    bad = ready; bad.allocation[0] ^= 1; assert(!lmb_hybrid_routes_match(&o.hybrid, &bad));
+    bad = ready; bad.peers[0].key[0] ^= 1; assert(!lmb_hybrid_routes_match(&o.hybrid, &bad));
+    bad = ready; bad.peers[0].begin--; assert(!lmb_hybrid_routes_match(&o.hybrid, &bad));
+    bad = ready; strcpy(bad.peers[0].addr, "127.0.0.1:65536"); assert(!lmb_hybrid_routes_valid(&bad, 1));
+    bad = ready; bad.count = 2; bad.peers[1] = bad.peers[0]; assert(!lmb_hybrid_routes_valid(&bad, 1));
+    bad.peers[1].key[0] = 8; assert(!lmb_hybrid_routes_valid(&bad, 1)); /* overlapping ranges */
+    b = (LmbBuf){0}; assert(!lmb_hybrid_routes_pack(&b, &ready, 1));
+    c = (LmbCur){b.p, b.len, 0}; assert(!lmb_hybrid_routes_unpack(&c, &bad, 1));
+    assert(lmb_hybrid_routes_match(&o.hybrid, &bad));
+    b.p[b.len - 2] = 0; c = (LmbCur){b.p, b.len, 0};
+    assert(lmb_hybrid_routes_unpack(&c, &bad, 1)); /* embedded NUL is not an endpoint */
+    free(b.p);
+    decoded = o; decoded.hybrid.peers[0].key[0] = decoded.edge_peer[0];
+    assert(!lmb_home_offer_valid(&decoded));
+    decoded = o; decoded.hybrid_role = 99; assert(!lmb_home_offer_valid(&decoded));
+    decoded = o; decoded.end--; assert(!lmb_home_offer_valid(&decoded));
+    decoded = o; strcpy(decoded.model_type, "kimi"); assert(!lmb_home_offer_valid(&decoded));
+    decoded = o; decoded.hybrid_role = LMB_HYBRID_ACCELERATOR; assert(!lmb_home_offer_valid(&decoded));
+}
+
 int main(void) {
+    hybrid_permissions();
     LmbHomeOffer o = fixture(), decoded;
     LmbBuf b = {0}; assert(!lmb_home_offer_pack(&b, &o));
     for (size_t n = 0; n < b.len; n++) {

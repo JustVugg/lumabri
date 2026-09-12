@@ -79,6 +79,8 @@ def main():
                         help="after reuse, clear weights from the donor workspace and verify an approved cold restart")
     parser.add_argument("--expect-metrics", action="store_true",
                         help="require versioned generation timings through Hosted into the TUI")
+    parser.add_argument("--expect-hybrid", action="store_true",
+                        help="approve a full resident coordinator and an authenticated expert accelerator")
     parser.add_argument("--expect-calibration", action="store_true",
                         help="require saved real timings, matching catalogue speed and changed-context invalidation")
     parser.add_argument("--expect-no-fit", action="store_true",
@@ -99,6 +101,8 @@ def main():
     if not 30 <= args.prepare_timeout <= 900:
         parser.error("--prepare-timeout must be between 30 and 900 seconds")
     resident = args.resident_default or os.environ.get("LUMABRI_RESIDENT_REQUIRED") == "1"
+    if args.expect_hybrid and not resident:
+        parser.error("--expect-hybrid requires resident weights")
     if resident and args.repeat_cached:
         parser.error("resident weights persist in RAM; --repeat-cached exercises the legacy disk cache")
     if args.crash_requester and (not resident or args.kill_donor or args.repeat_cached):
@@ -156,6 +160,7 @@ def main():
             settings.write_text(f"tracker={addr}\ntoken=household-test\nmodels={Path(args.models_dir).resolve()}\nram={ram}\n")
             settings.chmod(0o600)
         result = {**os.environ, "HOME": str(home), "LUMABRI_ENCRYPT": "1",
+                "LUMABRI_HOME_HYBRID": "1" if args.expect_hybrid else "0",
                 # The default product path is resident. Keep legacy cache
                 # regressions explicit; resident tests exercise the TUI too.
                 "LUMABRI_RESIDENT_REQUIRED": "1" if resident else "0",
@@ -556,7 +561,8 @@ def main():
             assert chat.has("greedy decoding"), "greedy-only capability was not shown to the client"
         until(lambda: chat.has("/experts shows tracker activity."),
               message="the accepted compute allocation is missing from chat")
-        assert "Approved Segment plan: 2 compute donors" in chat.text
+        plan_label = "Approved Hybrid plan: 2 compute donors" if args.expect_hybrid else "Approved Segment plan: 2 compute donors"
+        assert plan_label in chat.text
         assert "This chat process runs no model layers" in chat.text
         announced_ranges = sorted((int(begin), int(end)) for begin, end in
                                   re.findall(r"layers \[(\d+),(\d+)\)", chat.text))
@@ -589,7 +595,7 @@ def main():
                 profile = json.loads(observations[-1])
                 assert profile["version"] == 1 and profile["valid"], profile
                 assert profile["scope"] == "client_run_round_trip"
-                assert [(s["begin"], s["end"]) for s in profile["stages"]] == announced_ranges
+                assert [(s["begin"], s["end"]) for s in profile["stages"]] == (announced_ranges[:1] if args.expect_hybrid else announced_ranges)
                 counts = {s["decode_calls"] for s in profile["stages"]}
                 generated = re.findall(r"host prefill [\d.]+s · (\d+) generated tokens", chat.text)
                 assert generated, "missing token count for stage-profile validation"
@@ -602,6 +608,13 @@ def main():
                     assert s["decode_min_seconds"] * s["decode_calls"] <= s["decode_seconds"] + 1e-6
                     assert s["decode_seconds"] <= s["decode_max_seconds"] * s["decode_calls"] + 1e-6
             commits = re.findall(r"\[segment-node [^\]\n]+ (\d+):(\d+)\] committed_runs=(\d+)", log)
+            if args.expect_hybrid and not edge_log.exists():
+                commits = re.findall(r"resident_expert_calls=(\d+) range=(\d+):(\d+)", log)
+                commits = [(begin, end, calls) for calls, begin, end in commits]
+                assert "weight input sealed" in log and "resident_expert_calls=" in log, log
+            elif args.expect_hybrid:
+                assert "[home-hybrid] committed_rounds=" in log, "coordinator never ran concurrent local/remote work"
+                assert "public discovery disabled" in log, "unapproved discovery was not disabled"
             assert commits, f"{donor} did not report any committed model execution"
             ranges = {(int(begin), int(end)) for begin, end, _ in commits}
             assert len(ranges) == 1, ranges
@@ -609,7 +622,7 @@ def main():
         assert sorted(executed_ranges) == announced_ranges, (executed_ranges, announced_ranges)
         assert edge_policies == 1, "the approved Edge host did not enforce CPU execution"
         chat.send("/plan\n")
-        until(lambda: chat.text.count("Approved Segment plan: 2 compute donors") >= 2,
+        until(lambda: chat.text.count(plan_label) >= 2,
               message="/plan did not show the same accepted allocation")
         chat.send("/experts\n")
         until(lambda: chat.has("executor activity"),
@@ -860,7 +873,8 @@ def main():
             until(lambda: donor.has("your workspace"))
             donor.send("\x1b")
         until(lambda: a.p.poll() is not None and b.p.poll() is not None)
-        print(f"HOME FLOW: PASS (consent, two executing ranges match the plan, real Segment generation, {'killed donor cleanup' if args.kill_donor else 'normal cleanup'})", flush=True)
+        execution_kind = "concurrent resident Hybrid" if args.expect_hybrid else "real Segment generation"
+        print(f"HOME FLOW: PASS (consent, approved ranges executed, {execution_kind}, {'killed donor cleanup' if args.kill_donor else 'normal cleanup'})", flush=True)
     except Exception:
         # Only test-owned engine logs: no shell environment or real keys.
         for log in tmp.rglob("engines.log"):

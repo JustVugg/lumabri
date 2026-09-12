@@ -9,6 +9,30 @@
 #include "lumabri_cluster.h"
 #include "lumabri_calibration.h"
 
+/* Reuse the reviewed accelerator ranges, but reserve the COMPLETE model on
+ * Edge as well. No fit means keep the ordinary disjoint Segment plan. */
+static LMB_UNUSED int lmb_home_plan_hybrid(const LmbModelShape *shape, uint64_t bytes,
+    const LmbClusterNode *nodes, uint32_t count, uint32_t context,
+    const LmbClusterPlan *seed, LmbClusterPlan *out) {
+    if (!shape || !nodes || !seed || !out || count < 2 || count > 32 || seed->nslices != count ||
+        seed->state != LMB_PLAN_RESIDENT || strcmp(shape->segment_id, "olmoe") ||
+        shape->experts_per_tok < 2 || seed->edge_node >= count || seed->hybrid) return -1;
+    LmbClusterPlan candidate = *seed;
+    candidate.hybrid = 1; candidate.nslices = 1; candidate.fetch_bytes = 0;
+    candidate.ready_known = 0; candidate.ready_seconds = 0;
+    candidate.slices[0] = (LmbSlice){.node=seed->edge_node, .layer_begin=0, .layer_end=shape->layers};
+    for (uint32_t i = 0; i < count; i++)
+        if (seed->slices[i].node != seed->edge_node)
+            candidate.slices[candidate.nslices++] = seed->slices[i];
+    if (candidate.nslices != count || lmb_home_plan_budgets(shape, bytes, nodes, count, context, &candidate) ||
+        candidate.state != LMB_PLAN_RESIDENT) return -1;
+    for (uint32_t i = 0; i < count; i++) {
+        candidate.slices[i].bytes_to_fetch = candidate.slices[i].bytes_resident;
+        candidate.fetch_bytes = lmb_budget_add(candidate.fetch_bytes, candidate.slices[i].bytes_to_fetch);
+    }
+    *out = candidate; return 0;
+}
+
 /* Only ranges may differ. Hardware, builds, context, order and thread counts
  * must match before observations may guide a new candidate. */
 static LMB_UNUSED int lmb_cal_stage_costs(const LmbCalibration *record,

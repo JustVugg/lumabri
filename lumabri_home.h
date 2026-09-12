@@ -4,6 +4,7 @@
 #define LUMABRI_HOME_H
 #include "lumabri_inventory.h"
 #include "lumabri_families.h"
+#include "lumabri_home_hybrid.h"
 
 #define LMB_HOME_VERSION 1u
 #define LMB_HOME_LEASE_MS 15000u
@@ -21,6 +22,8 @@ typedef struct {
     uint32_t begin, end, layers, context, threads, max_new;
     uint64_t ram_bytes, edge_ram_bytes, disk_bytes, model_bytes;
     uint32_t runs_edge;
+    uint32_t hybrid_role;
+    LmbHybridRoutes hybrid;
 } LmbHomeOffer;
 
 typedef struct {
@@ -54,6 +57,18 @@ static LMB_MAYBE_UNUSED int lmb_home_nonzero(const uint8_t *p, size_t n) {
 }
 
 static LMB_MAYBE_UNUSED int lmb_home_offer_valid(const LmbHomeOffer *o) {
+    if (o->hybrid_role > LMB_HYBRID_ACCELERATOR) return 0;
+    if (o->hybrid_role) {
+        const LmbModelFamily *f = lmb_family_for(o->model_type);
+        if (!f || strcmp(f->segment_id, "olmoe")) return 0;
+        if (o->hybrid_role == LMB_HYBRID_COORDINATOR) {
+            if (!o->runs_edge || o->begin || o->end != o->layers ||
+                !lmb_hybrid_routes_valid(&o->hybrid, 0) ||
+                memcmp(o->hybrid.allocation, o->id, 32) || memcmp(o->hybrid.root, o->model_root, 32)) return 0;
+            for (uint32_t i = 0; i < o->hybrid.count; i++)
+                if (o->hybrid.peers[i].end > o->layers || !memcmp(o->hybrid.peers[i].key, o->edge_peer, 32)) return 0;
+        } else if (o->runs_edge || o->hybrid.count) return 0;
+    } else if (o->hybrid.count) return 0;
     if (!lmb_home_nonzero(o->id, 32) || !lmb_home_nonzero(o->requester, 32) ||
         !lmb_home_nonzero(o->edge_peer, 32) || !lmb_home_nonzero(o->model_root, 32) ||
         !o->model[0] || !o->tracker[0] || !lmb_family_for(o->model_type) ||
@@ -73,7 +88,7 @@ static LMB_MAYBE_UNUSED int lmb_home_offer_valid(const LmbHomeOffer *o) {
 }
 
 static LMB_MAYBE_UNUSED int lmb_home_offer_pack(LmbBuf *b, const LmbHomeOffer *o) {
-    if (!lmb_home_offer_valid(o) || lmb_buf_u32(b, LMB_HOME_VERSION)) return -1;
+    if (!lmb_home_offer_valid(o) || lmb_buf_u32(b, o->hybrid_role ? 2u : LMB_HOME_VERSION)) return -1;
 #define HOME_KEY(f) if (lmb_buf_bytes(b, o->f, sizeof o->f)) return -1
     HOME_KEY(id); HOME_KEY(requester); HOME_KEY(edge_peer); HOME_KEY(model_root);
 #undef HOME_KEY
@@ -87,13 +102,15 @@ static LMB_MAYBE_UNUSED int lmb_home_offer_pack(LmbBuf *b, const LmbHomeOffer *o
 #define HOME_U64(f) if (lmb_buf_u64(b, o->f)) return -1
     HOME_U64(ram_bytes); HOME_U64(edge_ram_bytes); HOME_U64(disk_bytes); HOME_U64(model_bytes);
 #undef HOME_U64
+    if (o->hybrid_role && (lmb_buf_u32(b, o->hybrid_role) ||
+        (o->hybrid_role == LMB_HYBRID_COORDINATOR && lmb_hybrid_routes_pack(b, &o->hybrid, 0)))) return -1;
     return 0;
 }
 
 static LMB_MAYBE_UNUSED int lmb_home_offer_unpack(LmbCur *c, LmbHomeOffer *o) {
     memset(o, 0, sizeof *o);
     uint32_t version;
-    if (lmb_cur_u32(c, &version) || version != LMB_HOME_VERSION) return -1;
+    if (lmb_cur_u32(c, &version) || (version != LMB_HOME_VERSION && version != 2u)) return -1;
 #define HOME_KEY(f) do { if (c->off > c->len || sizeof o->f > c->len - c->off) return -1; \
     memcpy(o->f, c->p + c->off, sizeof o->f); c->off += sizeof o->f; } while (0)
     HOME_KEY(id); HOME_KEY(requester); HOME_KEY(edge_peer); HOME_KEY(model_root);
@@ -108,6 +125,8 @@ static LMB_MAYBE_UNUSED int lmb_home_offer_unpack(LmbCur *c, LmbHomeOffer *o) {
 #define HOME_U64(f) if (lmb_cur_u64(c, &o->f)) return -1
     HOME_U64(ram_bytes); HOME_U64(edge_ram_bytes); HOME_U64(disk_bytes); HOME_U64(model_bytes);
 #undef HOME_U64
+    if (version == 2u && (lmb_cur_u32(c, &o->hybrid_role) || !o->hybrid_role ||
+        (o->hybrid_role == LMB_HYBRID_COORDINATOR && lmb_hybrid_routes_unpack(c, &o->hybrid, 0)))) return -1;
     return c->off == c->len && lmb_home_offer_valid(o) ? 0 : -1;
 }
 

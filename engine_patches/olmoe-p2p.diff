@@ -26,7 +26,7 @@ diff --git a/c/olmoe.c b/c/olmoe.c
  
      /* Persistent hot pinning belongs to the standalone runtime. A Segment
       * range must never enqueue expert reads for layers it does not own. */
-@@ -771,6 +782,40 @@
+@@ -771,6 +782,48 @@
  }
  
  /* MoE sui token x[S,hidden] -> out[S,hidden] */
@@ -62,12 +62,20 @@ diff --git a/c/olmoe.c b/c/olmoe.c
 +            }
 +    return 0;
 +}
++static int lmb_olmoe_provider(void *opaque, int layer, int expert,
++                              const float *x, int D, float *out) {
++    Model *m = opaque;
++    LmbOlmoeLocal ctx = {m, malloc((size_t)m->c.inter * sizeof(float)),
++                           malloc((size_t)m->c.inter * sizeof(float))};
++    int rc = !ctx.g || !ctx.u ? -1 : lmb_olmoe_local(&ctx, layer, expert, x, D, out);
++    free(ctx.g); free(ctx.u); return rc;
++}
 +#endif
 +
  static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
      Cfg *c = &m->c; int D = c->hidden, E = c->n_experts, K = c->topk, I = c->inter;
      float *logits = falloc((int64_t)S*E);
-@@ -814,6 +859,14 @@
+@@ -814,6 +867,14 @@
              if (freq_l) for (int kk = 0; kk < K; kk++) if (idx[kk] >= 0) freq_l[idx[kk]]++;
          }
          const float *xs = x + (int64_t)s*D;
@@ -82,3 +90,30 @@ diff --git a/c/olmoe.c b/c/olmoe.c
          for (int kk = 0; kk < K; kk++) {
              Slot *e; expert_get(m, layer, idx[kk], &e);
  #if defined(__AVX2__)
+@@ -1746,6 +1807,16 @@
+     capabilities->max_batch_rows = 128;
+     capabilities->max_context_tokens = 4096;
+     capabilities->num_layers = (uint32_t)config.n_layers;
++#ifdef LUMIBRI_P2P
++    const char *accelerator = getenv("LUMABRI_HOME_ACCELERATOR");
++    if (accelerator && *accelerator)
++        lmb_home_expert_provider(&engine->model, lmb_olmoe_provider);
++    if (lumi_home_init(config.n_layers, config.n_experts, config.hidden, capabilities->numeric_class)) {
++        olmoe_segment_model_destroy(engine);
++        pthread_mutex_destroy(&engine->run_lock); free(engine);
++        return coli_segment_adapter_error(error, error_size, "invalid approved Hybrid routes");
++    }
++#endif
+     *engine_impl = engine;
+     return 0;
+ }
+@@ -1753,6 +1824,9 @@
+ static void olmoe_segment_engine_destroy(void *engine_impl) {
+     OlmoeSegmentEngine *engine = (OlmoeSegmentEngine *)engine_impl;
+     if (!engine) return;
++#ifdef LUMIBRI_P2P
++    lmb_home_expert_provider(NULL, NULL);
++#endif
+     olmoe_segment_model_destroy(engine);
+     pthread_mutex_destroy(&engine->run_lock);
+     free(engine);

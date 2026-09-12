@@ -34,6 +34,7 @@
 #include "lumabri_sign.h"
 #include "lumabri_secure.h"
 #include "lumabri_scheduler.h"
+#include "lumabri_home_hybrid.h"
 
 #define LUMI_MAX_PEERS 64
 #define LUMI_MAX_K     64
@@ -97,6 +98,7 @@ typedef struct {
 } LumiPeer;
 
 static struct {
+    LmbHybridRoutes home;
     int on, initialized, discovery;
     LumiPeer peers[LUMI_MAX_PEERS];
     int npeers;
@@ -215,7 +217,13 @@ static int lumi_take_sock(LumiPeer *p) {
         if (!dial || !dial[0]) { lumi_peer_failed(p); return -1; }
     }
     int fd = lmb_connect(dial);
-    if (fd >= 0 && lmb_auth(fd)) { close(fd); fd = -1; }
+    if (fd >= 0) {
+        if (L.home.count) {
+            ptrdiff_t i = p - L.peers;
+            if (i < 0 || (uint32_t)i >= L.home.count ||
+                !lmb_secure_peer_matches(fd, L.home.peers[i].key)) { close(fd); fd = -1; }
+        } else if (lmb_auth(fd)) { close(fd); fd = -1; }
+    }
     if (fd < 0) {
         fprintf(stderr, "[lumabri] peer %s unreachable — circuit failure\n", p->addr);
         lumi_peer_failed(p);
@@ -224,7 +232,8 @@ static int lumi_take_sock(LumiPeer *p) {
     /* An expert call that has not answered in two minutes is lost, not slow:
      * the general five-minute I/O timeout cost a reply 10 minutes twice in
      * one hour. Long enough for a prefill block on a slow uplink. */
-    lmb_set_io_timeout(fd, lmb_env_int("LUMABRI_EXEC_TIMEOUT_MS", 120000, 1000, 3600000));
+    lmb_set_io_timeout(fd, L.home.count ? 1000 :
+                       lmb_env_int("LUMABRI_EXEC_TIMEOUT_MS", 120000, 1000, 3600000));
     return fd;
 }
 
@@ -961,6 +970,7 @@ static int lumi_layer_covered(int layer) {
 }
 
 static LMB_MAYBE_UNUSED int lumi_layer_on(int layer) {
+    if (L.home.count) return lumi_layer_covered(layer);
     lumi_maybe_discover();
     if (layer < 0 || layer >= L.n_layers) return 0;
     if (L.routed && !L.routed[layer]) return 0;
@@ -1168,6 +1178,10 @@ static int lumi_pick(int gid, uint32_t tried) {
 static int lumi_send_exec(LumiPeer *p, int fd, int layer, int eid,
                           const float *x, int D, int nr, const float *w) {
     LmbBuf b = {0};
+    if (L.home.count) {
+        if (nr != 1 || w || lmb_buf_bytes(&b, L.home.allocation, 32) ||
+            lmb_buf_bytes(&b, L.home.root, 32)) { free(b.p); return -1; }
+    }
     int targeted = p && p->relay_target[0];
     /* EXEC2 to a node that speaks it, directly: the activation goes as
      * bf16 when every value already is one (DeepSeek rounds its MoE input
@@ -1192,7 +1206,7 @@ static int lumi_send_exec(LumiPeer *p, int fd, int layer, int eid,
         if (packed) { lmb_bf16_pack(packed, x, n); pay = packed; pay_len = (uint32_t)(n * 2); }
         else { bf16 = 0; b.p[b.len - (w ? nr * 4 : 0) - 4] = LMB_ENC_F32; }
     }
-    int rc = lmb_send(fd, targeted ? LMB_TEXEC : exec2 ? LMB_EXEC2 : LMB_EXEC,
+    int rc = lmb_send(fd, L.home.count ? LMB_HOME_EXPERT : targeted ? LMB_TEXEC : exec2 ? LMB_EXEC2 : LMB_EXEC,
                       b.p, (uint32_t)b.len, pay, pay_len);
     if (!rc && p) p->bytes_out += 16 + b.len + pay_len;
     free(packed);
@@ -1375,7 +1389,7 @@ static float *lumi_exec_retry(int layer, int eid, const float *x, int D, int nr,
              * patched call site can discard partial remote output and run
              * the unchanged local path. Ordinary expert-only chat keeps the
              * historical wait/fail-closed policy. */
-            if (getenv("LUMABRI_EXEC_FALLBACK_LOCAL")) {
+            if (L.home.count || getenv("LUMABRI_EXEC_FALLBACK_LOCAL")) {
                 if (tried_io) *tried_io = tried;
                 return NULL;
             }
@@ -1614,6 +1628,9 @@ static LMB_MAYBE_UNUSED int lumi_moe_apply_split(int layer, const int *idx,
     if (local_count) {
         L.hybrid_rounds++;
         L.hybrid_local_calls += (unsigned long long)local_count;
+        if (L.home.count && !(L.hybrid_rounds & (L.hybrid_rounds - 1)))
+            fprintf(stderr, "[home-hybrid] committed_rounds=%llu local_experts=%llu remote_experts=%llu\n",
+                    L.hybrid_rounds, L.hybrid_local_calls, L.calls);
     }
     lumi_round_done(t0);
     return 1;
@@ -1634,11 +1651,67 @@ static LMB_MAYBE_UNUSED int lumi_moe_apply(int layer, const int *idx,
 /* Explicit diagnostic opt-in, not a household permission or a speed claim.
  * Invalid or all-local splits leave the established all-remote path intact. */
 static LMB_MAYBE_UNUSED int lumi_hybrid_local_count(int K) {
+    if (L.home.count) return K > 1 ? K - 1 : 0;
     const char *s = getenv("LUMABRI_HYBRID_LOCAL_EXPERTS");
     if (!s || !*s) return 0;
     char *end; errno = 0;
     long n = strtol(s, &end, 10);
     return errno || *end || n <= 0 || n >= K ? 0 : (int)n;
+}
+
+/* Called only after the complete local fallback is loaded. Unlike public
+ * discovery, this immutable map cannot acquire a peer that was not approved.
+ * Endpoints are hints; every new connection authenticates its pinned key. */
+static LMB_MAYBE_UNUSED int lumi_home_init(int layers, int experts, int hidden, const char *numeric) {
+    const char *hex = getenv("LUMABRI_HOME_HYBRID_ROUTES");
+    if (!hex || !*hex) return 0;
+    size_t n = strlen(hex);
+    if (n >= LMB_HOME_HYBRID_ENV || (n & 1) || layers <= 0 || layers > 512 ||
+        experts <= 0 || experts > 65536 || hidden <= 0 || hidden > 65536 ||
+        !numeric || !*numeric || strlen(numeric) >= 64) return -1;
+    uint8_t bytes[LMB_HOME_HYBRID_ENV / 2];
+    if (lmb_unhex(bytes, hex, n / 2)) return -1;
+    LmbCur c = {bytes, n / 2, 0}; LmbHybridRoutes routes;
+    if (lmb_hybrid_routes_unpack(&c, &routes, 1) || c.off != c.len) return -1;
+    for (uint32_t i = 0; i < routes.count; i++) if (routes.peers[i].end > (uint32_t)layers) return -1;
+    /* NO_EXEC keeps public discovery inert before this controlled setup. */
+    if (L.on || L.own) return -1;
+    size_t slots = (size_t)layers * experts * LUMI_MAX_REP;
+    L.own = malloc(slots * sizeof *L.own);
+    L.layer_ok = calloc((size_t)layers, 1);
+    if (!L.own || !L.layer_ok) { free(L.own); free(L.layer_ok); L.own = NULL; L.layer_ok = NULL; return -1; }
+    for (size_t i = 0; i < slots; i++) L.own[i] = -1;
+    L.home = routes; L.n_layers = layers; L.n_experts = experts; L.hidden = hidden;
+    L.npeers = (int)routes.count; L.hedge_ms = -1; L.verify_pct = 0;
+    L.discovery = 0; L.exec_wait_ms = 1000; L.on = 1;
+    for (uint32_t i = 0; i < routes.count; i++) {
+        const LmbHybridPeer *p = &routes.peers[i];
+        snprintf(L.peers[i].addr, sizeof L.peers[i].addr, "%s", p->addr);
+        L.peers[i].resident = 1; L.peers[i].rtt_us = 1000;
+        for (uint32_t layer = p->begin; layer < p->end; layer++) {
+            L.layer_ok[layer] = 1;
+            for (int e = 0; e < experts; e++) L.own[((size_t)layer * experts + e) * LUMI_MAX_REP] = (int)i;
+        }
+    }
+    for (uint32_t i = 0; i < routes.count; i++) {
+        int fd = lumi_take_sock(&L.peers[i]); LmbMsg response = {0};
+        uint8_t scope[128] = {0}; memcpy(scope, routes.allocation, 32); memcpy(scope + 32, routes.root, 32);
+        memcpy(scope + 64, numeric, strlen(numeric));
+        int bad = fd < 0 || lmb_send(fd, LMB_HOME_FEATURES, scope, sizeof scope, NULL, 0) ||
+            lmb_recv(fd, &response) || response.op != LMB_OK || response.body_len != sizeof scope ||
+            response.pay_len || memcmp(response.body, scope, sizeof scope);
+        lmb_msg_free(&response);
+        if (bad) {
+            if (fd >= 0) close(fd);
+            for (uint32_t j = 0; j < routes.count; j++)
+                while (L.peers[j].nsocks) close(L.peers[j].socks[--L.peers[j].nsocks]);
+            free(L.own); free(L.layer_ok); L.own = NULL; L.layer_ok = NULL;
+            L.on = 0; L.home.count = 0; return -1;
+        }
+        lumi_put_sock(&L.peers[i], fd);
+    }
+    fprintf(stderr, "[home-hybrid] authorized resident accelerators=%u; public discovery disabled\n", routes.count);
+    return 0;
 }
 
 /* ---- the batched form: one whole layer, every position at once -----------
