@@ -332,9 +332,6 @@ jobs:
       # A native macOS 15 test is not a macOS 12 test, but do not ship a binary
       # whose load commands already forbid the user's macOS 12.6 machine.
       MACOSX_DEPLOYMENT_TARGET: '12.0'
-      # Every household stage must write where failure-log upload looks,
-      # not only the first OLMoE stage (Darwin otherwise uses /var/folders).
-      TMPDIR: ${{ runner.temp }}
     strategy:
       fail-fast: false
       matrix:
@@ -343,6 +340,11 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 35
     steps:
+      # runner.temp is available to steps, not job-level env expressions.
+      # Keep all household logs where the failure artifact collects them.
+      - name: Set the household test temporary directory
+        shell: bash
+        run: printf 'TMPDIR=%s\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           path: lumabri
