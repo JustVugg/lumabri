@@ -70,7 +70,7 @@ PLANNER_ADAPTER_DEPS = $(wildcard planner_adapters/*.h)
 # Adapter contracts are included transitively by the planner. Rebuild every
 # consumer when one changes, including when a new contract is introduced.
 lumabri test_chat_ui test_planner test_planner_io test_cluster test_memory_budget test_calibration segment_budget_probe segment_node: $(PLANNER_ADAPTER_DEPS)
-lumabri test_chat_ui: lumabri_runtime_identity.h lumabri_checkpoint_identity.h lumabri_calibration_store.h lumabri_calibration.h
+lumabri test_chat_ui: lumabri_runtime_identity.h lumabri_checkpoint_identity.h lumabri_calibration_store.h lumabri_calibration.h lumabri_stage_metrics.h src/planner/lumabri_stage_placement.h
 lumabri test_chat_ui: src/planner/lumabri_catalogue_advice.h
 lumabri test_chat_ui: src/runtime/lumabri_preload.h
 lumabri segment_chat test_chat_ui: lumabri_metrics.h
@@ -463,10 +463,10 @@ test_planner_io: tests/c/test_planner_io.c lumabri_planner.h lumabri_families.h
 test_cluster: tests/c/test_cluster.c lumabri_cluster.h lumabri_memory_budget.h lumabri_planner.h lumabri_families.h lumabri_machine.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_cluster.c -o $@
 
-test_memory_budget: tests/c/test_memory_budget.c lumabri_memory_budget.h lumabri_checkpoint_inventory.h lumabri_content.h lumabri_cluster.h lumabri_planner.h lumabri_families.h
+test_memory_budget: tests/c/test_memory_budget.c lumabri_memory_budget.h lumabri_checkpoint_inventory.h lumabri_content.h lumabri_cluster.h lumabri_planner.h lumabri_families.h src/planner/lumabri_stage_placement.h lumabri_calibration.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_memory_budget.c -o $@
 
-test_calibration: tests/c/test_calibration.c lumabri_calibration.h lumabri_calibration_store.h lumabri_runtime_identity.h lumabri_checkpoint_identity.h lumabri_checkpoint_inventory.h lumabri_planner.h $(SECURE_DEPS)
+test_calibration: tests/c/test_calibration.c lumabri_calibration.h lumabri_calibration_store.h lumabri_runtime_identity.h lumabri_checkpoint_identity.h lumabri_checkpoint_inventory.h lumabri_planner.h src/planner/lumabri_stage_placement.h lumabri_cluster.h $(SECURE_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_calibration.c -o $@
 
 test_catalogue_advice: tests/c/test_catalogue_advice.c src/planner/lumabri_catalogue_advice.h

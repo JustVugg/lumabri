@@ -5,6 +5,44 @@
 #include <unistd.h>
 #include "lumabri_cluster.h"
 #include "lumabri_checkpoint_inventory.h"
+#include "src/planner/lumabri_stage_placement.h"
+
+static void timed_plans(void) {
+    const uint64_t mib = UINT64_C(1) << 20;
+    LmbModelShape shape = {0}; strcpy(shape.model_type, "olmoe");
+    shape.layers = 16; shape.hidden = 64; shape.vocab = 128;
+    shape.sizing_verified = shape.memory_contract = 1; shape.max_context = 4096;
+    shape.edge_resident_bytes = 8 * mib;
+    for (uint32_t i = 0; i < shape.layers; i++) shape.memory[i].resident_bytes = 100 * mib;
+    LmbClusterNode nodes[2] = {{.ram_budget_bytes = 2200 * mib}, {.ram_budget_bytes = 1000 * mib}};
+    LmbClusterPlan seed, got, before;
+    assert(!lmb_home_plan_source(&shape, 1, nodes, 2, 128, 1, LMB_GOAL_ONE_SESSION, 1, &seed));
+    assert(seed.state == LMB_PLAN_RESIDENT && seed.nslices == 2);
+    double costs[2] = {.01, .08};
+    assert(!lmb_home_plan_selected(&shape, 1, nodes, 2, 128, &seed, costs, &got));
+    assert(got.nslices == 2 && got.slices[0].layer_end == 15 && got.slices[1].layer_begin == 15);
+    nodes[0].ram_budget_bytes = 1500 * mib;
+    assert(!lmb_home_plan_selected(&shape, 1, nodes, 2, 128, &seed, costs, &got));
+    assert(got.slices[0].layer_end == 14 && got.slices[1].layer_begin == 14);
+    nodes[0].ram_budget_bytes = 2200 * mib;
+    seed.goal = LMB_GOAL_THROUGHPUT;
+    costs[0] = .04;
+    assert(!lmb_home_plan_selected(&shape, 1, nodes, 2, 128, &seed, costs, &got));
+    double best = 1e9; unsigned split = 0;
+    for (unsigned s = 1; s < 16; s++) {
+        double a = costs[0] * s, b = costs[1] * (16 - s), value = a > b ? a : b;
+        if (value < best) { best = value; split = s; }
+    }
+    assert(got.slices[0].layer_end == split);
+    before = got; costs[0] = NAN;
+    assert(lmb_home_plan_selected(&shape, 1, nodes, 2, 128, &seed, costs, &got));
+    assert(!memcmp(&got, &before, sizeof got));
+    costs[0] = .01; nodes[1].ram_budget_bytes = 100 * mib;
+    assert(lmb_home_plan_selected(&shape, 1, nodes, 2, 128, &seed, costs, &got));
+    assert(!memcmp(&got, &before, sizeof got));
+    shape.layers = 1;
+    assert(lmb_home_plan_selected(&shape, 1, nodes, 2, 128, &seed, NULL, &got));
+}
 
 static void sized_file(const char *path, off_t size) {
     int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
@@ -106,6 +144,7 @@ static void feasible_plans(void) {
 }
 
 int main(void) {
+    timed_plans();
     feasible_plans();
     LmbModelShape m = {0};
     strcpy(m.model_type, "olmoe");

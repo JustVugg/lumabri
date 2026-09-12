@@ -1929,8 +1929,17 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
         fprintf(stderr, "[segment-stage] request=%u ", request_id);
         stage_observations_print(stderr, &result);
         fputc('\n', stderr); fflush(stderr);
-        printf("DONE %u STAT %zu %.3f 0 0 %zu 0 %s\n", request_id,
-               result.token_count, lmb_metrics_decode_rate(&result.metrics), result.prompt_count,metrics);
+        printf("DONE %u STAT %zu %.3f 0 0 %zu 0", request_id,
+               result.token_count, lmb_metrics_decode_rate(&result.metrics), result.prompt_count);
+        if (result.stages_valid && result.metrics.decode_steps && result.stage_count <= LMB_STAGE_PROFILE_MAX) {
+            printf(" STAGES1 %zu", result.stage_count);
+            for (size_t i = 0; i < result.stage_count; i++) {
+                const StageObservation *s = &result.stages[i];
+                printf(" %u %u %llu %.9f", s->begin, s->end,
+                    (unsigned long long)s->timing.decode_calls, s->timing.decode_seconds);
+            }
+        }
+        printf(" %s\n", metrics);
         fflush(stdout);
         generation_result_free(&result);
     }

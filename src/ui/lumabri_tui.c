@@ -515,6 +515,8 @@ static void draw_workspace(const LmbTuiState *st, int tab, int sel, int detail,
         ui_printf(11, 5, UI_MUTED, "%s · %u layers · %u context · %u session(s)",
                   m->shape.model_type, m->shape.layers, st->context, st->sessions);
         ui_printf(13, 5, UI_TEXT, "Plan: %s    Speed: %s", state_word(m), speed);
+        if (m->stage_cost_placement)
+            ui_text(14, 5, UI_MUTED, "Placement guided by previous stage timings; changed ranges need calibration.");
         if (m->advice_flags)
             ui_printf(15, 5, UI_SAND, "Resource advice: %s (not an answer-quality ranking)", lmb_advice_text(m->advice_flags));
         if (m->has_calibration && m->calibration_key_valid &&
@@ -702,6 +704,12 @@ int lmb_tui_run(LmbTuiState *st, int snapshot, const char *keys) {
         if (k == 27 && !detail) break;
         if (ui_w < 60 || ui_h < 28) continue;
         if ((k == 'c' || (detail && (k == '\r' || k == '\n'))) && !tab && st->nmodels && st->tracker[0]) {
+            /* A selection invalidates its previous plan. An early Enter is
+             * not approval for whatever an in-flight refresh later chooses. */
+            if (!st->models[sel].planned || st->models[sel].plan.state != LMB_PLAN_RESIDENT) {
+                refresh_start(&job, st);
+                continue;
+            }
             st->action_model = sel;
             action = detail == 2 ? LMB_TUI_REQUEST_CALIBRATION : LMB_TUI_REQUEST_CHAT;
             break;

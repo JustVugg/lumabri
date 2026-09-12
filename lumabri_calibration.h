@@ -58,6 +58,8 @@ typedef struct {
     uint32_t samples;           /* completed turns represented by this record */
     uint32_t prompt_tokens;     /* observed workload, not the configured context limit */
     uint32_t generated_tokens;
+    uint32_t stage_count;        /* zero on legacy/no per-range observations */
+    double stage_decode_seconds[LMB_CAL_NODES_MAX]; /* seconds per RUN, includes transport */
 } LmbCalibration;
 
 /* Never compare unterminated fields or let two equally incomplete records
@@ -91,6 +93,10 @@ static LMB_UNUSED int lmb_cal_key_valid(const LmbCalKey *k) {
 }
 
 static LMB_UNUSED int lmb_cal_valid(const LmbCalibration *c) {
+    if (!c || (c->stage_count && c->stage_count != c->key.nodes) || c->stage_count > LMB_CAL_NODES_MAX) return 0;
+    for (uint32_t i = 0; i < c->stage_count; i++)
+        if (!isfinite(c->stage_decode_seconds[i]) || c->stage_decode_seconds[i] <= 0 ||
+            c->stage_decode_seconds[i] > 1e9) return 0;
     return c && lmb_cal_key_valid(&c->key) && c->samples &&
            c->prompt_tokens && c->prompt_tokens <= c->key.context &&
            c->generated_tokens > 1 && c->generated_tokens <= 1048576 &&

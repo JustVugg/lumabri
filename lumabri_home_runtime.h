@@ -773,9 +773,21 @@ static int home_request_chat(LmbTuiState *st, int selected) {
         indices[count] = i; nodes[count] = st->nodes[i];
         count++;
     }
-    LmbClusterPlan plan;
-    if (!count || lmb_home_plan_source(&m->shape, m->checkpoint_bytes, nodes, count,
-        st->context, 1, LMB_GOAL_ONE_SESSION, 1, &plan) ||
+    /* Apply the reviewed snapshot, not a second independently chosen split.
+     * Revalidate all reservations before any network side effect. */
+    LmbClusterPlan plan = m->plan;
+    if (!m->planned || !count || plan.nslices != count)
+        return home_fail("No resident assignment for every selected computer. Refresh the plan and check each donor's offered RAM.");
+    plan.edge_node = UINT32_MAX;
+    for (uint32_t j = 0; j < plan.nslices; j++) {
+        plan.slices[j].node = UINT32_MAX;
+        for (uint32_t i = 0; i < count; i++) {
+            if (m->plan.edge_node == indices[i]) plan.edge_node = i;
+            if (m->plan.slices[j].node == indices[i]) plan.slices[j].node = i;
+        }
+    }
+    if (lmb_home_plan_budgets(&m->shape, m->checkpoint_bytes, nodes, count,
+        st->context, &plan) ||
         plan.state != LMB_PLAN_RESIDENT) {
         return home_fail("No complete resident plan found for the selected computers. Keep Share resources open and check their offered RAM.");
     }

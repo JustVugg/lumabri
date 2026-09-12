@@ -26,6 +26,7 @@ typedef struct {
     LmbModelShape shape;
     LmbClusterPlan plan;
     int planned;                    /* 0 when the cluster cannot be planned */
+    int stage_cost_placement;       /* candidate from prior observations; NOT a rate */
     int weights_present;
     uint64_t checkpoint_bytes;
     int checkpoint_inventory_ok;
