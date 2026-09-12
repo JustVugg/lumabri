@@ -4,6 +4,7 @@ Requires one actual small planner-supported checkpoint (not a mock engine).
 This loopback integration gate is not a physical LAN or native-platform test.
 """
 import argparse
+import codecs
 import fcntl
 import json
 import os
@@ -21,6 +22,22 @@ import termios
 import time
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+class TerminalText:
+    """PTY reads are byte fragments, not UTF-8 characters or output lines."""
+    def __init__(self):
+        self.text = ""
+        self.decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+
+    def feed(self, data):
+        self.text = (self.text + self.decoder.decode(data))[-200000:]
+
+
+def hosted_turn_complete(text):
+    # cmd_chat prints timing, transport and final newline in separate calls.
+    # A metric prefix is not completion, even on a fast tiny checkpoint.
+    return re.search(r" · hosted stream · no local checkpoint(?:\x1b\[[0-9;]*m)*\r?\n", text) is not None
 
 
 def main():
@@ -135,9 +152,10 @@ def main():
             result.pop("LUMABRI_RESIDENT_REQUIRED", None)
         return result
 
-    class Terminal:
+    class Terminal(TerminalText):
         def __init__(self, name, argv, environment_name=None):
-            self.name, self.text = name, ""
+            super().__init__()
+            self.name = name
             self.master, slave = pty.openpty()
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 35, 140, 0, 0))
             self.log = open(tmp / f"{name}.terminal.log", "wb")
@@ -156,8 +174,7 @@ def main():
                 if not data:
                     break
                 self.log.write(data); self.log.flush()
-                self.text += data.decode("utf-8", errors="replace")
-                self.text = self.text[-200000:]
+                self.feed(data)
 
         def send(self, keys):
             os.write(self.master, keys.encode())
@@ -331,7 +348,7 @@ def main():
                 return False
 
             def completed_turn(chat):
-                return chat.has("hosted stream") and chat.has("no local checkpoint")
+                return hosted_turn_complete(chat.text)
 
             def reject_busy(label):
                 collision = Terminal(label, base, "reject")
@@ -444,7 +461,7 @@ def main():
             assert reject.p.poll() is None, "accepted alternative failed"
             assert "Approved Segment plan: 1 compute donor" in reject.text
             reject.send("hi\n")
-            until(lambda: reject.has("hosted stream · no local checkpoint") or reject.p.poll() is not None,
+            until(lambda: hosted_turn_complete(reject.text) or reject.p.poll() is not None,
                   seconds=120, message="alternative plan did not finish real generation")
             assert reject.p.poll() is None
             log = (tmp / "donor-a/.lumabri/home/engines.log").read_text(errors="replace")
@@ -516,7 +533,7 @@ def main():
         chat.send("\t\n")
         until(lambda: chat.has("Tab completes commands"), message="slash completion did not execute help")
         chat.send("hi\n")
-        until(lambda: chat.has("tok/s") or chat.has("generated tokens") or chat.has("prompt plus output exceeds context") or
+        until(lambda: hosted_turn_complete(chat.text) or chat.has("prompt plus output exceeds context") or
               chat.has("logits are unavailable for sampling") or chat.has("Segment generation failed") or
               chat.has("invalid token count") or chat.has("cannot read DeepSeek V4 embedding") or chat.p.poll() is not None, seconds=120,
               message="real model did not finish a response")
@@ -662,7 +679,7 @@ def main():
             until(lambda: resume.has("receives the text") or resume.p.poll() is not None)
             assert resume.p.poll() is None, "retained host cannot accept a second conversation"
             resume.send("hi\n")
-            until(lambda: resume.has("hosted stream · no local checkpoint") or resume.p.poll() is not None,
+            until(lambda: hosted_turn_complete(resume.text) or resume.p.poll() is not None,
                   seconds=120, message="resident generation failed with the weight source offline")
             assert resume.p.poll() is None and resume.has("generated tokens"), "resident second turn did not generate"
             resume.text = ""
@@ -762,7 +779,7 @@ def main():
                 # generation finished; old catalogue output is not a response.
                 repeat.text = ""
                 repeat.send("hi\n")
-                until(lambda: (repeat.has("hosted stream") and repeat.has("no local checkpoint")) or repeat.p.poll() is not None,
+                until(lambda: hosted_turn_complete(repeat.text) or repeat.p.poll() is not None,
                       seconds=120, message="model did not finish a response after cache reuse/refetch")
                 assert repeat.p.poll() is None and (repeat.has("tok/s") or repeat.has("generated tokens"))
                 stats = source_stats(repeat)
