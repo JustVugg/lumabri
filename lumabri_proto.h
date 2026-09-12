@@ -314,6 +314,7 @@ enum {
     LMB_MACHINE_REPORT = 77, LMB_MACHINE_LIST = 78, LMB_MACHINE_LIST_R = 79,
     LMB_HOME_OFFER = 80, LMB_HOME_STATUS = 81, LMB_HOME_COMMIT = 82,
     LMB_HOME_START_HOST = 83, LMB_HOME_CANCEL = 84, LMB_HOME_PULSE = 85,
+    LMB_HOME_DETACH = 86, /* close requester control; retain prepared weights */
 };
 #define LMB_CAP_EXEC2 (1u << 0)
 #define LMB_ENC_F32  0u

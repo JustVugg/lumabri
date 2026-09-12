@@ -1142,7 +1142,7 @@ static int cmd_serve(int argc, char **argv) {
 
 typedef struct {
     char peers[8][64]; int npeers;
-    uint64_t total_bytes; int nfiles;
+    uint64_t total_bytes, metadata_bytes; int nfiles;
     char config_peer[64];
     char model_type[64];
 } Swarm;
@@ -1163,7 +1163,11 @@ static int swarm_inspect(const char *tracker, const char *model, Swarm *s) {
         uint64_t size; uint16_t np;
         if (lmb_cur_str(&c, rel, sizeof rel) || lmb_cur_u64(&c, &size) ||
             lmb_cur_u16(&c, &np)) { lmb_msg_free(&m); return -1; }
+        if (UINT64_MAX - s->total_bytes < size) { lmb_msg_free(&m); return -1; }
         s->nfiles++; s->total_bytes += size;
+        size_t rel_len = strlen(rel);
+        if (rel_len < 12 || strcmp(rel + rel_len - 12, ".safetensors"))
+            s->metadata_bytes += size;
         int is_cfg = !strcmp(rel, "config.json");
         for (uint16_t p = 0; p < np; p++) {
             if (lmb_cur_str(&c, addr, sizeof addr)) { lmb_msg_free(&m); return -1; }
@@ -2415,6 +2419,7 @@ typedef struct {
     Proto proto;
     EngKind kind;
     int segment;
+    int reset_supported; /* explicit gateway capability; never assume from family */
     int greedy_only; /* actual Edge capability, not a model-name assumption */
     EngineTransport transport;
     uint32_t numeric_abi;
@@ -2485,6 +2490,7 @@ static char *read_until_prompt(int fd) {
 /* Wait for readiness in either dialect, and remember which one it was.
  * Returns 0, or -1 if the child died first. */
 static int engine_wait_ready(Engine *e) {
+    e->reset_supported = 0;
     e->greedy_only = 0;
     e->numeric_abi = 0; e->numeric_class[0] = 0;
     size_t cap = 8192, len = 0;
@@ -2502,6 +2508,7 @@ static int engine_wait_ready(Engine *e) {
         len += (size_t)r;
         buf[len] = 0;
         if (memmem(buf, len, FRAME_READY, strlen(FRAME_READY))) {
+            e->reset_supported = strstr(buf, "\nLUMABRI_RESET 1\n") != NULL;
             e->greedy_only = strstr(buf, "\nLUMABRI_SAMPLING GREEDY\n") != NULL;
             const char *numeric = strstr(buf, "\nLUMABRI_NUMERIC ");
             if (numeric) {
@@ -3216,6 +3223,7 @@ typedef struct {
     uint32_t idle_seconds;
     uint32_t request_seconds; /* absolute bound for an active inference */
     const uint8_t *client_key; /* optional identity bound by an accepted home plan */
+    const char *model_root; /* authenticated accepted checkpoint, not a peer's label */
 } HostState;
 
 static int host_read_hello(int fd, const HostState *h) {
@@ -3259,6 +3267,10 @@ static int host_greet(int fd, const HostState *h, int busy) {
         lmb_buf_u32(&b, 0x314d554e); /* NUM1, optional measured runtime metadata */
         lmb_buf_u32(&b, h->engine->numeric_abi);
         lmb_buf_str(&b, h->engine->numeric_class);
+        if (h->model_root && h->model_root[0]) {
+            lmb_buf_u32(&b, 0x31544f52); /* ROT1, accepted household root */
+            lmb_buf_str(&b, h->model_root);
+        }
     }
     int rc = lmb_send(fd, LMB_HOST_HELLO_R, b.p, (uint32_t)b.len, NULL, 0);
     free(b.p);
@@ -3354,6 +3366,8 @@ typedef struct {
     size_t header_len;
     uint64_t payload_left;
     int need_terminator, overflow;
+    char reset_expected[65];
+    int reset_done;
 } HostOutput;
 
 static int host_output(HostOutput *out, HostInput *in, const char *data,
@@ -3393,6 +3407,10 @@ static int host_output(HostOutput *out, HostInput *in, const char *data,
             if (errno || *end) return -1;
             out->payload_left = n;
             out->need_terminator = 1;
+        } else if (!out->overflow && out->reset_expected[0] &&
+                   sscanf(out->header, "RESET_DONE %63s %c", id, &extra) == 1 &&
+                   !strcmp(id, out->reset_expected)) {
+            out->reset_done = 1;
         } else if (((!strncmp(out->header, "DONE ", 5) &&
                      sscanf(out->header, "DONE %63s", id) == 1) ||
                     (!strncmp(out->header, "ERROR ", 6) &&
@@ -3416,21 +3434,23 @@ static int host_expired(const HostInput *in, const HostState *h,
 
 /* Both directions remain inside LMB_HOST_STREAM frames (authenticated and
  * encrypted whenever the transport's strict mode is enabled). */
-static void host_bridge(int fd, Engine *e, const HostState *h) {
+static int host_bridge(int fd, Engine *e, const HostState *h,
+                       HostInput *remaining_input, HostOutput *remaining_output) {
     char buf[16384];
     HostInput input = {0};
     HostOutput output = {0};
     double last_input = nowd();
+    int broken = 0;
     for (;;) {
         struct pollfd p[2] = { { fd, POLLIN, 0 }, { e->from, POLLIN, 0 } };
         int n = poll(p, 2, 1000);
-        if (g_stopping) return;
-        if (n < 0) { if (errno == EINTR) continue; return; }
+        if (g_stopping) break;
+        if (n < 0) { if (errno == EINTR) continue; broken = 1; break; }
         int expired = host_expired(&input, h, last_input, nowd());
         if (expired) {
             fprintf(stderr, "[host] %s\n", expired == 2 ?
                     "active request deadline exceeded" : "idle session expired");
-            return;
+            break;
         }
         if (p[0].revents & POLLIN) {
             LmbMsg m = {0};
@@ -3438,24 +3458,63 @@ static void host_bridge(int fd, Engine *e, const HostState *h) {
                 !m.pay_len || host_input(&input, e, h, m.pay, m.pay_len)) {
                 lmb_msg_free(&m);
                 fprintf(stderr, "[host] invalid or oversized client frame\n");
-                return;
+                break;
             }
             last_input = nowd();
             lmb_msg_free(&m);
         }
         if (p[1].revents & POLLIN) {
             ssize_t got = read(e->from, buf, sizeof buf);
-            if (got <= 0) return;                 /* engine died: so does this */
+            if (got <= 0) { broken = 1; break; }
             int completed;
             if (host_output(&output, &input, buf, (size_t)got, &completed)) {
                 fprintf(stderr, "[host] invalid engine codec frame\n");
-                return;
+                broken = 1; break;
             }
             if (completed) last_input = nowd();
             if (lmb_send(fd, LMB_HOST_STREAM, NULL, 0, buf, (uint32_t)got))
-                return;
+                break;
         }
-        if ((p[0].revents | p[1].revents) & (POLLERR | POLLHUP)) return;
+        if ((p[0].revents | p[1].revents) & (POLLERR | POLLHUP)) break;
+    }
+    *remaining_input = input;
+    *remaining_output = output;
+    return broken ? -1 : 0;
+}
+
+/* Close the conversation, not its resident weights. Drain an already
+ * accepted request before resetting; incomplete client payloads cannot be
+ * repaired by injecting a command into their bytes. A fresh unpredictable
+ * acknowledgement is recognized only at codec boundaries, never in DATA. */
+static int host_reset_conversation(Engine *e, const HostState *h,
+                                   HostInput *in, HostOutput *out) {
+    if (!e->segment || !e->reset_supported || in->payload_left ||
+        in->need_terminator || g_stopping) return -1;
+    char bytes[16384];
+    double deadline = in->active ? in->started + h->request_seconds : nowd();
+    int reset_sent = 0;
+    for (;;) {
+        if (g_stopping) return -1;
+        if (!in->active && !reset_sent) {
+            uint8_t nonce[16];
+            lmb_random(nonce, sizeof nonce);
+            lmb_hex(out->reset_expected, nonce, sizeof nonce);
+            char command[96];
+            int n = snprintf(command, sizeof command, "RESET %s\n", out->reset_expected);
+            if (engine_write_full(e->to, command, (size_t)n)) return -1;
+            reset_sent = 1;
+            deadline = nowd() + 30;
+        }
+        if (out->reset_done) return 0;
+        if (nowd() >= deadline) return -1;
+        struct pollfd p = {e->from, POLLIN, 0};
+        int ready = poll(&p, 1, 100);
+        if (ready < 0) { if (errno == EINTR) continue; return -1; }
+        if (!ready) continue;
+        if (!(p.revents & POLLIN)) return -1;
+        ssize_t n = read(e->from, bytes, sizeof bytes);
+        int completed;
+        if (n <= 0 || host_output(out, in, bytes, (size_t)n, &completed)) return -1;
     }
 }
 
@@ -3555,7 +3614,8 @@ static int cmd_host(int argc, char **argv) {
     if (!host_engine) { close(lfd); engine_stop(&eng); return 1; }
     HostState h = { &eng, mtype, host_engine, 0, max_frame,
                     (uint32_t)max_new, idle_seconds, request_seconds,
-                    client_key ? allowed_client : NULL };
+                    client_key ? allowed_client : NULL,
+                    getenv("LUMABRI_EXPECT_MODEL_ROOT") };
 
     printf("  %shost ready on port %d · %s · one session at a time%s\n",
            C_DIM, port, mtype[0] ? mtype : "?", C_R);
@@ -3576,14 +3636,22 @@ static int cmd_host(int argc, char **argv) {
         pthread_t busy_thread;
         int watching = pthread_create(&busy_thread, NULL,
                                       host_busy_acceptor, &busy) == 0;
-        host_bridge(fd, &eng, &h);
+        HostInput remaining_input = {0};
+        HostOutput remaining_output = {0};
+        int exchange_broken = host_bridge(fd, &eng, &h,
+                                         &remaining_input, &remaining_output);
+        lmb_close(fd);
+        int reset = !exchange_broken &&
+                    !host_reset_conversation(&eng, &h, &remaining_input, &remaining_output);
         atomic_store(&busy.stop, 1);
         if (watching) pthread_join(busy_thread, NULL);
-        lmb_close(fd);
-        /* Between two clients the engine keeps the previous conversation in
-         * its KV, so the next client would continue somebody else's chat.
-         * Restart it: with one session there is nothing cheaper that is also
-         * correct, and correctness here is somebody else's private text. */
+        if (reset) {
+            fprintf(stderr, "[host] conversation reset; resident weights retained\n");
+            continue;
+        }
+        if (g_stopping) break;
+        /* Older or damaged gateways cannot acknowledge a clean session.
+         * Never hand their KV to the next client. */
         fprintf(stderr, "[host] session closed; restarting the engine so the "
                 "next client starts clean\n");
         engine_stop(&eng);
@@ -3649,7 +3717,8 @@ static void *host_client_pump(void *arg) {
     return NULL;
 }
 
-static int host_connect(const char *addr, const char *model_type, const char *expected_key, Engine *e,
+static int host_connect(const char *addr, const char *model_type, const char *expected_key,
+                        const char *expected_root, Engine *e,
                         int *requested_max_new) {
     memset(e, 0, sizeof *e);
     e->to = e->from = -1;
@@ -3714,8 +3783,21 @@ static int host_connect(const char *addr, const char *model_type, const char *ex
         fprintf(stderr, "[lumabri] unsupported host numeric metadata\n");
         lmb_msg_free(&m); lmb_close(fd); return -1;
     }
+    uint32_t root_tag = 0;
+    char model_root[65] = ""; uint8_t root_bytes[32];
+    if (c.off < c.len && (lmb_cur_u32(&c, &root_tag) || root_tag != 0x31544f52 ||
+        lmb_inventory_string(&c, model_root, sizeof model_root) ||
+        strlen(model_root) != 64 || lmb_unhex(root_bytes, model_root, 32))) {
+        fprintf(stderr, "[lumabri] invalid host checkpoint identity\n");
+        lmb_msg_free(&m); lmb_close(fd); return -1;
+    }
     if (c.off != c.len || m.pay_len) { lmb_msg_free(&m); lmb_close(fd); return -1; }
     lmb_msg_free(&m);
+    if (expected_root && (!expected_key || strlen(expected_root) != 64 ||
+        lmb_unhex(root_bytes, expected_root, 32) || strcmp(expected_root, model_root))) {
+        fprintf(stderr, "[lumabri] host checkpoint differs from the accepted resident plan; no text sent\n");
+        lmb_close(fd); return -1;
+    }
     if (model_type && model_type[0] && strcmp(model_type, mtype)) {
         fprintf(stderr, "[lumabri] %s serves %s, not %s\n", addr, mtype,
                 model_type);
@@ -3810,6 +3892,11 @@ static int resolve_engine(const char *engines_dir, const char *engine_path,
  * block it touches, so a 300 GB model needs 300 GB here — the single most
  * common way this goes wrong, and it goes wrong hours in, silently. */
 static void disk_preflight(const char *model, uint64_t model_bytes) {
+    const char *resident = getenv("LUMABRI_RESIDENT_REQUIRED");
+    if (resident && !strcmp(resident, "1")) {
+        printf("  Resident preparation: weights go to donor RAM, not the disk mirror.\n");
+        return;
+    }
     const char *home = getenv("HOME") ? getenv("HOME") : ".";
     char cache[1024];
     snprintf(cache, sizeof cache, "%s/.lumabri", home);
@@ -4476,10 +4563,12 @@ static int model_boot(const char *tracker, const char *model, const char *shim,
                 if (!segment_ready) {
                     e->proto = PROTO_SERVE2;
                     printf("  %s\xe2\x9c\x93 %s ready via Segment in %.1fs%s%s "
-                           "\xc2\xb7 Edge in CAS \xc2\xb7 /swarm /experts /model /debug "
+                           "\xc2\xb7 %s \xc2\xb7 /swarm /experts /model /debug "
                            "/storage /reset /quit%s\n",
                            C_GRN, model, nowd() - segment_started, C_R,
-                           C_DIM, C_R);
+                           C_DIM, getenv("LUMABRI_RESIDENT_REQUIRED") &&
+                               !strcmp(getenv("LUMABRI_RESIDENT_REQUIRED"), "1") ?
+                               "Edge weights resident in RAM" : "Edge in CAS", C_R);
                     if (e->greedy_only)
                         printf("  greedy decoding · this backend does not expose sampling logits\n");
                     return 0;
@@ -4585,7 +4674,7 @@ static int cmd_chat(int argc, char **argv) {
     const char *engine_path = NULL, *engines_dir = getenv("LUMABRI_ENGINES");
     const char *want_model = NULL, *local_dir = NULL;
     const char *role_arg = NULL, *model_dir_arg = NULL;
-    const char *donor_name_arg = NULL, *host_addr = NULL, *host_key = NULL;
+    const char *donor_name_arg = NULL, *host_addr = NULL, *host_key = NULL, *host_root = NULL;
     double donate_gb = 0;
     int max_new = 256, ctx = 2048, cap_experts = 64, quick_probe = 0;
     for (int i = 0; i < argc; i++) {
@@ -4603,6 +4692,7 @@ static int cmd_chat(int argc, char **argv) {
         else if (!strcmp(argv[i], "--donor-name") && i + 1 < argc) donor_name_arg = argv[++i];
         else if (!strcmp(argv[i], "--host") && i + 1 < argc) host_addr = argv[++i];
         else if (!strcmp(argv[i], "--host-key") && i + 1 < argc) host_key = argv[++i];
+        else if (!strcmp(argv[i], "--host-root") && i + 1 < argc) host_root = argv[++i];
         else if (!strcmp(argv[i], "--calibrate")) quick_probe = 1;
         else if (!strcmp(argv[i], "--plain")) g_tty = 0;
         else { fprintf(stderr, "usage: lumabri chat [--tracker H:P] [--model NAME] "
@@ -4733,7 +4823,7 @@ static int cmd_chat(int argc, char **argv) {
      * and the only way to actually mean it. */
     if (host_addr) {
         memset(&sw, 0, sizeof sw);
-        if (host_connect(host_addr, NULL, host_key, &eng, &max_new)) return 1;
+        if (host_connect(host_addr, NULL, host_key, host_root, &eng, &max_new)) return 1;
         if (g_execution_view) lmb_execution_print(stdout, g_execution_view);
     } else if (model_boot(tracker, model, shim, engines_dir, engine_path,
                           local_dir, ctx, max_new, cap_experts, &eng, &sw))

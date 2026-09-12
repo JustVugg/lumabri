@@ -392,6 +392,8 @@ static int cmd_home(void) {
     g_stopping = 0; install_chat_signal_handlers();
     if (s.owner) (void)home_tracker_resume(&s, &tracker_child, notice, sizeof notice);
     while (!g_stopping) {
+        LmbResidentPlan resident_plan;
+        int have_resident = s.tracker[0] && !home_resident_plan_load(s.tracker, &resident_plan);
         HomeTerminal term; home_terminal_begin(&term);
         int key = -1;
         while (!g_stopping) {
@@ -416,7 +418,9 @@ static int cmd_home(void) {
                 "Inspect and clear unused household weight caches"};
             ui_text(top, 5, UI_TEXT, actions ? "Workspace actions" : "What would you like to do?");
             for (int i = 0; i < (actions ? 6 : 4); i++) ui_item(top + 2 + i * 3, selected == i,
-                actions ? commands[i] : titles[i], actions ? command_help[i] : help[i]);
+                actions ? commands[i] : i == 0 && have_resident ? "New conversation · retained model" : titles[i],
+                actions ? command_help[i] : i == 0 && have_resident ?
+                    "Reuse the approved plan. Host identity and model are checked on connection." : help[i]);
             ui_footer(notice[0] ? notice : s.tracker[0] ? s.tracker : "Create or join a household with / actions.",
                       "↑ ↓ move   Enter select   / actions   Esc back   Ctrl-C exit");
             if (ui_h < 28 || ui_w < 60) {
@@ -433,7 +437,7 @@ static int cmd_home(void) {
             if (key == 1001) selected = (selected + choices - 1) % choices;
             if (key == 1002) selected = (selected + 1) % choices;
             if ((key == '\r' || key == '\n') && ui_h >= 28 && ui_w >= 60) {
-                key = actions ? "njsqfk"[selected] : "ccpd"[selected];
+                key = actions ? "njsqfk"[selected] : selected == 0 && have_resident ? 'r' : "ccpd"[selected];
                 actions = 0; selected = 0; break;
             }
             (void)poll(NULL, 0, 100);
@@ -495,12 +499,14 @@ static int cmd_home(void) {
             printf("\nOn your other computers choose Join a household.\n\nAddress: %s\nHousehold key: %s\n\n"
                    "Host identity: %.16s\nKeep this Lumabri window open. Only share the key with your household.\nPress Enter to continue.\n", s.tracker, s.token, identity);
             char line[16]; if (!fgets(line, sizeof line, stdin)) break;
-        } else if (key == 'c' || key == 'p' || key == 'd') {
+        } else if (key == 'c' || key == 'p' || key == 'd' || key == 'r') {
             if (!s.tracker[0] || !s.token[0]) { snprintf(notice, sizeof notice, "Create or join a household first."); continue; }
             setenv("LUMABRI_TOKEN", s.token, 1);
             home_error[0] = 0;
             int rc;
-            if (key == 'd') {
+            if (key == 'r') {
+                rc = home_resident_plan_chat(&resident_plan);
+            } else if (key == 'd') {
                 char *args[] = {"--join", s.tracker, "--ram-gb", s.ram};
                 rc = cmd_donor(4, args);
             } else {

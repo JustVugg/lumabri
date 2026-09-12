@@ -97,7 +97,7 @@ def line():
         raise RuntimeError("Segment gateway closed:\n"+
                            p.stderr.read().decode("utf-8", "replace"))
     return value
-if line() != b"\n" or line() != b"LUMABRI_SAMPLING LOGITS\n":
+if line() != b"\n" or line() != b"LUMABRI_RESET 1\n" or line() != b"LUMABRI_SAMPLING LOGITS\n":
     raise RuntimeError("missing OLMoE sampling capability")
 if not re.fullmatch(rb"LUMABRI_NUMERIC [1-9][0-9]* [\x20-\x7e]{1,96}\n", line()):
     raise RuntimeError("missing or invalid numeric ABI metadata")

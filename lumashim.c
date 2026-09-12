@@ -188,6 +188,8 @@ static struct {
      * are in the mirror (already there, or fetched by the warm-up thread) */
     _Atomic uint64_t dense_total, dense_done;
     _Atomic int dense_state;        /* 0 off · 1 running · 2 ready · 3 failed */
+    int direct_weights;
+    _Atomic int weights_sealed;
     pthread_once_t once;
 } g = { .cache_lock_fd = -1, .reset_lock_fd = -1, .once = PTHREAD_ONCE_INIT };
 
@@ -1047,6 +1049,8 @@ static void *stats_thread(void *arg) {
 
 static void shim_init_impl(void) {
     shim_resolve();
+    const char *resident = getenv("LUMABRI_RESIDENT_REQUIRED");
+    g.direct_weights = resident && !strcmp(resident, "1");
     if (lmb_secure_init()) return; /* fail closed: hooks reject every network fd */
     const char *cache = getenv("LUMABRI_CACHE");
     if (!cache || !cache[0]) {
@@ -1389,6 +1393,7 @@ static void shim_init_impl(void) {
     if (pf) { pf_depth = atoi(pf); pf_user_set = 1; }
     if (pf_depth < 0) pf_depth = 0;
     if (pf_depth > 16) pf_depth = 16;
+    if (g.direct_weights) pf_depth = 0;
     if (pf_depth && g.npeers) {
         int nw = pf_depth < 4 ? pf_depth : 4;
         for (int i = 0; i < nw; i++) {
@@ -1412,7 +1417,7 @@ static void shim_init_impl(void) {
     }
     /* The chatter asks for the dense warm-up on a swarm-fed model: it needs
      * peers (or a CAS) to pull from, and it must not run for a local copy. */
-    if (getenv("LUMABRI_PREFETCH_DENSE") && (g.npeers || g.cas_dir[0])) {
+    if (!g.direct_weights && getenv("LUMABRI_PREFETCH_DENSE") && (g.npeers || g.cas_dir[0])) {
         pthread_t t;
         atomic_store(&g.dense_state, 1);
         if (pthread_create(&t, NULL, dense_prefetch_thread, NULL) == 0)
@@ -1687,7 +1692,7 @@ static uint8_t *cas_load(RFile *f, uint64_t off, uint32_t len) {
         if (cas_path(path, sizeof path, f->hash + (size_t)ci * 32)) {
             free(data); return NULL;
         }
-        int fd = real_open(path, O_RDONLY | O_NOFOLLOW);
+        int fd = real_open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
         struct stat st;
         uint8_t got[32];
         int bad = fd < 0 || fstat(fd, &st) || !S_ISREG(st.st_mode) ||
@@ -1701,6 +1706,27 @@ static uint8_t *cas_load(RFile *f, uint64_t off, uint32_t len) {
     return data;
 }
 
+/* A hash filename is only a hint. Compare with the already verified incoming
+ * chunk before skipping publication, so a torn/truncated cache is repairable.
+ * The bounded buffer does not duplicate a model block in memory. */
+static int cas_matches(const char *path, const uint8_t *data, uint32_t n) {
+    int fd = real_open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) return 0;
+    struct stat st;
+    int same = !fstat(fd, &st) && S_ISREG(st.st_mode) && st.st_size == (off_t)n;
+    uint8_t buf[4096];
+    uint32_t at = 0;
+    while (same && at < n) {
+        size_t take = n - at < sizeof buf ? n - at : sizeof buf;
+        ssize_t got = real_pread(fd, buf, take, at);
+        if (got < 0 && errno == EINTR) continue;
+        if (got <= 0 || memcmp(buf, data + at, (size_t)got)) same = 0;
+        else at += (uint32_t)got;
+    }
+    real_close(fd);
+    return same;
+}
+
 static void cas_publish(RFile *f, uint64_t off, const uint8_t *data, uint32_t len) {
     if (!g.cas_dir[0] || f->hstate != 1 || off % LMB_HASH_CHUNK) return;
     for (uint32_t o = 0; o < len; o += LMB_HASH_CHUNK) {
@@ -1709,7 +1735,7 @@ static void cas_publish(RFile *f, uint64_t off, const uint8_t *data, uint32_t le
         if (ci >= f->nh) return;
         char path[LMB_CACHE_PATH_MAX], tmp[LMB_CACHE_PATH_MAX];
         if (cas_path(path, sizeof path, f->hash + (size_t)ci * 32)) return;
-        if (!access(path, R_OK)) continue;
+        if (cas_matches(path, data + o, n)) continue;
         mkdir_parent(path);
         if (path_printf(tmp, sizeof tmp, "%s.tmp.%ld.%lu", path, (long)getpid(),
                         (unsigned long)pthread_self())) return;
@@ -1718,14 +1744,18 @@ static void cas_publish(RFile *f, uint64_t off, const uint8_t *data, uint32_t le
         uint32_t put = 0;
         while (put < n) {
             ssize_t w = write(fd, data + o + put, n - put);
-            if (w < 0) { if (errno == EINTR) continue; break; }
+            if (w <= 0) { if (w < 0 && errno == EINTR) continue; break; }
             put += (uint32_t)w;
         }
-        int ok = put == n && fsync(fd) == 0;
-        if (ok) fchmod(fd, 0444);
-        close(fd);
-        if (ok && !rename(tmp, path)) fsync_parent_dir(path);
-        else unlink(tmp);
+        /* CAS is a reconstructible cache, not the durable mirror map or the
+         * signed truth. Publish complete immutable bytes atomically, without
+         * forcing a file + directory journal commit per MiB in the inference
+         * thread. After power loss a missing/torn chunk is rejected by size
+         * and hash on read, then replaced from verified source bytes. The
+         * mirror's data-before-map fdatasync ordering stays unchanged. */
+        int ok = put == n && fchmod(fd, 0444) == 0;
+        if (real_close(fd)) ok = 0;
+        if (!ok || rename(tmp, path)) unlink(tmp);
     }
 }
 
@@ -1916,6 +1946,91 @@ static int ensure_range(RFile *f, uint64_t off, uint64_t len) {
 
 static int ensure_full(RFile *f) { return ensure_range(f, 0, f->size); }
 
+/* One bounded preparation buffer, never a second copy of the model. Bytes
+ * travel from the authenticated source directly into engine-owned tensors.
+ * The sparse descriptors exist for fstat/offset compatibility only: no
+ * weight payload is read from or written to the disk mirror in this mode. */
+static pthread_mutex_t direct_weight_lock = PTHREAD_MUTEX_INITIALIZER;
+static RFile *direct_weight_file;
+static uint64_t direct_weight_offset;
+static uint32_t direct_weight_length;
+static uint8_t *direct_weight_data;
+/* Some upstream kernels access embedding tables through pread even when
+ * their entire table is resident. Retain only those explicitly declared
+ * tensor ranges, in their native representation, until process shutdown.
+ * They are not a file-backed mirror or a second copy of dense/expert RAM. */
+typedef struct ResidentRange {
+    RFile *file;
+    uint64_t offset, length;
+    uint8_t *data;
+    struct ResidentRange *next;
+} ResidentRange;
+static ResidentRange *resident_ranges;
+
+static int direct_weight_file_p(const RFile *f) {
+    size_t n = f ? strlen(f->rel) : 0;
+    return g.direct_weights && n >= 12 && !strcmp(f->rel + n - 12, ".safetensors");
+}
+
+int lmb_weights_seal(void) {
+    if (!g.ok || !g.direct_weights) return -1;
+    pthread_mutex_lock(&direct_weight_lock);
+    atomic_store(&g.weights_sealed, 1);
+    free(direct_weight_data); direct_weight_data = NULL;
+    direct_weight_file = NULL; direct_weight_length = 0;
+    pthread_mutex_unlock(&direct_weight_lock);
+    fprintf(stderr, "[resident] weight input sealed; inference uses resident RAM only\n");
+    return 0;
+}
+
+static ssize_t direct_weight_read(RFile *f, void *buf, size_t n, off_t off) {
+    if (off < 0 || n > SSIZE_MAX) { errno = EINVAL; return -1; }
+    if ((uint64_t)off >= f->size || !n) return 0;
+    if (n > f->size - (uint64_t)off) n = (size_t)(f->size - (uint64_t)off);
+    pthread_mutex_lock(&direct_weight_lock);
+    for (ResidentRange *r = resident_ranges; r; r = r->next) {
+        if (r->file == f && (uint64_t)off >= r->offset &&
+            (uint64_t)off - r->offset <= r->length &&
+            n <= r->length - ((uint64_t)off - r->offset)) {
+            memcpy(buf, r->data + ((uint64_t)off - r->offset), n);
+            pthread_mutex_unlock(&direct_weight_lock);
+            return (ssize_t)n;
+        }
+    }
+    if (atomic_load(&g.weights_sealed)) {
+        fprintf(stderr, "[resident] rejected weight read after READY: %s\n", f->rel);
+        pthread_mutex_unlock(&direct_weight_lock); errno = EPERM; return -1;
+    }
+    hashes_ensure(f);
+    if (f->hstate != 1) goto bad;
+    size_t copied = 0;
+    while (copied < n) {
+        uint64_t pos = (uint64_t)off + copied;
+        uint64_t start = pos / g.block * g.block;
+        uint32_t len = f->size - start < g.block ? (uint32_t)(f->size - start) : g.block;
+        if (direct_weight_file != f || direct_weight_offset != start || !direct_weight_data) {
+            free(direct_weight_data); direct_weight_data = NULL; direct_weight_file = NULL;
+            for (int i = 0; i < f->npeers && !direct_weight_data; i++) {
+                uint8_t *data = peer_fetch(&g.peers[f->peer_idx[i]], f->rel, start, len);
+                if (data && block_verify(f, start, data, len)) { free(data); data = NULL; }
+                direct_weight_data = data;
+            }
+            if (!direct_weight_data) goto bad;
+            direct_weight_file = f; direct_weight_offset = start; direct_weight_length = len;
+            atomic_fetch_add(&g.net_bytes, len); atomic_fetch_add(&g.net_blocks, 1);
+        }
+        size_t within = (size_t)(pos - start);
+        size_t take = direct_weight_length - within;
+        if (take > n - copied) take = n - copied;
+        memcpy((uint8_t *)buf + copied, direct_weight_data + within, take);
+        copied += take;
+    }
+    pthread_mutex_unlock(&direct_weight_lock);
+    return (ssize_t)copied;
+bad:
+    pthread_mutex_unlock(&direct_weight_lock); errno = EIO; return -1;
+}
+
 /* ---- fd table ----------------------------------------------------------- */
 
 static void fdmap_set(int fd, RFile *f) {
@@ -1925,6 +2040,28 @@ static void fdmap_set(int fd, RFile *f) {
 
 static RFile *fdmap_get(int fd) {
     return fd >= 0 && fd < FD_LIMIT ? g.fdmap[fd] : NULL;
+}
+
+int lmb_weights_retain(int fd, uint64_t offset, uint64_t length) {
+    RFile *f = fdmap_get(fd);
+    if (!direct_weight_file_p(f) || atomic_load(&g.weights_sealed) ||
+        !length || length > SSIZE_MAX || offset > f->size || length > f->size - offset)
+        return -1;
+    ResidentRange *r = calloc(1, sizeof *r);
+    if (!r) return -1;
+    r->data = malloc((size_t)length);
+    if (!r->data || direct_weight_read(f, r->data, (size_t)length, (off_t)offset) != (ssize_t)length) {
+        free(r->data); free(r); return -1;
+    }
+    r->file = f; r->offset = offset; r->length = length;
+    pthread_mutex_lock(&direct_weight_lock);
+    if (atomic_load(&g.weights_sealed)) {
+        pthread_mutex_unlock(&direct_weight_lock);
+        free(r->data); free(r); return -1;
+    }
+    r->next = resident_ranges; resident_ranges = r;
+    pthread_mutex_unlock(&direct_weight_lock);
+    return 0;
 }
 
 /* ---- interposed libc ---------------------------------------------------- */
@@ -2033,6 +2170,10 @@ static FILE *fopen_common(const char *path, const char *mode, FILE *(*fn)(const 
     RFile *f = rfind(rel);
     if (f) {
         if (strpbrk(mode, "wa+")) { errno = EROFS; return NULL; }
+        if (direct_weight_file_p(f)) {
+            fprintf(stderr, "[resident] weight stdio requires a bounded tensor reader: %s\n", f->rel);
+            errno = ENOTSUP; return NULL;
+        }
         /* stdio streams read sequentially behind our back; a model file
          * opened with fopen is small (config/tokenizer) — fetch it whole
          * so every later fread is a plain local read */
@@ -2067,6 +2208,7 @@ DIR *opendir(const char *path) {
 ssize_t pread(int fd, void *buf, size_t n, off_t off) {
     shim_resolve();
     RFile *f = fdmap_get(fd);
+    if (direct_weight_file_p(f)) return direct_weight_read(f, buf, n, off);
     if (f) {
         if (ensure_range(f, (uint64_t)off, n)) { errno = EIO; return -1; }
         atomic_fetch_add(&g.warm_reads, 1);
@@ -2078,6 +2220,7 @@ ssize_t pread(int fd, void *buf, size_t n, off_t off) {
 ssize_t pread64(int fd, void *buf, size_t n, off_t off) {
     shim_resolve();
     RFile *f = fdmap_get(fd);
+    if (direct_weight_file_p(f)) return direct_weight_read(f, buf, n, off);
     if (f) {
         if (ensure_range(f, (uint64_t)off, n)) { errno = EIO; return -1; }
         atomic_fetch_add(&g.warm_reads, 1);
@@ -2089,6 +2232,12 @@ ssize_t pread64(int fd, void *buf, size_t n, off_t off) {
 ssize_t read(int fd, void *buf, size_t n) {
     shim_resolve();
     RFile *f = fdmap_get(fd);
+    if (direct_weight_file_p(f)) {
+        off_t off = lseek(fd, 0, SEEK_CUR);
+        ssize_t got = direct_weight_read(f, buf, n, off);
+        if (got > 0 && lseek(fd, off + got, SEEK_SET) < 0) return -1;
+        return got;
+    }
     if (f) {
         off_t cur = lseek(fd, 0, SEEK_CUR);
         if (cur >= 0 && ensure_range(f, (uint64_t)cur, n)) { errno = EIO; return -1; }
@@ -2104,6 +2253,10 @@ ssize_t read(int fd, void *buf, size_t n) {
 static void *mmap_common(void *addr, size_t len, int prot, int flags, int fd,
                          off_t off, void *(*fn)(void *, size_t, int, int, int, off_t)) {
     RFile *f = fdmap_get(fd);
+    if (direct_weight_file_p(f)) {
+        fprintf(stderr, "[resident] file-backed weight mmap refused: %s\n", f->rel);
+        errno = ENOTSUP; return MAP_FAILED;
+    }
     if (f && ensure_range(f, (uint64_t)off, len)) { errno = EIO; return MAP_FAILED; }
     return fn(addr, len, prot, flags, fd, off);
 }

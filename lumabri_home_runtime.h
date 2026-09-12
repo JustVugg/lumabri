@@ -7,6 +7,13 @@
 #include "src/runtime/lumabri_prepare_progress.h"
 
 static char home_error[512];
+static int home_resident_required(void) {
+    const char *value = getenv("LUMABRI_RESIDENT_REQUIRED");
+    /* Household is resident by default. Explicit zero remains available to
+     * the legacy cache regression harness, not as an automatic fallback. */
+    if (!value) { setenv("LUMABRI_RESIDENT_REQUIRED", "1", 0); return 1; }
+    return value && !strcmp(value, "1");
+}
 static int home_fail(const char *fmt, ...) {
     va_list args; va_start(args, fmt);
     vsnprintf(home_error, sizeof home_error, fmt, args);
@@ -14,6 +21,7 @@ static int home_fail(const char *fmt, ...) {
     fprintf(stderr, "%s\n", home_error);
     return 1;
 }
+#include "src/runtime/lumabri_resident_plan.h"
 
 typedef struct {
     struct termios saved;
@@ -198,6 +206,7 @@ static int home_status_send(int fd, const LmbHomeTransaction *t, int segment_por
 typedef struct {
     LmbHomeTransaction transaction;
     unsigned thread_capacity;
+    int retained; /* owner's sharing lifetime, independent of any chat */
     int client, lease, weight_lease, segment_port, host_port, segment_ready, host_ready;
     pid_t segment, host;
     char bin_dir[1024], cache_base[1024], disk[512], ip[INET_ADDRSTRLEN];
@@ -216,6 +225,7 @@ static int home_weight_lease(const char *base) {
 }
 
 static void home_donor_release(HomeDonor *d, LmbHomePhase why, const char *reason) {
+    d->retained = 0;
     home_stop_child(&d->host); home_stop_child(&d->segment);
     if (d->segment_ready >= 0) { close(d->segment_ready); d->segment_ready = -1; }
     if (d->host_ready >= 0) { close(d->host_ready); d->host_ready = -1; }
@@ -227,6 +237,28 @@ static void home_donor_release(HomeDonor *d, LmbHomePhase why, const char *reaso
 
 static void home_donor_disconnect(HomeDonor *d, const char *reason) {
     home_donor_release(d, LMB_HOME_CLOSED, reason);
+    if (d->client >= 0) {
+        /* Best effort: the requester must see the lease/owner-stop reason,
+         * not just EOF after the reservation has disappeared. */
+        (void)home_status_send(d->client, &d->transaction, 0, 0);
+        lmb_close(d->client); d->client = -1;
+    }
+}
+
+static int home_donor_can_retain(const HomeDonor *d) {
+    return home_resident_required() && d->segment > 0 && d->transaction.reservation_held &&
+        (d->transaction.phase == LMB_HOME_READY ||
+         (!d->transaction.offer.runs_edge && d->transaction.phase == LMB_HOME_SEGMENT_READY));
+}
+
+/* A disappearing chatter is not permission to evict an owner's loaded model.
+ * Explicit CANCEL still rolls back a failed/incomplete plan; owner Stop and
+ * donor shutdown still free everything. Only fully prepared ranges survive. */
+static void home_donor_lost_requester(HomeDonor *d, const char *reason) {
+    if (!home_donor_can_retain(d)) { home_donor_disconnect(d, reason); return; }
+    d->retained = 1;
+    snprintf(d->transaction.reason, sizeof d->transaction.reason,
+             "Requester disconnected. Weights stay in RAM until you stop sharing.");
     if (d->client >= 0) { lmb_close(d->client); d->client = -1; }
 }
 
@@ -325,13 +357,14 @@ static void home_donor_screen(const HomeDonor *d, const char *name, uint64_t ram
     if (clear) {
         ui_begin("share resources");
         ui_printf(5, 5, UI_TEXT, "%s · up to %.1f GB RAM · CPU execution", name, ram / 1e9);
-        ui_text(7, 5, UI_SAND, lmb_home_phase_name(t->phase));
+        ui_text(7, 5, UI_SAND, d->retained ? "Weights retained in RAM; ready for another chat" : lmb_home_phase_name(t->phase));
         if (t->phase != LMB_HOME_IDLE) {
             char who[65]; lmb_hex(who, t->offer.requester, 32);
             ui_printf(10, 5, UI_TEXT, "Model: %s (%s)", t->offer.model, t->offer.model_type);
             ui_printf(12, 5, UI_MUTED, "Requester identity: %.24s…", who);
-            ui_printf(14, 5, UI_TEXT, "Layers %u–%u of %u · %.2f GB RAM · %.2f GB disk headroom",
-                t->offer.begin, t->offer.end - 1, t->offer.layers, t->offer.ram_bytes / 1e9, t->offer.disk_bytes / 1e9);
+            ui_printf(14, 5, UI_TEXT, "Layers %u–%u of %u · %.2f GB RAM · %.2f GB %s",
+                t->offer.begin, t->offer.end - 1, t->offer.layers, t->offer.ram_bytes / 1e9,
+                t->offer.disk_bytes / 1e9, home_resident_required() ? "metadata headroom" : "disk headroom");
             ui_printf(16, 5, UI_MUTED, "%u context · one session · %u threads · up to %u new tokens per turn", t->offer.context,
                       t->offer.threads < d->thread_capacity ? t->offer.threads : d->thread_capacity, t->offer.max_new);
             ui_text(18, 5, UI_MUTED, t->offer.runs_edge ?
@@ -343,25 +376,30 @@ static void home_donor_screen(const HomeDonor *d, const char *name, uint64_t ram
         }
         int y = ui_h >= 34 ? 23 : 20;
         if (t->phase == LMB_HOME_PENDING) {
-            ui_item(y, choice == 0, "Accept this request", "Reserve only the displayed resources for this plan.");
+            ui_item(y, choice == 0, "Accept this request", home_resident_required() ?
+                "Keep these weights in RAM until you stop sharing." : "Reserve only the displayed resources for this plan.");
             ui_item(y + 3, choice == 1, "Decline", "No weights or model state will be loaded.");
-        } else ui_item(y, 0, "Keep this window open to share", "Press Esc to stop sharing and release resources.");
+        } else ui_item(y, 0, "Keep this window open to share", d->retained ?
+            "Weights stay in RAM. Unload only to accept a different plan." :
+            "Press Esc to stop sharing and release resources.");
         ui_footer(t->reason[0] ? t->reason : d->log, t->phase == LMB_HOME_PENDING ?
-            "↑ ↓ choose   Enter confirm   Esc stop and return" : "Esc stop sharing and return");
+            "↑ ↓ choose   Enter confirm   Esc stop and return" :
+            d->retained ? "x unload model, keep sharing   Esc stop sharing" : "Esc stop sharing and return");
         if (ui_w < 60 || ui_h < 28) {
             ui_begin("share resources"); ui_text(5, 4, UI_SAND, "Resize to at least 60 × 28. Esc stops sharing.");
         }
         ui_present(); return;
     }
     printf("LUMABRI / SHARE RESOURCES\n\n%s · up to %.1f GB RAM · CPU\n\n%s\n",
-           name, ram / 1e9, lmb_home_phase_name(t->phase));
+           name, ram / 1e9, d->retained ? "Weights retained in RAM; ready for another chat" : lmb_home_phase_name(t->phase));
     if (t->phase != LMB_HOME_IDLE) {
         char who[65]; lmb_hex(who, t->offer.requester, 32);
         printf("\nRequester identity: %.24s…\nModel: %s (%s)\nLayers: %u–%u of %u\n"
-               "RAM budget: %.2f GB · estimated disk headroom: %.2f GB\n"
+               "RAM budget: %.2f GB · %s headroom: %.2f GB\n"
                "Context: %u · one session · %u threads · up to %u new tokens per turn\n",
                who, t->offer.model, t->offer.model_type, t->offer.begin,
                t->offer.end - 1, t->offer.layers, t->offer.ram_bytes / 1e9,
+               home_resident_required() ? "metadata" : "estimated disk",
                t->offer.disk_bytes / 1e9, t->offer.context,
                t->offer.threads < d->thread_capacity ? t->offer.threads : d->thread_capacity, t->offer.max_new);
         if (t->offer.runs_edge)
@@ -380,6 +418,9 @@ static int home_donor_offer(HomeDonor *d, int incoming, const char *tracker,
     (void)fcntl(incoming, F_SETFD, FD_CLOEXEC);
     lmb_set_io_timeout(incoming, home_control_io_ms(1000));
     if (lmb_secure_server(incoming)) return -1;
+    /* Handshake restores the general I/O timeout. Control messages need
+     * their own bound again, including idle preflight connections. */
+    lmb_set_io_timeout(incoming, home_control_io_ms(1000));
     LmbMsg m = {0}; LmbHomeOffer offer;
     int rc = lmb_recv(incoming, &m);
     const char *token = getenv("LUMABRI_TOKEN");
@@ -402,12 +443,14 @@ static int home_donor_offer(HomeDonor *d, int incoming, const char *tracker,
              !lmb_secure_peer_matches(incoming, offer.requester);
     }
     lmb_msg_free(&m);
-    if (!rc && d->client >= 0) {
+    if (!rc && (d->client >= 0 || d->retained)) {
         /* Reply against the NEW request ID without changing the admitted
          * transaction, its leases, or its controller connection. An EOF is
          * not a useful capacity signal to a second household chatter. */
         LmbHomeTransaction busy = { .offer = offer, .phase = LMB_HOME_REJECTED };
         snprintf(busy.reason, sizeof busy.reason,
+                 "%s", d->retained ?
+                 "BUSY: this model is still resident. Stop sharing before replacing its allocation." :
                  "BUSY: this computer already has an active household request.");
         (void)home_status_send(incoming, &busy, 0, 0);
         return -1; /* caller closes only this unadmitted connection */
@@ -428,6 +471,14 @@ static int home_donor_message(HomeDonor *d) {
         t->last_seen_ms = (uint64_t)(nowd() * 1000);
         switch (m.op) {
         case LMB_HOME_PULSE: break;
+        case LMB_HOME_DETACH:
+            if (!home_donor_can_retain(d)) {
+                rc = -1; break;
+            }
+            d->retained = 1;
+            snprintf(t->reason, sizeof t->reason,
+                     "Chat closed. Weights stay in RAM until this computer stops sharing.");
+            break;
         case LMB_HOME_CANCEL:
             home_donor_release(d, LMB_HOME_CLOSED, "The requester cancelled the plan."); break;
         case LMB_HOME_COMMIT:
@@ -444,10 +495,16 @@ static int home_donor_message(HomeDonor *d) {
         }
     }
     lmb_msg_free(&m);
-    return rc ? -1 : home_status_send(d->client, t, d->segment_port, d->host_port);
+    if (!rc) rc = home_status_send(d->client, t, d->segment_port, d->host_port);
+    if (d->retained) {
+        lmb_close(d->client); d->client = -1;
+        return 0; /* a lost acknowledgement must not unload prepared RAM */
+    }
+    return rc;
 }
 
 static int cmd_donor(int argc, char **argv) {
+    (void)home_resident_required();
     home_error[0] = 0;
     const char *tracker = NULL, *name = NULL, *disk = NULL;
     uint64_t limit = UINT64_MAX;
@@ -544,7 +601,7 @@ static int cmd_donor(int argc, char **argv) {
             }
         }
         if (d.client >= 0 && ready[1].fd == d.client && ready[1].revents && home_donor_message(&d))
-            home_donor_disconnect(&d, "The requester disconnected or sent an invalid command.");
+            home_donor_lost_requester(&d, "The requester disconnected or sent an invalid command.");
         int key = home_key();
         if (key == 'q' || key == 3 || key == 27) break;
         if (key == 1001 || key == 1002) { donor_choice = !donor_choice; redraw = 0; }
@@ -570,8 +627,8 @@ static int cmd_donor(int argc, char **argv) {
             if (d.client >= 0 && home_status_send(d.client, &d.transaction, 0, 0))
                 home_donor_disconnect(&d, "The requester disconnected.");
         }
-        if (lmb_home_expired(&d.transaction, (uint64_t)(nowd() * 1000)))
-            home_donor_disconnect(&d, "Request lease expired; resources released.");
+        if (!d.retained && lmb_home_expired(&d.transaction, (uint64_t)(nowd() * 1000)))
+            home_donor_lost_requester(&d, "Request lease expired before preparation completed.");
         if (d.segment > 0 && waitpid(d.segment, NULL, WNOHANG) == d.segment)
             home_donor_release(&d, LMB_HOME_FAILED, "Segment stopped. See the engine log.");
         if (d.host > 0 && waitpid(d.host, NULL, WNOHANG) == d.host)
@@ -596,23 +653,63 @@ typedef struct {
     uint32_t count, edge;
     pid_t source;
     _Atomic int stop, failed;
+    pthread_mutex_t status_lock, send_lock;
 } HomeSession;
+
+#define HOME_SESSION_INIT { .status_lock = PTHREAD_MUTEX_INITIALIZER, \
+                            .send_lock = PTHREAD_MUTEX_INITIALIZER }
+
+static int home_session_error(HomeSession *s, uint32_t i, const char *operation, int error) {
+    char detail[160] = {0};
+    snprintf(detail, sizeof detail, "%s at %.64s: %s (errno %d).",
+             operation, s->addresses[i], error ? strerror(error) : "connection closed", error);
+    pthread_mutex_lock(&s->status_lock);
+    if (!s->reason[i][0])
+        memcpy(s->reason[i], detail, sizeof detail);
+    pthread_mutex_unlock(&s->status_lock);
+    return -1;
+}
+
+/* One complete frame at a time, including plaintext diagnostic fixtures.
+ * The preparation UI may send COMMIT while the monitor sends a heartbeat. */
+static int home_session_send(HomeSession *s, uint32_t i, uint32_t op) {
+    pthread_mutex_lock(&s->send_lock);
+    int rc = lmb_send(s->fd[i], op, s->offers[i].id, 32, NULL, 0);
+    int error = errno;
+    pthread_mutex_unlock(&s->send_lock);
+    return rc ? home_session_error(s, i, "Cannot send control message", error) : 0;
+}
+
+static void home_session_snapshot(HomeSession *s, LmbHomePhase *phases, uint32_t *ports) {
+    pthread_mutex_lock(&s->status_lock);
+    memcpy(phases, s->phase, s->count * sizeof *phases);
+    memcpy(ports, s->host_port, s->count * sizeof *ports);
+    pthread_mutex_unlock(&s->status_lock);
+}
 
 static int home_session_receive(HomeSession *s, uint32_t i) {
     LmbMsg m = {0};
-    if (lmb_recv(s->fd[i], &m)) { lmb_msg_free(&m); return -1; }
+    errno = 0;
+    if (lmb_recv(s->fd[i], &m)) {
+        int error = errno; lmb_msg_free(&m);
+        return home_session_error(s, i, "Cannot receive donor status", error);
+    }
     LmbCur c = {m.body, m.body_len, 0};
     uint32_t version = 0, phase = 0, segment_port = 0, host_port = 0;
     int bad = m.op != LMB_HOME_STATUS || m.pay_len ||
         lmb_cur_u32(&c, &version) || version != LMB_HOME_VERSION || c.len - c.off < 32;
     if (!bad) { bad = memcmp(c.p + c.off, s->offers[i].id, 32); c.off += 32; }
+    char reason[160] = {0};
     if (!bad) bad = lmb_cur_u32(&c, &phase) || phase > LMB_HOME_CLOSED ||
         lmb_cur_u32(&c, &segment_port) || segment_port > 65535 ||
         lmb_cur_u32(&c, &host_port) || host_port > 65535 ||
-        lmb_inventory_string(&c, s->reason[i], sizeof s->reason[i]) || c.off != c.len;
+        lmb_inventory_string(&c, reason, sizeof reason) || c.off != c.len;
     lmb_msg_free(&m);
-    if (bad) return -1;
+    if (bad) return home_session_error(s, i, "Invalid donor status", EPROTO);
+    pthread_mutex_lock(&s->status_lock);
     s->phase[i] = (LmbHomePhase)phase; s->host_port[i] = host_port;
+    snprintf(s->reason[i], sizeof s->reason[i], "%s", reason);
+    pthread_mutex_unlock(&s->status_lock);
     return phase >= LMB_HOME_REJECTED ? -1 : 0;
 }
 
@@ -620,7 +717,7 @@ static int home_session_poll(HomeSession *s, int pulse) {
     struct pollfd fds[LMB_CLUSTER_MAX_NODES];
     for (uint32_t i = 0; i < s->count; i++) {
         fds[i] = (struct pollfd){s->fd[i], POLLIN, 0};
-        if (pulse && lmb_send(s->fd[i], LMB_HOME_PULSE, s->offers[i].id, 32, NULL, 0)) return -1;
+        if (pulse && home_session_send(s, i, LMB_HOME_PULSE)) return -1;
     }
     int n = poll(fds, s->count, 50);
     if (n < 0 && errno != EINTR) return -1;
@@ -645,10 +742,14 @@ static void *home_session_keepalive(void *arg) {
     return NULL;
 }
 
-static void home_session_close(HomeSession *s) {
+static void home_session_close(HomeSession *s, int retain_weights) {
     for (uint32_t i = 0; i < s->count; i++) {
         if (s->fd[i] < 0) continue;
-        (void)lmb_send(s->fd[i], LMB_HOME_CANCEL, s->offers[i].id, 32, NULL, 0);
+        if (retain_weights) {
+            if (lmb_send(s->fd[i], LMB_HOME_DETACH, s->offers[i].id, 32, NULL, 0) ||
+                home_session_receive(s, i))
+                fprintf(stderr, "[resident] Could not confirm retained allocation on %s. Check its donor screen.\n", s->names[i]);
+        } else (void)lmb_send(s->fd[i], LMB_HOME_CANCEL, s->offers[i].id, 32, NULL, 0);
         shutdown(s->fd[i], SHUT_RDWR); lmb_close(s->fd[i]); s->fd[i] = -1;
     }
     home_stop_child(&s->source);
@@ -695,7 +796,7 @@ static int home_request_chat(LmbTuiState *st, int selected) {
         if (!authenticated) return home_fail("Cannot authenticate %.64s at %.64s. %s No model was loaded.",
             nodes[i].name, nodes[i].addr, matched ? "Check the household key and whether the donor is responding in time." : "The donor identity changed; refresh the computer list.");
     }
-    HomeSession s = {0};
+    HomeSession s = HOME_SESSION_INIT;
     for (uint32_t i = 0; i < LMB_CLUSTER_MAX_NODES; i++) s.fd[i] = -1;
     char kp[1024], pkhex[65], idhex[65];
     uint8_t sk[64], pk[32], id[32];
@@ -724,12 +825,13 @@ static int home_request_chat(LmbTuiState *st, int selected) {
     HomeTerminal term; home_terminal_begin(&term);
     g_stopping = 0; install_chat_signal_handlers(); signal(SIGPIPE, SIG_IGN);
     s.source = home_spawn(source_argv, NULL, logfile, NULL, source_listener);
-    int result = -1;
+    int result = -1, prepared = 0, heartbeat_started = 0;
+    pthread_t heartbeat;
     const char *stage = "starting the checkpoint source";
     if (s.source <= 0) goto done;
     LmbModelIdentity identity;
     Swarm swarm = {0};
-    double started = nowd(), pulse = 0;
+    double started = nowd();
     LmbPrepareProgress progress = {0};
     int found = 0;
     stage = "indexing and verifying the checkpoint source";
@@ -792,7 +894,13 @@ static int home_request_chat(LmbTuiState *st, int selected) {
         }
         o->ram_bytes = reservation.total_bytes;
         o->edge_ram_bytes = reservation.edge_bytes;
-        o->disk_bytes = lmb_budget_add(lmb_budget_add(swarm.total_bytes, swarm.total_bytes), UINT64_C(256) << 20);
+        /* Resident weights never occupy the file mirror. Keep a bounded
+         * allowance for metadata, signed block hashes, sparse-file maps and
+         * logs; do not reserve two complete checkpoints on each donor. */
+        uint64_t disk_input = home_resident_required() ? swarm.metadata_bytes : swarm.total_bytes;
+        o->disk_bytes = lmb_budget_add(lmb_budget_add(disk_input, disk_input), UINT64_C(256) << 20);
+        if (home_resident_required())
+            o->disk_bytes = lmb_budget_add(o->disk_bytes, swarm.total_bytes / 1024);
         if (o->disk_bytes == UINT64_MAX) {
             home_fail("The model's disk requirements exceed the supported size.");
             goto done;
@@ -812,6 +920,7 @@ static int home_request_chat(LmbTuiState *st, int selected) {
             home_fail("Cannot reach %.64s at %.64s while sending the request: %s.", nodes[n].name, nodes[n].addr, lmb_connect_why());
             goto done;
         }
+        lmb_set_io_timeout(fd, home_control_io_ms(1000));
         (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
         if (!lmb_secure_peer_matches(fd, recipient) || lmb_auth(fd)) {
             home_fail("Authentication failed while requesting %.64s. Refresh the household identity and key.", nodes[n].name);
@@ -838,14 +947,27 @@ static int home_request_chat(LmbTuiState *st, int selected) {
         }
     }
     if (!have_edge || !s.count) goto done;
+    /* Preparation must keep leases alive even if terminal output blocks or
+     * progress rendering is slow. The monitor is the sole status reader
+     * from approval through chat; the UI consumes mutex-protected snapshots. */
+    if (pthread_create(&heartbeat, NULL, home_session_keepalive, &s)) {
+        home_fail("Cannot start the household connection monitor."); goto done;
+    }
+    heartbeat_started = 1;
     int committed = 0, host_started = 0, first_visible = 0;
+    double last_draw = 0;
     started = nowd();
     while (!g_stopping && nowd() - started < 900) {
         stage = !committed ? "waiting for donor approval" :
                 !host_started ? "loading the approved segments" : "starting the chat host";
-        int send_pulse = nowd() - pulse >= 1;
-        if (send_pulse) pulse = nowd();
-        if (home_session_poll(&s, send_pulse)) goto done;
+        if (atomic_load(&s.failed)) goto done;
+        LmbHomePhase phases[LMB_CLUSTER_MAX_NODES];
+        uint32_t host_ports[LMB_CLUSTER_MAX_NODES];
+        home_session_snapshot(&s, phases, host_ports);
+        /* Never repaint thousands of full frames per second while socket
+         * statuses arrive. Terminal backpressure is independent of leases. */
+        if (nowd() - last_draw < .1) { (void)poll(NULL, 0, 10); continue; }
+        last_draw = nowd();
         lmb_prepare_read(&progress, logfile, nowd());
         if (term.active) {
             ui_begin("prepare chat");
@@ -861,7 +983,9 @@ static int home_request_chat(LmbTuiState *st, int selected) {
             if (committed) {
                 ui_text(10, 5, UI_SAND, bar);
                 ui_text(12, 5, UI_TEXT, detail);
-                ui_text(13, 5, UI_MUTED, "Weights load on demand; cache reuse and retries change transfer totals.");
+                ui_text(13, 5, UI_MUTED, home_resident_required() ?
+                    "All assigned weights load into RAM before chat. They stay until you stop sharing." :
+                    "Weights load on demand; cache reuse and retries change transfer totals.");
             }
         } else {
             printf("%s\n", loading);
@@ -877,10 +1001,10 @@ static int home_request_chat(LmbTuiState *st, int selected) {
             if (term.active) {
                 if ((int)i >= first_visible && (int)i < first_visible + visible)
                     ui_printf(first_row + ((int)i - first_visible) * 2, 5, UI_TEXT,
-                              "%s · %s", s.names[i], lmb_home_phase_name(s.phase[i]));
-            } else printf("%-20s %s\n", s.names[i], lmb_home_phase_name(s.phase[i]));
-            if (s.phase[i] != LMB_HOME_ACCEPTED) accepted = 0;
-            if (s.phase[i] < LMB_HOME_SEGMENT_READY) ready = 0;
+                              "%s · %s", s.names[i], lmb_home_phase_name(phases[i]));
+            } else printf("%-20s %s\n", s.names[i], lmb_home_phase_name(phases[i]));
+            if (phases[i] != LMB_HOME_ACCEPTED) accepted = 0;
+            if (phases[i] < LMB_HOME_SEGMENT_READY) ready = 0;
         }
         if (!term.active) { puts("\nNothing loads until every selected computer accepts.\n[q] Cancel and release all computers"); fflush(stdout); }
         if (term.active) { ui_footer("Chat starts only when the entire approved chain is ready.",
@@ -890,14 +1014,14 @@ static int home_request_chat(LmbTuiState *st, int selected) {
         if (key == 1002 && first_visible + visible < (int)s.count) first_visible++;
         if (!committed && accepted) {
             for (uint32_t i = 0; i < s.count; i++)
-                if (lmb_send(s.fd[i], LMB_HOME_COMMIT, id, 32, NULL, 0)) goto done;
+                if (home_session_send(&s, i, LMB_HOME_COMMIT)) goto done;
             committed = 1;
         }
         if (committed && !host_started && ready) {
-            if (lmb_send(s.fd[s.edge], LMB_HOME_START_HOST, id, 32, NULL, 0)) goto done;
+            if (home_session_send(&s, s.edge, LMB_HOME_START_HOST)) goto done;
             host_started = 1;
         }
-        if (host_started && s.phase[s.edge] == LMB_HOME_READY && s.host_port[s.edge]) {
+        if (host_started && phases[s.edge] == LMB_HOME_READY && host_ports[s.edge]) {
             LmbExecutionView execution = { .count = s.count, .layers = m->shape.layers };
             for (uint32_t i = 0; i < s.count; i++) {
                 LmbExecutionNode *node = &execution.nodes[i];
@@ -915,16 +1039,29 @@ static int home_request_chat(LmbTuiState *st, int selected) {
             const char *colon = strrchr(s.addresses[s.edge], ':');
             if (!colon) goto done;
             snprintf(host, sizeof host, "%.*s:%u", (int)(colon - s.addresses[s.edge]),
-                     s.addresses[s.edge], s.host_port[s.edge]);
+                     s.addresses[s.edge], host_ports[s.edge]);
             snprintf(ctx, sizeof ctx, "%u", st->context);
             snprintf(token_limit, sizeof token_limit, "%u", s.offers[s.edge].max_new);
             home_terminal_end(&term);
-            pthread_t heartbeat;
-            if (pthread_create(&heartbeat, NULL, home_session_keepalive, &s)) goto done;
             char expected_host[65]; lmb_hex(expected_host, edge_pk, 32);
+            char expected_root[65]; lmb_hex(expected_root, identity.root, 32);
             char *chat_argv[] = {"--host", host, "--model", model, "--ctx", ctx,
                                  "--role", "chat", "--max-new", token_limit, "--host-key", expected_host,
-                                 "--tracker", st->tracker, "--calibrate"};
+                                 "--tracker", st->tracker, "--host-root", expected_root, "--calibrate"};
+            if (home_resident_required()) {
+                LmbResidentPlan saved = {.context = st->context, .max_new = s.offers[s.edge].max_new,
+                    .execution = execution};
+                snprintf(saved.tracker, sizeof saved.tracker, "%s", st->tracker);
+                snprintf(saved.host, sizeof saved.host, "%s", host);
+                snprintf(saved.host_key, sizeof saved.host_key, "%s", expected_host);
+                snprintf(saved.root, sizeof saved.root, "%s", expected_root);
+                snprintf(saved.model, sizeof saved.model, "%s", model);
+                if (home_resident_plan_save(&saved)) {
+                    atomic_store(&s.stop, 1); pthread_join(heartbeat, NULL);
+                    home_fail("Cannot save the approved resident plan. Check home-directory permissions; no chat was started.");
+                    goto done;
+                }
+            }
             g_execution_view = &execution;
             LmbCalibration measurement = {0}; char measurement_dir[1200];
             LmbTuiModel measured = *m;
@@ -960,17 +1097,19 @@ static int home_request_chat(LmbTuiState *st, int selected) {
                         !m->content_id[0] ? "checkpoint content identity is unavailable" :
                         !st->build_id[0] ? "client binary identity is unavailable" :
                         "the approved plan's runtime identities are incomplete or changed");
-            result = cmd_chat(st->quick_calibration ? 15 : 14, chat_argv);
+            prepared = 1; /* From here on, conversation failure is not allocation rollback. */
+            result = cmd_chat(st->quick_calibration ? 17 : 16, chat_argv);
             g_recording_calibration = NULL; g_calibration_directory = NULL;
             g_execution_view = NULL;
-            atomic_store(&s.stop, 1); pthread_join(heartbeat, NULL);
             if (atomic_load(&s.failed)) result = -1;
             break;
         }
     }
 done:
+    if (heartbeat_started) { atomic_store(&s.stop, 1); pthread_join(heartbeat, NULL); }
+    if (atomic_load(&s.failed)) result = -1;
     home_terminal_end(&term);
-    home_session_close(&s);
+    home_session_close(&s, prepared && home_resident_required());
     if (result) {
         if (!home_error[0]) {
             for (uint32_t i = 0; i < s.count; i++) if (s.reason[i][0]) {
@@ -978,11 +1117,16 @@ done:
                 break;
             }
         }
-        if (!home_error[0]) home_fail("Chat stopped while %s. Resources were released. Source log: %.240s", stage, logfile);
-        fprintf(stderr, "Household plan did not complete; allocations have been cancelled. Source log: %s\n", logfile);
+        const char *outcome = prepared && home_resident_required() ?
+            "Healthy resident allocations remain loaded until their owner stops sharing." :
+            "Incomplete allocations have been cancelled.";
+        if (!home_error[0]) home_fail("Chat stopped while %s. %s Source log: %.240s", stage, outcome, logfile);
+        fprintf(stderr, "Household chat stopped. %s Source log: %s\n", outcome, logfile);
         for (uint32_t i = 0; i < s.count; i++) if (s.reason[i][0])
             fprintf(stderr, "%s: %s\n", s.names[i], s.reason[i]);
     }
+    pthread_mutex_destroy(&s.send_lock);
+    pthread_mutex_destroy(&s.status_lock);
     return result;
 }
 #endif

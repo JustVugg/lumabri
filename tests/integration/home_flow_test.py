@@ -4,6 +4,7 @@ Requires one actual small planner-supported checkpoint (not a mock engine).
 This loopback integration gate is not a physical LAN or native-platform test.
 """
 import argparse
+import codecs
 import fcntl
 import json
 import os
@@ -21,6 +22,22 @@ import termios
 import time
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+class TerminalText:
+    """PTY reads are byte fragments, not UTF-8 characters or output lines."""
+    def __init__(self):
+        self.text = ""
+        self.decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+
+    def feed(self, data):
+        self.text = (self.text + self.decoder.decode(data))[-200000:]
+
+
+def hosted_turn_complete(text):
+    # cmd_chat prints timing, transport and final newline in separate calls.
+    # A metric prefix is not completion, even on a fast tiny checkpoint.
+    return re.search(r" · hosted stream · no local checkpoint(?:\x1b\[[0-9;]*m)*\r?\n", text) is not None
 
 
 def main():
@@ -51,7 +68,22 @@ def main():
                         help="select a donor below the process floor; require a valid plan on the other donor only")
     parser.add_argument("--kill-donor", action="store_true",
                         help="kill a donor TUI after generation; assert engines and leases are released")
+    parser.add_argument("--crash-requester", action="store_true",
+                        help="resident contract: lose the chatter, retain weights beyond the control lease, reconnect")
+    parser.add_argument("--resident-default", action="store_true",
+                        help="exercise resident household without setting a resident environment flag")
+    parser.add_argument("--stall-preparation-ui", action="store_true",
+                        help="stop reading requester output beyond the lease interval")
+    parser.add_argument("--prepare-timeout", type=int, default=180,
+                        help="bounded indexing/loading deadline for a large-checkpoint diagnostic (max 900 seconds)")
     args = parser.parse_args()
+    if not 30 <= args.prepare_timeout <= 900:
+        parser.error("--prepare-timeout must be between 30 and 900 seconds")
+    resident = args.resident_default or os.environ.get("LUMABRI_RESIDENT_REQUIRED") == "1"
+    if resident and args.repeat_cached:
+        parser.error("resident weights persist in RAM; --repeat-cached exercises the legacy disk cache")
+    if args.crash_requester and (not resident or args.kill_donor or args.repeat_cached):
+        parser.error("--crash-requester requires the resident path and no other termination mode")
     if args.expect_quick_calibration and any((args.expect_disjoint_plans, args.repeat_cached,
         args.expect_no_fit, args.expect_unused_donor, args.kill_donor,
         args.expect_calibration, args.expect_metrics, args.expect_greedy)):
@@ -104,7 +136,10 @@ def main():
             ram = 0.1 if args.expect_unused_donor and name == "donor-b" else args.donor_ram_gb
             settings.write_text(f"tracker={addr}\ntoken=household-test\nmodels={Path(args.models_dir).resolve()}\nram={ram}\n")
             settings.chmod(0o600)
-        return {**os.environ, "HOME": str(home), "LUMABRI_ENCRYPT": "1",
+        result = {**os.environ, "HOME": str(home), "LUMABRI_ENCRYPT": "1",
+                # The default product path is resident. Keep legacy cache
+                # regressions explicit; resident tests exercise the TUI too.
+                "LUMABRI_RESIDENT_REQUIRED": "1" if resident else "0",
                 "LUMABRI_HOME_PORT_BASE": str(service_base + 16 * service_slots.get(name, 0)),
                 "LUMABRI_PEER_KEY": str(home / "peer.key"),
                 "LUMABRI_KNOWN_HOSTS": str(home / "known.hosts"),
@@ -113,10 +148,14 @@ def main():
                 "LUMABRI_ENGINE_BACKEND": "cuda",
                 "LUMABRI_RAM_RESERVE_MB": "256", "LUMABRI_IO_TIMEOUT_MS": "10000",
                 "OMP_NUM_THREADS": "2", "COLI_NO_OMP_TUNE": "1", "PIN": "off"}
+        if args.resident_default:
+            result.pop("LUMABRI_RESIDENT_REQUIRED", None)
+        return result
 
-    class Terminal:
+    class Terminal(TerminalText):
         def __init__(self, name, argv, environment_name=None):
-            self.name, self.text = name, ""
+            super().__init__()
+            self.name = name
             self.master, slave = pty.openpty()
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 35, 140, 0, 0))
             self.log = open(tmp / f"{name}.terminal.log", "wb")
@@ -135,8 +174,7 @@ def main():
                 if not data:
                     break
                 self.log.write(data); self.log.flush()
-                self.text += data.decode("utf-8", errors="replace")
-                self.text = self.text[-200000:]
+                self.feed(data)
 
         def send(self, keys):
             os.write(self.master, keys.encode())
@@ -214,8 +252,12 @@ def main():
         unreachable_socket.bind(("127.0.0.1", 0))
         unreachable = unreachable_socket.getsockname()[1]
         with open(tmp / "offline-worker.log", "wb") as log:
+            # This unreachable advert must fit the *whole* model, unlike
+            # each real donor below, which only owns a slice. No resources
+            # can be allocated on this socket; never increase real budgets.
+            offline_ram = args.donor_ram_gb * (1 if args.expect_no_fit else 2)
             offline_worker = subprocess.Popen(["./lumabri", "worker", "--join", addr,
-                "--name", "offline-test-donor", "--ram-gb", str(args.donor_ram_gb), "--disk", str(tmp),
+                "--name", "offline-test-donor", "--ram-gb", str(offline_ram), "--disk", str(tmp),
                 "--control-address", f"127.0.0.1:{unreachable}"], cwd=ROOT,
                 env=env("offline-worker"), stdout=log, stderr=subprocess.STDOUT)
         children.append(offline_worker)
@@ -306,7 +348,7 @@ def main():
                 return False
 
             def completed_turn(chat):
-                return chat.has("hosted stream") and chat.has("no local checkpoint")
+                return hosted_turn_complete(chat.text)
 
             def reject_busy(label):
                 collision = Terminal(label, base, "reject")
@@ -419,7 +461,7 @@ def main():
             assert reject.p.poll() is None, "accepted alternative failed"
             assert "Approved Segment plan: 1 compute donor" in reject.text
             reject.send("hi\n")
-            until(lambda: reject.has("hosted stream · no local checkpoint") or reject.p.poll() is not None,
+            until(lambda: hosted_turn_complete(reject.text) or reject.p.poll() is not None,
                   seconds=120, message="alternative plan did not finish real generation")
             assert reject.p.poll() is None
             log = (tmp / "donor-a/.lumabri/home/engines.log").read_text(errors="replace")
@@ -437,7 +479,7 @@ def main():
             print("HOME ALTERNATIVE PLAN: PASS (two selected, one used; real generation, no unused-donor offer, cleanup)", flush=True)
             return
         until(lambda: a.has("Waiting for your approval") and b.has("Waiting for your approval"),
-              seconds=60, message="offers never reached both donor TUIs")
+              seconds=args.prepare_timeout, message="offers never reached both donor TUIs")
         assert not engines_started("donor-a") and not engines_started("donor-b")
         a.send("\x1b[A\r")
         until(lambda: a.has("Accepted; waiting"))
@@ -455,15 +497,28 @@ def main():
         chat.send("\x1b[B\r\x1b[B\r\t")
         time.sleep(.5)
         chat.send("\r\r")
-        until(lambda: a.has("Waiting for your approval") and b.has("Waiting for your approval"), seconds=60)
+        until(lambda: a.has("Waiting for your approval") and b.has("Waiting for your approval"), seconds=args.prepare_timeout)
         a.send("\x1b[A\r"); b.send("\x1b[A\r")
-        until(lambda: chat.has("receives the text") or chat.p.poll() is not None, seconds=180,
+        if args.stall_preparation_ui:
+            # Keep donor terminals draining but let requester output block.
+            # Do not call until()/chat.has(): those would drain its PTY.
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                a.drain(); b.drain()
+                assert "lease expired" not in a.text.lower() + b.text.lower(), "render backpressure expired a healthy donor"
+                assert chat.p.poll() is None, "requester died while its terminal was paused"
+                time.sleep(.05)
+            print("HOME PREPARATION MONITOR: terminal paused 20s; donor leases stayed alive", flush=True)
+        until(lambda: chat.has("receives the text") or chat.p.poll() is not None, seconds=args.prepare_timeout,
               message="accepted plan did not reach real hosted chat")
         assert chat.p.poll() is None, "accepted plan failed; inspect donor engine logs"
-        assert "Transferring weights and loading approved segments" in chat.text
-        assert "MB served from this computer" in chat.text
-        assert "remaining time unavailable" in chat.text, "on-demand transfer invented a denominator"
-        assert "Loading the chat host; segments are ready" in chat.text
+        # Terminal.text is a bounded tail; repeated redraws during a slower
+        # native load may legitimately remove an earlier progress phase.
+        preparation = (tmp / "chatter.terminal.log").read_text(errors="replace")
+        assert "Transferring weights and loading approved segments" in preparation
+        assert "MB served from this computer" in preparation
+        assert "remaining time unavailable" in preparation, "transfer invented a denominator"
+        assert "Loading the chat host; segments are ready" in preparation
         if args.expect_greedy:
             assert chat.has("greedy decoding"), "greedy-only capability was not shown to the client"
         until(lambda: chat.has("/experts shows tracker activity."),
@@ -478,9 +533,9 @@ def main():
         chat.send("\t\n")
         until(lambda: chat.has("Tab completes commands"), message="slash completion did not execute help")
         chat.send("hi\n")
-        until(lambda: chat.has("tok/s") or chat.has("generated tokens") or chat.has("prompt plus output exceeds context") or
+        until(lambda: hosted_turn_complete(chat.text) or chat.has("prompt plus output exceeds context") or
               chat.has("logits are unavailable for sampling") or chat.has("Segment generation failed") or
-              chat.has("invalid token count") or chat.p.poll() is not None, seconds=120,
+              chat.has("invalid token count") or chat.has("cannot read DeepSeek V4 embedding") or chat.p.poll() is not None, seconds=120,
               message="real model did not finish a response")
         assert chat.has("tok/s") or chat.has("generated tokens"), "engine failed during generation"
         if args.expect_metrics:
@@ -541,12 +596,30 @@ def main():
             a.p.kill(); a.p.wait(timeout=5)
             until(lambda: chat.p.poll() is not None, seconds=45,
                   message="lost donor left hosted chat blocked")
-            until(lambda: b.has("Released"), message="surviving donor was not released")
+            if resident:
+                until(lambda: b.has("Weights retained in RAM"), message="a failed chat evicted the healthy donor")
+                for lock in ("compute-donor.lock", "home/weights.lock"):
+                    with open(tmp / "donor-b/.lumabri" / lock, "r") as lease:
+                        try:
+                            fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        except BlockingIOError:
+                            pass
+                        else:
+                            raise AssertionError("the healthy donor lost its resident reservation")
+                b.text = ""; b.send("x")
+            until(lambda: b.has("Released"), message="surviving donor was not released after owner Stop")
         else:
-            chat.send("/quit\n")
+            if args.crash_requester:
+                chat.p.kill()
+            else:
+                chat.send("/quit\n")
             until(lambda: chat.p.poll() is not None, message="quit left hosted chat blocked")
-            assert chat.p.returncode == 0
-            until(lambda: a.has("Released") and b.has("Released"), message="donor leases were not released")
+            assert chat.p.returncode == (-signal.SIGKILL if args.crash_requester else 0)
+            if resident:
+                until(lambda: a.has("Weights retained in RAM") and b.has("Weights retained in RAM"),
+                      message="closing chat unloaded the resident donor allocation")
+            else:
+                until(lambda: a.has("Released") and b.has("Released"), message="donor leases were not released")
         def leases_released():
             for name in ("donor-a", "donor-b"):
                 for lock in ("compute-donor.lock", "home/weights.lock"):
@@ -556,7 +629,77 @@ def main():
                         except BlockingIOError:
                             return False
             return True
-        until(leases_released, message="a child retained a donor resource lease after closing chat")
+        if resident and not args.kill_donor:
+            assert not leases_released(), "resident allocation lost its memory reservation"
+            if args.crash_requester:
+                # Outlive both the old 15-second control lease and the
+                # tracker's 30-second checkpoint-source advert TTL.
+                deadline = time.monotonic() + 35
+                while time.monotonic() < deadline:
+                    for terminal in terminals:
+                        terminal.drain()
+                    assert not leases_released(), "control lease expiration evicted resident weights"
+                    time.sleep(.1)
+            engine_logs = [tmp / name / ".lumabri/home/engines.log" for name in ("donor-a", "donor-b")]
+            def reset_count():
+                return sum(path.read_text(errors="replace").count("conversation reset; resident weights retained")
+                           for path in engine_logs)
+            until(lambda: reset_count() >= 1, message="host reloaded weights instead of resetting its conversation")
+            boot_counts = {path: path.read_text(errors="replace").count("weight input sealed") for path in engine_logs}
+            endpoint = re.search(r"host (127\.0\.0\.1:[0-9]+) ·", chat.text)
+            assert endpoint, "the original host endpoint is missing"
+            # A persisted address is not proof of the same checkpoint. Reuse
+            # must reject a stale root even with the correct pinned peer key.
+            record = (tmp / "chatter/.lumabri/resident-plan").read_bytes()
+            offset = 4
+            strings = []
+            for _ in range(5):
+                length = struct.unpack_from("<H", record, offset)[0]
+                offset += 2
+                strings.append(record[offset:offset+length].decode())
+                offset += length
+            assert strings[1] == endpoint.group(1)
+            wrong_root = ("1" if strings[3][0] == "0" else "0") + strings[3][1:]
+            refused = subprocess.run(["./lumabri", "chat", "--host", strings[1],
+                "--host-key", strings[2], "--host-root", wrong_root, "--max-new", "4"],
+                cwd=ROOT, env=env("chatter"), input="must not reach the engine\n", text=True,
+                capture_output=True, timeout=20)
+            assert refused.returncode and "checkpoint differs" in refused.stderr, refused.stderr
+            # This rejected connection creates no conversation; the host may
+            # complete its harmless reset before the next accepted client.
+            until(lambda: reset_count() >= 2, message="rejected stale-root client left the host busy")
+            resets_before_resume = reset_count()
+            # The original requester and its checkpoint-serving child have
+            # exited. Reconnect with the same accepted identity: no source,
+            # no donor restart and no checkpoint download are available.
+            resume = Terminal("resident-resume", ["./lumabri"], "chatter")
+            until(lambda: resume.has("New conversation · retained model"),
+                  message="TUI did not recover the approved resident plan after restart")
+            resume.send("\r")
+            until(lambda: resume.has("receives the text") or resume.p.poll() is not None)
+            assert resume.p.poll() is None, "retained host cannot accept a second conversation"
+            resume.send("hi\n")
+            until(lambda: hosted_turn_complete(resume.text) or resume.p.poll() is not None,
+                  seconds=120, message="resident generation failed with the weight source offline")
+            assert resume.p.poll() is None and resume.has("generated tokens"), "resident second turn did not generate"
+            resume.text = ""
+            resume.send("/quit\n")
+            until(lambda: resume.has("your workspace"), message="chat did not return to the workspace")
+            resume.send("\x1b")
+            until(lambda: resume.p.poll() is not None)
+            assert resume.p.returncode == 0
+            until(lambda: reset_count() > resets_before_resume, message="second conversation was not reset in place")
+            for path, count in boot_counts.items():
+                assert path.read_text(errors="replace").count("weight input sealed") == count, "resident engine rebooted"
+            for donor in ("donor-a", "donor-b"):
+                for weight in (tmp / donor).rglob("*.safetensors"):
+                    assert weight.stat().st_blocks == 0, f"weight payload reached disk: {weight}"
+            assert not leases_released(), "second chat released the resident reservation"
+            print("HOME RESIDENT PASS: second private conversation, source offline, no reload, no weight mirror writes", flush=True)
+            a.text = b.text = ""
+            a.send("x"); b.send("x")
+            until(lambda: a.has("Released") and b.has("Released"), message="owner Stop did not unload weights")
+        until(leases_released, message="an allocation retained its lease after explicit release")
         if args.expect_calibration:
             records = list((tmp / "chatter/.lumabri/calibrations").glob("*.cal"))
             assert len(records) == 1, "completed real generation did not save a bound measurement"
@@ -636,7 +779,7 @@ def main():
                 # generation finished; old catalogue output is not a response.
                 repeat.text = ""
                 repeat.send("hi\n")
-                until(lambda: (repeat.has("hosted stream") and repeat.has("no local checkpoint")) or repeat.p.poll() is not None,
+                until(lambda: hosted_turn_complete(repeat.text) or repeat.p.poll() is not None,
                       seconds=120, message="model did not finish a response after cache reuse/refetch")
                 assert repeat.p.poll() is None and (repeat.has("tok/s") or repeat.has("generated tokens"))
                 stats = source_stats(repeat)

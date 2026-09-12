@@ -62,7 +62,7 @@ check-warnings:
 		CFLAGS='$(CFLAGS) -Werror'
 
 SECURE_DEPS = lumabri_secure.h lumabri_crypto.h
-HOME_NET_DEPS = lumabri_home_net.h lumabri_home_discovery.h lumabri_platform.h lumabri_wakeup.h lumabri_runtime_probe.h
+HOME_NET_DEPS = lumabri_home_net.h lumabri_home_discovery.h lumabri_platform.h lumabri_wakeup.h lumabri_runtime_probe.h src/runtime/lumabri_resident_plan.h
 MACHINE_SRC = lumabri_machine.c
 MACHINE_DEPS = lumabri_machine.h $(MACHINE_SRC)
 PLANNER_ADAPTER_DEPS = $(wildcard planner_adapters/*.h)
@@ -487,6 +487,12 @@ test_home: tests/c/test_home.c lumabri_home.h lumabri_inventory.h lumabri_famili
 test_chat_ui: $(HOME_NET_DEPS) $(SECURE_DEPS) src/runtime/lumabri_probe_deadline.h tests/c/test_chat_ui.c lumabri.c src/ui/lumabri_tui.c src/ui/lumabri_tui.h src/ui/lumabri_visual.h src/ui/lumabri_chat_editor.h src/ui/lumabri_execution_view.h lumabri_home_runtime.h src/ui/lumabri_home_ui.h lumabri_ready.h lumabri_cluster.h lumabri_memory_budget.h lumabri_checkpoint_inventory.h lumabri_content.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_chat_ui.c src/ui/lumabri_tui.c lumabri_machine.c -o $@
 
+.PHONY: test-home-monitor
+test-home-monitor: $(HOME_NET_DEPS) $(SECURE_DEPS) tests/c/test_home_monitor.c lumabri.c lumabri_home_runtime.h
+	mkdir -p build/tests
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_home_monitor.c src/ui/lumabri_tui.c lumabri_machine.c -o build/tests/home-monitor
+	./build/tests/home-monitor
+
 test-ready-pipe: tests/c/test_ready_pipe.c lumabri_ready.h
 	mkdir -p build/tests
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_ready_pipe.c -o build/tests/ready-pipe
@@ -504,6 +510,7 @@ test-home-network: tests/c/test_home_network.c $(HOME_NET_DEPS) src/ui/lumabri_v
 .PHONY: test-home-network
 
 test-chat-ui: lumabri test_chat_ui test-ready-pipe
+	./test_chat_ui resident-plan
 	python3 tests/integration/chat_ui_test.py
 	python3 tests/ui_text_test.py
 	python3 tests/integration/workspace_navigation_test.py
@@ -601,11 +608,11 @@ HYBRID_ENGINE_DIR = build/segment-hybrid-colibri
 COLIBRI_SEGMENT_LIB = $(HYBRID_ENGINE_DIR)/build/segment/libcolibri_segment_edge.a
 HYBRID_ROOT = $(abspath .)
 SEGMENT_CFLAGS = $(CFLAGS) -I. -I$(ENGINE) $(OMP_FLAGS)
-SEGMENT_COMMON = segment_colibri.h src/runtime/lumabri_backend_policy.h lumabri_segment.c lumabri_segment.h \
+SEGMENT_COMMON = segment_colibri.h src/runtime/lumabri_resident.h src/runtime/lumabri_backend_policy.h lumabri_segment.c lumabri_segment.h \
 		lumabri_segment_discovery.c lumabri_segment_discovery.h \
 		lumabri_proto.h lumabri_sign.h lumabri_sha.h $(SECURE_DEPS)
 
-HYBRID_PATCH_INPUTS = engine_patches/make_patches.py \
+HYBRID_PATCH_INPUTS = tools/prepare_resident_adapters.py engine_patches/make_patches.py \
 	engine_patches/deepseek_v4_p2p.py $(wildcard engine_patches/*-p2p.diff) \
 	lumabri_client.h lumibri_client.h lumi_v4_ext.h lumi_v4_bridge.c \
 	lumabri_proto.h lumabri_sign.h lumabri_secure.h lumabri_crypto.h \
@@ -632,6 +639,7 @@ $(HYBRID_ENGINE_DIR)/.prepared: Makefile build/segment-options build/segment-sou
 	python3 engine_patches/make_patches.py --engine-dir $(ENGINE) --apply-one olmoe.c --out $(HYBRID_ENGINE_DIR)/olmoe.c
 	python3 engine_patches/make_patches.py --engine-dir $(ENGINE) --apply-one qwen36.c --out $(HYBRID_ENGINE_DIR)/qwen36.c
 	python3 engine_patches/deepseek_v4_p2p.py $(ENGINE)/deepseek_v4.c $(HYBRID_ENGINE_DIR)/deepseek_v4.c
+	python3 tools/prepare_resident_adapters.py --copy $(HYBRID_ENGINE_DIR)
 	touch $@
 
 build/segment_hybrid_bridge.o: build/segment-options lumi_v4_bridge.c $(HYBRID_PATCH_INPUTS)
@@ -780,9 +788,11 @@ test: all test_weight_cache test_key_rotation test_hedge test_local_fallback tes
 	bash ./tests/integration/catalog_test.sh
 	./test_inventory
 	./test_home
+	$(MAKE) test-home-monitor
 	$(MAKE) test-ready-pipe
 	$(MAKE) test-home-network
 	python3 ./tests/integration/chat_ui_test.py
+	python3 ./tests/integration/home_flow_output_test.py
 	python3 ./tests/integration/package_household_test.py
 	python3 ./tests/integration/prepare_engine_source_test.py
 	python3 ./tests/integration/preload_path_test.py
