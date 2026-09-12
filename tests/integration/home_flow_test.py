@@ -437,6 +437,10 @@ def main():
                   message="simultaneous independent chats did not both generate")
             assert all(chat.p.poll() is None and completed_turn(chat) for chat in chats)
             chats[0].send("/quit\n")
+            if resident:
+                until(lambda: chats[0].p.poll() is not None and owners[0].has("Weights retained in RAM"))
+                assert lease_is_held(owners[0], "compute-donor.lock")
+                owners[0].send("x")  # only the owner's Stop releases resident weights
             until(lambda: chats[0].p.poll() is not None and owners[0].has("Released"))
             assert chats[0].p.returncode == 0
             for lock in ("compute-donor.lock", "home/weights.lock"):
@@ -447,6 +451,10 @@ def main():
                   seconds=120, message="the surviving chat could not continue")
             assert chats[1].p.poll() is None and completed_turn(chats[1])
             chats[1].send("/quit\n")
+            if resident:
+                until(lambda: chats[1].p.poll() is not None and owners[1].has("Weights retained in RAM"))
+                assert lease_is_held(owners[1], "compute-donor.lock")
+                owners[1].send("x")
             until(lambda: chats[1].p.poll() is not None and owners[1].has("Released"))
             assert chats[1].p.returncode == 0
             ranges = []

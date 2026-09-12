@@ -29,6 +29,13 @@ int main(void) {
         assert(lmb_stage_samples_parse(invalid_profiles[i], samples, &count) == -1 && !count);
         assert(!memcmp(&samples[0], &previous, sizeof previous));
     }
+    char maximum[4096]; size_t at = (size_t)snprintf(maximum, sizeof maximum, "STAT 9 4 0 0 20 0 STAGES1 32");
+    for (unsigned i = 0; i < 32; i++)
+        at += (size_t)snprintf(maximum + at, sizeof maximum - at, " %u %u 8 0.125000000", i, i + 1);
+    assert(at > 512 && at + 40 < sizeof maximum);
+    snprintf(maximum + at, sizeof maximum - at, " PERF1 9 8 15 4 19.2");
+    assert(!lmb_stage_samples_parse(maximum, samples, &count) && count == 32 && samples[31].end == 32);
+    assert(!lmb_metrics_parse(maximum, &compatible));
     LmbStageMetrics stage = {0};
     assert(!lmb_stage_metrics_add(&stage, 0, 8, .25));
     assert(!lmb_stage_metrics_add(&stage, 0, 1, .125)); /* one-row PREFILL, not decode */
