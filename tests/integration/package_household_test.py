@@ -139,6 +139,60 @@ class PackageTest(unittest.TestCase):
         with patch.dict(os.environ, {"MACOSX_DEPLOYMENT_TARGET": "12.0"}):
             self.assertEqual(self.build("Darwin")["minimum_macos"], "12.0.0")
 
+    def test_only_explicit_openmp_dependency_is_allowed(self):
+        lib = (self.runtime / "libomp.dylib").resolve()
+        binary = self.runtime / "segment_node"
+        for name in (str(lib), "@rpath/libomp.dylib"):
+            report = f"segment_node:\n\t{name} (compatibility version 5.0.0)\n"
+            with patch.object(module.subprocess, "check_output", return_value=report):
+                self.assertEqual(module.dependencies(binary, "Darwin", lib), report)
+        for name in ("/tmp/unapproved/libomp.dylib", "@rpath/libother.dylib", "@rpath/libomp.dylib"):
+            report = f"segment_node:\n\t{name} (compatibility version 5.0.0)\n"
+            with patch.object(module.subprocess, "check_output", return_value=report):
+                with self.assertRaisesRegex(ValueError, "non-system"):
+                    module.dependencies(binary, "Darwin", lib, packaged=True)
+
+    def test_packaged_openmp_link_is_loader_relative(self):
+        for filename, link in (("segment_node", "@loader_path/../lib/lumabri/libomp.dylib"),
+                               ("liblumabri.dylib", "@loader_path/libomp.dylib")):
+            report = filename + ":\n"
+            if filename.endswith(".dylib"):
+                report += f"\t@rpath/{filename} (compatibility version 0.0.0)\n"
+            report += f"\t{link} (compatibility version 5.0.0)\n"
+            with patch.object(module.subprocess, "check_output", return_value=report):
+                self.assertEqual(module.dependencies(self.runtime / filename, "Darwin",
+                    self.runtime / "libomp.dylib", packaged=True), report)
+
+    def test_openmp_licence_and_provenance_required(self):
+        prefix = self.root / "omp"
+        (prefix / "lib").mkdir(parents=True)
+        (prefix / "lib/libomp.dylib").write_bytes(b"test runtime")
+        with self.assertRaises(FileNotFoundError):
+            module.openmp_files(prefix)
+        licences = prefix / "share/licenses/libomp"
+        licences.mkdir(parents=True)
+        (licences / "LICENSE.TXT").write_text("test licence")
+        (licences / "SOURCE.json").write_text('{"version":"unverified"}')
+        with self.assertRaisesRegex(ValueError, "provenance"):
+            module.openmp_files(prefix)
+        source = {"repository": "https://github.com/llvm/llvm-project",
+                  "commit": "3b5b5c1ec4a3095ab096dd780e84d7ab81f3d7ff", "version": "18.1.8"}
+        (licences / "SOURCE.json").write_text(json.dumps(source))
+        self.assertEqual(module.openmp_files(prefix)[3], source)
+
+    def test_relocation_changes_copies_and_resigns(self):
+        report = {"segment_node": "segment_node:\n\t@rpath/libomp.dylib (version 5)\n",
+                  "libomp.dylib": "libomp.dylib:\n\t@rpath/libomp.dylib (version 5)\n\t/usr/lib/libSystem.B.dylib (version 1)\n"}
+        with patch.object(module, "macos_rpaths", return_value=["/build/private path"]), \
+                patch.object(module, "dependencies", return_value="verified"), \
+                patch.object(module.subprocess, "check_call") as call:
+            module.relocate_openmp(self.output, report)
+        commands = [c.args[0] for c in call.call_args_list]
+        self.assertIn(["install_name_tool", "-change", "@rpath/libomp.dylib",
+            "@loader_path/../lib/lumabri/libomp.dylib", str(self.output / "bin/segment_node")], commands)
+        self.assertIn(["codesign", "--verify", "--strict", str(self.output / "lib/lumabri/libomp.dylib")], commands)
+        self.assertTrue(all(str(self.output) in c[-1] for c in commands))
+
 
 if __name__ == "__main__":
     unittest.main()

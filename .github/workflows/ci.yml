@@ -356,8 +356,21 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - if: matrix.openmp == 'enabled'
-        run: brew install libomp
+      - uses: actions/checkout@v4
+        if: matrix.openmp == 'enabled'
+        with:
+          repository: llvm/llvm-project
+          ref: 3b5b5c1ec4a3095ab096dd780e84d7ab81f3d7ff
+          path: llvm-openmp
+          sparse-checkout: |
+            openmp
+            cmake
+            llvm/cmake
+      - name: Build relocatable OpenMP for the supported macOS floor
+        if: matrix.openmp == 'enabled'
+        run: |
+          python3 lumabri/tools/build_macos_openmp.py --source llvm-openmp --build "$RUNNER_TEMP/openmp-build" --prefix "$RUNNER_TEMP/openmp-install"
+          printf 'OMP_PREFIX=%s\n' "$RUNNER_TEMP/openmp-install" >> "$GITHUB_ENV"
       - name: Build the native household runtime
         working-directory: lumabri
         env:
@@ -469,11 +482,18 @@ jobs:
         env:
           LUMABRI_RESIDENT_REQUIRED: '1'
         run: python3 tests/integration/home_flow_test.py --models-dir build/kimi-home-models --donor-ram-gb 4.5 --expect-metrics
-      - name: Assemble and test a system-libraries-only native macOS candidate
-        if: matrix.openmp == 'disabled'
+      - name: Assemble and test the relocated native macOS candidate
         working-directory: lumabri
+        env:
+          OPENMP_MODE: ${{ matrix.openmp }}
         run: |
-          python3 tools/package_household.py --colibri-root ../colibri --output 'build/native candidate'
+          if [ "$OPENMP_MODE" = enabled ]; then
+            python3 tools/package_household.py --colibri-root ../colibri --openmp-prefix "$OMP_PREFIX" --output 'build/native candidate'
+            test "$(OMP_NUM_THREADS=2 'build/native candidate/bin/segment_node' --thread-capacity)" = 2
+          else
+            python3 tools/package_household.py --colibri-root ../colibri --output 'build/native candidate'
+            test "$('build/native candidate/bin/segment_node' --thread-capacity)" = 1
+          fi
           python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --resident-default --expect-metrics
           python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --repeat-cached --clear-cached --expect-metrics --expect-calibration
           python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --kill-donor
@@ -482,9 +502,8 @@ jobs:
           python3 tools/package_household.py --verify 'build/native candidate'
           tar -czf build/lumabri-macos-candidate.tar.gz -C 'build/native candidate' .
       - uses: actions/upload-artifact@v4
-        if: matrix.openmp == 'disabled'
         with:
-          name: household-candidate-${{ matrix.runner }}
+          name: household-candidate-${{ matrix.runner }}-${{ matrix.openmp }}
           path: lumabri/build/lumabri-macos-candidate.tar.gz
           retention-days: 7
       - uses: actions/upload-artifact@v4

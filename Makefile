@@ -12,7 +12,7 @@ ifeq ($(PLATFORM),Darwin)
 override CPPFLAGS += -D_DARWIN_C_SOURCE
 SHIM_LIB = liblumabri.dylib
 SHIM_FLAGS = -dynamiclib -fPIC
-OMP_PREFIX := $(shell brew --prefix libomp 2>/dev/null)
+OMP_PREFIX ?= $(shell brew --prefix libomp 2>/dev/null)
 ifneq ($(wildcard $(OMP_PREFIX)/include/omp.h),)
 OMP_FLAGS = -Xclang -fopenmp -I$(OMP_PREFIX)/include
 OMP_LIBS = -L$(OMP_PREFIX)/lib -Wl,-rpath,$(OMP_PREFIX)/lib -lomp
