@@ -478,6 +478,9 @@ test_tcp_latency: tests/c/test_tcp_latency.c $(SECURE_DEPS) lumabri_proto.h luma
 test_metrics: tests/c/test_metrics.c lumabri_metrics.h lumabri_stage_metrics.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_metrics.c -o $@
 
+test_hybrid_parallel: tests/c/test_hybrid_parallel.c lumabri_client.h lumabri_proto.h lumabri_sign.h $(SECURE_DEPS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_hybrid_parallel.c -o $@ -lm
+
 test_inventory: tests/c/test_inventory.c lumabri_inventory.h lumabri_machine.h lumabri_proto.h lumabri_sign.h $(SECURE_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_inventory.c -o $@
 
@@ -754,7 +757,7 @@ test-adapters: tracker segment_node segment_chat
 test-segment-discovery: tracker test_segment_discovery
 	bash ./tests/integration/segment_discovery_test.sh
 
-test: all test_weight_cache test_key_rotation test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 test_accum_order test_residency_report test_model_family test_planner test_cluster test_memory_budget \
+test: all test_weight_cache test_key_rotation test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 test_accum_order test_hybrid_parallel test_residency_report test_model_family test_planner test_cluster test_memory_budget \
 		test_inventory test_home test_chat_ui test_calibration test_catalogue_advice test_metrics \
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
 		test_meminfo test_compute_lease test_content_filter \
@@ -812,6 +815,7 @@ test: all test_weight_cache test_key_rotation test_hedge test_local_fallback tes
 	./test_calibration
 	./test_catalogue_advice
 	./test_metrics
+	./test_hybrid_parallel
 	./test_tcp_latency
 	./test_nat_adopt
 	bash ./tests/integration/rtt_refresh_test.sh
@@ -863,7 +867,7 @@ install: all
 clean:
 	rm -f tracker maintainer liblumabri.so liblumabri.dylib test_shim swarm_probe lumabri \
 	      test_relay_exec test_swarm_fed test_key_rotation test_hedge \
-	      test_local_fallback test_accum_order test_residency_report \
+	      test_local_fallback test_accum_order test_hybrid_parallel test_residency_report \
 	      test_model_family test_planner test_planner_io test_cluster test_memory_budget test_calibration test_catalogue_advice test_metrics test_inventory test_home test_chat_ui test_weight_cache segment_budget_probe \
 	      test_nat_adopt test_rtt_refresh \
 	      test_verify_failover test_segment_v2 test_segment_discovery test_sampling \

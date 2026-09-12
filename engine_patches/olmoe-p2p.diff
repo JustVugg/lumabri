@@ -1,7 +1,7 @@
 diff --git a/c/olmoe.c b/c/olmoe.c
 --- a/c/olmoe.c
 +++ b/c/olmoe.c
-@@ -37,6 +37,13 @@
+@@ -38,6 +38,13 @@
  #endif
  #include "omp_tune.h"
  #include "route_trace.h"                    /* shared routing telemetry (#700) */
@@ -15,7 +15,7 @@ diff --git a/c/olmoe.c b/c/olmoe.c
  #include "serve_codec.h"
  #ifdef COLI_SEGMENT_ADAPTER
  #include "segment_runtime.h"
-@@ -471,6 +478,10 @@
+@@ -472,6 +479,10 @@
      if (cl < 0.1f) cl = 0.1f; if (cl > 1.0f) cl = 1.0f;
      m->pilot_conf_limit = cl;
      m->dense_load_s = now_s() - t0;
@@ -26,13 +26,56 @@ diff --git a/c/olmoe.c b/c/olmoe.c
  
      /* Persistent hot pinning belongs to the standalone runtime. A Segment
       * range must never enqueue expert reads for layers it does not own. */
-@@ -813,6 +824,12 @@
+@@ -771,6 +782,40 @@
+ }
+ 
+ /* MoE sui token x[S,hidden] -> out[S,hidden] */
++#ifdef LUMIBRI_P2P
++typedef struct { Model *m; float *g, *u; } LmbOlmoeLocal;
++static int lmb_olmoe_local(void *opaque, int layer, int expert,
++                           const float *xs, int D, float *hh) {
++    LmbOlmoeLocal *ctx = opaque;
++    Model *m = ctx->m;
++    if (D != m->c.hidden || layer < 0 || layer >= m->c.n_layers ||
++        expert < 0 || expert >= m->c.n_experts) return -1;
++    int I = m->c.inter;
++    float *g = ctx->g, *u = ctx->u;
++            Slot *e; expert_get(m, layer, expert, &e);
++#if defined(__AVX2__)
++            /* FUSED3: same contract as matmul_q's IDOT fast branch (IDOT env,
++             * dims %16==0, <=4096) — outside it the stock calls below run
++             * unchanged. Exact integer arithmetic only: bit-identical output
++             * (verified by memcmp in tests/bench_fused3.c). OFF by default. */
++            static int idot_moe = -1;
++            if (idot_moe < 0) { const char *ie = getenv("IDOT"); idot_moe = !(ie && *ie == '0'); }
++            if (g_fused3 && idot_moe && D % 16 == 0 && D <= 4096 && I % 16 == 0 && I <= 4096) {
++                matmul_q_idot_pair_v3(g, u, xs, e->g, e->gs, e->u, e->us, D, I);   /* gate+up share one quant of xs */
++                for (int i = 0; i < I; i++) { float gv = g[i]; g[i] = (gv / (1.f + expf(-gv))) * u[i]; }
++                matmul_q_idot_v3(hh, g, e->d, e->ds, I, D);                        /* down_proj [D,I] */
++            } else
++#endif
++            {
++            matmul_q(g, xs, e->g, e->gs, D, I);     /* gate_proj [I,D] */
++            matmul_q(u, xs, e->u, e->us, D, I);     /* up_proj   [I,D] */
++            for (int i = 0; i < I; i++) { float gv = g[i]; g[i] = (gv / (1.f + expf(-gv))) * u[i]; }
++            matmul_q(hh, g, e->d, e->ds, I, D);     /* down_proj [D,I] */
++            }
++    return 0;
++}
++#endif
++
+ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
+     Cfg *c = &m->c; int D = c->hidden, E = c->n_experts, K = c->topk, I = c->inter;
+     float *logits = falloc((int64_t)S*E);
+@@ -814,6 +859,14 @@
              if (freq_l) for (int kk = 0; kk < K; kk++) if (idx[kk] >= 0) freq_l[idx[kk]]++;
          }
          const float *xs = x + (int64_t)s*D;
 +#ifdef LUMIBRI_P2P
++        LmbOlmoeLocal local = {m, g, u};
 +        if (lumi_layer_on(layer) &&
-+            lumi_moe_apply(layer, idx, val, K, xs, D, out + (int64_t)s*D)) {
++            lumi_moe_apply_split(layer, idx, val, K, xs, D, out + (int64_t)s*D,
++                                 lumi_hybrid_local_count(K), lmb_olmoe_local, &local)) {
 +            continue;
 +        }
 +#endif

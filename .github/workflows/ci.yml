@@ -49,6 +49,8 @@ jobs:
           ./test_chat_ui prepare-progress
           make test_tcp_latency CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           ./test_tcp_latency
+          make test_hybrid_parallel CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
+          ./test_hybrid_parallel
           ./test_memory_budget
           ./test_weight_cache
           python3 tests/integration/storage_ui_test.py
