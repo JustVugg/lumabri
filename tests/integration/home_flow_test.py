@@ -285,11 +285,20 @@ def main():
         offline.send("\t\x1b[B\r\t")
         time.sleep(.5)
         offline.send("\r")
-        until(lambda: offline.has("Plan: resident"), message="offline-donor preview did not settle")
-        offline.send("\r")
-        until(lambda: offline.p.poll() is not None, message="unreachable donor did not fail preflight")
-        failure = "No complete resident plan found" if args.expect_no_fit else "Cannot reach offline-test-donor"
-        assert offline.p.returncode != 0 and offline.has(failure)
+        if args.expect_no_fit:
+            until(lambda: offline.has("Plan: not runnable"), message="undersized offline donor was admitted")
+            offline.send("\r")
+            time.sleep(.2); offline.drain()
+            assert offline.p.poll() is None, "an unfit preview attempted execution"
+            assert not offline.has("Cannot reach offline-test-donor"), "unfit plan reached network preflight"
+            offline.send("q")
+            until(lambda: offline.p.poll() is not None)
+            assert offline.p.returncode == 0
+        else:
+            until(lambda: offline.has("Plan: resident"), message="offline-donor preview did not settle")
+            offline.send("\r")
+            until(lambda: offline.p.poll() is not None, message="unreachable donor did not fail preflight")
+            assert offline.p.returncode != 0 and offline.has("Cannot reach offline-test-donor")
         assert not list((tmp / "offline-request").rglob("home-source-*.log")), "indexed before reachability check"
         offline_worker.terminate(); offline_worker.wait(timeout=5)
 
