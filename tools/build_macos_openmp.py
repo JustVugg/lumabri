@@ -12,7 +12,7 @@ import platform
 import shutil
 import subprocess
 
-REVISION = "3b5b5c1ec4a3095ab096dd780e84d7ab81f3d7ff"
+REVISION = "87f0227cb60147a26a1eeb4fb06e3b505e9c7261"
 
 
 def main():
@@ -27,7 +27,7 @@ def main():
     revision = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
     dirty = subprocess.check_output(["git", "-C", str(source), "status", "--porcelain"], text=True)
     if revision != REVISION or dirty:
-        p.error("expected a clean pinned LLVM 18.1.8 checkout")
+        p.error("expected a clean pinned LLVM 20.1.8 checkout")
     if any(path.exists() or path.is_symlink() for path in (args.build, args.prefix)):
         p.error("build and prefix must be new paths")
     target = os.environ.get("MACOSX_DEPLOYMENT_TARGET", "12.0")
@@ -42,7 +42,7 @@ def main():
     licence_dir.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(source / "openmp/LICENSE.TXT", licence_dir / "LICENSE.TXT")
     (licence_dir / "SOURCE.json").write_text(json.dumps({
-        "repository": "https://github.com/llvm/llvm-project", "commit": REVISION, "version": "18.1.8"}, indent=2) + "\n")
+        "repository": "https://github.com/llvm/llvm-project", "commit": REVISION, "version": "20.1.8"}, indent=2) + "\n")
 
 
 if __name__ == "__main__":

@@ -360,7 +360,7 @@ jobs:
         if: matrix.openmp == 'enabled'
         with:
           repository: llvm/llvm-project
-          ref: 3b5b5c1ec4a3095ab096dd780e84d7ab81f3d7ff
+          ref: 87f0227cb60147a26a1eeb4fb06e3b505e9c7261
           path: llvm-openmp
           sparse-checkout: |
             openmp

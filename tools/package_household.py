@@ -111,8 +111,8 @@ def openmp_files(prefix):
         raise ValueError("oversized OpenMP provenance")
     source = json.loads(provenance.read_text())
     if source != {"repository": "https://github.com/llvm/llvm-project",
-                  "commit": "3b5b5c1ec4a3095ab096dd780e84d7ab81f3d7ff",
-                  "version": "18.1.8"}:
+                  "commit": "87f0227cb60147a26a1eeb4fb06e3b505e9c7261",
+                  "version": "20.1.8"}:
         raise ValueError("unrecognized OpenMP build provenance")
     return library, licence, provenance, source
 

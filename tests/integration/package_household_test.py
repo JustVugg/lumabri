@@ -176,7 +176,7 @@ class PackageTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "provenance"):
             module.openmp_files(prefix)
         source = {"repository": "https://github.com/llvm/llvm-project",
-                  "commit": "3b5b5c1ec4a3095ab096dd780e84d7ab81f3d7ff", "version": "18.1.8"}
+                  "commit": "87f0227cb60147a26a1eeb4fb06e3b505e9c7261", "version": "20.1.8"}
         (licences / "SOURCE.json").write_text(json.dumps(source))
         self.assertEqual(module.openmp_files(prefix)[3], source)
 
