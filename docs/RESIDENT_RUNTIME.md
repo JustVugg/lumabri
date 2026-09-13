@@ -173,6 +173,17 @@ byte identity, empty weight mirrors and post-seal refusal; complete two-donor
 Hybrid TUI flow including paused rendering, requester loss, retained RAM and
 calibration invalidation. The updated physical PC/Mac run is still required.
 
+The 7.4-GB OLMoE checkpoint subsequently passed the complete two-donor
+loopback flow with context 4096, resident Hybrid, second conversation with
+the source offline, no reload and zero weight-mirror allocation. Logs recorded
+336 completed remote expert calls and 2352 concurrent local expert calls.
+This was a functional test with two threads per donor on one physical PC,
+not a PC/Mac speed comparison. Use `home_flow_test.py --prepare-timeout 3600
+--io-timeout-ms 300000` for this large CPU diagnostic: the harness defaults
+remain short for tiny CI fixtures. A prior run with the forced 10-second test
+I/O deadline reached READY but timed out during prefill and entered recovery;
+the production transport default was not changed to make this test pass.
+
 - Native CI on the final commit and the physical PC/Mac
   transfer/prepare/generate/reconnect/Stop test.
 - Measured memory-pressure/pageout policy, not a claim based on malloc alone.

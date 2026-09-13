@@ -97,9 +97,13 @@ def main():
                         help="stop reading requester output beyond the lease interval")
     parser.add_argument("--prepare-timeout", type=int, default=180,
                         help="bounded indexing/loading deadline for a large-checkpoint diagnostic (max 3600 seconds)")
+    parser.add_argument("--io-timeout-ms", type=int, default=10000,
+                        help="test transport deadline; use the production 300000 ms for large CPU checkpoints")
     args = parser.parse_args()
     if not 30 <= args.prepare_timeout <= 3600:
         parser.error("--prepare-timeout must be between 30 and 3600 seconds")
+    if not 1000 <= args.io_timeout_ms <= 600000:
+        parser.error("--io-timeout-ms must be between 1000 and 600000")
     resident = args.resident_default or os.environ.get("LUMABRI_RESIDENT_REQUIRED") == "1"
     if args.expect_hybrid and not resident:
         parser.error("--expect-hybrid requires resident weights")
@@ -170,7 +174,7 @@ def main():
                 "LUMABRI_TOKEN": "household-test", "LUMABRI_NO_DISK_PROBE": "1",
                 # An inherited preference must not override CPU-only approval.
                 "LUMABRI_ENGINE_BACKEND": "cuda",
-                "LUMABRI_RAM_RESERVE_MB": "256", "LUMABRI_IO_TIMEOUT_MS": "10000",
+                "LUMABRI_RAM_RESERVE_MB": "256", "LUMABRI_IO_TIMEOUT_MS": str(args.io_timeout_ms),
                 "OMP_NUM_THREADS": "2", "COLI_NO_OMP_TUNE": "1", "PIN": "off"}
         if args.resident_default:
             result.pop("LUMABRI_RESIDENT_REQUIRED", None)
