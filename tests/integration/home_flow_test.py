@@ -96,10 +96,10 @@ def main():
     parser.add_argument("--stall-preparation-ui", action="store_true",
                         help="stop reading requester output beyond the lease interval")
     parser.add_argument("--prepare-timeout", type=int, default=180,
-                        help="bounded indexing/loading deadline for a large-checkpoint diagnostic (max 900 seconds)")
+                        help="bounded indexing/loading deadline for a large-checkpoint diagnostic (max 3600 seconds)")
     args = parser.parse_args()
-    if not 30 <= args.prepare_timeout <= 900:
-        parser.error("--prepare-timeout must be between 30 and 900 seconds")
+    if not 30 <= args.prepare_timeout <= 3600:
+        parser.error("--prepare-timeout must be between 30 and 3600 seconds")
     resident = args.resident_default or os.environ.get("LUMABRI_RESIDENT_REQUIRED") == "1"
     if args.expect_hybrid and not resident:
         parser.error("--expect-hybrid requires resident weights")

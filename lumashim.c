@@ -2011,7 +2011,10 @@ static ssize_t direct_weight_read(RFile *f, void *buf, size_t n, off_t off) {
         pthread_mutex_unlock(&direct_weight_lock); errno = EPERM; return -1;
     }
     hashes_ensure(f);
-    if (f->hstate != 1) goto bad;
+    if (f->hstate != 1) {
+        fprintf(stderr, "[resident] preparation has no verified block map: %s\n", f->rel);
+        goto bad;
+    }
     size_t copied = 0;
     unsigned slots = (unsigned)(LMB_PREPARE_CACHE_BYTES / g.block);
     if (slots > LMB_PREPARE_CACHE_SLOTS) slots = LMB_PREPARE_CACHE_SLOTS;
@@ -2037,10 +2040,18 @@ static ssize_t direct_weight_read(RFile *f, void *buf, size_t n, off_t off) {
             free(block->data); memset(block, 0, sizeof *block);
             for (int i = 0; i < f->npeers && !block->data; i++) {
                 uint8_t *data = peer_fetch(&g.peers[f->peer_idx[i]], f->rel, start, len);
-                if (data && block_verify(f, start, data, len)) { free(data); data = NULL; }
+                if (data && block_verify(f, start, data, len)) {
+                    fprintf(stderr, "[resident] preparation block hash mismatch: %s offset=%llu bytes=%u\n",
+                            f->rel, (unsigned long long)start, len);
+                    free(data); data = NULL;
+                }
                 block->data = data;
             }
-            if (!block->data) goto bad;
+            if (!block->data) {
+                fprintf(stderr, "[resident] no peer supplied a verified preparation block: %s offset=%llu bytes=%u\n",
+                        f->rel, (unsigned long long)start, len);
+                goto bad;
+            }
             block->file = f; block->offset = start; block->length = len;
             direct_weight_fetches++;
             atomic_fetch_add(&g.net_bytes, len); atomic_fetch_add(&g.net_blocks, 1);
