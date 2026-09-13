@@ -35,6 +35,7 @@
 #include "lumabri_secure.h"
 #include "lumabri_scheduler.h"
 #include "lumabri_home_hybrid.h"
+#include "src/runtime/lumabri_hybrid_policy.h"
 
 #define LUMI_MAX_PEERS 64
 #define LUMI_MAX_K     64
@@ -99,6 +100,10 @@ typedef struct {
 
 static struct {
     LmbHybridRoutes home;
+    int hybrid_policy;
+    LmbHybridTiming hybrid_timing[512];
+    unsigned char hybrid_probes[512];
+    int hybrid_numeric_failed;
     int on, initialized, discovery;
     LumiPeer peers[LUMI_MAX_PEERS];
     int npeers;
@@ -970,7 +975,9 @@ static int lumi_layer_covered(int layer) {
 }
 
 static LMB_MAYBE_UNUSED int lumi_layer_on(int layer) {
-    if (L.home.count) return lumi_layer_covered(layer);
+    /* After an observed numeric mismatch, use the engine's original local
+     * kernel directly: no extra per-expert allocation/copy/transport path. */
+    if (L.home.count) return !L.hybrid_numeric_failed && lumi_layer_covered(layer);
     lumi_maybe_discover();
     if (layer < 0 || layer >= L.n_layers) return 0;
     if (L.routed && !L.routed[layer]) return 0;
@@ -1556,6 +1563,9 @@ static LMB_MAYBE_UNUSED int lumi_moe_apply_split(int layer, const int *idx,
         !idx || !val || !x || !out || layer < 0 || layer >= L.n_layers ||
         local_count < 0 || local_count >= K || (local_count && !local)) return 0;
     for (int k = 0; k < K; k++) if (idx[k] < 0 || idx[k] >= L.n_experts) return 0;
+    int household = L.home.count && local_count && layer < 512;
+    if (household && (L.hybrid_numeric_failed ||
+        !lmb_hybrid_choose(&L.hybrid_timing[layer], L.hybrid_policy))) local_count = K;
     int remote_count = K - local_count;
     int fds[LUMI_MAX_K];
     uint32_t tried[LUMI_MAX_K];
@@ -1588,10 +1598,12 @@ static LMB_MAYBE_UNUSED int lumi_moe_apply_split(int layer, const int *idx,
             break;
         }
     }
+    double sent_done = lumi_now();
     for (int k = remote_count; k < K; k++) {
         res[k] = malloc((size_t)D * sizeof(float));
         if (!res[k] || local(ctx, layer, idx[k], x, D, res[k])) goto fail;
     }
+    double local_done = lumi_now();
     /* then collect, in order; a failed reply falls over to the next replica */
     for (int k = 0; k < remote_count; k++) {
         if (fds[k] >= 0) {
@@ -1617,6 +1629,27 @@ static LMB_MAYBE_UNUSED int lumi_moe_apply_split(int layer, const int *idx,
         }
         if (!res[k]) goto fail;
     }
+    double received_done = lumi_now();
+    /* A shared adapter label does not prove cross-compiler/libm identity.
+     * Check the first four actual routed inputs of each accelerated layer.
+     * This is a runtime smoke test, NOT a proof for all future inputs. An
+     * observed mismatch is never accumulated: compute that contribution
+     * locally and retain local execution for this resident engine lifetime. */
+    if (household && remote_count && L.hybrid_probes[layer] < 4) {
+        for (int k = 0; k < remote_count; k++) {
+            float *check = malloc((size_t)D * sizeof(float));
+            if (!check || local(ctx, layer, idx[k], x, D, check)) { free(check); goto fail; }
+            if (memcmp(check, res[k], (size_t)D * sizeof(float))) {
+                if (!L.hybrid_numeric_failed)
+                    fprintf(stderr, "[home-hybrid] numeric probe differs at layer %d expert %d; "
+                        "using local results and retaining local execution; approved donor RAM is unchanged\n",
+                        layer, idx[k]);
+                L.hybrid_numeric_failed = 1;
+                free(res[k]); res[k] = check;
+            } else free(check);
+        }
+        L.hybrid_probes[layer]++;
+    }
     /* accumulate in the router's order, exactly as the local path does */
     for (int k = 0; k < K; k++) {
         float w = val[k];
@@ -1631,6 +1664,17 @@ static LMB_MAYBE_UNUSED int lumi_moe_apply_split(int layer, const int *idx,
         if (L.home.count && !(L.hybrid_rounds & (L.hybrid_rounds - 1)))
             fprintf(stderr, "[home-hybrid] committed_rounds=%llu local_experts=%llu remote_experts=%llu\n",
                     L.hybrid_rounds, L.hybrid_local_calls, L.calls);
+    }
+    if (household) {
+        LmbHybridTiming *t = &L.hybrid_timing[layer];
+        lmb_hybrid_observe(t, remote_count != 0, lumi_now() - t0,
+            sent_done - t0, local_done - sent_done, received_done - local_done);
+        if (!(t->rounds & (t->rounds - 1)))
+            fprintf(stderr, "[home-hybrid-profile] layer=%d rounds=%llu local_n=%llu split_n=%llu "
+                "local_ms=%.3f split_ms=%.3f send_ms=%.3f work_ms=%.3f wait_ms=%.3f\n", layer,
+                (unsigned long long)t->rounds, (unsigned long long)t->samples[0],
+                (unsigned long long)t->samples[1], 1000*t->seconds[0], 1000*t->seconds[1],
+                1000*t->send_s/t->rounds, 1000*t->local_s/t->rounds, 1000*t->wait_s/t->rounds);
     }
     lumi_round_done(t0);
     return 1;
@@ -1665,6 +1709,13 @@ static LMB_MAYBE_UNUSED int lumi_hybrid_local_count(int K) {
 static LMB_MAYBE_UNUSED int lumi_home_init(int layers, int experts, int hidden, const char *numeric) {
     const char *hex = getenv("LUMABRI_HOME_HYBRID_ROUTES");
     if (!hex || !*hex) return 0;
+    const char *policy = getenv("LUMABRI_HOME_HYBRID_POLICY");
+    L.hybrid_policy = LMB_HYBRID_ADAPTIVE;
+    if (policy && *policy && strcmp(policy, "adaptive")) {
+        if (!strcmp(policy, "local")) L.hybrid_policy = LMB_HYBRID_FORCE_LOCAL;
+        else if (!strcmp(policy, "split")) L.hybrid_policy = LMB_HYBRID_FORCE_SPLIT;
+        else return -1;
+    }
     size_t n = strlen(hex);
     if (n >= LMB_HOME_HYBRID_ENV || (n & 1) || layers <= 0 || layers > 512 ||
         experts <= 0 || experts > 65536 || hidden <= 0 || hidden > 65536 ||

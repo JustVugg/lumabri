@@ -8,6 +8,9 @@ SHIM_LIB = liblumabri.so
 SHIM_FLAGS = -shared -fPIC -ldl
 OMP_FLAGS = -fopenmp
 OMP_LIBS =
+# Optional CPU tuning for a locally built cluster. Distributed candidates stay
+# portable by default; -march=native binaries must not be copied to other CPUs.
+ENGINE_CPU_FLAGS ?=
 ifeq ($(PLATFORM),Darwin)
 override CPPFLAGS += -D_DARWIN_C_SOURCE
 SHIM_LIB = liblumabri.dylib
@@ -27,6 +30,7 @@ lumabri test_chat_ui: src/runtime/lumabri_weight_cache.h
 lumabri test_chat_ui: src/runtime/lumabri_prepare_progress.h
 lumabri test_chat_ui test_memory_budget test_cluster segment_node test_calibration $(SHIM_LIB): src/runtime/lumabri_prepare_limits.h
 lumabri test_chat_ui test_home test_hybrid_parallel test_accum_order test_local_fallback test_verify_failover test_nat_adopt: lumabri_home_hybrid.h
+test_hybrid_parallel test_accum_order test_local_fallback test_verify_failover test_nat_adopt build/segment_hybrid_bridge.o: src/runtime/lumabri_hybrid_policy.h
 
 test_weight_cache: tests/c/test_weight_cache.c src/runtime/lumabri_weight_cache.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_weight_cache.c -o $@
@@ -483,6 +487,7 @@ test_metrics: tests/c/test_metrics.c lumabri_metrics.h lumabri_stage_metrics.h
 test_hybrid_parallel: tests/c/test_hybrid_parallel.c lumabri_client.h lumabri_proto.h lumabri_sign.h $(SECURE_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_hybrid_parallel.c -o $@ -lm
 
+
 test_inventory: tests/c/test_inventory.c lumabri_inventory.h lumabri_machine.h lumabri_proto.h lumabri_sign.h $(SECURE_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_inventory.c -o $@
 
@@ -618,7 +623,7 @@ SEGMENT_COMMON = segment_colibri.h src/runtime/lumabri_resident.h src/runtime/lu
 		lumabri_proto.h lumabri_sign.h lumabri_sha.h $(SECURE_DEPS)
 
 HYBRID_PATCH_INPUTS = tools/prepare_resident_adapters.py engine_patches/make_patches.py \
-	lumabri_home_hybrid.h \
+	lumabri_home_hybrid.h src/runtime/lumabri_hybrid_policy.h \
 	engine_patches/deepseek_v4_p2p.py $(wildcard engine_patches/*-p2p.diff) \
 	lumabri_client.h lumibri_client.h lumi_v4_ext.h lumi_v4_bridge.c \
 	lumabri_proto.h lumabri_sign.h lumabri_secure.h lumabri_crypto.h \
@@ -630,7 +635,7 @@ segment-options-force:
 # An installed libomp or changed build flags must invalidate both the runtime
 # archive and its bridge, without requiring users to discover make -B.
 build/segment-options: segment-options-force tools/update_build_stamp.py
-	python3 tools/update_build_stamp.py $@ '$(CC)' '$(CPPFLAGS)' '$(CFLAGS)' '$(OMP_FLAGS)' '$(OMP_LIBS)' '$(abspath $(ENGINE))'
+	python3 tools/update_build_stamp.py $@ '$(CC)' '$(CPPFLAGS)' '$(CFLAGS)' '$(OMP_FLAGS)' '$(OMP_LIBS)' '$(abspath $(ENGINE))' '$(ENGINE_CPU_FLAGS)'
 
 # Track every copied adapter/header/build input, including new upstream files,
 # deletions and preserved-mtime edits. This reads sources only, never weights.
@@ -655,9 +660,15 @@ build/segment_hybrid_bridge.o: build/segment-options lumi_v4_bridge.c $(HYBRID_P
 $(COLIBRI_SEGMENT_LIB): $(HYBRID_ENGINE_DIR)/.prepared build/segment_hybrid_bridge.o
 	env -u MAKEFLAGS $(MAKE) -C $(HYBRID_ENGINE_DIR) MAKEOVERRIDES= \
 		COLI_V4_SUPPORTED=1 CC='$(CC)' \
-		CFLAGS='-O2 $(CPPFLAGS) $(OMP_FLAGS) -pthread -I$(HYBRID_ROOT) -include $(HYBRID_ROOT)/lumi_v4_ext.h -DLUMABRI_P2P -DLUMIBRI_P2P' \
+		CFLAGS='-O2 $(ENGINE_CPU_FLAGS) $(CPPFLAGS) $(OMP_FLAGS) -pthread -I$(HYBRID_ROOT) -include $(HYBRID_ROOT)/lumi_v4_ext.h -DLUMABRI_P2P -DLUMIBRI_P2P' \
 		segment-edge-library
 	$(AR) rcs $@ build/segment_hybrid_bridge.o
+
+# Optional diagnostic; requires explicit, already approved household routes.
+build/bench_home_hybrid: tests/c/bench_home_hybrid.c $(COLIBRI_SEGMENT_LIB)
+	$(CC) $(CPPFLAGS) -O2 $(ENGINE_CPU_FLAGS) $(OMP_FLAGS) -pthread -I$(HYBRID_ENGINE_DIR) \
+		-include lumi_v4_ext.h -DLUMABRI_P2P -DLUMIBRI_P2P -DCOLI_SEGMENT_ADAPTER -DCOLI_EDGE_ADAPTER \
+		tests/c/bench_home_hybrid.c $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
 
 segment_node: segment_node.c $(HOME_NET_DEPS) lumabri_planner.h lumabri_memory_budget.h lumabri_families.h lumabri_ready.h \
 		$(SEGMENT_COMMON) $(COLIBRI_SEGMENT_LIB) $(MACHINE_DEPS) \

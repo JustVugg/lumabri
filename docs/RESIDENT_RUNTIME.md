@@ -192,3 +192,67 @@ Concurrent donor/chat operation, independent private sessions, a web chat UI,
 and upstream-supported GPU execution remain separate uncompleted product
 requirements. Segment still places per-layer KV on the approved donor nodes;
 local chat history alone does not keep that KV solely on the chatter.
+
+### September 13 Hybrid performance follow-up
+
+The updated physical PC/Mac preparation completed and three 32-token chats
+reported 3.66, 3.56 and 4.09 token/s (OLMoE, context 4096, PC 12 threads,
+Mac 4 threads, approved accelerator layers 14:16). Weight-source bytes did
+not advance during generation. This establishes execution, not a speedup
+against historical PC-only runs with potentially different builds/load.
+
+The calibration failure message previously conflated a missing leased advert
+with a changed runtime. Missing inventory is now retried for two reporting
+periods; an observed hardware/endpoint/runtime/thread mismatch still rejects
+the measurement immediately and names the component. The original approved
+identity is never replaced with the most recent report. This fixes the
+classification/retry; the exact cause of the original physical advert failure
+has not been established. Isolated real-model calibration/reopen/invalidation
+passed with this change; the physical catalogue still needs retesting.
+
+Resident Hybrid now measures local and split work per layer. Four interleaved
+samples per path initialize an EWMA; split must be at least 3% faster. The
+other path is probed every 64 observed rounds. This is a workload-dependent
+heuristic, not a monotonic latency guarantee. Approved donor memory remains
+resident. `LUMABRI_HOME_HYBRID_POLICY=local|split|adaptive` is an advanced
+diagnostic setting inherited when the donor starts (default adaptive), not a
+new permission or public-discovery route. Logs separate send, local work and
+collection wait. Prewarming/calibration probes are included in reported time.
+
+The first four routed inputs of each accelerated layer also compare the
+remote contribution against the local callback. A mismatch is replaced with
+the local result and disables remote use for that resident engine lifetime.
+This smoke test does not prove equality for every possible later input.
+`split` cannot override a detected incompatibility.
+
+The physical MoE microbenchmark detected small cross-platform differences
+(maximum absolute error 1.49e-8) despite the same advertised numeric class.
+Raw split results therefore failed its strict bitwise gate. Timings were also
+highly variable; they must not be presented as certified token/s or a speedup.
+The benchmark's optional `LMB_BENCH_INSPECT_DIFF=1` only quantifies raw
+differences and still exits nonzero on a mismatch. It is not a production
+bypass. The normal test must either match or report local fallback explicitly.
+
+`make build/bench_home_hybrid ENGINE=...` builds this opt-in OLMoE diagnostic
+against prepared sources. It reuses already approved routes and requests no
+new donor allocation. Its numbers are milliseconds per MoE layer, not full
+generation throughput. `ENGINE_CPU_FLAGS` permits explicit local tuning and
+invalidates the generated archive; portable packages leave it empty. A native
+build must not be redistributed to a different CPU, and changing SIMD/math
+paths requires renewed numerical and performance validation. Colibri's source
+checkout remains unchanged.
+
+Final local gates passed with the numerical fallback enabled: the two-donor
+resident TUI flow, saved/reopened calibration and invalidation, second private
+conversation with the source offline, and zero weight-mirror writes. Against
+the still-approved physical Intel Mac, the microbenchmark returned
+`NUMERIC FALLBACK PASS`: one remote probe was rejected and all delivered
+results matched the native local oracle. That proves the fallback, not a
+cross-machine speedup. No final full-chat A/B or native CI result is implied.
+
+One repeated flow exposed a separate streaming failure on the random tiny
+tokenizer: conservative UTF-8 replacement-character holdback moved before an
+already emitted, unchanged prefix. Streaming now retains verified emitted
+bytes, holds replacement characters at the end of the common prefix, and
+still rejects actual prefix rewrites. Targeted prefix tests and the subsequent
+complete resident flow passed.

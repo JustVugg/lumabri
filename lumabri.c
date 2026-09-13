@@ -5400,6 +5400,56 @@ static int catalog_calibration_key(const LmbTuiState *st, const LmbTuiModel *m,
     return edge ? 0 : -1;
 }
 
+/* Missing leased inventory is not evidence of a changed executable. A loaded
+ * donor can briefly disappear while its worker reconnects. Never substitute a
+ * new identity: retry absence, but reject an observed mismatch immediately. */
+static int catalog_runtime_match(const LmbCalKey *key, const LmbMachineReport *reports,
+    uint32_t count, char *why, size_t cap) {
+    int missing = 0;
+    for (uint32_t j = 0; j < key->nodes; j++) {
+        const LmbMachineReport *found = NULL;
+        for (uint32_t k = 0; k < count; k++) {
+            char peer[65]; lmb_hex(peer, reports[k].identity, 32);
+            if (!strcmp(peer, key->node_id[j])) { found = &reports[k]; break; }
+        }
+        if (!found) {
+            if (!missing) snprintf(why, cap, "Donor %u inventory temporarily unavailable", j + 1);
+            missing = 1; continue;
+        }
+        char hardware[65];
+        catalog_hardware_id(&found->machine, found->control_addr, hardware);
+        unsigned threads = found->machine.logical_cpus;
+        if (found->runtime_threads && threads > found->runtime_threads) threads = found->runtime_threads;
+        if (threads > 256) threads = 256;
+        const char *changed = strcmp(hardware, key->node_hardware_id[j]) ? "hardware or endpoint" :
+            !found->runtime_id[0] ? "runtime identity unavailable" :
+            strcmp(found->runtime_id, key->node_build_id[j]) ? "runtime identity" :
+            threads != key->threads[j] ? "thread capacity" : NULL;
+        if (changed) {
+            snprintf(why, cap, "Donor %u: %s differs from the approved snapshot", j + 1, changed);
+            return -1;
+        }
+    }
+    return missing;
+}
+
+static int catalog_runtime_revalidate(const LmbTuiState *st, const LmbCalKey *key,
+    char *why, size_t cap) {
+    /* Two reporting periods; bounded independently of preparation progress. */
+    double deadline = nowd() + 2 * LMB_INVENTORY_HEARTBEAT_MS / 1000.0;
+    for (;;) {
+        LmbMachineReport reports[LMB_INVENTORY_MAX]; uint32_t count = 0;
+        int match = 1;
+        if (lmb_inventory_fetch(st->tracker, reports, &count))
+            snprintf(why, cap, "Household inventory unavailable");
+        else match = catalog_runtime_match(key, reports, count, why, cap);
+        if (!match) return 0;
+        if (match < 0 || g_stopping || nowd() >= deadline) return -1;
+        struct timespec pause = {0, 250000000};
+        nanosleep(&pause, NULL);
+    }
+}
+
 static void catalog_advice_refresh(LmbTuiState *st) {
     LmbAdviceCandidate candidates[LMB_TUI_MAX_MODELS] = {0};
     uint32_t advice[LMB_TUI_MAX_MODELS];

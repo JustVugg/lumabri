@@ -1194,22 +1194,9 @@ static int home_request_chat(LmbTuiState *st, int selected) {
             int can_record = !catalog_calibration_dir(measurement_dir) &&
                 !catalog_calibration_key(st, &measured, 0, NULL, &measurement.key);
             if (can_record) {
-                LmbMachineReport current[LMB_INVENTORY_MAX]; uint32_t current_count = 0;
-                can_record = !lmb_inventory_fetch(st->tracker, current, &current_count);
-                for (uint32_t j = 0; can_record && j < measurement.key.nodes; j++) {
-                    int matched = 0;
-                    for (uint32_t k = 0; k < current_count; k++) {
-                        char peer[65], hardware[65]; lmb_hex(peer, current[k].identity, 32);
-                        catalog_hardware_id(&current[k].machine, current[k].control_addr, hardware);
-                        if (!strcmp(peer, measurement.key.node_id[j]) &&
-                            !strcmp(hardware, measurement.key.node_hardware_id[j]) &&
-                            !strcmp(current[k].runtime_id, measurement.key.node_build_id[j])) matched = 1;
-                    }
-                    if (!matched) {
-                        fprintf(stderr, "[calibration] Donor %u no longer matches the approved runtime inventory.\n", j + 1);
-                        can_record = 0;
-                    }
-                }
+                char why[200] = "";
+                can_record = !catalog_runtime_revalidate(st, &measurement.key, why, sizeof why);
+                if (!can_record) fprintf(stderr, "[calibration] %s.\n", why);
             }
             g_recording_calibration = can_record ? &measurement : NULL;
             g_calibration_directory = can_record ? measurement_dir : NULL;

@@ -20,6 +20,18 @@ typedef struct {
 typedef struct { Gate *gate; int fd, expert; } Remote;
 
 static float contribution(int eid) { return eid == 3 ? 1.f : 0x1p-24f; }
+static int resident_local(void *opaque, int layer, int expert, const float *x, int D, float *out) {
+    int *calls = opaque; assert(layer == 0 && x && D == DIM); (*calls)++;
+    for (int d = 0; d < D; d++) out[d] = contribution(expert);
+    return 0;
+}
+static void *different_remote(void *opaque) {
+    int fd = *(int *)opaque; LmbMsg msg = {0};
+    assert(!lmb_recv(fd, &msg) && msg.op == LMB_HOME_EXPERT);
+    float out[DIM]; for (int i = 0; i < DIM; i++) out[i] = 9.f;
+    assert(!lmb_send(fd, LMB_EXEC_R, NULL, 0, out, sizeof out));
+    lmb_msg_free(&msg); close(fd); return NULL;
+}
 
 static void *worker(void *opaque) {
     Remote *r = opaque;
@@ -115,10 +127,58 @@ static void run_case(int fail_local, int bad_reply) {
 }
 
 int main(void) {
+    LmbHybridTiming timing = {0};
+    for (unsigned i = 0; i < 8; i++) {
+        int split = lmb_hybrid_choose(&timing, LMB_HYBRID_ADAPTIVE);
+        assert(split == !(i & 1));
+        lmb_hybrid_observe(&timing, split, split ? .030 : .004, 0, .003, 0);
+    }
+    assert(!lmb_hybrid_choose(&timing, LMB_HYBRID_ADAPTIVE));
+    assert(lmb_hybrid_choose(&timing, LMB_HYBRID_FORCE_SPLIT));
+    assert(!lmb_hybrid_choose(&timing, LMB_HYBRID_FORCE_LOCAL));
+    timing.rounds = 64;
+    assert(lmb_hybrid_choose(&timing, LMB_HYBRID_ADAPTIVE));
+    timing.rounds = 65; timing.seconds[1] = .002;
+    assert(lmb_hybrid_choose(&timing, LMB_HYBRID_ADAPTIVE));
+    lmb_hybrid_observe(&timing, 1, NAN, 0, 0, 0); assert(timing.rounds == 65);
     signal(SIGPIPE, SIG_IGN);
     setenv("LUMABRI_EXEC_FALLBACK_LOCAL", "1", 1);
     unsetenv("LUMABRI_TRACKER");
     run_case(0, 0); run_case(1, 0); run_case(0, 1);
+    /* An approved slower accelerator stays resident while the exact same
+     * callback handles all experts locally; no socket is required. */
+    memset(&L, 0, sizeof L);
+    L.home.count = 1; L.n_layers = 1; L.n_experts = EXPERTS; L.hidden = DIM;
+    L.hybrid_policy = LMB_HYBRID_FORCE_LOCAL;
+    int all_idx[4] = {3, 0, 1, 2}, calls = 0;
+    float all_x[DIM] = {0}, all_w[4] = {1,1,1,1}, all_out[DIM] = {0};
+    assert(lumi_moe_apply_split(0, all_idx, all_w, 4, all_x, DIM, all_out, 3, resident_local, &calls));
+    float expected = 0; for (int i = 0; i < 4; i++) expected += contribution(all_idx[i]);
+    for (int d = 0; d < DIM; d++) assert(!memcmp(&all_out[d], &expected, sizeof expected));
+    assert(calls == 4 && L.calls == 0 && L.hybrid_timing[0].samples[0] == 1);
+    L.hybrid_policy = LMB_HYBRID_FORCE_SPLIT;
+    L.npeers = 1; L.exec_wait_ms = 5000; L.hedge_ms = -1;
+    L.own = malloc(EXPERTS * LUMI_MAX_REP * sizeof *L.own); assert(L.own);
+    for (int i = 0; i < EXPERTS * LUMI_MAX_REP; i++) L.own[i] = -1;
+    L.own[3 * LUMI_MAX_REP] = 0;
+    int pair[2]; assert(!socketpair(AF_UNIX, SOCK_STREAM, 0, pair));
+    L.peers[0].socks[0] = pair[0]; L.peers[0].nsocks = 1;
+    pthread_t mismatched; assert(!pthread_create(&mismatched, NULL, different_remote, &pair[1]));
+    memset(all_out, 0, sizeof all_out);
+    assert(lumi_moe_apply_split(0, all_idx, all_w, 4, all_x, DIM, all_out, 3, resident_local, &calls));
+    assert(!pthread_join(mismatched, NULL));
+    assert(L.hybrid_numeric_failed && L.calls == 1);
+    L.on = 1;
+    assert(!lumi_layer_on(0)); /* native engine path, without callback overhead */
+    for (int d = 0; d < DIM; d++) assert(!memcmp(&all_out[d], &expected, sizeof expected));
+    /* Even forced split cannot reuse an observed incompatible path. */
+    memset(all_out, 0, sizeof all_out);
+    assert(lumi_moe_apply_split(0, all_idx, all_w, 4, all_x, DIM, all_out, 3, resident_local, &calls));
+    assert(L.calls == 1);
+    for (int d = 0; d < DIM; d++) assert(!memcmp(&all_out[d], &expected, sizeof expected));
+    while (L.peers[0].nsocks) close(L.peers[0].socks[--L.peers[0].nsocks]);
+    free(L.own);
+    memset(&L, 0, sizeof L);
     int idx[4] = {0, 1, 2, 3};
     float x[4] = {0}, w[4] = {1, 1, 1, 1}, out[4] = {0};
     assert(!lumi_moe_apply_split(0, idx, w, 4, x, 4, out, 4, local, NULL));

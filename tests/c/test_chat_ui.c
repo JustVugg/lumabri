@@ -5,6 +5,37 @@
 #include <assert.h>
 
 int main(int argc, char **argv) {
+    LmbMachineReport inventory = {.machine = {.logical_cpus = 4, .physical_cores = 2,
+        .ram_total_bytes = 8ull << 30}, .runtime_threads = 4};
+    inventory.identity[0] = 1;
+    snprintf(inventory.control_addr, sizeof inventory.control_addr, "192.168.1.12:47301");
+    memset(inventory.runtime_id, 'a', 64);
+    LmbCalKey approved = {.nodes = 1}; char reason[200];
+    lmb_hex(approved.node_id[0], inventory.identity, 32);
+    memcpy(approved.node_build_id[0], inventory.runtime_id, 65);
+    approved.threads[0] = 4;
+    catalog_hardware_id(&inventory.machine, inventory.control_addr, approved.node_hardware_id[0]);
+    assert(!catalog_runtime_match(&approved, &inventory, 1, reason, sizeof reason));
+    /* RAM consumed by the approved model is not a hardware change. */
+    inventory.machine.ram_available_bytes = 1ull << 30;
+    inventory.ram_budget_bytes = 0;
+    assert(!catalog_runtime_match(&approved, &inventory, 1, reason, sizeof reason));
+    assert(catalog_runtime_match(&approved, &inventory, 0, reason, sizeof reason) == 1);
+    assert(strstr(reason, "temporarily unavailable"));
+    assert(!catalog_runtime_match(&approved, &inventory, 1, reason, sizeof reason));
+    inventory.runtime_id[0] = 'b';
+    assert(catalog_runtime_match(&approved, &inventory, 1, reason, sizeof reason) == -1);
+    assert(strstr(reason, "runtime identity"));
+    inventory.runtime_id[0] = 'a'; inventory.runtime_threads = 1;
+    assert(catalog_runtime_match(&approved, &inventory, 1, reason, sizeof reason) == -1);
+    assert(strstr(reason, "thread capacity"));
+    inventory.runtime_threads = 4; inventory.machine.logical_cpus = 8;
+    assert(catalog_runtime_match(&approved, &inventory, 1, reason, sizeof reason) == -1);
+    assert(strstr(reason, "hardware or endpoint"));
+    if (argc > 1 && !strcmp(argv[1], "calibration-inventory")) {
+        puts("CALIBRATION INVENTORY: PASS (absence is retryable; runtime, hardware and thread changes rejected)");
+        return 0;
+    }
     LmbPrepareWatchdog watchdog = {.started = 0, .advanced = 0};
     /* Same progressing transfer that used to be killed at 900 seconds. */
     for (unsigned t = 300; t <= 3600; t += 300) {

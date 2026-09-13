@@ -1244,6 +1244,26 @@ static void generation_result_free(GenerationResult *result) {
  * ends inside a byte-fallback character. A non-final failure only defers text;
  * the final prefix MUST decode successfully. Never emit a partial UTF-8 scalar
  * or a trailing replacement which another byte token could still complete. */
+static int generation_stable_bytes(const char *previous, size_t previous_bytes,
+    const char *text, size_t bytes, size_t emitted, int flush, size_t *result) {
+    if (emitted > bytes || emitted > previous_bytes ||
+        (emitted && (!previous || memcmp(previous, text, emitted)))) return -1;
+    size_t stable = 0;
+    if (flush) stable = bytes;
+    else if (previous) {
+        size_t common = previous_bytes < bytes ? previous_bytes : bytes;
+        while (stable < common && previous[stable] == text[stable]) stable++;
+        while (stable && stable < bytes && ((unsigned char)text[stable] & 0xc0) == 0x80) stable--;
+        /* A replacement at the end of the common prefix may still belong to
+         * an incomplete byte-fallback scalar, even with newer text after it. */
+        while (stable >= 3 && !memcmp(text + stable - 3, "\xef\xbf\xbd", 3)) stable -= 3;
+    }
+    /* The prefix was checked above. Conservative suffix holdback cannot
+     * revoke identical bytes already delivered to the client. */
+    *result = stable < emitted ? emitted : stable;
+    return 0;
+}
+
 static int generation_stream_prefix(ColiEdgeEngine *edge,
                                     const int32_t *tokens, size_t count,
                                     int32_t eos_token,
@@ -1268,27 +1288,12 @@ static int generation_stream_prefix(ColiEdgeEngine *edge,
         return -1;
     }
     text[bytes] = 0;
-    if (*emitted_bytes > bytes ||
-        (*emitted_bytes && (!*previous ||
-         memcmp(*previous, text, *emitted_bytes)))) {
+    size_t stable = 0;
+    if (generation_stable_bytes(*previous, *previous_bytes, text, bytes,
+                                *emitted_bytes, flush, &stable)) {
         free(text);
         snprintf(error, error_size,
                  "tokenizer rewrote text that was already streamed");
-        return -1;
-    }
-    size_t stable = 0;
-    if (flush) stable = bytes;
-    else if (*previous) {
-        size_t common = *previous_bytes < bytes ? *previous_bytes : bytes;
-        while (stable < common && (*previous)[stable] == text[stable]) stable++;
-        while (stable && stable < bytes && ((unsigned char)text[stable] & 0xc0)==0x80) stable--;
-        if (stable==bytes)
-            while (stable>=3 && !memcmp(text+stable-3,"\xef\xbf\xbd",3)) stable-=3;
-    }
-    if (stable < *emitted_bytes) {
-        free(text);
-        snprintf(error, error_size,
-                 "tokenizer changed an already streamed prefix");
         return -1;
     }
     size_t delta = stable - *emitted_bytes;

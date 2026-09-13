@@ -6,6 +6,14 @@
 #include <assert.h>
 
 int main(void) {
+    size_t stable;
+    const char *replacement = "A\xef\xbf\xbd";
+    assert(!generation_stable_bytes(NULL, 0, "A", 1, 0, 0, &stable) && !stable);
+    assert(!generation_stable_bytes(replacement, 4, "A\xef\xbf\xbdX", 5, 1, 0, &stable) && stable == 1);
+    assert(!generation_stable_bytes("A\xef\xbf\xbdX", 5, replacement, 4, 4, 0, &stable) && stable == 4);
+    assert(generation_stable_bytes(replacement, 4, "AB", 2, 4, 0, &stable));
+    assert(generation_stable_bytes("AB", 2, "AX", 2, 2, 0, &stable));
+    assert(!generation_stable_bytes(replacement, 4, replacement, 4, 1, 1, &stable) && stable == 4);
     /* Invalid or recovered profiles expose no partially measured ranges. */
     GenerationResult observed = {.stages_valid = 0, .stage_count = 1};
     observed.stages[0].timing.decode_seconds = NAN;
