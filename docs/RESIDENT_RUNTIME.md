@@ -219,11 +219,24 @@ diagnostic setting inherited when the donor starts (default adaptive), not a
 new permission or public-discovery route. Logs separate send, local work and
 collection wait. Prewarming/calibration probes are included in reported time.
 
-The first four routed inputs of each accelerated layer also compare the
-remote contribution against the local callback. A mismatch is replaced with
-the local result and disables remote use for that resident engine lifetime.
-This smoke test does not prove equality for every possible later input.
-`split` cannot override a detected incompatibility.
+The original `23ebce7` check compared the first four remote contributions
+bit-for-bit against the local callback. This was too strict as a household
+cross-platform compatibility policy: a difference alone does not establish
+an incorrect model. The revised FP32 envelope (policy v1) is
+`abs(remote-reference) <= 1e-6 + 1e-5 * abs(reference)` for **every** component,
+with finite inputs required. These are explicit engineering tolerances, not
+a universal model-quality theorem. They do not promise identical greedy
+tokens. Only the already-approved OLMoE Hybrid callback currently uses this
+policy; model/root, shape, numeric-class and peer authorization still apply.
+
+Small differences retain the remote result and are logged as rounding, not
+silently recomputed locally. An out-of-envelope probe is replaced locally
+and disables remote use for that engine lifetime. Probe the first four remote
+inputs per accelerated layer and periodically every 64 layer rounds; examine
+all replies for NaN/Inf even between probes. Forced `split` cannot override an
+out-of-envelope/non-finite result. These smoke tests cannot establish a bound
+for every future input. Their extra reference computation is excluded from
+the scheduler's service estimate but remains in actual end-to-end timings.
 
 The physical MoE microbenchmark detected small cross-platform differences
 (maximum absolute error 1.49e-8) despite the same advertised numeric class.
@@ -232,6 +245,52 @@ highly variable; they must not be presented as certified token/s or a speedup.
 The benchmark's optional `LMB_BENCH_INSPECT_DIFF=1` only quantifies raw
 differences and still exits nonzero on a mismatch. It is not a production
 bypass. The normal test must either match or report local fallback explicitly.
+
+`LMB_BENCH_GREEDY=1` adds a separate full-model check with the actual tokenizer,
+chat template, three fixed prompts, fresh KV, and up to 32 greedy tokens per
+prompt. Local and forced-split execution must produce identical token IDs;
+fallback or zero remote calls cannot pass this test. It loads another resident
+copy on the PC and must only run with sufficient spare RAM. Its cache-miss
+check proves no late expert loads, not OS-level no-swap behavior. Passing this
+finite corpus is evidence for the tested build and devices, not universal
+bitwise reproducibility across platforms.
+
+The September 14 physical test of the **original** `23ebce7` runtime completed
+three 32-token hosted turns: 6.61, 6.49 and 7.19 tok/s (median 6.61), fresh
+conversation each time. Calibration was saved and the source's transfer
+counter stayed at 11,264,897,654 bytes after preparation. The first remote
+probe was discarded, so these are **local-fallback** speeds, not Mac speedups.
+A subsequent isolated raw-result microbenchmark on the same approved Mac
+measured 5.212 ms per native-local MoE layer versus 11.434 ms split, over
+48 timed samples each. Maximum absolute difference was 1.49e-8. Those are
+synthetic per-layer timings, not chat throughput; variability remains material.
+
+The first draft of the revised policy used an absolute floor of `1e-7`.
+The full-model test encountered a 2.04891e-7 expert-output difference and
+correctly reported **NOT VALIDATED**, because fallback had replaced the Mac.
+That run is not evidence of remote equivalence. The revised `1e-6` absolute
+floor plus `1e-5` relative tolerance subsequently passed the three-prompt
+physical oracle: **96 identical token IDs, 513 remote calls, 18 rounded probes,
+no numerical fallback and no late expert loads**. This validates the finite
+corpus on that PC and Intel Mac; it does not certify all prompts or platforms.
+
+For the three prompts, 31 decode steps took respectively 4.044 / 3.663 / 3.255
+seconds locally and 6.138 / 4.498 / 4.633 seconds with forced splitting.
+This uses a separate in-process diagnostic model, context capacity 512 and
+12 PC threads, not the hosted TUI timing path. Mac computation was used, but
+this one-remote-expert-per-covered-layer policy was slower on every prompt.
+Numerical compatibility is fixed for this corpus; a PC+Mac speedup remains
+unproven. The adaptive policy is allowed to prefer local execution when the
+measured split service is slower; retained donor memory is not evidence of
+useful concurrent execution.
+
+The revised policy also passed the local household flow (approval, resident
+Hybrid, timing/calibration persistence and invalidation, and a second private
+conversation with the checkpoint source offline and no weight-mirror writes),
+the parallel/order/failure unit tests including non-finite replies after the
+startup probes, and the PTY UI regression. `/plan` now explicitly separates
+approved resident capacity from live execution. These results do not replace
+native CI for the revised commit or establish an acceleration over the PC.
 
 `make build/bench_home_hybrid ENGINE=...` builds this opt-in OLMoE diagnostic
 against prepared sources. It reuses already approved routes and requests no

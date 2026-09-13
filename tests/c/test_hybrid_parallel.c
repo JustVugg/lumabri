@@ -18,6 +18,7 @@ typedef struct {
     struct timespec deadline;
 } Gate;
 typedef struct { Gate *gate; int fd, expert; } Remote;
+typedef struct { int fd; float value; } NumericReply;
 
 static float contribution(int eid) { return eid == 3 ? 1.f : 0x1p-24f; }
 static int resident_local(void *opaque, int layer, int expert, const float *x, int D, float *out) {
@@ -31,6 +32,39 @@ static void *different_remote(void *opaque) {
     float out[DIM]; for (int i = 0; i < DIM; i++) out[i] = 9.f;
     assert(!lmb_send(fd, LMB_EXEC_R, NULL, 0, out, sizeof out));
     lmb_msg_free(&msg); close(fd); return NULL;
+}
+static void *numeric_remote(void *opaque) {
+    NumericReply *reply = opaque; LmbMsg msg = {0};
+    assert(!lmb_recv(reply->fd, &msg) && msg.op == LMB_HOME_EXPERT);
+    float out[DIM]; for (int i = 0; i < DIM; i++) out[i] = reply->value;
+    assert(!lmb_send(reply->fd, LMB_EXEC_R, NULL, 0, out, sizeof out));
+    lmb_msg_free(&msg); close(reply->fd); return NULL;
+}
+
+static void numeric_case(float value, int rejected, int late) {
+    memset(&L, 0, sizeof L);
+    L.home.count = 1; L.n_layers = 1; L.n_experts = EXPERTS; L.hidden = DIM;
+    L.hybrid_policy = LMB_HYBRID_FORCE_SPLIT;
+    L.npeers = 1; L.exec_wait_ms = 5000; L.hedge_ms = -1;
+    if (late) { L.hybrid_probes[0] = 4; L.hybrid_timing[0].rounds = late == 2 ? 64 : 5; }
+    L.own = malloc(EXPERTS * LUMI_MAX_REP * sizeof *L.own); assert(L.own);
+    for (int i = 0; i < EXPERTS * LUMI_MAX_REP; i++) L.own[i] = -1;
+    L.own[3 * LUMI_MAX_REP] = 0;
+    int pair[2]; assert(!socketpair(AF_UNIX, SOCK_STREAM, 0, pair));
+    L.peers[0].socks[0] = pair[0]; L.peers[0].nsocks = 1;
+    NumericReply reply = {pair[1], value}; pthread_t thread;
+    assert(!pthread_create(&thread, NULL, numeric_remote, &reply));
+    int idx[4] = {3, 0, 1, 2}, calls = 0;
+    float x[DIM] = {0}, w[4] = {1, 1, 1, 1}, out[DIM] = {0};
+    assert(lumi_moe_apply_split(0, idx, w, 4, x, DIM, out, 3, resident_local, &calls));
+    assert(!pthread_join(thread, NULL));
+    assert(L.calls == 1 && !!L.hybrid_numeric_failed == rejected);
+    float expected = rejected ? contribution(3) : value;
+    for (int k = 1; k < 4; k++) expected += contribution(idx[k]);
+    for (int d = 0; d < DIM; d++) assert(isfinite(out[d]) && out[d] == expected);
+    if (!rejected && value != contribution(3)) assert(L.hybrid_rounding_accepts == 1);
+    while (L.peers[0].nsocks) close(L.peers[0].socks[--L.peers[0].nsocks]);
+    free(L.own); memset(&L, 0, sizeof L);
 }
 
 static void *worker(void *opaque) {
@@ -127,6 +161,22 @@ static void run_case(int fail_local, int bad_reply) {
 }
 
 int main(void) {
+    float numeric_ref[] = {0, 1, -1, 1e-12f};
+    float numeric_got[] = {-0.f, 1, -1, 1e-12f}; double numeric_error = -1;
+    assert(lmb_hybrid_numeric_check(numeric_ref, numeric_got, 4, &numeric_error) == LMB_HYBRID_NUMERIC_EXACT);
+    assert(numeric_error == 0);
+    numeric_got[1] = nextafterf(1.f, 2.f);
+    assert(lmb_hybrid_numeric_check(numeric_ref, numeric_got, 4, &numeric_error) == LMB_HYBRID_NUMERIC_ROUNDING);
+    assert(numeric_error > 0);
+    numeric_got[0] = 1e-5f; /* near-zero errors cannot hide in a relative metric */
+    assert(lmb_hybrid_numeric_check(numeric_ref, numeric_got, 4, NULL) == LMB_HYBRID_NUMERIC_REJECT);
+    numeric_got[0] = 0; numeric_got[2] = -.99f;
+    assert(lmb_hybrid_numeric_check(numeric_ref, numeric_got, 4, NULL) == LMB_HYBRID_NUMERIC_REJECT);
+    numeric_got[2] = -1; numeric_got[0] = NAN;
+    assert(lmb_hybrid_numeric_check(numeric_ref, numeric_got, 4, NULL) == LMB_HYBRID_NUMERIC_REJECT);
+    numeric_ref[0] = numeric_got[0] = INFINITY;
+    assert(lmb_hybrid_numeric_check(numeric_ref, numeric_got, 4, NULL) == LMB_HYBRID_NUMERIC_REJECT);
+    assert(lmb_hybrid_numeric_check(NULL, numeric_got, 4, NULL) == LMB_HYBRID_NUMERIC_REJECT);
     LmbHybridTiming timing = {0};
     for (unsigned i = 0; i < 8; i++) {
         int split = lmb_hybrid_choose(&timing, LMB_HYBRID_ADAPTIVE);
@@ -144,6 +194,12 @@ int main(void) {
     signal(SIGPIPE, SIG_IGN);
     setenv("LUMABRI_EXEC_FALLBACK_LOCAL", "1", 1);
     unsetenv("LUMABRI_TRACKER");
+    numeric_case(nextafterf(1.f, 2.f), 0, 0);
+    numeric_case(1.01f, 1, 0);
+    numeric_case(1.01f, 1, 2); /* periodic check after startup */
+    numeric_case(1.f, 0, 1);
+    numeric_case(NAN, 1, 1);
+    numeric_case(INFINITY, 1, 1);
     run_case(0, 0); run_case(1, 0); run_case(0, 1);
     /* An approved slower accelerator stays resident while the exact same
      * callback handles all experts locally; no socket is required. */

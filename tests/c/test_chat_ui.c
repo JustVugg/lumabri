@@ -342,6 +342,9 @@ int main(int argc, char **argv) {
     if (argc > 1 && !strcmp(argv[1], "plan")) {
         snprintf(execution.nodes[1].name, 64, "donor-1\033[2J");
         lmb_execution_print(stdout, &execution);
+        execution.hybrid = 1;
+        execution.nodes[0].end = execution.layers;
+        lmb_execution_print(stdout, &execution);
         lmb_execution_print(stdout, NULL);
         return 0;
     }

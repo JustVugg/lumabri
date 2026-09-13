@@ -63,7 +63,9 @@ static void lmb_execution_print(FILE *out, const LmbExecutionView *view) {
                 n->edge ? (view->hybrid ? " · full resident coordinator / chat host" : " · Edge / chat host") :
                           (view->hybrid ? " · approved expert accelerator" : ""));
     }
-    fputs(view->hybrid ? "  Coordinator: full local fallback. Other donors: concurrent resident experts.\n" :
+    fputs(view->hybrid ? "  Coordinator: full local fallback. Other donors: resident expert capacity.\n"
+                        "  Allocation is not live activity: measured scheduling may run experts locally.\n"
+                        "  A donor retaining RAM does not by itself mean a faster reply.\n" :
                         "  Each Segment executes attention and experts for its own layers.\n", out);
     fputs(
           "  This chat process runs no model layers.\n"

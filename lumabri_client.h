@@ -104,6 +104,7 @@ static struct {
     LmbHybridTiming hybrid_timing[512];
     unsigned char hybrid_probes[512];
     int hybrid_numeric_failed;
+    unsigned long long hybrid_rounding_accepts;
     int on, initialized, discovery;
     LumiPeer peers[LUMI_MAX_PEERS];
     int npeers;
@@ -1631,25 +1632,43 @@ static LMB_MAYBE_UNUSED int lumi_moe_apply_split(int layer, const int *idx,
     }
     double received_done = lumi_now();
     /* A shared adapter label does not prove cross-compiler/libm identity.
-     * Check the first four actual routed inputs of each accelerated layer.
-     * This is a runtime smoke test, NOT a proof for all future inputs. An
-     * observed mismatch is never accumulated: compute that contribution
-     * locally and retain local execution for this resident engine lifetime. */
-    if (household && remote_count && L.hybrid_probes[layer] < 4) {
+     * Validate the first four remote inputs, then periodically, against a
+     * documented FP32 envelope. Small rounding differences remain remote;
+     * incompatible results are replaced locally before any accumulation.
+     * Always examine non-finite replies, even after the initial probes.
+     * These are numerical smoke tests, not proof of all future outputs. */
+    int nonfinite = 0;
+    if (household) for (int k = 0; k < remote_count; k++)
+        for (int d = 0; d < D; d++) if (!isfinite(res[k][d])) nonfinite = 1;
+    if (household && remote_count && (L.hybrid_probes[layer] < 4 ||
+        !(L.hybrid_timing[layer].rounds % 64) || nonfinite)) {
         for (int k = 0; k < remote_count; k++) {
             float *check = malloc((size_t)D * sizeof(float));
             if (!check || local(ctx, layer, idx[k], x, D, check)) { free(check); goto fail; }
-            if (memcmp(check, res[k], (size_t)D * sizeof(float))) {
+            double max_error;
+            int match = lmb_hybrid_numeric_check(check, res[k], D, &max_error);
+            if (match == LMB_HYBRID_NUMERIC_REJECT) {
                 if (!L.hybrid_numeric_failed)
-                    fprintf(stderr, "[home-hybrid] numeric probe differs at layer %d expert %d; "
+                    fprintf(stderr, "[home-hybrid] numeric probe exceeds FP32 envelope at layer %d expert %d "
+                        "(max_abs=%g); "
                         "using local results and retaining local execution; approved donor RAM is unchanged\n",
-                        layer, idx[k]);
+                        layer, idx[k], max_error);
                 L.hybrid_numeric_failed = 1;
                 free(res[k]); res[k] = check;
-            } else free(check);
+            } else {
+                if (match == LMB_HYBRID_NUMERIC_ROUNDING) {
+                    unsigned long long n = ++L.hybrid_rounding_accepts;
+                    if (!(n & (n - 1)))
+                        fprintf(stderr, "[home-hybrid] FP32 rounding accepted at layer %d expert %d "
+                            "(max_abs=%g); remote result retained; probes=%llu\n",
+                            layer, idx[k], max_error, n);
+                }
+                free(check);
+            }
         }
-        L.hybrid_probes[layer]++;
+        if (L.hybrid_probes[layer] < 4) L.hybrid_probes[layer]++;
     }
+    double validation_done = lumi_now();
     /* accumulate in the router's order, exactly as the local path does */
     for (int k = 0; k < K; k++) {
         float w = val[k];
@@ -1667,7 +1686,10 @@ static LMB_MAYBE_UNUSED int lumi_moe_apply_split(int layer, const int *idx,
     }
     if (household) {
         LmbHybridTiming *t = &L.hybrid_timing[layer];
-        lmb_hybrid_observe(t, remote_count != 0, lumi_now() - t0,
+        /* Probe recomputation is validation overhead, not the steady-state
+         * split service time. Actual end-to-end token timings still include it. */
+        lmb_hybrid_observe(t, remote_count != 0,
+            lumi_now() - t0 - (validation_done - received_done),
             sent_done - t0, local_done - sent_done, received_done - local_done);
         if (!(t->rounds & (t->rounds - 1)))
             fprintf(stderr, "[home-hybrid-profile] layer=%d rounds=%llu local_n=%llu split_n=%llu "
