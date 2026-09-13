@@ -64,6 +64,7 @@
 #include "lumabri_secure.h"
 #include "lumabri_sha.h"
 #include "lumabri_sign.h"
+#include "src/runtime/lumabri_prepare_limits.h"
 
 #define FD_LIMIT      65536
 #define MAX_RPEERS    32
@@ -1946,15 +1947,19 @@ static int ensure_range(RFile *f, uint64_t off, uint64_t len) {
 
 static int ensure_full(RFile *f) { return ensure_range(f, 0, f->size); }
 
-/* One bounded preparation buffer, never a second copy of the model. Bytes
+/* Bounded preparation buffers, never a second copy of the model. Bytes
  * travel from the authenticated source directly into engine-owned tensors.
  * The sparse descriptors exist for fstat/offset compatibility only: no
  * weight payload is read from or written to the disk mirror in this mode. */
 static pthread_mutex_t direct_weight_lock = PTHREAD_MUTEX_INITIALIZER;
-static RFile *direct_weight_file;
-static uint64_t direct_weight_offset;
-static uint32_t direct_weight_length;
-static uint8_t *direct_weight_data;
+typedef struct {
+    RFile *file;
+    uint64_t offset, used;
+    uint32_t length;
+    uint8_t *data;
+} DirectWeightBlock;
+static DirectWeightBlock direct_weight_blocks[LMB_PREPARE_CACHE_SLOTS];
+static uint64_t direct_weight_clock, direct_weight_fetches, direct_weight_hits;
 /* Some upstream kernels access embedding tables through pread even when
  * their entire table is resident. Retain only those explicitly declared
  * tensor ranges, in their native representation, until process shutdown.
@@ -1976,8 +1981,12 @@ int lmb_weights_seal(void) {
     if (!g.ok || !g.direct_weights) return -1;
     pthread_mutex_lock(&direct_weight_lock);
     atomic_store(&g.weights_sealed, 1);
-    free(direct_weight_data); direct_weight_data = NULL;
-    direct_weight_file = NULL; direct_weight_length = 0;
+    for (unsigned i = 0; i < LMB_PREPARE_CACHE_SLOTS; i++) {
+        free(direct_weight_blocks[i].data);
+        memset(&direct_weight_blocks[i], 0, sizeof direct_weight_blocks[i]);
+    }
+    fprintf(stderr, "[resident] preparation block cache: %llu fetches, %llu hits; buffers released\n",
+            (unsigned long long)direct_weight_fetches, (unsigned long long)direct_weight_hits);
     pthread_mutex_unlock(&direct_weight_lock);
     fprintf(stderr, "[resident] weight input sealed; inference uses resident RAM only\n");
     return 0;
@@ -2004,25 +2013,43 @@ static ssize_t direct_weight_read(RFile *f, void *buf, size_t n, off_t off) {
     hashes_ensure(f);
     if (f->hstate != 1) goto bad;
     size_t copied = 0;
+    unsigned slots = (unsigned)(LMB_PREPARE_CACHE_BYTES / g.block);
+    if (slots > LMB_PREPARE_CACHE_SLOTS) slots = LMB_PREPARE_CACHE_SLOTS;
+    if (!slots) goto bad; /* Never exceed the admitted preparation memory. */
     while (copied < n) {
         uint64_t pos = (uint64_t)off + copied;
         uint64_t start = pos / g.block * g.block;
         uint32_t len = f->size - start < g.block ? (uint32_t)(f->size - start) : g.block;
-        if (direct_weight_file != f || direct_weight_offset != start || !direct_weight_data) {
-            free(direct_weight_data); direct_weight_data = NULL; direct_weight_file = NULL;
-            for (int i = 0; i < f->npeers && !direct_weight_data; i++) {
+        DirectWeightBlock *block = NULL;
+        for (unsigned i = 0; i < slots; i++) {
+            DirectWeightBlock *b = &direct_weight_blocks[i];
+            if (b->data && b->file == f && b->offset == start) { block = b; break; }
+        }
+        if (block) direct_weight_hits++;
+        else {
+            block = &direct_weight_blocks[0];
+            for (unsigned i = 0; i < slots; i++) {
+                DirectWeightBlock *b = &direct_weight_blocks[i];
+                if (!b->data) { block = b; break; }
+                if (b->used < block->used) block = b;
+            }
+            /* Evict before fetching, including authentication/hash failures. */
+            free(block->data); memset(block, 0, sizeof *block);
+            for (int i = 0; i < f->npeers && !block->data; i++) {
                 uint8_t *data = peer_fetch(&g.peers[f->peer_idx[i]], f->rel, start, len);
                 if (data && block_verify(f, start, data, len)) { free(data); data = NULL; }
-                direct_weight_data = data;
+                block->data = data;
             }
-            if (!direct_weight_data) goto bad;
-            direct_weight_file = f; direct_weight_offset = start; direct_weight_length = len;
+            if (!block->data) goto bad;
+            block->file = f; block->offset = start; block->length = len;
+            direct_weight_fetches++;
             atomic_fetch_add(&g.net_bytes, len); atomic_fetch_add(&g.net_blocks, 1);
         }
+        block->used = ++direct_weight_clock;
         size_t within = (size_t)(pos - start);
-        size_t take = direct_weight_length - within;
+        size_t take = block->length - within;
         if (take > n - copied) take = n - copied;
-        memcpy((uint8_t *)buf + copied, direct_weight_data + within, take);
+        memcpy((uint8_t *)buf + copied, block->data + within, take);
         copied += take;
     }
     pthread_mutex_unlock(&direct_weight_lock);

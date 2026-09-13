@@ -42,7 +42,12 @@ not automatic failover: the interrupted chat still reports the missing node.
 ## Preparation and inference
 
 The preparation loader transfers authenticated, hash-verified weight blocks
-directly into engine memory, with one bounded transport block. Sparse virtual
+directly into engine memory, with a bounded, verified preparation cache.
+It holds up to four blocks, never more than 64 MiB per engine; the slot count
+shrinks for larger protocol blocks. This prevents interleaved gate/up/down
+reads from fetching the same block for every matrix. Both Segment and Edge
+reservations explicitly include this temporary allowance. All buffers are
+freed when weight input is sealed, before READY. Sparse virtual
 file descriptors exist for metadata/offset compatibility; the resident path
 does not write weight payloads to the mirror or CAS.
 
@@ -145,6 +150,28 @@ native/Linux CI for `29f7732` passed; native macOS 12.6 and physical LAN
 completion remain unverified.
 
 ## Outstanding release gates
+
+### September 13 PC / Intel Mac preparation regression
+
+The physical Hybrid run reached accelerator READY on the Mac (four OpenMP
+threads), but the coordinator stopped after preparing layer 12. Source
+progress was still increasing at 897.6 seconds: 29.14 GB served across remote
+and local readers. The requester had a fixed 900-second preparation limit;
+cancelling the source then surfaced as a read error and donor disconnection.
+No conversation or speed measurement completed in that run.
+
+Preparation now expires after 15 minutes **without** a transfer-byte advance
+or a forward preparation-phase transition, with a separate 24-hour safety
+ceiling. Heartbeats and repeated status messages do not renew this allowance.
+Expiry names the reason before rolling back the approved allocations.
+The interleaved input cache above addresses the repeated-block amplification;
+it does not add a disk inference path.
+
+Regression gates: fake-clock progress past 900 seconds and stalled/hard-limit
+expiry; authenticated interleaved and cross-shard reads with bounded eviction;
+byte identity, empty weight mirrors and post-seal refusal; complete two-donor
+Hybrid TUI flow including paused rendering, requester loss, retained RAM and
+calibration invalidation. The updated physical PC/Mac run is still required.
 
 - Native CI on the final commit and the physical PC/Mac
   transfer/prepare/generate/reconnect/Stop test.

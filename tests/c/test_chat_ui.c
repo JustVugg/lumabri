@@ -5,6 +5,23 @@
 #include <assert.h>
 
 int main(int argc, char **argv) {
+    LmbPrepareWatchdog watchdog = {.started = 0, .advanced = 0};
+    /* Same progressing transfer that used to be killed at 900 seconds. */
+    for (unsigned t = 300; t <= 3600; t += 300) {
+        lmb_prepare_watchdog_advance(&watchdog, t, t * 1024u, 2);
+        assert(!lmb_prepare_watchdog_expired(&watchdog, t));
+    }
+    /* Connected/status repeats do not renew a stalled download. */
+    lmb_prepare_watchdog_advance(&watchdog, 4499, 3600 * 1024u, 2);
+    assert(!lmb_prepare_watchdog_expired(&watchdog, 4499));
+    assert(lmb_prepare_watchdog_expired(&watchdog, 4500) == 1);
+    /* Local loading / host startup can advance without network traffic. */
+    lmb_prepare_watchdog_advance(&watchdog, 4499, 3600 * 1024u, 3);
+    assert(!lmb_prepare_watchdog_expired(&watchdog, 4500));
+    lmb_prepare_watchdog_advance(&watchdog, 86400, 999999999, 4);
+    assert(lmb_prepare_watchdog_expired(&watchdog, 86400) == 2);
+    LmbPrepareWatchdog approval = {.started = 10, .advanced = 10};
+    assert(lmb_prepare_watchdog_expired(&approval, 910) == 1);
     LmbPrepareProgress prep = {0};
     char prep_bar[29], prep_detail[180];
     lmb_prepare_display(&prep.index, 1, 0, prep_bar, prep_detail, sizeof prep_detail);

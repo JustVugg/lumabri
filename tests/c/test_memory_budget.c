@@ -42,7 +42,9 @@ static void timed_plans(void) {
     double costs[2] = {.01, .08};
     assert(!lmb_home_plan_selected(&shape, 1, nodes, 2, 128, &seed, costs, &got));
     assert(got.nslices == 2 && got.slices[0].layer_end == 15 && got.slices[1].layer_begin == 15);
-    nodes[0].ram_budget_bytes = 1500 * mib;
+    LmbHomeReservation fourteen;
+    assert(!lmb_home_reservation(&shape, 1, 0, 14, 128, 1, &fourteen));
+    nodes[0].ram_budget_bytes = fourteen.total_bytes;
     assert(!lmb_home_plan_selected(&shape, 1, nodes, 2, 128, &seed, costs, &got));
     assert(got.slices[0].layer_end == 14 && got.slices[1].layer_begin == 14);
     nodes[0].ram_budget_bytes = 2200 * mib;
@@ -80,7 +82,7 @@ static void feasible_plans(void) {
     m.edge_resident_bytes = 8 * mib;
     for (uint32_t i = 0; i < m.layers; i++) m.memory[i].resident_bytes = 100 * mib;
     LmbClusterNode nodes[LMB_CLUSTER_MAX_NODES] = {0};
-    nodes[0].ram_budget_bytes = 500 * mib;
+    nodes[0].ram_budget_bytes = 500 * mib + 2 * LMB_PREPARE_CACHE_BYTES;
     nodes[1].ram_budget_bytes = 100 * mib;
     LmbClusterPlan p, old;
     assert(!lmb_plan_cluster_source(&m, nodes, 2, 128, 1, LMB_GOAL_ONE_SESSION, 1, &old));
@@ -99,7 +101,7 @@ static void feasible_plans(void) {
     nodes[0].has_checkpoint = 0;
 
     /* Successful legacy placements (and thus calibration keys) are stable. */
-    nodes[1].ram_budget_bytes = 500 * mib;
+    nodes[1].ram_budget_bytes = 500 * mib + LMB_PREPARE_CACHE_BYTES;
     assert(!lmb_plan_cluster_source(&m, nodes, 2, 128, 1, LMB_GOAL_ONE_SESSION, 1, &old));
     assert(!lmb_home_plan_budgets(&m, 1, nodes, 2, 128, &old));
     assert(old.state == LMB_PLAN_RESIDENT && old.nslices == 2);
@@ -109,7 +111,8 @@ static void feasible_plans(void) {
     /* More selected donors than layers used to strand Edge without a slice.
      * Neither donor can hold both layers with Edge; two are genuinely needed. */
     m.layers = 2;
-    for (uint32_t i = 0; i < LMB_CLUSTER_MAX_NODES; i++) nodes[i].ram_budget_bytes = 250 * mib;
+    for (uint32_t i = 0; i < LMB_CLUSTER_MAX_NODES; i++)
+        nodes[i].ram_budget_bytes = 250 * mib + 2 * LMB_PREPARE_CACHE_BYTES;
     assert(!lmb_plan_cluster_source(&m, nodes, 8, 128, 1, LMB_GOAL_ONE_SESSION, 1, &old));
     assert(lmb_home_plan_budgets(&m, 1, nodes, 8, 128, &old));
     assert(!lmb_home_plan_source(&m, 1, nodes, 8, 128, 1, LMB_GOAL_ONE_SESSION, 1, &p));
@@ -176,7 +179,8 @@ int main(void) {
     const uint64_t mib = UINT64_C(1) << 20, bytes = 620001;
     LmbHomeReservation r;
     assert(!lmb_home_reservation(&m, bytes, 0, 4, 128, 1, &r));
-    assert(r.segment_bytes >= 128 * mib && r.edge_bytes >= 64 * mib);
+    assert(r.segment_bytes >= 128 * mib + LMB_PREPARE_CACHE_BYTES);
+    assert(r.edge_bytes >= 64 * mib + LMB_PREPARE_CACHE_BYTES);
     assert(!(r.segment_bytes % mib) && !(r.edge_bytes % mib));
     assert(r.total_bytes == r.segment_bytes + r.edge_bytes);
     assert(lmb_checkpoint_floor(101, 4, 1, 4) == 75 + 5);

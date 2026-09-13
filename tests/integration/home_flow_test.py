@@ -356,7 +356,7 @@ def main():
             assert chat.has("hosted stream") and chat.has("no local checkpoint")
             records = list((tmp / "chatter/.lumabri/calibrations").glob("*.cal"))
             assert len(records) == 1 and records[0].stat().st_mode & 0o077 == 0
-            assert_stage_record(records[0])
+            assert_stage_record(records[0], stages=0 if args.expect_hybrid else 2)
             until(lambda: a.has("Released") and b.has("Released"))
             for name in ("donor-a", "donor-b"):
                 for lock in ("compute-donor.lock", "home/weights.lock"):
@@ -754,7 +754,10 @@ def main():
             records = list((tmp / "chatter/.lumabri/calibrations").glob("*.cal"))
             assert len(records) == 1, "completed real generation did not save a bound measurement"
             assert records[0].stat().st_mode & 0o077 == 0, "calibration record is not private"
-            assert_stage_record(records[0])
+            # Hybrid's remote expert calls overlap the coordinator; they are
+            # not independent Segment stages. Save the measured total rate,
+            # but never manufacture per-donor stage costs for placement.
+            assert_stage_record(records[0], stages=0 if args.expect_hybrid else 2)
             for condition in ("current", "context", "selection", "runtime"):
                 changed = condition != "current"
                 if condition == "runtime":

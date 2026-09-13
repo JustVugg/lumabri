@@ -1058,7 +1058,8 @@ static int home_request_chat(LmbTuiState *st, int selected) {
     int committed = 0, coordinator_started = 0, host_started = 0, first_visible = 0;
     double last_draw = 0;
     started = nowd();
-    while (!g_stopping && nowd() - started < 900) {
+    LmbPrepareWatchdog preparation = {.started = started, .advanced = started};
+    while (!g_stopping) {
         stage = !committed ? "waiting for donor approval" :
                 !host_started ? "loading the approved segments" : "starting the chat host";
         if (atomic_load(&s.failed)) goto done;
@@ -1070,6 +1071,16 @@ static int home_request_chat(LmbTuiState *st, int selected) {
         if (nowd() - last_draw < .1) { (void)poll(NULL, 0, 10); continue; }
         last_draw = nowd();
         lmb_prepare_read(&progress, logfile, nowd());
+        unsigned phase_progress = 0;
+        for (uint32_t i = 0; i < s.count; i++) phase_progress += (unsigned)phases[i];
+        lmb_prepare_watchdog_advance(&preparation, nowd(), progress.transfer.done, phase_progress);
+        int expired = lmb_prepare_watchdog_expired(&preparation, nowd());
+        if (expired) {
+            home_fail("Preparation cancelled: %s. Approved allocations have been released. Source log: %.240s",
+                      expired == 2 ? "the 24-hour safety limit was reached" :
+                      "no transfer or preparation-stage progress for 15 minutes", logfile);
+            goto done;
+        }
         if (term.active) {
             ui_begin("prepare chat");
             ui_printf(6, 5, UI_TEXT, "%s · %u computer(s) · one session", m->name, s.count);
