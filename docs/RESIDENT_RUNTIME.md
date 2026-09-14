@@ -315,3 +315,61 @@ already emitted, unchanged prefix. Streaming now retains verified emitted
 bytes, holds replacement characters at the end of the common prefix, and
 still rejects actual prefix rewrites. Targeted prefix tests and the subsequent
 complete resident flow passed.
+
+## Perfect-draft verification experiment (2026-09-14)
+
+The opt-in benchmark now accepts `LMB_BENCH_BLOCK=1`. This mode does not use
+household credentials, remote routes, allocations or a draft model. It loads
+one separate resident OLMoE copy, generates a native greedy reference, then
+teacher-forces the same continuation through 1/2/4/8-row verification. Every
+row receives normalization, the vocabulary projection and argmax, and every
+prediction is compared with the reference. Calling `step(S)` alone would
+return only the last row and undercount verification work.
+
+Example developer invocation (not a portable binary build):
+
+```sh
+make build/bench_home_hybrid ENGINE=/path/to/colibri/c ENGINE_CPU_FLAGS=-march=native
+LMB_BENCH_BLOCK=1 LUMABRI_NO_EXEC=1 COLI_NO_OMP_TUNE=1 PIN=off \
+  build/bench_home_hybrid /path/to/olmoe 0 16 12
+```
+
+Measured on the i7-1355U Linux/WSL PC, OLMoE merged resident INT8 expert
+checkpoint, GCC 13.3, `-O2 -march=native -fopenmp`, 12 threads, context capacity
+512. Three prompts, 16 continuation positions each, three rotated repeats.
+Prefill and weight preparation are excluded; all verification work is timed.
+The table uses the median of the three 48-position corpus totals, not the
+best run. The tiny-model test first passed the same correctness checks.
+
+| Mode | Median seconds / 48 positions | Ideal positions/s | Relative to native |
+| --- | ---: | ---: | ---: |
+| Native one-token decode | 4.730674 | 10.147 | 1.000 |
+| One-row verifier control | 4.639351 | 10.346 | 1.020 |
+| Two-row verification | 3.896706 | 12.318 | 1.214 |
+| Four-row verification | 3.363934 | 14.269 | 1.406 |
+| Eight-row verification | 3.437260 | 13.965 | 1.376 |
+| Eight rows, experimental batched head | 3.141728 | 15.278 | 1.506 |
+
+All **864 greedy predictions** matched; there were zero late expert-cache
+misses. This is not a universal numerical-equivalence or OS no-swap proof.
+The final mode batches only the vocabulary projection using the existing
+matrix kernel; it is diagnostic code, not a deployed Edge implementation.
+Colibri is not modified. Binary SHA-256 for this run:
+`dfc7cce471d9c706e7dd620d1f377e31e80421f9bf34d292def523addcd9a61e`.
+
+These are optimistic verification rates for **perfect, free proposals**,
+not measured speculative chat rates or a PC+Mac speedup. Real drafting,
+communication, rejection and rollback must still be paid. This locally tuned
+binary and short-context workload cannot be compared directly with the older
+6.60 tok/s packaged hosted-chat result. Timings varied substantially across
+repeats; a larger deployment benchmark is still necessary.
+
+Decision: batching creates measurable headroom, but this verifier alone does
+not establish a doubling or 20 tok/s. At the measured rates, eight-row
+verification costs about 5.8 native token times (5.3 with the experimental
+head), before drafting/network/rejection overhead. A real proposer must
+therefore deliver enough useful consecutive outputs to repay that cost.
+More speculative candidates are not automatically useful: four rows beat
+eight in the unmodified-head comparison. OLMoE's MoE loop still processes
+rows individually; grouping the rows that use the same expert is a separate
+kernel experiment, not an acceleration claimed by this measurement.

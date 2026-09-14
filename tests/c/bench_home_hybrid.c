@@ -79,15 +79,18 @@ static int greedy_oracle(Model *m, const char *directory) {
     return 0;
 }
 
+#include "bench_block_verify.h"
+
 int main(int argc, char **argv) {
     if (argc != 5) { fprintf(stderr, "usage: bench MODEL BEGIN END THREADS\n"); return 2; }
     int begin = atoi(argv[2]), end = atoi(argv[3]), threads = atoi(argv[4]);
     if (begin < 0 || end <= begin || end > 512 || threads < 1 || threads > 256) return 2;
-    if (!getenv("LUMABRI_HOME_HYBRID_ROUTES") || lmb_secure_init()) return 2;
+    int block = getenv("LMB_BENCH_BLOCK") != NULL;
+    if (!block && (!getenv("LUMABRI_HOME_HYBRID_ROUTES") || lmb_secure_init())) return 2;
     omp_set_num_threads(threads);
     Cfg config = {0}; load_cfg(&config, argv[1]);
     if (end > config.n_layers) return 2;
-    int greedy = getenv("LMB_BENCH_GREEDY") != NULL;
+    int greedy = block || getenv("LMB_BENCH_GREEDY") != NULL;
     Model m;
     model_init_range(&m, argv[1], config.n_experts, 8,
         greedy ? 0 : begin, greedy ? config.n_layers : end, greedy, 0);
@@ -101,6 +104,7 @@ int main(int argc, char **argv) {
         if (greedy) fprintf(stderr, "[oracle] layer %d resident: %d/%d experts\n",
             layer, config.n_experts, config.n_experts);
     }
+    if (block) return block_oracle(&m, argv[1]);
     if (lumi_home_init(config.n_layers, config.n_experts, config.hidden, "olmoe/f32-int8/cpu-v1")) return 3;
     for (int layer = begin; layer < end; layer++) if (!L.layer_ok[layer]) return 3;
     if (greedy) return greedy_oracle(&m, argv[1]);
