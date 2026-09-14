@@ -69,6 +69,8 @@ jobs:
         run: bash tests/integration/crypto_test.sh
       - name: Household ports, discovery parser and terminal palettes
         run: make test-home-network CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
+      - name: Encrypted donor authentication and offer admission
+        run: make test-home-monitor CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
       - name: Native workspace navigation and terminal restoration
         run: python3 tests/integration/workspace_navigation_test.py
       - name: Native candidate packaging contracts
