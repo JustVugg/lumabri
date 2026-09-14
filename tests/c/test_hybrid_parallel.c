@@ -165,6 +165,7 @@ static void run_case(int fail_local, int bad_reply) {
 static void rpc_failure_case(int kind, const char *reason) {
     memset(&L, 0, sizeof L);
     L.npeers = 1; L.hedge_ms = -1; L.exec_wait_ms = 20;
+    L.home.count = kind == 1 ? 0 : 1; /* Only EOF is eligible to reconnect. */
     LumiPeer *peer = &L.peers[0];
     snprintf(peer->addr, sizeof peer->addr, "test-peer");
     int pair[2]; assert(!socketpair(AF_UNIX, SOCK_STREAM, 0, pair));
@@ -225,7 +226,77 @@ static void secure_receive_failure_case(int kind, int expected_errno) {
     lmb_msg_free(&msg); close(pair[0]); close(pair[1]);
 }
 
+typedef struct { int listener, close_again, wrong_identity, requests; } Reconnect;
+static void *reconnect_server(void *opaque) {
+    Reconnect *r = opaque;
+    int fd = accept(r->listener, NULL, NULL); assert(fd >= 0);
+    lmb_set_io_timeout(fd, 2000);
+    assert(!lmb_secure_server(fd));
+    LmbMsg msg = {0}; int rc = lmb_recv(fd, &msg);
+    if (r->wrong_identity) {
+        assert(rc); /* Approval pin failed: not one activation was sent. */
+    } else {
+        assert(!rc && msg.op == LMB_HOME_EXPERT && msg.body_len == 80);
+        assert(!memcmp(msg.body, L.home.allocation, 32));
+        assert(lmb_get32(msg.body + 64) == 0 && lmb_get32(msg.body + 68) == 3);
+        assert(lmb_get32(msg.body + 72) == DIM && lmb_get32(msg.body + 76) == 1);
+        assert(msg.pay_len == DIM * sizeof(float));
+        r->requests++;
+        if (!r->close_again)
+            assert(!lmb_send(fd, LMB_EXEC_R, NULL, 0, msg.pay, msg.pay_len));
+    }
+    lmb_msg_free(&msg); close(fd); return NULL;
+}
+
+static void reconnect_case(int close_again, int wrong_identity) {
+    memset(&L, 0, sizeof L);
+    L.home.count = 1; L.home.allocation[0] = 17;
+    L.npeers = 1; L.hedge_ms = -1; L.exec_wait_ms = 2000;
+    Reconnect r = {.listener=lmb_listen(0), .close_again=close_again,
+                   .wrong_identity=wrong_identity};
+    assert(r.listener >= 0);
+    struct sockaddr_in addr; socklen_t size = sizeof addr;
+    assert(!getsockname(r.listener, (struct sockaddr *)&addr, &size));
+    snprintf(L.peers[0].addr, sizeof L.peers[0].addr, "127.0.0.1:%u", ntohs(addr.sin_port));
+    uint8_t seed[32] = {42}; lmb_sign_keypair(g_sec_pk, g_sec_sk, seed);
+    memcpy(L.home.peers[0].key, g_sec_pk, 32);
+    if (wrong_identity) L.home.peers[0].key[0] ^= 1;
+    char path[] = "/tmp/lumabri-rpc-pins-XXXXXX", hex[65];
+    int pinfd = mkstemp(path); assert(pinfd >= 0);
+    FILE *pins = fdopen(pinfd, "w"); assert(pins);
+    lmb_hex(hex, g_sec_pk, 32); fprintf(pins, "%s %s\n", L.peers[0].addr, hex);
+    assert(!fclose(pins));
+    const char *previous = getenv("LUMABRI_PEER_PINS");
+    char *saved = previous ? strdup(previous) : NULL;
+    assert(!setenv("LUMABRI_PEER_PINS", path, 1));
+    lmb_enc_send = lmb_sec_send_hook; lmb_enc_recv = lmb_sec_recv_hook;
+    lmb_enc_wrap = lmb_sec_wrap_hook; lmb_enc_forget = lmb_sec_forget_hook;
+    pthread_t thread; assert(!pthread_create(&thread, NULL, reconnect_server, &r));
+    int pair[2]; assert(!socketpair(AF_UNIX, SOCK_STREAM, 0, pair));
+    assert(!shutdown(pair[1], SHUT_WR)); /* FIN raced with the prior dispatch. */
+    LumiPeer *winner = NULL; uint32_t tried = 0; float x[DIM] = {1, 2, 3, 4};
+    lumi_peer_sent(&L.peers[0]);
+    float *result = lumi_finish_exec(0, 3, x, DIM, 1, NULL, pair[0], &L.peers[0],
+                                     lumi_now(), &tried, &winner);
+    assert(!pthread_join(thread, NULL));
+    if (!close_again && !wrong_identity) {
+        assert(result && !memcmp(result, x, sizeof x) && winner == &L.peers[0]);
+    } else assert(!result && !winner);
+    assert(r.requests == !wrong_identity && !L.peers[0].inflight);
+    /* Even a second EOF permits no third connection. */
+    struct pollfd pending = {r.listener, POLLIN, 0}; assert(poll(&pending, 1, 0) == 0);
+    free(result); close(pair[1]); close(r.listener);
+    while (L.peers[0].nsocks) close(L.peers[0].socks[--L.peers[0].nsocks]);
+    lmb_enc_send = NULL; lmb_enc_recv = NULL; lmb_enc_wrap = NULL; lmb_enc_forget = NULL;
+    if (saved) { assert(!setenv("LUMABRI_PEER_PINS", saved, 1)); free(saved); }
+    else assert(!unsetenv("LUMABRI_PEER_PINS"));
+    assert(!unlink(path));
+}
+
 int main(void) {
+    reconnect_case(0, 0);
+    reconnect_case(1, 0);
+    reconnect_case(0, 1);
     secure_receive_failure_case(0, ECONNRESET);
     secure_receive_failure_case(1, EBADMSG);
     secure_receive_failure_case(2, EPROTO);

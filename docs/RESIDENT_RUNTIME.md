@@ -438,3 +438,32 @@ tests cover EOF, authentication failure and malformed headers. Parallel order,
 fallback, failover, encryption and ASan/UBSan checks passed locally. These
 diagnostics do not by themselves establish the cause of a physical-network
 failure or a speedup.
+
+### Bounded recovery after a closed household expert connection
+
+The physical diagnostic run on allocation `18a72f4cc93bec91` (Mac layers
+`[13,16)`, 12 coordinator threads, context 512) reported `connection-closed`,
+`ECONNRESET`, after 116.055 ms, not the client's 1000 ms reply timeout. The
+benchmark stopped with 173 completed remote calls and `NOT VALIDATED`.
+The donor also applies a 1000 ms receive timeout while waiting for the next
+request. Its idle close can race with the client's pooled-socket liveness
+check while the coordinator computes other layers. The trace establishes a
+closed connection; without a corresponding server close reason it does not
+prove which server-side event closed that particular socket.
+
+For a closed connection only, the client now retries a stateless HOME_EXPERT
+request at most once on a **fresh connection to the same approved peer**.
+The peer identity is checked again before transmitting the activation;
+allocation, model root, layer, expert and input are unchanged. The recovery
+is logged as `action=reconnect-once`. A second closure fails normally. No
+timeouts are increased; remote errors, malformed/authentication failures and
+timeouts are not retried by this recovery. Stateful Segment RUN requests
+are unaffected. A repeated expert evaluation may cost additional work; this
+is a reliability change, not a speedup claim.
+
+Encrypted loopback regression tests verify successful reconnection, bounded
+failure after a second closure, and rejection of an unexpected approval
+identity before sending any activation. These and ASan/UBSan, parallel order,
+fallback, failover and secure-channel regressions passed locally. Physical
+validation of the recovery remains pending: the approved coordinator and
+donor processes had stopped before the recovery-enabled benchmark started.

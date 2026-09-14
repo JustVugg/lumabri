@@ -211,12 +211,7 @@ static int lumi_sock_alive(int fd) {
     return r == 0;                             /* nothing pending = idle and open */
 }
 
-static int lumi_take_sock(LumiPeer *p) {
-    while (p->nsocks) {
-        int fd = p->socks[--p->nsocks];
-        if (lumi_sock_alive(fd)) return fd;
-        close(fd);                             /* stale: the peer hung up */
-    }
+static int lumi_open_sock(LumiPeer *p) {
     const char *dial = p->loopback[0] ? p->loopback : p->addr;
     if (p->relay_target[0]) {
         dial = getenv("LUMABRI_TRACKER");
@@ -241,6 +236,15 @@ static int lumi_take_sock(LumiPeer *p) {
     lmb_set_io_timeout(fd, L.home.count ? 1000 :
                        lmb_env_int("LUMABRI_EXEC_TIMEOUT_MS", 120000, 1000, 3600000));
     return fd;
+}
+
+static int lumi_take_sock(LumiPeer *p) {
+    while (p->nsocks) {
+        int fd = p->socks[--p->nsocks];
+        if (lumi_sock_alive(fd)) return fd;
+        close(fd);
+    }
+    return lumi_open_sock(p);
 }
 
 static void lumi_put_sock(LumiPeer *p, int fd) {
@@ -1300,7 +1304,7 @@ static float *lumi_finish_exec(int layer, int eid, const float *x, int D, int nr
             }
         }
     }
-    int alive = 1 + (fd[1] >= 0);
+    int alive = 1 + (fd[1] >= 0), reconnected = 0;
     while (alive) {
         struct pollfd pf[2]; int map[2], np = 0;
         for (int i = 0; i < 2; i++) if (fd[i] >= 0) {
@@ -1351,6 +1355,25 @@ static float *lumi_finish_exec(int layer, int eid, const float *x, int D, int nr
                               started[i], wait_ms, &m);
             lmb_msg_free(&m);
             close(fd[i]); fd[i] = -1; lumi_peer_done(p[i]);
+            /* A donor may expire a pooled connection while the coordinator
+             * computes other layers. FIN can race with the pre-send liveness
+             * check. HOME_EXPERT is stateless: retry that exact approved RPC
+             * once on a fresh, identity-checked connection, never a new peer.
+             * Do not retry timeouts, invalid replies, auth failures or ERR.
+             * This does not apply to stateful Segment RUN requests. */
+            if (L.home.count && i == 0 && alive == 1 && !reconnected &&
+                recv_rc && recv_error == ECONNRESET) {
+                reconnected = 1;
+                fd[i] = lumi_open_sock(p[i]);
+                started[i] = lumi_now();
+                if (fd[i] >= 0 && !lumi_send_exec(p[i], fd[i], layer, eid, x, D, nr, w)) {
+                    lumi_peer_sent(p[i]);
+                    fprintf(stderr, "[expert-rpc] peer=%s layer=%d expert=%d "
+                        "action=reconnect-once scope=same-approved-expert\n", p[i]->addr, layer, eid);
+                    continue;
+                }
+                if (fd[i] >= 0) { close(fd[i]); fd[i] = -1; }
+            }
             lumi_peer_failed(p[i]); alive--;
         }
     }
