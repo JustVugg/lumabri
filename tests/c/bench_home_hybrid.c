@@ -80,12 +80,14 @@ static int greedy_oracle(Model *m, const char *directory) {
 }
 
 #include "bench_block_verify.h"
+#include "bench_causal_spec.h"
 
 int main(int argc, char **argv) {
     if (argc != 5) { fprintf(stderr, "usage: bench MODEL BEGIN END THREADS\n"); return 2; }
     int begin = atoi(argv[2]), end = atoi(argv[3]), threads = atoi(argv[4]);
     if (begin < 0 || end <= begin || end > 512 || threads < 1 || threads > 256) return 2;
-    int block = getenv("LMB_BENCH_BLOCK") != NULL;
+    int causal = getenv("LMB_BENCH_CAUSAL") != NULL;
+    int block = causal || getenv("LMB_BENCH_BLOCK") != NULL;
     if (!block && (!getenv("LUMABRI_HOME_HYBRID_ROUTES") || lmb_secure_init())) return 2;
     omp_set_num_threads(threads);
     Cfg config = {0}; load_cfg(&config, argv[1]);
@@ -104,6 +106,7 @@ int main(int argc, char **argv) {
         if (greedy) fprintf(stderr, "[oracle] layer %d resident: %d/%d experts\n",
             layer, config.n_experts, config.n_experts);
     }
+    if (causal) return causal_oracle(&m, argv[1]);
     if (block) return block_oracle(&m, argv[1]);
     if (lumi_home_init(config.n_layers, config.n_experts, config.hidden, "olmoe/f32-int8/cpu-v1")) return 3;
     for (int layer = begin; layer < end; layer++) if (!L.layer_ok[layer]) return 3;

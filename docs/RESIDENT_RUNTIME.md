@@ -373,3 +373,44 @@ More speculative candidates are not automatically useful: four rows beat
 eight in the unmodified-head comparison. OLMoE's MoE loop still processes
 rows individually; grouping the rows that use the same expert is a separate
 kernel experiment, not an acceleration claimed by this measurement.
+
+## Causal proposer experiment (2026-09-14)
+
+`LMB_BENCH_CAUSAL=1` replaces perfect proposals with a zero-weight n-gram
+proposer. It sees only committed prompt/output tokens, requires a suffix match
+of at least two tokens, and proposes at most three tokens. Verification uses
+all rows and the experimental batched head. At a mismatch, only the accepted
+prefix plus the correction token is appended; OLMoE's causal KV position is
+restored and the discarded suffix is overwritten. This rollback is not valid
+for recurrent compressed attention and is not offered to other adapters.
+The reference continuation is used only to check results, never to propose.
+Special-token stops are honored. No remote proposer or network is involved.
+
+The same PC, model, compiler flags and 12-thread setting as the preceding test
+were used, with up to 32 generated positions, four prompts and three repeats.
+The initial prefill/first prediction is reported separately and excluded from
+the decode times below; all proposal, verification and rollback costs are
+included. The repetition prompt is deliberately separate from ordinary chat.
+
+| Prompt | Native median decode seconds | Causal n-gram median seconds | Native / speculative |
+| --- | ---: | ---: | ---: |
+| Cappelletti description | 2.896520 | 2.917638 | 0.99 |
+| Arithmetic question | 3.142904 | 3.466701 | 0.91 |
+| Python function | 3.378155 | 5.869074 | 0.58 |
+| Explicit sentence repetition | 3.788574 | 2.701853 | 1.40 |
+
+All **768 generated positions** matched. Across speculative runs: 123 proposed
+tokens, 75 accepted, 18 rejected blocks, zero late expert-cache misses. The
+median full-corpus decode time was 15.133205 s native versus 15.509343 s with
+speculation (8.194 versus 7.995 decode positions/s). Timings had substantial
+outliers; the roughly 2.4% corpus difference is not evidence of a statistically
+established slowdown. It is also **not evidence of a general speedup**.
+Binary SHA-256: `a9cf6dc06c00e2372305fab840ccf0c411c8ea58c6d747fa404e8d1cfae82020`.
+
+Decision: do not enable this proposer in household chat or offload it to a
+donor as a claimed acceleration. It has too little useful work on ordinary
+prompts, even before communication is added. Repetition-only improvement
+does not satisfy the PC+Mac objective. A better compatible proposer and/or
+cheaper verification still needs to be demonstrated. The tiny-model contract
+test validates accepted-prefix handling and real rollback after rejection;
+its repetitive/random output is not a performance proxy for a trained model.
