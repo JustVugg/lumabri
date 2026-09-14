@@ -111,6 +111,9 @@ typedef struct {
     uint64_t session_memory_limit_bytes;
     LmbGovernor governor;
     _Atomic uint64_t committed_runs;
+    _Atomic uint64_t expert_runs;
+    int home_accelerator;
+    uint8_t home_allocation[32];
     TrackerRegistration registration;
 } Node;
 
@@ -1030,6 +1033,41 @@ static int handle_control(Node *node, int fd, const LmbMsg *msg) {
 
 typedef struct { Node *node; int fd; } Connection;
 
+static int handle_home_expert(Node *node, int fd, const LmbMsg *msg) {
+    int probe = msg->op == LMB_HOME_FEATURES;
+    if (!node->home_accelerator || msg->body_len != (probe ? 128u : 80u) ||
+        memcmp(msg->body, node->home_allocation, 32) ||
+        memcmp(msg->body + 32, node->advert.model_root, 32))
+        return lmb_send(fd, LMB_ERR, "unapproved Hybrid request", 25, NULL, 0);
+    if (probe) {
+        uint8_t numeric[64] = {0};
+        size_t n = strlen(node->cap.numeric_class);
+        if (msg->pay_len || !n || n >= sizeof numeric) return -1;
+        memcpy(numeric, node->cap.numeric_class, n);
+        if (memcmp(numeric, msg->body + 64, sizeof numeric)) return -1;
+        return lmb_send(fd, LMB_OK, msg->body, 128, NULL, 0);
+    }
+    uint32_t layer = lmb_get32(msg->body + 64), expert = lmb_get32(msg->body + 68);
+    uint32_t D = lmb_get32(msg->body + 72), rows = lmb_get32(msg->body + 76);
+    if (layer < node->advert.layer_begin || layer >= node->advert.layer_end ||
+        D != node->cap.state_width || !D || rows != 1 ||
+        (uint64_t)D * sizeof(float) != msg->pay_len || expert > INT_MAX)
+        return lmb_send(fd, LMB_ERR, "invalid Hybrid shape", 20, NULL, 0);
+    int admitted = lmb_run_gate_enter(&node->run_gate, node->run_wait_ms, run_should_cancel, node);
+    if (admitted != 1) return lmb_send(fd, LMB_ERR, "Hybrid capacity busy", 20, NULL, 0);
+    float *out = malloc((size_t)D * sizeof(float));
+    int bad = !out || lmb_home_expert_apply((int)layer, (int)expert, (const float *)msg->pay, (int)D, out);
+    int rc = bad ? lmb_send(fd, LMB_ERR, "Hybrid expert failed", 20, NULL, 0) :
+        lmb_send(fd, LMB_EXEC_R, NULL, 0, out, (uint32_t)((size_t)D * sizeof(float)));
+    free(out); lmb_run_gate_leave(&node->run_gate);
+    if (!bad && !rc) {
+        uint64_t n = atomic_fetch_add(&node->expert_runs, 1) + 1;
+        if (!(n & (n-1))) fprintf(stderr, "[home-hybrid] resident_expert_calls=%llu range=%u:%u\n",
+            (unsigned long long)n, node->advert.layer_begin, node->advert.layer_end);
+    }
+    return rc;
+}
+
 static void *connection_worker(void *opaque) {
     Connection *connection = (Connection *)opaque;
     Node *node = connection->node;
@@ -1039,11 +1077,16 @@ static void *connection_worker(void *opaque) {
         LmbMsg msg = {0};
         if (lmb_recv(fd, &msg)) break;
         int rc;
-        if (msg.op == LMB_PING) {
+        if (node->home_accelerator && msg.op != LMB_HOME_EXPERT &&
+            msg.op != LMB_HOME_FEATURES && msg.op != LMB_PING) {
+            rc = lmb_send(fd, LMB_ERR, "approved expert RPCs only", 24, NULL, 0);
+        } else if (msg.op == LMB_PING) {
             lmb_emu_delay();
             rc = lmb_send(fd, LMB_OK, NULL, 0, NULL, 0);
         }
         else if (msg.op == LMB_SEG_OPEN) rc = handle_open(node, fd, &msg);
+        else if (msg.op == LMB_HOME_EXPERT || msg.op == LMB_HOME_FEATURES)
+            rc = handle_home_expert(node, fd, &msg);
         else if (msg.op == LMB_SEG_RUN) rc = handle_run(node, fd, &msg);
         else if (msg.op == LMB_SEG_SNAPSHOT) rc = handle_snapshot(node, fd, &msg);
         else if (msg.op == LMB_SEG_RESTORE) rc = handle_restore(node, fd, &msg);
@@ -1393,6 +1436,7 @@ int main(int argc, char **argv) {
     Node node;
     memset(&node, 0, sizeof node);
     atomic_init(&node.committed_runs, 0);
+    atomic_init(&node.expert_runs, 0);
     for (size_t i = 0; i < NODE_CONNECTIONS_MAX; i++) node.connection_fds[i] = -1;
     pthread_mutex_init(&node.sessions_lock, NULL);
     if (lmb_run_gate_init(&node.run_gate, 1, run_queue)) {
@@ -1431,6 +1475,16 @@ int main(int argc, char **argv) {
         return 1;
     }
     node.cap.struct_size = sizeof node.cap;
+    const char *accelerator = getenv("LUMABRI_HOME_ACCELERATOR");
+    if (accelerator && *accelerator) {
+        if (!home_client_key || strcmp(engine_id, "olmoe") || !lmb_resident_required() ||
+            strlen(accelerator) != 64 || lmb_unhex(node.home_allocation, accelerator, 32) ||
+            !lmb_home_expert_available()) {
+            fprintf(stderr, "[home-hybrid] invalid resident accelerator contract\n");
+            (void)coli_segment_engine_close(node.engine, error, sizeof error); return 1;
+        }
+        node.home_accelerator = 1;
+    }
     if (lmb_resident_required() &&
         (!lmb_resident_adapter_is_prepared() || lmb_resident_seal())) {
         fprintf(stderr, "[resident] adapter has not prepared all assigned weights; refusing READY\n");
@@ -1560,7 +1614,7 @@ int main(int argc, char **argv) {
         if (home_client_key && !lmb_secure_peer_matches(fd, home_client)) {
             lmb_close(fd); continue;
         }
-        lmb_set_io_timeout(fd, lmb_env_int("LUMABRI_IO_TIMEOUT_MS",
+        lmb_set_io_timeout(fd, node.home_accelerator ? 1000 : lmb_env_int("LUMABRI_IO_TIMEOUT_MS",
                            LMB_DEFAULT_IO_TIMEOUT_MS, 100, 3600000));
         Connection *connection = malloc(sizeof *connection);
         if (!connection) { close(fd); continue; }

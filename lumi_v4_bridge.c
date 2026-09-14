@@ -7,6 +7,17 @@
 #include "lumabri_client.h"
 #include <sys/resource.h>
 #include <dlfcn.h>
+#include "lumi_v4_ext.h"
+
+static void *home_expert_context;
+static LmbHomeExpertFn home_expert_function;
+void lmb_home_expert_provider(void *ctx, LmbHomeExpertFn fn) {
+    home_expert_context = ctx; home_expert_function = fn;
+}
+int lmb_home_expert_available(void) { return home_expert_function != NULL; }
+int lmb_home_expert_apply(int layer, int expert, const float *x, int D, float *out) {
+    return home_expert_function ? home_expert_function(home_expert_context, layer, expert, x, D, out) : -1;
+}
 
 static int resident_prepared;
 void lmb_resident_adapter_prepared(void) { resident_prepared = 1; }

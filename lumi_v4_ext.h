@@ -5,6 +5,10 @@
 #ifndef LUMI_V4_EXT_H
 #define LUMI_V4_EXT_H
 #ifdef LUMABRI_P2P
+typedef int (*LmbHomeExpertFn)(void *, int, int, const float *, int, float *);
+extern void lmb_home_expert_provider(void *, LmbHomeExpertFn);
+extern int lmb_home_expert_apply(int, int, const float *, int, float *);
+extern int lmb_home_expert_available(void);
 extern void lmb_resident_adapter_prepared(void);
 extern int lmb_resident_adapter_is_prepared(void);
 extern int lmb_resident_budget_exceeded(unsigned long long limit);

@@ -34,7 +34,7 @@ typedef struct {
     char commit_lumabri[41];    /* optional provenance; exact binary IDs remain required */
     char commit_colibri[41];
     char build_id[65];          /* compiler, flags, engine configuration */
-    char plan_kind[16];         /* segment or expert */
+    char plan_kind[16];         /* segment, expert or approved household hybrid */
     uint32_t goal;              /* LmbPlanGoal without including cluster.h */
     uint32_t nodes;
     uint32_t edge_node;         /* index in this key's ordered ranges */
@@ -58,6 +58,8 @@ typedef struct {
     uint32_t samples;           /* completed turns represented by this record */
     uint32_t prompt_tokens;     /* observed workload, not the configured context limit */
     uint32_t generated_tokens;
+    uint32_t stage_count;        /* zero on legacy/no per-range observations */
+    double stage_decode_seconds[LMB_CAL_NODES_MAX]; /* seconds per RUN, includes transport */
 } LmbCalibration;
 
 /* Never compare unterminated fields or let two equally incomplete records
@@ -79,7 +81,7 @@ static LMB_UNUSED int lmb_cal_key_valid(const LmbCalKey *k) {
     if (k->commit_lumabri[0]) { CAL_TEXT(commit_lumabri); }
     if (k->commit_colibri[0]) { CAL_TEXT(commit_colibri); }
     CAL_TEXT(build_id); CAL_TEXT(plan_kind);
-    if (strcmp(k->plan_kind, "segment") && strcmp(k->plan_kind, "expert")) return 0;
+    if (strcmp(k->plan_kind, "segment") && strcmp(k->plan_kind, "expert") && strcmp(k->plan_kind, "hybrid")) return 0;
     for (uint32_t i = 0; i < k->nodes; i++) {
         CAL_TEXT(node_id[i]); CAL_TEXT(node_hardware_id[i]);
         CAL_TEXT(node_build_id[i]); CAL_TEXT(node_backend[i]);
@@ -91,6 +93,10 @@ static LMB_UNUSED int lmb_cal_key_valid(const LmbCalKey *k) {
 }
 
 static LMB_UNUSED int lmb_cal_valid(const LmbCalibration *c) {
+    if (!c || (c->stage_count && c->stage_count != c->key.nodes) || c->stage_count > LMB_CAL_NODES_MAX) return 0;
+    for (uint32_t i = 0; i < c->stage_count; i++)
+        if (!isfinite(c->stage_decode_seconds[i]) || c->stage_decode_seconds[i] <= 0 ||
+            c->stage_decode_seconds[i] > 1e9) return 0;
     return c && lmb_cal_key_valid(&c->key) && c->samples &&
            c->prompt_tokens && c->prompt_tokens <= c->key.context &&
            c->generated_tokens > 1 && c->generated_tokens <= 1048576 &&

@@ -5,6 +5,54 @@
 #include <assert.h>
 
 int main(int argc, char **argv) {
+    LmbMachineReport inventory = {.machine = {.logical_cpus = 4, .physical_cores = 2,
+        .ram_total_bytes = 8ull << 30}, .runtime_threads = 4};
+    inventory.identity[0] = 1;
+    snprintf(inventory.control_addr, sizeof inventory.control_addr, "192.168.1.12:47301");
+    memset(inventory.runtime_id, 'a', 64);
+    LmbCalKey approved = {.nodes = 1}; char reason[200];
+    lmb_hex(approved.node_id[0], inventory.identity, 32);
+    memcpy(approved.node_build_id[0], inventory.runtime_id, 65);
+    approved.threads[0] = 4;
+    catalog_hardware_id(&inventory.machine, inventory.control_addr, approved.node_hardware_id[0]);
+    assert(!catalog_runtime_match(&approved, &inventory, 1, reason, sizeof reason));
+    /* RAM consumed by the approved model is not a hardware change. */
+    inventory.machine.ram_available_bytes = 1ull << 30;
+    inventory.ram_budget_bytes = 0;
+    assert(!catalog_runtime_match(&approved, &inventory, 1, reason, sizeof reason));
+    assert(catalog_runtime_match(&approved, &inventory, 0, reason, sizeof reason) == 1);
+    assert(strstr(reason, "temporarily unavailable"));
+    assert(!catalog_runtime_match(&approved, &inventory, 1, reason, sizeof reason));
+    inventory.runtime_id[0] = 'b';
+    assert(catalog_runtime_match(&approved, &inventory, 1, reason, sizeof reason) == -1);
+    assert(strstr(reason, "runtime identity"));
+    inventory.runtime_id[0] = 'a'; inventory.runtime_threads = 1;
+    assert(catalog_runtime_match(&approved, &inventory, 1, reason, sizeof reason) == -1);
+    assert(strstr(reason, "thread capacity"));
+    inventory.runtime_threads = 4; inventory.machine.logical_cpus = 8;
+    assert(catalog_runtime_match(&approved, &inventory, 1, reason, sizeof reason) == -1);
+    assert(strstr(reason, "hardware or endpoint"));
+    if (argc > 1 && !strcmp(argv[1], "calibration-inventory")) {
+        puts("CALIBRATION INVENTORY: PASS (absence is retryable; runtime, hardware and thread changes rejected)");
+        return 0;
+    }
+    LmbPrepareWatchdog watchdog = {.started = 0, .advanced = 0};
+    /* Same progressing transfer that used to be killed at 900 seconds. */
+    for (unsigned t = 300; t <= 3600; t += 300) {
+        lmb_prepare_watchdog_advance(&watchdog, t, t * 1024u, 2);
+        assert(!lmb_prepare_watchdog_expired(&watchdog, t));
+    }
+    /* Connected/status repeats do not renew a stalled download. */
+    lmb_prepare_watchdog_advance(&watchdog, 4499, 3600 * 1024u, 2);
+    assert(!lmb_prepare_watchdog_expired(&watchdog, 4499));
+    assert(lmb_prepare_watchdog_expired(&watchdog, 4500) == 1);
+    /* Local loading / host startup can advance without network traffic. */
+    lmb_prepare_watchdog_advance(&watchdog, 4499, 3600 * 1024u, 3);
+    assert(!lmb_prepare_watchdog_expired(&watchdog, 4500));
+    lmb_prepare_watchdog_advance(&watchdog, 86400, 999999999, 4);
+    assert(lmb_prepare_watchdog_expired(&watchdog, 86400) == 2);
+    LmbPrepareWatchdog approval = {.started = 10, .advanced = 10};
+    assert(lmb_prepare_watchdog_expired(&approval, 910) == 1);
     LmbPrepareProgress prep = {0};
     char prep_bar[29], prep_detail[180];
     lmb_prepare_display(&prep.index, 1, 0, prep_bar, prep_detail, sizeof prep_detail);
@@ -107,6 +155,30 @@ int main(int argc, char **argv) {
     const char *real_reset = "RESET_DONE private-reset\n";
     assert(!host_output(&reset_output, &host_in, real_reset, strlen(real_reset), &completed));
     assert(reset_output.reset_done);
+    /* A 32-range profile exceeds the old 512-byte header. Exercise the
+     * actual Hosted observer and chatter reader, not just the field parser. */
+    char long_done[4096], observed_stat[4096];
+    size_t used = (size_t)snprintf(long_done, sizeof long_done,
+        "DONE 7 STAT 9 4 0 0 20 0 STAGES1 32");
+    for (unsigned i = 0; i < 32; i++)
+        used += (size_t)snprintf(long_done + used, sizeof long_done - used,
+            " %u %u 8 0.125000000", i, i + 1);
+    used += (size_t)snprintf(long_done + used, sizeof long_done - used, " PERF1 9 8 15 4 19.2\n");
+    assert(used > 512 && used < sizeof long_done);
+    host_in.active = 1;
+    for (size_t i = 0; i < used; i++) {
+        assert(!host_output(&host_out, &host_in, long_done + i, 1, &completed));
+        assert(completed == (i == used - 1));
+    }
+    FILE *long_stream = tmpfile(); assert(long_stream);
+    assert(fwrite(long_done, 1, used, long_stream) == used); fflush(long_stream); rewind(long_stream);
+    Engine remote_stream = {.from = fileno(long_stream)};
+    assert(!stream_serve2(&remote_stream, observed_stat, sizeof observed_stat, NULL));
+    LmbStageSample profile[LMB_STAGE_PROFILE_MAX]; uint32_t profile_count = 0;
+    assert(!lmb_stage_samples_parse(observed_stat, profile, &profile_count) && profile_count == 32);
+    LmbGenerationMetrics long_metrics;
+    assert(!lmb_metrics_parse(observed_stat, &long_metrics) && long_metrics.decode_steps == 8);
+    fclose(long_stream);
     fclose(codec_sink);
     if (argc > 1 && !strcmp(argv[1], "host-codec")) {
         puts("HOST CODEC: PASS (fragmentation, payload boundaries, request/idle deadlines)");
@@ -246,6 +318,11 @@ int main(int argc, char **argv) {
         assert(!home_resident_plan_save(&plan));
         assert(!home_resident_plan_load(plan.tracker, &loaded));
         assert(!strcmp(loaded.root, plan.root) && loaded.execution.count == 2 && loaded.max_new == 256);
+        plan.execution.hybrid = 1;
+        plan.execution.nodes[0].end = plan.execution.layers;
+        assert(!home_resident_plan_save(&plan));
+        assert(!home_resident_plan_load(plan.tracker, &loaded));
+        assert(loaded.execution.hybrid && lmb_execution_valid(&loaded.execution));
         assert(home_resident_plan_load("other-household:47300", &loaded));
         assert(!home_resident_plan_path(record, sizeof record));
         struct stat metadata; assert(!stat(record, &metadata) && !(metadata.st_mode & 077));
@@ -264,6 +341,9 @@ int main(int argc, char **argv) {
     assert(!lmb_execution_valid(NULL));
     if (argc > 1 && !strcmp(argv[1], "plan")) {
         snprintf(execution.nodes[1].name, 64, "donor-1\033[2J");
+        lmb_execution_print(stdout, &execution);
+        execution.hybrid = 1;
+        execution.nodes[0].end = execution.layers;
         lmb_execution_print(stdout, &execution);
         lmb_execution_print(stdout, NULL);
         return 0;

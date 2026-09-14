@@ -3,6 +3,7 @@
 #ifndef LUMABRI_MEMORY_BUDGET_H
 #define LUMABRI_MEMORY_BUDGET_H
 #include "lumabri_planner.h"
+#include "src/runtime/lumabri_prepare_limits.h"
 
 typedef struct {
     uint64_t segment_bytes, edge_bytes, total_bytes;
@@ -41,13 +42,15 @@ static LMB_UNUSED int lmb_home_reservation(const LmbModelShape *shape,
     uint64_t live = lmb_budget_add(segment.state_bytes, segment.scratch_bytes);
     uint64_t guarded = lmb_budget_add(lmb_budget_add(floor, UINT64_C(128) << 20), live);
     uint64_t described = lmb_budget_add(segment.resident_bytes, live);
-    out->segment_bytes = lmb_budget_mib(guarded > described ? guarded : described);
+    out->segment_bytes = lmb_budget_mib(lmb_budget_add(
+        guarded > described ? guarded : described, LMB_PREPARE_CACHE_BYTES));
     if (runs_edge) {
         LmbRangeCost edge = lmb_estimate_edge(shape, context, 1);
         if (!edge.ok) return -1;
         uint64_t cost = lmb_budget_add(edge.resident_bytes,
                         lmb_budget_add(edge.state_bytes, edge.scratch_bytes));
-        out->edge_bytes = lmb_budget_mib(lmb_budget_add(cost, UINT64_C(64) << 20));
+        out->edge_bytes = lmb_budget_mib(lmb_budget_add(
+            lmb_budget_add(cost, UINT64_C(64) << 20), LMB_PREPARE_CACHE_BYTES));
     }
     out->total_bytes = lmb_budget_add(out->segment_bytes, out->edge_bytes);
     /* Both process budgets are individually aligned. Subtracting an

@@ -9,6 +9,8 @@
 #include "src/runtime/lumabri_backend_policy.h"
 #include "src/runtime/lumabri_resident.h"
 extern int lmb_resident_adapter_is_prepared(void);
+extern int lmb_home_expert_available(void);
+extern int lmb_home_expert_apply(int, int, const float *, int, float *);
 
 _Static_assert((uint64_t)COLI_SEGMENT_CAP_CPU == (uint64_t)LMB_SEG_CAP_CPU &&
                (uint64_t)COLI_EDGE_CAP_CPU == (uint64_t)LMB_SEG_CAP_CPU,

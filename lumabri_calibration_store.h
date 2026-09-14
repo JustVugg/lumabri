@@ -37,7 +37,7 @@ static LMB_UNUSED int lmb_cal_encode(const LmbCalibration *r, LmbBuf *out) {
 #define PUT(call) do { if (call) goto bad; } while (0)
 #define STR(f) PUT(lmb_buf_str(&b, k->f))
 #define U32(f) PUT(lmb_buf_u32(&b, k->f))
-    PUT(lmb_buf_bytes(&b, "LMB-CAL1", 8));
+    PUT(lmb_buf_bytes(&b, "LMB-CAL2", 8));
     STR(model_root); STR(adapter); U32(adapter_abi); STR(numeric_class);
     STR(commit_lumabri); STR(commit_colibri); STR(build_id); STR(plan_kind);
     U32(goal); U32(nodes); U32(edge_node); U32(context); U32(sessions);
@@ -51,6 +51,8 @@ static LMB_UNUSED int lmb_cal_encode(const LmbCalibration *r, LmbBuf *out) {
     PUT(lmb_buf_u32(&b, r->samples));
     PUT(lmb_buf_u32(&b, r->prompt_tokens));
     PUT(lmb_buf_u32(&b, r->generated_tokens));
+    PUT(lmb_buf_u32(&b, r->stage_count));
+    for (uint32_t i = 0; i < r->stage_count; i++) PUT(lmb_cal_put_double(&b, r->stage_decode_seconds[i]));
     lmb_sha_init(&sha); lmb_sha_update(&sha, b.p, b.len); lmb_sha_final(&sha, digest);
     PUT(lmb_buf_bytes(&b, digest, sizeof digest));
     if (b.len > LMB_CAL_RECORD_MAX) goto bad;
@@ -65,7 +67,9 @@ bad:
 static LMB_UNUSED int lmb_cal_decode(const void *data, size_t len, LmbCalibration *out) {
     if (!out) return -1;
     memset(out, 0, sizeof *out);
-    if (!data || len < 40 || len > LMB_CAL_RECORD_MAX || memcmp(data, "LMB-CAL1", 8)) return -1;
+    if (!data || len < 40 || len > LMB_CAL_RECORD_MAX ||
+        (memcmp(data, "LMB-CAL1", 8) && memcmp(data, "LMB-CAL2", 8))) return -1;
+    int version2 = !memcmp(data, "LMB-CAL2", 8);
     uint8_t digest[32]; LmbSha sha;
     lmb_sha_init(&sha); lmb_sha_update(&sha, data, len - 32); lmb_sha_final(&sha, digest);
     if (memcmp(digest, (const uint8_t *)data + len - 32, 32)) return -1;
@@ -91,6 +95,11 @@ static LMB_UNUSED int lmb_cal_decode(const void *data, size_t len, LmbCalibratio
     GET(lmb_cur_u32(&c, &r.samples));
     GET(lmb_cur_u32(&c, &r.prompt_tokens));
     GET(lmb_cur_u32(&c, &r.generated_tokens));
+    if (version2) {
+        GET(lmb_cur_u32(&c, &r.stage_count));
+        if (r.stage_count > LMB_CAL_NODES_MAX) return -1;
+        for (uint32_t i = 0; i < r.stage_count; i++) GET(lmb_cal_get_double(&c, &r.stage_decode_seconds[i]));
+    }
     if (c.off != c.len || !lmb_cal_valid(&r)) return -1;
     *out = r; return 0;
 #undef GET

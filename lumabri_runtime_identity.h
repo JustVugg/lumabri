@@ -32,7 +32,7 @@ static LMB_MAYBE_UNUSED int lmb_stat_same(const struct stat *a, const struct sta
            lmb_stat_ctime_ns(a) == lmb_stat_ctime_ns(b);
 }
 typedef struct { struct stat stat; uint8_t digest[32]; int valid; } LmbBinaryDigest;
-typedef struct { LmbBinaryDigest files[4]; } LmbRuntimeIdentityCache;
+typedef struct { LmbBinaryDigest files[5]; } LmbRuntimeIdentityCache;
 
 static LMB_MAYBE_UNUSED int lmb_binary_digest(const char *path, LmbBinaryDigest *cache, uint8_t out[32]) {
     int fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
@@ -81,6 +81,21 @@ static LMB_MAYBE_UNUSED int lmb_runtime_identity(const char *bin_dir, const char
         if (lmb_binary_digest(path, &cache->files[i], digest)) return -1;
         lmb_sha_update(&sha, names[i], strlen(names[i]) + 1);
         lmb_sha_update(&sha, digest, 32);
+    }
+    /* A replaced bundled OpenMP runtime changes execution even if the four
+     * executables did not change. Absence is explicit, not a stale digest.
+     * Unbundled system libraries remain covered conservatively by the epoch. */
+    char omp[1200]; uint8_t omp_digest[32]; struct stat omp_stat;
+    int n = snprintf(omp, sizeof omp, "%s/../lib/lumabri/libomp.dylib", bin_dir);
+    if (n < 0 || (size_t)n >= sizeof omp) return -1;
+    lmb_sha_update(&sha, "bundled-libomp", sizeof "bundled-libomp");
+    if (!lstat(omp, &omp_stat)) {
+        if (!S_ISREG(omp_stat.st_mode) || lmb_binary_digest(omp, &cache->files[4], omp_digest)) return -1;
+        lmb_sha_update(&sha, omp_digest, sizeof omp_digest);
+    } else {
+        if (errno != ENOENT) return -1;
+        cache->files[4].valid = 0;
+        lmb_sha_update(&sha, "absent", sizeof "absent");
     }
     uint8_t digest[32]; lmb_sha_final(&sha, digest);
     for (unsigned i = 0; i < 32; i++) snprintf(out + 2 * i, 3, "%02x", digest[i]);

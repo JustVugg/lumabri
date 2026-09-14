@@ -5,6 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 ENGINE="${ENGINE:-../colibri/c}"
+MODEL_DIR="${MODEL_DIR:-tiny_olmoe}"
 PORT="${PORT:-7890}"
 TMP=$(mktemp -d /tmp/lumabri-segment-hybrid.XXXXXX)
 PIDS=()
@@ -40,9 +41,10 @@ wait_port() {
     return 1
 }
 
-prompt=$(python3 - <<'PY'
+prompt=$(python3 - "$MODEL_DIR/ref.json" <<'PY'
 import json
-r=json.load(open('tiny_olmoe/ref.json', encoding='utf-8'))
+import sys
+r=json.load(open(sys.argv[1], encoding='utf-8'))
 print(','.join(map(str,r['prompt_ids'])))
 PY
 )
@@ -56,19 +58,21 @@ LUMABRI_KNOWN_HOSTS="$TMP/tracker.known_hosts" \
 wait_port "$PORT"
 
 LUMABRI_PEER_KEY="$TMP/segment.key" LUMABRI_KNOWN_HOSTS="$TMP/segment.hosts" \
-LUMABRI_VERIFY=0 LUMABRI_EXEC_WAIT_MS=2000 OMP_NUM_THREADS=2 ./segment_node --engine olmoe \
-    --model-dir tiny_olmoe --model tiny-olmoe --range 0:16 \
+LUMABRI_VERIFY=0 LUMABRI_EXEC_WAIT_MS=2000 LUMABRI_HYBRID_LOCAL_EXPERTS=1 \
+OMP_NUM_THREADS=2 ./segment_node --engine olmoe \
+    --model-dir "$MODEL_DIR" --model tiny-olmoe --range 0:16 \
     --port "$((PORT+2))" --tracker "127.0.0.1:$PORT" \
     --advertise "127.0.0.1:$((PORT+2))" --name hybrid-segment \
     --model-root "$model_root" --tokenizer-root "$tokenizer_root" \
     --context 64 --max-rows 16 --sessions 2 --threads 2 --fallback \
     >"$TMP/segment.log" 2>&1 & PIDS+=("$!")
+SEGMENT_PID=$!
 wait_port "$((PORT+2))"
 
 # Establish the oracle with the exact same Segment engine and numeric profile,
 # before any Expert donor exists. This detects a network-induced change while
 # avoiding assumptions about which tiny fixture a Colibri checkout provides.
-OMP_NUM_THREADS=2 ./segment_chat --engine olmoe --model-dir tiny_olmoe \
+OMP_NUM_THREADS=2 ./segment_chat --engine olmoe --model-dir "$MODEL_DIR" \
     --model tiny-olmoe --tracker "127.0.0.1:$PORT" \
     --model-root "$model_root" --tokenizer-root "$tokenizer_root" \
     --prompt-ids "$prompt" --tokens 3 --context 64 --max-rows 16 \
@@ -84,7 +88,7 @@ PY
 # coverage. --resident makes ACTIVE mean that every advertised expert is in
 # RAM before the node can receive a single EXEC.
 LUMABRI_PEER_KEY="$TMP/donor.key" LUMABRI_KNOWN_HOSTS="$TMP/donor.hosts" \
-OMP_NUM_THREADS=2 ./expert_node --model tiny_olmoe --model-name tiny-olmoe \
+OMP_NUM_THREADS=2 ./expert_node --model "$MODEL_DIR" --model-name tiny-olmoe \
     --name resident-layer-0 --port "$((PORT+1))" \
     --advertise "127.0.0.1:$((PORT+1))" --tracker "127.0.0.1:$PORT" \
     --layers 0 --resident --parallel 2 >"$TMP/donor.log" 2>&1 &
@@ -95,13 +99,13 @@ sleep 5.2
 # The first layer check after a newly joined peer refreshes the immutable
 # discovery snapshot. That warm-up may already use later covered layers; the
 # measured/oracle run below starts after the new route is fully installed.
-OMP_NUM_THREADS=2 ./segment_chat --engine olmoe --model-dir tiny_olmoe \
+OMP_NUM_THREADS=2 ./segment_chat --engine olmoe --model-dir "$MODEL_DIR" \
     --model tiny-olmoe --tracker "127.0.0.1:$PORT" \
     --model-root "$model_root" --tokenizer-root "$tokenizer_root" \
     --prompt-ids "$prompt" --tokens 1 --context 64 --max-rows 16 \
     --retry-first-run --json >"$TMP/discovery.json" 2>"$TMP/discovery.log"
 
-OMP_NUM_THREADS=2 ./segment_chat --engine olmoe --model-dir tiny_olmoe \
+OMP_NUM_THREADS=2 ./segment_chat --engine olmoe --model-dir "$MODEL_DIR" \
     --model tiny-olmoe --tracker "127.0.0.1:$PORT" \
     --model-root "$model_root" --tokenizer-root "$tokenizer_root" \
     --prompt-ids "$prompt" --tokens 3 --expect-ids "$expected" \
@@ -139,7 +143,7 @@ PY
 # timeout are guaranteed — and it exercises the more dangerous failure, a peer
 # that is wedged rather than gone.
 kill -STOP "$DONOR_PID"
-OMP_NUM_THREADS=2 ./segment_chat --engine olmoe --model-dir tiny_olmoe \
+OMP_NUM_THREADS=2 ./segment_chat --engine olmoe --model-dir "$MODEL_DIR" \
     --model tiny-olmoe --tracker "127.0.0.1:$PORT" \
     --model-root "$model_root" --tokenizer-root "$tokenizer_root" \
     --prompt-ids "$prompt" --tokens 3 --expect-ids "$expected" \
@@ -150,4 +154,10 @@ grep -q 'phase 2 partial: 1 of 16 routed layers' "$TMP/segment.log"
 # the dead donor before this run reaches layer 0. The donor has been killed and
 # waited above, no other Expert exists, and the exact token oracle already
 # proves that the only remaining path—the local kernel—completed the turn.
-echo 'SEGMENT HYBRID TEST: PASS (resident donor used; dead donor falls back locally)'
+# Normal process shutdown publishes completed split rounds. Checking actual
+# local work as well as remote donor calls prevents an unused opt-in from
+# masquerading as a concurrent Hybrid test.
+kill -TERM "$SEGMENT_PID"
+wait "$SEGMENT_PID"
+grep -Eq 'hybrid: [1-9][0-9]* concurrent layer rounds' "$TMP/segment.log"
+echo 'SEGMENT HYBRID TEST: PASS (concurrent local + resident remote experts; exact tokens; bounded fallback)'

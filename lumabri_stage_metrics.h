@@ -5,6 +5,49 @@
 #define LUMABRI_STAGE_METRICS_H
 #include <math.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+
+#define LMB_STAGE_PROFILE_MAX 32u
+typedef struct {
+    uint32_t begin, end, calls;
+    double seconds;
+} LmbStageSample;
+
+/* Bounded STAT extension, before PERF1 so old rate readers still work.
+ * These are observed RUN round trips, not predicted layer/kernel timings. */
+static inline int lmb_stage_samples_parse(const char *stat, LmbStageSample *out,
+                                         uint32_t *count) {
+    if (!stat || !out || !count) return -1;
+    *count = 0;
+    const char *p = strstr(stat, " STAGES1 ");
+    if (!p) return 1;
+    p += 9;
+    char *end; errno = 0;
+    unsigned long n = strtoul(p, &end, 10);
+    if (*p < '0' || *p > '9' || errno || *end != ' ' || !n || n > LMB_STAGE_PROFILE_MAX) return -1;
+    p = end + 1;
+    LmbStageSample samples[LMB_STAGE_PROFILE_MAX] = {{0}};
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t *fields[] = {&samples[i].begin, &samples[i].end, &samples[i].calls};
+        for (unsigned j = 0; j < 3; j++) {
+            errno = 0; unsigned long v = strtoul(p, &end, 10);
+            if (*p < '0' || *p > '9' || errno || v > 1048576 || *end != ' ') return -1;
+            *fields[j] = (uint32_t)v; p = end + 1;
+        }
+        errno = 0; samples[i].seconds = strtod(p, &end);
+        if (*p < '0' || *p > '9' || errno || *end != ' ' ||
+            !isfinite(samples[i].seconds) || samples[i].seconds <= 0 || samples[i].seconds > 1e9 ||
+            !samples[i].calls || samples[i].begin >= samples[i].end ||
+            samples[i].begin != (i ? samples[i-1].end : 0)) return -1;
+        p = end + 1;
+    }
+    if (strncmp(p, "PERF1 ", 6)) return -1;
+    memcpy(out, samples, n * sizeof *out); *count = (uint32_t)n;
+    return 0;
+}
 
 typedef struct {
     uint64_t prefill_calls, prefill_rows, decode_calls;

@@ -55,6 +55,7 @@ typedef enum {
 typedef struct {
     LmbPlanState state;
     LmbPlanGoal goal;
+    uint32_t hybrid;            /* full resident coordinator + approved accelerators */
     uint32_t nslices;
     LmbSlice slices[LMB_CLUSTER_MAX_NODES];
     uint32_t edge_node;          /* who holds embedding and head */
@@ -211,6 +212,12 @@ static LMB_UNUSED int lmb_plan_cluster(const LmbModelShape *m,
 /* Household resident admission uses the same process budgets as launch.
  * Keep this separate from adapter arithmetic: guard overhead is neither a
  * tensor nor a measured working set. No speed/optimality claim is made. */
+static LMB_UNUSED uint64_t lmb_home_hybrid_extra(const LmbModelShape *s) {
+    uint64_t floats = lmb_size_add(lmb_size_mul(s->hidden, (uint64_t)s->experts_per_tok + 1),
+                                   lmb_size_mul(2, s->moe_intermediate));
+    return lmb_size_add(UINT64_C(8) << 20, lmb_size_mul(floats, sizeof(float)));
+}
+
 static LMB_UNUSED int lmb_home_plan_budgets(const LmbModelShape *shape,
     uint64_t checkpoint_bytes, const LmbClusterNode *nodes, uint32_t count,
     uint32_t context, LmbClusterPlan *plan) {
@@ -226,13 +233,21 @@ static LMB_UNUSED int lmb_home_plan_budgets(const LmbModelShape *shape,
         total_budget = lmb_budget_add(total_budget, nodes[i].ram_budget_bytes);
     for (uint32_t i = 0; i < plan->nslices; i++) {
         LmbSlice *s = &plan->slices[i];
-        if (s->node >= count || s->layer_begin != next) return -1;
+        if (s->node >= count || (!plan->hybrid && s->layer_begin != next)) return -1;
+        if (plan->hybrid) {
+            if (plan->hybrid != 1 || strcmp(shape->segment_id, "olmoe") ||
+                shape->experts_per_tok < 2 || plan->nslices != count || count < 2 ||
+                (i == 0 && (s->node != plan->edge_node || s->layer_begin || s->layer_end != shape->layers)) ||
+                (i && s->node == plan->edge_node) ||
+                (i > 1 && s->layer_begin < plan->slices[i-1].layer_end)) return -1;
+        }
         for (uint32_t j = 0; j < i; j++)
             if (plan->slices[j].node == s->node) return -1;
         LmbHomeReservation r;
         int edge = s->node == plan->edge_node;
         if (lmb_home_reservation(shape, checkpoint_bytes, s->layer_begin,
                                 s->layer_end, context, edge, &r)) return -1;
+        if (plan->hybrid) r.total_bytes = lmb_budget_add(r.total_bytes, lmb_home_hybrid_extra(shape));
         next = s->layer_end; has_edge += (uint32_t)edge;
         s->bytes_resident = r.total_bytes;
         s->state = r.total_bytes <= nodes[s->node].ram_budget_bytes ?
@@ -240,7 +255,7 @@ static LMB_UNUSED int lmb_home_plan_budgets(const LmbModelShape *shape,
         if (s->state == LMB_PLAN_UNRUNNABLE)
             missing = lmb_budget_add(missing, r.total_bytes - nodes[s->node].ram_budget_bytes);
     }
-    if (next != shape->layers || has_edge != 1) return -1;
+    if ((!plan->hybrid && next != shape->layers) || has_edge != 1) return -1;
     plan->missing_bytes = missing;
     plan->missing_nodes = 0;
     uint64_t average = total_budget / count;
