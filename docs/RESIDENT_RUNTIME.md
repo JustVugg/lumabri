@@ -414,3 +414,27 @@ does not satisfy the PC+Mac objective. A better compatible proposer and/or
 cheaper verification still needs to be demonstrated. The tiny-model contract
 test validates accepted-prefix handling and real rollback after rejection;
 its repetitive/random output is not a performance proxy for a trained model.
+
+### Expert RPC failure diagnostics
+
+The client now logs `[expert-rpc]` when receiving an expert contribution fails.
+`reason` distinguishes a poll reply timeout, a receive timeout (including a
+partial frame), connection closure/reset, an invalid frame or reply, AEAD
+authentication failure, and an explicit remote error. Each line includes the
+peer, layer, expert, errno, poll events, elapsed time since dispatch and the
+configured poll wait. Elapsed time includes overlapping local computation;
+it is **not** a measurement of pure network RTT. Socket I/O timeouts remain
+separate from the poll wait. Timeout, retry and admission policies are unchanged.
+
+Only known fixed remote error strings are logged. Arbitrary remote text,
+activations, credentials and frame payloads are not printed. EOF and malformed
+plain/encrypted frames set explicit errno values instead of reusing stale
+errors. A failed contribution still invalidates the strict Hybrid benchmark;
+local fallback is not counted as donor acceleration.
+
+Socket-pair regression tests cover withheld replies, EOF, withheld payloads,
+wrong reply sizes, remote busy/errors and malformed frame headers. Encrypted
+tests cover EOF, authentication failure and malformed headers. Parallel order,
+fallback, failover, encryption and ASan/UBSan checks passed locally. These
+diagnostics do not by themselves establish the cause of a physical-network
+failure or a speedup.

@@ -160,7 +160,84 @@ static void run_case(int fail_local, int bad_reply) {
     pthread_cond_destroy(&gate.changed); pthread_mutex_destroy(&gate.lock);
 }
 
+/* Deterministic wire failures: no allocation, model or physical donor needed.
+ * Capture the public diagnostic, including redaction of arbitrary peer text. */
+static void rpc_failure_case(int kind, const char *reason) {
+    memset(&L, 0, sizeof L);
+    L.npeers = 1; L.hedge_ms = -1; L.exec_wait_ms = 20;
+    LumiPeer *peer = &L.peers[0];
+    snprintf(peer->addr, sizeof peer->addr, "test-peer");
+    int pair[2]; assert(!socketpair(AF_UNIX, SOCK_STREAM, 0, pair));
+    lmb_set_io_timeout(pair[0], 20);
+    float out[DIM] = {0};
+    if (kind == 1) assert(!shutdown(pair[1], SHUT_WR));
+    if (kind == 2 || kind == 5) {
+        const char *body = kind == 2 ? "Hybrid capacity busy" : "SECRET-must-not-be-logged";
+        assert(!lmb_send(pair[1], LMB_ERR, body, (uint32_t)strlen(body), NULL, 0));
+    }
+    if (kind == 3) assert(!lmb_send(pair[1], LMB_EXEC_R, NULL, 0, out, sizeof(float)));
+    if (kind == 4 || kind == 6) {
+        uint8_t header[16] = {0};
+        lmb_put32(header, kind == 6 ? 0 : LMB_MAGIC);
+        lmb_put32(header + 4, LMB_EXEC_R);
+        lmb_put32(header + 12, sizeof out);
+        assert(!lmb_write_full(pair[1], header, sizeof header));
+        /* kind 4 withholds payload; kind 6 has invalid magic. */
+    }
+    FILE *log = tmpfile(); assert(log);
+    fflush(stderr); int saved = dup(STDERR_FILENO); assert(saved >= 0);
+    assert(dup2(fileno(log), STDERR_FILENO) >= 0);
+    uint32_t tried = 0; LumiPeer *winner = NULL;
+    lumi_peer_sent(peer);
+    errno = EINVAL; /* EOF must not inherit an unrelated error. */
+    assert(!lumi_finish_exec(0, 3, out, DIM, 1, NULL, pair[0], peer,
+                             lumi_now(), &tried, &winner));
+    fflush(stderr); assert(dup2(saved, STDERR_FILENO) >= 0); close(saved);
+    rewind(log); char text[2048] = {0};
+    assert(fread(text, 1, sizeof text - 1, log) > 0); fclose(log);
+    assert(strstr(text, reason));
+    assert(strstr(text, "layer=0 expert=3"));
+    assert(!strstr(text, "SECRET"));
+    if (kind == 2) assert(strstr(text, "remote_error=Hybrid capacity busy"));
+    assert(!peer->inflight && !peer->nsocks && !winner && !L.calls);
+    close(pair[1]);
+}
+
+static void secure_receive_failure_case(int kind, int expected_errno) {
+    int pair[2]; assert(!socketpair(AF_UNIX, SOCK_STREAM, 0, pair));
+    LmbSecure sender = {0}, receiver = {0};
+    sender.active = receiver.active = 1;
+    if (kind == 0) assert(!shutdown(pair[1], SHUT_WR));
+    if (kind == 1) {
+        sender.tx_key[0] = 1; /* Deliberate authentication failure. */
+        assert(!lmb_secure_send(&sender, pair[1], LMB_EXEC_R, NULL, 0, NULL, 0));
+    }
+    if (kind == 2 || kind == 3) {
+        uint8_t header[16] = {0};
+        lmb_put32(header, kind == 2 ? 0 : LMB_MAGIC);
+        lmb_put32(header + 4, LMB_EXEC_R);
+        lmb_put32(header + 12, UINT32_MAX);
+        assert(!lmb_write_full(pair[1], header, sizeof header));
+    }
+    LmbMsg msg = {0}; errno = EINVAL;
+    assert(lmb_secure_recv(&receiver, pair[0], &msg) == -1);
+    assert(errno == expected_errno);
+    lmb_msg_free(&msg); close(pair[0]); close(pair[1]);
+}
+
 int main(void) {
+    secure_receive_failure_case(0, ECONNRESET);
+    secure_receive_failure_case(1, EBADMSG);
+    secure_receive_failure_case(2, EPROTO);
+    secure_receive_failure_case(3, EMSGSIZE);
+    rpc_failure_case(0, "reason=reply-timeout");
+    rpc_failure_case(1, "reason=connection-closed");
+    rpc_failure_case(2, "reason=remote-error");
+    rpc_failure_case(3, "reason=invalid-reply");
+    rpc_failure_case(4, "reason=receive-timeout");
+    rpc_failure_case(5, "remote_error=unspecified");
+    rpc_failure_case(6, "reason=invalid-frame");
+    memset(&L, 0, sizeof L);
     float numeric_ref[] = {0, 1, -1, 1e-12f};
     float numeric_got[] = {-0.f, 1, -1, 1e-12f}; double numeric_error = -1;
     assert(lmb_hybrid_numeric_check(numeric_ref, numeric_got, 4, &numeric_error) == LMB_HYBRID_NUMERIC_EXACT);

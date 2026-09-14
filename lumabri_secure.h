@@ -170,11 +170,11 @@ static int lmb_secure_recv(LmbSecure *s, int fd, LmbMsg *m) {
     memset(m, 0, sizeof *m);
     uint8_t hdr[16];
     if (lmb_read_full(fd, hdr, 16)) return -1;
-    if (lc_ld32(hdr) != LMB_MAGIC) return -1;
+    if (lc_ld32(hdr) != LMB_MAGIC) { errno = EPROTO; return -1; }
     m->op = lc_ld32(hdr + 4);
     m->body_len = lc_ld32(hdr + 8);
     m->pay_len = lc_ld32(hdr + 12);
-    if (!lmb_frame_shape_ok(m->op, m->body_len, m->pay_len)) return -1;
+    if (!lmb_frame_shape_ok(m->op, m->body_len, m->pay_len)) { errno = EMSGSIZE; return -1; }
     uint64_t total64 = (uint64_t)m->body_len + m->pay_len;
     if (total64 > UINT32_MAX) { errno = EMSGSIZE; return -1; }
     uint32_t total = (uint32_t)total64;
@@ -190,7 +190,7 @@ static int lmb_secure_recv(LmbSecure *s, int fd, LmbMsg *m) {
     }
     uint8_t nonce[12]; lmb_sec_nonce(nonce, s->rx_ctr++);
     if (lc_aead_open(s->rx_key, nonce, hdr, 16, wire, total, tag, wire)) {
-        free(wire); lmb_rx_release(m); return -1;  /* tamper, replay, or wrong key */
+        free(wire); lmb_rx_release(m); errno = EBADMSG; return -1; /* tamper, replay, or wrong key */
     }
     m->storage = wire;
     if (m->body_len) m->body = wire;

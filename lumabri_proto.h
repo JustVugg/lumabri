@@ -385,7 +385,7 @@ static int lmb_read_full(int fd, void *buf, size_t n) {
     while (n) {
         ssize_t r = read(fd, p, n);
         if (r < 0) { if (errno == EINTR) continue; return -1; }
-        if (r == 0) return -1;              /* peer closed mid-frame */
+        if (r == 0) { errno = ECONNRESET; return -1; } /* EOF, not stale errno */
         p += r; n -= (size_t)r;
     }
     return 0;
@@ -529,7 +529,7 @@ static int lmb_recv(int fd, LmbMsg *m) {
     uint8_t pre[16];
     memset(m, 0, sizeof *m);
     if (lmb_read_full(fd, pre, 16)) return -1;
-    if (lmb_get32(pre) != LMB_MAGIC) return -1;
+    if (lmb_get32(pre) != LMB_MAGIC) { errno = EPROTO; return -1; }
     m->op = lmb_get32(pre + 4);
     m->body_len = lmb_get32(pre + 8);
     m->pay_len = lmb_get32(pre + 12);

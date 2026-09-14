@@ -665,7 +665,7 @@ $(COLIBRI_SEGMENT_LIB): $(HYBRID_ENGINE_DIR)/.prepared build/segment_hybrid_brid
 	$(AR) rcs $@ build/segment_hybrid_bridge.o
 
 # Optional diagnostic; requires explicit, already approved household routes.
-build/bench_home_hybrid: tests/c/bench_home_hybrid.c tests/c/bench_block_verify.h tests/c/bench_causal_spec.h $(COLIBRI_SEGMENT_LIB)
+build/bench_home_hybrid: tests/c/bench_home_hybrid.c tests/c/bench_block_verify.h tests/c/bench_causal_spec.h lumabri_client.h lumabri_proto.h $(SECURE_DEPS) $(COLIBRI_SEGMENT_LIB)
 	$(CC) $(CPPFLAGS) -O2 $(ENGINE_CPU_FLAGS) $(OMP_FLAGS) -pthread -I$(HYBRID_ENGINE_DIR) \
 		-include lumi_v4_ext.h -DLUMABRI_P2P -DLUMIBRI_P2P -DCOLI_SEGMENT_ADAPTER -DCOLI_EDGE_ADAPTER \
 		tests/c/bench_home_hybrid.c $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)

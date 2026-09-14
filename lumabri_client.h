@@ -1243,6 +1243,29 @@ static float *lumi_exec_take(LmbMsg *m, int nr, int D) {
     return NULL;
 }
 
+/* Diagnostics must not print payloads, credentials or arbitrary peer text.
+ * This observes failures without changing timeouts, retries or admission. */
+static const char *lumi_exec_remote_error(const LmbMsg *m) {
+    static const char *known[] = {"Hybrid capacity busy", "Hybrid expert failed",
+        "unapproved Hybrid request", "invalid Hybrid shape"};
+    if (!m || m->op != LMB_ERR) return "none";
+    for (unsigned i = 0; i < sizeof known / sizeof *known; i++)
+        if (m->body && m->body_len == strlen(known[i]) &&
+            !memcmp(m->body, known[i], m->body_len)) return known[i];
+    return "unspecified";
+}
+
+static void lumi_exec_failure(const LumiPeer *peer, int layer, int expert,
+                              const char *reason, int error, int events,
+                              double started, int wait_ms, const LmbMsg *msg) {
+    fprintf(stderr, "[expert-rpc] peer=%s layer=%d expert=%d reason=%s errno=%d "
+        "events=0x%x elapsed_ms=%.3f wait_limit_ms=%d opcode=%u body_bytes=%u "
+        "payload_bytes=%u remote_error=%s\n", peer->addr, layer, expert,
+        reason, error, (unsigned)events, 1000 * (lumi_now() - started), wait_ms,
+        msg ? msg->op : 0, msg ? msg->body_len : 0, msg ? msg->pay_len : 0,
+        lumi_exec_remote_error(msg));
+}
+
 /* Adaptive p95 hedging, with LUMABRI_HEDGE_MS as an explicit fixed override.
  * The losing socket is closed so its late frame can never be mistaken for a
  * future request. */
@@ -1291,11 +1314,21 @@ static float *lumi_finish_exec(int layer, int eid, const float *x, int D, int nr
         int wait_ms = L.exec_wait_ms > 0 ? L.exec_wait_ms
                                          : LMB_DEFAULT_IO_TIMEOUT_MS;
         do pr = poll(pf, np, wait_ms); while (pr < 0 && errno == EINTR);
-        if (pr <= 0) break;   /* timeout falls through to peer_failed + failover */
+        if (pr <= 0) {
+            int error = pr < 0 ? errno : ETIMEDOUT;
+            for (int q = 0; q < np; q++) {
+                int i = map[q];
+                lumi_exec_failure(p[i], layer, eid, pr ? "poll-error" : "reply-timeout",
+                                  error, pf[q].revents, started[i], wait_ms, NULL);
+            }
+            break; /* existing peer_failed + failover policy */
+        }
         for (int q = 0; q < np; q++) if (pf[q].revents) {
             int i = map[q];
             LmbMsg m = {0};
-            float *res = lmb_recv(fd[i], &m) == 0 ? lumi_exec_take(&m, nr, D) : NULL;
+            errno = 0;
+            int recv_rc = lmb_recv(fd[i], &m), recv_error = errno;
+            float *res = recv_rc == 0 ? lumi_exec_take(&m, nr, D) : NULL;
             if (res) {
                 uint32_t got = m.pay_len; lmb_msg_free(&m);
                 lumi_peer_done(p[i]);
@@ -1309,6 +1342,13 @@ static float *lumi_finish_exec(int layer, int eid, const float *x, int D, int nr
                 if (from) *from = p[i];
                 return res;
             }
+            const char *reason = !recv_rc ? (m.op == LMB_ERR ? "remote-error" : "invalid-reply") :
+                recv_error == ECONNRESET ? "connection-closed" :
+                (recv_error == EAGAIN || recv_error == EWOULDBLOCK || recv_error == ETIMEDOUT) ? "receive-timeout" :
+                recv_error == EBADMSG ? "authentication-failed" :
+                (recv_error == EPROTO || recv_error == EMSGSIZE) ? "invalid-frame" : "receive-error";
+            lumi_exec_failure(p[i], layer, eid, reason, recv_error, pf[q].revents,
+                              started[i], wait_ms, &m);
             lmb_msg_free(&m);
             close(fd[i]); fd[i] = -1; lumi_peer_done(p[i]);
             lumi_peer_failed(p[i]); alive--;
