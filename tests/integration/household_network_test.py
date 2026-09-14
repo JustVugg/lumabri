@@ -44,6 +44,11 @@ class Terminal:
         env = {**os.environ, "HOME": str(home), "LUMABRI_HOME_PORT_BASE": str(base),
                "LUMABRI_PEER_KEY": str(self.home / "peer.key"), "LUMABRI_TOKEN": "",
                "LUMABRI_KNOWN_HOSTS": str(self.home / "known.hosts"), "LUMABRI_ENCRYPT": "1"}
+        env.pop("LUMABRI_ADVERTISE", None)
+        if self.home.name == "owner":
+            # Override must survive create, attach and restart, independently
+            # of whichever physical/VPN interface the runner prefers.
+            env["LUMABRI_ADVERTISE"] = "127.0.0.1"
         self.p = subprocess.Popen([str(ROOT / "lumabri")], cwd=home, env=env,
                                   stdin=self.slave, stdout=self.slave, stderr=self.slave)
 
@@ -122,6 +127,7 @@ def main():
             owner.expect("Host identity:")
             saved = owner.settings()
             assert saved["owner"] == "1" and saved["tracker"].endswith(f":{base}")
+            assert saved["tracker"] == f"127.0.0.1:{base}"
             assert saved["token"] and not saved["tracker"].startswith("10.255.255.254:")
             owner.send(b"\n"); owner.expect("What would you like to do?")
 

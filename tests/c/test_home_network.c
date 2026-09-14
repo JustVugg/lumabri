@@ -5,6 +5,20 @@
 #include <assert.h>
 
 int main(void) {
+    char advertised[INET_ADDRSTRLEN];
+    setenv("LUMABRI_ADVERTISE", "100.101.102.103", 1);
+    assert(!lmb_home_advertise_ip(advertised, sizeof advertised));
+    assert(!strcmp(advertised, "100.101.102.103"));
+    const char *bad[] = {"0.0.0.0", "255.255.255.255", "224.0.0.1", "::1",
+        "100.101.102.103:47300", "100.101.102.103junk", "\n100.101.102.103"};
+    for (size_t i = 0; i < sizeof bad / sizeof *bad; i++) {
+        setenv("LUMABRI_ADVERTISE", bad[i], 1);
+        assert(lmb_home_advertise_ip(advertised, sizeof advertised));
+    }
+    setenv("LUMABRI_ADVERTISE", "127.0.0.1", 1);
+    assert(!lmb_home_advertise_ip(advertised, sizeof advertised));
+    assert(lmb_home_advertise_ip(advertised, 2));
+    unsetenv("LUMABRI_ADVERTISE");
     int writer = -1, reader = lmb_wakeup_open(&writer);
     assert(reader >= 0 && writer >= 0 && reader != writer);
     assert(fcntl(reader, F_GETFL) & O_NONBLOCK);

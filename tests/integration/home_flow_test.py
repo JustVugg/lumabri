@@ -150,6 +150,10 @@ def main():
                 "OMP_NUM_THREADS": "2", "COLI_NO_OMP_TUNE": "1", "PIN": "off"}
         if args.resident_default:
             result.pop("LUMABRI_RESIDENT_REQUIRED", None)
+        # Reopened donor restores the saved key rather than relying on the
+        # shell that launched it. Other peers exercise an inherited key.
+        if name == "donor-a":
+            result.pop("LUMABRI_TOKEN", None)
         return result
 
     class Terminal(TerminalText):

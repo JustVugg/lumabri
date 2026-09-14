@@ -455,6 +455,16 @@ static int home_donor_offer(HomeDonor *d, int incoming, const char *tracker,
         (void)home_status_send(incoming, &busy, 0, 0);
         return -1; /* caller closes only this unadmitted connection */
     }
+    if (!rc && strcmp(offer.tracker, tracker)) {
+        /* Keep exact household admission. A validated peer gets an actionable
+         * rejection, not an EOF; never mutate an existing allocation. */
+        LmbHomeTransaction rejected = { .offer = offer, .phase = LMB_HOME_REJECTED };
+        snprintf(rejected.reason, sizeof rejected.reason,
+            "Household mismatch: announced %.32s, joined %.32s. Set LUMABRI_ADVERTISE on owner and rejoin.",
+            offer.tracker, tracker);
+        (void)home_status_send(incoming, &rejected, 0, 0);
+        return -1;
+    }
     if (!rc) rc = lmb_home_offer_begin(&d->transaction, &offer, tracker,
                                        ram, disk, (uint64_t)(nowd() * 1000));
     if (rc) return -1;

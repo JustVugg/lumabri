@@ -37,6 +37,12 @@ static void home_settings_load(HomeSettings *s) {
     fclose(f);
 }
 
+/* The saved household is authoritative when reopening the launcher. Do not
+ * inherit another household's key, or silently start a keyless donor. */
+static int home_settings_activate(const HomeSettings *s) {
+    return setenv("LUMABRI_TOKEN", s->token, 1);
+}
+
 static int home_settings_save(const HomeSettings *s) {
     char path[1200], temporary[1232];
     if (home_settings_path(path, sizeof path) ||
@@ -122,8 +128,8 @@ static void home_error_dialog(const char *title, const char *message) {
 static int home_tracker_resume(HomeSettings *s, pid_t *child, char *notice, size_t cap) {
     char ip[INET_ADDRSTRLEN], dir[1024], binary[1200], log[1200], port[20];
     int chosen = lmb_home_port_base();
-    if (chosen < 0 || home_interface_ip(ip, sizeof ip)) {
-        snprintf(notice, cap, "No usable LAN address or valid household port range."); return -1;
+    if (chosen < 0 || lmb_home_advertise_ip(ip, sizeof ip)) {
+        snprintf(notice, cap, "No usable address or port range. LUMABRI_ADVERTISE must be a unicast IPv4 address, without a port."); return -1;
     }
     HomeSettings next = *s;
     if (!next.owner || !next.token[0]) {
@@ -386,6 +392,7 @@ static void home_storage_screen(void) {
 static int cmd_home(void) {
     if (!isatty(0) || home_private_network()) return 1;
     HomeSettings s; home_settings_load(&s);
+    if (home_settings_activate(&s)) return home_fail("Cannot activate the saved household credentials.");
     pid_t tracker_child = 0;
     char notice[200] = "";
     int selected = 0, actions = 0;

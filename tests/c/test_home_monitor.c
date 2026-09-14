@@ -59,6 +59,79 @@ static void test_authenticated_idle_offer(void) {
     puts("HOME IDLE OFFER: PASS (encrypted authenticated preflight bounded; no weights)");
 }
 
+static void *complete_offer_server(void *arg) {
+    IdleOffer *o = arg;
+    o->rc = home_donor_offer(&o->donor, o->fd, "127.0.0.1:1", 1ull << 30, 1ull << 30);
+    if (o->rc) shutdown(o->fd, SHUT_RDWR);
+    return NULL;
+}
+
+static void test_complete_offers(void) {
+    HomeSettings settings = {0};
+    strcpy(settings.token, "monitor-test-only");
+    unsetenv("LUMABRI_TOKEN");
+    assert(!home_settings_activate(&settings));
+    assert(!strcmp(getenv("LUMABRI_TOKEN"), settings.token));
+    setenv("LUMABRI_TOKEN", "stale-other-household", 1);
+    assert(!home_settings_activate(&settings));
+    /* 0 correct, 1 wrong key, 2 missing AUTH, 3 duplicate AUTH,
+     * 4 different tracker. Rejections never allocate resources. */
+    for (int mode = 0; mode < 5; mode++) {
+        int pair[2]; assert(!socketpair(AF_UNIX, SOCK_STREAM, 0, pair));
+        IdleOffer o = {.fd = pair[1], .donor = {.client = -1}};
+        pthread_t server; assert(!pthread_create(&server, NULL, complete_offer_server, &o));
+        LmbSecure client;
+        assert(!lmb_secure_handshake(pair[0], 1, g_sec_sk, g_sec_pk, &client));
+        lmb_set_io_timeout(pair[0], 3000);
+        LmbBuf b = {0}; LmbMsg ack = {0};
+        if (mode != 2) {
+            assert(!lmb_buf_str(&b, mode == 1 ? "wrong-key" : settings.token));
+            assert(!lmb_secure_send(&client, pair[0], LMB_AUTH, b.p, b.len, NULL, 0));
+            free(b.p); b = (LmbBuf){0};
+            int rc = lmb_secure_recv(&client, pair[0], &ack);
+            if (mode == 1) assert(rc || ack.op != LMB_OK);
+            else assert(!rc && ack.op == LMB_OK);
+            lmb_msg_free(&ack);
+        }
+        if (mode != 1) {
+            LmbHomeOffer offer = {0};
+            offer.id[0] = 1; offer.model_root[0] = 2; offer.edge_peer[0] = 3;
+            memcpy(offer.requester, g_sec_pk, 32);
+            strcpy(offer.model, "tiny-olmoe"); strcpy(offer.model_type, "olmoe");
+            strcpy(offer.tracker, mode == 4 ? "100.101.102.103:47300" : "127.0.0.1:1");
+            offer.layers = 4; offer.end = 2; offer.context = 64;
+            offer.threads = 1; offer.max_new = 16;
+            offer.ram_bytes = 256u << 20; offer.disk_bytes = 128u << 20;
+            offer.model_bytes = 64u << 20;
+            assert(!lmb_home_offer_pack(&b, &offer));
+            assert(!lmb_secure_send(&client, pair[0], mode == 3 ? LMB_AUTH : LMB_HOME_OFFER,
+                                   b.p, b.len, NULL, 0));
+            free(b.p);
+            int rc = lmb_secure_recv(&client, pair[0], &ack);
+            if (mode == 0 || mode == 4) {
+                assert(!rc && ack.op == LMB_HOME_STATUS && !ack.pay_len);
+                LmbCur c = {ack.body, ack.body_len, 0}; uint32_t version, phase, port;
+                assert(!lmb_cur_u32(&c, &version) && version == LMB_HOME_VERSION);
+                assert(c.len - c.off >= 32 && !memcmp(c.p + c.off, offer.id, 32)); c.off += 32;
+                assert(!lmb_cur_u32(&c, &phase));
+                assert(phase == (mode == 0 ? LMB_HOME_PENDING : LMB_HOME_REJECTED));
+                assert(!lmb_cur_u32(&c, &port) && !port);
+                assert(!lmb_cur_u32(&c, &port) && !port);
+                char reason[160]; assert(!lmb_cur_str(&c, reason, sizeof reason) && c.off == c.len);
+                if (mode == 4) assert(strstr(reason, "100.101.102.103:47300") &&
+                    strstr(reason, "127.0.0.1:1") && strstr(reason, "LUMABRI_ADVERTISE"));
+            } else assert(rc || ack.op != LMB_HOME_STATUS);
+            lmb_msg_free(&ack);
+        }
+        pthread_join(server, NULL);
+        assert(!o.donor.transaction.reservation_held);
+        if (mode == 0) assert(!o.rc && o.donor.client == pair[1]);
+        else assert(o.rc && o.donor.client == -1 && o.donor.transaction.phase == LMB_HOME_IDLE);
+        lmb_close(pair[0]); lmb_close(pair[1]);
+    }
+    puts("HOME AUTH/OFFER: PASS (saved credentials, single AUTH, wrong/missing/duplicate AUTH, tracker rejection)");
+}
+
 static void *monitor_donor(void *arg) {
     MonitorDonor *d = arg;
     while (!atomic_load(&d->stop)) {
@@ -122,5 +195,6 @@ int main(void) {
     pthread_mutex_destroy(&s.status_lock); pthread_mutex_destroy(&s.send_lock);
     puts("HOME MONITOR: PASS (two leases survive a paused UI; terminal reasons preserved)");
     test_authenticated_idle_offer();
+    test_complete_offers();
     return 0;
 }
