@@ -15,6 +15,7 @@ import pty
 import re
 import select
 import signal
+import shutil
 import socket
 import struct
 import subprocess
@@ -81,6 +82,8 @@ def main():
                         help="require versioned generation timings through Hosted into the TUI")
     parser.add_argument("--expect-hybrid", action="store_true",
                         help="approve a full resident coordinator and an authenticated expert accelerator")
+    parser.add_argument("--expect-hybrid-fanout", action="store_true",
+                        help="copy a small OLMoE fixture with top-k=4 and verify three remote experts per round")
     parser.add_argument("--expect-calibration", action="store_true",
                         help="require saved real timings, matching catalogue speed and changed-context invalidation")
     parser.add_argument("--expect-no-fit", action="store_true",
@@ -100,6 +103,8 @@ def main():
     parser.add_argument("--io-timeout-ms", type=int, default=10000,
                         help="test transport deadline; use the production 300000 ms for large CPU checkpoints")
     args = parser.parse_args()
+    if args.expect_hybrid_fanout and not args.expect_hybrid:
+        parser.error("--expect-hybrid-fanout requires --expect-hybrid")
     if not 30 <= args.prepare_timeout <= 3600:
         parser.error("--prepare-timeout must be between 30 and 3600 seconds")
     if not 1000 <= args.io_timeout_ms <= 600000:
@@ -135,6 +140,21 @@ def main():
     if args.repeat_cached and not (ROOT / "swarm_probe").is_file():
         parser.error("build swarm_probe before running --repeat-cached")
     tmp = Path(tempfile.mkdtemp(prefix="lumabri-home-flow-"))
+    if args.expect_hybrid_fanout:
+        # Mutate only a private test fixture, never a user's checkpoint.
+        # Shape/weights are unchanged; this is not the source fixture's token oracle.
+        sources = sorted(Path(args.models_dir).glob("*/config.json"))
+        if len(sources) != 1:
+            parser.error("fanout requires exactly one small OLMoE test fixture")
+        cfg = json.loads(sources[0].read_text())
+        size = sum(p.stat().st_size for p in sources[0].parent.rglob("*") if p.is_file())
+        if cfg.get("model_type") != "olmoe" or cfg.get("num_experts", 0) < 4 or size > 16 * 1024**2:
+            parser.error("fanout accepts only an OLMoE test fixture up to 16 MiB with >=4 experts")
+        target = tmp / "fanout-models" / sources[0].parent.name
+        shutil.copytree(sources[0].parent, target)
+        cfg["num_experts_per_tok"] = 4
+        (target / "config.json").write_text(json.dumps(cfg, indent=2) + "\n")
+        args.models_dir = str(target.parent)
     children, terminals = [], []
     print(f"Household test logs: {tmp}", flush=True)
     # Reserve and pass the actual listener, exactly as the household launcher
@@ -178,6 +198,9 @@ def main():
                 "OMP_NUM_THREADS": "2", "COLI_NO_OMP_TUNE": "1", "PIN": "off"}
         if args.resident_default:
             result.pop("LUMABRI_RESIDENT_REQUIRED", None)
+        if args.expect_hybrid_fanout:
+            result["LUMABRI_HOME_HYBRID_POLICY"] = "split"
+            result["LUMABRI_HOME_HYBRID_REMOTE_EXPERTS"] = "3"
         # Reopened donor restores the saved key rather than relying on the
         # shell that launched it. Other peers exercise an inherited key.
         if name == "donor-a":
@@ -623,6 +646,11 @@ def main():
             elif args.expect_hybrid:
                 assert "[home-hybrid] committed_rounds=" in log, "coordinator never ran concurrent local/remote work"
                 assert "public discovery disabled" in log, "unapproved discovery was not disabled"
+                if args.expect_hybrid_fanout:
+                    work = re.findall(r"committed_rounds=(\d+) local_experts=(\d+) remote_experts=(\d+)", log)
+                    assert work and all(int(local) == int(rounds) and int(remote) == 3 * int(rounds)
+                                        for rounds, local, remote in work), work
+                    assert "numeric probe exceeds" not in log, "remote fanout silently became local"
             assert commits, f"{donor} did not report any committed model execution"
             ranges = {(int(begin), int(end)) for begin, end, _ in commits}
             assert len(ranges) == 1, ranges

@@ -30,7 +30,7 @@ lumabri test_chat_ui: src/runtime/lumabri_weight_cache.h
 lumabri test_chat_ui: src/runtime/lumabri_prepare_progress.h
 lumabri test_chat_ui test_memory_budget test_cluster segment_node test_calibration $(SHIM_LIB): src/runtime/lumabri_prepare_limits.h
 lumabri test_chat_ui test_home test_hybrid_parallel test_accum_order test_local_fallback test_verify_failover test_nat_adopt: lumabri_home_hybrid.h
-test_hybrid_parallel test_accum_order test_local_fallback test_verify_failover test_nat_adopt build/segment_hybrid_bridge.o: src/runtime/lumabri_hybrid_policy.h
+test_hybrid_parallel test_accum_order test_local_fallback test_verify_failover test_nat_adopt build/segment_hybrid_bridge.o build/bench_home_hybrid: src/runtime/lumabri_hybrid_policy.h
 
 test_weight_cache: tests/c/test_weight_cache.c src/runtime/lumabri_weight_cache.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_weight_cache.c -o $@

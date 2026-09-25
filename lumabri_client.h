@@ -100,7 +100,7 @@ typedef struct {
 
 static struct {
     LmbHybridRoutes home;
-    int hybrid_policy;
+    int hybrid_policy, hybrid_remote_experts;
     LmbHybridTiming hybrid_timing[512];
     unsigned char hybrid_probes[512];
     int hybrid_numeric_failed;
@@ -1628,8 +1628,11 @@ static LMB_MAYBE_UNUSED int lumi_moe_apply_split(int layer, const int *idx,
         local_count < 0 || local_count >= K || (local_count && !local)) return 0;
     for (int k = 0; k < K; k++) if (idx[k] < 0 || idx[k] >= L.n_experts) return 0;
     int household = L.home.count && local_count && layer < 512;
-    if (household && (L.hybrid_numeric_failed ||
-        !lmb_hybrid_choose(&L.hybrid_timing[layer], L.hybrid_policy))) local_count = K;
+    if (household) {
+        int wanted = L.hybrid_remote_experts > 0 ? L.hybrid_remote_experts : K - local_count;
+        int remote = lmb_hybrid_choose(&L.hybrid_timing[layer], L.hybrid_policy, K, wanted);
+        local_count = L.hybrid_numeric_failed ? K : K - remote;
+    }
     int remote_count = K - local_count;
     int fds[LUMI_MAX_K];
     uint32_t tried[LUMI_MAX_K];
@@ -1751,19 +1754,21 @@ static LMB_MAYBE_UNUSED int lumi_moe_apply_split(int layer, const int *idx,
         LmbHybridTiming *t = &L.hybrid_timing[layer];
         /* Probe recomputation is validation overhead, not the steady-state
          * split service time. Actual end-to-end token timings still include it. */
-        lmb_hybrid_observe(t, remote_count != 0,
+        lmb_hybrid_observe(t, remote_count,
             lumi_now() - t0 - (validation_done - received_done),
             sent_done - t0, local_done - sent_done, received_done - local_done);
         if (!(t->rounds & (t->rounds - 1)))
-            fprintf(stderr, "[home-hybrid-profile] layer=%d rounds=%llu local_n=%llu split_n=%llu "
+            fprintf(stderr, "[home-hybrid-profile] layer=%d rounds=%llu remote_experts=%d best_remote=%d local_n=%llu split_n=%llu "
                 "local_ms=%.3f split_ms=%.3f send_ms=%.3f work_ms=%.3f wait_ms=%.3f\n", layer,
-                (unsigned long long)t->rounds, (unsigned long long)t->samples[0],
-                (unsigned long long)t->samples[1], 1000*t->seconds[0], 1000*t->seconds[1],
+                (unsigned long long)t->rounds, remote_count, lmb_hybrid_best(t),
+                (unsigned long long)t->samples[0], (unsigned long long)t->samples[remote_count],
+                1000*t->seconds[0], 1000*t->seconds[remote_count],
                 1000*t->send_s/t->rounds, 1000*t->local_s/t->rounds, 1000*t->wait_s/t->rounds);
     }
     lumi_round_done(t0);
     return 1;
 fail:
+    if (household) lmb_hybrid_failed(&L.hybrid_timing[layer], remote_count);
     for (int k = 0; k < K; k++) {
         if (fds[k] >= 0) { close(fds[k]); lumi_peer_done(ps[k]); }
         free(res[k]);
@@ -1800,6 +1805,15 @@ static LMB_MAYBE_UNUSED int lumi_home_init(int layers, int experts, int hidden, 
         if (!strcmp(policy, "local")) L.hybrid_policy = LMB_HYBRID_FORCE_LOCAL;
         else if (!strcmp(policy, "split")) L.hybrid_policy = LMB_HYBRID_FORCE_SPLIT;
         else return -1;
+    }
+    /* Diagnostic sweep only. Adaptive mode chooses its own count. Clamp to
+     * K-1 at the call site; never silently turn Hybrid into all-remote. */
+    const char *remote = getenv("LUMABRI_HOME_HYBRID_REMOTE_EXPERTS");
+    L.hybrid_remote_experts = 0;
+    if (remote && *remote) {
+        char *end; errno = 0; long nremote = strtol(remote, &end, 10);
+        if (errno || *end || nremote < 1 || nremote > LMB_HYBRID_MAX_REMOTE) return -1;
+        L.hybrid_remote_experts = (int)nremote;
     }
     size_t n = strlen(hex);
     if (n >= LMB_HOME_HYBRID_ENV || (n & 1) || layers <= 0 || layers > 512 ||

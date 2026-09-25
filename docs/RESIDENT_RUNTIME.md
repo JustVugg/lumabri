@@ -210,14 +210,39 @@ classification/retry; the exact cause of the original physical advert failure
 has not been established. Isolated real-model calibration/reopen/invalidation
 passed with this change; the physical catalogue still needs retesting.
 
-Resident Hybrid now measures local and split work per layer. Four interleaved
-samples per path initialize an EWMA; split must be at least 3% faster. The
-other path is probed every 64 observed rounds. This is a workload-dependent
-heuristic, not a monotonic latency guarantee. Approved donor memory remains
-resident. `LUMABRI_HOME_HYBRID_POLICY=local|split|adaptive` is an advanced
+Resident Hybrid measures the number of remote experts per layer, not just a
+fixed one-expert split. It compares all-local against counts from one through
+`min(top_k - 1, 8)`, always retaining local work. Two samples per remote count,
+interleaved with fresh local baselines, initialize an EWMA; a split must beat
+all-local by at least 3%. Initial exploration takes at most `4*limit+1`
+successful rounds per layer. A different count is revisited every 64 rounds;
+a failed count is not retried by the scheduler for 128 rounds. Existing
+transport failure and peer-identity checks still apply.
+
+This is a workload-dependent heuristic, not a monotonic latency guarantee.
+Exploration costs work and may temporarily slow a chat. Approved donor memory
+remains resident; the scheduler neither loads additional layers nor discovers
+new donors. `LUMABRI_HOME_HYBRID_POLICY=local|split|adaptive` is an advanced
 diagnostic setting inherited when the donor starts (default adaptive), not a
 new permission or public-discovery route. Logs separate send, local work and
-collection wait. Prewarming/calibration probes are included in reported time.
+collection wait, and identify the actual and preferred remote expert counts.
+Prewarming/calibration probes are included in end-to-end reported time.
+
+For a forced-split diagnostic only, `LUMABRI_HOME_HYBRID_REMOTE_EXPERTS=1..8`
+selects the count (clamped to `top_k-1`). The default forced count is one;
+adaptive mode chooses its own count. Requests overlap local compute but an
+individual donor still uses its bounded execution queue, not one unbounded
+thread team per request. More remote experts can therefore be slower.
+
+`LMB_BENCH_FANOUT=1 build/bench_home_hybrid MODEL BEGIN END THREADS` compares
+native-local, callback-local, splits of 1/2/4/maximum and adaptive on already
+approved resident routes. It uses independent scheduler state per contender,
+reports warm-up cost separately, and rejects missing contributions or numeric
+fallback. These are MoE-layer timings, **not token/s**. The full-model greedy
+oracle uses `LMB_BENCH_GREEDY=1` (optionally `LMB_BENCH_ADAPTIVE=1`); it compares
+token IDs, accounts for all committed Hybrid contributions, and includes
+exploration and numerical checks in elapsed time. Neither diagnostic requests
+new allocations or authorizes additional peers.
 
 The original `23ebce7` check compared the first four remote contributions
 bit-for-bit against the local callback. This was too strict as a household
@@ -244,7 +269,8 @@ Raw split results therefore failed its strict bitwise gate. Timings were also
 highly variable; they must not be presented as certified token/s or a speedup.
 The benchmark's optional `LMB_BENCH_INSPECT_DIFF=1` only quantifies raw
 differences and still exits nonzero on a mismatch. It is not a production
-bypass. The normal test must either match or report local fallback explicitly.
+bypass. The normal service sweep rejects numeric fallback rather than timing
+it as remote work; rounded results within the envelope are labelled as such.
 
 `LMB_BENCH_GREEDY=1` adds a separate full-model check with the actual tokenizer,
 chat template, three fixed prompts, fresh KV, and up to 32 greedy tokens per
