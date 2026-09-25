@@ -91,6 +91,20 @@ static inline int lmb_home_interface_ip(char *out, size_t cap) {
     return best ? 0 : -1;
 }
 
+/* Match the existing service override: host only, never host:port. A bad
+ * override must fail, not fall back silently to a different interface.
+ * Loopback is intentional for isolated local households and tests. */
+static inline int lmb_home_advertise_ip(char *out, size_t cap) {
+    const char *forced = getenv("LUMABRI_ADVERTISE");
+    if (!forced || !*forced) return lmb_home_interface_ip(out, cap);
+    struct in_addr address;
+    if (inet_pton(AF_INET, forced, &address) != 1) { errno = EINVAL; return -1; }
+    uint32_t host = ntohl(address.s_addr);
+    if ((host >> 24) == 0 || (host >> 28) >= 14 ||
+        !inet_ntop(AF_INET, &address, out, cap)) { errno = EINVAL; return -1; }
+    return 0;
+}
+
 static inline int lmb_home_subnet(const char *ip, char *out, size_t cap) {
     struct in_addr wanted;
     if (inet_pton(AF_INET, ip, &wanted) != 1) return -1;

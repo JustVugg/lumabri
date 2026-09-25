@@ -52,6 +52,15 @@ VPN routing and WSL NAT mode can still prevent direct discovery or connections;
 the helper does not reconfigure those networks. If your LAN address changes,
 use **/join** to rediscover the household rather than guessing an address.
 
+For an advanced multi-interface setup (for example, a VPN or Tailscale), start
+the household owner with `LUMABRI_ADVERTISE=100.101.102.103 ./lumabri`, replacing
+the example with that computer's reachable IPv4 address. Use the same override
+on later starts; Lumabri saves the announced tracker endpoint in `home.conf`.
+Join that exact endpoint on the other computers. The value is an IPv4 address
+without a port, not a hostname. This does not configure VPNs or firewall rules.
+An address mismatch is rejected explicitly; it does not bypass household
+authentication or donor approval. Reopened TUIs restore their saved household key.
+
 Apple Terminal uses a compatible 256-colour palette with a contrasting
 selection background. Other terminals use detected colour support. For
 diagnostics, `LUMABRI_COLOR=16`, `256`, `truecolor` or `none` overrides detection;
