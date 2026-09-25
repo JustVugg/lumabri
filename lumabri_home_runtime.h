@@ -707,8 +707,13 @@ typedef struct {
 
 static int home_session_error(HomeSession *s, uint32_t i, const char *operation, int error) {
     char detail[160] = {0};
+    /* The transport reports EOF as ECONNRESET rather than leaving errno
+     * unset. Preserve the actionable, platform-independent UI category
+     * while retaining the actual error number for diagnostics. */
+    const char *reason = !error ? "connection closed" :
+        (error == ECONNRESET || error == EPIPE) ? "connection closed or reset" : strerror(error);
     snprintf(detail, sizeof detail, "%s at %.64s: %s (errno %d).",
-             operation, s->addresses[i], error ? strerror(error) : "connection closed", error);
+             operation, s->addresses[i], reason, error);
     pthread_mutex_lock(&s->status_lock);
     if (!s->reason[i][0])
         memcpy(s->reason[i], detail, sizeof detail);
