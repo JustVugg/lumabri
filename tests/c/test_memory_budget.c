@@ -67,6 +67,73 @@ static void timed_plans(void) {
     assert(lmb_home_plan_selected(&shape, 1, nodes, 2, 128, &seed, NULL, &got));
 }
 
+/* Product capacity contract, independent of any performance claim: neither
+ * selected machine can host the complete model, but their disjoint resident
+ * slices can. Exercise the same source -> selected -> optional Hybrid order
+ * as the catalogue. These are declared synthetic sizes, not hardware results. */
+static void combined_capacity(void) {
+    const uint64_t mib = UINT64_C(1) << 20;
+    LmbModelShape m = {0};
+    strcpy(m.model_type, "olmoe"); strcpy(m.segment_id, "olmoe");
+    m.layers = 16; m.hidden = 64; m.vocab = 128;
+    m.moe_intermediate = 32; m.experts_per_tok = 2;
+    m.sizing_verified = m.memory_contract = 1; m.max_context = 4096;
+    m.edge_resident_bytes = 8 * mib;
+    for (uint32_t i = 0; i < m.layers; i++) m.memory[i].resident_bytes = 100 * mib;
+    const uint64_t bytes = 1608 * mib;
+    LmbHomeReservation first, second, whole;
+    assert(!lmb_home_reservation(&m, bytes, 0, 8, 128, 1, &first));
+    assert(!lmb_home_reservation(&m, bytes, 8, 16, 128, 0, &second));
+    assert(!lmb_home_reservation(&m, bytes, 0, 16, 128, 1, &whole));
+    LmbClusterNode nodes[2] = {{.ram_budget_bytes = first.total_bytes},
+                              {.ram_budget_bytes = second.total_bytes}};
+    for (unsigned i = 0; i < 2; i++) {
+        assert(nodes[i].ram_budget_bytes < whole.total_bytes);
+        LmbClusterPlan single = {0};
+        int rc = lmb_home_plan_source(&m, bytes, nodes + i, 1, 128, 1,
+                                      LMB_GOAL_ONE_SESSION, 1, &single);
+        assert(rc || single.state == LMB_PLAN_UNRUNNABLE);
+    }
+    LmbClusterPlan seed, plan;
+    assert(!lmb_home_plan_source(&m, bytes, nodes, 2, 128, 1,
+                                 LMB_GOAL_ONE_SESSION, 1, &seed));
+    assert(seed.state == LMB_PLAN_RESIDENT && !seed.hybrid);
+    const double costs[] = {.001, .1}; /* a slow donor is still needed for capacity */
+    for (unsigned measured = 0; measured < 2; measured++) {
+        assert(!lmb_home_plan_selected(&m, bytes, nodes, 2, 128, &seed,
+                                      measured ? costs : NULL, &plan));
+        assert(plan.state == LMB_PLAN_RESIDENT && !plan.hybrid && plan.nslices == 2);
+        uint32_t next = 0, seen = 0, edge = 0;
+        for (unsigned i = 0; i < plan.nslices; i++) {
+            const LmbSlice *s = &plan.slices[i];
+            assert(s->node < 2 && !(seen & (1u << s->node)));
+            assert(s->layer_begin == next && s->layer_end > next);
+            seen |= 1u << s->node; next = s->layer_end;
+            edge += s->node == plan.edge_node;
+            LmbHomeReservation r;
+            assert(!lmb_home_reservation(&m, bytes, s->layer_begin, s->layer_end,
+                                        128, s->node == plan.edge_node, &r));
+            assert(s->bytes_resident == r.total_bytes);
+            assert(r.total_bytes <= nodes[s->node].ram_budget_bytes);
+        }
+        assert(next == m.layers && seen == 3 && edge == 1);
+        LmbClusterPlan before = plan;
+        /* Hybrid duplicates the complete model on Edge: it must not replace
+         * this feasible Segment plan or partially overwrite it on failure. */
+        assert(lmb_home_plan_hybrid(&m, bytes, nodes, 2, 128, &plan, &plan));
+        assert(!memcmp(&plan, &before, sizeof plan));
+        /* Loss of either donor cannot silently become local-only or disk. */
+        for (unsigned lost = 0; lost < 2; lost++) {
+            LmbClusterNode reduced[2]; memcpy(reduced, nodes, sizeof reduced);
+            reduced[lost].ram_budget_bytes = 0;
+            assert(lmb_home_plan_selected(&m, bytes, reduced, 2, 128, &seed,
+                                          measured ? costs : NULL, &plan));
+            assert(!memcmp(&plan, &before, sizeof plan));
+        }
+    }
+    puts("COMBINED RESIDENT CAPACITY: PASS (neither alone; both required; no Hybrid/disk substitution)");
+}
+
 static void sized_file(const char *path, off_t size) {
     int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
     assert(fd >= 0 && !ftruncate(fd, size));
@@ -169,6 +236,7 @@ static void feasible_plans(void) {
 
 int main(void) {
     timed_plans();
+    combined_capacity();
     feasible_plans();
     LmbModelShape m = {0};
     strcpy(m.model_type, "olmoe");
