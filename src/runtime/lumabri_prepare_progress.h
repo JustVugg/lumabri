@@ -27,6 +27,27 @@ typedef struct {
     int overflow, opened;
 } LmbPrepareProgress;
 
+/* Heartbeats only prove connectivity, not preparation progress. Byte advances
+ * and forward phase transitions renew the idle allowance, not the absolute
+ * ceiling. A large, progressing model must not die at minute fifteen. */
+typedef struct {
+    double started, advanced;
+    uint64_t bytes;
+    unsigned phase;
+} LmbPrepareWatchdog;
+
+static void lmb_prepare_watchdog_advance(LmbPrepareWatchdog *w, double now,
+                                       uint64_t bytes, unsigned phase) {
+    if (bytes > w->bytes || phase > w->phase) w->advanced = now;
+    if (bytes > w->bytes) w->bytes = bytes;
+    if (phase > w->phase) w->phase = phase;
+}
+
+static int lmb_prepare_watchdog_expired(const LmbPrepareWatchdog *w, double now) {
+    if (now - w->started >= 24 * 60 * 60) return 2;
+    return now - w->advanced >= 900 ? 1 : 0;
+}
+
 static void lmb_prepare_record(LmbPrepareProgress *p, const char *line, double now) {
     char kind[16], extra;
     unsigned long long done, total, ms;

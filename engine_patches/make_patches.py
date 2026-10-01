@@ -58,8 +58,10 @@ OLMOE = [
 #endif
 """),
     hook("        const float *xs = x + (int64_t)s*D;\n", """#ifdef LUMIBRI_P2P
+        LmbOlmoeLocal local = {m, g, u};
         if (lumi_layer_on(layer) &&
-            lumi_moe_apply(layer, idx, val, K, xs, D, out + (int64_t)s*D)) {
+            lumi_moe_apply_split(layer, idx, val, K, xs, D, out + (int64_t)s*D,
+                                 lumi_hybrid_local_count(K), lmb_olmoe_local, &local)) {
             continue;
         }
 #endif
@@ -299,6 +301,69 @@ def find_anchor(text, anchor):
     return [m.group(0) for m in re.finditer(pattern, text)]
 
 
+def olmoe_local_callback(src):
+    """Copy the existing scalar-row kernel verbatim, including ISA branches.
+
+    No new arithmetic or upstream edits: the callback borrows the MoE's
+    existing scratch and executes on the same engine thread. Exact anchors
+    deliberately fail if upstream changes the kernel's ownership/shape.
+    """
+    start = "            Slot *e; expert_get(m, layer, idx[kk], &e);\n"
+    stop = "            float w = val[kk];\n"
+    anchor = "static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {"
+    if src.count(start) != 1 or src.count(stop) != 1 or src.count(anchor) != 1:
+        raise SystemExit("olmoe.c: local expert kernel anchors changed")
+    begin, end = src.index(start), src.index(stop)
+    if end <= begin:
+        raise SystemExit("olmoe.c: local expert kernel boundaries reversed")
+    kernel = src[begin:end].replace("idx[kk]", "expert")
+    callback = """#ifdef LUMIBRI_P2P
+typedef struct { Model *m; float *g, *u; } LmbOlmoeLocal;
+static int lmb_olmoe_local(void *opaque, int layer, int expert,
+                           const float *xs, int D, float *hh) {
+    LmbOlmoeLocal *ctx = opaque;
+    Model *m = ctx->m;
+    if (D != m->c.hidden || layer < 0 || layer >= m->c.n_layers ||
+        expert < 0 || expert >= m->c.n_experts) return -1;
+    int I = m->c.inter;
+    float *g = ctx->g, *u = ctx->u;
+""" + kernel + """    return 0;
+}
+static int lmb_olmoe_provider(void *opaque, int layer, int expert,
+                              const float *x, int D, float *out) {
+    Model *m = opaque;
+    LmbOlmoeLocal ctx = {m, malloc((size_t)m->c.inter * sizeof(float)),
+                           malloc((size_t)m->c.inter * sizeof(float))};
+    int rc = !ctx.g || !ctx.u ? -1 : lmb_olmoe_local(&ctx, layer, expert, x, D, out);
+    free(ctx.g); free(ctx.u); return rc;
+}
+#endif
+
+"""
+    out = src.replace(anchor, callback + anchor, 1)
+    begin = out.index("static int olmoe_segment_engine_open(")
+    end = out.index("static void olmoe_segment_engine_destroy(", begin)
+    portion = out[begin:end]
+    mark = "    *engine_impl = engine;\n"
+    if portion.count(mark) != 1:
+        raise SystemExit("olmoe.c: Segment provider open anchor changed")
+    portion = portion.replace(mark, """#ifdef LUMIBRI_P2P
+    const char *accelerator = getenv("LUMABRI_HOME_ACCELERATOR");
+    if (accelerator && *accelerator)
+        lmb_home_expert_provider(&engine->model, lmb_olmoe_provider);
+    if (lumi_home_init(config.n_layers, config.n_experts, config.hidden, capabilities->numeric_class)) {
+        olmoe_segment_model_destroy(engine);
+        pthread_mutex_destroy(&engine->run_lock); free(engine);
+        return coli_segment_adapter_error(error, error_size, "invalid approved Hybrid routes");
+    }
+#endif
+""" + mark, 1)
+    out = out[:begin] + portion + out[end:]
+    mark = "    olmoe_segment_model_destroy(engine);\n    pthread_mutex_destroy(&engine->run_lock);"
+    # Clear after connections have drained, before freeing the provider model.
+    return out.replace(mark, "#ifdef LUMIBRI_P2P\n    lmb_home_expert_provider(NULL, NULL);\n#endif\n" + mark, 1)
+
+
 def apply_hooks(src, hooks, name):
     out = src
     for h in hooks:
@@ -312,7 +377,7 @@ def apply_hooks(src, hooks, name):
             out = out.replace(literal, literal + h["add"], 1)
         else:
             out = out.replace(literal, h["add"] + literal, 1)
-    return out
+    return olmoe_local_callback(out) if name == "olmoe.c" else out
 
 
 def pristine(engine_dir, fname):

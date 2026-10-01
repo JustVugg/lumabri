@@ -26,6 +26,7 @@ typedef struct {
     LmbModelShape shape;
     LmbClusterPlan plan;
     int planned;                    /* 0 when the cluster cannot be planned */
+    int stage_cost_placement;       /* candidate from prior observations; NOT a rate */
     int weights_present;
     uint64_t checkpoint_bytes;
     int checkpoint_inventory_ok;
@@ -67,6 +68,7 @@ enum { LMB_TUI_REQUEST_CHAT = 10, LMB_TUI_REQUEST_CALIBRATION = 11 };
 static inline void lmb_tui_invalidate_plans(LmbTuiState *st) {
     for (int i = 0; i < st->nmodels; i++) {
         st->models[i].planned = 0;
+        st->models[i].stage_cost_placement = 0;
         st->models[i].calibration_key_valid = 0;
         st->models[i].advice_flags = 0;
     }

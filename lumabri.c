@@ -2699,11 +2699,12 @@ static int sr_take(SReader *s, size_t n, int emit, Cap *cap) {   /* copy/discard
  * is prefill (the prompt crossing the layers), everything after is decode.
  * One number for both hid a 60 s prefill inside "0.2 tok/s". */
 #include "lumabri_metrics.h"
+#include "lumabri_stage_metrics.h"
 static volatile double g_first_token_at;
 
 static int stream_serve2(Engine *e, char *statline, size_t scap, char **captured) {
     SReader s = { e->from, {0}, 0, 0 };
-    char line[600];
+    char line[4096];
     Cap cap = {0};
     if (statline && scap) statline[0] = 0;
     if (captured) *captured = NULL;
@@ -3362,7 +3363,7 @@ static int host_input(HostInput *in, Engine *e, const HostState *h,
  * contain "DONE <id>". Pipes can split a header or combine several frames.
  * Long telemetry lines are ignored without allocating unbounded memory. */
 typedef struct {
-    char header[512];
+    char header[4096];
     size_t header_len;
     uint64_t payload_left;
     int need_terminator, overflow;
@@ -4951,7 +4952,7 @@ static int cmd_chat(int argc, char **argv) {
         }
 
         double m0 = g_eng.net_mb, r0 = nowd();
-        char stat[512] = "";
+        char stat[4096] = "";
 
         if (eng.proto == PROTO_SERVE2) {
             char *reply = NULL;
@@ -5060,6 +5061,17 @@ static int cmd_chat(int argc, char **argv) {
                 record.ttft_seconds = first > r0 ? first - r0 : metrics.prefill_seconds;
                 record.measured_at = (double)time(NULL); record.samples = 1;
                 record.prompt_tokens = prompt_count; record.generated_tokens = metrics.generated_tokens;
+                record.stage_count = 0;
+                LmbStageSample samples[LMB_STAGE_PROFILE_MAX]; uint32_t count = 0;
+                if (!lmb_stage_samples_parse(stat, samples, &count) && count == record.key.nodes) {
+                    int valid = 1;
+                    for (uint32_t i = 0; i < count; i++) {
+                        if (samples[i].begin != record.key.layer_begin[i] || samples[i].end != record.key.layer_end[i] ||
+                            samples[i].calls != metrics.decode_steps) valid = 0;
+                        record.stage_decode_seconds[i] = samples[i].seconds / samples[i].calls;
+                    }
+                    if (valid) record.stage_count = count;
+                }
                 if (!lmb_cal_store(g_calibration_directory, &record)) {
                     *g_recording_calibration = record;
                     probe_recorded = 1;
@@ -5346,6 +5358,8 @@ static int catalog_calibration_dir(char out[1200]) {
     return !home || checked_printf(out, 1200, "%s/.lumabri/calibrations", home);
 }
 
+#include "src/planner/lumabri_stage_placement.h"
+
 static void catalog_hardware_id(const LmbMachineProfile *p, const char *address, char out[65]) {
     LmbSha sha; uint8_t digest[32]; lmb_sha_init(&sha);
     const char *fields[] = {p->os, p->arch, p->cpu_model, p->isa, address};
@@ -5365,7 +5379,7 @@ static int catalog_calibration_key(const LmbTuiState *st, const LmbTuiModel *m,
     snprintf(key->model_root, sizeof key->model_root, "%s", m->content_id);
     snprintf(key->adapter, sizeof key->adapter, "%s", m->shape.segment_id);
     snprintf(key->build_id, sizeof key->build_id, "%s", st->build_id);
-    snprintf(key->plan_kind, sizeof key->plan_kind, "segment");
+    snprintf(key->plan_kind, sizeof key->plan_kind, "%s", m->plan.hybrid ? "hybrid" : "segment");
     snprintf(key->numeric_class, sizeof key->numeric_class, "%s", numeric ? numeric : "");
     key->adapter_abi = abi; key->goal = m->plan.goal;
     key->context = st->context; key->sessions = st->sessions; key->nodes = m->plan.nslices;
@@ -5384,6 +5398,56 @@ static int catalog_calibration_key(const LmbTuiState *st, const LmbTuiModel *m,
     /* ABI/numeric may be unknown until the real Edge greeting. All other
      * fields must already be bound; the writer validates the completed key. */
     return edge ? 0 : -1;
+}
+
+/* Missing leased inventory is not evidence of a changed executable. A loaded
+ * donor can briefly disappear while its worker reconnects. Never substitute a
+ * new identity: retry absence, but reject an observed mismatch immediately. */
+static int catalog_runtime_match(const LmbCalKey *key, const LmbMachineReport *reports,
+    uint32_t count, char *why, size_t cap) {
+    int missing = 0;
+    for (uint32_t j = 0; j < key->nodes; j++) {
+        const LmbMachineReport *found = NULL;
+        for (uint32_t k = 0; k < count; k++) {
+            char peer[65]; lmb_hex(peer, reports[k].identity, 32);
+            if (!strcmp(peer, key->node_id[j])) { found = &reports[k]; break; }
+        }
+        if (!found) {
+            if (!missing) snprintf(why, cap, "Donor %u inventory temporarily unavailable", j + 1);
+            missing = 1; continue;
+        }
+        char hardware[65];
+        catalog_hardware_id(&found->machine, found->control_addr, hardware);
+        unsigned threads = found->machine.logical_cpus;
+        if (found->runtime_threads && threads > found->runtime_threads) threads = found->runtime_threads;
+        if (threads > 256) threads = 256;
+        const char *changed = strcmp(hardware, key->node_hardware_id[j]) ? "hardware or endpoint" :
+            !found->runtime_id[0] ? "runtime identity unavailable" :
+            strcmp(found->runtime_id, key->node_build_id[j]) ? "runtime identity" :
+            threads != key->threads[j] ? "thread capacity" : NULL;
+        if (changed) {
+            snprintf(why, cap, "Donor %u: %s differs from the approved snapshot", j + 1, changed);
+            return -1;
+        }
+    }
+    return missing;
+}
+
+static int catalog_runtime_revalidate(const LmbTuiState *st, const LmbCalKey *key,
+    char *why, size_t cap) {
+    /* Two reporting periods; bounded independently of preparation progress. */
+    double deadline = nowd() + 2 * LMB_INVENTORY_HEARTBEAT_MS / 1000.0;
+    for (;;) {
+        LmbMachineReport reports[LMB_INVENTORY_MAX]; uint32_t count = 0;
+        int match = 1;
+        if (lmb_inventory_fetch(st->tracker, reports, &count))
+            snprintf(why, cap, "Household inventory unavailable");
+        else match = catalog_runtime_match(key, reports, count, why, cap);
+        if (!match) return 0;
+        if (match < 0 || g_stopping || nowd() >= deadline) return -1;
+        struct timespec pause = {0, 250000000};
+        nanosleep(&pause, NULL);
+    }
 }
 
 static void catalog_advice_refresh(LmbTuiState *st) {
@@ -5448,11 +5512,24 @@ static int catalog_state_refresh(LmbTuiState *st, void *unused) {
             selected[nselected] = st->nodes[j];
             mapping[nselected++] = j;
         }
-        if (household && m->weights_present)
+        if (household && m->weights_present) {
             m->planned = st->inventory_ok && m->checkpoint_inventory_ok &&
                 !lmb_home_plan_source(&m->shape, m->checkpoint_bytes, selected,
                     nselected, st->context, st->sessions, LMB_GOAL_ONE_SESSION, 1, &m->plan);
-        else
+            if (m->planned && lmb_home_plan_selected(&m->shape, m->checkpoint_bytes,
+                selected, nselected, st->context, &m->plan, NULL, &m->plan)) {
+                m->plan.state = LMB_PLAN_UNRUNNABLE;
+                m->plan.nslices = 0;
+            }
+            const char *hybrid = getenv("LUMABRI_HOME_HYBRID");
+            const char *resident = getenv("LUMABRI_RESIDENT_REQUIRED");
+            if (m->planned && (!resident || !strcmp(resident, "1")) &&
+                (!hybrid || strcmp(hybrid, "0"))) {
+                LmbClusterPlan candidate;
+                if (!lmb_home_plan_hybrid(&m->shape, m->checkpoint_bytes, selected,
+                    nselected, st->context, &m->plan, &candidate)) m->plan = candidate;
+            }
+        } else
             m->planned = st->inventory_ok && !lmb_plan_cluster_source(&m->shape, selected,
                 nselected, st->context, st->sessions, LMB_GOAL_ONE_SESSION, 0, &m->plan);
         if (m->planned) {
@@ -5465,6 +5542,28 @@ static int catalog_state_refresh(LmbTuiState *st, void *unused) {
             m->has_calibration = 1;
             m->calibration_key_valid = !catalog_calibration_key(st, m, m->calibration.key.adapter_abi,
                 m->calibration.key.numeric_class, &m->calibration_key) && lmb_cal_key_valid(&m->calibration_key);
+            double stage_costs[LMB_CAL_NODES_MAX], node_costs[LMB_CLUSTER_MAX_NODES] = {0};
+            if (household && !m->plan.hybrid && m->calibration_key_valid &&
+                !lmb_cal_stage_costs(&m->calibration, &m->calibration_key, stage_costs)) {
+                LmbClusterPlan local = m->plan, candidate;
+                for (uint32_t a = 0; a < nselected; a++) {
+                    if (mapping[a] == m->plan.edge_node) local.edge_node = a;
+                    for (uint32_t b = 0; b < local.nslices; b++)
+                        if (mapping[a] == m->plan.slices[b].node) {
+                            local.slices[b].node = a; node_costs[a] = stage_costs[b];
+                        }
+                }
+                if (!lmb_home_plan_selected(&m->shape, m->checkpoint_bytes, selected,
+                    nselected, st->context, &local, node_costs, &candidate)) {
+                    candidate.edge_node = mapping[candidate.edge_node];
+                    for (uint32_t j = 0; j < candidate.nslices; j++)
+                        candidate.slices[j].node = mapping[candidate.slices[j].node];
+                    m->plan = candidate; m->stage_cost_placement = 1;
+                    m->calibration_key_valid = !catalog_calibration_key(st, m,
+                        m->calibration.key.adapter_abi, m->calibration.key.numeric_class,
+                        &m->calibration_key) && lmb_cal_key_valid(&m->calibration_key);
+                }
+            }
         }
         st->nmodels++;
     }

@@ -23,6 +23,8 @@ assert "Approved Segment plan: 2 compute donors" in plan
 assert "layers [0,2)" in plan and "layers [2,4)" in plan
 assert "This chat process runs no model layers" in plan
 assert "No approved household plan" in plan
+assert "Allocation is not live activity" in plan
+assert "A donor retaining RAM does not by itself mean a faster reply" in plan
 assert "\x1b" not in plan, "a peer name injected terminal controls"
 
 advice = subprocess.check_output(["./test_chat_ui", "advice"], cwd=ROOT, text=True)

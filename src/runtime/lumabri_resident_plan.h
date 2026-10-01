@@ -34,11 +34,12 @@ static int home_resident_plan_save(const LmbResidentPlan *p) {
     if (home_resident_plan_path(path, sizeof path) ||
         checked_printf(temporary, sizeof temporary, "%s.XXXXXX", path)) return -1;
     LmbBuf b = {0};
-    lmb_buf_u32(&b, 1);
+    lmb_buf_u32(&b, p->execution.hybrid ? 2 : 1);
     lmb_buf_str(&b, p->tracker); lmb_buf_str(&b, p->host);
     lmb_buf_str(&b, p->host_key); lmb_buf_str(&b, p->root); lmb_buf_str(&b, p->model);
     lmb_buf_u32(&b, p->context); lmb_buf_u32(&b, p->max_new);
     lmb_buf_u32(&b, p->execution.count); lmb_buf_u32(&b, p->execution.layers);
+    if (p->execution.hybrid) lmb_buf_u32(&b, p->execution.hybrid);
     for (uint32_t i = 0; i < p->execution.count; i++) {
         const LmbExecutionNode *n = &p->execution.nodes[i];
         lmb_buf_str(&b, n->name); lmb_buf_str(&b, n->address);
@@ -76,7 +77,7 @@ static int home_resident_plan_load(const char *tracker, LmbResidentPlan *p) {
     int rc = lmb_read_full(fd, bytes, length); close(fd);
     if (rc) return -1;
     LmbCur c = {bytes, length, 0}; uint32_t version;
-    if (lmb_cur_u32(&c, &version) || version != 1 ||
+    if (lmb_cur_u32(&c, &version) || (version != 1 && version != 2) ||
         lmb_inventory_string(&c, p->tracker, sizeof p->tracker) || strcmp(tracker, p->tracker) ||
         lmb_inventory_string(&c, p->host, sizeof p->host) ||
         lmb_inventory_string(&c, p->host_key, sizeof p->host_key) ||
@@ -85,6 +86,7 @@ static int home_resident_plan_load(const char *tracker, LmbResidentPlan *p) {
         lmb_cur_u32(&c, &p->context) || lmb_cur_u32(&c, &p->max_new) ||
         lmb_cur_u32(&c, &p->execution.count) || lmb_cur_u32(&c, &p->execution.layers) ||
         p->execution.count > LMB_CLUSTER_MAX_NODES) return -1;
+    if (version == 2 && (lmb_cur_u32(&c, &p->execution.hybrid) || p->execution.hybrid != 1)) return -1;
     for (uint32_t i = 0; i < p->execution.count; i++) {
         LmbExecutionNode *n = &p->execution.nodes[i]; uint32_t edge;
         if (lmb_inventory_string(&c, n->name, sizeof n->name) ||

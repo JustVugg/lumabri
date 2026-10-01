@@ -24,6 +24,8 @@ def main():
         source.mkdir()
         (source / "weights.bin").write_bytes(os.urandom(2 * 1024 * 1024 + 777))
         (source / "weights.safetensors").write_bytes((source / "weights.bin").read_bytes())
+        (source / "weights.safetensors.other.safetensors").write_bytes(
+            b"z" * (2 * 1024 * 1024 + 777))
         (source / "config.json").write_text('{"model":"native-cas"}\n')
         children = []
 
@@ -87,7 +89,9 @@ def main():
                 str(tmp / "resident-vroot/weights.safetensors"), str(source / "weights.safetensors")],
                 env=resident_env, capture_output=True, text=True, timeout=45)
             assert checked.returncode == 0, checked.stdout + checked.stderr
+            assert "preparation block cache: 9 fetches," in checked.stderr, checked.stderr
             assert (tmp / "resident-cache/data/weights.safetensors").stat().st_blocks == 0
+            assert (tmp / "resident-cache/data/weights.safetensors.other.safetensors").stat().st_blocks == 0
             assert not any(p.is_file() for p in (tmp / "resident-cas").rglob("*"))
             print(checked.stdout.strip())
             chunk = (source / "weights.bin").read_bytes()[:1024*1024]

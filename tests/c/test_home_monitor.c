@@ -152,7 +152,29 @@ static void *monitor_donor(void *arg) {
     return NULL;
 }
 
+static void test_connection_reasons(void) {
+    HomeSession s = HOME_SESSION_INIT;
+    snprintf(s.addresses[0], sizeof s.addresses[0], "donor-test");
+    const int errors[] = {0, ECONNRESET, EPIPE};
+    for (unsigned i = 0; i < sizeof errors / sizeof *errors; i++) {
+        s.reason[0][0] = 0;
+        assert(home_session_error(&s, 0, "Cannot receive donor status", errors[i]) == -1);
+        assert(strstr(s.reason[0], "donor-test"));
+        assert(strstr(s.reason[0], "connection closed"));
+        char code[32]; snprintf(code, sizeof code, "errno %d", errors[i]);
+        assert(strstr(s.reason[0], code));
+    }
+    char first[sizeof s.reason[0]]; memcpy(first, s.reason[0], sizeof first);
+    assert(home_session_error(&s, 0, "Later failure", ETIMEDOUT) == -1);
+    assert(!memcmp(first, s.reason[0], sizeof first));
+    s.reason[0][0] = 0;
+    assert(home_session_error(&s, 0, "Cannot receive donor status", ETIMEDOUT) == -1);
+    assert(!strstr(s.reason[0], "connection closed"));
+    pthread_mutex_destroy(&s.status_lock); pthread_mutex_destroy(&s.send_lock);
+}
+
 int main(void) {
+    test_connection_reasons();
     signal(SIGPIPE, SIG_IGN);
     HomeSession s = HOME_SESSION_INIT;
     MonitorDonor donors[2] = {0};
@@ -173,6 +195,11 @@ int main(void) {
     /* Foreground makes no UI/socket progress for a lease plus margin. */
     double until = nowd() + LMB_HOME_LEASE_MS / 1000.0 + 2;
     while (nowd() < until) (void)poll(NULL, 0, 100);
+    if (atomic_load(&s.failed)) {
+        pthread_mutex_lock(&s.status_lock);
+        fprintf(stderr, "monitor failed: donor-0=%s donor-1=%s\n", s.reason[0], s.reason[1]);
+        pthread_mutex_unlock(&s.status_lock);
+    }
     assert(!atomic_load(&s.failed));
     LmbHomePhase phases[LMB_CLUSTER_MAX_NODES];
     uint32_t ports[LMB_CLUSTER_MAX_NODES];

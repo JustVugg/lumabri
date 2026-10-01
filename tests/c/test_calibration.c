@@ -8,6 +8,7 @@
 #include <string.h>
 #include "lumabri_calibration_store.h"
 #include "lumabri_checkpoint_identity.h"
+#include "src/planner/lumabri_stage_placement.h"
 
 static int bad;
 #define CHECK(c, ...) do { if (!(c)) { fprintf(stderr, __VA_ARGS__); \
@@ -102,6 +103,37 @@ static void record_tests(void) {
     encoded.p[12] ^= 1; got = r;
     CHECK(lmb_cal_decode(encoded.p, encoded.len, &got) && !got.samples, "corrupt record accepted");
     encoded.p[12] ^= 1;
+    /* CAL1 remains readable, but never fabricates per-stage observations. */
+    size_t legacy_len = encoded.len - 4; /* remove CAL2's empty stage count */
+    uint8_t *legacy = malloc(legacy_len);
+    CHECK(legacy != NULL, "cannot allocate legacy fixture");
+    if (legacy) {
+        memcpy(legacy, encoded.p, legacy_len - 32); memcpy(legacy, "LMB-CAL1", 8);
+        LmbSha sha; lmb_sha_init(&sha); lmb_sha_update(&sha, legacy, legacy_len - 32);
+        lmb_sha_final(&sha, legacy + legacy_len - 32);
+        CHECK(!lmb_cal_decode(legacy, legacy_len, &got) && !got.stage_count &&
+              got.decode_tok_s == r.decode_tok_s, "legacy record failed");
+        free(legacy);
+    }
+    LmbCalibration staged = r; LmbBuf stage_bytes = {0};
+    staged.stage_count = 2; staged.stage_decode_seconds[0] = .125; staged.stage_decode_seconds[1] = .25;
+    CHECK(!lmb_cal_encode(&staged, &stage_bytes) &&
+          !lmb_cal_decode(stage_bytes.p, stage_bytes.len, &got) && got.stage_count == 2 &&
+          got.stage_decode_seconds[0] == .125 && got.stage_decode_seconds[1] == .25,
+          "per-stage record round trip failed");
+    free(stage_bytes.p);
+    staged.stage_count = 1; CHECK(!lmb_cal_valid(&staged), "partial chain profile accepted");
+    staged.stage_count = 2; staged.stage_decode_seconds[0] = NAN;
+    CHECK(!lmb_cal_valid(&staged), "NaN stage time accepted");
+    staged.stage_decode_seconds[0] = 0; CHECK(!lmb_cal_valid(&staged), "zero stage time accepted");
+    staged.stage_decode_seconds[0] = .125;
+    double costs[LMB_CAL_NODES_MAX]; LmbCalKey moved = r.key;
+    moved.layer_end[0] = 21; moved.layer_begin[1] = 21;
+    CHECK(!lmb_cal_stage_costs(&staged, &moved, costs) && costs[0] == .125 / 22 &&
+          costs[1] == .25 / 22, "valid observations unavailable for alternate ranges");
+    CHECK(!lmb_cal_matches(&staged.key, &moved), "new range incorrectly inherits measured speed");
+    moved.threads[0]++;
+    CHECK(lmb_cal_stage_costs(&staged, &moved, costs) && !costs[0], "thread change reused stage timings");
     /* Exercise parsing, not just the checksum: re-sign truncated payloads
      * and malformed length/count fields so integrity does not hide bugs. */
     uint8_t *candidate = malloc(encoded.len);
@@ -162,7 +194,43 @@ static void record_tests(void) {
     free(encoded.p);
 }
 
+static void bundled_runtime_identity(void) {
+    char root[] = "/tmp/lumabri-cal-bundle-XXXXXX", bin[512], lib[512], path[640];
+    CHECK(mkdtemp(root) != NULL, "cannot create bundle fixture");
+    snprintf(bin, sizeof bin, "%s/bin", root); CHECK(!mkdir(bin, 0700), "cannot create bin");
+    snprintf(lib, sizeof lib, "%s/lib", root); CHECK(!mkdir(lib, 0700), "cannot create lib");
+    snprintf(lib, sizeof lib, "%s/lib/lumabri", root); CHECK(!mkdir(lib, 0700), "cannot create runtime lib");
+    const char *names[] = {"lumabri", "segment_node", "segment_chat", LMB_SHIM_NAME};
+    for (unsigned i = 0; i < 4; i++) {
+        snprintf(path, sizeof path, "%s/%s", bin, names[i]);
+        FILE *f = fopen(path, "wb"); CHECK(f != NULL, "cannot write binary fixture");
+        if (f) { fputs("runtime", f); fclose(f); }
+    }
+    char epoch[65], absent[65], first[65], second[65];
+    memset(epoch, 'a', 64); epoch[64] = 0;
+    LmbRuntimeIdentityCache cache = {0};
+    CHECK(!lmb_runtime_identity(bin, epoch, &cache, absent), "unbundled identity failed");
+    snprintf(path, sizeof path, "%s/libomp.dylib", lib);
+    FILE *f = fopen(path, "wb"); CHECK(f != NULL, "cannot create libomp fixture");
+    if (f) { fputs("openmp-v1", f); fclose(f); }
+    CHECK(!lmb_runtime_identity(bin, epoch, &cache, first) && strcmp(first, absent), "added runtime did not invalidate identity");
+    f = fopen(path, "ab"); if (f) { fputs("update", f); fclose(f); }
+    CHECK(!lmb_runtime_identity(bin, epoch, &cache, second) && strcmp(first, second), "updated runtime retained identity");
+    CHECK(!unlink(path), "cannot remove library fixture");
+    CHECK(!lmb_runtime_identity(bin, epoch, &cache, second) && !strcmp(second, absent), "removed runtime retained its digest");
+    CHECK(!symlink("missing", path), "cannot create library symlink fixture");
+    CHECK(lmb_runtime_identity(bin, epoch, &cache, second) && !second[0], "invalid bundled runtime was accepted");
+    CHECK(!unlink(path), "cannot remove library symlink");
+    for (unsigned i = 0; i < 4; i++) {
+        snprintf(path, sizeof path, "%s/%s", bin, names[i]); CHECK(!unlink(path), "cannot remove binary fixture");
+    }
+    CHECK(!rmdir(bin) && !rmdir(lib), "cannot clean bundle fixture");
+    snprintf(lib, sizeof lib, "%s/lib", root);
+    CHECK(!rmdir(lib) && !rmdir(root), "cannot clean bundle root");
+}
+
 int main(void) {
+    bundled_runtime_identity();
     LmbCalKey a = base(), b = base();
     CHECK(lmb_cal_matches(&a, &b), "two identical keys did not match");
 

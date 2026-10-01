@@ -80,4 +80,5 @@ test_cluster
 test_model_family
 test_inventory
 test_home
+test_home_expert
 test_chat_ui

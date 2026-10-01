@@ -315,6 +315,7 @@ enum {
     LMB_HOME_OFFER = 80, LMB_HOME_STATUS = 81, LMB_HOME_COMMIT = 82,
     LMB_HOME_START_HOST = 83, LMB_HOME_CANCEL = 84, LMB_HOME_PULSE = 85,
     LMB_HOME_DETACH = 86, /* close requester control; retain prepared weights */
+    LMB_HOME_FEATURES = 87, LMB_HOME_HYBRID_ROUTES = 88, LMB_HOME_EXPERT = 89,
 };
 #define LMB_CAP_EXEC2 (1u << 0)
 #define LMB_ENC_F32  0u
@@ -384,7 +385,7 @@ static int lmb_read_full(int fd, void *buf, size_t n) {
     while (n) {
         ssize_t r = read(fd, p, n);
         if (r < 0) { if (errno == EINTR) continue; return -1; }
-        if (r == 0) return -1;              /* peer closed mid-frame */
+        if (r == 0) { errno = ECONNRESET; return -1; } /* EOF, not stale errno */
         p += r; n -= (size_t)r;
     }
     return 0;
@@ -410,6 +411,10 @@ static void lmb_frame_caps(uint32_t op, uint32_t *body_cap, uint32_t *pay_cap) {
     *body_cap = LMB_MAX_SMALL_BODY;
     *pay_cap = 0;
     switch (op) {
+    case LMB_HOME_EXPERT:
+        *body_cap = 80;
+        *pay_cap = 256u << 10; /* One activation, at most 65536 float cells. */
+        break;
     case LMB_REGISTER:
         *body_cap = LMB_MAX_BODY;
         break;
@@ -524,7 +529,7 @@ static int lmb_recv(int fd, LmbMsg *m) {
     uint8_t pre[16];
     memset(m, 0, sizeof *m);
     if (lmb_read_full(fd, pre, 16)) return -1;
-    if (lmb_get32(pre) != LMB_MAGIC) return -1;
+    if (lmb_get32(pre) != LMB_MAGIC) { errno = EPROTO; return -1; }
     m->op = lmb_get32(pre + 4);
     m->body_len = lmb_get32(pre + 8);
     m->pay_len = lmb_get32(pre + 12);

@@ -31,7 +31,8 @@ this is not live attestation of arbitrary library changes or a dishonest host.
 GPU discovery never substitutes for an actual execution backend.
 
 The runtime fingerprint hashes the installed Lumabri, Segment node, Segment
-chat and shim binaries. Unchanged hashes are cached after stat checks. Model
+chat and shim binaries, plus an optional bundled OpenMP library. Replacing or
+removing that library invalidates the identity. Unchanged hashes are cached after stat checks. Model
 content is identified from the source's existing hash sidecars, without
 reading weight payloads again. Before recording, that content is checked
 against the signed routing root of the approved session. Per-request routing
@@ -66,10 +67,15 @@ Changing any matched condition makes a previous speed stale. The producer
 verifies where each field came from: structural validation alone would not
 make invented build IDs or a partial key authoritative.
 
+New `LMB-CAL2` records optionally store complete per-range decode RUN averages.
+`LMB-CAL1` remains readable without invented stage costs. The `STAGES1` extension
+precedes `PERF1`; a malformed stage profile cannot influence placement, but
+does not discard otherwise valid end-to-end timing.
+
 The C TUI and JSON export consume the same owned snapshot. JSON returns
 `calibration: null` when absent, and `decode_tok_s: null` when stale. This
-feature does not yet provide a calibrated cost model for placement or a
-quality ranking across model families.
+feature provides historical per-stage averages for heuristic placement, not
+a measured speed for a new plan or a quality ranking across model families.
 
 ## Verification
 
