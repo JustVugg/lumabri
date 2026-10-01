@@ -212,11 +212,21 @@ passed with this change; the physical catalogue still needs retesting.
 
 Resident Hybrid measures the number of remote experts per layer, not just a
 fixed one-expert split. It compares all-local against counts from one through
-`min(top_k - 1, 8)`, always retaining local work. Two samples per remote count,
-interleaved with fresh local baselines, initialize an EWMA; a split must beat
-all-local by at least 3%. Initial exploration takes at most `4*limit+1`
-successful rounds per layer. A different count is revisited every 64 rounds;
-a failed count is not retried by the scheduler for 128 rounds. Existing
+`min(top_k - 1, 8)`, always retaining local work. Two samples per remote count
+initialize an EWMA; a split must beat both the all-local EWMA and its latest
+sample by at least 3%. Startup tests only the one-expert split twice, each
+preceded by a local reference. Other counts are explored at intervals of at
+least 16 rounds, with a fresh local reference and two observations per count.
+After the second bootstrap or a scheduled probe, its excess wall time over
+the local reference determines the next gap: `ceil(excess / (local * 0.03))`,
+clamped to 16–512 rounds. Numerical validation, authenticated connection setup
+and collection are included in this pacing cost. This amortization heuristic
+is **not** a 3% overhead limit: bootstrap, jitter and the finite rediscovery
+cap can exceed it. Costly alternatives remain discoverable, but less often.
+A winning remote schedule refreshes the local reference at least every nine
+successful rounds. This avoids a full sweep on the first response and a stale,
+slow startup reference keeping remote execution selected. A failed count is
+not retried by the scheduler for 128 rounds. Existing
 transport failure and peer-identity checks still apply.
 
 This is a workload-dependent heuristic, not a monotonic latency guarantee.
@@ -224,9 +234,23 @@ Exploration costs work and may temporarily slow a chat. Approved donor memory
 remains resident; the scheduler neither loads additional layers nor discovers
 new donors. `LUMABRI_HOME_HYBRID_POLICY=local|split|adaptive` is an advanced
 diagnostic setting inherited when the donor starts (default adaptive), not a
-new permission or public-discovery route. Logs separate send, local work and
-collection wait, and identify the actual and preferred remote expert counts.
-Prewarming/calibration probes are included in end-to-end reported time.
+new permission or public-discovery route. Logs separate send/connection,
+local work, collection, numerical validation and accumulation. These are
+non-overlapping coordinator phases, not measurements of isolated network RTT
+or donor compute. `home-hybrid-cost` reports successful wall time (the sum of
+those phases), remote versus all-local rounds, and failed-attempt time
+separately. The expert-round summary includes local compute; send-to-collection
+latency includes overlapping local work. Neither means pure network wait.
+`home-hybrid-transport` separately counts connection attempts, authenticated
+opens, pooled reuse, stale pooled sockets and TCP/authentication/open time.
+These are passive counters, not additional network probes, and the open time
+is a component of send time, not extra time to add to the phase totals.
+Prewarming/calibration probes are included in end-to-end reported time; the
+service EWMA excludes numerical validation, which remains visible in wall time.
+Periodic numerical validation is due after 64 rounds since the last check and
+runs on the next remote contribution; it does not require the remote schedule
+to land on an exact multiple of 64. The first four remote inputs and every
+non-finite reply are still checked. The FP32 envelope is unchanged.
 
 For a forced-split diagnostic only, `LUMABRI_HOME_HYBRID_REMOTE_EXPERTS=1..8`
 selects the count (clamped to `top_k-1`). The default forced count is one;
@@ -493,3 +517,175 @@ identity before sending any activation. These and ASan/UBSan, parallel order,
 fallback, failover and secure-channel regressions passed locally. Physical
 validation of the recovery remains pending: the approved coordinator and
 donor processes had stopped before the recovery-enabled benchmark started.
+
+### October 1 paced-probe experiment — not a release gate
+
+The i7-1355U PC and i5-5250U Mac completed an approved resident OLMoE
+household chat with the paced-probe candidate: three 64-token turns at
+6.20, 6.51 and 6.90 host-reported decode tokens/s, context 512. Normal chat
+samples tokens; these are observations, not an identical-token speedup proof.
+The approved Mac held layers 13–15 as an expert accelerator; the PC retained
+the full local model. The first build's coordinator phases totalled 5.751 s
+across 801 Hybrid rounds: 1.433 s send/connection, 3.426 s local work,
+0.775 s collection, 0.106 s validation and 0.010 s accumulation. These are
+only the covered MoE rounds, not total model time or pure network latency.
+
+A follow-up native/adaptive greedy comparison passed 96 token IDs on the
+base build, but stopped on the candidate: layer 14, expert 8 exceeded the
+unchanged FP32 envelope (largest absolute difference in the vector:
+2.03401e-6). The offending result was replaced locally. That invalidates
+this candidate's strict Hybrid performance proof; no acceleration or
+production readiness is claimed. This does not yet distinguish benign
+cross-build rounding from an implementation defect. Do not widen the
+tolerance merely to pass the benchmark.
+
+The final source also makes periodic numerical checks due-based rather than
+exact-modulo-based. It passes scheduler, phase accounting and transport unit
+tests; that final source has not passed a new physical greedy oracle. The
+remaining gates are reproducing and classifying the numerical discrepancy,
+then a repeated native/Hybrid comparison on identical prompts and token IDs.
+
+### October 1 numerical follow-up — discrepancy reproduced
+
+An owner-approved physical PC+Mac run reproduced the same layer 14, expert 8
+contribution. Of its 2048 outputs, one exceeds the unchanged pairwise FP32
+envelope. At index 1855 the PC returned `0.0849096700549` and the Mac
+`0.0849076360464`: absolute difference `2.03400850296e-6`, or 1.100001 times
+the allowed bound. The strict oracle exited 4 (`NOT VALIDATED`) because it
+fell back locally; this is not evidence of a different generated token.
+
+Replaying that identical input on the PC produced bit-identical output in
+nine trials (three each with 1, 4 and 12 threads). Three repetitions on the
+same approved Mac expert were also bit-identical to its original response.
+An in-process reference evaluated the **same quantized weights** with
+long-double accumulation and `expl`, then rounded its output to FP32. Both
+machines pass the existing envelope against that reference on all 2048
+outputs. The reference value at index 1855 is `0.084909170866`; maximum
+envelope ratios across the vector are 0.369665 for PC and 0.830040 for Mac.
+
+This is a reproducible cross-execution numerical difference, not observed
+random corruption or thread-count instability. Passing independently against
+a reference does not imply that two rounded results pass a pairwise test.
+It does not prove the specific compiler/ISA/FMA cause, compatibility for the
+whole model, or correctness of a looser acceptance rule. The shipping
+tolerance and fallback remain unchanged. Numerical-class compatibility still
+needs an explicit contract and whole-model validation before a speed claim.
+
+The opt-in benchmark diagnostic and a regression counterexample record this
+case; no activation capture is included in the shipping runtime. The first
+attempt to save the diagnostic arrays used a socket writer for a regular
+file and left an empty file (`NUMERIC_CAPTURE saved=0`). The repetitions and
+reference above ran in memory and completed, but offline compiler-variant
+replay did **not** run. The writer is now corrected and self-tested for
+round-trip contents, private permissions and refusal to overwrite a capture.
+The real-array capture has not been repeated with that correction.
+
+### Reference-backed verification — physical follow-up
+
+The subsequent candidate adds an exceptional resident-only reference check
+for borderline OLMoE household results; see [Hybrid verification](HYBRID_CONCURRENCY.md).
+It does not change ATOL/RTOL, the donor kernel, router-order accumulation,
+or upstream Colibri. Both production outputs must independently fit the
+original envelope. The additional scratch is included in plan reservations.
+
+On allocation `62209b6045c2`, PC i7-1355U (12 threads), Mac i5-5250U
+(4 threads), Mac ranges `[13,16)`, context 512, the same layer 14/expert 8
+case was reference-verified in **both** full-model trials. Each trial passed
+96 matching greedy token IDs across three fixed prompts, with no numerical
+fallback, no failed Hybrid rounds and no late expert loads. There were 151
+and 126 actual remote expert calls respectively, and one exceptional
+reference attempt/accept per trial. These are two repetitions of the same
+finite corpus, not 192 distinct test cases or a proof for other models.
+
+The reference/capture self-tests, Hybrid ordering/numerical/transport tests,
+local fallback, verified failover, home transaction, household expert scope,
+cluster budget tests and ASan/UBSan passed locally. Native macOS and remote
+CI have not been run for this candidate. The physical Mac used its existing
+package: only the coordinator's verification changed.
+
+Decode timings below count 93 subsequent decode steps per trial (31 per
+prompt), not the first token from prefill. These standalone greedy-kernel
+measurements are not interchangeable with the TUI's host-reported speed.
+
+| Trial | Native PC decode | Adaptive PC+Mac decode | Native tok/s | Hybrid tok/s |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 7.363 s | 8.483 s | 12.63 | 10.96 |
+| 2 | 8.559 s | 9.101 s | 10.87 | 10.22 |
+
+Across both trials, 186 decode steps took 15.922 s locally and 17.584 s
+adaptively: **10.44% more decode time**, or 11.68 versus 10.58 steps/s.
+No acceleration is established. The separate TUI run completed three
+64-token sampled turns at 6.73, 6.84 and 7.12 host-reported tok/s. There is
+no paired native TUI run here, so those three numbers do not prove a gain.
+Probe/connection/collection overhead remains in the measured costs; the
+numerical correction is not itself a performance optimization.
+
+This run successfully saved the public-fixture input and both result arrays
+(24,600 bytes, mode 0600). Offline replay of unmodified upstream OLMoE with
+GCC native flags exactly reproduced the PC vector. Portable x86-64 and
+native `-ffp-contract=off` builds differed from that vector and from the Mac,
+but passed the original pairwise envelope against both. Compiler/codegen
+options demonstrably affect this case; the exact Mac compiler path remains
+unidentified. This supersedes the preceding run's empty-capture limitation.
+
+Evidence: `artifacts/lan-hybrid-x16o2kc0/reference-comparison.json` and its
+per-trial logs; benchmark SHA-256
+`bb6dbd48f0366b94031fc6230fd39fd4cba40d232cd5c2e15ea548e51535b36d`.
+
+### Cost-aware probe cadence — physical ABBA comparison
+
+On October 1, allocation `9959b734363d` used the same resident OLMoE model,
+PC i7-1355U (12 threads), Intel Mac i5-5250U (4 threads), accelerator range
+`[13,16)` and context 512. Only the PC candidate changed; the Mac used its
+existing approved runtime. After one TUI-approved preparation, four separate
+resident benchmark processes ran in old/new/new/old order. Each alternated
+native-local and adaptive order across the same three greedy prompts. Each
+reported 96 matching token IDs, no failed Hybrid rounds, no numerical fallback
+and no late expert loads. This is repeated finite-corpus evidence, not a
+universal equivalence or OS no-swap guarantee.
+
+"Old" here is the preceding reference-backed candidate, **not** the base
+commit or released binary. "New" adds measured probe cooldown and passive
+connection counters. Both use the same unmodified inference kernels and
+original numerical acceptance envelope. All costs of probing and validation
+remain in the measured inference times.
+
+| Order | Candidate | Native PC decode | Adaptive decode | Native steps/s | Adaptive steps/s | Remote expert calls |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | Old | 11.092 s | 10.653 s | 8.38 | 8.73 | 126 |
+| 2 | New | 8.891 s | 9.259 s | 10.46 | 10.04 | 8 |
+| 3 | New | 8.563 s | 9.080 s | 10.86 | 10.24 | 7 |
+| 4 | Old | 8.797 s | 10.523 s | 10.57 | 8.84 | 126 |
+
+Each row counts 93 decode steps (31 per prompt); the first generated token
+belongs to prefill. Pooling the two adaptive rows for each candidate gives
+8.78 steps/s old and 10.14 new, a **15.47% raw difference in this run**. The
+native baselines also vary substantially, notably the first trial. Therefore
+this is not a precise causal speedup estimate or a latency SLA. Against its
+own paired native baselines, the new candidate still takes **5.07% more decode
+time** (18.339 versus 17.454 seconds, 186 steps), or 10.14 versus 10.66 steps/s.
+
+The improvement is reduced exploration overhead, **not donor acceleration**.
+Most new-candidate rounds run locally after the initial remote probes lose;
+two of three prompts in the first new trial make no remote calls at all.
+Approved Mac weights remain resident and eligible for later re-evaluation.
+The two new trials each open two authenticated connections during inference;
+these cost 0.157 and 0.265 seconds respectively. Pool reuse counts are six and
+five. These open costs overlap the reported send phase and must not be added
+again. The old binary does not have these passive counters.
+
+The separate TUI run completed three 64-token turns at **7.18, 7.08 and
+6.55 host-reported tok/s**, with prefill 1.6, 1.5 and 1.4 seconds. There is no
+paired native TUI measurement in this run. Do not display the standalone
+10.14 result as this TUI's calibrated speed.
+
+Evidence: `artifacts/lan-hybrid-31uq39ut/transport-comparison.json`, per-trial
+logs, TUI `result.json`, and the persistent copy under
+`artifacts/hybrid-transport-2026-10-01/`. New benchmark SHA-256:
+`4a51d2f2cdce6dff198bfe2b0875882d9f3a8ad86cb067903c199b79e4e451a9`.
+Build, targeted regression tests, ASan/UBSan and the CI engine-anchor check
+passed locally. The strict generated-diff check initially reported four
+non-OLMoE diffs as stale. Review confirmed only hunk line numbers differed;
+regenerating those against the pinned upstream revision made the strict
+check pass without changing their hooks or upstream source.
+No remote CI, new native macOS build, release or merge is implied by this test.

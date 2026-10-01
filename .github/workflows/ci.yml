@@ -120,8 +120,10 @@ jobs:
       - name: Resident Segment Hybrid gate
         working-directory: lumabri
         run: |
-          make test-segment-hybrid test_home_expert ENGINE=../colibri/c
+          make test-segment-hybrid test_home_expert build/bench_home_hybrid ENGINE=../colibri/c
           ./test_home_expert
+          ./build/bench_home_hybrid --numeric-reference-selftest
+          ./build/bench_home_hybrid --numeric-capture-selftest "$(mktemp -d)"
       - name: Segment failover gate (fresh fencing, checkpoint replay)
         working-directory: colibri/c
         run: |

@@ -61,7 +61,7 @@ endif
 # regressions would make this gate depend on whichever checkout ENGINE names.
 check-warnings:
 	$(MAKE) -B all test_relay_exec test_swarm_fed test_key_rotation \
-		test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 test_exec2 test_accum_order test_residency_report test_model_family test_planner test_cluster test_memory_budget test_calibration test_metrics \
+		test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 test_exec2 test_accum_order test_hybrid_parallel test_residency_report test_model_family test_planner test_cluster test_memory_budget test_calibration test_metrics \
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
 		test_meminfo test_compute_lease test_content_filter \
 		test_scheduler test_run_gate test_inventory test_home test_chat_ui test_weight_cache test_planner_io \
@@ -484,7 +484,7 @@ test_tcp_latency: tests/c/test_tcp_latency.c $(SECURE_DEPS) lumabri_proto.h luma
 test_metrics: tests/c/test_metrics.c lumabri_metrics.h lumabri_stage_metrics.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_metrics.c -o $@
 
-test_hybrid_parallel: tests/c/test_hybrid_parallel.c lumabri_client.h lumabri_proto.h lumabri_sign.h $(SECURE_DEPS)
+test_hybrid_parallel: tests/c/test_hybrid_parallel.c src/runtime/lumabri_q8_reference.h lumabri_client.h lumabri_proto.h lumabri_sign.h $(SECURE_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_hybrid_parallel.c -o $@ -lm
 
 
@@ -592,6 +592,7 @@ test-sanitize:
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_content_filter.c -o build/sanitize/test_content_filter
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_scheduler.c -o build/sanitize/test_scheduler
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_planner_io.c -o build/sanitize/test_planner_io
+	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_hybrid_parallel.c -o build/sanitize/test_hybrid_parallel -lm
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_segment_v2
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_segment_discovery
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_run_gate
@@ -600,6 +601,7 @@ test-sanitize:
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_content_filter
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_scheduler
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_planner_io
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_hybrid_parallel
 
 test-thread-sanitize:
 	mkdir -p build/sanitize
@@ -623,7 +625,7 @@ SEGMENT_COMMON = segment_colibri.h src/runtime/lumabri_resident.h src/runtime/lu
 		lumabri_proto.h lumabri_sign.h lumabri_sha.h $(SECURE_DEPS)
 
 HYBRID_PATCH_INPUTS = tools/prepare_resident_adapters.py engine_patches/make_patches.py \
-	lumabri_home_hybrid.h src/runtime/lumabri_hybrid_policy.h \
+	lumabri_home_hybrid.h src/runtime/lumabri_hybrid_policy.h src/runtime/lumabri_q8_reference.h \
 	engine_patches/deepseek_v4_p2p.py $(wildcard engine_patches/*-p2p.diff) \
 	lumabri_client.h lumibri_client.h lumi_v4_ext.h lumi_v4_bridge.c \
 	lumabri_proto.h lumabri_sign.h lumabri_secure.h lumabri_crypto.h \
@@ -665,7 +667,7 @@ $(COLIBRI_SEGMENT_LIB): $(HYBRID_ENGINE_DIR)/.prepared build/segment_hybrid_brid
 	$(AR) rcs $@ build/segment_hybrid_bridge.o
 
 # Optional diagnostic; requires explicit, already approved household routes.
-build/bench_home_hybrid: tests/c/bench_home_hybrid.c tests/c/bench_block_verify.h tests/c/bench_causal_spec.h lumabri_client.h lumabri_proto.h $(SECURE_DEPS) $(COLIBRI_SEGMENT_LIB)
+build/bench_home_hybrid: tests/c/bench_home_hybrid.c tests/c/bench_hybrid_numeric.h tests/c/bench_block_verify.h tests/c/bench_causal_spec.h lumabri_client.h lumabri_proto.h $(SECURE_DEPS) $(COLIBRI_SEGMENT_LIB)
 	$(CC) $(CPPFLAGS) -O2 $(ENGINE_CPU_FLAGS) $(OMP_FLAGS) -pthread -I$(HYBRID_ENGINE_DIR) \
 		-include lumi_v4_ext.h -DLUMABRI_P2P -DLUMIBRI_P2P -DCOLI_SEGMENT_ADAPTER -DCOLI_EDGE_ADAPTER \
 		tests/c/bench_home_hybrid.c $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)

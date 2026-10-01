@@ -1,7 +1,7 @@
 diff --git a/c/colibri.c b/c/colibri.c
 --- a/c/colibri.c
 +++ b/c/colibri.c
-@@ -68,6 +68,13 @@
+@@ -69,6 +69,13 @@
  #include "schema_gbnf.h"                          /* SCHEMA=: JSON-Schema -> GBNF for method F */
  #include "decode_batch.h"
  #include "route_trace.h"                           /* ROUTE_TRACE + .coli_usage, engine-agnostic (#700) */
@@ -15,7 +15,7 @@ diff --git a/c/colibri.c b/c/colibri.c
  #include "kv_fp8.h"                               /* KV8=1: cache latente in fp8 e4m3 + scala per-riga */
  #include "kv_tq.h"                                /* KV_TQ=3|4: cache latente PolarQuant (rot+polare) */
  #ifdef _OPENMP
-@@ -2464,6 +2471,19 @@
+@@ -2465,6 +2472,19 @@
          if(!m->has_mtp) rt_drop_row(c->n_layers);
      }
      m->resident_bytes=rb;
@@ -35,7 +35,7 @@ diff --git a/c/colibri.c b/c/colibri.c
  }
  
  static void model_init(Model *m, const char *snap, int cap,
-@@ -5391,6 +5411,17 @@
+@@ -5392,6 +5412,17 @@
          int e=idxs[(int64_t)s*K+kk];
          if(!seen[e]){ seen[e]=1; uniq[nu++]=e; }
      }

@@ -213,9 +213,13 @@ static LMB_UNUSED int lmb_plan_cluster(const LmbModelShape *m,
  * Keep this separate from adapter arithmetic: guard overhead is neither a
  * tensor nor a measured working set. No speed/optimality claim is made. */
 static LMB_UNUSED uint64_t lmb_home_hybrid_extra(const LmbModelShape *s) {
-    uint64_t floats = lmb_size_add(lmb_size_mul(s->hidden, (uint64_t)s->experts_per_tok + 1),
+    uint64_t floats = lmb_size_add(lmb_size_mul(s->hidden, (uint64_t)s->experts_per_tok + 2),
                                    lmb_size_mul(2, s->moe_intermediate));
-    return lmb_size_add(UINT64_C(8) << 20, lmb_size_mul(floats, sizeof(float)));
+    /* Exceptional reference: one output vector above and one long-double
+     * activation vector. Reserve 16 bytes/element across supported ABIs. */
+    uint64_t scratch = lmb_size_add(lmb_size_mul(floats, sizeof(float)),
+                                    lmb_size_mul(16, s->moe_intermediate));
+    return lmb_size_add(UINT64_C(8) << 20, scratch);
 }
 
 static LMB_UNUSED int lmb_home_plan_budgets(const LmbModelShape *shape,

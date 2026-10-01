@@ -31,6 +31,9 @@ static LmbClusterNode node(const char *name, double gb, uint32_t gpu) {
 int main(void) {
     LmbModelShape m = v4();
     LmbClusterPlan p;
+    CHECK(lmb_home_hybrid_extra(&m) == (UINT64_C(8) << 20) +
+        ((uint64_t)m.hidden * (m.experts_per_tok + 2) + 2*m.moe_intermediate) * sizeof(float) +
+        16u*m.moe_intermediate, "Hybrid reservation omits independent-reference scratch");
 
     LmbClusterNode overflow_nodes[2] = { node("a", 32, 0), node("b", 32, 0) };
     overflow_nodes[0].ram_budget_bytes = UINT64_MAX - 1;

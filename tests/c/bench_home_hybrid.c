@@ -3,9 +3,38 @@
  * sweep results are per-layer timings, not a token/s benchmark.
  * Build with the prepared OLMoE include directory and the normal Segment
  * archive. No upstream files are edited. */
+static void bench_numeric_capture(int, int, const float *, int, const float *, const float *);
+#define LMB_HYBRID_NUMERIC_DIAGNOSTIC bench_numeric_capture
 #define OLMOE_NO_MAIN
 #include "olmoe.c"
 #include <assert.h>
+#include "bench_hybrid_numeric.h"
+
+static LmbHybridTiming hybrid_costs(void) {
+    LmbHybridTiming total = {0};
+    for (int i = 0; i < 512; i++) {
+        const LmbHybridTiming *t = &L.hybrid_timing[i];
+        total.completed += t->completed; total.remote_rounds += t->remote_rounds;
+        total.wall_s += t->wall_s; total.send_s += t->send_s;
+        total.local_s += t->local_s; total.wait_s += t->wait_s;
+        total.validation_s += t->validation_s; total.merge_s += t->merge_s;
+        total.failures += t->failures; total.failed_s += t->failed_s;
+    }
+    return total;
+}
+
+/* Passive counters: never add a PING or connection to the timed workload. */
+static LumiPeer hybrid_transport(void) {
+    LumiPeer total = {0};
+    for (int i = 0; i < L.npeers; i++) {
+        total.connect_attempts += L.peers[i].connect_attempts;
+        total.connect_successes += L.peers[i].connect_successes;
+        total.pool_reuses += L.peers[i].pool_reuses;
+        total.stale_pool_closes += L.peers[i].stale_pool_closes;
+        total.connect_s += L.peers[i].connect_s;
+    }
+    return total;
+}
 
 /* Full-model oracle, distinct from the synthetic per-layer timing loop.
  * Uses the actual tokenizer/template, fresh KV per run and greedy sampling.
@@ -43,6 +72,8 @@ static int greedy_oracle(Model *m, const char *directory) {
             L.on = mode; L.hybrid_policy = adaptive ? LMB_HYBRID_ADAPTIVE : LMB_HYBRID_FORCE_SPLIT;
             unsigned long long remote_before = L.calls;
             unsigned long long rounds_before = L.hybrid_rounds, local_before = L.hybrid_local_calls;
+            LmbHybridTiming costs_before = hybrid_costs();
+            LumiPeer transport_before = hybrid_transport();
             m->kv_len = 0;
             double start = lumi_now();
             float *logits = step(m, ids, np, 0);
@@ -59,6 +90,27 @@ static int greedy_oracle(Model *m, const char *directory) {
             printf("greedy prompt=%u mode=%s tokens=%d prefill=%.3fs decode_steps=%u decode=%.3fs\n",
                 prompt, mode ? (adaptive ? "adaptive" : "split") : "native-local", counts[mode], prefill, decode_steps, decode);
             fflush(stdout);
+            if (mode) {
+                LmbHybridTiming after = hybrid_costs();
+                LumiPeer transport = hybrid_transport();
+                printf("hybrid_transport prompt=%u attempts=%llu opened=%llu reused=%llu "
+                    "stale=%llu open_s=%.6f\n", prompt,
+                    transport.connect_attempts-transport_before.connect_attempts,
+                    transport.connect_successes-transport_before.connect_successes,
+                    transport.pool_reuses-transport_before.pool_reuses,
+                    transport.stale_pool_closes-transport_before.stale_pool_closes,
+                    transport.connect_s-transport_before.connect_s);
+                printf("hybrid_cost prompt=%u completed=%llu remote_rounds=%llu wall_s=%.6f "
+                    "send_s=%.6f local_s=%.6f collect_s=%.6f validation_s=%.6f merge_s=%.6f "
+                    "failures=%llu failed_s=%.6f\n", prompt,
+                    (unsigned long long)(after.completed-costs_before.completed),
+                    (unsigned long long)(after.remote_rounds-costs_before.remote_rounds),
+                    after.wall_s-costs_before.wall_s, after.send_s-costs_before.send_s,
+                    after.local_s-costs_before.local_s, after.wait_s-costs_before.wait_s,
+                    after.validation_s-costs_before.validation_s, after.merge_s-costs_before.merge_s,
+                    (unsigned long long)(after.failures-costs_before.failures), after.failed_s-costs_before.failed_s);
+                fflush(stdout);
+            }
             /* A failed split returns to the native caller without committing
              * a Hybrid round. Count complete rounds as well as contributions,
              * so an adaptive all-local decision is distinct from fallback. */
@@ -86,8 +138,10 @@ static int greedy_oracle(Model *m, const char *directory) {
         fprintf(stderr, "GREEDY NOT VALIDATED: remote path absent or replaced by local fallback\n");
         return 4;
     }
-    printf("GREEDY PASS: %u matching token IDs, 3 prompts; remote_calls=%llu rounding_probes=%llu; "
-        "no late expert loads (not an OS no-swap assertion)\n", total, L.calls, L.hybrid_rounding_accepts);
+    printf("GREEDY PASS: %u matching token IDs, 3 prompts; remote_calls=%llu rounding_probes=%llu "
+        "reference_checks=%llu reference_accepts=%llu; "
+        "no late expert loads (not an OS no-swap assertion)\n", total, L.calls, L.hybrid_rounding_accepts,
+        L.hybrid_reference_checks, L.hybrid_reference_accepts);
     return 0;
 }
 
@@ -95,6 +149,10 @@ static int greedy_oracle(Model *m, const char *directory) {
 #include "bench_causal_spec.h"
 
 int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "--numeric-reference-selftest"))
+        return bench_numeric_reference_selftest();
+    if (argc == 3 && !strcmp(argv[1], "--numeric-capture-selftest"))
+        return bench_numeric_capture_selftest(argv[2]);
     if (argc != 5) { fprintf(stderr, "usage: bench MODEL BEGIN END THREADS\n"); return 2; }
     int begin = atoi(argv[2]), end = atoi(argv[3]), threads = atoi(argv[4]);
     if (begin < 0 || end <= begin || end > 512 || threads < 1 || threads > 256) return 2;
@@ -122,7 +180,11 @@ int main(int argc, char **argv) {
     if (block) return block_oracle(&m, argv[1]);
     if (lumi_home_init(config.n_layers, config.n_experts, config.hidden, "olmoe/f32-int8/cpu-v1")) return 3;
     for (int layer = begin; layer < end; layer++) if (!L.layer_ok[layer]) return 3;
-    if (greedy) return greedy_oracle(&m, argv[1]);
+    if (greedy) {
+        int rc = greedy_oracle(&m, argv[1]);
+        if (numeric_sample.data) bench_numeric_replay(&m);
+        return rc; /* Diagnostics can never turn an oracle failure into success. */
+    }
     float *x = falloc(config.hidden), *out = falloc(config.hidden), *oracle = falloc(config.hidden);
     int fanout = getenv("LMB_BENCH_FANOUT") != NULL;
     int limit = lmb_hybrid_remote_limit(config.topk);
@@ -198,7 +260,7 @@ int main(int argc, char **argv) {
             }
         }
     }
-    printf("sweep warmup: %.3f s (%d rounds per mode/layer; excluded from service means, not free)\n",
+    printf("sweep warmup: %.3f s (%d rounds per mode/layer; excluded from service means, not free; adaptive exploration continues)\n",
         warmup_seconds, warmup);
     for (int i = 0; i < modes; i++) printf("%s: %.3f ms/MoE-layer (%u samples)\n", names[i],
         1000 * elapsed[i] / samples[i], samples[i]);

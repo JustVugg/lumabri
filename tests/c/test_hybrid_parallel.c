@@ -9,6 +9,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include "lumabri_client.h"
+#include "src/runtime/lumabri_q8_reference.h"
 
 enum { DIM = 4, EXPERTS = 4 };
 typedef struct {
@@ -47,7 +48,7 @@ static void numeric_case(float value, int rejected, int late) {
     L.hybrid_policy = LMB_HYBRID_FORCE_SPLIT;
     L.hybrid_timing[0].top_k = EXPERTS;
     L.npeers = 1; L.exec_wait_ms = 5000; L.hedge_ms = -1;
-    if (late) { L.hybrid_probes[0] = 4; L.hybrid_timing[0].rounds = late == 2 ? 64 : 5; }
+    if (late) { L.hybrid_probes[0] = 4; L.hybrid_timing[0].rounds = late == 2 ? 65 : 5; }
     L.own = malloc(EXPERTS * LUMI_MAX_REP * sizeof *L.own); assert(L.own);
     for (int i = 0; i < EXPERTS * LUMI_MAX_REP; i++) L.own[i] = -1;
     L.own[3 * LUMI_MAX_REP] = 0;
@@ -66,6 +67,75 @@ static void numeric_case(float value, int rejected, int late) {
     if (!rejected && value != contribution(3)) assert(L.hybrid_rounding_accepts == 1);
     while (L.peers[0].nsocks) close(L.peers[0].socks[--L.peers[0].nsocks]);
     free(L.own); memset(&L, 0, sizeof L);
+}
+
+typedef struct { float local, reference; int calls, fail; } ReferenceCase;
+static int reference_local(void *opaque, int layer, int expert, const float *x, int D, float *out) {
+    ReferenceCase *c = opaque; assert(layer == 0 && x && D == DIM);
+    for (int d = 0; d < D; d++) out[d] = expert == 3 ? c->local : contribution(expert);
+    return 0;
+}
+static int reference_precise(void *opaque, int layer, int expert, const float *x, int D, float *out) {
+    ReferenceCase *c = opaque; assert(layer == 0 && expert == 3 && x && D == DIM);
+    c->calls++;
+    if (c->fail) return -1;
+    for (int d = 0; d < D; d++) out[d] = c->reference;
+    return 0;
+}
+static void reference_case(float pc, float mac, float precise, int reject, int calls, int fail) {
+    memset(&L, 0, sizeof L);
+    L.home.count = 1; L.n_layers = 1; L.n_experts = EXPERTS; L.hidden = DIM;
+    L.hybrid_policy = LMB_HYBRID_FORCE_SPLIT;
+    L.hybrid_timing[0].top_k = EXPERTS;
+    L.npeers = 1; L.exec_wait_ms = 1000; L.hedge_ms = -1;
+    L.own = malloc(EXPERTS * LUMI_MAX_REP * sizeof *L.own); assert(L.own);
+    for (int i = 0; i < EXPERTS * LUMI_MAX_REP; i++) L.own[i] = -1;
+    L.own[3 * LUMI_MAX_REP] = 0;
+    int pair[2]; assert(!socketpair(AF_UNIX, SOCK_STREAM, 0, pair));
+    L.peers[0].socks[0] = pair[0]; L.peers[0].nsocks = 1;
+    NumericReply reply = {pair[1], mac}; pthread_t thread;
+    assert(!pthread_create(&thread, NULL, numeric_remote, &reply));
+    ReferenceCase c = {pc, precise, 0, fail};
+    int idx[] = {3, 0, 1, 2};
+    float x[DIM] = {0}, w[] = {1,1,1,1}, out[DIM] = {0};
+    assert(lumi_moe_apply_split_checked(0, idx, w, 4, x, DIM, out, 3,
+                                       reference_local, reference_precise, &c));
+    assert(!pthread_join(thread, NULL));
+    assert(c.calls == calls && !!L.hybrid_numeric_failed == reject && L.calls == 1);
+    assert(L.hybrid_reference_checks == (unsigned)calls);
+    assert(L.hybrid_reference_accepts == (unsigned)(calls && !reject));
+    float expected = reject ? pc : mac;
+    for (int k = 1; k < 4; k++) expected += contribution(idx[k]);
+    for (int d = 0; d < DIM; d++) assert(out[d] == expected);
+    assert(L.hybrid_timing[0].completed == 1);
+    assert(L.hybrid_timing[0].wall_s >= L.hybrid_timing[0].validation_s);
+    while (L.peers[0].nsocks) close(L.peers[0].socks[--L.peers[0].nsocks]);
+    free(L.own); memset(&L, 0, sizeof L);
+}
+
+static void reference_math_cases(void) {
+    int8_t g[] = {1,-1}, u[] = {2,1}, d[] = {3,-2};
+    float x[] = {2,1}, gs[] = {1}, us[] = {.5f}, ds[] = {1,2}, out[2];
+    assert(!lmb_q8_expert_reference(x, 2, 1, g, u, d, gs, us, ds, out));
+    long double a = 2.5L / (1 + expl(-1));
+    assert(out[0] == (float)(3*a) && out[1] == (float)(-4*a));
+    x[0] = 0; /* negative gate, stable SiLU branch */
+    assert(!lmb_q8_expert_reference(x, 2, 1, g, u, d, gs, us, ds, out));
+    a = -.5L / (1 + expl(1));
+    assert(out[0] == (float)(3*a) && out[1] == (float)(-4*a));
+    x[0] = -10000; /* no overflow or NaN in exp(-gate) */
+    assert(!lmb_q8_expert_reference(x, 2, 1, g, u, d, gs, us, ds, out));
+    assert(out[0] == 0 && out[1] == 0);
+    x[0] = NAN;
+    assert(lmb_q8_expert_reference(x, 2, 1, g, u, d, gs, us, ds, out));
+    x[0] = 2; gs[0] = INFINITY;
+    assert(lmb_q8_expert_reference(x, 2, 1, g, u, d, gs, us, ds, out));
+    gs[0] = FLT_MAX;
+    assert(lmb_q8_expert_reference(x, 2, 1, g, u, d, gs, us, ds, out));
+    assert(lmb_q8_expert_reference(x, 0, 1, g, u, d, gs, us, ds, out));
+    assert(lmb_q8_expert_reference(x, 2, 0, g, u, d, gs, us, ds, out));
+    assert(lmb_q8_expert_reference(x, 2, 65537, g, u, d, gs, us, ds, out));
+    assert(lmb_q8_expert_reference(NULL, 2, 1, g, u, d, gs, us, ds, out));
 }
 
 static void *worker(void *opaque) {
@@ -132,12 +202,18 @@ static void home_count_case(int top_k, int remote, int bad) {
     assert(calls == top_k - remote);
     if (bad) {
         assert(!ok && !L.calls && L.hybrid_timing[0].retry_after[remote] > 0);
+        assert(!L.hybrid_timing[0].completed && L.hybrid_timing[0].failures == 1);
+        assert(L.hybrid_timing[0].failed_s > 0);
         for (int d = 0; d < DIM; d++) assert(out[d] == 0); /* no partial publication */
     } else {
         float expected = 0;
         for (int k = 0; k < top_k; k++) expected += contribution(idx[k]);
         assert(ok && L.calls == (unsigned)remote);
         assert(L.hybrid_timing[0].samples[remote] == 1);
+        const LmbHybridTiming *t = &L.hybrid_timing[0];
+        assert(t->completed == 1 && t->remote_rounds == 1 && !t->failures);
+        assert(fabs(t->wall_s - (t->send_s + t->local_s + t->wait_s +
+            t->validation_s + t->merge_s)) < 1e-9);
         for (int d = 0; d < DIM; d++) assert(!memcmp(&out[d], &expected, sizeof expected));
     }
     while (L.peers[0].nsocks) close(L.peers[0].socks[--L.peers[0].nsocks]);
@@ -149,14 +225,22 @@ static void policy_cases(void) {
         int limit = lmb_hybrid_remote_limit(top_k);
         for (int winner = 0; winner <= limit; winner++) {
             LmbHybridTiming t = {0};
-            for (int n = 0; n < 4 * limit + 1; n++) {
+            /* Every count remains discoverable, but exploration is spread
+             * across the session instead of front-loaded into 29 rounds. */
+            for (int n = 0; n < 4 * (limit + 1) * LMB_HYBRID_PROBE_MAX_INTERVAL; n++) {
                 int r = lmb_hybrid_choose(&t, LMB_HYBRID_ADAPTIVE, top_k, 1);
                 assert(r >= 0 && r <= limit && r < top_k);
                 double ms = r == winner ? .002 : .020;
                 lmb_hybrid_observe(&t, r, ms, 0, .001, 0);
             }
             assert(lmb_hybrid_best(&t) == winner);
-            assert(lmb_hybrid_choose(&t, LMB_HYBRID_ADAPTIVE, top_k, 1) == winner);
+            unsigned chosen = 0;
+            for (int n = 0; n < 256; n++) {
+                int r = lmb_hybrid_choose(&t, LMB_HYBRID_ADAPTIVE, top_k, 1);
+                chosen += r == winner;
+                lmb_hybrid_observe(&t, r, r == winner ? .002 : .020, 0, .001, 0);
+            }
+            assert(chosen >= 192); /* exploitation still dominates */
             assert(!lmb_hybrid_choose(&t, LMB_HYBRID_FORCE_LOCAL, top_k, 1));
             assert(lmb_hybrid_choose(&t, LMB_HYBRID_FORCE_SPLIT, top_k, 99) == limit);
             uint64_t rounds = t.rounds;
@@ -165,15 +249,20 @@ static void policy_cases(void) {
             lmb_hybrid_observe(&t, 0, .001, -1, 0, 0);
             assert(t.rounds == rounds);
             if (!limit) continue;
-            t.rounds = 64;
-            assert(lmb_hybrid_choose(&t, LMB_HYBRID_ADAPTIVE, top_k, 1) != winner);
-            t.rounds = 65;
-            assert(lmb_hybrid_choose(&t, LMB_HYBRID_ADAPTIVE, top_k, 1) == winner);
-            lmb_hybrid_failed(&t, 1);
-            assert(lmb_hybrid_choose(&t, LMB_HYBRID_ADAPTIVE, top_k, 1) != 1);
+            lmb_hybrid_failed(&t, 1, .040);
             assert(!t.samples[1]);
-            t.rounds = t.retry_after[1]; t.last_remote = 0;
-            assert(lmb_hybrid_choose(&t, LMB_HYBRID_ADAPTIVE, top_k, 1) == 1);
+            while (t.rounds < t.retry_after[1]) {
+                int r = lmb_hybrid_choose(&t, LMB_HYBRID_ADAPTIVE, top_k, 1);
+                assert(r != 1);
+                lmb_hybrid_observe(&t, r, .010, 0, .001, 0);
+            }
+            int retried = 0;
+            for (int n = 0; n < 4 * (limit + 1) * LMB_HYBRID_PROBE_MAX_INTERVAL; n++) {
+                int r = lmb_hybrid_choose(&t, LMB_HYBRID_ADAPTIVE, top_k, 1);
+                retried |= r == 1;
+                lmb_hybrid_observe(&t, r, .010, 0, .001, 0);
+            }
+            assert(retried); /* no permanent blacklist after a timeout */
         }
     }
     LmbHybridTiming t = {.top_k=8, .rounds=100};
@@ -181,6 +270,109 @@ static void policy_cases(void) {
     assert(!lmb_hybrid_best(&t)); /* insufficient gain cannot displace local */
     assert(!lmb_hybrid_choose(&t, LMB_HYBRID_ADAPTIVE, 4, 1));
     assert(t.top_k == 4 && !t.rounds && !t.samples[3]); /* different top-k is not the same plan */
+
+    memset(&t, 0, sizeof t);
+    unsigned remote_startup = 0;
+    double startup_s = 0;
+    for (int n = 0; n < 29; n++) {
+        int r = lmb_hybrid_choose(&t, LMB_HYBRID_ADAPTIVE, 8, 1);
+        remote_startup += r > 0;
+        double elapsed = r ? .020 : .002;
+        startup_s += elapsed;
+        lmb_hybrid_observe(&t, r, elapsed, 0, .001, 0);
+    }
+    assert(remote_startup == 2); /* only the bootstrap, no early costly sweep */
+    assert(startup_s < .120); /* deterministic fixture, not a speed claim */
+
+    /* A winner must keep being compared with a fresh local reference. */
+    for (int n = 0; n < 20000; n++) {
+        int r = lmb_hybrid_choose(&t, LMB_HYBRID_ADAPTIVE, 8, 1);
+        lmb_hybrid_observe(&t, r, r == 1 ? .001 : .010, 0, .001, 0);
+        if (lmb_hybrid_best(&t)) assert(t.rounds - t.local_at <= LMB_HYBRID_LOCAL_REFRESH);
+    }
+    assert(lmb_hybrid_best(&t) == 1);
+    /* Load/topology can change without changing the approved allocation. */
+    for (int n = 0; n < 20000; n++) {
+        int r = lmb_hybrid_choose(&t, LMB_HYBRID_ADAPTIVE, 8, 1);
+        lmb_hybrid_observe(&t, r, r == 7 ? .001 : .010, 0, .001, 0);
+    }
+    assert(lmb_hybrid_best(&t) == 7);
+    t.seconds[0] = .050; t.last_local_s = .0005;
+    assert(!lmb_hybrid_best(&t)); /* stale slow local EWMA cannot force remote */
+
+    /* Deterministic measured cooldown, including clamp and recovery. */
+    memset(&t, 0, sizeof t); t.top_k = 8;
+    assert(lmb_hybrid_probe_gap(&t, .100) == LMB_HYBRID_PROBE_INTERVAL);
+    lmb_hybrid_observe(&t, 0, .002, 0, .002, 0);
+    assert(lmb_hybrid_probe_gap(&t, .001) == LMB_HYBRID_PROBE_INTERVAL);
+    assert(lmb_hybrid_probe_gap(&t, .008) == 100);
+    assert(lmb_hybrid_probe_gap(&t, .200) == LMB_HYBRID_PROBE_MAX_INTERVAL);
+    assert(lmb_hybrid_probe_gap(&t, INFINITY) == LMB_HYBRID_PROBE_MAX_INTERVAL);
+    lmb_hybrid_record(&t, 1, .001, .001, .001, 0, 0);
+    lmb_hybrid_record(&t, 0, 0, .002, 0, 0, 0);
+    lmb_hybrid_record(&t, 1, .001, .001, .001, .020, 0);
+    assert(t.next_probe - t.rounds == 350); /* validation is not free */
+    assert(fabs(t.seconds[1] - .003) < 1e-12); /* service EWMA stays separate */
+    uint64_t due = t.next_probe;
+    while (t.rounds < due) {
+        assert(!lmb_hybrid_choose(&t, LMB_HYBRID_ADAPTIVE, 8, 1));
+        lmb_hybrid_observe(&t, 0, .002, 0, .002, 0);
+    }
+    assert(lmb_hybrid_choose(&t, LMB_HYBRID_ADAPTIVE, 8, 1) == 2);
+}
+
+static void cost_cases(void) {
+    /* Physical OLMoE PC+Mac counterexample, layer 14/expert 8/index 1855.
+     * Both independently rounded outputs fit the existing bound against a
+     * higher-precision reference, but the pairwise test rejects. Document
+     * the current policy limit; do NOT silently relax it to pass an oracle. */
+    float reference = 0.084909170866f, pc = 0.0849096700549f, mac = 0.0849076360464f;
+    assert(lmb_hybrid_numeric_check(&reference, &pc, 1, NULL) >= 0);
+    assert(lmb_hybrid_numeric_check(&reference, &mac, 1, NULL) >= 0);
+    assert(lmb_hybrid_numeric_check(&pc, &mac, 1, NULL) == LMB_HYBRID_NUMERIC_REJECT);
+    assert(lmb_hybrid_reference_candidate(&pc, &mac, 1));
+    assert(lmb_hybrid_reference_check(&reference, &pc, &mac, 1));
+    assert(!lmb_hybrid_reference_check(NULL, &pc, &mac, 1));
+    reference_case(pc, mac, reference, 0, 1, 0); /* real cross-platform case */
+    reference_case(pc, mac, reference, 1, 1, 1); /* unavailable reference */
+    reference_case(pc, mac, pc, 1, 1, 0); /* remote fails independent bound */
+    reference_case(pc, mac, mac, 1, 1, 0); /* local fails independent bound */
+    reference_case(pc, mac, NAN, 1, 1, 0); /* invalid reference */
+    reference_case(pc, mac, INFINITY, 1, 1, 0);
+    reference_case(1, nextafterf(1, 2), 0, 0, 0, 0); /* fast path unchanged */
+    reference_case(1, 1.01f, 1, 1, 0, 0); /* gross error cannot trigger ref */
+    reference_case(1, NAN, 1, 1, 0, 0);
+    reference_case(1, INFINITY, 1, 1, 0, 0);
+    reference_case(-.9e-6f, .9e-6f, 0, 0, 1, 0); /* cancellation near zero */
+    reference_math_cases();
+    LmbHybridTiming t = {.top_k=8};
+    assert(lmb_hybrid_validation_due(&t, 0));
+    assert(!lmb_hybrid_validation_due(&t, 4));
+    t.rounds = 65;
+    assert(lmb_hybrid_validation_due(&t, 4)); /* no exact-modulo blind spot */
+    t.validated_at = t.rounds;
+    assert(!lmb_hybrid_validation_due(&t, 4));
+    t.rounds = 128;
+    assert(!lmb_hybrid_validation_due(&t, 4));
+    t.rounds = 129;
+    assert(lmb_hybrid_validation_due(&t, 4));
+    lmb_hybrid_record(&t, 2, .001, .002, .003, .004, .005);
+    assert(t.completed == 1 && t.remote_rounds == 1 && t.samples[2] == 1);
+    assert(fabs(t.wall_s - .015) < 1e-12);
+    assert(fabs(t.seconds[2] - .011) < 1e-12); /* validation charged only to wall */
+    lmb_hybrid_record(&t, 0, 0, .002, 0, 0, .001);
+    assert(t.completed == 2 && t.remote_rounds == 1);
+    assert(fabs(t.wall_s - .018) < 1e-12);
+    assert(fabs(t.wall_s - (t.send_s+t.local_s+t.wait_s+t.validation_s+t.merge_s)) < 1e-12);
+    LmbHybridTiming before = t;
+    lmb_hybrid_record(&t, 1, .001, .002, .003, NAN, .004);
+    lmb_hybrid_record(&t, 1, .001, .002, .003, .004, -1);
+    lmb_hybrid_record(&t, 1, 0, 0, 0, .003, 0); /* no service observation */
+    assert(!memcmp(&before, &t, sizeof t));
+    lmb_hybrid_failed(&t, 2, .007);
+    lmb_hybrid_failed(&t, 0, .009);
+    assert(t.failures == 2 && fabs(t.failed_s - .016) < 1e-12);
+    assert(t.completed == 2 && fabs(t.wall_s - .018) < 1e-12);
 }
 
 static void *feature_reply(void *opaque) {
@@ -421,6 +613,9 @@ static void reconnect_case(int close_again, int wrong_identity) {
         assert(result && !memcmp(result, x, sizeof x) && winner == &L.peers[0]);
     } else assert(!result && !winner);
     assert(r.requests == !wrong_identity && !L.peers[0].inflight);
+    assert(L.peers[0].connect_attempts == 1);
+    assert(L.peers[0].connect_successes == (unsigned)!wrong_identity);
+    assert(L.peers[0].connect_s > 0);
     /* Even a second EOF permits no third connection. */
     struct pollfd pending = {r.listener, POLLIN, 0}; assert(poll(&pending, 1, 0) == 0);
     free(result); close(pair[1]); close(r.listener);
@@ -431,7 +626,23 @@ static void reconnect_case(int close_again, int wrong_identity) {
     assert(!unlink(path));
 }
 
+static void pool_counter_case(void) {
+    LumiPeer peer = {0};
+    int live[2], stale[2];
+    assert(!socketpair(AF_UNIX, SOCK_STREAM, 0, live));
+    assert(!socketpair(AF_UNIX, SOCK_STREAM, 0, stale));
+    close(stale[1]);
+    lumi_put_sock(&peer, live[0]);
+    lumi_put_sock(&peer, stale[0]);
+    int fd = lumi_take_sock(&peer);
+    assert(fd == live[0] && !peer.nsocks);
+    assert(peer.pool_reuses == 1 && peer.stale_pool_closes == 1);
+    assert(!peer.connect_attempts && !peer.connect_successes && peer.connect_s == 0);
+    close(fd); close(live[1]);
+}
+
 int main(void) {
+    pool_counter_case();
     reconnect_case(0, 0);
     reconnect_case(1, 0);
     reconnect_case(0, 1);
@@ -464,6 +675,7 @@ int main(void) {
     assert(lmb_hybrid_numeric_check(numeric_ref, numeric_got, 4, NULL) == LMB_HYBRID_NUMERIC_REJECT);
     assert(lmb_hybrid_numeric_check(NULL, numeric_got, 4, NULL) == LMB_HYBRID_NUMERIC_REJECT);
     policy_cases();
+    cost_cases();
     configuration_cases();
     signal(SIGPIPE, SIG_IGN);
     setenv("LUMABRI_EXEC_FALLBACK_LOCAL", "1", 1);
