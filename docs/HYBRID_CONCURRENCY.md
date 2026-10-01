@@ -60,12 +60,44 @@ the recipient key; the readiness probe also checks allocation, checkpoint and
 numeric class. Public expert discovery, relay, hedges and implicit peer adoption
 remain disabled. Older packages fail capability preflight before preparation.
 
-For each covered layer, one selected expert is sent remotely while the other
-top-k minus one execute locally, with unchanged router-order accumulation.
+For each covered layer, the adaptive policy measures all-local and a remote
+prefix of up to `min(top_k - 1, 8)` experts. The local suffix runs while remote
+requests are in flight, with unchanged router-order accumulation. Exploration
+is paced and reversible; see [Resident runtime](RESIDENT_RUNTIME.md) for its
+cadence and timing semantics.
 Uncovered layers stay local. Bounded RPC failures can recompute from the full
 resident local copy. This is not a speedup guarantee: latency or a slow donor
 can still dominate. `LUMABRI_HOME_HYBRID=0` selects normal Segment for A/B tests.
 Other families keep their existing Segment implementation.
+
+### Borderline numerical verification (OLMoE household only)
+
+The normal pairwise FP32 check retains its `1e-6 + 1e-5*abs(reference)`
+envelope. If a sampled finite pair fails that check but lies within twice
+the larger per-value envelope, the OLMoE adapter can supply an independent
+reference. The factor of two only bounds eligibility for extra work; it
+never accepts an output. **Both** local and remote vectors must pass the
+original envelope against the reference, or the existing local fallback
+still applies. Remote output is retained unchanged after success.
+
+The exceptional reference uses already-resident int8 weights and row scales,
+long-double accumulation and stable SiLU, rounding its final result to FP32.
+It cannot fetch weights. Missing slots, incompatible dimensions, other weight
+formats, activation-quantized IDOT/FUSED3, a background pilot, fast-math and
+failed/invalid references are ineligible. Other adapters without a reference
+callback retain their original policy. This is a sampled interoperability
+check, not proof of universal bitwise equivalence or adversarial correctness.
+
+Reference attempts and accepts are counted separately; their entire cost is
+included in validation and end-to-end wall time. Admission reserves one extra
+FP32 output vector and at most 16 bytes per intermediate element for the
+reference scratch. No new donor permission, weight copy, network request or
+checkpoint read is introduced by this verification.
+
+Tests cover the physical rounding counterexample, both sides failing their
+independent bound, NaN/Inf, unavailable references, gross errors, cancellation
+near zero, original no-reference behavior and resident-only adapter access.
+The full-model greedy oracle remains a separate release gate.
 
 Closing the chat retains approved RAM for another conversation. Owner Stop
 unloads it. The private restart hint preserves the Hybrid label, but grants no

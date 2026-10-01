@@ -1,16 +1,47 @@
-/* Opt-in microbenchmark against an ALREADY APPROVED resident accelerator.
- * No allocations are requested from donors. Not a token/s benchmark.
+/* Opt-in service sweep or full-model oracle against an ALREADY APPROVED
+ * resident accelerator. No allocations are requested from donors. Service
+ * sweep results are per-layer timings, not a token/s benchmark.
  * Build with the prepared OLMoE include directory and the normal Segment
  * archive. No upstream files are edited. */
+static void bench_numeric_capture(int, int, const float *, int, const float *, const float *);
+#define LMB_HYBRID_NUMERIC_DIAGNOSTIC bench_numeric_capture
 #define OLMOE_NO_MAIN
 #include "olmoe.c"
 #include <assert.h>
+#include "bench_hybrid_numeric.h"
+
+static LmbHybridTiming hybrid_costs(void) {
+    LmbHybridTiming total = {0};
+    for (int i = 0; i < 512; i++) {
+        const LmbHybridTiming *t = &L.hybrid_timing[i];
+        total.completed += t->completed; total.remote_rounds += t->remote_rounds;
+        total.wall_s += t->wall_s; total.send_s += t->send_s;
+        total.local_s += t->local_s; total.wait_s += t->wait_s;
+        total.validation_s += t->validation_s; total.merge_s += t->merge_s;
+        total.failures += t->failures; total.failed_s += t->failed_s;
+    }
+    return total;
+}
+
+/* Passive counters: never add a PING or connection to the timed workload. */
+static LumiPeer hybrid_transport(void) {
+    LumiPeer total = {0};
+    for (int i = 0; i < L.npeers; i++) {
+        total.connect_attempts += L.peers[i].connect_attempts;
+        total.connect_successes += L.peers[i].connect_successes;
+        total.pool_reuses += L.peers[i].pool_reuses;
+        total.stale_pool_closes += L.peers[i].stale_pool_closes;
+        total.connect_s += L.peers[i].connect_s;
+    }
+    return total;
+}
 
 /* Full-model oracle, distinct from the synthetic per-layer timing loop.
  * Uses the actual tokenizer/template, fresh KV per run and greedy sampling.
  * It allocates a separate resident model; existing household state is not
  * changed. A passing finite corpus is NOT universal bitwise equivalence. */
 static int greedy_oracle(Model *m, const char *directory) {
+    int adaptive = getenv("LMB_BENCH_ADAPTIVE") != NULL;
     const char *prompts[] = {"Descrivi i cappelletti in due frasi.",
         "What is 17 plus 25? Explain briefly.",
         "Write a short Python function that returns the larger of two numbers."};
@@ -38,8 +69,11 @@ static int greedy_oracle(Model *m, const char *directory) {
         /* Reverse order on alternating prompts to expose state/order bias. */
         for (int j = 0; j < 2; j++) {
             int mode = (j + prompt) % 2;
-            L.on = mode; L.hybrid_policy = LMB_HYBRID_FORCE_SPLIT;
+            L.on = mode; L.hybrid_policy = adaptive ? LMB_HYBRID_ADAPTIVE : LMB_HYBRID_FORCE_SPLIT;
             unsigned long long remote_before = L.calls;
+            unsigned long long rounds_before = L.hybrid_rounds, local_before = L.hybrid_local_calls;
+            LmbHybridTiming costs_before = hybrid_costs();
+            LumiPeer transport_before = hybrid_transport();
             m->kv_len = 0;
             double start = lumi_now();
             float *logits = step(m, ids, np, 0);
@@ -54,11 +88,41 @@ static int greedy_oracle(Model *m, const char *directory) {
             }
             double decode = lumi_now() - decode_start;
             printf("greedy prompt=%u mode=%s tokens=%d prefill=%.3fs decode_steps=%u decode=%.3fs\n",
-                prompt, mode ? "split" : "native-local", counts[mode], prefill, decode_steps, decode);
+                prompt, mode ? (adaptive ? "adaptive" : "split") : "native-local", counts[mode], prefill, decode_steps, decode);
             fflush(stdout);
+            if (mode) {
+                LmbHybridTiming after = hybrid_costs();
+                LumiPeer transport = hybrid_transport();
+                printf("hybrid_transport prompt=%u attempts=%llu opened=%llu reused=%llu "
+                    "stale=%llu open_s=%.6f\n", prompt,
+                    transport.connect_attempts-transport_before.connect_attempts,
+                    transport.connect_successes-transport_before.connect_successes,
+                    transport.pool_reuses-transport_before.pool_reuses,
+                    transport.stale_pool_closes-transport_before.stale_pool_closes,
+                    transport.connect_s-transport_before.connect_s);
+                printf("hybrid_cost prompt=%u completed=%llu remote_rounds=%llu wall_s=%.6f "
+                    "send_s=%.6f local_s=%.6f collect_s=%.6f validation_s=%.6f merge_s=%.6f "
+                    "failures=%llu failed_s=%.6f\n", prompt,
+                    (unsigned long long)(after.completed-costs_before.completed),
+                    (unsigned long long)(after.remote_rounds-costs_before.remote_rounds),
+                    after.wall_s-costs_before.wall_s, after.send_s-costs_before.send_s,
+                    after.local_s-costs_before.local_s, after.wait_s-costs_before.wait_s,
+                    after.validation_s-costs_before.validation_s, after.merge_s-costs_before.merge_s,
+                    (unsigned long long)(after.failures-costs_before.failures), after.failed_s-costs_before.failed_s);
+                fflush(stdout);
+            }
+            /* A failed split returns to the native caller without committing
+             * a Hybrid round. Count complete rounds as well as contributions,
+             * so an adaptive all-local decision is distinct from fallback. */
+            unsigned long long expected = (unsigned long long)covered * (np + decode_steps);
+            int forced = L.hybrid_remote_experts ? L.hybrid_remote_experts : 1;
+            int limit = lmb_hybrid_remote_limit(m->c.topk);
+            if (forced > limit) forced = limit;
             if (mode && (L.hybrid_numeric_failed ||
-                L.calls - remote_before != (unsigned long long)covered * (np + decode_steps))) {
-                fprintf(stderr, "GREEDY NOT VALIDATED: not every planned remote contribution was used\n");
+                L.hybrid_rounds - rounds_before != expected ||
+                (!adaptive && L.calls - remote_before != expected * forced) ||
+                L.calls - remote_before + L.hybrid_local_calls - local_before != expected * m->c.topk)) {
+                fprintf(stderr, "GREEDY NOT VALIDATED: incomplete Hybrid rounds or local fallback\n");
                 return 4;
             }
         }
@@ -74,8 +138,10 @@ static int greedy_oracle(Model *m, const char *directory) {
         fprintf(stderr, "GREEDY NOT VALIDATED: remote path absent or replaced by local fallback\n");
         return 4;
     }
-    printf("GREEDY PASS: %u matching token IDs, 3 prompts; remote_calls=%llu rounding_probes=%llu; "
-        "no late expert loads (not an OS no-swap assertion)\n", total, L.calls, L.hybrid_rounding_accepts);
+    printf("GREEDY PASS: %u matching token IDs, 3 prompts; remote_calls=%llu rounding_probes=%llu "
+        "reference_checks=%llu reference_accepts=%llu; "
+        "no late expert loads (not an OS no-swap assertion)\n", total, L.calls, L.hybrid_rounding_accepts,
+        L.hybrid_reference_checks, L.hybrid_reference_accepts);
     return 0;
 }
 
@@ -83,6 +149,10 @@ static int greedy_oracle(Model *m, const char *directory) {
 #include "bench_causal_spec.h"
 
 int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "--numeric-reference-selftest"))
+        return bench_numeric_reference_selftest();
+    if (argc == 3 && !strcmp(argv[1], "--numeric-capture-selftest"))
+        return bench_numeric_capture_selftest(argv[2]);
     if (argc != 5) { fprintf(stderr, "usage: bench MODEL BEGIN END THREADS\n"); return 2; }
     int begin = atoi(argv[2]), end = atoi(argv[3]), threads = atoi(argv[4]);
     if (begin < 0 || end <= begin || end > 512 || threads < 1 || threads > 256) return 2;
@@ -110,31 +180,67 @@ int main(int argc, char **argv) {
     if (block) return block_oracle(&m, argv[1]);
     if (lumi_home_init(config.n_layers, config.n_experts, config.hidden, "olmoe/f32-int8/cpu-v1")) return 3;
     for (int layer = begin; layer < end; layer++) if (!L.layer_ok[layer]) return 3;
-    if (greedy) return greedy_oracle(&m, argv[1]);
+    if (greedy) {
+        int rc = greedy_oracle(&m, argv[1]);
+        if (numeric_sample.data) bench_numeric_replay(&m);
+        return rc; /* Diagnostics can never turn an oracle failure into success. */
+    }
     float *x = falloc(config.hidden), *out = falloc(config.hidden), *oracle = falloc(config.hidden);
-    const char *names[] = {"native-local", "callback-local", "split", "adaptive"};
-    double elapsed[4] = {0}, max_abs = 0, max_rel = 0;
-    unsigned samples[4] = {0}, mismatches = 0, rounding = 0;
+    int fanout = getenv("LMB_BENCH_FANOUT") != NULL;
+    int limit = lmb_hybrid_remote_limit(config.topk);
+    if (!limit) { fprintf(stderr, "Hybrid sweep requires top-k >= 2\n"); return 2; }
+    char names[7][32] = {"native-local", "callback-local"};
+    int counts[7] = {0}, modes = 2;
+    const int candidates[] = {1, 2, 4, limit};
+    for (unsigned i = 0; i < (fanout ? 4u : 1u); i++) {
+        int n = fanout ? candidates[i] : (L.hybrid_remote_experts ? L.hybrid_remote_experts : 1);
+        if (n > limit) n = limit;
+        int duplicate = 0;
+        for (int j = 2; j < modes; j++) if (counts[j] == n) duplicate = 1;
+        if (duplicate) continue;
+        counts[modes] = n;
+        snprintf(names[modes++], sizeof names[0], "split-%d", n);
+    }
+    snprintf(names[modes++], sizeof names[0], "adaptive");
+    double elapsed[7] = {0}, max_abs = 0, max_rel = 0;
+    unsigned samples[7] = {0}, mismatches = 0, rounding = 0;
+    /* Forced schedules must not train the adaptive contender. Give each
+     * mode its own per-layer measurements, and time its warm-up separately. */
+    LmbHybridTiming *timing = calloc((size_t)modes * config.n_layers, sizeof *timing);
+    if (!timing) return 2;
+    int warmup = fanout ? 4 * limit + 1 : 1;
+    double warmup_start = lumi_now(), warmup_seconds = 0;
     int inspect = getenv("LMB_BENCH_INSPECT_DIFF") != NULL;
     /* Inspection skips initial probes, but not periodic/non-finite checks.
      * Any rounding or fallback must exit nonzero in this strict diagnostic;
      * never mistake envelope compatibility for bit-identical execution. */
     if (inspect) memset(L.hybrid_probes, 4, sizeof L.hybrid_probes);
-    /* Alternate paths and inputs, exclude first block from timings. Always
+    /* Alternate paths and inputs, report warm-up separately. Always
      * compare against the untouched native MoE result for that same input. */
-    for (int repeat = 0; repeat < 17; repeat++) {
+    for (int repeat = 0; repeat < warmup + 16; repeat++) {
+        if (repeat == warmup) warmup_seconds = lumi_now() - warmup_start;
         for (int d = 0; d < config.hidden; d++) x[d] = (float)((d * 17 + repeat * 13) % 101 - 50) / 51.f;
         for (int layer = begin; layer < end; layer++) {
             L.on = 0;
             moe(&m, &m.L[layer], layer, x, 1, oracle);
-            for (int j = 0; j < 4; j++) {
-                int mode = (j + repeat) % 4;
+            for (int j = 0; j < modes; j++) {
+                int mode = (j + repeat) % modes;
                 L.on = mode != 0;
                 L.hybrid_policy = mode == 1 ? LMB_HYBRID_FORCE_LOCAL :
-                    mode == 2 ? LMB_HYBRID_FORCE_SPLIT : LMB_HYBRID_ADAPTIVE;
+                    mode == modes - 1 ? LMB_HYBRID_ADAPTIVE : LMB_HYBRID_FORCE_SPLIT;
+                L.hybrid_remote_experts = counts[mode];
+                L.hybrid_timing[layer] = timing[mode * config.n_layers + layer];
+                unsigned long long before = L.hybrid_rounds;
+                unsigned long long calls_before = L.calls;
                 double start = lumi_now();
                 moe(&m, &m.L[layer], layer, x, 1, out);
                 double seconds = lumi_now() - start;
+                timing[mode * config.n_layers + layer] = L.hybrid_timing[layer];
+                if (mode && (L.hybrid_rounds != before + 1 || L.hybrid_numeric_failed ||
+                    (mode != modes - 1 && L.calls - calls_before != (unsigned)counts[mode]))) {
+                    fprintf(stderr, "SWEEP NOT VALIDATED: failed Hybrid round or numeric fallback\n");
+                    return 4;
+                }
                 if (memcmp(out, oracle, config.hidden * sizeof(float))) {
                     int compatible = lmb_hybrid_numeric_check(oracle, out, config.hidden, NULL) >= 0;
                     if (compatible) rounding++; else mismatches++;
@@ -150,20 +256,23 @@ int main(int argc, char **argv) {
                         return 4;
                     }
                 }
-                if (repeat) { elapsed[mode] += seconds; samples[mode]++; }
+                if (repeat >= warmup) { elapsed[mode] += seconds; samples[mode]++; }
             }
         }
     }
-    for (int i = 0; i < 4; i++) printf("%s: %.3f ms/MoE-layer (%u samples)\n", names[i],
+    printf("sweep warmup: %.3f s (%d rounds per mode/layer; excluded from service means, not free; adaptive exploration continues)\n",
+        warmup_seconds, warmup);
+    for (int i = 0; i < modes; i++) printf("%s: %.3f ms/MoE-layer (%u samples)\n", names[i],
         1000 * elapsed[i] / samples[i], samples[i]);
+    for (int layer = begin; layer < end; layer++)
+        printf("adaptive layer=%d best_remote=%d\n", layer,
+            lmb_hybrid_best(&timing[(modes - 1) * config.n_layers + layer]));
     if (mismatches) printf("NUMERIC FAIL: %u differing results; max_abs=%g max_scaled=%g; diagnostic timings only\n",
         mismatches, max_abs, max_rel);
-    else if (L.hybrid_numeric_failed)
-        printf("NUMERIC FALLBACK PASS: native local results retained after incompatible remote probe; RPC calls=%llu\n", L.calls);
     else if (rounding) printf("NUMERIC ENVELOPE PASS: %u rounded results, max_abs=%g max_scaled=%g; "
         "remote calls=%llu; NOT bit-identical\n", rounding, max_abs, max_rel, L.calls);
     else printf("NUMERIC PASS: all modes bit-identical to native local; remote calls=%llu\n", L.calls);
-    free(x); free(out); free(oracle);
+    free(x); free(out); free(oracle); free(timing);
     /* Process exit releases the diagnostic model; existing donors untouched. */
-    return mismatches || (inspect && (rounding || L.hybrid_numeric_failed)) ? 4 : 0;
+    return mismatches || (inspect && rounding) ? 4 : 0;
 }

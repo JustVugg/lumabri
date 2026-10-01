@@ -151,13 +151,23 @@ OMP_NUM_THREADS=2 ./segment_chat --engine olmoe --model-dir "$MODEL_DIR" \
 
 grep -q 'phase 2 partial: 1 of 16 routed layers' "$TMP/segment.log"
 # Do not require a failed socket attempt: the async discovery thread may evict
-# the dead donor before this run reaches layer 0. The donor has been killed and
-# waited above, no other Expert exists, and the exact token oracle already
+# the unavailable donor before this run reaches layer 0. The donor is stopped,
+# no other Expert exists, and the exact token oracle already
 # proves that the only remaining path—the local kernel—completed the turn.
 # Normal process shutdown publishes completed split rounds. Checking actual
 # local work as well as remote donor calls prevents an unused opt-in from
 # masquerading as a concurrent Hybrid test.
 kill -TERM "$SEGMENT_PID"
 wait "$SEGMENT_PID"
-grep -Eq 'hybrid: [1-9][0-9]* concurrent layer rounds' "$TMP/segment.log"
+python3 - "$TMP/segment.log" <<'PY'
+import re,sys
+text=open(sys.argv[1], encoding='utf-8', errors='replace').read()
+rounds=re.search(r'hybrid: (\d+) scheduled layer rounds \(including all-local\) · '
+                 r'(\d+) local expert calls \(in addition to remote calls\)', text)
+assert rounds and all(int(n)>0 for n in rounds.groups()), text
+# A scheduled round can be all-local. Require successful remote work too,
+# rather than equating the scheduling counter with concurrent execution.
+remote=re.search(r'(\d+) remote expert calls in (\d+) layer rounds', text)
+assert remote and all(int(n)>0 for n in remote.groups()), text
+PY
 echo 'SEGMENT HYBRID TEST: PASS (concurrent local + resident remote experts; exact tokens; bounded fallback)'

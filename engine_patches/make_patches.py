@@ -60,8 +60,8 @@ OLMOE = [
     hook("        const float *xs = x + (int64_t)s*D;\n", """#ifdef LUMIBRI_P2P
         LmbOlmoeLocal local = {m, g, u};
         if (lumi_layer_on(layer) &&
-            lumi_moe_apply_split(layer, idx, val, K, xs, D, out + (int64_t)s*D,
-                                 lumi_hybrid_local_count(K), lmb_olmoe_local, &local)) {
+            lumi_moe_apply_split_checked(layer, idx, val, K, xs, D, out + (int64_t)s*D,
+                                 lumi_hybrid_local_count(K), lmb_olmoe_local, lmb_olmoe_reference, &local)) {
             continue;
         }
 #endif
@@ -318,6 +318,7 @@ def olmoe_local_callback(src):
         raise SystemExit("olmoe.c: local expert kernel boundaries reversed")
     kernel = src[begin:end].replace("idx[kk]", "expert")
     callback = """#ifdef LUMIBRI_P2P
+#include "src/runtime/lumabri_q8_reference.h"
 typedef struct { Model *m; float *g, *u; } LmbOlmoeLocal;
 static int lmb_olmoe_local(void *opaque, int layer, int expert,
                            const float *xs, int D, float *hh) {
@@ -328,6 +329,23 @@ static int lmb_olmoe_local(void *opaque, int layer, int expert,
     int I = m->c.inter;
     float *g = ctx->g, *u = ctx->u;
 """ + kernel + """    return 0;
+}
+static int lmb_olmoe_reference(void *opaque, int layer, int expert,
+                              const float *x, int D, float *out) {
+    LmbOlmoeLocal *ctx = opaque;
+    Model *m = ctx->m;
+    const char *idot = getenv("IDOT");
+    if (D != m->c.hidden || layer < 0 || layer >= m->c.n_layers ||
+        expert < 0 || expert >= m->c.n_experts || m->quant_bits != 8 ||
+        (idot && *idot == '1') || g_fused3 || g_pilot) return -1;
+    /* Do not call expert_get: a reference must NEVER fetch a missing weight.
+     * The model's existing cache lock protects the resident slot lifetime. */
+    pthread_mutex_lock(&g_pilot_mx);
+    Slot *e = slot_indexed(m, layer, expert);
+    int rc = !e ? -1 : lmb_q8_expert_reference(x, D, m->c.inter,
+        e->g, e->u, e->d, e->gs, e->us, e->ds, out);
+    pthread_mutex_unlock(&g_pilot_mx);
+    return rc;
 }
 static int lmb_olmoe_provider(void *opaque, int layer, int expert,
                               const float *x, int D, float *out) {

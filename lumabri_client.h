@@ -95,16 +95,19 @@ typedef struct {
      * that crossed the wire each way — the report divides them by rounds */
     unsigned long long ok_calls, bytes_out, bytes_in;
     double lat_s;
+    unsigned long long connect_attempts, connect_successes, pool_reuses, stale_pool_closes;
+    double connect_s; /* TCP + authenticated handshake + peer identity check */
     uint32_t caps;              /* LMB_CAP_* the executor advertised (ERES) */
 } LumiPeer;
 
 static struct {
     LmbHybridRoutes home;
-    int hybrid_policy;
+    int hybrid_policy, hybrid_remote_experts;
     LmbHybridTiming hybrid_timing[512];
     unsigned char hybrid_probes[512];
     int hybrid_numeric_failed;
     unsigned long long hybrid_rounding_accepts;
+    unsigned long long hybrid_reference_checks, hybrid_reference_accepts;
     int on, initialized, discovery;
     LumiPeer peers[LUMI_MAX_PEERS];
     int npeers;
@@ -199,7 +202,7 @@ static void lumi_peer_done(LumiPeer *peer) {
  * transport failure feeds the circuit breaker; it does not erase a valid
  * manifest permanently. */
 /* A pooled socket may have been closed by the executor while it sat idle
- * (its I/O timeout is minutes; a slow reply leaves sockets idle longer).
+ * (household accelerators have a shorter timeout than public executors).
  * Reusing it means a send that succeeds into the kernel and a recv that
  * finds EOF: a "failed" call charged to a healthy peer, a retry, and after
  * a few of those an open circuit and a patience wait. A closed socket is
@@ -217,6 +220,8 @@ static int lumi_open_sock(LumiPeer *p) {
         dial = getenv("LUMABRI_TRACKER");
         if (!dial || !dial[0]) { lumi_peer_failed(p); return -1; }
     }
+    double opening = lumi_now();
+    p->connect_attempts++;
     int fd = lmb_connect(dial);
     if (fd >= 0) {
         if (L.home.count) {
@@ -225,11 +230,13 @@ static int lumi_open_sock(LumiPeer *p) {
                 !lmb_secure_peer_matches(fd, L.home.peers[i].key)) { close(fd); fd = -1; }
         } else if (lmb_auth(fd)) { close(fd); fd = -1; }
     }
+    p->connect_s += lumi_now() - opening;
     if (fd < 0) {
         fprintf(stderr, "[lumabri] peer %s unreachable — circuit failure\n", p->addr);
         lumi_peer_failed(p);
         return fd;
     }
+    p->connect_successes++;
     /* An expert call that has not answered in two minutes is lost, not slow:
      * the general five-minute I/O timeout cost a reply 10 minutes twice in
      * one hour. Long enough for a prefill block on a slow uplink. */
@@ -241,7 +248,8 @@ static int lumi_open_sock(LumiPeer *p) {
 static int lumi_take_sock(LumiPeer *p) {
     while (p->nsocks) {
         int fd = p->socks[--p->nsocks];
-        if (lumi_sock_alive(fd)) return fd;
+        if (lumi_sock_alive(fd)) { p->pool_reuses++; return fd; }
+        p->stale_pool_closes++;
         close(fd);
     }
     return lumi_open_sock(p);
@@ -1618,18 +1626,22 @@ typedef int (*LumiLocalExpert)(void *ctx, int layer, int expert,
  * only the remote executors run concurrently. Never publish a partial sum.
  * The caller owns residency and permission checks, not this transport helper.
  * local_count=0 preserves the original all-remote protocol exactly. */
-static LMB_MAYBE_UNUSED int lumi_moe_apply_split(int layer, const int *idx,
+static LMB_MAYBE_UNUSED int lumi_moe_apply_split_checked(int layer, const int *idx,
                            const float *val, int K,
                            const float *x, int D, float *out,
-                           int local_count, LumiLocalExpert local, void *ctx) {
+                           int local_count, LumiLocalExpert local,
+                           LumiLocalExpert reference, void *ctx) {
     if (K > LUMI_MAX_K) lumi_die("top-k larger than the client supports");
     if (K <= 0 || D <= 0 || (size_t)D > SIZE_MAX / sizeof(float) ||
         !idx || !val || !x || !out || layer < 0 || layer >= L.n_layers ||
         local_count < 0 || local_count >= K || (local_count && !local)) return 0;
     for (int k = 0; k < K; k++) if (idx[k] < 0 || idx[k] >= L.n_experts) return 0;
     int household = L.home.count && local_count && layer < 512;
-    if (household && (L.hybrid_numeric_failed ||
-        !lmb_hybrid_choose(&L.hybrid_timing[layer], L.hybrid_policy))) local_count = K;
+    if (household) {
+        int wanted = L.hybrid_remote_experts > 0 ? L.hybrid_remote_experts : K - local_count;
+        int remote = lmb_hybrid_choose(&L.hybrid_timing[layer], L.hybrid_policy, K, wanted);
+        local_count = L.hybrid_numeric_failed ? K : K - remote;
+    }
     int remote_count = K - local_count;
     int fds[LUMI_MAX_K];
     uint32_t tried[LUMI_MAX_K];
@@ -1703,13 +1715,33 @@ static LMB_MAYBE_UNUSED int lumi_moe_apply_split(int layer, const int *idx,
     int nonfinite = 0;
     if (household) for (int k = 0; k < remote_count; k++)
         for (int d = 0; d < D; d++) if (!isfinite(res[k][d])) nonfinite = 1;
-    if (household && remote_count && (L.hybrid_probes[layer] < 4 ||
-        !(L.hybrid_timing[layer].rounds % 64) || nonfinite)) {
+    if (household && remote_count && (lmb_hybrid_validation_due(&L.hybrid_timing[layer],
+        L.hybrid_probes[layer]) || nonfinite)) {
         for (int k = 0; k < remote_count; k++) {
             float *check = malloc((size_t)D * sizeof(float));
             if (!check || local(ctx, layer, idx[k], x, D, check)) { free(check); goto fail; }
             double max_error;
             int match = lmb_hybrid_numeric_check(check, res[k], D, &max_error);
+#ifdef LMB_HYBRID_NUMERIC_DIAGNOSTIC
+            /* Standalone benchmark only: no production capture or policy change. */
+            if (match == LMB_HYBRID_NUMERIC_REJECT)
+                LMB_HYBRID_NUMERIC_DIAGNOSTIC(layer, idx[k], x, D, check, res[k]);
+#endif
+            if (match == LMB_HYBRID_NUMERIC_REJECT && reference &&
+                lmb_hybrid_reference_candidate(check, res[k], D)) {
+                float *precise = malloc((size_t)D * sizeof(float));
+                L.hybrid_reference_checks++;
+                if (precise && !reference(ctx, layer, idx[k], x, D, precise) &&
+                    lmb_hybrid_reference_check(precise, check, res[k], D)) {
+                    match = LMB_HYBRID_NUMERIC_ROUNDING;
+                    unsigned long long n = ++L.hybrid_reference_accepts;
+                    if (!(n & (n - 1)))
+                        fprintf(stderr, "[home-hybrid] reference verified at layer %d expert %d "
+                            "(pair_max_abs=%g); both outputs fit the original FP32 envelope; checks=%llu\n",
+                            layer, idx[k], max_error, n);
+                }
+                free(precise);
+            }
             if (match == LMB_HYBRID_NUMERIC_REJECT) {
                 if (!L.hybrid_numeric_failed)
                     fprintf(stderr, "[home-hybrid] numeric probe exceeds FP32 envelope at layer %d expert %d "
@@ -1730,6 +1762,7 @@ static LMB_MAYBE_UNUSED int lumi_moe_apply_split(int layer, const int *idx,
             }
         }
         if (L.hybrid_probes[layer] < 4) L.hybrid_probes[layer]++;
+        L.hybrid_timing[layer].validated_at = L.hybrid_timing[layer].rounds;
     }
     double validation_done = lumi_now();
     /* accumulate in the router's order, exactly as the local path does */
@@ -1739,6 +1772,7 @@ static LMB_MAYBE_UNUSED int lumi_moe_apply_split(int layer, const int *idx,
         for (int d = 0; d < D; d++) out[d] += w * h[d];
         free(res[k]);
     }
+    double merged_done = lumi_now();
     L.calls += (unsigned long long)remote_count;
     if (local_count) {
         L.hybrid_rounds++;
@@ -1749,17 +1783,20 @@ static LMB_MAYBE_UNUSED int lumi_moe_apply_split(int layer, const int *idx,
     }
     if (household) {
         LmbHybridTiming *t = &L.hybrid_timing[layer];
-        /* Probe recomputation is validation overhead, not the steady-state
-         * split service time. Actual end-to-end token timings still include it. */
-        lmb_hybrid_observe(t, remote_count != 0,
-            lumi_now() - t0 - (validation_done - received_done),
-            sent_done - t0, local_done - sent_done, received_done - local_done);
-        if (!(t->rounds & (t->rounds - 1)))
-            fprintf(stderr, "[home-hybrid-profile] layer=%d rounds=%llu local_n=%llu split_n=%llu "
-                "local_ms=%.3f split_ms=%.3f send_ms=%.3f work_ms=%.3f wait_ms=%.3f\n", layer,
-                (unsigned long long)t->rounds, (unsigned long long)t->samples[0],
-                (unsigned long long)t->samples[1], 1000*t->seconds[0], 1000*t->seconds[1],
-                1000*t->send_s/t->rounds, 1000*t->local_s/t->rounds, 1000*t->wait_s/t->rounds);
+        lmb_hybrid_record(t, remote_count, sent_done - t0, local_done - sent_done,
+            received_done - local_done, validation_done - received_done,
+            merged_done - validation_done);
+        if (t->completed && !(t->rounds & (t->rounds - 1)))
+            fprintf(stderr, "[home-hybrid-profile] layer=%d rounds=%llu remote_experts=%d best_remote=%d local_n=%llu split_n=%llu "
+                "local_ms=%.3f split_ms=%.3f wall_ms=%.3f send_ms=%.3f work_ms=%.3f collect_ms=%.3f "
+                "validation_ms=%.3f merge_ms=%.3f remote_rounds=%llu failures=%llu failed_ms=%.3f\n", layer,
+                (unsigned long long)t->rounds, remote_count, lmb_hybrid_best(t),
+                (unsigned long long)t->samples[0], (unsigned long long)t->samples[remote_count],
+                1000*t->seconds[0], 1000*t->seconds[remote_count],
+                1000*t->wall_s/t->completed, 1000*t->send_s/t->completed,
+                1000*t->local_s/t->completed, 1000*t->wait_s/t->completed,
+                1000*t->validation_s/t->completed, 1000*t->merge_s/t->completed,
+                (unsigned long long)t->remote_rounds, (unsigned long long)t->failures, 1000*t->failed_s);
     }
     lumi_round_done(t0);
     return 1;
@@ -1768,7 +1805,18 @@ fail:
         if (fds[k] >= 0) { close(fds[k]); lumi_peer_done(ps[k]); }
         free(res[k]);
     }
+    if (household) lmb_hybrid_failed(&L.hybrid_timing[layer], remote_count, lumi_now() - t0);
     return 0;
+}
+
+/* Other adapters and public execution keep their original verification.
+ * A reference callback is an explicit adapter capability, never inferred
+ * from a donor label or provided by the untrusted remote side. */
+static LMB_MAYBE_UNUSED int lumi_moe_apply_split(int layer, const int *idx,
+    const float *val, int K, const float *x, int D, float *out,
+    int local_count, LumiLocalExpert local, void *ctx) {
+    return lumi_moe_apply_split_checked(layer, idx, val, K, x, D, out,
+                                        local_count, local, NULL, ctx);
 }
 
 static LMB_MAYBE_UNUSED int lumi_moe_apply(int layer, const int *idx,
@@ -1800,6 +1848,15 @@ static LMB_MAYBE_UNUSED int lumi_home_init(int layers, int experts, int hidden, 
         if (!strcmp(policy, "local")) L.hybrid_policy = LMB_HYBRID_FORCE_LOCAL;
         else if (!strcmp(policy, "split")) L.hybrid_policy = LMB_HYBRID_FORCE_SPLIT;
         else return -1;
+    }
+    /* Diagnostic sweep only. Adaptive mode chooses its own count. Clamp to
+     * K-1 at the call site; never silently turn Hybrid into all-remote. */
+    const char *remote = getenv("LUMABRI_HOME_HYBRID_REMOTE_EXPERTS");
+    L.hybrid_remote_experts = 0;
+    if (remote && *remote) {
+        char *end; errno = 0; long nremote = strtol(remote, &end, 10);
+        if (errno || *end || nremote < 1 || nremote > LMB_HYBRID_MAX_REMOTE) return -1;
+        L.hybrid_remote_experts = (int)nremote;
     }
     size_t n = strlen(hex);
     if (n >= LMB_HOME_HYBRID_ENV || (n & 1) || layers <= 0 || layers > 512 ||
@@ -2226,11 +2283,11 @@ static LMB_MAYBE_UNUSED int lumi_moe_apply_v4(int layer, const int *indices,
 static LMB_MAYBE_UNUSED void lumi_report(void) {
     if (!L.on && !L.calls) return;
     if (L.hybrid_rounds)
-        fprintf(stderr, "[lumabri] hybrid: %llu concurrent layer rounds · "
+        fprintf(stderr, "[lumabri] hybrid: %llu scheduled layer rounds (including all-local) · "
                         "%llu local expert calls (in addition to remote calls)\n",
                 L.hybrid_rounds, L.hybrid_local_calls);
     fprintf(stderr, "[lumabri] %llu remote expert calls in %llu layer rounds · "
-                    "%.2fs waiting on peers (%.2f ms per layer round, worst %.1f ms) · "
+                    "%.2fs expert round wall time (%.2f ms per layer round, worst %.1f ms) · "
                     "%llu batched call(s)/%llu rows · %llu hedge(s), %llu won · "
                     "%llu failover(s) · %llu tracker relay call(s) · "
                     "%llu spot-check(s)%s\n",
@@ -2240,6 +2297,16 @@ static LMB_MAYBE_UNUSED void lumi_report(void) {
             L.batch_calls, L.batch_rows, L.hedges, L.hedge_wins,
             L.failovers, L.relays, L.verified,
             L.integrity_fails ? "" : ", all agreed");
+    for (int layer = 0; layer < 512; layer++) {
+        const LmbHybridTiming *t = &L.hybrid_timing[layer];
+        if (!t->completed && !t->failures) continue;
+        fprintf(stderr, "[home-hybrid-cost] layer=%d completed=%llu remote_rounds=%llu "
+            "wall_s=%.6f send_s=%.6f local_s=%.6f collect_s=%.6f validation_s=%.6f merge_s=%.6f "
+            "failures=%llu failed_s=%.6f\n", layer,
+            (unsigned long long)t->completed, (unsigned long long)t->remote_rounds,
+            t->wall_s, t->send_s, t->local_s, t->wait_s, t->validation_s, t->merge_s,
+            (unsigned long long)t->failures, t->failed_s);
+    }
     if (L.demotions || L.integrity_fails)
         fprintf(stderr, "[lumabri] %llu layer demotion(s) to the local mirror"
                         " · %llu integrity quarantine(s)\n",
@@ -2250,8 +2317,13 @@ static LMB_MAYBE_UNUSED void lumi_report(void) {
     for (int i = 0; i < L.npeers; i++) {
         LumiPeer *p = &L.peers[i];
         out += p->bytes_out; in += p->bytes_in;
+        if (L.home.count && (p->connect_attempts || p->pool_reuses || p->stale_pool_closes))
+            fprintf(stderr, "[home-hybrid-transport] peer=%s attempts=%llu opened=%llu "
+                "reused=%llu stale=%llu open_s=%.6f\n", p->addr,
+                p->connect_attempts, p->connect_successes, p->pool_reuses,
+                p->stale_pool_closes, p->connect_s);
         if (!p->ok_calls && !p->bytes_out) continue;
-        fprintf(stderr, "[lumabri] executor %s: %llu call(s) answered · %.1f ms each · "
+        fprintf(stderr, "[lumabri] executor %s: %llu call(s) answered · %.1f ms send-to-collection (includes overlap) · "
                         "%.1f MB up · %.1f MB down%s%s\n",
                 p->addr, p->ok_calls,
                 p->ok_calls ? 1000.0 * p->lat_s / (double)p->ok_calls : 0.0,
