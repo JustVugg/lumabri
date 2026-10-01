@@ -266,7 +266,7 @@ static void policy_cases(void) {
         }
     }
     LmbHybridTiming t = {.top_k=8, .rounds=100};
-    t.samples[0] = t.samples[3] = 2; t.seconds[0] = .010; t.seconds[3] = .0098;
+    t.samples[0] = t.samples[3] = 2; t.seconds[0] = t.last_local_s = .010; t.seconds[3] = .0098;
     assert(!lmb_hybrid_best(&t)); /* insufficient gain cannot displace local */
     assert(!lmb_hybrid_choose(&t, LMB_HYBRID_ADAPTIVE, 4, 1));
     assert(t.top_k == 4 && !t.rounds && !t.samples[3]); /* different top-k is not the same plan */
@@ -367,12 +367,31 @@ static void cost_cases(void) {
     LmbHybridTiming before = t;
     lmb_hybrid_record(&t, 1, .001, .002, .003, NAN, .004);
     lmb_hybrid_record(&t, 1, .001, .002, .003, .004, -1);
-    lmb_hybrid_record(&t, 1, 0, 0, 0, .003, 0); /* no service observation */
+    lmb_hybrid_record(&t, 1, 0, -.001, 0, .003, 0);
     assert(!memcmp(&before, &t, sizeof t));
     lmb_hybrid_failed(&t, 2, .007);
     lmb_hybrid_failed(&t, 0, .009);
     assert(t.failures == 2 && fabs(t.failed_s - .016) < 1e-12);
     assert(t.completed == 2 && fabs(t.wall_s - .018) < 1e-12);
+
+    /* macOS ARM can time an all-local four-float call in one clock tick.
+     * Keep the completed work and measured zero, without inventing a time
+     * or accepting it as evidence of an infinitely fast remote schedule. */
+    memset(&t, 0, sizeof t); t.top_k = 4;
+    lmb_hybrid_record(&t, 0, 0, 0, 0, 0, 0);
+    assert(t.completed == 1 && t.samples[0] == 1 && t.rounds == 1);
+    assert(t.wall_s == 0 && t.last_local_s == 0 && !lmb_hybrid_best(&t));
+    assert(lmb_hybrid_probe_gap(&t, .001) == LMB_HYBRID_PROBE_MAX_INTERVAL);
+    lmb_hybrid_record(&t, 1, 0, 0, 0, .003, 0);
+    lmb_hybrid_record(&t, 1, 0, 0, 0, 0, 0);
+    assert(t.completed == 3 && t.remote_rounds == 2 && t.seconds[1] == 0);
+    assert(t.wall_s == .003 && t.validation_s == .003 && !lmb_hybrid_best(&t));
+    lmb_hybrid_record(&t, 0, 0, .010, 0, 0, 0);
+    assert(!lmb_hybrid_best(&t)); /* zero remote observations do not win */
+    lmb_hybrid_observe(&t, 1, .0001, 0, 0, 0);
+    assert(lmb_hybrid_best(&t) == 1);
+    lmb_hybrid_record(&t, 0, 0, 0, 0, 0, 0);
+    assert(!lmb_hybrid_best(&t)); /* latest local below resolution */
 }
 
 static void *feature_reply(void *opaque) {

@@ -90,10 +90,13 @@ static inline int lmb_hybrid_best(const LmbHybridTiming *t) {
      * the local machine is fast again. Keep the EWMA, but also require a win
      * against the most recent local observation. This is not a latency SLA. */
     double baseline = t->seconds[0];
-    if (t->last_local_s > 0 && t->last_local_s < baseline) baseline = t->last_local_s;
+    if (t->last_local_s >= 0 && t->last_local_s < baseline) baseline = t->last_local_s;
+    /* A completed tiny call can be below the monotonic clock's resolution.
+     * It counts as work, but cannot establish a relative remote speedup. */
+    if (baseline <= 0) return 0;
     for (int r = 1; r <= lmb_hybrid_remote_limit(t->top_k); r++) {
         if (t->samples[r] < 2 || t->rounds < t->retry_after[r]) continue;
-        if (t->seconds[r] < baseline * 0.97 &&
+        if (t->seconds[r] > 0 && t->seconds[r] < baseline * 0.97 &&
             (!best || t->seconds[r] < t->seconds[best])) best = r;
     }
     return best;
@@ -105,7 +108,7 @@ static inline int lmb_hybrid_best(const LmbHybridTiming *t) {
 static inline uint64_t lmb_hybrid_probe_gap(const LmbHybridTiming *t, double wall) {
     if (!t->samples[0]) return LMB_HYBRID_PROBE_INTERVAL;
     double baseline = t->seconds[0];
-    if (t->last_local_s > 0 && t->last_local_s < baseline) baseline = t->last_local_s;
+    if (t->last_local_s >= 0 && t->last_local_s < baseline) baseline = t->last_local_s;
     if (!isfinite(wall) || !isfinite(baseline) || baseline <= 0)
         return LMB_HYBRID_PROBE_MAX_INTERVAL;
     double excess = wall > baseline ? wall - baseline : 0;
@@ -148,7 +151,7 @@ static inline int lmb_hybrid_choose(LmbHybridTiming *t, int policy,
 static inline void lmb_hybrid_observe(LmbHybridTiming *t, int remote,
     double total, double send, double local, double wait) {
     if (remote < 0 || remote > lmb_hybrid_remote_limit(t->top_k) ||
-        !isfinite(total) || total <= 0 || !isfinite(send) || send < 0 ||
+        !isfinite(total) || total < 0 || !isfinite(send) || send < 0 ||
         !isfinite(local) || local < 0 || !isfinite(wait) || wait < 0) return;
     if (!t->samples[remote]) t->seconds[remote] = total;
     else t->seconds[remote] += 0.2 * (total - t->seconds[remote]);
