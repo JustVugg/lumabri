@@ -82,9 +82,9 @@ Short probes seed observations and completed sessions update them; changed
 execution conditions make them stale. See [the evidence contract](CALIBRATION_RECORDS.md#planner-resource-evidence)
 for the implemented subset and remaining unknowns.
 
-A separate **DeepSeek V4.1** integration must address
-its cross-layer state and resident Engram tables; Colibri 1.12.1's standalone
-engine is not an Edge/Segment adapter and cannot be aliased to DeepSeek V4.
+The [DeepSeek V4.1 integration](DEEPSEEK_V41.md) adds a Lumabri-owned text CPU
+adapter with resident Engram tables and per-conversation cross-layer feedback.
+It uses the same approval and service lifecycle, without aliasing V4.1 to V4.
 
 ## Tests
 
