@@ -249,26 +249,23 @@ fail:
 ]
 
 # --------------------------------------------------------------------------
-# qwen36 (Qwen3.6): olmoe's dialect and one row at a time, but every layer also
-# has a SHARED expert after the routed loop, plus a CUDA tier branch behind
-# qt_ready() (a stub returning 0 without COLI_CUDA). So the hook must NOT
-# `continue` — it delegates the K routed experts and lets the shared expert and
-# the row's tail run locally. It lands right after `int shared_done = 0;` and
-# ends in `} else`, so it becomes an `else if` in front of the qt_ready() branch:
-# the CPU path delegates, shared_done stays 0, and the shared expert still adds
-# itself to `out`. Without the macro the added lines vanish and qt_ready() is a
-# plain `if` again.
+# Qwen3.6 v1.12.1 adds a batched planar-int4 runner before the CUDA/legacy
+# CPU branches. Delegate only the legacy CPU arithmetic supported by our
+# Expert glue. Do not disable upstream's optimized runner to enable Hybrid:
+# its inputs must be filled for every row and its numeric profile is different.
+# Shared experts still run in the common CPU tail, exactly once.
 # --------------------------------------------------------------------------
 QWEN36 = [
-    hook('#include "qwen36_tier.h"   /* optional transparent Vulkan compute backend for MoE experts */\n',
-         INCLUDE),
+    # v1.12.1 renamed the trailing backend comment. Anchor the directive,
+    # not its description; insert before it so the comment stays attached.
+    hook('#include "qwen36_tier.h"', INCLUDE, where="before"),
     hook("    m->dense_load_s = now_s() - t0;\n", """#ifdef LUMIBRI_P2P
     lumi_init(c->n_layers, c->n_experts, c->hidden);
     atexit(lumi_report);
 #endif
 """),
-    hook("        if (use_qt) {\n", """#ifdef LUMIBRI_P2P
-        if (lumi_layer_on(layer) &&   /* shared expert remains local */
+    hook("        if (use_xf) {\n", """#ifdef LUMIBRI_P2P
+        if (!use_xf && !use_qt && lumi_layer_on(layer) &&
             lumi_moe_apply(layer, idx, val, K, xs, D, out + (int64_t)s*D)) {
         } else
 #endif

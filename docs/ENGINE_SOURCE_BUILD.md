@@ -1,5 +1,32 @@
 # Build inputs are not model caches
 
+## Supported upstream baseline
+
+Household CI and candidate packages use Colibri **v1.12.1**, commit
+`ce370e87d7b623d7759b52ec2007d75fc5b0e87e`. Use this same revision for local
+builds. Lumabri never edits the source checkout; compatibility and resident
+preparation hooks are applied to its bounded build copy.
+
+This release has eight paired Edge/Segment adapters. Its new standalone
+DeepSeek V4.1 engine has no distributed adapter and must not be mapped to V4.
+The registry parity gate checks the upstream adapter headers and exact aliases,
+not the number of standalone executables.
+
+The v1.12.1 Qwen3.6 planar-int4 runner and CUDA tier retain upstream execution.
+The existing Expert hook is used only on its legacy CPU path: bypassing the
+new runner would change the numeric profile, and skipping individual rows
+would leave its batch inputs uninitialized. This does not certify a new GPU
+household backend. DeepSeek V4's updated routing diagnostic is preserved, and
+remote delegation is still inserted before prefetch and loader startup.
+
+`tests/integration/engine_patch_test.py --engine /path/to/colibri/c` checks
+these boundaries and rejects changed or ambiguous anchors. Compile and real
+Segment/Hybrid integration tests remain required; anchor tests alone cannot
+certify inference. Existing speed calibrations are not transferable to the
+new source/build identity.
+
+## Bounded preparation
+
 The household build used to copy the entire configured Colibri `c` directory
 before patching its generated build copy. A local checkout can also contain
 large converted checkpoints, tiny fixtures, virtual environments and previous
