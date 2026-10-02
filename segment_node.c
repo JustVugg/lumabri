@@ -1334,7 +1334,7 @@ int main(int argc, char **argv) {
                         "disabled for Segment safety\n");
     }
     if (lmb_colibri_register_all()) {
-        fprintf(stderr, "cannot register all six Colibri adapters\n"); return 1;
+        fprintf(stderr, "cannot register all Colibri adapters\n"); return 1;
     }
     uint8_t resolved_model_root[LMB_SEG_ROOT_BYTES];
     uint8_t resolved_tokenizer_root[LMB_SEG_ROOT_BYTES];

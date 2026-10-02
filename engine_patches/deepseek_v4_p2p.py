@@ -21,6 +21,20 @@ def main():
     # at file scope for every COLI_V4_UNIT_* section; this script only inserts
     # the call hooks.
 
+    # v1.12.1 keeps the same routing check but now reports the failing layer.
+    # Preserve that diagnostic verbatim and still insert before any prefetch
+    # or loader starts. Accept only the two reviewed layouts, not a prefix.
+    selected_checks = [
+        '    if (!result && selected != topk) result = -1;\n',
+        '    if (!result && selected != topk)\n'
+        '        result = moe_fail("layer %d: routing selected %d experts, wanted %d",\n'
+        '                          weights->plan.layer, selected, topk);\n',
+    ]
+    matched = [anchor for anchor in selected_checks if s.count(anchor) == 1]
+    if sum(s.count(anchor) for anchor in selected_checks) != 1:
+        sys.exit("deepseek_v4.c: expected exactly one reviewed routing check")
+    selected_check = matched[0]
+
     # apply hooks: (anchor, hook, expected count)
     hooks = [
         # site 1 — moe_token: single loader, reset n
@@ -43,8 +57,8 @@ def main():
         # Decide remotely here instead: on success the routed partial lands in
         # a buffer, `selected` becomes 0 before a single loader starts, and
         # site 2b adds the buffer where the local loop would have accumulated.
-        ('    if (!result && selected != topk) result = -1;\n',
-         '    if (!result && selected != topk) result = -1;\n'
+        (selected_check,
+         selected_check +
          '#ifdef LUMABRI_P2P\n'
          '    float *lumi_partial = NULL;\n'
          '    if (!result && lumi_v4_bridge_on(weights->plan.layer)) {\n'
@@ -128,7 +142,7 @@ def main():
     for anchor, repl in hooks:
         if s.count(anchor) != 1:
             sys.exit("deepseek_v4.c: expert-apply anchor found %d times (want 1) — "
-                     "layout changed" % s.count(anchor))
+                     "layout changed:\n%s" % (s.count(anchor), anchor))
         s = s.replace(anchor, repl, 1); n += 1
 
     # init hook — the always-run tail of coli_v4_engine_open (4-space indent,

@@ -73,14 +73,15 @@ will not open it.
 su - lumabri
 git clone https://github.com/JustVugg/lumabri.git
 cd lumabri
-git clone https://github.com/JustVugg/colibri.git ../colibri
+git clone --branch v1.12.1 https://github.com/JustVugg/colibri.git ../colibri
+git -C ../colibri checkout --detach ce370e87d7b623d7759b52ec2007d75fc5b0e87e
 make ENGINE=$HOME/colibri/c
 exit                        # back to root for the install step
 cd /home/lumabri/lumabri && make install     # → /usr/local
 ```
 
 The command above builds automatic Segment execution for every adapter in the
-matching Colibri dev checkout. To retain the classic fine-grained expert
+matching Colibri v1.12.1 checkout. To retain the classic fine-grained expert
 fallback too, build the patch for the engine your model uses — they are per engine,
 because the engines do not share a shape:
 
@@ -113,7 +114,8 @@ downloading expert weights.
 
 ```sh
 su - lumabri
-git clone https://github.com/JustVugg/colibri.git
+git clone --branch v1.12.1 https://github.com/JustVugg/colibri.git
+git -C colibri checkout --detach ce370e87d7b623d7759b52ec2007d75fc5b0e87e
 cd ~/lumabri && make phase2-all ENGINE=$HOME/colibri/c
 exit
 cd /home/lumabri/lumabri && make install

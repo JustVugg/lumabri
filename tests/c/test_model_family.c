@@ -48,6 +48,10 @@ int main(void) {
     want("llama", NULL);
     want("mixtral", NULL);
     want("deepseek_v3", NULL);   /* "deepseek" was a prefix once: not any more */
+    /* Colibri v1.12.1 has a standalone V4.1 engine, but no Edge/Segment ABI.
+     * Never route these checkpoints through the V4 distributed adapter. */
+    want("deepseek_v41", NULL);
+    want("deepseek_v41_text", NULL);
     want("kimi_future", NULL);
     want("glm53_moe", NULL);
     want("qwen3_moe", NULL);
