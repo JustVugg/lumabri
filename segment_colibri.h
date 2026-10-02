@@ -6,6 +6,7 @@
 #include "edge_runtime.h"
 #include "segment_adapters.h"
 #include "segment_runtime.h"
+#include "engine_patches/segment_owned.h"
 #include "src/runtime/lumabri_backend_policy.h"
 #include "src/runtime/lumabri_resident.h"
 extern int lmb_resident_adapter_is_prepared(void);
@@ -49,7 +50,8 @@ static int lmb_colibri_register_all(void) {
            coli_olmoe_edge_adapter_register() ||
            coli_qwen36_edge_adapter_register() ||
            coli_qwen38_edge_adapter_register() ||
-           coli_deepseek_v4_edge_adapter_register();
+           coli_deepseek_v4_edge_adapter_register() ||
+           lmb_v41_adapter_register();
 }
 
 /* Colibri's ABI is allowed to return a failure without writing the caller's

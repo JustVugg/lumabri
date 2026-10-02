@@ -166,10 +166,11 @@ Homebrew `libomp` when available and work single-threaded without it. Changing
 OpenMP flags invalidates the generated engine build automatically. CI pins
 Colibri to **v1.12.1**, commit
 `ce370e87d7b623d7759b52ec2007d75fc5b0e87e`, for reproducibility.
-Use that revision for local builds too. The eight distributed adapters are
+Use that revision for local builds too. The eight upstream distributed adapters are
 GLM, GLM5.3, Inkling, Kimi, OLMoE, Qwen3.6, Qwen3.8 and DeepSeek V4.
-Standalone engines added by Colibri are not automatically clusterable:
-DeepSeek V4.1 does not yet expose an Edge/Segment adapter in this release.
+Lumabri also provides a [resident DeepSeek V4.1 text CPU adapter](docs/DEEPSEEK_V41.md),
+including Engram and cross-layer state. Other standalone engines added by
+Colibri are not automatically clusterable: each needs a verified adapter.
 
 Discovery and outbound reporting do not prove inbound connectivity. Before
 indexing, Lumabri checks each selected donor's address and identity. The

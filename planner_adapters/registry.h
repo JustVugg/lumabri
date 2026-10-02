@@ -8,6 +8,7 @@
 #include "qwen38.h"
 #include "olmoe.h"
 #include "deepseek_v4.h"
+#include "deepseek_v41.h"
 
 typedef int (*LmbMemoryDescribe)(const char *, const char *, const char *, LmbModelShape *);
 typedef struct { const char *adapter; LmbMemoryDescribe describe; } LmbMemoryContract;
@@ -24,12 +25,14 @@ LMB_MEMORY_WRAPPER(lmb_describe_kimi, lmb_kimi_memory(root,cfg,m))
 LMB_MEMORY_WRAPPER(lmb_describe_glm, lmb_glm_memory(root,cfg,m))
 LMB_MEMORY_WRAPPER(lmb_describe_olmoe, lmb_olmoe_memory(root,cfg,m))
 LMB_MEMORY_WRAPPER(lmb_describe_v4, lmb_v4_memory(root,cfg,m))
+LMB_MEMORY_WRAPPER(lmb_describe_v41, lmb_v41_memory(root,cfg,m))
 #undef LMB_MEMORY_WRAPPER
 
 /* model_family_test.sh compares these ids to Colibri's registry as well. */
 static const LmbMemoryContract LMB_MEMORY_CONTRACTS[] = {
     {"olmoe", lmb_describe_olmoe},
     {"deepseek_v4", lmb_describe_v4},
+    {"deepseek_v41", lmb_describe_v41},
     {"qwen36", lmb_describe_qwen36},
     {"inkling", lmb_describe_inkling},
     {"kimi", lmb_describe_kimi},

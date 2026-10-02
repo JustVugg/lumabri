@@ -48,10 +48,10 @@ int main(void) {
     want("llama", NULL);
     want("mixtral", NULL);
     want("deepseek_v3", NULL);   /* "deepseek" was a prefix once: not any more */
-    /* Colibri v1.12.1 has a standalone V4.1 engine, but no Edge/Segment ABI.
-     * Never route these checkpoints through the V4 distributed adapter. */
-    want("deepseek_v41", NULL);
-    want("deepseek_v41_text", NULL);
+    /* Lumabri owns the additive V4.1 ABI. Never send it to the V4 adapter. */
+    want("deepseek_v41", "deepseek_v41");
+    want("deepseek_v41_text", "deepseek_v41");
+    want("deepseek_v42", NULL);
     want("kimi_future", NULL);
     want("glm53_moe", NULL);
     want("qwen3_moe", NULL);
@@ -65,8 +65,10 @@ int main(void) {
     }
     const LmbModelFamily *glm53 = lmb_family_by_id("glm53");
     const LmbModelFamily *qwen38 = lmb_family_by_id("qwen38");
+    const LmbModelFamily *v41 = lmb_family_by_id("deepseek_v41");
     if (!glm53 || glm53->p2p_engine || glm53->expert_node ||
-        !qwen38 || qwen38->p2p_engine || qwen38->expert_node) {
+        !qwen38 || qwen38->p2p_engine || qwen38->expert_node ||
+        !v41 || v41->p2p_engine || v41->expert_node || strcmp(lmb_family_batch_rows(v41->segment_id),"1")) {
         fprintf(stderr, "an adapter without an Expert path advertised one\n");
         bad = 1;
     }

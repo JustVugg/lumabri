@@ -1,5 +1,4 @@
-/* Exercise the real public Colibri ABI around Lumabri's experimental wrapper.
- * Product registration and bounded admission remain disabled independently. */
+/* Exercise Lumabri's V4.1 adapter through the real public Colibri ABI. */
 #define _GNU_SOURCE
 #undef NDEBUG
 #include <assert.h>
@@ -16,17 +15,19 @@ static ssize_t guarded_pread(int fd,void *p,size_t n,off_t off) {
 #include "v41_range_core.c"
 #undef main
 #undef pread
-#include "engine_patches/v41_abi_lab.h"
+#include "engine_patches/v41_adapter.h"
 
 static int cancelled(void *p){(void)p;return 1;}
 static void prove(const char *path,int cut) {
     char error[512]={0};
 #define OK(expr) do {int rc=(expr);if(rc){fprintf(stderr,"ABI failure at %d: %s\n",__LINE__,error);abort();}}while(0)
-    OK(lmb_v41_lab_register());
+    OK(lmb_v41_register_impl());
+    LmbModelShape shape;assert(!lmb_v41_inspect(path,&shape));
     ColiEdgeEngineOptions eo={.struct_size=sizeof eo,.model_dir=path,.backend_mask=COLI_EDGE_CAP_CPU};
     ColiEdgeEngine *edge=NULL;
     eo.memory_limit_bytes=1;assert(coli_edge_engine_open("deepseek_v41",&eo,&edge,error,sizeof error) && !edge);
-    eo.memory_limit_bytes=0;OK(coli_edge_engine_open("deepseek_v41",&eo,&edge,error,sizeof error));
+    eo.memory_limit_bytes=shape.edge_resident_bytes+shape.edge_scratch_fixed_bytes;
+    OK(coli_edge_engine_open("deepseek_v41",&eo,&edge,error,sizeof error));
     ColiEdgeCapabilities ec={.struct_size=sizeof ec};OK(coli_edge_engine_capabilities(edge,&ec,error,sizeof error));
     size_t tokens=0;OK(coli_edge_tokenize(edge,"Hello",5,NULL,0,&tokens,error,sizeof error));assert(tokens);
     int32_t *encoded=calloc(tokens,sizeof *encoded);assert(encoded);
@@ -40,15 +41,22 @@ static void prove(const char *path,int cut) {
         ColiSegmentEngineOptions o={.struct_size=sizeof o,.model_dir=path,.layer_begin=peer ? (uint32_t)cut : 0,
             .layer_end=peer ? ec.num_layers : (uint32_t)cut,.context_tokens=96,.backend_mask=COLI_SEGMENT_CAP_CPU};
         o.memory_limit_bytes=1;assert(coli_segment_engine_open("deepseek_v41",&o,&engines[peer],error,sizeof error) && !engines[peer]);
-        o.memory_limit_bytes=0;OK(coli_segment_engine_open("deepseek_v41",&o,&engines[peer],error,sizeof error));
+        LmbRangeCost cost=lmb_estimate_segment(&shape,o.layer_begin,o.layer_end,o.context_tokens,1);assert(cost.ok);
+        o.memory_limit_bytes=cost.resident_bytes+cost.scratch_bytes+cost.state_bytes*3/2;
+        OK(coli_segment_engine_open("deepseek_v41",&o,&engines[peer],error,sizeof error));
         ColiSegmentCapabilities sc={.struct_size=sizeof sc};OK(coli_segment_engine_capabilities(engines[peer],&sc,error,sizeof error));
         assert(sc.max_context_tokens==96 && sc.state_width==ec.state_width && sc.max_batch_rows==1);
         assert(!strcmp(sc.state_schema,ec.state_schema) && !strcmp(sc.numeric_class,ec.numeric_class));
         assert(!(sc.flags&COLI_SEGMENT_CAP_SNAPSHOT));
         for(int chat=0;chat<2;chat++) {
             ColiSegmentSessionOptions so={.struct_size=sizeof so,.context_tokens=80};
+            so.memory_limit_bytes=1;
+            assert(coli_segment_session_create(engines[peer],&so,&sessions[peer][chat],error,sizeof error) && !sessions[peer][chat]);
+            so.memory_limit_bytes=cost.state_bytes/2;
             OK(coli_segment_session_create(engines[peer],&so,&sessions[peer][chat],error,sizeof error));
         }
+        ColiSegmentSession *third=NULL;ColiSegmentSessionOptions full={.struct_size=sizeof full,.context_tokens=80};
+        assert(coli_segment_session_create(engines[peer],&full,&third,error,sizeof error) && !third);
         assert(coli_segment_engine_close(engines[peer],error,sizeof error)); /* live sessions own their engine */
     }
     Model reference={0},refs[2]={0};Cfg c;cfg_load(&c,path);
@@ -106,7 +114,7 @@ static void prove(const char *path,int cut) {
     assert(!forbidden_reads);
     for(int i=0;i<2;i++){free(feedback[i]);lmb_v41_model_destroy(&refs[i],0);}lmb_v41_model_destroy(&reference,1);
     coli_edge_engine_close(edge);free(a);free(b);free(expected);free(actual);
-    printf("V41 public Edge/Segment ABI: cut %d, two isolated chats, 48 exact logits, clean reopen; bounded opens refused.\n",cut);
+    printf("V41 public Edge/Segment ABI: cut %d, two isolated chats, 48 exact logits, clean reopen; bounded admission enforced.\n",cut);
 #undef OK
 }
 int main(int argc,char **argv) {
@@ -116,5 +124,5 @@ int main(int argc,char **argv) {
         if(!pid){prove(argv[1],cut);return 0;}
         int status;assert(waitpid(pid,&status,0)==pid && WIFEXITED(status) && !WEXITSTATUS(status));
     }
-    puts("V41 ABI LAB PASS. Not registered in shipped binaries; bounded checkpoint admission still required.");return 0;
+    puts("V41 ABI PASS: resident budgets, isolated state and exact inference.");return 0;
 }

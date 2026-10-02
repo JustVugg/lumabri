@@ -39,6 +39,7 @@ test_weight_cache: tests/c/test_weight_cache.c src/runtime/lumabri_weight_cache.
 household: tracker maintainer $(SHIM_LIB) lumabri segment_node segment_chat
 
 lumabri segment_node segment_chat test_calibration test_chat_ui: src/planner/lumabri_link_evidence.h
+segment_node segment_chat test_backend_routes test_home_expert: engine_patches/segment_owned.h src/runtime/lumabri_v41_contract.h
 
 .PHONY: test-runtime-probe
 test-runtime-probe: tests/c/test_runtime_probe.c lumabri_runtime_probe.h src/runtime/lumabri_backend_policy.h lumabri_segment.h
@@ -664,12 +665,15 @@ build/segment_hybrid_bridge.o: build/segment-options lumi_v4_bridge.c $(HYBRID_P
 	mkdir -p build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(OMP_FLAGS) -pthread -I. -I$(ENGINE) -c lumi_v4_bridge.c -o $@
 
-$(COLIBRI_SEGMENT_LIB): $(HYBRID_ENGINE_DIR)/.prepared build/segment_hybrid_bridge.o
+build/v41_adapter.o: engine_patches/v41_adapter.c engine_patches/v41_adapter.h engine_patches/v41_boundary.h engine_patches/v41_lifecycle.h src/runtime/lumabri_v41_contract.h lumabri_planner.h $(wildcard planner_adapters/*.h) build/v41_range_core.c build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) -O2 $(ENGINE_CPU_FLAGS) $(OMP_FLAGS) -pthread -I. -Ibuild -I$(ENGINE) -c engine_patches/v41_adapter.c -o $@
+
+$(COLIBRI_SEGMENT_LIB): $(HYBRID_ENGINE_DIR)/.prepared build/segment_hybrid_bridge.o build/v41_adapter.o
 	env -u MAKEFLAGS $(MAKE) -C $(HYBRID_ENGINE_DIR) MAKEOVERRIDES= \
 		COLI_V4_SUPPORTED=1 CC='$(CC)' \
 		CFLAGS='-O2 $(ENGINE_CPU_FLAGS) $(CPPFLAGS) $(OMP_FLAGS) -pthread -I$(HYBRID_ROOT) -include $(HYBRID_ROOT)/lumi_v4_ext.h -DLUMABRI_P2P -DLUMIBRI_P2P' \
 		segment-edge-library
-	$(AR) rcs $@ build/segment_hybrid_bridge.o
+	$(AR) rcs $@ build/segment_hybrid_bridge.o build/v41_adapter.o
 
 # Optional diagnostic; requires explicit, already approved household routes.
 build/bench_home_hybrid: tests/c/bench_home_hybrid.c tests/c/bench_hybrid_numeric.h tests/c/bench_block_verify.h tests/c/bench_causal_spec.h lumabri_client.h lumabri_proto.h $(SECURE_DEPS) $(COLIBRI_SEGMENT_LIB)
@@ -707,7 +711,7 @@ test_sampling: tests/c/test_sampling.c lumabri_sampling.c lumabri_sampling.h
 .PHONY: segment-direct
 segment-direct: segment_node segment_chat
 
-# V4.1 boundary laboratory, deliberately NOT linked/registered in the product.
+# V4.1 range engine and conformance tests, shared with the household adapter.
 # Reuses pinned upstream arithmetic through generated range hooks. Fixture
 # creation needs the upstream test dependencies (torch/safetensors/numpy/sympy).
 build/v41_range_core.c: tools/prepare_v41_range.py $(ENGINE)/deepseek_v41.c
@@ -719,8 +723,16 @@ build/test_v41_range: tests/c/test_v41_range.c engine_patches/v41_boundary.h eng
 build/test_v41_transport: tests/c/test_v41_transport.c engine_patches/v41_boundary.h engine_patches/v41_lifecycle.h build/v41_range_core.c lumabri_segment.c lumabri_segment.h lumabri_proto.h $(SECURE_DEPS) build/segment-sources build/segment-options
 	$(CC) $(CPPFLAGS) -O2 $(OMP_FLAGS) -pthread -I. -Ibuild -I$(ENGINE) tests/c/test_v41_transport.c lumabri_segment.c -o $@ -lm $(OMP_LIBS)
 
-build/test_v41_abi: tests/c/test_v41_abi.c engine_patches/v41_abi_lab.h engine_patches/v41_boundary.h engine_patches/v41_lifecycle.h build/v41_range_core.c build/segment-sources build/segment-options
+build/test_v41_abi: tests/c/test_v41_abi.c engine_patches/v41_adapter.h engine_patches/v41_boundary.h engine_patches/v41_lifecycle.h $(wildcard planner_adapters/*.h) src/runtime/lumabri_v41_contract.h build/v41_range_core.c build/segment-sources build/segment-options
 	$(CC) $(CPPFLAGS) -O2 $(OMP_FLAGS) -pthread -I. -Ibuild -I$(ENGINE) tests/c/test_v41_abi.c $(ENGINE)/segment_runtime.c $(ENGINE)/edge_runtime.c -o $@ -lm $(OMP_LIBS)
+
+build/test_v41_memory: tests/c/test_v41_memory.c lumabri_planner.h lumabri_families.h $(wildcard planner_adapters/*.h)
+	mkdir -p build
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Werror -I. tests/c/test_v41_memory.c -o $@ -lm
+
+.PHONY: test-v41-memory-existing
+test-v41-memory-existing: build/test_v41_memory
+	python3 tests/integration/v41_memory_test.py --fixture build/v41-tiny --probe build/test_v41_memory
 
 build/v41_upstream: build/segment-sources build/segment-options
 	mkdir -p build

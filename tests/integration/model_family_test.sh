@@ -68,6 +68,10 @@ for row in rows:
     table[names[0]] = claims
 
 expected = set(sys.argv[1].split())
+owned_header = open("engine_patches/segment_owned.h", encoding="utf-8").read()
+owned = set(re.search(r'#define LMB_OWNED_SEGMENT_IDS "([^"]+)"', owned_header).group(1).split())
+assert not (expected & owned), "an upstream adapter now supersedes an owned adapter: revalidate before removing the extension"
+expected |= owned
 registry = runpy.run_path(sys.argv[2])
 official = {f.id: set(f.model_types) for f in registry["FAMILIES"]}
 bad = []
@@ -109,4 +113,4 @@ if bad:
 print("  %d adapters, all exactly mapped" % len(table))
 PYEOF
 
-echo "MODEL FAMILY TEST: PASS ($(echo "$seg" | wc -w) adapters registered, mapped and unambiguous)"
+echo "MODEL FAMILY TEST: PASS ($(echo "$seg" | wc -w) upstream adapters plus validated Lumabri extensions, mapped and unambiguous)"

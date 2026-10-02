@@ -7,10 +7,11 @@ Household CI and candidate packages use Colibri **v1.12.1**, commit
 builds. Lumabri never edits the source checkout; compatibility and resident
 preparation hooks are applied to its bounded build copy.
 
-This release has eight paired Edge/Segment adapters. Its new standalone
-DeepSeek V4.1 engine has no distributed adapter and must not be mapped to V4.
-The registry parity gate checks the upstream adapter headers and exact aliases,
-not the number of standalone executables.
+This upstream release has eight paired Edge/Segment adapters. Lumabri adds its
+own [resident V4.1 adapter](DEEPSEEK_V41.md); it must not be mapped to V4.
+The parity gate checks the upstream headers, owned extension registry and exact
+aliases, not a hardcoded adapter count. A future upstream V4.1 adapter requires
+deliberate revalidation instead of duplicate registration.
 
 The v1.12.1 Qwen3.6 planar-int4 runner and CUDA tier retain upstream execution.
 The existing Expert hook is used only on its legacy CPU path: bypassing the

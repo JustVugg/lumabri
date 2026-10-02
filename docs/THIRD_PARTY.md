@@ -1,6 +1,6 @@
 # Third-party build inputs
 
-## Colibri V4.1 boundary laboratory
+## Colibri V4.1 resident adapter
 
 - Source: `JustVugg/colibri`, tag `v1.12.1`, commit
   `ce370e87d7b623d7759b52ec2007d75fc5b0e87e`.
@@ -13,8 +13,9 @@
   reference math remain upstream-owned.
 - Lumabri changes: exact, hash-pinned build-copy hooks for partial range loading,
   residual/mHC boundaries and resident packed Engram tables; a Lumabri-owned
-  shared-state delta codec, session lifetime helper, experimental public-ABI
-  wrapper and numerical/encrypted process-boundary oracle tests. DSpark and vision are excluded
-  from this text boundary laboratory; they are not declared supported.
+  shared-state delta codec, session lifetime helper, public-ABI wrapper,
+  checkpoint memory inspector and numerical/encrypted process-boundary oracle
+  tests. DSpark and vision are excluded from this text adapter.
 - The source checkout is never modified. The generated copy is not a general
-  engine fork and is not linked into shipped Lumabri binaries.
+  engine fork. It is linked through the Lumabri-owned adapter into household
+  binaries; Colibri's upstream adapter registry remains unchanged.

@@ -38,6 +38,7 @@ TOKENS="${SPLIT_TOKENS:-8}"
 THREADS_TOTAL="${SPLIT_THREADS:-4}"
 CONTEXT="${SPLIT_CONTEXT:-64}"
 ROUNDS="${SPLIT_ROUNDS:-3}"
+MAX_ROWS="${SPLIT_MAX_ROWS:-16}"
 
 TMP=$(mktemp -d /tmp/lumabri-segment-split.XXXXXX)
 PIDS=()
@@ -115,7 +116,7 @@ start_phase() {              # $1 = nodes, $2 = threads each, $3 = tag
             --port "$(( base + i ))" --tracker "127.0.0.1:$TRACKER" \
             --advertise "127.0.0.1:$(( base + i ))" --name "$tag-$i" \
             --model-root "$model_root" --tokenizer-root "$tokenizer_root" \
-            --context "$CONTEXT" --max-rows 16 --sessions 2 --threads "$threads" \
+            --context "$CONTEXT" --max-rows "$MAX_ROWS" --sessions 2 --threads "$threads" \
             >"$TMP/$tag-$i.log" 2>&1 &
         PIDS+=("$!")
         wait_port "$(( base + i ))"
@@ -141,7 +142,7 @@ run_chat() {                 # $1 = threads, $2 = log name
         --tracker "127.0.0.1:$TRACKER" \
         --model-root "$model_root" --tokenizer-root "$tokenizer_root" \
         --prompt-ids "$prompt" --tokens "$TOKENS" --context "$CONTEXT" \
-        --max-rows 16 --retry-first-run --direct-only --json \
+        --max-rows "$MAX_ROWS" --retry-first-run --direct-only --json \
         >"$TMP/$log.json" 2>"$TMP/$log.log"
     t1=$(date +%s.%N)
     python3 - "$TMP/$log.json" "$t0" "$t1" <<'PY'
@@ -199,6 +200,10 @@ echo "   checkpoint is disk, every later one is page cache)"
 start_phase 1 "$THREADS_TOTAL" whole
 whole=$(best_of "$THREADS_TOTAL" whole)
 whole_s=${whole%% *}; oracle=${whole#* }
+if [[ -n "${SPLIT_EXPECT_IDS:-}" && "$oracle" != "$SPLIT_EXPECT_IDS" ]]; then
+    echo "SEGMENT SPLIT TEST: FAIL — runtime differs from independent local oracle" >&2
+    exit 1
+fi
 echo "  A  1 node,  $THREADS_TOTAL threads   ${whole_s}s"
 stop_phase
 

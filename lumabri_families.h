@@ -52,6 +52,8 @@ static const LmbModelFamily LMB_FAMILIES[] = {
       { "olmoe", NULL } },
     { "deepseek_v4", "deepseek_v4", "deepseek", "expert_node_deepseek", "root",
       { "deepseek_v4", NULL } },
+    { "deepseek_v41", "deepseek_v41", NULL, NULL, "text_config",
+      { "deepseek_v41", "deepseek_v41_text", NULL } },
     { "kimi",        "kimi_k3",  "kimi_k3", "expert_node_kimi", "text_config",
       { "kimi_k3", "kimi_linear", NULL } },
     { "inkling",     "inkling",  "inkling", "expert_node_inkling", "text_config",
@@ -91,6 +93,11 @@ static LMB_UNUSED const LmbModelFamily *lmb_family_for(const char *model_type) {
  * typo is refused instead of silently ignored. */
 static LMB_UNUSED const LmbModelFamily *lmb_family_override(const char *segment_id) {
     return lmb_family_by_id(segment_id);
+}
+
+/* Single-row shared-state deltas cannot be batched across tokens. */
+static LMB_UNUSED const char *lmb_family_batch_rows(const char *id) {
+    return id && !strcmp(id,"deepseek_v41") ? "1" : "16";
 }
 
 #endif /* LUMABRI_FAMILIES_H */

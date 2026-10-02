@@ -1,22 +1,39 @@
-/* Public Colibri ABI laboratory. Not registered by the product.
- * Bounded-budget opens are deliberately REFUSED until the checkpoint inspector
- * accounts for Engram + foreign KV + scratch. Never silently ignore a budget.
- * The pinned CLI loader still has fatal-error paths: this is not a safe public
- * checkpoint loader yet. The ordinary Lumabri binaries do not link this header.
+/* Lumabri-owned text-only V4.1 adapter for the public Colibri ABI.
+ * Admission uses the resident checkpoint inspector, including Engram, foreign
+ * KV, preparation scratch and independently reserved conversation state.
+ * The pinned loader's fatal I/O/OOM failures are contained by the household's
+ * engine subprocess. A failed preparation never publishes READY.
  */
-#ifndef LMB_V41_ABI_LAB_H
-#define LMB_V41_ABI_LAB_H
+#ifndef LMB_V41_ADAPTER_H
+#define LMB_V41_ADAPTER_H
 #include "segment_adapter_internal.h"
 #include "edge_tok_internal.h"
 #include "v41_boundary.h"
 #include "v41_lifecycle.h"
+#include "lumabri_planner.h"
+#include "planner_adapters/deepseek_v41.h"
+#include "src/runtime/lumabri_v41_contract.h"
 
-#define LMB_V41_SCHEMA "lmb-v41-text-delta1-lab-v1"
-#define LMB_V41_NUMERIC "v41/f32/single-row-cpu-v1"
+#ifdef LMB_V41_PRODUCT
+extern void lmb_resident_adapter_prepared(void);
+extern int lmb_resident_budget_exceeded(unsigned long long);
+#endif
 static pthread_mutex_t lmb_v41_runtime_lock=PTHREAD_MUTEX_INITIALIZER;
-typedef struct {Model weights; unsigned sessions;} LmbV41Engine;
+typedef struct {Model weights; unsigned sessions;uint64_t budget,base_bytes,session_bytes;} LmbV41Engine;
 typedef struct {LmbV41Engine *engine;Model state;int counts[V41_MAX_LAYERS];uint32_t context;} LmbV41Session;
 typedef struct {Model weights;Tok tokenizer;size_t width;} LmbV41Edge;
+
+static int lmb_v41_inspect(const char *root,LmbModelShape *m) {
+    static const char *const unsupported[]={"V41_INDEX_OWNER","COLI_MODEL_DIRS","COLI_MODEL_MIRROR","SNAP_MIRROR"};
+    for(unsigned i=0;i<sizeof unsupported/sizeof *unsupported;i++) {
+        const char *s=getenv(unsupported[i]);if(s && *s)return -1;
+    }
+    char *json=lmb_v41_read_json(root,"config.json",65535,NULL);if(!json)return -1;
+    const char *cfg=lmb_json_member(json,"text_config");if(!cfg)cfg=json;
+    memset(m,0,sizeof *m);int rc=lmb_v41_memory(root,cfg,m);free(json);
+    if(!rc)m->sizing_verified=1;
+    return rc;
+}
 
 static size_t lmb_v41_state_width(const Cfg *c) {
     return 2+(size_t)c->hc_mult*(c->dim+1)+lmb_v41_aux_width(c);
@@ -43,15 +60,23 @@ static int lmb_v41_row_valid(const Cfg *c,const float *in,size_t bytes) {
 static int lmb_v41_segment_open(void **impl,ColiSegmentCapabilities *cap,
     const ColiSegmentEngineOptions *o,char *error,size_t error_size) {
     *impl=NULL;
-    if(o->memory_limit_bytes || o->resource_plan_size)
-        return coli_segment_adapter_error(error,error_size,"V4.1 bounded admission is not implemented; laboratory only");
+    if(o->resource_plan_size)
+        return coli_segment_adapter_error(error,error_size,"V4.1 opaque resource plans are unsupported");
     if(o->backend_mask && o->backend_mask!=COLI_SEGMENT_CAP_CPU)
-        return coli_segment_adapter_error(error,error_size,"V4.1 laboratory is CPU only");
+        return coli_segment_adapter_error(error,error_size,"V4.1 Segment is CPU only");
+    LmbModelShape shape;
+    if(lmb_v41_inspect(o->model_dir,&shape))
+        return coli_segment_adapter_error(error,error_size,"invalid or incomplete resident V4.1 checkpoint");
+    LmbRangeCost cost=lmb_estimate_segment(&shape,o->layer_begin,o->layer_end,o->context_tokens,1);
+    uint64_t need=lmb_size_add(cost.resident_bytes,lmb_size_add(cost.scratch_bytes,cost.state_bytes));
+    if(!cost.ok || need==UINT64_MAX || (o->memory_limit_bytes && need>o->memory_limit_bytes))
+        return coli_segment_adapter_error(error,error_size,"V4.1 resident weights, Engram, state and scratch exceed the memory budget");
     Cfg c;cfg_load(&c,o->model_dir);
     if(!lmb_v41_layout_valid(&c) || o->layer_begin>=o->layer_end || o->layer_end>(uint32_t)c.n_layers ||
        o->context_tokens<2 || o->context_tokens>(uint32_t)c.max_positions)
         return coli_segment_adapter_error(error,error_size,"invalid V4.1 range or context");
     LmbV41Engine *e=calloc(1,sizeof *e);if(!e)return -1;
+    e->session_bytes=cost.state_bytes/2;e->base_bytes=need-e->session_bytes;e->budget=o->memory_limit_bytes;
     e->weights.range_enabled=1;e->weights.range_begin=(int)o->layer_begin;e->weights.range_end=(int)o->layer_end;
     e->weights.context_limit=(int)o->context_tokens;
     pthread_mutex_lock(&lmb_v41_runtime_lock);
@@ -59,6 +84,13 @@ static int lmb_v41_segment_open(void **impl,ColiSegmentCapabilities *cap,
     for(uint32_t l=o->layer_begin;l<o->layer_end;l++)
         for(int k=0;k<c.n_routed;k++)(void)expert_slot_at(&e->weights,&e->weights.cache[l],"layers",(int)l,k);
     pthread_mutex_unlock(&lmb_v41_runtime_lock);
+#ifdef LMB_V41_PRODUCT
+    if(o->memory_limit_bytes && lmb_resident_budget_exceeded(o->memory_limit_bytes)) {
+        lmb_v41_model_destroy(&e->weights,1);free(e);
+        return coli_segment_adapter_error(error,error_size,"V4.1 preparation exceeded approved resident memory");
+    }
+    lmb_resident_adapter_prepared();
+#endif
     memset(cap,0,sizeof *cap);cap->struct_size=sizeof *cap;cap->abi_version=COLI_SEGMENT_ABI_VERSION;
     cap->flags=COLI_SEGMENT_CAP_TOKEN_IDS|COLI_SEGMENT_CAP_RANGE_NATIVE|COLI_SEGMENT_CAP_MULTI_SESSION|COLI_SEGMENT_CAP_CPU;
     snprintf(cap->engine_id,sizeof cap->engine_id,"deepseek_v41");
@@ -73,10 +105,17 @@ static void lmb_v41_segment_destroy(void *impl) {
 }
 static int lmb_v41_session_create(void *impl,void **out,const ColiSegmentSessionOptions *o,char *err,size_t size) {
     LmbV41Engine *e=impl;*out=NULL;
-    if(o->memory_limit_bytes || o->context_tokens<2 || o->context_tokens>(uint32_t)e->weights.c.max_positions)
-        return coli_segment_adapter_error(err,size,"invalid or bounded V4.1 laboratory session");
-    LmbV41Session *s=calloc(1,sizeof *s);if(!s)return -1;
+    if(o->context_tokens<2 || o->context_tokens>(uint32_t)e->weights.c.max_positions ||
+       (o->memory_limit_bytes && e->session_bytes>o->memory_limit_bytes))
+        return coli_segment_adapter_error(err,size,"V4.1 session context or memory budget is insufficient");
     pthread_mutex_lock(&lmb_v41_runtime_lock);
+    uint64_t total=lmb_size_add(e->base_bytes,lmb_size_mul(e->session_bytes,(uint64_t)e->sessions+1));
+    if(e->sessions>=1024 || total==UINT64_MAX || (e->budget && total>e->budget)) {
+        pthread_mutex_unlock(&lmb_v41_runtime_lock);
+        return coli_segment_adapter_error(err,size,"V4.1 engine has no unreserved session memory");
+    }
+    LmbV41Session *s=calloc(1,sizeof *s);
+    if(!s){pthread_mutex_unlock(&lmb_v41_runtime_lock);return -1;}
     int rc=lmb_v41_session_model(&s->state,&e->weights);
     if(!rc)e->sessions++;
     pthread_mutex_unlock(&lmb_v41_runtime_lock);
@@ -114,10 +153,16 @@ static void lmb_v41_edge_destroy(void *impl) {
 }
 static int lmb_v41_edge_open(void **impl,ColiEdgeCapabilities *cap,const ColiEdgeEngineOptions *o,char *err,size_t size) {
     *impl=NULL;
-    if(o->memory_limit_bytes || o->resource_plan_size)
-        return coli_edge_adapter_error(err,size,"V4.1 bounded Edge admission is not implemented; laboratory only");
+    if(o->resource_plan_size)
+        return coli_edge_adapter_error(err,size,"V4.1 opaque Edge resource plans are unsupported");
     if(o->backend_mask && o->backend_mask!=COLI_EDGE_CAP_CPU)
-        return coli_edge_adapter_error(err,size,"V4.1 laboratory is CPU only");
+        return coli_edge_adapter_error(err,size,"V4.1 Edge is CPU only");
+    LmbModelShape shape;
+    if(lmb_v41_inspect(o->model_dir,&shape))
+        return coli_edge_adapter_error(err,size,"invalid or incomplete resident V4.1 checkpoint");
+    uint64_t need=lmb_size_add(shape.edge_resident_bytes,shape.edge_scratch_fixed_bytes);
+    if(need==UINT64_MAX || (o->memory_limit_bytes && need>o->memory_limit_bytes))
+        return coli_edge_adapter_error(err,size,"V4.1 resident Edge exceeds the memory budget");
     LmbV41Edge *e=calloc(1,sizeof *e);if(!e)return -1;
     Model *m=&e->weights;cfg_load(&m->c,o->model_dir);
     if(!lmb_v41_layout_valid(&m->c)){free(e);return coli_edge_adapter_error(err,size,"invalid V4.1 layout");}
@@ -128,6 +173,12 @@ static int lmb_v41_edge_open(void **impl,ColiEdgeCapabilities *cap,const ColiEdg
     char path[1024];int n=snprintf(path,sizeof path,"%s/tokenizer.json",o->model_dir);
     if(n<0 || (size_t)n>=sizeof path){lmb_v41_edge_destroy(e);return -1;}
     tok_load(&e->tokenizer,path);e->width=lmb_v41_state_width(&m->c);
+#ifdef LMB_V41_PRODUCT
+    if(o->memory_limit_bytes && lmb_resident_budget_exceeded(o->memory_limit_bytes)) {
+        lmb_v41_edge_destroy(e);return coli_edge_adapter_error(err,size,"V4.1 Edge exceeded approved resident memory");
+    }
+    lmb_resident_adapter_prepared();
+#endif
     memset(cap,0,sizeof *cap);cap->struct_size=sizeof *cap;cap->abi_version=COLI_EDGE_ABI_VERSION;
     cap->flags=COLI_EDGE_CAP_TOKENIZE|COLI_EDGE_CAP_DETOKENIZE|COLI_EDGE_CAP_GREEDY|COLI_EDGE_CAP_LOGITS|COLI_EDGE_CAP_CPU;
     snprintf(cap->engine_id,sizeof cap->engine_id,"deepseek_v41");
@@ -138,7 +189,7 @@ static int lmb_v41_edge_open(void **impl,ColiEdgeCapabilities *cap,const ColiEdg
     cap->vocab_size=(uint32_t)m->c.vocab;cap->max_batch_rows=1;
     cap->max_context_tokens=(uint32_t)m->c.max_positions;cap->num_layers=(uint32_t)m->c.n_layers;
     cap->bos_token_id=-1;cap->eos_token_id=-1;int eos[1];if(serve_eos(m,o->model_dir,eos,1)==1)cap->eos_token_id=eos[0];
-    cap->resident_bytes=(uint64_t)m->c.vocab*m->c.dim*4+(uint64_t)m->c.dim*4;
+    cap->resident_bytes=shape.edge_resident_bytes;
     *impl=e;return 0;
 }
 static int lmb_v41_tokenize(void *impl,const char *text,size_t n,int32_t *ids,size_t cap,size_t *count,char *err,size_t size) {
@@ -182,7 +233,7 @@ static int lmb_v41_select(void *impl,const ColiEdgeSelectRequest *r,char *err,si
     if(!rc)rc=coli_edge_argmax(logits,(uint32_t)e->weights.c.vocab,r->token_ids,r->scores);
     free(logits);return rc;
 }
-static int lmb_v41_lab_register(void) {
+static int lmb_v41_register_impl(void) {
     static const ColiSegmentAdapter segment={.struct_size=sizeof segment,.abi_version=COLI_SEGMENT_ABI_VERSION,
         .engine_id="deepseek_v41",.engine_open=lmb_v41_segment_open,.engine_destroy=lmb_v41_segment_destroy,
         .session_create=lmb_v41_session_create,.session_destroy=lmb_v41_session_destroy,.session_run=lmb_v41_session_run};

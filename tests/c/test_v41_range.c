@@ -181,10 +181,28 @@ static void prove_sessions(const char *path) {
 }
 
 int main(int argc,char **argv) {
-    assert(argc==2);
+    assert(argc==2 || (argc==3 && !strcmp(argv[2],"--tokens-json")));
     setenv("CTX","128",1); setenv("PIN","off",1);
     unsetenv("V41_INDEX_OWNER");
     Cfg c; cfg_load(&c,argv[1]);
+    if(argc==3) {
+        char path[1024];snprintf(path,sizeof path,"%s/ref.json",argv[1]);
+        FILE *f=fopen(path,"rb");assert(f);assert(!fseek(f,0,SEEK_END));long length=ftell(f);
+        assert(length>0 && length<=16*1024*1024 && !fseek(f,0,SEEK_SET));
+        char *text=malloc((size_t)length+1);assert(text);
+        size_t n=fread(text,1,(size_t)length,f);assert(!ferror(f) && n==(size_t)length);fclose(f);text[n]=0;
+        char *arena=NULL;jval *root=json_parse(text,&arena);assert(root);
+        int count=0;int *ids=load_ids(root,"prompt_ids",&count);assert(ids && count>0 && count+8<=128);
+        Model model={0};model_load(&model,argv[1],c.n_routed,32);
+        float *logits=malloc((size_t)c.vocab*4);assert(logits);
+        for(int i=0;i<count;i++)forward(&model,&ids[i],1,logits);
+        printf("{\"token_ids\":[");
+        for(int i=0;i<8;i++) {
+            int next=argmax(logits,c.vocab);printf("%s%d",i?",":"",next);
+            if(i!=7)forward(&model,&next,1,logits);
+        }
+        puts("]}");free(ids);free(logits);json_free(root);free(arena);free(text);lmb_v41_model_destroy(&model,1);return 0;
+    }
     for(int test=0;test<(c.n_layers-1)*3+3;test++) {
         fflush(NULL); pid_t pid=fork(); assert(pid>=0);
         if(!pid) {
@@ -197,5 +215,5 @@ int main(int argc,char **argv) {
         }
         int status; assert(waitpid(pid,&status,0)==pid && WIFEXITED(status) && !WEXITSTATUS(status));
     }
-    puts("V4.1 RANGE ORACLE PASS: exact logits at every cut; foreign KV and mHC are mandatory. Not a production adapter.");
+    puts("V4.1 RANGE ORACLE PASS: exact logits at every cut; foreign KV and mHC are mandatory.");
 }

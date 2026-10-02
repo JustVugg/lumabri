@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build-only V4.1 range hooks; never change the upstream checkout.
 
-This is an oracle laboratory, NOT a distributed adapter registration. It
+The household adapter and its independent boundary oracle share this copy. It
 reuses the pinned engine's layer arithmetic, loads only the selected layer
 weights and preserves mHC pre_mix across a boundary. Cross-layer attention
 state must also be transported; tests deliberately check that contract.
@@ -21,7 +21,7 @@ def prepare(text):
     # These hooks are audited against this source, not against similarly named
     # functions in a future release. Deliberate revalidation is required.
     if hashlib.sha256(text.encode()).hexdigest() != '29957921abf6febf6c409b3aac22319065acddc6f9e303df1b4e02b30d10b141':
-        raise ValueError('V4.1 range laboratory requires pinned Colibri 1.12.1')
+        raise ValueError('V4.1 range engine requires pinned Colibri 1.12.1')
     text = replace_once(text, '    int fd_w, fd_s;\n    int64_t off_w, off_s, rows;',
                         '    int fd_w, fd_s;\n    uint8_t *resident_w, *resident_s;\n    int64_t off_w, off_s, rows;')
     text = replace_once(text, '    t->rows = w->nbytes / head_dim;', '''    t->rows = w->nbytes / head_dim;
