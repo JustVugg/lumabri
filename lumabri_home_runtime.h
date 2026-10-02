@@ -631,6 +631,7 @@ static int cmd_donor_inner(int argc, char **argv) {
         (name && (!*name || strlen(name) >= 64 || lmb_inventory_text(name))) || home_private_network())
         return 2;
     int background = !home_service_foreground();
+    if (background && !home_resident_required()) return home_fail("Background sharing requires resident weights. Disk-cache diagnostics require LUMABRI_HOME_FOREGROUND=1.");
     HomeService service = {.lock = -1, .listener = -1, .reply = -1};
     if (background) {
         if (home_service_ensure()) return home_fail("Cannot start the private household service.");
@@ -1059,7 +1060,7 @@ static int home_request_chat_direct(LmbTuiState *st, int selected) {
             ui_text(12, 5, UI_SAND, bar);
             ui_text(14, 5, UI_TEXT, detail);
             ui_footer("No donor starts without approval.", "Esc cancels"); ui_present();
-        } else {
+        } else if (!home_background_job) {
             printf("LUMABRI / PREPARE CHAT\n\nIndexing %s and verifying its checkpoint identity.\n"
                    "No donor engine is running yet.\n\n[q] Cancel\n", m->name);
             printf("%s\n%s\n", bar, detail);
@@ -1212,7 +1213,7 @@ static int home_request_chat_direct(LmbTuiState *st, int selected) {
         if (term.active) {
             ui_begin("prepare chat");
             ui_printf(6, 5, UI_TEXT, "%s · %u computer(s) · one session", m->name, s.count);
-        } else printf("LUMABRI / PREPARE CHAT\n\n%s · %u computer(s) · one session\n\n", m->name, s.count);
+        } else if (!home_background_job) printf("LUMABRI / PREPARE CHAT\n\n%s · %u computer(s) · one session\n\n", m->name, s.count);
         char bar[29], detail[180];
         lmb_prepare_display(&progress.transfer, 0, nowd(), bar, detail, sizeof detail);
         const char *loading = !committed ? "Waiting for approval; no weights are loading" :
@@ -1232,7 +1233,7 @@ static int home_request_chat_direct(LmbTuiState *st, int selected) {
                     "All assigned weights load into RAM before chat. They stay until you stop sharing." :
                     "Weights load on demand; cache reuse and retries change transfer totals.");
             }
-        } else {
+        } else if (!home_background_job) {
             printf("%s\n", loading);
             if (committed) printf("%s\n%s\n", bar, detail);
         }
@@ -1247,11 +1248,11 @@ static int home_request_chat_direct(LmbTuiState *st, int selected) {
                 if ((int)i >= first_visible && (int)i < first_visible + visible)
                     ui_printf(first_row + ((int)i - first_visible) * 2, 5, UI_TEXT,
                               "%s · %s", s.names[i], lmb_home_phase_name(phases[i]));
-            } else printf("%-20s %s\n", s.names[i], lmb_home_phase_name(phases[i]));
+            } else if (!home_background_job) printf("%-20s %s\n", s.names[i], lmb_home_phase_name(phases[i]));
             if (phases[i] != LMB_HOME_ACCEPTED) accepted = 0;
             if (phases[i] < LMB_HOME_SEGMENT_READY) ready = 0;
         }
-        if (!term.active) { puts("\nNothing loads until every selected computer accepts.\n[q] Cancel and release all computers"); fflush(stdout); }
+        if (!term.active && !home_background_job) { puts("\nNothing loads until every selected computer accepts.\n[q] Cancel and release all computers"); fflush(stdout); }
         if (term.active) { ui_footer("Chat starts only when the entire approved chain is ready.",
             "↑ ↓ scroll computers   Esc cancels and releases"); ui_present(); }
         int key = home_key(); if (key == 'q' || key == 27 || key == 3) goto done;
@@ -1375,6 +1376,7 @@ done:
 
 static int home_request_chat(LmbTuiState *st, int selected) {
     if (home_service_foreground()) return home_request_chat_direct(st, selected);
+    if (!home_resident_required()) return home_fail("Background preparation requires resident weights. Disk-cache diagnostics require LUMABRI_HOME_FOREGROUND=1.");
     g_stopping = 0; install_chat_signal_handlers();
     if (selected < 0 || selected >= st->nmodels || home_service_ensure())
         return home_fail("Cannot start preparation without a selected model and a private service.");

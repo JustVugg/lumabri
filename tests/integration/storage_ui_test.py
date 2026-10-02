@@ -61,7 +61,9 @@ with tempfile.TemporaryDirectory(prefix="lumabri-storage-ui-") as temp:
     try:
         wait_for("What would you like to do?")
         send(b"/"); wait_for("/storage")
-        send(b"\x1b[A\r"); wait_for("Household weight storage")
+        # /service follows /storage now. Navigate forward from /create;
+        # wrapping to the last action would open the service controls.
+        send(b"\x1b[B" * 5 + b"\r"); wait_for("Household weight storage")
         wait_for("Weights are in use")
         send(b"\x1b[B\r"); wait_for("Cleanup is unavailable")
         assert chunk.exists() and mirror.exists()

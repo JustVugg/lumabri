@@ -51,6 +51,13 @@ def main():
                 client.sendall(struct.pack("<II", 1, 1) + bytes(72))
                 assert client.recv(1) == b""
             assert manager()["instance"] == initial["instance"]
+            with socket.socket(socket.AF_UNIX) as client:
+                client.connect(str(directory / "manager.sock"))
+                client.settimeout(2)
+                # Correct incarnation, stale transaction revision.
+                client.sendall(struct.pack("<II", 1, 1) + bytes.fromhex(initial["instance"]) + bytes(32) + struct.pack("<Q", 1))
+                assert client.recv(1) == b""
+            assert manager()["instance"] == initial["instance"]
             # A partial frame has an absolute deadline and cannot monopolize IPC.
             with socket.socket(socket.AF_UNIX) as client:
                 client.connect(str(directory / "manager.sock"))
