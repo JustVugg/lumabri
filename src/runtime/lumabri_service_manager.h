@@ -112,7 +112,10 @@ static int cmd_service(int argc, char **argv) {
                 i ? "," : "", home_service_roles[i], state, live ? "true" : "false", instance,
                 (unsigned long long)s.pid, (unsigned long long)s.segment_pid, (unsigned long long)s.host_pid,
                 s.phase, (unsigned long long)(live && s.has_offer && s.phase >= LMB_HOME_ACCEPTED && s.phase <= LMB_HOME_READY ? s.offer.ram_bytes : 0));
-            doctor_json_string(s.has_offer ? s.offer.model : ""); fputs(",\"detail\":", stdout);
+            doctor_json_string(s.has_offer ? s.offer.model : "");
+            printf(",\"model_count\":%u,\"reserved_total_bytes\":%llu", live ? s.model_count : 0,
+                   (unsigned long long)(live ? s.reserved_total : 0));
+            fputs(",\"detail\":", stdout);
             doctor_json_string(s.detail); fputc('}', stdout);
         } else printf("%-8s %-12s %s%s\n", home_service_roles[i], state,
             live && s.has_offer ? s.offer.model : "", recorded && !live ? " (saved state is not a live allocation)" : "");

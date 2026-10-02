@@ -8,9 +8,10 @@
 #include <sys/file.h>
 
 #define HOME_SVC_VERSION 1u
+#define HOME_SVC_RECORD_VERSION 2u
 #define HOME_SVC_MAX 65536u
 enum { HOME_SVC_STATUS = 0, HOME_SVC_STOP, HOME_SVC_ACCEPT, HOME_SVC_DECLINE,
-       HOME_SVC_UNLOAD, HOME_SVC_CANCEL };
+       HOME_SVC_UNLOAD, HOME_SVC_CANCEL, HOME_SVC_NEXT_MODEL };
 enum { HOME_SVC_RUNNING = 1, HOME_SVC_DONE, HOME_SVC_FAILED, HOME_SVC_STOPPED };
 
 typedef struct {
@@ -20,6 +21,8 @@ typedef struct {
     char role[16], name[64], tracker[256], detail[512];
     LmbHomeOffer offer;
     int has_offer;
+    uint32_t model_count;
+    uint64_t reserved_total;
 } HomeServiceSnapshot;
 
 typedef struct {
@@ -110,7 +113,8 @@ static int home_service_pack(LmbBuf *b, const HomeServiceSnapshot *s) {
     if (!home_service_role(s->role) || !s->state || s->state > HOME_SVC_STOPPED ||
         s->phase > LMB_HOME_CLOSED || s->retained > 1 ||
         (s->has_offer && !lmb_home_offer_valid(&s->offer))) return -1;
-    if (lmb_buf_u32(b, HOME_SVC_VERSION) || lmb_buf_bytes(b, s->instance, 32) ||
+    if (s->model_count > 4 || s->reserved_total > s->ram) return -1;
+    if (lmb_buf_u32(b, HOME_SVC_RECORD_VERSION) || lmb_buf_bytes(b, s->instance, 32) ||
         lmb_buf_u32(b, s->state) || lmb_buf_u32(b, s->phase) ||
         lmb_buf_u32(b, s->retained) || lmb_buf_u32(b, s->threads) ||
         lmb_buf_u64(b, s->pid) || lmb_buf_u64(b, s->segment_pid) ||
@@ -121,13 +125,15 @@ static int home_service_pack(LmbBuf *b, const HomeServiceSnapshot *s) {
     LmbBuf offer = {0};
     int rc = s->has_offer ? lmb_home_offer_pack(&offer, &s->offer) : 0;
     if (!rc) rc = lmb_buf_u32(b, (uint32_t)offer.len) || (offer.len && lmb_buf_bytes(b, offer.p, offer.len));
-    free(offer.p); return rc || b->len > HOME_SVC_MAX ? -1 : 0;
+    free(offer.p);
+    if (!rc) rc = lmb_buf_u32(b, s->model_count) || lmb_buf_u64(b, s->reserved_total);
+    return rc || b->len > HOME_SVC_MAX ? -1 : 0;
 }
 
 static int home_service_unpack(const uint8_t *bytes, size_t n, HomeServiceSnapshot *s) {
     memset(s, 0, sizeof *s);
     LmbCur c = {bytes, n, 0}; uint32_t v, has, size;
-    if (lmb_cur_u32(&c, &v) || v != HOME_SVC_VERSION || c.len - c.off < 32) return -1;
+    if (lmb_cur_u32(&c, &v) || (v != 1 && v != HOME_SVC_RECORD_VERSION) || c.len - c.off < 32) return -1;
     memcpy(s->instance, c.p + c.off, 32); c.off += 32;
     if (lmb_cur_u32(&c, &s->state) || lmb_cur_u32(&c, &s->phase) ||
         lmb_cur_u32(&c, &s->retained) || lmb_cur_u32(&c, &s->threads) ||
@@ -137,10 +143,13 @@ static int home_service_unpack(const uint8_t *bytes, size_t n, HomeServiceSnapsh
         lmb_inventory_string(&c, s->name, sizeof s->name) ||
         lmb_inventory_string(&c, s->tracker, sizeof s->tracker) ||
         lmb_inventory_string(&c, s->detail, sizeof s->detail) ||
-        lmb_cur_u32(&c, &has) || has > 1 || lmb_cur_u32(&c, &size) || size != c.len - c.off) return -1;
+        lmb_cur_u32(&c, &has) || has > 1 || lmb_cur_u32(&c, &size) || size > c.len - c.off) return -1;
     s->has_offer = (int)has;
     LmbCur offer = {c.p + c.off, size, 0};
     if ((has && lmb_home_offer_unpack(&offer, &s->offer)) || (!has && size)) return -1;
+    c.off += size;
+    if (v == 2 && (lmb_cur_u32(&c, &s->model_count) || lmb_cur_u64(&c, &s->reserved_total))) return -1;
+    if (c.off != c.len) return -1;
     LmbBuf check = {0}; int rc = home_service_pack(&check, s); free(check.p); return rc;
 }
 
@@ -273,7 +282,7 @@ static int home_service_poll(HomeService *s) {
     uint8_t r[80];
     if (fcntl(fd, F_SETFD, FD_CLOEXEC) || fcntl(fd, F_SETFL, O_NONBLOCK) || home_service_peer(fd) ||
         home_service_io(fd, r, sizeof r, 0, nowd() + .2) ||
-        lmb_get32(r) != HOME_SVC_VERSION || lmb_get32(r + 4) > HOME_SVC_CANCEL) { close(fd); return -1; }
+        lmb_get32(r) != HOME_SVC_VERSION || lmb_get32(r + 4) > HOME_SVC_NEXT_MODEL) { close(fd); return -1; }
     uint32_t op = lmb_get32(r + 4);
     uint64_t revision = (uint64_t)lmb_get32(r + 72) | ((uint64_t)lmb_get32(r + 76) << 32);
     if (op && (memcmp(r + 8, s->snapshot.instance, 32) || memcmp(r + 40, s->snapshot.offer.id, 32) || revision != s->snapshot.revision)) {

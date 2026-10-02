@@ -9,6 +9,7 @@ import random
 import select
 import signal
 import socket
+import shutil
 import struct
 import subprocess
 import tempfile
@@ -23,6 +24,7 @@ def main():
     parser.add_argument("--models-dir", required=True, type=Path)
     parser.add_argument("--runtime-dir", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--keep-requester", action="store_true", help="also verify the normal post-preparation chat and saved calibration")
+    parser.add_argument("--multi-model", action="store_true", help="two distinct checkpoints coexist on the same donors; unload only one")
     args = parser.parse_args()
     runtime = args.runtime_dir.resolve()
     tmp = Path(tempfile.mkdtemp(prefix="lmb-service-flow-"))
@@ -50,7 +52,7 @@ def main():
         home = tmp / name; (home / ".lumabri").mkdir(parents=True, exist_ok=True)
         settings = home / ".lumabri/home.conf"
         if not settings.exists():
-            settings.write_text(f"tracker={tracker}\ntoken=service-test\nmodels={args.models_dir.resolve()}\nram=0.5\nowner={int(name == 'owner')}\n")
+            settings.write_text(f"tracker={tracker}\ntoken=service-test\nmodels={args.models_dir.resolve()}\nram={1.0 if args.multi_model else 0.5}\nowner={int(name == 'owner')}\n")
             settings.chmod(0o600)
         e = {**os.environ, "HOME": str(home), "LUMABRI_TOKEN": "service-test",
              "LUMABRI_ENCRYPT": "1", "LUMABRI_RESIDENT_REQUIRED": "1", "LUMABRI_HOME_HYBRID": "0",
@@ -198,6 +200,73 @@ def main():
             assert assert_stage_record(records[0]) == 2, "resident real session did not update existing observations"
         resumed.text = ""; resumed.send("/quit\n")
         until(lambda: resumed.has("your workspace"), "chat did not close")
+        if args.multi_model:
+            first_plan = tmp / "first.plan"; shutil.copyfile(record, first_plan); first_plan.chmod(0o600)
+            configs = list(args.models_dir.glob("*/config.json"))
+            assert len(configs) == 1, "multi-model test expects one tiny checkpoint"
+            assert sum(p.stat().st_size for p in configs[0].parent.rglob("*") if p.is_file()) < 32 << 20, "only tiny fixtures may be copied"
+            second_models = tmp / "second-models"; second_model = second_models / "other-checkpoint"
+            shutil.copytree(configs[0].parent, second_model)
+            config = json.loads((second_model / "config.json").read_text())
+            config["_lumabri_test_variant"] = "independent-second-checkpoint"
+            (second_model / "config.json").write_text(json.dumps(config))
+            a, b = sharing("a"), sharing("b")
+            another = Terminal("chatter", ["models", "--models-dir", str(second_models), "--tracker", tracker,
+                                            "--context", "128", "--max-new", "8"])
+            until(lambda: "3 computers visible" in current_frame(another), "second-model inventory missing")
+            another.send("\t")
+            until(lambda: "Nothing is selected automatically" in current_frame(another), "second selection missing")
+            another.send("\x1b[B\r")
+            until(lambda: "1 selected" in current_frame(another), "first second-model donor missing")
+            another.send("\x1b[B\r")
+            until(lambda: "2 selected" in current_frame(another), "second second-model donor missing")
+            another.send("\t\r")
+            until(lambda: "Plan: resident" in current_frame(another) and current_frame(another).count("GB reserved") == 2,
+                  "existing allocations prevented a feasible second model")
+            another.send("\r")
+            until(lambda: "Waiting for your approval" in current_frame(a) and "Waiting for your approval" in current_frame(b),
+                  "same donors did not receive second-model offers", 150)
+            a.send("\x1b[A\r"); b.send("\x1b[A\r")
+            until(lambda: another.has("receives the text"), "second model did not start", 180)
+            another.send("hello second model\n")
+            until(lambda: hosted_turn_complete(another.text), "second model did not generate", 120)
+            second_live = {name: service(name)["donor"] for name in ("a", "b")}
+            assert all(s["model_count"] == 2 and s["reserved_total_bytes"] > s["reserved_bytes"] for s in second_live.values()), second_live
+            assert all(second_live[name]["segment_pid"] != before[name]["segment_pid"] for name in ("a", "b"))
+            for name in ("a", "b", "chatter"):
+                service(name, "restart")
+            assert all(service(name)["donor"]["model_count"] == 2 for name in ("a", "b")), "manager lost a resident allocation"
+            # Separate hosts must accept independent conversations while both
+            # models are loaded; neither admission can reuse the other's KV.
+            raw = first_plan.read_bytes(); at = 4; names = []
+            for _ in range(5):
+                size = struct.unpack_from("<H", raw, at)[0]; at += 2
+                names.append(raw[at:at+size].decode()); at += size
+            parallel = Terminal("chatter", ["chat", "--host", names[1], "--host-key", names[2],
+                "--host-root", names[3], "--model", names[4], "--tracker", tracker, "--ctx", "128", "--max-new", "8"])
+            until(lambda: parallel.has("receives the text"), "first model could not open a parallel conversation")
+            another.text = ""; another.send("beta\n"); parallel.send("alpha\n")
+            until(lambda: hosted_turn_complete(another.text) and hosted_turn_complete(parallel.text),
+                  "concurrent independent models failed to generate", 120)
+            parallel.send("/quit\n")
+            until(lambda: parallel.p.poll() is not None, "parallel first-model chat did not close")
+            # The authenticated release names the first allocation, not the
+            # keeper's currently selected second model.
+            release = subprocess.run([str(runtime / "test_chat_ui"), "resident-release", str(first_plan), tracker],
+                                     env=env("chatter"), text=True, capture_output=True, timeout=20)
+            assert release.returncode == 0, release.stderr
+            assert all(service(name)["donor"]["model_count"] == 1 for name in ("a", "b"))
+            assert all(service(name)["donor"]["segment_pid"] == second_live[name]["segment_pid"] for name in ("a", "b")), "unload killed the other model"
+            another.text = ""; another.send("still here?\n")
+            until(lambda: hosted_turn_complete(another.text), "second model stopped after first model unloaded", 120)
+            another.send("/quit\n")
+            until(lambda: another.p.poll() is not None, "second chat did not close")
+            release = subprocess.run([str(runtime / "test_chat_ui"), "resident-release", str(record), tracker],
+                                     env=env("chatter"), text=True, capture_output=True, timeout=20)
+            assert release.returncode == 0, release.stderr
+            assert all(not service(name)["donor"]["reserved_total_bytes"] for name in ("a", "b"))
+            print("MULTI-MODEL SERVICE: PASS (two checkpoints on SAME donors, separate approval and RAM, manager restart, unload first while second chat lives)", flush=True)
+            return
         resumed.send("\x1b[B" * 4 + "\r")
         until(lambda: resumed.has("resident models"), "resident library missing")
         resumed.send("r")

@@ -5861,6 +5861,7 @@ static int cmd_models(int argc, char **argv) {
 /* A worker publishes inventory even before a model is selected. This command
  * does not reserve RAM, launch engines or download checkpoint blocks. */
 static int cmd_worker(int argc, char **argv) {
+    int donor_service = 0;
     const char *tracker = NULL, *name = NULL, *disk = ".", *control = "";
     const char *runtime_epoch = NULL;
     uint64_t limit = UINT64_MAX;
@@ -5870,6 +5871,7 @@ static int cmd_worker(int argc, char **argv) {
         else if (!strcmp(argv[i], "--disk") && i + 1 < argc) disk = argv[++i];
         else if (!strcmp(argv[i], "--control-address") && i + 1 < argc) control = argv[++i];
         else if (!strcmp(argv[i], "--runtime-epoch") && i + 1 < argc) runtime_epoch = argv[++i];
+        else if (!strcmp(argv[i], "--donor-service")) donor_service = 1;
         else if (!strcmp(argv[i], "--ram-gb") && i + 1 < argc) {
             char *end;
             double gb = strtod(argv[++i], &end);
@@ -5930,6 +5932,14 @@ static int cmd_worker(int argc, char **argv) {
             uint64_t available = report.machine.ram_available_bytes;
             report.ram_budget_bytes = available > reserve ? available - reserve : 0;
             if (report.ram_budget_bytes > limit) report.ram_budget_bytes = limit;
+            if (donor_service) {
+                HomeServiceSnapshot keeper;
+                if (home_service_query("donor", HOME_SVC_STATUS, NULL, &keeper) ||
+                    strcmp(keeper.tracker, tracker) || keeper.reserved_total > keeper.ram)
+                    report.ram_budget_bytes = 0;
+                else if (report.ram_budget_bytes > keeper.ram - keeper.reserved_total)
+                    report.ram_budget_bytes = keeper.ram - keeper.reserved_total;
+            }
             if (lmb_governor_manual_paused()) report.ram_budget_bytes = 0;
             LmbBuf body = {0}, signed_data = {0};
             uint8_t sig[64];

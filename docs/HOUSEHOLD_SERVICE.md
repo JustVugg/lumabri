@@ -37,7 +37,8 @@ RAM or resume models automatically. No system-wide login service is installed.
 
 ## Interface
 
-- **Share resources:** Esc detaches; `x` unloads the current allocation;
+- **Share resources:** Esc detaches; Tab cycles the loaded/requested models;
+  `x` unloads only the currently displayed allocation;
   `s` stops the local sharing service. Pending offers remain declined by default.
 - **Preparation:** Esc detaches; `c` cancels the operation and releases its
   incomplete allocations. Closing the window is not cancellation.
@@ -51,10 +52,25 @@ RAM or resume models automatically. No system-wide login service is installed.
 - CLI: `lumabri service status --json`, `start`, `restart`, `stop`.
 
 The resident library stores no conversation text, credentials or weights.
-Multiple plans are separate records, not evidence of simultaneous capacity on
-one computer. Each donor still admits one allocation; multiple active plans
-need disjoint available donors. There is one preparation at a time per local
-service. Shared-donor batching, automatic failover/replay, server-wide cost
+The background donor keeper can retain up to four independently approved models
+on the same machine, provided their summed reservations fit its sharing budget
+and current memory permits preparation. Pending loads remain reserved before
+their full RSS appears. The reporter subtracts all live reservations from the
+offered budget; admission rechecks it, so stale inventory never grants memory.
+Overflow and capacity exhaustion fail closed. Allocations share one machine-wide
+ownership lease, but have separate engine processes, KV/session state, allocation
+IDs and mutable preparation mirrors; content-addressed immutable blocks may be shared.
+Releasing one model or losing its requester cannot release another allocation.
+Only stopping the sharing service unloads all its models. Manager restart does
+not replay approvals or create duplicate reservations.
+
+This is memory-safe coexistence, not guaranteed per-model performance. Models
+share CPU time through the OS; their independent engines may compete when chats
+overlap. Previous single-model tok/s are historical observations, not a concurrent
+SLA. The current maximum is four models and one hosted chat per model. There is
+one preparation at a time per requesting local service. The legacy foreground
+diagnostic donor remains single-allocation. Shared-donor batching, fair global
+compute scheduling, automatic failover/replay, server-wide cost
 optimization and model eviction policies are separate work.
 
 ## Next dependencies
@@ -66,10 +82,7 @@ Short probes seed observations and completed sessions update them; changed
 execution conditions make them stale. See [the evidence contract](CALIBRATION_RECORDS.md#planner-resource-evidence)
 for the implemented subset and remaining unknowns.
 
-Shared-donor **multi-model management** follows this foundation: independent
-allocation identities, summed reservations, per-model unload, isolated sessions
-and restart reconciliation must work on the same donor before concurrent
-capacity can be claimed. A separate **DeepSeek V4.1** integration must address
+A separate **DeepSeek V4.1** integration must address
 its cross-layer state and resident Engram tables; Colibri 1.12.1's standalone
 engine is not an Edge/Segment adapter and cannot be aliased to DeepSeek V4.
 
@@ -83,6 +96,7 @@ household scoping.
 
 ```sh
 python3 tests/integration/household_service_flow_test.py --models-dir /path/to/tiny-model-parent
+python3 tests/integration/household_service_flow_test.py --models-dir /path/to/tiny-model-parent --keep-requester --multi-model
 ```
 
 This real-engine gate creates an isolated tracker and two donors, closes the
