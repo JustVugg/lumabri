@@ -460,9 +460,9 @@ static int cmd_home(void) {
             int menu_rows = (ui_h - top - 6) / 3; if (menu_rows < 1) menu_rows = 1;
             int menu_first = selected >= menu_rows ? selected - menu_rows + 1 : 0;
             for (int i = menu_first; i < menu_count && i < menu_first + menu_rows; i++) ui_item(top + 2 + (i - menu_first) * 3, selected == i,
-                actions ? commands[i] : i == 0 && have_resident ? "New conversation · retained model" : titles[i],
+                actions ? commands[i] : i == 0 && have_resident ? "New conversation · saved plan" : titles[i],
                 actions ? command_help[i] : i == 0 && have_resident ?
-                    "Reuse the approved plan. Host identity and model are checked on connection." : help[i]);
+                    "Reconnect if its donors are ready. Host and model are checked; no weights are loaded." : help[i]);
             ui_footer(notice[0] ? notice : s.tracker[0] ? s.tracker : "Create or join a household with / actions.",
                       "↑ ↓ move   Enter select   / actions   Esc back   Ctrl-C exit");
             if (ui_h < 28 || ui_w < 60) {

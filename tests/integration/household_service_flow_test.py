@@ -57,7 +57,10 @@ def main():
              "LUMABRI_ADVERTISE": "127.0.0.1", "LUMABRI_HOME_PORT_BASE": str(base + 16 * slots[name]),
              "LUMABRI_RAM_RESERVE_MB": "256", "LUMABRI_NO_DISK_PROBE": "1",
              "LUMABRI_PEER_KEY": str(home / "peer.key"), "LUMABRI_KNOWN_HOSTS": str(home / "known.hosts"),
-             "LUMABRI_IO_TIMEOUT_MS": "2000", "COLI_NO_OMP_TUNE": "1", "OMP_NUM_THREADS": "2", "PIN": "off"}
+             # Tracker idle timeout must exceed the 5-second inventory
+             # heartbeat. A 2-second timeout made healthy donors disappear
+             # between reports and changed the plan during key navigation.
+             "LUMABRI_IO_TIMEOUT_MS": "15000", "COLI_NO_OMP_TUNE": "1", "OMP_NUM_THREADS": "2", "PIN": "off"}
         e.pop("LUMABRI_HOME_FOREGROUND", None)
         return e
 
@@ -184,7 +187,7 @@ def main():
         service("a", "start")
         assert service("a")["donor"]["segment_pid"] == before["a"]["segment_pid"]
         resumed = Terminal("chatter")
-        until(lambda: resumed.has("New conversation · retained model"), "retained entry missing")
+        until(lambda: resumed.has("New conversation · saved plan"), "saved plan entry missing")
         resumed.send("\r")
         until(lambda: resumed.has("receives the text"), "retained host did not answer")
         resumed.send("hi\n")

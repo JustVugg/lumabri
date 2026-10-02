@@ -763,7 +763,7 @@ def main():
             # exited. Reconnect with the same accepted identity: no source,
             # no donor restart and no checkpoint download are available.
             resume = Terminal("resident-resume", ["./lumabri"], "chatter")
-            until(lambda: resume.has("New conversation · retained model"),
+            until(lambda: resume.has("New conversation · saved plan"),
                   message="TUI did not recover the approved resident plan after restart")
             resume.send("\r")
             until(lambda: resume.has("receives the text") or resume.p.poll() is not None)
