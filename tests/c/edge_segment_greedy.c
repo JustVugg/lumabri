@@ -78,16 +78,19 @@ done:
 }
 
 int main(int argc, char **argv) {
+    /* Colibri's header also exports the permissive legacy parser. Oracles
+     * use the checked API introduced before v1.12.1, never a partial tree. */
+    (void)json_parse;
     if(argc!=4) {fprintf(stderr,"usage: %s FAMILY CHECKPOINT ORACLE.json\n",argv[0]);return 2;}
     char error[512]="invalid oracle"; int rc=1;
     FILE *file=fopen(argv[3],"rb"); if(!file) return 2;
-    char *text=malloc(1u<<20),*arena=NULL; jval *root=NULL;
+    char *text=malloc(1u<<20); jval *root=NULL;
     ColiEdgeEngine *edge=NULL;
     if(!text) {fclose(file);return 2;}
     size_t n=fread(text,1,(1u<<20)-1,file);
     int bad=ferror(file)||!feof(file); fclose(file); text[n]=0;
-    REQUIRE(!bad);
-    root=json_parse(text,&arena); REQUIRE(root);
+    REQUIRE(!bad && !memchr(text,0,n));
+    root=json_parse_checked(text); REQUIRE(root);
     int32_t prompt[512],full[512];
     int np=ids(root,"prompt_ids",prompt),nf=ids(root,"full_ids",full);
     REQUIRE(np>0 && nf>np && !memcmp(prompt,full,(size_t)np*sizeof(*prompt)));
@@ -104,5 +107,5 @@ int main(int argc, char **argv) {
     REQUIRE(!run_oracle(argv[1],argv[2],edge,&ec,2,prompt,np,full,nf));
     rc=0;
 done:
-    coli_edge_engine_close(edge);json_free(root);free(arena);free(text);return rc;
+    coli_edge_engine_close(edge);json_free(root);free(text);return rc;
 }

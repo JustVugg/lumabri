@@ -263,6 +263,7 @@ jobs:
           python3 tests/integration/prepare_qwen38_fixture.py --engine ../colibri/c --out build/qwen38-contract/qwen38-tiny
           python3 tests/integration/planner_tensor_contract_test.py --family qwen38 --model build/qwen38-contract/qwen38-tiny
           cc -I../colibri/c -O2 -Wall -Wextra -Werror -fopenmp -pthread tests/c/edge_segment_greedy.c build/segment-hybrid-colibri/build/segment/libcolibri_segment_edge.a -o build/qwen38-greedy-oracle -lm
+          python3 tests/integration/edge_oracle_input_test.py build/qwen38-greedy-oracle
           cc -I. -I../colibri/c -O2 -Wall -Wextra -Werror -fopenmp -pthread tests/c/test_segment_stream.c lumabri_segment.c lumabri_segment_discovery.c lumabri_sampling.c build/segment-hybrid-colibri/build/segment/libcolibri_segment_edge.a -o build/test-segment-stream -lm
           build/test-segment-stream
           OMP_NUM_THREADS=2 build/qwen38-greedy-oracle qwen38 build/qwen38-contract/qwen38-tiny build/qwen38-contract/qwen38-tiny/ref.json
