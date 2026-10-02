@@ -36,10 +36,12 @@ def prepare(text):
         memcpy(bytes, t->resident_w + (size_t)id * head_dim, (size_t)head_dim);
         memcpy(scales, t->resident_s + (size_t)id * groups, (size_t)groups);''')
     text = replace_once(text, "    Cfg c;\n    shards S;", """    Cfg c;
-    int range_begin, range_end, range_enabled;
+    int range_begin, range_end, range_enabled, context_limit;
     const float *boundary_input, *boundary_mix;
     float *boundary_output, *boundary_output_mix;
     shards S;""")
+    text = replace_once(text, '    cfg_load(c, snap);\n    attn_project_check(c);',
+                        '    cfg_load(c, snap);\n    if (m->context_limit >= 2 && m->context_limit < c->max_positions) c->max_positions = m->context_limit;\n    attn_project_check(c);')
     # No global head/embedding and no unrelated layer weights on a donor.
     text = replace_once(text, '    wb_load(&m->S, &m->embed, "embed.weight", c->vocab, dim);',
                         '    if (!m->range_enabled) {\n    wb_load(&m->S, &m->embed, "embed.weight", c->vocab, dim);')

@@ -146,8 +146,13 @@ jobs:
         working-directory: lumabri
         run: |
           make test-v41-range ENGINE=../colibri/c
+          make test-v41-transport-existing test-v41-abi-existing ENGINE=../colibri/c
           cc -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -pthread -I. -Ibuild -I../colibri/c tests/c/test_v41_range.c -o build/test_v41_range_san -lm
           ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./build/test_v41_range_san build/v41-tiny
+          cc -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -pthread -I. -Ibuild -I../colibri/c tests/c/test_v41_transport.c lumabri_segment.c -o build/test_v41_transport_san -lm
+          ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./build/test_v41_transport_san build/v41-tiny
+          cc -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -pthread -I. -Ibuild -I../colibri/c tests/c/test_v41_abi.c ../colibri/c/segment_runtime.c ../colibri/c/edge_runtime.c -o build/test_v41_abi_san -lm
+          ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./build/test_v41_abi_san build/v41-tiny
       - uses: actions/upload-artifact@v4
         with:
           name: tiny-v41-boundary-checkpoint
@@ -425,9 +430,9 @@ jobs:
           OPENMP_MODE: ${{ matrix.openmp }}
         run: |
           if [ "$OPENMP_MODE" = disabled ]; then
-            make test-v41-range-existing ENGINE=../colibri/c CC=clang OMP_FLAGS= OMP_LIBS=
+            make test-v41-range-existing test-v41-transport-existing test-v41-abi-existing ENGINE=../colibri/c CC=clang OMP_FLAGS= OMP_LIBS=
           else
-            make test-v41-range-existing ENGINE=../colibri/c CC=clang
+            make test-v41-range-existing test-v41-transport-existing test-v41-abi-existing ENGINE=../colibri/c CC=clang
           fi
       - name: Request, accept, fetch weights and chat on native macOS
         working-directory: lumabri

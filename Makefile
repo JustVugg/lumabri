@@ -716,6 +716,12 @@ build/v41_range_core.c: tools/prepare_v41_range.py $(ENGINE)/deepseek_v41.c
 build/test_v41_range: tests/c/test_v41_range.c engine_patches/v41_boundary.h engine_patches/v41_lifecycle.h build/v41_range_core.c build/segment-sources build/segment-options
 	$(CC) $(CPPFLAGS) -O2 $(OMP_FLAGS) -pthread -I. -Ibuild -I$(ENGINE) tests/c/test_v41_range.c -o $@ -lm $(OMP_LIBS)
 
+build/test_v41_transport: tests/c/test_v41_transport.c engine_patches/v41_boundary.h engine_patches/v41_lifecycle.h build/v41_range_core.c lumabri_segment.c lumabri_segment.h lumabri_proto.h $(SECURE_DEPS) build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) -O2 $(OMP_FLAGS) -pthread -I. -Ibuild -I$(ENGINE) tests/c/test_v41_transport.c lumabri_segment.c -o $@ -lm $(OMP_LIBS)
+
+build/test_v41_abi: tests/c/test_v41_abi.c engine_patches/v41_abi_lab.h engine_patches/v41_boundary.h engine_patches/v41_lifecycle.h build/v41_range_core.c build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) -O2 $(OMP_FLAGS) -pthread -I. -Ibuild -I$(ENGINE) tests/c/test_v41_abi.c $(ENGINE)/segment_runtime.c $(ENGINE)/edge_runtime.c -o $@ -lm $(OMP_LIBS)
+
 build/v41_upstream: build/segment-sources build/segment-options
 	mkdir -p build
 	$(CC) $(CPPFLAGS) -O2 $(OMP_FLAGS) -pthread $(ENGINE)/deepseek_v41.c -o $@ -lm $(OMP_LIBS)
@@ -723,7 +729,7 @@ build/v41_upstream: build/segment-sources build/segment-options
 build/v41-tiny/ref.json: $(ENGINE)/tools/make_dsv41_tiny.py $(ENGINE)/tools/dsv41_ref.py
 	python3 $(ENGINE)/tools/make_dsv41_tiny.py --out build/v41-tiny --emit-ref $@ --max-new 16 --prompt-len 8
 
-.PHONY: test-v41-range test-v41-range-existing
+.PHONY: test-v41-range test-v41-range-existing test-v41-transport-existing test-v41-abi-existing
 test-v41-range: build/v41-tiny/ref.json
 	$(MAKE) test-v41-range-existing
 
@@ -731,9 +737,18 @@ test-v41-range: build/v41-tiny/ref.json
 # PyTorch or regenerate a different reference on the target machine.
 test-v41-range-existing: build/test_v41_range build/v41_upstream
 	test -f build/v41-tiny/ref.json
+	python3 tests/integration/v41_build_guard_test.py --source $(ENGINE)/deepseek_v41.c
 	SNAP=build/v41-tiny OMP_NUM_THREADS=1 CTX=128 V41_ENGRAM_ROWS=32 build/v41_upstream 8 build/v41-tiny/ref.json
 	OMP_NUM_THREADS=1 build/test_v41_range build/v41-tiny
 	OMP_NUM_THREADS=2 build/test_v41_range build/v41-tiny
+
+test-v41-transport-existing: build/test_v41_transport
+	OMP_NUM_THREADS=1 build/test_v41_transport build/v41-tiny
+	OMP_NUM_THREADS=2 build/test_v41_transport build/v41-tiny
+
+test-v41-abi-existing: build/test_v41_abi
+	OMP_NUM_THREADS=1 build/test_v41_abi build/v41-tiny
+	OMP_NUM_THREADS=2 build/test_v41_abi build/v41-tiny
 
 test-segment-direct-real: tracker maintainer liblumabri.so lumabri \
 		segment-direct test_sampling

@@ -13,7 +13,8 @@
   reference math remain upstream-owned.
 - Lumabri changes: exact, hash-pinned build-copy hooks for partial range loading,
   residual/mHC boundaries and resident packed Engram tables; a Lumabri-owned
-  shared-state delta codec and range oracle test. DSpark and vision are excluded
+  shared-state delta codec, session lifetime helper, experimental public-ABI
+  wrapper and numerical/encrypted process-boundary oracle tests. DSpark and vision are excluded
   from this text boundary laboratory; they are not declared supported.
 - The source checkout is never modified. The generated copy is not a general
   engine fork and is not linked into shipped Lumabri binaries.

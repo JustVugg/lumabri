@@ -34,6 +34,27 @@ two-conversation test, reset and destroy/recreate reproduce exact logits without
 weight reads. This is a tested lifetime primitive, not yet the public ABI wrapper
 or proof that every allocation-failure path is handled.
 
+`make test-v41-transport-existing` then executes two ranges in **separate
+processes**, over authenticated encrypted local socket pairs with pinned test
+identities and the existing Segment RUN codec/session table. Two interleaved
+conversations each reproduce 48 exact logits blocks. Stale/future owners,
+truncated and malformed delta frames are refused; a duplicate request returns
+its cached response without a second kernel invocation. Tail feedback is
+separate per conversation. These are local sockets, not physical LAN evidence,
+and the harness is not the product `segment_node` or approval flow.
+
+`make test-v41-abi-existing` registers an experimental wrapper **only inside
+the test executable**, through the actual Colibri Edge/Segment ABI. Tokenization,
+embedding, logits/greedy selection, two isolated sessions, cancellation before a
+token, malformed/out-of-order input and close/reopen run at all five layer cuts.
+The wrapper loads only Edge weights or the assigned range, not a whole model
+per donor. It exposes single-row text CPU execution and no snapshot capability.
+Positive memory budgets are explicitly refused, never silently ignored: the
+bounded checkpoint inspector and admission contract are not implemented yet.
+The underlying CLI loader's fatal-error paths must also be contained before it
+can become a product adapter. Neither this wrapper nor its experimental
+registration is linked into the normal Lumabri binaries.
+
 ## Required state
 
 The residual streams alone are insufficient. Each cut needs mHC `pre_mix`,
@@ -54,8 +75,9 @@ explicit, matched numerical policy when comparing results.
 
 ## Still required before product registration
 
-1. Complete Edge/Segment lifecycle and cleanup with separate session state,
-   bounded memory preflight, reset/cancellation and validated snapshots/replay.
+1. Turn the tested Edge/Segment wrapper into a bounded, failure-safe checkpoint
+   loader; enforce aggregate engine/session memory and validated snapshots or
+   replay. Token-boundary cancellation is tested, not mid-kernel cancellation.
 2. Authenticated, allocation-scoped transport for the delta state and feedback,
    including retries and failover; no cross-session or stale-frame reuse.
 3. Exact planner tensor/sidecar inspection and memory accounting, including

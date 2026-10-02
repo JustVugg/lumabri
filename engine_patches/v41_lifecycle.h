@@ -111,6 +111,12 @@ static void lmb_v41_state_reset(Model *m) {
     m->pos = m->last_start = m->last_rows = m->main_hidden_rows = m->rollback_save = 0;
     m->boundary_input = m->boundary_mix = NULL;
     m->boundary_output = m->boundary_output_mix = NULL;
+    m->clock = m->hits = m->miss = m->forwards = m->expert_bytes = 0;
+    m->t_disk = m->t_expert = m->t_attn = m->t_engram = m->t_spec = 0;
+    for (int i = 0; i < c->n_layers; i++) {
+        if (m->ehit) memset(m->ehit[i], 0, (size_t)c->n_routed);
+        for (int j = 0; j < m->cache[i].n; j++) m->cache[i].slot[j].used = 0;
+    }
     kv_prefix_clear(&m->kvp);
 }
 
