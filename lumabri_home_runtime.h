@@ -205,7 +205,7 @@ static int home_status_send(int fd, const LmbHomeTransaction *t, int segment_por
     free(b.p); return rc;
 }
 
-typedef struct {
+typedef struct HomeDonor {
     LmbHomeTransaction transaction;
     LmbHybridRoutes hybrid_routes;
     int hybrid_routes_ready;
@@ -219,7 +219,48 @@ typedef struct {
     char log[1200];
     char runtime_epoch[65], runtime_id[65];
     LmbRuntimeIdentityCache runtime_cache;
+    struct HomeDonor *parked; /* three additional allocations owned by this same keeper */
+    uint32_t park_capacity;
+    uint64_t pool_budget;
+    uint32_t display_models;
+    uint64_t display_reserved;
 } HomeDonor;
+
+static uint64_t home_donor_reserved(const HomeDonor *d) {
+    uint64_t used = d->transaction.reservation_held ? d->transaction.offer.ram_bytes : 0;
+    for (uint32_t i = 0; i < d->park_capacity; i++)
+        if (d->parked[i].transaction.reservation_held)
+            used = lmb_size_add(used, d->parked[i].transaction.offer.ram_bytes);
+    return used;
+}
+
+static uint64_t home_donor_room(const HomeDonor *d, uint64_t available) {
+    uint64_t used = home_donor_reserved(d);
+    uint64_t room = used < d->pool_budget ? d->pool_budget - used : 0;
+    /* Loading allocations have not materialized their full RSS yet. Keep
+     * their reservation out of observed free memory as well as the pool cap.
+     * Counting partial RSS twice is conservative, never an overcommit. */
+    uint64_t loading = d->transaction.reservation_held && !d->retained ? d->transaction.offer.ram_bytes : 0;
+    for (uint32_t i = 0; i < d->park_capacity; i++)
+        if (d->parked[i].transaction.reservation_held && !d->parked[i].retained)
+            loading = lmb_size_add(loading, d->parked[i].transaction.offer.ram_bytes);
+    available = available > loading ? available - loading : 0;
+    return available < room ? available : room;
+}
+
+static void home_donor_swap(HomeDonor *d, uint32_t index) {
+    /* The revision fences the VIEW, not a reusable slot number. */
+    uint64_t revision = d->offer_revision;
+    HomeDonor temp = *d; *d = d->parked[index]; d->parked[index] = temp;
+    d->offer_revision = revision == UINT64_MAX ? revision : revision + 1;
+}
+
+static int home_donor_available_slot(const HomeDonor *d) {
+    for (uint32_t i = 0; i < d->park_capacity; i++)
+        if (!d->parked[i].transaction.reservation_held && d->parked[i].client < 0 &&
+            d->parked[i].transaction.phase != LMB_HOME_PENDING) return (int)i;
+    return -1;
+}
 
 /* --disk can point two different homes at the same persistent weight cache.
  * Their RAM leases are separate files, so also serialize mutable mirrors by
@@ -298,8 +339,9 @@ static int home_donor_launch(HomeDonor *d, int edge) {
     char bytes[32], layers[20], max_new[20], e_omp[64], e_omp_limit[64];
     if (checked_printf(shim, sizeof shim, "%s/" LMB_SHIM_NAME, d->bin_dir) ||
         checked_printf(binary, sizeof binary, "%s/%s", d->bin_dir, edge ? "lumabri" : "segment_node") ||
-        checked_printf(vroot, sizeof vroot, "%s/%.16s/vroot", d->cache_base, id) ||
-        checked_printf(cache, sizeof cache, "%s/mirrors/%s/cache", d->cache_base, family->segment_id) ||
+        checked_printf(vroot, sizeof vroot, "%s/%s/vroot", d->cache_base, id) ||
+        checked_printf(cache, sizeof cache, "%s/mirrors/%s/cache",
+                       d->cache_base, d->park_capacity ? id : family->segment_id) ||
         checked_printf(cas, sizeof cas, "%s/cas", d->cache_base) ||
         access(binary, X_OK)) return -1;
     if (access(shim, R_OK) &&
@@ -378,6 +420,9 @@ static void home_donor_screen(const HomeDonor *d, const char *name, uint64_t ram
         ui_begin("share resources");
         ui_printf(5, 5, UI_TEXT, "%s · up to %.1f GB RAM · CPU execution", name, ram / 1e9);
         ui_text(7, 5, UI_SAND, d->retained ? "Weights retained in RAM; ready for another chat" : lmb_home_phase_name(t->phase));
+        if (d->persistent && d->display_models > 1)
+            ui_printf(8, 5, UI_MUTED, "%u models · %.2f GB reserved in total · Tab changes the selected model · CPU time is shared",
+                      d->display_models, d->display_reserved / 1e9);
         if (t->phase != LMB_HOME_IDLE) {
             char who[65]; lmb_hex(who, t->offer.requester, 32);
             ui_printf(10, 5, UI_TEXT, "Model: %s (%s)", t->offer.model, t->offer.model_type);
@@ -401,11 +446,11 @@ static void home_donor_screen(const HomeDonor *d, const char *name, uint64_t ram
                 "Keep these weights in RAM until you stop sharing." : "Reserve only the displayed resources for this plan.");
             ui_item(y + 3, choice == 1, "Decline", "No weights or model state will be loaded.");
         } else ui_item(y, 0, d->persistent ? "Sharing continues in the background" : "Keep this window open to share", d->retained ?
-            "Weights stay in RAM. Unload only to accept a different plan." : d->persistent ?
+            "Weights stay in RAM. Additional models require free capacity and separate approval." : d->persistent ?
             "Closing this view does not approve new requests or stop sharing." : "Press Esc to stop sharing and release resources.");
         ui_footer(t->reason[0] ? t->reason : d->persistent ? "No allocation starts without your approval." : d->log, d->persistent ?
             t->phase == LMB_HOME_PENDING ? "↑ ↓ choose   Enter confirm   Esc detach   s stop sharing" :
-            "x unload model   Esc detach   s stop sharing" : t->phase == LMB_HOME_PENDING ?
+            "Tab next model   x unload this model   Esc detach   s stop sharing" : t->phase == LMB_HOME_PENDING ?
             "↑ ↓ choose   Enter confirm   Esc stop and return" :
             d->retained ? "x unload model, keep sharing   Esc stop sharing" : "Esc stop sharing and return");
         if (ui_w < 60 || ui_h < 28) {
@@ -462,16 +507,20 @@ static int home_donor_offer(HomeDonor *d, int incoming, const char *tracker,
     }
     if (!rc) {
         if (m.op == LMB_HOME_QUERY || m.op == LMB_HOME_RELEASE) {
+            HomeDonor *target = d;
+            if (m.body_len == 64 && memcmp(m.body, d->transaction.offer.id, 32))
+                for (uint32_t i = 0; i < d->park_capacity; i++)
+                    if (!memcmp(m.body, d->parked[i].transaction.offer.id, 32)) { target = &d->parked[i]; break; }
             /* A remembered endpoint is not authority. Only the original
              * authenticated requester can inspect/release THIS allocation. */
             int permitted = m.body_len == 64 && !m.pay_len &&
-                lmb_home_offer_valid(&d->transaction.offer) &&
-                !memcmp(m.body, d->transaction.offer.id, 32) &&
-                !memcmp(m.body + 32, d->transaction.offer.model_root, 32) &&
-                lmb_secure_peer_matches(incoming, d->transaction.offer.requester);
+                lmb_home_offer_valid(&target->transaction.offer) &&
+                !memcmp(m.body, target->transaction.offer.id, 32) &&
+                !memcmp(m.body + 32, target->transaction.offer.model_root, 32) &&
+                lmb_secure_peer_matches(incoming, target->transaction.offer.requester);
             if (permitted) {
-                if (m.op == LMB_HOME_RELEASE) home_donor_disconnect(d, "Released by the original requester.");
-                (void)home_status_send(incoming, &d->transaction, d->segment_port, d->host_port);
+                if (m.op == LMB_HOME_RELEASE) home_donor_disconnect(target, "Released by the original requester.");
+                (void)home_status_send(incoming, &target->transaction, target->segment_port, target->host_port);
             }
             lmb_msg_free(&m); return -1;
         }
@@ -487,6 +536,21 @@ static int home_donor_offer(HomeDonor *d, int incoming, const char *tracker,
              !lmb_secure_peer_matches(incoming, offer.requester);
     }
     lmb_msg_free(&m);
+    if (!rc) {
+        for (uint32_t i = 0; i <= d->park_capacity; i++) {
+            const HomeDonor *other = i ? &d->parked[i-1] : d;
+            if ((other->transaction.reservation_held || other->transaction.phase == LMB_HOME_PENDING) &&
+                !memcmp(other->transaction.offer.id, offer.id, 32)) {
+                LmbHomeTransaction busy = {.offer = offer, .phase = LMB_HOME_REJECTED};
+                snprintf(busy.reason, sizeof busy.reason, "BUSY: this allocation already exists; no duplicate reservation was created.");
+                (void)home_status_send(incoming, &busy, 0, 0); return -1;
+            }
+        }
+    }
+    if (!rc && d->retained && !strcmp(offer.tracker, tracker) && offer.ram_bytes <= ram) {
+        int slot = home_donor_available_slot(d);
+        if (slot >= 0 && d->offer_revision < UINT64_MAX) home_donor_swap(d, (uint32_t)slot);
+    }
     if (!rc && (d->client >= 0 || d->retained)) {
         /* Reply against the NEW request ID without changing the admitted
          * transaction, its leases, or its controller connection. An EOF is
@@ -494,7 +558,7 @@ static int home_donor_offer(HomeDonor *d, int incoming, const char *tracker,
         LmbHomeTransaction busy = { .offer = offer, .phase = LMB_HOME_REJECTED };
         snprintf(busy.reason, sizeof busy.reason,
                  "%s", d->retained ?
-                 "BUSY: this model is still resident. Stop sharing before replacing its allocation." :
+                 "BUSY: resident allocation capacity is full. Unload one model before requesting another." :
                  "BUSY: this computer already has an active household request.");
         (void)home_status_send(incoming, &busy, 0, 0);
         return -1; /* caller closes only this unadmitted connection */
@@ -580,6 +644,10 @@ static void home_service_donor_snapshot(HomeService *service, const HomeDonor *d
     s->threads = d->thread_capacity;
     s->segment_pid = (uint64_t)d->segment; s->host_pid = (uint64_t)d->host;
     snprintf(s->detail, sizeof s->detail, "%s", d->transaction.reason);
+    s->reserved_total = home_donor_reserved(d);
+    s->model_count = (uint32_t)(d->transaction.reservation_held || d->transaction.phase == LMB_HOME_PENDING);
+    for (uint32_t i = 0; i < d->park_capacity; i++)
+        s->model_count += d->parked[i].transaction.reservation_held || d->parked[i].transaction.phase == LMB_HOME_PENDING;
 }
 
 static int home_service_donor_ui(const char *tracker) {
@@ -591,7 +659,8 @@ static int home_service_donor_ui(const char *tracker) {
             rc = home_fail("Sharing service unavailable or belongs to another household. Check service status before retrying."); break;
         }
         if (seen != s.revision) { seen = s.revision; choice = 1; }
-        HomeDonor d = {.thread_capacity = s.threads, .retained = (int)s.retained, .persistent = 1};
+        HomeDonor d = {.thread_capacity = s.threads, .retained = (int)s.retained, .persistent = 1,
+            .display_models = s.model_count, .display_reserved = s.reserved_total};
         d.transaction.phase = (LmbHomePhase)s.phase; d.transaction.offer = s.offer;
         snprintf(d.transaction.reason, sizeof d.transaction.reason, "%.159s", s.detail);
         home_donor_screen(&d, s.name, s.ram, term.active, choice);
@@ -599,7 +668,7 @@ static int home_service_donor_ui(const char *tracker) {
         if (key == 'q' || key == 27 || key == 3) break;
         if (key == 1001 || key == 1002) choice = !choice;
         if ((key == '\r' || key == '\n') && (!term.active || (ui_w >= 60 && ui_h >= 28))) key = choice ? 'n' : 'y';
-        uint32_t op = key == 's' ? HOME_SVC_STOP : key == 'x' ? HOME_SVC_UNLOAD :
+        uint32_t op = key == '\t' ? HOME_SVC_NEXT_MODEL : key == 's' ? HOME_SVC_STOP : key == 'x' ? HOME_SVC_UNLOAD :
             key == 'y' && s.phase == LMB_HOME_PENDING ? HOME_SVC_ACCEPT :
             key == 'n' && s.phase == LMB_HOME_PENDING ? HOME_SVC_DECLINE : HOME_SVC_STATUS;
         if (op && home_service_query("donor", op, &s, &s)) {
@@ -677,6 +746,12 @@ static int cmd_donor_inner(int argc, char **argv) {
     uint64_t ram = profile.ram_available_bytes > reserve ? profile.ram_available_bytes - reserve : 0;
     if (limit < ram) ram = limit;
     if (ram < (32u << 20)) return home_fail("Not enough available RAM to share safely: %.2f GB available, %.2f GB system reserve. Close other applications and retry.", profile.ram_available_bytes / 1e9, reserve / 1e9);
+    HomeDonor parked[3];
+    d.pool_budget = ram;
+    if (background) {
+        d.parked = parked; d.park_capacity = 3;
+        for (uint32_t i = 0; i < d.park_capacity; i++) parked[i] = d;
+    }
     if (!name) name = profile.hostname;
     if (background) {
         if (home_service_open(&service, "donor")) return home_fail("Sharing is already starting, or the private service directory is unsafe. No duplicate donor was started.");
@@ -698,13 +773,15 @@ static int cmd_donor_inner(int argc, char **argv) {
     snprintf(report_log, sizeof report_log, "%s/inventory.log", d.cache_base);
     char *worker_argv[] = {own_bin, "worker", "--join", (char *)tracker,
         "--name", (char *)name, "--ram-gb", budget, "--disk", d.cache_base,
-        "--control-address", addr, "--runtime-epoch", d.runtime_epoch, NULL};
+        "--control-address", addr, "--runtime-epoch", d.runtime_epoch,
+        background ? "--donor-service" : NULL, NULL};
     pid_t reporter = home_spawn(worker_argv, NULL, report_log, NULL, -1);
     if (reporter <= 0) { close(listener); return home_fail("Cannot start the inventory reporter: %s.", strerror(errno)); }
     g_stopping = 0; install_chat_signal_handlers(); signal(SIGPIPE, SIG_IGN);
     HomeTerminal term = {0}; if (!background) home_terminal_begin(&term);
     double redraw = 0;
     int donor_choice = 1; /* Enter alone must never accept a new allocation. */
+    uint32_t next_model = 0;
     while (!g_stopping) {
         if (waitpid(reporter, NULL, WNOHANG) == reporter) {
             (void)home_fail("The inventory reporter stopped. See %s. No new requests can be accepted.", report_log);
@@ -712,8 +789,10 @@ static int cmd_donor_inner(int argc, char **argv) {
         }
         double now = nowd();
         if (!background && now - redraw >= .25) { home_donor_screen(&d, name, ram, term.active, donor_choice); redraw = now; }
-        struct pollfd ready[2] = {{listener, POLLIN, 0}, {d.client, POLLIN, 0}};
-        (void)poll(ready, 2, 50);
+        HomeDonor *models[4] = {&d, &parked[0], &parked[1], &parked[2]};
+        struct pollfd ready[5] = {{listener, POLLIN, 0}};
+        for (uint32_t i = 0; i <= d.park_capacity; i++) ready[i+1] = (struct pollfd){models[i]->client, POLLIN, 0};
+        (void)poll(ready, 2 + d.park_capacity, 50);
         if (ready[0].revents & POLLIN) {
             int incoming = accept(listener, NULL, NULL);
             if (incoming >= 0) {
@@ -722,20 +801,32 @@ static int cmd_donor_inner(int argc, char **argv) {
                 if (d.client < 0) donor_choice = 1;
                 lmb_machine_refresh_resources(&profile, d.cache_base);
                 uint64_t free_ram = profile.ram_available_bytes > reserve ? profile.ram_available_bytes - reserve : 0;
-                if (free_ram > ram) free_ram = ram;
+                free_ram = home_donor_room(&d, free_ram);
                 if (home_donor_offer(&d, incoming, tracker, free_ram, profile.disk_available_bytes)) {
                     if (d.client == incoming) home_donor_disconnect(&d, "Request connection failed.");
                     else lmb_close(incoming);
                 }
             }
         }
-        if (d.client >= 0 && ready[1].fd == d.client && ready[1].revents && home_donor_message(&d))
-            home_donor_lost_requester(&d, "The requester disconnected or sent an invalid command.");
+        for (uint32_t i = 0; i <= d.park_capacity; i++) {
+            HomeDonor *m = models[i];
+            if (m->client >= 0 && ready[i+1].fd == m->client && ready[i+1].revents && home_donor_message(m))
+                home_donor_lost_requester(m, "The requester disconnected or sent an invalid command.");
+        }
         home_service_donor_snapshot(&service, &d);
         int operation = background ? home_service_poll(&service) : -1;
         int key = background ? operation == HOME_SVC_ACCEPT ? 'y' : operation == HOME_SVC_DECLINE ? 'n' :
-            operation == HOME_SVC_UNLOAD ? 'x' : operation == HOME_SVC_STOP ? 'q' : -1 : home_key();
+            operation == HOME_SVC_UNLOAD ? 'x' : operation == HOME_SVC_STOP ? 'q' :
+            operation == HOME_SVC_NEXT_MODEL ? '\t' : -1 : home_key();
         if (key == 'q' || key == 3 || key == 27) break;
+        if (key == '\t' && d.offer_revision < UINT64_MAX) {
+            for (uint32_t i = 0; i < d.park_capacity; i++) {
+                uint32_t at = (next_model + i) % d.park_capacity;
+                if (parked[at].transaction.reservation_held || parked[at].transaction.phase == LMB_HOME_PENDING) {
+                    home_donor_swap(&d, at); next_model = (at + 1) % d.park_capacity; donor_choice = 1; break;
+                }
+            }
+        }
         if (key == 1001 || key == 1002) { donor_choice = !donor_choice; redraw = 0; }
         if (key == '\r' || key == '\n') {
             if (term.active && (ui_w < 60 || ui_h < 28)) continue;
@@ -751,11 +842,27 @@ static int cmd_donor_inner(int argc, char **argv) {
             }
             lmb_machine_refresh_resources(&profile, d.cache_base);
             uint64_t free_ram = profile.ram_available_bytes > reserve ? profile.ram_available_bytes - reserve : 0;
+            free_ram = home_donor_room(&d, free_ram);
             if (key == 'y') {
                 char owner[256];
-                if (!lmb_governor_manual_paused() && d.transaction.offer.threads <= profile.logical_cpus)
-                    d.lease = lmb_machine_compute_lease_acquire(d.transaction.offer.model, tracker, owner, sizeof owner);
-                if (d.lease >= 0) d.weight_lease = home_weight_lease(d.cache_base);
+                if (!lmb_governor_manual_paused() && d.transaction.offer.threads <= profile.logical_cpus) {
+                    /* One machine-wide owner; each allocation holds a dup of
+                     * that lease, never an independent competing RAM owner. */
+                    for (uint32_t i = 0; i < d.park_capacity && d.lease < 0; i++)
+                        if (parked[i].lease >= 0 && parked[i].transaction.reservation_held) {
+                            d.lease = dup(parked[i].lease);
+                            if (d.lease >= 0 && fcntl(d.lease, F_SETFD, FD_CLOEXEC)) {
+                                close(d.lease); d.lease = -1;
+                            }
+                        }
+                    if (d.lease < 0) d.lease = lmb_machine_compute_lease_acquire(d.transaction.offer.model, tracker, owner, sizeof owner);
+                }
+                char cache_lock[1200], allocation[65];
+                lmb_hex(allocation, d.transaction.offer.id, 32);
+                if (d.lease >= 0 && !checked_printf(cache_lock, sizeof cache_lock,
+                    d.park_capacity ? "%s/mirrors/%s" : "%s%s", d.cache_base, d.park_capacity ? allocation : "")) {
+                    mkdir_p(cache_lock); d.weight_lease = home_weight_lease(cache_lock);
+                }
             }
             if ((key == 'y' && (d.lease < 0 || d.weight_lease < 0)) ||
                 lmb_home_decide(&d.transaction, key == 'y', free_ram,
@@ -764,16 +871,19 @@ static int cmd_donor_inner(int argc, char **argv) {
             if (d.client >= 0 && home_status_send(d.client, &d.transaction, 0, 0))
                 home_donor_disconnect(&d, "The requester disconnected.");
         }
-        if (!d.retained && lmb_home_expired(&d.transaction, (uint64_t)(nowd() * 1000)))
-            home_donor_lost_requester(&d, "Request lease expired before preparation completed.");
-        if (d.segment > 0 && waitpid(d.segment, NULL, WNOHANG) == d.segment)
-            home_donor_release(&d, LMB_HOME_FAILED, "Segment stopped. See the engine log.");
-        if (d.host > 0 && waitpid(d.host, NULL, WNOHANG) == d.host)
-            home_donor_release(&d, LMB_HOME_FAILED, "Chat host stopped. See the engine log.");
-        if (d.transaction.phase == LMB_HOME_LOADING && home_child_ready(&d.segment_ready))
-            (void)lmb_home_mark_segment_ready(&d.transaction);
-        if (d.transaction.phase == LMB_HOME_STARTING_HOST && home_child_ready(&d.host_ready))
-            d.transaction.phase = LMB_HOME_READY;
+        for (uint32_t i = 0; i <= d.park_capacity; i++) {
+            HomeDonor *m = models[i];
+            if (!m->retained && lmb_home_expired(&m->transaction, (uint64_t)(nowd() * 1000)))
+                home_donor_lost_requester(m, "Request lease expired before preparation completed.");
+            if (m->segment > 0 && waitpid(m->segment, NULL, WNOHANG) == m->segment)
+                home_donor_release(m, LMB_HOME_FAILED, "Segment stopped. See the engine log.");
+            if (m->host > 0 && waitpid(m->host, NULL, WNOHANG) == m->host)
+                home_donor_release(m, LMB_HOME_FAILED, "Chat host stopped. See the engine log.");
+            if (m->transaction.phase == LMB_HOME_LOADING && home_child_ready(&m->segment_ready))
+                (void)lmb_home_mark_segment_ready(&m->transaction);
+            if (m->transaction.phase == LMB_HOME_STARTING_HOST && home_child_ready(&m->host_ready))
+                m->transaction.phase = LMB_HOME_READY;
+        }
         if (background) {
             home_service_donor_snapshot(&service, &d);
             if (home_service_save(&service)) { (void)home_fail("Cannot persist donor state; sharing stopped safely."); break; }
@@ -782,6 +892,7 @@ static int cmd_donor_inner(int argc, char **argv) {
     }
     home_terminal_end(&term);
     home_donor_disconnect(&d, "Donor closed.");
+    for (uint32_t i = 0; i < d.park_capacity; i++) home_donor_disconnect(&parked[i], "Donor closed.");
     home_stop_child(&reporter); close(listener);
     if (background) {
         home_service_donor_snapshot(&service, &d);

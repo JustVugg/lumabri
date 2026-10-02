@@ -5,6 +5,28 @@
 #include <assert.h>
 
 int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "model-pool")) {
+        HomeDonor parked[3] = {0}, d = {.parked = parked, .park_capacity = 3, .pool_budget = 1000, .offer_revision = 3};
+        for (unsigned i = 0; i < 3; i++) { parked[i] = d; parked[i].client = -1; }
+        d.transaction.reservation_held = 1; d.transaction.offer.ram_bytes = 400; d.retained = 1;
+        assert(home_donor_reserved(&d) == 400 && home_donor_room(&d, 900) == 600);
+        home_donor_swap(&d, 0);
+        assert(!d.transaction.reservation_held && d.offer_revision == 4 && home_donor_reserved(&d) == 400);
+        d.transaction.reservation_held = 1; d.transaction.offer.ram_bytes = 300;
+        assert(home_donor_room(&d, 400) == 100); /* reserve the loading allocation not yet in RSS */
+        d.retained = 1; assert(home_donor_room(&d, 400) == 300);
+        parked[1].transaction.reservation_held = 1; parked[1].transaction.offer.ram_bytes = 300;
+        assert(!home_donor_room(&d, 10000));
+        parked[1].transaction.offer.ram_bytes = UINT64_MAX;
+        assert(home_donor_reserved(&d) == UINT64_MAX && !home_donor_room(&d, UINT64_MAX));
+        puts("MODEL POOL: PASS (aggregate reservations, pending load, view swap, overflow)"); return 0;
+    }
+    if (argc == 4 && !strcmp(argv[1], "resident-release")) {
+        assert(!lmb_secure_init()); LmbResidentPlan plan;
+        assert(!home_resident_plan_read(argv[2], argv[3], &plan));
+        for (uint32_t i = 0; i < plan.execution.count; i++) assert(!home_resident_peer(&plan, i, 1));
+        return 0;
+    }
     if (argc == 2 && !strcmp(argv[1], "planner-evidence")) {
         LmbTuiState *st = calloc(1, sizeof *st); assert(st);
         st->nnodes = 1; st->nmodels = 2; st->context = 128; st->sessions = 1;

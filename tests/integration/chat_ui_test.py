@@ -17,6 +17,7 @@ import time
 import unicodedata
 
 ROOT = Path(__file__).resolve().parents[2]
+subprocess.run(["./test_chat_ui", "model-pool"], cwd=ROOT, check=True)
 
 evidence = json.loads(subprocess.check_output(["./test_chat_ui", "planner-evidence"], cwd=ROOT, text=True))
 measured, stale = evidence["models"]
