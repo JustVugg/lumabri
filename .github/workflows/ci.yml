@@ -163,6 +163,7 @@ jobs:
           cp -a ../colibri/c/olmoe_tiny_merged build/home-flow-models/olmoe-tiny
           python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models
           python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester
+          python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester --multi-model
           make segment_budget_probe
           python3 tests/integration/planner_tensor_contract_test.py --family olmoe --model build/home-flow-models/olmoe-tiny
           make swarm_probe
@@ -414,6 +415,7 @@ jobs:
           make swarm_probe
           make test_chat_ui
           python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models
+          python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester --multi-model
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --repeat-cached --clear-cached --expect-metrics --expect-calibration
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --kill-donor
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --expect-selected-no-fit
