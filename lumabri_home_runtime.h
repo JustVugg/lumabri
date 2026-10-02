@@ -22,6 +22,7 @@ static int home_fail(const char *fmt, ...) {
     return 1;
 }
 #include "src/runtime/lumabri_resident_plan.h"
+#include "src/runtime/lumabri_service.h"
 
 typedef struct {
     struct termios saved;
@@ -48,6 +49,7 @@ static void home_terminal_end(HomeTerminal *term) {
 }
 
 static int home_key(void) {
+    if (home_background_job) return home_service_key();
     static int pending = -1;
     if (pending >= 0) { int next = pending; pending = -1; return next; }
     struct pollfd p = {0, POLLIN, 0};
@@ -209,6 +211,8 @@ typedef struct {
     int hybrid_routes_ready;
     unsigned thread_capacity;
     int retained; /* owner's sharing lifetime, independent of any chat */
+    int persistent; /* rendering only: the service is not owned by this view */
+    uint64_t offer_revision;
     int client, lease, weight_lease, segment_port, host_port, segment_ready, host_ready;
     pid_t segment, host;
     char bin_dir[1024], cache_base[1024], disk[512], ip[INET_ADDRSTRLEN];
@@ -396,14 +400,17 @@ static void home_donor_screen(const HomeDonor *d, const char *name, uint64_t ram
             ui_item(y, choice == 0, "Accept this request", home_resident_required() ?
                 "Keep these weights in RAM until you stop sharing." : "Reserve only the displayed resources for this plan.");
             ui_item(y + 3, choice == 1, "Decline", "No weights or model state will be loaded.");
-        } else ui_item(y, 0, "Keep this window open to share", d->retained ?
-            "Weights stay in RAM. Unload only to accept a different plan." :
-            "Press Esc to stop sharing and release resources.");
-        ui_footer(t->reason[0] ? t->reason : d->log, t->phase == LMB_HOME_PENDING ?
+        } else ui_item(y, 0, d->persistent ? "Sharing continues in the background" : "Keep this window open to share", d->retained ?
+            "Weights stay in RAM. Unload only to accept a different plan." : d->persistent ?
+            "Closing this view does not approve new requests or stop sharing." : "Press Esc to stop sharing and release resources.");
+        ui_footer(t->reason[0] ? t->reason : d->persistent ? "No allocation starts without your approval." : d->log, d->persistent ?
+            t->phase == LMB_HOME_PENDING ? "↑ ↓ choose   Enter confirm   Esc detach   s stop sharing" :
+            "x unload model   Esc detach   s stop sharing" : t->phase == LMB_HOME_PENDING ?
             "↑ ↓ choose   Enter confirm   Esc stop and return" :
             d->retained ? "x unload model, keep sharing   Esc stop sharing" : "Esc stop sharing and return");
         if (ui_w < 60 || ui_h < 28) {
-            ui_begin("share resources"); ui_text(5, 4, UI_SAND, "Resize to at least 60 × 28. Esc stops sharing.");
+            ui_begin("share resources"); ui_text(5, 4, UI_SAND, d->persistent ?
+                "Resize to at least 60 × 28. Esc closes this view only." : "Resize to at least 60 × 28. Esc stops sharing.");
         }
         ui_present(); return;
     }
@@ -454,6 +461,20 @@ static int home_donor_offer(HomeDonor *d, int incoming, const char *tracker,
         if (!rc) rc = lmb_send(incoming, LMB_OK, NULL, 0, NULL, 0) || lmb_recv(incoming, &m);
     }
     if (!rc) {
+        if (m.op == LMB_HOME_QUERY || m.op == LMB_HOME_RELEASE) {
+            /* A remembered endpoint is not authority. Only the original
+             * authenticated requester can inspect/release THIS allocation. */
+            int permitted = m.body_len == 64 && !m.pay_len &&
+                lmb_home_offer_valid(&d->transaction.offer) &&
+                !memcmp(m.body, d->transaction.offer.id, 32) &&
+                !memcmp(m.body + 32, d->transaction.offer.model_root, 32) &&
+                lmb_secure_peer_matches(incoming, d->transaction.offer.requester);
+            if (permitted) {
+                if (m.op == LMB_HOME_RELEASE) home_donor_disconnect(d, "Released by the original requester.");
+                (void)home_status_send(incoming, &d->transaction, d->segment_port, d->host_port);
+            }
+            lmb_msg_free(&m); return -1;
+        }
         if (m.op == LMB_HOME_FEATURES && !m.body_len && !m.pay_len) {
             uint8_t version[4]; lmb_put32(version, home_resident_required() ? 2 : 1);
             (void)lmb_send(incoming, LMB_OK, version, sizeof version, NULL, 0);
@@ -488,9 +509,11 @@ static int home_donor_offer(HomeDonor *d, int incoming, const char *tracker,
         (void)home_status_send(incoming, &rejected, 0, 0);
         return -1;
     }
+    if (!rc && d->offer_revision == UINT64_MAX) rc = -1;
     if (!rc) rc = lmb_home_offer_begin(&d->transaction, &offer, tracker,
                                        ram, disk, (uint64_t)(nowd() * 1000));
     if (rc) return -1;
+    d->offer_revision++;
     d->client = incoming;
     return home_status_send(incoming, &d->transaction, 0, 0);
 }
@@ -547,7 +570,49 @@ static int home_donor_message(HomeDonor *d) {
     return rc;
 }
 
-static int cmd_donor(int argc, char **argv) {
+static void home_service_donor_snapshot(HomeService *service, const HomeDonor *d) {
+    HomeServiceSnapshot *s = &service->snapshot;
+    s->phase = (uint32_t)d->transaction.phase;
+    s->offer = d->transaction.offer;
+    s->has_offer = lmb_home_offer_valid(&s->offer);
+    s->retained = (uint32_t)d->retained;
+    s->revision = d->offer_revision;
+    s->threads = d->thread_capacity;
+    s->segment_pid = (uint64_t)d->segment; s->host_pid = (uint64_t)d->host;
+    snprintf(s->detail, sizeof s->detail, "%s", d->transaction.reason);
+}
+
+static int home_service_donor_ui(const char *tracker) {
+    HomeTerminal term; home_terminal_begin(&term);
+    HomeServiceSnapshot s = {0};
+    int choice = 1, rc = 0; uint64_t seen = UINT64_MAX;
+    while (!g_stopping) {
+        if (home_service_query("donor", HOME_SVC_STATUS, NULL, &s) || strcmp(s.tracker, tracker)) {
+            rc = home_fail("Sharing service unavailable or belongs to another household. Check service status before retrying."); break;
+        }
+        if (seen != s.revision) { seen = s.revision; choice = 1; }
+        HomeDonor d = {.thread_capacity = s.threads, .retained = (int)s.retained, .persistent = 1};
+        d.transaction.phase = (LmbHomePhase)s.phase; d.transaction.offer = s.offer;
+        snprintf(d.transaction.reason, sizeof d.transaction.reason, "%.159s", s.detail);
+        home_donor_screen(&d, s.name, s.ram, term.active, choice);
+        int key = home_key();
+        if (key == 'q' || key == 27 || key == 3) break;
+        if (key == 1001 || key == 1002) choice = !choice;
+        if ((key == '\r' || key == '\n') && (!term.active || (ui_w >= 60 && ui_h >= 28))) key = choice ? 'n' : 'y';
+        uint32_t op = key == 's' ? HOME_SVC_STOP : key == 'x' ? HOME_SVC_UNLOAD :
+            key == 'y' && s.phase == LMB_HOME_PENDING ? HOME_SVC_ACCEPT :
+            key == 'n' && s.phase == LMB_HOME_PENDING ? HOME_SVC_DECLINE : HOME_SVC_STATUS;
+        if (op && home_service_query("donor", op, &s, &s)) {
+            rc = home_fail("Request changed or the sharing service did not confirm the action. Refresh before retrying."); break;
+        }
+        if (op == HOME_SVC_STOP) break;
+        (void)poll(NULL, 0, 100);
+    }
+    home_terminal_end(&term); return rc;
+}
+
+static int home_donor_keeper;
+static int cmd_donor_inner(int argc, char **argv) {
     (void)home_resident_required();
     home_error[0] = 0;
     const char *tracker = NULL, *name = NULL, *disk = NULL;
@@ -565,6 +630,14 @@ static int cmd_donor(int argc, char **argv) {
     if (!tracker || !*tracker || strlen(tracker) >= 256 || !isatty(0) ||
         (name && (!*name || strlen(name) >= 64 || lmb_inventory_text(name))) || home_private_network())
         return 2;
+    int background = !home_service_foreground();
+    HomeService service = {.lock = -1, .listener = -1, .reply = -1};
+    if (background) {
+        if (home_service_ensure()) return home_fail("Cannot start the private household service.");
+        HomeServiceSnapshot existing;
+        if (!home_service_query("donor", HOME_SVC_STATUS, NULL, &existing))
+            return home_service_donor_ui(tracker);
+    }
     HomeDonor d = {0}; d.client = d.lease = d.weight_lease = d.segment_ready = d.host_ready = -1;
     exe_dir(d.bin_dir, sizeof d.bin_dir);
     const char *services[] = {"segment_node", "segment_chat"};
@@ -604,6 +677,17 @@ static int cmd_donor(int argc, char **argv) {
     if (limit < ram) ram = limit;
     if (ram < (32u << 20)) return home_fail("Not enough available RAM to share safely: %.2f GB available, %.2f GB system reserve. Close other applications and retry.", profile.ram_available_bytes / 1e9, reserve / 1e9);
     if (!name) name = profile.hostname;
+    if (background) {
+        if (home_service_open(&service, "donor")) return home_fail("Sharing is already starting, or the private service directory is unsafe. No duplicate donor was started.");
+        snprintf(service.snapshot.name, sizeof service.snapshot.name, "%s", name);
+        snprintf(service.snapshot.tracker, sizeof service.snapshot.tracker, "%s", tracker);
+        service.snapshot.ram = ram; service.snapshot.threads = d.thread_capacity;
+        if (home_service_save(&service)) { home_service_close(&service); return home_fail("Cannot persist sharing configuration. No resources were shared."); }
+        int detached = home_service_detach(&service, -1);
+        if (detached < 0) { home_service_close(&service); return home_fail("Cannot detach the sharing service."); }
+        if (detached) return home_service_donor_ui(tracker);
+        home_donor_keeper = 1;
+    }
     int port, listener = home_listen(&port);
     if (listener < 0) return home_fail("Cannot open a donor port in the household range: %s. Close another sharing window and retry.", strerror(errno));
     char own_bin[1200], addr[64], budget[32], report_log[1200];
@@ -617,7 +701,7 @@ static int cmd_donor(int argc, char **argv) {
     pid_t reporter = home_spawn(worker_argv, NULL, report_log, NULL, -1);
     if (reporter <= 0) { close(listener); return home_fail("Cannot start the inventory reporter: %s.", strerror(errno)); }
     g_stopping = 0; install_chat_signal_handlers(); signal(SIGPIPE, SIG_IGN);
-    HomeTerminal term; home_terminal_begin(&term);
+    HomeTerminal term = {0}; if (!background) home_terminal_begin(&term);
     double redraw = 0;
     int donor_choice = 1; /* Enter alone must never accept a new allocation. */
     while (!g_stopping) {
@@ -626,7 +710,7 @@ static int cmd_donor(int argc, char **argv) {
             break;
         }
         double now = nowd();
-        if (now - redraw >= .25) { home_donor_screen(&d, name, ram, term.active, donor_choice); redraw = now; }
+        if (!background && now - redraw >= .25) { home_donor_screen(&d, name, ram, term.active, donor_choice); redraw = now; }
         struct pollfd ready[2] = {{listener, POLLIN, 0}, {d.client, POLLIN, 0}};
         (void)poll(ready, 2, 50);
         if (ready[0].revents & POLLIN) {
@@ -646,7 +730,10 @@ static int cmd_donor(int argc, char **argv) {
         }
         if (d.client >= 0 && ready[1].fd == d.client && ready[1].revents && home_donor_message(&d))
             home_donor_lost_requester(&d, "The requester disconnected or sent an invalid command.");
-        int key = home_key();
+        home_service_donor_snapshot(&service, &d);
+        int operation = background ? home_service_poll(&service) : -1;
+        int key = background ? operation == HOME_SVC_ACCEPT ? 'y' : operation == HOME_SVC_DECLINE ? 'n' :
+            operation == HOME_SVC_UNLOAD ? 'x' : operation == HOME_SVC_STOP ? 'q' : -1 : home_key();
         if (key == 'q' || key == 3 || key == 27) break;
         if (key == 1001 || key == 1002) { donor_choice = !donor_choice; redraw = 0; }
         if (key == '\r' || key == '\n') {
@@ -656,6 +743,11 @@ static int cmd_donor(int argc, char **argv) {
         }
         if (key == 'x') home_donor_disconnect(&d, "Stopped by this computer's owner.");
         if ((key == 'y' || key == 'n') && d.transaction.phase == LMB_HOME_PENDING) {
+            if (background) {
+                snprintf(service.snapshot.detail, sizeof service.snapshot.detail, "%s", key == 'y' ?
+                    "Owner approved this immutable allocation; acquiring resources." : "Owner declined this allocation.");
+                if (home_service_save(&service)) { (void)home_fail("Cannot persist the owner's decision; no allocation was approved."); break; }
+            }
             lmb_machine_refresh_resources(&profile, d.cache_base);
             uint64_t free_ram = profile.ram_available_bytes > reserve ? profile.ram_available_bytes - reserve : 0;
             if (key == 'y') {
@@ -681,11 +773,27 @@ static int cmd_donor(int argc, char **argv) {
             (void)lmb_home_mark_segment_ready(&d.transaction);
         if (d.transaction.phase == LMB_HOME_STARTING_HOST && home_child_ready(&d.host_ready))
             d.transaction.phase = LMB_HOME_READY;
+        if (background) {
+            home_service_donor_snapshot(&service, &d);
+            if (home_service_save(&service)) { (void)home_fail("Cannot persist donor state; sharing stopped safely."); break; }
+            home_service_answer(&service);
+        }
     }
     home_terminal_end(&term);
     home_donor_disconnect(&d, "Donor closed.");
     home_stop_child(&reporter); close(listener);
+    if (background) {
+        home_service_donor_snapshot(&service, &d);
+        service.snapshot.state = home_error[0] ? HOME_SVC_FAILED : HOME_SVC_STOPPED;
+        (void)home_service_save(&service); home_service_answer(&service); home_service_close(&service);
+    }
     return home_error[0] ? 1 : 0;
+}
+
+static int cmd_donor(int argc, char **argv) {
+    int rc = cmd_donor_inner(argc, argv);
+    if (home_donor_keeper) _exit(rc);
+    return rc;
 }
 typedef struct {
     int fd[LMB_CLUSTER_MAX_NODES];
@@ -833,7 +941,7 @@ static int home_session_hybrid_routes(HomeSession *s) {
     pthread_mutex_unlock(&s->send_lock); free(b.p); return rc;
 }
 
-static int home_request_chat(LmbTuiState *st, int selected) {
+static int home_request_chat_direct(LmbTuiState *st, int selected) {
     home_error[0] = 0;
     if (selected < 0 || selected >= st->nmodels || !st->tracker[0] ||
         !st->inventory_ok || home_private_network())
@@ -909,6 +1017,11 @@ static int home_request_chat(LmbTuiState *st, int selected) {
     for (char *p = model; *p; p++)
         if (!( (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
                (*p >= '0' && *p <= '9') || *p == '-')) *p = '_';
+    if (home_background_job) {
+        snprintf(home_background_job->snapshot.name, sizeof home_background_job->snapshot.name, "%s", model);
+        snprintf(home_background_job->snapshot.detail, sizeof home_background_job->snapshot.detail, "Indexing and verifying checkpoint identity");
+        if (home_service_save(home_background_job)) return home_fail("Cannot persist preparation identity. No donor was contacted.");
+    }
     char dir[1024], maintainer[1200], ip[INET_ADDRSTRLEN], port[20], addr[64], name[64];
     char logdir[1100], logfile[1200];
     exe_dir(dir, sizeof dir); snprintf(maintainer, sizeof maintainer, "%s/maintainer", dir);
@@ -1105,6 +1218,11 @@ static int home_request_chat(LmbTuiState *st, int selected) {
         const char *loading = !committed ? "Waiting for approval; no weights are loading" :
                               !host_started ? "Transferring weights and loading approved segments" :
                                               "Loading the chat host; segments are ready";
+        if (home_background_job) {
+            snprintf(home_background_job->snapshot.detail, sizeof home_background_job->snapshot.detail,
+                "%.180s. %.180s", loading, committed ? detail : "Each donor must accept in Share resources");
+            if (home_service_save(home_background_job)) { home_fail("Cannot persist preparation progress."); goto done; }
+        }
         if (term.active) {
             ui_text(8, 5, UI_SAND, loading);
             if (committed) {
@@ -1192,12 +1310,14 @@ static int home_request_chat(LmbTuiState *st, int selected) {
                 snprintf(saved.host_key, sizeof saved.host_key, "%s", expected_host);
                 snprintf(saved.root, sizeof saved.root, "%s", expected_root);
                 snprintf(saved.model, sizeof saved.model, "%s", model);
-                if (home_resident_plan_save(&saved)) {
-                    atomic_store(&s.stop, 1); pthread_join(heartbeat, NULL);
+                memcpy(saved.allocation, id, 32);
+                memcpy(saved.peer_keys, s.peer_keys, s.count * 32);
+                if (home_resident_plan_save(&saved) || home_resident_library_save(&saved)) {
                     home_fail("Cannot save the approved resident plan. Check home-directory permissions; no chat was started.");
                     goto done;
                 }
             }
+            if (home_background_job) { prepared = 1; result = 0; break; }
             g_execution_view = &execution;
             LmbCalibration measurement = {0}; char measurement_dir[1200];
             LmbTuiModel measured = *m;
@@ -1251,5 +1371,81 @@ done:
     pthread_mutex_destroy(&s.send_lock);
     pthread_mutex_destroy(&s.status_lock);
     return result;
+}
+
+static int home_request_chat(LmbTuiState *st, int selected) {
+    if (home_service_foreground()) return home_request_chat_direct(st, selected);
+    g_stopping = 0; install_chat_signal_handlers();
+    if (selected < 0 || selected >= st->nmodels || home_service_ensure())
+        return home_fail("Cannot start preparation without a selected model and a private service.");
+    HomeService job;
+    if (home_service_open(&job, "prepare"))
+        return home_fail("Another preparation is already running. See the background operation in Resident models; no second allocation was requested.");
+    snprintf(job.snapshot.name, sizeof job.snapshot.name, "%s", st->models[selected].name);
+    snprintf(job.snapshot.tracker, sizeof job.snapshot.tracker, "%s", st->tracker);
+    snprintf(job.snapshot.detail, sizeof job.snapshot.detail, "Preparing the reviewed plan; donor approval is still required");
+    if (home_service_save(&job)) { home_service_close(&job); return home_fail("Cannot persist this operation."); }
+    int detached = home_service_detach(&job, -1);
+    if (detached < 0) { home_service_close(&job); return home_fail("Cannot start the preparation keeper."); }
+    if (!detached) {
+        home_background_job = &job;
+        int rc = home_request_chat_direct(st, selected);
+        job.snapshot.state = rc ? HOME_SVC_FAILED : HOME_SVC_DONE;
+        snprintf(job.snapshot.detail, sizeof job.snapshot.detail, "%s", rc ? home_error : "Approved model is ready; open it from Resident models");
+        if (home_service_save(&job)) rc = 1;
+        home_service_answer(&job); home_service_close(&job); _exit(rc);
+    }
+    HomeTerminal term; home_terminal_begin(&term);
+    int rc = 0;
+    HomeServiceSnapshot status = job.snapshot;
+    for (;;) {
+        HomeServiceSnapshot observed;
+        int live = !home_service_query("prepare", HOME_SVC_STATUS, NULL, &observed);
+        if (!live && home_service_record("prepare", &observed)) { rc = home_fail("Cannot read preparation status. Check service diagnostics."); break; }
+        if (memcmp(observed.instance, job.snapshot.instance, 32)) { rc = home_fail("The preparation operation changed; refresh Resident models."); break; }
+        status = observed;
+        if (status.state != HOME_SVC_RUNNING) break;
+        ui_begin("prepare chat");
+        ui_printf(6, 5, UI_TEXT, "%s", st->models[selected].name);
+        ui_text(9, 5, UI_SAND, status.detail);
+        ui_text(13, 5, UI_MUTED, "This operation continues if you close the interface.");
+        ui_footer("Donors must approve the reviewed allocation. No silent reload or replacement.",
+            "Esc detach   c cancel preparation and release incomplete allocations"); ui_present();
+        int key = home_key();
+        if (g_stopping || key == 27 || key == 3 || key == 'q') { home_terminal_end(&term); return 0; }
+        if (key == 'c') {
+            if (home_service_query("prepare", HOME_SVC_CANCEL, &status, &observed))
+                rc = home_fail("Cancellation was not confirmed. Check the background operation before retrying.");
+            home_terminal_end(&term); return rc;
+        }
+        if (!live) {
+            char path[1200]; int fd = -1;
+            if (!home_service_path("prepare", "lock", path, sizeof path)) fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+            int active = fd >= 0 && flock(fd, LOCK_EX | LOCK_NB);
+            if (fd >= 0) close(fd);
+            if (!active) { rc = home_fail("Preparation keeper stopped. Its previous approval will not be replayed. Check the donors before retrying."); break; }
+        }
+        (void)poll(NULL, 0, 100);
+    }
+    home_terminal_end(&term);
+    if (rc) return rc;
+    if (status.state != HOME_SVC_DONE) return home_fail("%s", status.detail[0] ? status.detail : "Preparation did not finish.");
+    LmbResidentPlan saved;
+    if (home_resident_plan_load(st->tracker, &saved) || strcmp(saved.model, status.name))
+        return home_fail("Prepared plan changed; choose it from Resident models.");
+    LmbCalibration measurement = {0}; char directory[1200], why[200] = "";
+    uint8_t indexed[32], expected[32];
+    /* The indexer ran in the keeper. Refresh its content evidence in this
+     * process too; a pre-index catalogue legitimately had no content key. */
+    int measured = !lmb_checkpoint_identity(st->models[selected].dir, st->models[selected].content_id, saved.model, indexed) &&
+        !lmb_unhex(expected, saved.root, 32) && !memcmp(indexed, expected, 32) &&
+        !catalog_calibration_dir(directory) &&
+        !catalog_calibration_key(st, &st->models[selected], 0, NULL, &measurement.key) &&
+        !catalog_runtime_revalidate(st, &measurement.key, why, sizeof why);
+    g_recording_calibration = measured ? &measurement : NULL;
+    g_calibration_directory = measured ? directory : NULL;
+    rc = home_resident_plan_chat_mode(&saved, st->quick_calibration);
+    g_recording_calibration = NULL; g_calibration_directory = NULL;
+    return rc;
 }
 #endif

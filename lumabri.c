@@ -6137,6 +6137,7 @@ static int cmd_doctor(int argc, char **argv) {
 }
 
 /* ---- main --------------------------------------------------------------- */
+#include "src/runtime/lumabri_service_manager.h"
 #include "src/ui/lumabri_home_ui.h"
 
 int main(int argc, char **argv) {
@@ -6153,6 +6154,8 @@ int main(int argc, char **argv) {
     if (argc >= 2 && !strcmp(argv[1], "resume"))
         return cmd_governor_manual(argc - 2, argv + 2, 0);
     if (lmb_secure_init()) return 1; /* children inherit the same strict mode */
+    if (argc >= 2 && !strcmp(argv[1], "service"))
+        return cmd_service(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "models"))
         return cmd_models(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "worker"))
@@ -6180,6 +6183,7 @@ int main(int argc, char **argv) {
     fprintf(stderr,
         "lumabri: your computers, one shared model\n\n"
         "  lumabri                                                    household workspace\n"
+        "  lumabri service [status|start|restart|stop]                 private background service\n"
         "  lumabri machine [--json] [--tracker HOST:PORT]             profile this machine\n"
         "  lumabri worker --join HOST:PORT [--ram-gb N]              publish LAN inventory\n"
         "  lumabri models --tracker HOST:PORT                       cluster planning preview\n"

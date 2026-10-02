@@ -5,6 +5,18 @@
 #include <assert.h>
 
 int main(int argc, char **argv) {
+    if (argc == 4 && !strcmp(argv[1], "resident-deny-stale")) {
+        assert(!lmb_secure_init());
+        LmbResidentPlan plan, changed;
+        assert(!home_resident_plan_read(argv[2], argv[3], &plan));
+        changed = plan; changed.allocation[0] ^= 1;
+        assert(home_resident_peer(&changed, 0, 1));
+        changed = plan; changed.root[0] = changed.root[0] == 'a' ? 'b' : 'a';
+        assert(home_resident_peer(&changed, 0, 1));
+        assert(!home_resident_peer(&plan, 0, 0));
+        puts("RESIDENT AUTHORITY: PASS (stale allocation/root cannot unload the live model)");
+        return 0;
+    }
     LmbMachineReport inventory = {.machine = {.logical_cpus = 4, .physical_cores = 2,
         .ram_total_bytes = 8ull << 30}, .runtime_threads = 4};
     inventory.identity[0] = 1;
@@ -323,6 +335,29 @@ int main(int argc, char **argv) {
         assert(!home_resident_plan_save(&plan));
         assert(!home_resident_plan_load(plan.tracker, &loaded));
         assert(loaded.execution.hybrid && lmb_execution_valid(&loaded.execution));
+        plan.allocation[0] = 1;
+        plan.peer_keys[0][0] = 2; plan.peer_keys[1][0] = 3;
+        assert(!home_resident_plan_save(&plan));
+        assert(!home_resident_plan_load(plan.tracker, &loaded));
+        assert(!memcmp(loaded.allocation, plan.allocation, 32));
+        assert(!memcmp(loaded.peer_keys, plan.peer_keys, sizeof plan.peer_keys));
+        LmbResidentPlan library[4]; char library_path_a[1200], library_path_b[1200], library_directory[1200];
+        assert(!home_resident_library_path(&plan, library_path_a, sizeof library_path_a));
+        assert(!home_resident_library_save(&plan));
+        assert(!home_resident_library_save(&plan));
+        assert(home_resident_library_list(plan.tracker, library, 4) == 1);
+        plan.allocation[0] = 4;
+        assert(!home_resident_library_path(&plan, library_path_b, sizeof library_path_b));
+        assert(!home_resident_library_save(&plan));
+        assert(home_resident_library_list(plan.tracker, library, 4) == 2);
+        assert(!home_resident_library_list("other:47300", library, 4));
+        assert(!chmod(library_path_a, 0644));
+        assert(home_resident_library_list(plan.tracker, library, 4) == 1);
+        assert(!unlink(library_path_a)); assert(!symlink(library_path_b, library_path_a));
+        assert(home_resident_library_list(plan.tracker, library, 4) == 1);
+        assert(!unlink(library_path_a)); assert(!unlink(library_path_b));
+        assert(!home_resident_library_directory(library_directory, sizeof library_directory));
+        assert(!rmdir(library_directory));
         assert(home_resident_plan_load("other-household:47300", &loaded));
         assert(!home_resident_plan_path(record, sizeof record));
         struct stat metadata; assert(!stat(record, &metadata) && !(metadata.st_mode & 077));

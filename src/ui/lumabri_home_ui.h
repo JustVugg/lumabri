@@ -3,6 +3,7 @@
 #ifndef LUMABRI_HOME_UI_H
 #define LUMABRI_HOME_UI_H
 #include "lumabri_home_discovery.h"
+#include "src/ui/lumabri_resident_ui.h"
 typedef struct {
     char tracker[256], token[LMB_TOKEN_MAX + 1], models[512], ram[32];
     int owner;
@@ -162,14 +163,45 @@ static int home_tracker_resume(HomeSettings *s, pid_t *child, char *notice, size
         }
         snprintf(log, sizeof log, "%s/.lumabri/home-tracker.log", getenv("HOME") ? getenv("HOME") : ".");
         char *args[] = {binary, "--port", port, "--household-discovery", NULL};
+        if (!home_service_foreground()) {
+            HomeService keeper;
+            if (home_service_ensure() || home_service_open(&keeper, "tracker")) {
+                close(probe); snprintf(notice, cap, "Cannot start the private tracker keeper. No duplicate tracker was started."); return -1;
+            }
+            snprintf(keeper.snapshot.name, sizeof keeper.snapshot.name, "Household tracker");
+            snprintf(keeper.snapshot.tracker, sizeof keeper.snapshot.tracker, "%s", next.tracker);
+            if (home_settings_save(&next) || home_service_save(&keeper)) {
+                close(probe); home_service_close(&keeper);
+                snprintf(notice, cap, "Cannot persist household service configuration."); return -1;
+            }
+            int detached = home_service_detach(&keeper, probe);
+            if (detached < 0) { close(probe); home_service_close(&keeper); return -1; }
+            if (!detached) {
+                pid_t tracker_pid = home_spawn(args, NULL, log, NULL, probe);
+                keeper.snapshot.host_pid = (uint64_t)(tracker_pid > 0 ? tracker_pid : 0);
+                while (tracker_pid > 0 && !g_stopping) {
+                    if (waitpid(tracker_pid, NULL, WNOHANG) == tracker_pid) break;
+                    if (home_service_save(&keeper)) break;
+                    if (home_service_poll(&keeper) == HOME_SVC_STOP) break;
+                    home_service_answer(&keeper); (void)poll(NULL, 0, 50);
+                }
+                home_stop_child(&tracker_pid);
+                keeper.snapshot.host_pid = 0; keeper.snapshot.state = HOME_SVC_STOPPED;
+                (void)home_service_save(&keeper); home_service_answer(&keeper); home_service_close(&keeper); _exit(0);
+            }
+            close(probe); probe = -1;
+            *child = 0;
+        } else {
         *child = home_spawn(args, NULL, log, NULL, probe);
+        }
         int ready = 0;
-        for (int attempt = 0; *child > 0 && attempt < 20 && !g_stopping; attempt++) {
+        for (int attempt = 0; attempt < 20 && !g_stopping; attempt++) {
             if (!home_connection_check(next.tracker, g_sec_pk)) { ready = 1; break; }
-            if (waitpid(*child, NULL, WNOHANG) == *child) break;
+            if (*child > 0 && waitpid(*child, NULL, WNOHANG) == *child) break;
             (void)poll(NULL, 0, 100);
         }
         if (!ready) {
+            if (!home_service_foreground()) { (void)home_service_stop_role("tracker"); (void)home_settings_save(s); }
             home_stop_child(child); setenv("LUMABRI_TOKEN", s->token, 1);
             snprintf(notice, cap, "Household tracker did not become ready. Check home-tracker.log."); return -1;
         }
@@ -406,7 +438,8 @@ static int cmd_home(void) {
         while (!g_stopping) {
             ui_begin("your workspace");
             int top = 5;
-            if (ui_h >= (actions ? 38 : 34) && ui_w >= 64) {
+            int menu_count = actions ? 7 : 5;
+            if (ui_h >= menu_count * 3 + 20 && ui_w >= 64) {
                 for (int r = 0; r < 6; r++) ui_text(top + r, 5, r < 3 ? UI_ACCENT : UI_SAND, WORDMARK[r]);
                 ui_text(top + 7, 5, UI_MUTED, "tiny engine, immense swarm");
                 if (ui_w >= 100) {
@@ -416,15 +449,17 @@ static int cmd_home(void) {
                 }
                 top += 10;
             }
-            static const char *titles[] = {"Start a conversation", "Explore models", "Your computers", "Share resources"};
+            static const char *titles[] = {"Start a conversation", "Explore models", "Your computers", "Share resources", "Resident models"};
             static const char *help[] = {"Choose a model and ask your selected donors.", "Memory needs, plans and measured speed.",
-                "See resources. Choose who participates.", "Review a request before anything is loaded."};
-            static const char *commands[] = {"/create", "/join", "/settings", "/quit", "/network", "/storage"};
+                "See resources. Choose who participates.", "Review a request before anything is loaded.", "Verify, chat with or release approved resident plans."};
+            static const char *commands[] = {"/create", "/join", "/settings", "/quit", "/network", "/storage", "/service"};
             static const char *command_help[] = {"Create or show this household", "Find your household on the LAN and pair with its key",
-                "Model folder and maximum RAM to share", "Close Lumabri", "Set up trusted LAN access once (Windows/WSL)",
-                "Inspect and clear unused household weight caches"};
+                "Model folder and maximum RAM to share", "Close this interface; background services keep running", "Set up trusted LAN access once (Windows/WSL)",
+                "Inspect and clear unused household weight caches", "View service status or explicitly stop all local resources"};
             ui_text(top, 5, UI_TEXT, actions ? "Workspace actions" : "What would you like to do?");
-            for (int i = 0; i < (actions ? 6 : 4); i++) ui_item(top + 2 + i * 3, selected == i,
+            int menu_rows = (ui_h - top - 6) / 3; if (menu_rows < 1) menu_rows = 1;
+            int menu_first = selected >= menu_rows ? selected - menu_rows + 1 : 0;
+            for (int i = menu_first; i < menu_count && i < menu_first + menu_rows; i++) ui_item(top + 2 + (i - menu_first) * 3, selected == i,
                 actions ? commands[i] : i == 0 && have_resident ? "New conversation · retained model" : titles[i],
                 actions ? command_help[i] : i == 0 && have_resident ?
                     "Reuse the approved plan. Host identity and model are checked on connection." : help[i]);
@@ -440,11 +475,11 @@ static int cmd_home(void) {
             if (key == 3 || (key == 27 && !actions)) break;
             if (key == 27) { actions = 0; selected = 0; }
             if (key == '/') { actions = !actions; selected = 0; }
-            int choices = actions ? 6 : 4;
+            int choices = actions ? 7 : 5;
             if (key == 1001) selected = (selected + choices - 1) % choices;
             if (key == 1002) selected = (selected + 1) % choices;
             if ((key == '\r' || key == '\n') && ui_h >= 28 && ui_w >= 60) {
-                key = actions ? "njsqfk"[selected] : selected == 0 && have_resident ? 'r' : "ccpd"[selected];
+                key = actions ? "njsqfkv"[selected] : selected == 0 && have_resident ? 'r' : "ccpdl"[selected];
                 actions = 0; selected = 0; break;
             }
             (void)poll(NULL, 0, 100);
@@ -452,13 +487,22 @@ static int cmd_home(void) {
         home_terminal_end(&term);
         if (key == 'q' || key == 3 || key == 27 || g_stopping) break;
         notice[0] = 0;
-        if (key == 'k') {
+        if (key == 'v') {
+            char *status[] = {"status"}; (void)cmd_service(1, status);
+            char answer[32] = "";
+            if (!home_field("Type stop to stop all LOCAL services and release their models; Enter keeps them running", answer, sizeof answer, 0) && !strcmp(answer, "stop")) {
+                char *stop[] = {"stop"}; (void)cmd_service(1, stop);
+            }
+        } else if (key == 'k') {
             home_storage_screen();
         } else if (key == 'f') {
             home_network_setup(notice, sizeof notice);
         } else if (key == 'j') {
-            if (tracker_child > 0) {
-                snprintf(notice, sizeof notice, "Close this household before joining another."); continue;
+            HomeServiceSnapshot running;
+            if (tracker_child > 0 || !home_service_query("tracker", HOME_SVC_STATUS, NULL, &running) ||
+                !home_service_query("donor", HOME_SVC_STATUS, NULL, &running) ||
+                !home_service_query("prepare", HOME_SVC_STATUS, NULL, &running)) {
+                snprintf(notice, sizeof notice, "Stop local services with /service before joining another household."); continue;
             }
             HomeSettings next = s;
             uint8_t expected[32]; int discovered = home_pick_household(&next, expected);
@@ -498,20 +542,22 @@ static int cmd_home(void) {
             if (home_settings_save(&next)) home_error_dialog("Could not save settings", "Check that your home directory is writable, then retry.");
             else {
                 s = next;
-                snprintf(notice, sizeof notice, "Settings saved. Models: %.110s · RAM limit: %.20s GB", s.models, s.ram);
+                snprintf(notice, sizeof notice, "Settings saved. RAM %.20s GB applies on the next sharing start; active allocations are unchanged.", s.ram);
             }
         } else if (key == 'n') {
             if (tracker_child <= 0 && home_tracker_resume(&s, &tracker_child, notice, sizeof notice)) continue;
             char identity[65]; lmb_hex(identity, g_sec_pk, 32);
             printf("\nOn your other computers choose Join a household.\n\nAddress: %s\nHousehold key: %s\n\n"
-                   "Host identity: %.16s\nKeep this Lumabri window open. Only share the key with your household.\nPress Enter to continue.\n", s.tracker, s.token, identity);
+                   "Host identity: %.16s\nThe household service runs independently of this window. Only share the key with your household.\nPress Enter to continue.\n", s.tracker, s.token, identity);
             char line[16]; if (!fgets(line, sizeof line, stdin)) break;
-        } else if (key == 'c' || key == 'p' || key == 'd' || key == 'r') {
+        } else if (key == 'c' || key == 'p' || key == 'd' || key == 'r' || key == 'l') {
             if (!s.tracker[0] || !s.token[0]) { snprintf(notice, sizeof notice, "Create or join a household first."); continue; }
             setenv("LUMABRI_TOKEN", s.token, 1);
             home_error[0] = 0;
             int rc;
-            if (key == 'r') {
+            if (key == 'l') {
+                rc = home_resident_library_ui(s.tracker);
+            } else if (key == 'r') {
                 rc = home_resident_plan_chat(&resident_plan);
             } else if (key == 'd') {
                 char *args[] = {"--join", s.tracker, "--ram-gb", s.ram};
@@ -520,7 +566,8 @@ static int cmd_home(void) {
                 char *args[] = {"--tracker", s.tracker, "--models-dir", s.models, "--computers"};
                 rc = cmd_models(key == 'p' ? 5 : 4, args);
             }
-            g_stopping = 0; install_chat_signal_handlers();
+            if (g_stopping) break;
+            install_chat_signal_handlers();
             if (rc || home_error[0]) home_error_dialog("Could not complete the operation", home_error[0] ? home_error :
                 "The operation did not finish. No plan is running. Check diagnostics before retrying.");
         }

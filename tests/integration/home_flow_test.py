@@ -188,6 +188,10 @@ def main():
                 # The default product path is resident. Keep legacy cache
                 # regressions explicit; resident tests exercise the TUI too.
                 "LUMABRI_RESIDENT_REQUIRED": "1" if resident else "0",
+                # This harness explicitly tests the original foreground
+                # lifetime, including terminal-death cleanup. The service
+                # lifecycle has its own real-model integration mode.
+                "LUMABRI_HOME_FOREGROUND": "1",
                 "LUMABRI_HOME_PORT_BASE": str(service_base + 16 * service_slots.get(name, 0)),
                 "LUMABRI_PEER_KEY": str(home / "peer.key"),
                 "LUMABRI_KNOWN_HOSTS": str(home / "known.hosts"),
