@@ -57,6 +57,22 @@ need disjoint available donors. There is one preparation at a time per local
 service. Shared-donor batching, automatic failover/replay, server-wide cost
 optimization and model eviction policies are separate work.
 
+## Next dependencies
+
+The next milestone is **inventory and measurements usable by the planner**:
+unify usable CPU/RAM and adapter-proven GPU/VRAM, per-model memory, links,
+load, preparation and per-range performance, plus optional cost/energy facts.
+Short probes seed observations and completed sessions update them; changed
+execution conditions make them stale. See [the evidence contract](CALIBRATION_RECORDS.md#planner-resource-evidence)
+for the implemented subset and remaining unknowns.
+
+Shared-donor **multi-model management** follows this foundation: independent
+allocation identities, summed reservations, per-model unload, isolated sessions
+and restart reconciliation must work on the same donor before concurrent
+capacity can be claimed. A separate **DeepSeek V4.1** integration must address
+its cross-layer state and resident Engram tables; Colibri 1.12.1's standalone
+engine is not an Edge/Segment adapter and cannot be aliased to DeepSeek V4.
+
 ## Tests
 
 `tests/integration/household_service_test.py` covers singleton startup, private

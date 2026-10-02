@@ -31,11 +31,17 @@ def main():
         def env(name):
             home = tmp / name
             home.mkdir(exist_ok=True)
-            return {**os.environ, "HOME": str(home), "LUMABRI_ENCRYPT": "1",
+            result = {**os.environ, "HOME": str(home), "LUMABRI_ENCRYPT": "1",
                     "LUMABRI_PEER_KEY": str(home / "peer.key"),
                     "LUMABRI_KNOWN_HOSTS": str(home / "known.hosts"),
                     "LUMABRI_TOKEN": "inventory-test", "LUMABRI_NO_DISK_PROBE": "1",
                     "LUMABRI_RAM_RESERVE_MB": "256", "LUMABRI_IO_TIMEOUT_MS": "20000"}
+            for key in ("LUMABRI_COST_PER_HOUR", "LUMABRI_COST_CURRENCY", "LUMABRI_ESTIMATED_POWER_WATTS"):
+                result.pop(key, None)
+            if name == "a":
+                result.update(LUMABRI_COST_PER_HOUR="0", LUMABRI_COST_CURRENCY="EUR",
+                              LUMABRI_ESTIMATED_POWER_WATTS="12.5")
+            return result
 
         def start(name, args, identity=None):
             log = open(tmp / f"{name}.log", "w+")
@@ -88,6 +94,15 @@ def main():
                 assert node["cpu_model"] and node["threads"] > 0
                 assert node["ram_budget_bytes"] <= node["ram_available_bytes"]
                 assert not node["segment_gpu_verified"]
+                assert node["runtime_state"] == "unknown"  # inventory workers are not loaded engines
+                assert node["resource_facts"]["load_one"] is not None
+                assert node["resource_facts"]["energy_joules"] is None
+                assert node["resource_facts"]["link_to_edge"] is None
+            facts_a = next(n for n in doc["nodes"] if n["name"] == "home-a")["resource_facts"]
+            facts_b = next(n for n in doc["nodes"] if n["name"] == "home-b")["resource_facts"]
+            assert facts_a["machine_cost"] == {"state": "declared", "micro_units_per_hour": 0, "currency": "EUR"}
+            assert facts_a["power"] == {"state": "declared_estimate", "watts": 12.5}
+            assert facts_b["machine_cost"] is None and facts_b["power"] is None
             assert next(n for n in doc["nodes"] if n["name"] == "home-a")["ram_budget_bytes"] <= 1e9
             assert not doc["execution_ready"] and doc["models"][0]["calibration"] is None
             assert len(snapshot("b")["nodes"]) == 2  # this computer counted once

@@ -4,8 +4,9 @@
 #define LUMABRI_INVENTORY_H
 #include "lumabri_proto.h"
 #include "lumabri_machine.h"
+#include "src/planner/lumabri_resource_facts.h"
 
-#define LMB_INVENTORY_VERSION 3u
+#define LMB_INVENTORY_VERSION 4u
 #define LMB_INVENTORY_MAX 32u
 #define LMB_INVENTORY_TTL_MS 15000u
 #define LMB_INVENTORY_HEARTBEAT_MS 5000u
@@ -18,6 +19,7 @@ typedef struct {
     char control_addr[64];      /* empty for an inventory-only worker */
     char runtime_id[65];        /* executable hashes + active donor epoch; empty = unknown */
     uint32_t runtime_threads;   /* queried installed engine, not detected CPU cores */
+    LmbResourceFacts facts;
 } LmbMachineReport;
 
 /* Lengths and control characters are checked before any field reaches a
@@ -54,7 +56,11 @@ static LMB_MAYBE_UNUSED int lmb_inventory_pack(LmbBuf *b,
     INV_U64(disk_available_bytes); INV_U64(disk_read_bps);
 #undef INV_U64
     return lmb_buf_u64(b, r->ram_budget_bytes) || lmb_buf_str(b, r->control_addr) ||
-           lmb_buf_str(b, r->runtime_id) || lmb_buf_u32(b, r->runtime_threads);
+           lmb_buf_str(b, r->runtime_id) || lmb_buf_u32(b, r->runtime_threads) ||
+           lmb_buf_u32(b, r->facts.known) || lmb_buf_u32(b, r->facts.load_milli) ||
+           lmb_buf_u64(b, r->facts.price_micro_per_hour) ||
+           lmb_buf_u32(b, r->facts.power_milliwatts) ||
+           lmb_buf_bytes(b, r->facts.currency, 4);
 }
 
 static LMB_MAYBE_UNUSED int lmb_inventory_unpack(LmbCur *c,
@@ -62,7 +68,7 @@ static LMB_MAYBE_UNUSED int lmb_inventory_unpack(LmbCur *c,
     memset(r, 0, sizeof *r);
     LmbMachineProfile *m = &r->machine;
     uint32_t version;
-    if (lmb_cur_u32(c, &version) || version != LMB_INVENTORY_VERSION ||
+    if (lmb_cur_u32(c, &version) || (version != 3 && version != LMB_INVENTORY_VERSION) ||
         c->len - c->off < sizeof r->identity) return -1;
     memcpy(r->identity, c->p + c->off, sizeof r->identity);
     c->off += sizeof r->identity;
@@ -82,6 +88,15 @@ static LMB_MAYBE_UNUSED int lmb_inventory_unpack(LmbCur *c,
         lmb_inventory_string(c, r->control_addr, sizeof r->control_addr) ||
         lmb_inventory_string(c, r->runtime_id, sizeof r->runtime_id) ||
         lmb_cur_u32(c, &r->runtime_threads)) return -1;
+    /* V3 peers remain usable, but missing load/cost data stays unknown. */
+    if (version >= 4) {
+        if (lmb_cur_u32(c, &r->facts.known) || lmb_cur_u32(c, &r->facts.load_milli) ||
+            lmb_cur_u64(c, &r->facts.price_micro_per_hour) ||
+            lmb_cur_u32(c, &r->facts.power_milliwatts) || c->off > c->len || c->len - c->off < 4) return -1;
+        memcpy(r->facts.currency, c->p + c->off, 4); c->off += 4;
+        if (!lmb_resource_facts_valid(&r->facts)) return -1;
+    }
+    m->load_one = r->facts.known & LMB_FACT_LOAD ? r->facts.load_milli / 1000.0 : -1;
     if (r->runtime_threads > 256 || (!!r->runtime_threads != !!r->runtime_id[0])) return -1;
     if (r->runtime_id[0]) {
         if (strlen(r->runtime_id) != 64 || !r->control_addr[0]) return -1;
@@ -114,7 +129,7 @@ static LMB_MAYBE_UNUSED int lmb_inventory_fetch(const char *tracker,
     LmbCur c = {m.body, m.body_len, 0};
     uint32_t version = 0, n = 0;
     int bad = m.op != LMB_MACHINE_LIST_R || m.pay_len ||
-              lmb_cur_u32(&c, &version) || version != LMB_INVENTORY_VERSION ||
+              lmb_cur_u32(&c, &version) || (version != 3 && version != LMB_INVENTORY_VERSION) ||
               lmb_cur_u32(&c, &n) || n > LMB_INVENTORY_MAX;
     for (uint32_t i = 0; !bad && i < n; i++) {
         uint32_t age = 0;

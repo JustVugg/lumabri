@@ -521,8 +521,9 @@ static void draw_workspace(const LmbTuiState *st, int tab, int sel, int detail,
             ui_printf(15, 5, UI_SAND, "Resource advice: %s (not an answer-quality ranking)", lmb_advice_text(m->advice_flags));
         if (m->has_calibration && m->calibration_key_valid &&
             lmb_cal_matches(&m->calibration.key, &m->calibration_key))
-            ui_printf(14, 5, UI_MUTED, "Last turn: %u prompt / %u generated tokens. Longer chats or other load may be slower.",
-                m->calibration.prompt_tokens, m->calibration.generated_tokens);
+            ui_printf(14, 5, UI_MUTED, "%s: %u prompt / %u generated tokens · %u observation(s). Speed depends on workload.",
+                m->calibration.source == LMB_CAL_SOURCE_PROBE ? "Short probe" : "Last turn",
+                m->calibration.prompt_tokens, m->calibration.generated_tokens, m->calibration.samples);
         if (m->planned && m->plan.state != LMB_PLAN_UNRUNNABLE) {
             for (uint32_t i = 0; i < m->plan.nslices && 16 + (int)i * 2 < ui_h - 7; i++) {
                 const LmbSlice *s = &m->plan.slices[i];
@@ -548,10 +549,13 @@ static void draw_workspace(const LmbTuiState *st, int tab, int sel, int detail,
         for (int i = top; i < (int)st->nnodes && i < top + rows; i++) {
             const LmbClusterNode *n = &st->nodes[i];
             const LmbMachineProfile *p = &st->profiles[i];
-            char title[256], description[512];
+            char title[256], description[512], load[48];
+            if (st->facts[i].known & LMB_FACT_LOAD)
+                snprintf(load, sizeof load, "load1 %.2f", st->facts[i].load_milli / 1000.0);
+            else snprintf(load, sizeof load, "load unknown");
             snprintf(title, sizeof title, "[%s] %s", lmb_tui_node_enabled(st, (uint32_t)i) ? "✓" : " ", n->name);
-            snprintf(description, sizeof description, "%s · %.1f GB RAM · %u threads · %u GPU detected / %.1f GB VRAM",
-                p->cpu_model, n->ram_budget_bytes / 1e9, n->threads, p->gpu_count, p->vram_available_bytes / 1e9);
+            snprintf(description, sizeof description, "%s · %.1f GB RAM · %u threads · %u GPU detected / %.1f GB VRAM · %s",
+                p->cpu_model, n->ram_budget_bytes / 1e9, n->threads, p->gpu_count, p->vram_available_bytes / 1e9, load);
             ui_item(10 + (i - top) * 3, i == sel, title, description);
         }
         ui_text(ui_h - 6, 5, UI_MUTED, "Nothing is selected automatically. GPU detected does not mean GPU execution.");

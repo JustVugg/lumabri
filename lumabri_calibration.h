@@ -25,6 +25,7 @@
 #include "lumabri_planner.h"
 
 #define LMB_CAL_NODES_MAX 32
+enum { LMB_CAL_SOURCE_UNKNOWN = 0, LMB_CAL_SOURCE_PROBE = 1, LMB_CAL_SOURCE_SESSION = 2 };
 
 typedef struct {
     char model_root[65];        /* content identity, checked against the signed routing root */
@@ -60,7 +61,13 @@ typedef struct {
     uint32_t generated_tokens;
     uint32_t stage_count;        /* zero on legacy/no per-range observations */
     double stage_decode_seconds[LMB_CAL_NODES_MAX]; /* seconds per RUN, includes transport */
+    uint32_t source;            /* origin of the latest observation; 0 for legacy records */
 } LmbCalibration;
+
+static LMB_UNUSED const char *lmb_cal_source_name(uint32_t source) {
+    return source == LMB_CAL_SOURCE_PROBE ? "short_probe" :
+        source == LMB_CAL_SOURCE_SESSION ? "real_session" : "unknown";
+}
 
 /* Never compare unterminated fields or let two equally incomplete records
  * establish a match. These checks also bound data loaded from disk. */
@@ -93,7 +100,8 @@ static LMB_UNUSED int lmb_cal_key_valid(const LmbCalKey *k) {
 }
 
 static LMB_UNUSED int lmb_cal_valid(const LmbCalibration *c) {
-    if (!c || (c->stage_count && c->stage_count != c->key.nodes) || c->stage_count > LMB_CAL_NODES_MAX) return 0;
+    if (!c || c->source > LMB_CAL_SOURCE_SESSION ||
+        (c->stage_count && c->stage_count != c->key.nodes) || c->stage_count > LMB_CAL_NODES_MAX) return 0;
     for (uint32_t i = 0; i < c->stage_count; i++)
         if (!isfinite(c->stage_decode_seconds[i]) || c->stage_decode_seconds[i] <= 0 ||
             c->stage_decode_seconds[i] > 1e9) return 0;
@@ -145,6 +153,17 @@ static LMB_UNUSED const char *lmb_cal_mismatch(const LmbCalKey *a,
 
 static LMB_UNUSED int lmb_cal_matches(const LmbCalKey *a, const LmbCalKey *b) {
     return lmb_cal_mismatch(a, b) == NULL;
+}
+
+/* Keep the actual latest rate/workload; never average unrelated prompts into
+ * a fabricated capacity promise. The count describes observations under the
+ * same execution key, not confidence or simultaneous-session capacity. */
+static LMB_UNUSED void lmb_cal_observation_count(LmbCalibration *next, const LmbCalibration *prior) {
+    if (!next) return;
+    next->samples = 1;
+    if (lmb_cal_valid(prior) && lmb_cal_matches(&next->key, &prior->key) &&
+        next->measured_at >= prior->measured_at)
+        next->samples = prior->samples == UINT32_MAX ? UINT32_MAX : prior->samples + 1;
 }
 
 /* What the catalogue prints in the speed column.

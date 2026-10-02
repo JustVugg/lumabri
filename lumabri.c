@@ -5059,7 +5059,13 @@ static int cmd_chat(int argc, char **argv) {
                 snprintf(record.key.numeric_class, sizeof record.key.numeric_class, "%s", eng.numeric_class);
                 record.decode_tok_s = lmb_metrics_decode_rate(&metrics);
                 record.ttft_seconds = first > r0 ? first - r0 : metrics.prefill_seconds;
-                record.measured_at = (double)time(NULL); record.samples = 1;
+                record.measured_at = (double)time(NULL);
+                record.source = quick_probe ? LMB_CAL_SOURCE_PROBE : LMB_CAL_SOURCE_SESSION;
+                LmbCalibration prior;
+                const LmbCalibration *previous = g_recording_calibration;
+                if (!lmb_cal_valid(previous) && !lmb_cal_load(g_calibration_directory, record.key.model_root, &prior))
+                    previous = &prior;
+                lmb_cal_observation_count(&record, previous);
                 record.prompt_tokens = prompt_count; record.generated_tokens = metrics.generated_tokens;
                 record.stage_count = 0;
                 LmbStageSample samples[LMB_STAGE_PROFILE_MAX]; uint32_t count = 0;
@@ -5295,7 +5301,9 @@ static void catalog_self(LmbClusterNode *n, LmbMachineProfile *profile,
                         ? p.ram_available_bytes - reserve : 0;
     n->vram_budget_bytes = p.vram_available_bytes;
     n->disk_read_bps = p.disk_read_bps;
-    n->gpu_backends = p.gpu_backends;
+    /* TUI compile flags and a detected device are not an adapter execution
+     * test. The resident household contract is currently CPU-only. */
+    n->gpu_backends = 0;
     n->threads = p.logical_cpus;
     n->has_checkpoint = 0;      /* set per catalogue entry, never globally */
 }
@@ -5309,7 +5317,9 @@ static int catalog_inventory(LmbTuiState *st) {
     memset(st->identities, 0, sizeof st->identities);
     memset(st->runtime_ids, 0, sizeof st->runtime_ids);
     memset(st->ages_ms, 0, sizeof st->ages_ms);
+    memset(st->facts, 0, sizeof st->facts);
     catalog_self(&st->nodes[0], &st->profiles[0], st->disk[0] ? st->disk : ".");
+    st->facts[0] = lmb_resource_facts_local(st->profiles[0].logical_cpus ? st->profiles[0].load_one : -1);
     st->nnodes = 1;
     st->inventory_ok = 1;
     if (!st->tracker[0]) return 0;
@@ -5347,6 +5357,7 @@ static int catalog_inventory(LmbTuiState *st) {
         node->gpu_backends = 0;
         node->disk_read_bps = r->machine.disk_read_bps;
         st->profiles[at] = r->machine;
+        st->facts[at] = r->facts;
         st->ages_ms[at] = r->age_ms;
         inventory_id_text(r->identity, st->identities[at]);
     }
@@ -5620,6 +5631,61 @@ static void json_string(FILE *out, const char *s) {
     fputc('"', out);
 }
 
+/* Same typed snapshot as the TUI. Missing facts use null, never an invented
+ * zero; monetary declarations and estimated watts are not measurements. */
+static void catalog_resource_json(const LmbResourceFacts *f) {
+    fputs(",\"resource_facts\":{\"load_one\":", stdout);
+    if (f->known & LMB_FACT_LOAD) printf("%.3f", f->load_milli / 1000.0);
+    else fputs("null", stdout);
+    fputs(",\"machine_cost\":", stdout);
+    if (f->known & LMB_FACT_PRICE)
+        printf("{\"state\":\"declared\",\"micro_units_per_hour\":%llu,\"currency\":\"%.3s\"}",
+            (unsigned long long)f->price_micro_per_hour, f->currency);
+    else fputs("null", stdout);
+    fputs(",\"power\":", stdout);
+    if (f->known & LMB_FACT_POWER)
+        printf("{\"state\":\"declared_estimate\",\"watts\":%.3f}", f->power_milliwatts / 1000.0);
+    else fputs("null", stdout);
+    /* Inventory currently has no endpoint-bound bandwidth/power sensor.
+     * A tracker RTT or a disk benchmark cannot substitute for either. */
+    fputs(",\"energy_joules\":null,\"link_to_edge\":null}", stdout);
+}
+
+static void catalog_plan_evidence_json(const LmbTuiModel *m, uint32_t context, uint32_t sessions) {
+    const LmbClusterPlan *p = &m->plan;
+    int current = m->has_calibration && m->calibration_key_valid &&
+        lmb_cal_matches(&m->calibration.key, &m->calibration_key);
+    fputs(",\"execution_evidence\":{\"gpu\":{\"state\":\"unavailable\","
+          "\"reason\":\"No verified household GPU memory/execution contract\"},\"preparation_seconds\":", stdout);
+    /* This is distribution only. Warm-up/engine load are not measured yet. */
+    fputs("null,\"distribution_estimate_seconds\":", stdout);
+    if (m->planned && p->ready_known) printf("%.6f", p->ready_seconds);
+    else fputs("null", stdout);
+    fputs(",\"ranges\":[", stdout);
+    for (uint32_t i = 0; m->planned && i < p->nslices; i++) {
+        const LmbSlice *s = &p->slices[i];
+        if (i) fputc(',', stdout);
+        printf("{\"node\":%u,\"begin\":%u,\"end\":%u,\"memory\":", s->node, s->layer_begin, s->layer_end);
+        LmbMemoryEvidence memory;
+        if (!lmb_memory_evidence(&m->shape, s->layer_begin, s->layer_end, context, sessions,
+                                s->node == p->edge_node, s->bytes_resident, &memory)) {
+            printf("{\"state\":\"estimated\",\"weights_bytes\":%llu,\"context_session_bytes\":%llu,"
+                   "\"scratch_bytes\":%llu,\"reserved_bytes\":%llu,\"guard_and_preparation_bytes\":",
+                   (unsigned long long)memory.weights, (unsigned long long)memory.state,
+                   (unsigned long long)memory.scratch, (unsigned long long)memory.reserved);
+            if (memory.reservation_complete) printf("%llu", (unsigned long long)memory.overhead);
+            else fputs("null", stdout);
+            fputc('}', stdout);
+        } else fputs("null", stdout);
+        fputs(",\"decode_run_seconds\":", stdout);
+        if (current && m->calibration.stage_count == p->nslices)
+            printf("%.9f", m->calibration.stage_decode_seconds[i]);
+        else fputs("null", stdout);
+        fputc('}', stdout);
+    }
+    fputs("]}", stdout);
+}
+
 static void catalog_json(const LmbTuiState *st) {
     printf("{\"schema\":\"lumabri.models.v1\",\"inventory_ok\":%s,"
            "\"execution_ready\":false,\"nodes\":[", st->inventory_ok ? "true" : "false");
@@ -5637,7 +5703,7 @@ static void catalog_json(const LmbTuiState *st) {
                "\"ram_available_bytes\":%llu,\"vram_inventory_bytes\":%llu,"
                "\"threads\":%u,\"physical_cores\":%u,\"numa_nodes\":%u,"
                "\"gpu_detected\":%u,\"segment_gpu_verified\":false,"
-               "\"disk_available_bytes\":%llu,\"disk_read_bps\":%llu,\"age_ms\":%u}",
+               "\"disk_available_bytes\":%llu,\"disk_read_bps\":%llu,\"age_ms\":%u",
                (unsigned long long)node->ram_budget_bytes,
                (unsigned long long)p->ram_total_bytes,
                (unsigned long long)p->ram_available_bytes,
@@ -5645,6 +5711,10 @@ static void catalog_json(const LmbTuiState *st) {
                node->threads, p->physical_cores, p->numa_nodes, p->gpu_count,
                (unsigned long long)p->disk_available_bytes,
                (unsigned long long)node->disk_read_bps, st->ages_ms[i]);
+        catalog_resource_json(&st->facts[i]);
+        fputs(",\"runtime_state\":", stdout);
+        json_string(stdout, st->runtime_ids[i][0] ? "identified" : "unknown");
+        fputc('}', stdout);
     }
     fputs("],\"models\":[", stdout);
     for (int i = 0; i < st->nmodels; i++) {
@@ -5677,8 +5747,14 @@ static void catalog_json(const LmbTuiState *st) {
                 current ? "measured" : "stale", model->calibration.measured_at, model->calibration.samples,
                 model->calibration.prompt_tokens, model->calibration.generated_tokens);
             if (current) printf("%.6f", model->calibration.decode_tok_s); else fputs("null", stdout);
+            fputs(",\"source\":", stdout); json_string(stdout, lmb_cal_source_name(model->calibration.source));
+            fputs(",\"stale_reason\":", stdout);
+            if (current) fputs("null", stdout);
+            else json_string(stdout, model->calibration_key_valid ?
+                lmb_cal_mismatch(&model->calibration.key, &model->calibration_key) : "current execution conditions incomplete");
             fputc('}', stdout);
         }
+        catalog_plan_evidence_json(model, st->context, st->sessions);
         fputs(",\"advice\":", stdout); json_string(stdout, lmb_advice_text(model->advice_flags));
         fputc('}', stdout);
     }
@@ -5835,6 +5911,7 @@ static int cmd_worker(int argc, char **argv) {
             }
             lmb_machine_refresh_resources(&profile, disk);
             report.machine = profile;
+            report.facts = lmb_resource_facts_local(profile.load_one);
             if (name) snprintf(report.machine.hostname, sizeof report.machine.hostname, "%s", name);
             uint64_t reserve = lmb_machine_ram_reserve();
             uint64_t available = report.machine.ram_available_bytes;

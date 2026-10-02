@@ -87,7 +87,7 @@ static void identity_tests(void) {
 static void record_tests(void) {
     LmbCalibration r = { .key = base(), .decode_tok_s = 12.5,
         .ttft_seconds = 1.25, .measured_at = 1234567, .samples = 1,
-        .prompt_tokens = 24, .generated_tokens = 8 }, got;
+        .prompt_tokens = 24, .generated_tokens = 8, .source = LMB_CAL_SOURCE_PROBE }, got;
     memset(r.key.model_root, 'a', 64); r.key.model_root[64] = 0;
     LmbBuf encoded = {0};
     CHECK(!lmb_cal_encode(&r, &encoded), "record encoding failed");
@@ -95,7 +95,8 @@ static void record_tests(void) {
     CHECK(!lmb_cal_decode(encoded.p, encoded.len, &got) && lmb_cal_matches(&r.key, &got.key) &&
           r.decode_tok_s == got.decode_tok_s && r.ttft_seconds == got.ttft_seconds &&
           r.measured_at == got.measured_at && r.samples == got.samples &&
-          r.prompt_tokens == got.prompt_tokens && r.generated_tokens == got.generated_tokens, "record round trip failed");
+          r.prompt_tokens == got.prompt_tokens && r.generated_tokens == got.generated_tokens &&
+          r.source == got.source, "record round trip failed");
     for (size_t i = 0; i < encoded.len; i++) {
         got = r;
         CHECK(lmb_cal_decode(encoded.p, i, &got) && !got.samples, "truncated record accepted at %zu", i);
@@ -104,14 +105,14 @@ static void record_tests(void) {
     CHECK(lmb_cal_decode(encoded.p, encoded.len, &got) && !got.samples, "corrupt record accepted");
     encoded.p[12] ^= 1;
     /* CAL1 remains readable, but never fabricates per-stage observations. */
-    size_t legacy_len = encoded.len - 4; /* remove CAL2's empty stage count */
+    size_t legacy_len = encoded.len - 8; /* remove empty stage count and CAL3 source */
     uint8_t *legacy = malloc(legacy_len);
     CHECK(legacy != NULL, "cannot allocate legacy fixture");
     if (legacy) {
         memcpy(legacy, encoded.p, legacy_len - 32); memcpy(legacy, "LMB-CAL1", 8);
         LmbSha sha; lmb_sha_init(&sha); lmb_sha_update(&sha, legacy, legacy_len - 32);
         lmb_sha_final(&sha, legacy + legacy_len - 32);
-        CHECK(!lmb_cal_decode(legacy, legacy_len, &got) && !got.stage_count &&
+        CHECK(!lmb_cal_decode(legacy, legacy_len, &got) && !got.stage_count && !got.source &&
               got.decode_tok_s == r.decode_tok_s, "legacy record failed");
         free(legacy);
     }
@@ -122,6 +123,28 @@ static void record_tests(void) {
           got.stage_decode_seconds[0] == .125 && got.stage_decode_seconds[1] == .25,
           "per-stage record round trip failed");
     free(stage_bytes.p);
+    LmbBuf v2 = {0};
+    CHECK(!lmb_cal_encode(&staged, &v2), "cannot prepare CAL2 fixture");
+    if (v2.p) {
+        v2.len -= 4; memcpy(v2.p, "LMB-CAL2", 8);
+        LmbSha sha; lmb_sha_init(&sha); lmb_sha_update(&sha, v2.p, v2.len - 32);
+        lmb_sha_final(&sha, v2.p + v2.len - 32);
+        CHECK(!lmb_cal_decode(v2.p, v2.len, &got) && got.stage_count == 2 && !got.source,
+              "CAL2 compatibility invented a measurement source");
+        free(v2.p);
+    }
+    LmbCalibration observed = r;
+    observed.source = LMB_CAL_SOURCE_SESSION; observed.decode_tok_s = 7;
+    lmb_cal_observation_count(&observed, &r);
+    CHECK(observed.samples == 2 && observed.decode_tok_s == 7 &&
+          observed.source == LMB_CAL_SOURCE_SESSION, "session did not update probe evidence");
+    observed.key.threads[0]++;
+    lmb_cal_observation_count(&observed, &r);
+    CHECK(observed.samples == 1, "changed plan inherited observation count");
+    observed = r; observed.measured_at--;
+    lmb_cal_observation_count(&observed, &r);
+    CHECK(observed.samples == 1, "backward clock inherited observation count");
+    observed.source = 99; CHECK(!lmb_cal_valid(&observed), "unknown source version accepted");
     staged.stage_count = 1; CHECK(!lmb_cal_valid(&staged), "partial chain profile accepted");
     staged.stage_count = 2; staged.stage_decode_seconds[0] = NAN;
     CHECK(!lmb_cal_valid(&staged), "NaN stage time accepted");

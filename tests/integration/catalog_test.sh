@@ -79,6 +79,18 @@ assert next(m for m in doc["models"] if m["name"] == "config-only")["weights_pre
 tiny = next(m for m in doc["models"] if m["name"] == "tiny")
 assert tiny["checkpoint_inventory_ok"] is True
 assert tiny["checkpoint_bytes"] > 4096  # includes config, not just weights
+evidence = tiny["execution_evidence"]
+assert evidence["gpu"]["state"] == "unavailable"
+assert evidence["preparation_seconds"] is None
+for row in evidence["ranges"]:
+    assert row["decode_run_seconds"] is None
+    memory = row["memory"]
+    assert memory["state"] == "estimated"
+    subtotal = sum(memory[k] for k in ("weights_bytes", "context_session_bytes", "scratch_bytes"))
+    if memory["guard_and_preparation_bytes"] is not None:
+        assert memory["reserved_bytes"] == subtotal + memory["guard_and_preparation_bytes"]
+    else:
+        assert memory["reserved_bytes"] < subtotal  # local preview, not admitted Edge allocation
 PY
 
 # A directory with no checkpoints says so instead of printing an empty table.

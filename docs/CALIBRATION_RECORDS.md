@@ -41,9 +41,10 @@ Missing or stale sidecars withhold the measurement; they do not weaken the
 signed model checks or prevent an otherwise valid chat.
 
 Upgrade the tracker, requester and donors together: machine inventory is now
-version 3. The Hosted greeting has optional numeric ABI metadata. Old
-inventory versions are rejected explicitly rather than treated as a complete
-calibration identity. An older host without metadata can still serve chat,
+version 4. Version 3 reports remain readable, but their missing load/cost
+fields are unknown. Older versions are rejected explicitly rather than treated
+as a complete calibration identity. The Hosted greeting has optional numeric
+ABI metadata. An older host without metadata can still serve chat,
 but cannot produce these records.
 
 ## Storage and limits
@@ -67,8 +68,12 @@ Changing any matched condition makes a previous speed stale. The producer
 verifies where each field came from: structural validation alone would not
 make invented build IDs or a partial key authoritative.
 
-New `LMB-CAL2` records optionally store complete per-range decode RUN averages.
-`LMB-CAL1` remains readable without invented stage costs. The `STAGES1` extension
+New `LMB-CAL3` records store the latest observation's origin (`short_probe` or
+`real_session`) as well as optional complete per-range decode RUN averages.
+Completed turns update the last value and observation count under the exact
+same key; a changed key starts a new count. Counts are not a statistical error
+bound or concurrent-session capacity. `LMB-CAL1` and `LMB-CAL2` remain readable
+without inventing their unknown measurement origin or missing stage costs. The `STAGES1` extension
 precedes `PERF1`; a malformed stage profile cannot influence placement, but
 does not discard otherwise valid end-to-end timing.
 
@@ -76,6 +81,32 @@ The C TUI and JSON export consume the same owned snapshot. JSON returns
 `calibration: null` when absent, and `decode_tok_s: null` when stale. This
 feature provides historical per-stage averages for heuristic placement, not
 a measured speed for a new plan or a quality ranking across model families.
+
+## Planner resource evidence
+
+The catalogue snapshot and `models --json` distinguish OS load, adapter-derived
+memory estimates, runtime identity and actual observations. The JSON adds
+`resource_facts` on nodes and `execution_evidence` on models. Per-range memory
+separates weights, context/session state, scratch and reservation overhead.
+Missing data is `null`; stale observations never populate per-range timings.
+The TUI labels a short probe separately from a completed chat and shows load1
+as an OS load average, not CPU percent.
+
+Optional operator declarations are `LUMABRI_COST_PER_HOUR` (fixed decimal,
+up to six fractional digits), `LUMABRI_COST_CURRENCY` (three uppercase letters),
+and `LUMABRI_ESTIMATED_POWER_WATTS` (up to three fractional digits). Start the
+sharing service with them set to advertise them. Missing or invalid values
+stay unknown; explicit zero cost stays a declared zero. These are whole-machine
+prices and estimated power, not billing receipts, incremental inference costs,
+live power readings or measured energy savings. No cost-based scheduling is
+enabled by publishing them.
+
+Endpoint-bound link measurements, preparation durations and energy sensors
+are not yet connected and remain explicitly unknown. A tracker RTT, disk
+benchmark or detected GPU cannot replace them. Household GPU execution stays
+unavailable until a matching adapter backend and memory contract pass execution
+tests. Thus this is the evidence foundation of the inventory milestone, not a
+claim that its hardware validation or the multi-model scheduler is complete.
 
 ## Verification
 

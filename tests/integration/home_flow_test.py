@@ -49,11 +49,13 @@ def current_frame(terminal):
     return terminal.text.rsplit("\x1b[H", 1)[-1]
 
 
-def assert_stage_record(path, stages=2):
+def assert_stage_record(path, stages=2, expected_source=2):
     record = path.read_bytes()
-    assert record[:8] == b"LMB-CAL2", "new per-stage record was not written"
+    assert record[:8] == b"LMB-CAL3", "new observation-source record was not written"
     assert hashlib.sha256(record[:-32]).digest() == record[-32:], "record checksum mismatch"
-    offset = len(record) - 32 - stages * 8 - 4
+    source = struct.unpack_from("<I", record, len(record) - 32 - 4)[0]
+    assert source == expected_source, "measurement has the wrong probe/session source"
+    offset = len(record) - 32 - stages * 8 - 8
     assert offset >= 8 and struct.unpack_from("<I", record, offset)[0] == stages, \
         "the complete approved stage profile did not reach the calibration store"
     values = struct.unpack_from("<" + "d" * stages, record, offset + 4)
@@ -391,7 +393,7 @@ def main():
             assert chat.has("hosted stream") and chat.has("no local checkpoint")
             records = list((tmp / "chatter/.lumabri/calibrations").glob("*.cal"))
             assert len(records) == 1 and records[0].stat().st_mode & 0o077 == 0
-            assert_stage_record(records[0], stages=0 if args.expect_hybrid else 2)
+            assert_stage_record(records[0], stages=0 if args.expect_hybrid else 2, expected_source=1)
             until(lambda: a.has("Released") and b.has("Released"))
             for name in ("donor-a", "donor-b"):
                 for lock in ("compute-donor.lock", "home/weights.lock"):
@@ -404,7 +406,7 @@ def main():
             until(lambda: reopened.has("tok/s (last)") or reopened.has("stale"), seconds=30,
                   message="the short measurement or revised-range status did not reappear")
             reopened.send("\r")
-            until(lambda: reopened.has("Last turn:") or reopened.has("Placement guided by previous stage timings"))
+            until(lambda: reopened.has("Short probe:") or reopened.has("Placement guided by previous stage timings"))
             if "stale" in current_frame(reopened):
                 assert reopened.has("Placement guided by previous stage timings")
                 assert "tok/s (last)" not in current_frame(reopened), "revised ranges retained the old speed"
