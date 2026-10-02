@@ -31,7 +31,8 @@ therefore a wire-compatibility statement first and a tarball second.
 3. Tag: `git tag -a vX.Y.Z -m "..." && git push origin vX.Y.Z`.
 4. Build the binaries people actually deploy:
    `make all engines chatters ENGINE=../colibri/c` on the oldest glibc you
-   intend to support, and note the colibri commit you built against in the
+   intend to support, using the Colibri v1.12.1 revision pinned in CI
+   (`ce370e87d7b623d7759b52ec2007d75fc5b0e87e`), and note it in the
    tag message — the pair is the release.
 5. Update the server(s) you operate **first** (they are the origin and the
    tracker: everyone else's experience depends on them), donors and
