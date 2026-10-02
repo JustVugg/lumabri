@@ -188,6 +188,10 @@ def main():
                 # The default product path is resident. Keep legacy cache
                 # regressions explicit; resident tests exercise the TUI too.
                 "LUMABRI_RESIDENT_REQUIRED": "1" if resident else "0",
+                # This harness explicitly tests the original foreground
+                # lifetime, including terminal-death cleanup. The service
+                # lifecycle has its own real-model integration mode.
+                "LUMABRI_HOME_FOREGROUND": "1",
                 "LUMABRI_HOME_PORT_BASE": str(service_base + 16 * service_slots.get(name, 0)),
                 "LUMABRI_PEER_KEY": str(home / "peer.key"),
                 "LUMABRI_KNOWN_HOSTS": str(home / "known.hosts"),
@@ -759,7 +763,7 @@ def main():
             # exited. Reconnect with the same accepted identity: no source,
             # no donor restart and no checkpoint download are available.
             resume = Terminal("resident-resume", ["./lumabri"], "chatter")
-            until(lambda: resume.has("New conversation · retained model"),
+            until(lambda: resume.has("New conversation · saved plan"),
                   message="TUI did not recover the approved resident plan after restart")
             resume.send("\r")
             until(lambda: resume.has("receives the text") or resume.p.poll() is not None)
@@ -843,7 +847,7 @@ def main():
                         until(lambda: storage.has("What would you like to do?"))
                         storage.send("/")
                         until(lambda: storage.has("/storage"))
-                        storage.send("\x1b[A\r")
+                        storage.send("\x1b[B" * 5 + "\r")
                         until(lambda: storage.has("Household weight storage"))
                         storage.send("\x1b[B\r")
                         until(lambda: storage.has("Clear unused household weights?"))

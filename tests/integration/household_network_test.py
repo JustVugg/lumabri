@@ -49,6 +49,7 @@ class Terminal:
             # Override must survive create, attach and restart, independently
             # of whichever physical/VPN interface the runner prefers.
             env["LUMABRI_ADVERTISE"] = "127.0.0.1"
+        self.env = env
         self.p = subprocess.Popen([str(ROOT / "lumabri")], cwd=home, env=env,
                                   stdin=self.slave, stdout=self.slave, stderr=self.slave)
 
@@ -165,6 +166,8 @@ def main():
             resumed.expect("Household ready")
             assert resumed.settings() == saved
             resumed.quit()
+            subprocess.run([str(ROOT / "lumabri"), "service", "stop"], env=resumed.env,
+                           check=True, capture_output=True, timeout=25)
 
             with socket.socket() as blocked:
                 blocked.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -179,6 +182,9 @@ def main():
         finally:
             for t in reversed(terminals):
                 t.close()
+            for name in {str(t.home): t for t in terminals}.values():
+                subprocess.run([str(ROOT / "lumabri"), "service", "stop"], env=name.env,
+                               capture_output=True, timeout=25)
 
 
 if __name__ == "__main__":

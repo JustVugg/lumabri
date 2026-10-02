@@ -31,13 +31,20 @@ old remote sessions and clears its conversation and sampler, without closing
 the Edge engine or the Segment engines. Generated DATA cannot impersonate
 the acknowledgement. A damaged or legacy gateway is not reused with stale KV.
 
-Owner Stop, donor exit, a failed preparation or explicit plan cancellation
+Owner Stop, allocation-keeper exit, a failed preparation or explicit plan cancellation
 release the allocation. A new requester cannot silently repurpose retained
 weights: the accepted client identity and allocation remain authoritative.
 After the entire plan is ready, a failed chat does not roll back healthy
 donors. They retain their weights and reservations until their owner unloads
 them, even if another participating computer disappears. This is retention,
 not automatic failover: the interrupted chat still reports the missing node.
+
+The default household path now uses independent keepers: closing a donor TUI
+does not close its allocation. The manager can restart without replacing
+keeper or engine processes. Preparation also continues outside the requesting
+TUI. The explicit `LUMABRI_HOME_FOREGROUND=1` diagnostic preserves the earlier
+foreground lifecycle for regression tests, not as the product default.
+See [Household service](HOUSEHOLD_SERVICE.md) for authority, recovery and limits.
 
 ## Preparation and inference
 

@@ -21,7 +21,7 @@ make ENGINE=/path/to/colibri/c
 After launch, use **arrow keys and Enter**. Press **/** for workspace actions
 and **Esc** to go back. Use a terminal at least 60 columns by 28 rows.
 
-1. On one computer, open **/ → /create**. Keep Lumabri running.
+1. On one computer, open **/ → /create**. Its household service runs in the background.
 2. On your other computers, open **/ → /join**. Select the household found
    on your LAN, compare its identity with **/create** on the owner computer,
    then enter the household key. Manual address entry remains available.
@@ -110,8 +110,17 @@ the computer also hosts chat. **Decline is selected initially.** Move to
 Accept and press Enter only when you agree.
 
 No model is loaded until every participating donor accepts. Rejection or
-cancellation releases the plan. Esc stops sharing; closing chat releases its
-allocations.
+cancellation during preparation releases incomplete allocations. **Esc closes
+the view, not the service.** Approved resident weights survive closing chat or
+the TUI. In Share resources, **x** unloads the model and **s** stops sharing.
+**Resident models** lists your saved plans: **r** checks every approved donor,
+Enter opens a conversation, and **x** asks for confirmation before unloading.
+A saved plan is not presented as live until its donors confirm it.
+
+Use **/service** to inspect or explicitly stop local services. Restarting the
+manager with `lumabri service restart` leaves live allocation keepers running;
+it never replays a saved approval. See [service lifecycle](docs/HOUSEHOLD_SERVICE.md)
+for restart behavior and current limits.
 
 Inside chat, your messages and the streamed answers stay in the transcript.
 Type **/** for command suggestions, use arrows to choose and Tab to complete.
@@ -158,8 +167,8 @@ OpenMP flags invalidates the generated engine build automatically. CI pins
 Colibri to `12a5c464b5c1f8292d578c62458706bc32d6ac95` for reproducibility.
 
 Discovery and outbound reporting do not prove inbound connectivity. Before
-indexing, Lumabri checks each selected donor's address and identity. Keep the
-household owner's window open; it owns the tracker. Allow the installed
+indexing, Lumabri checks each selected donor's address and identity. The
+household tracker runs independently of the owner's window. Allow the installed
 `lumabri` and `segment_node` executables through the donor's application
 firewall rather than disabling the firewall. Rebuilding an unsigned executable
 may require reviewing its application permission again.

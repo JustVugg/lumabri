@@ -79,6 +79,8 @@ lumabri test_chat_ui test_planner test_planner_io test_cluster test_memory_budge
 lumabri test_chat_ui: lumabri_runtime_identity.h lumabri_checkpoint_identity.h lumabri_calibration_store.h lumabri_calibration.h lumabri_stage_metrics.h src/planner/lumabri_stage_placement.h
 lumabri test_chat_ui: src/planner/lumabri_catalogue_advice.h
 lumabri test_chat_ui: src/runtime/lumabri_preload.h
+lumabri test_chat_ui: src/runtime/lumabri_service.h src/runtime/lumabri_service_manager.h
+lumabri test_chat_ui: src/ui/lumabri_resident_ui.h
 lumabri segment_chat test_chat_ui: lumabri_metrics.h
 
 lumabri: $(HOME_NET_DEPS) src/runtime/lumabri_probe_deadline.h lumabri.c src/ui/lumabri_tui.c src/ui/lumabri_tui.h src/ui/lumabri_visual.h src/ui/lumabri_chat_editor.h src/ui/lumabri_execution_view.h lumabri_proto.h lumabri_sign.h \
@@ -825,6 +827,7 @@ test: all test_weight_cache test_key_rotation test_hedge test_local_fallback tes
 	python3 tests/integration/storage_ui_test.py
 	python3 ./tests/integration/lan_inventory_test.py
 	python3 tests/integration/household_network_test.py
+	python3 tests/integration/household_service_test.py
 	bash ./tests/integration/hosted_chat_test.sh
 	bash ./tests/integration/tui_test.sh
 	./test_planner

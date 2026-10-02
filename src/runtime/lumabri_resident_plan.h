@@ -8,9 +8,13 @@ typedef struct {
     char tracker[256], host[64], host_key[65], root[65], model[64];
     uint32_t context, max_new;
     LmbExecutionView execution;
+    uint8_t allocation[32], peer_keys[LMB_CLUSTER_MAX_NODES][32];
 } LmbResidentPlan;
 
 static int home_resident_plan_valid(const LmbResidentPlan *p) {
+    if (!p || p->execution.count > LMB_CLUSTER_MAX_NODES) return 0;
+    if (lmb_home_nonzero(p->allocation, 32))
+        for (uint32_t i = 0; i < p->execution.count; i++) if (!lmb_home_nonzero(p->peer_keys[i], 32)) return 0;
     uint8_t bytes[32];
     return lmb_cal_text(p->tracker, sizeof p->tracker) &&
         lmb_cal_text(p->host, sizeof p->host) &&
@@ -28,23 +32,30 @@ static int home_resident_plan_path(char *path, size_t size) {
     return !home || !*home ? -1 : checked_printf(path, size, "%s/.lumabri/resident-plan", home);
 }
 
-static int home_resident_plan_save(const LmbResidentPlan *p) {
+static int home_resident_plan_write(const LmbResidentPlan *p, const char *path) {
     if (!home_resident_plan_valid(p)) return -1;
-    char path[1200], temporary[1232];
-    if (home_resident_plan_path(path, sizeof path) ||
-        checked_printf(temporary, sizeof temporary, "%s.XXXXXX", path)) return -1;
+    char temporary[1232];
+    if (checked_printf(temporary, sizeof temporary, "%s.XXXXXX", path)) return -1;
     LmbBuf b = {0};
-    lmb_buf_u32(&b, p->execution.hybrid ? 2 : 1);
+    /* The validated fixed-capacity fields fit this bound. Reserve before
+     * packing so allocation failure cannot produce a partial saved plan. */
+    if (lmb_buf_reserve(&b, 65536)) return -1;
+    int managed = lmb_home_nonzero(p->allocation, 32);
+    lmb_buf_u32(&b, managed ? 3 : p->execution.hybrid ? 2 : 1);
     lmb_buf_str(&b, p->tracker); lmb_buf_str(&b, p->host);
     lmb_buf_str(&b, p->host_key); lmb_buf_str(&b, p->root); lmb_buf_str(&b, p->model);
     lmb_buf_u32(&b, p->context); lmb_buf_u32(&b, p->max_new);
     lmb_buf_u32(&b, p->execution.count); lmb_buf_u32(&b, p->execution.layers);
-    if (p->execution.hybrid) lmb_buf_u32(&b, p->execution.hybrid);
+    if (managed || p->execution.hybrid) lmb_buf_u32(&b, p->execution.hybrid);
     for (uint32_t i = 0; i < p->execution.count; i++) {
         const LmbExecutionNode *n = &p->execution.nodes[i];
         lmb_buf_str(&b, n->name); lmb_buf_str(&b, n->address);
         lmb_buf_u32(&b, n->begin); lmb_buf_u32(&b, n->end);
         lmb_buf_u64(&b, n->reserved_bytes); lmb_buf_u32(&b, (uint32_t)n->edge);
+    }
+    if (managed) {
+        lmb_buf_bytes(&b, p->allocation, 32);
+        lmb_buf_bytes(&b, p->peer_keys, p->execution.count * 32);
     }
     int fd = mkstemp(temporary), rc = -1;
     if (fd >= 0) {
@@ -64,10 +75,13 @@ static int home_resident_plan_save(const LmbResidentPlan *p) {
     free(b.p); return rc;
 }
 
-static int home_resident_plan_load(const char *tracker, LmbResidentPlan *p) {
-    memset(p, 0, sizeof *p);
+static int home_resident_plan_save(const LmbResidentPlan *p) {
     char path[1200];
-    if (home_resident_plan_path(path, sizeof path)) return -1;
+    return home_resident_plan_path(path, sizeof path) ? -1 : home_resident_plan_write(p, path);
+}
+
+static int home_resident_plan_read(const char *path, const char *tracker, LmbResidentPlan *p) {
+    memset(p, 0, sizeof *p);
     int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) return -1;
     struct stat st;
@@ -77,7 +91,7 @@ static int home_resident_plan_load(const char *tracker, LmbResidentPlan *p) {
     int rc = lmb_read_full(fd, bytes, length); close(fd);
     if (rc) return -1;
     LmbCur c = {bytes, length, 0}; uint32_t version;
-    if (lmb_cur_u32(&c, &version) || (version != 1 && version != 2) ||
+    if (lmb_cur_u32(&c, &version) || version < 1 || version > 3 ||
         lmb_inventory_string(&c, p->tracker, sizeof p->tracker) || strcmp(tracker, p->tracker) ||
         lmb_inventory_string(&c, p->host, sizeof p->host) ||
         lmb_inventory_string(&c, p->host_key, sizeof p->host_key) ||
@@ -86,7 +100,8 @@ static int home_resident_plan_load(const char *tracker, LmbResidentPlan *p) {
         lmb_cur_u32(&c, &p->context) || lmb_cur_u32(&c, &p->max_new) ||
         lmb_cur_u32(&c, &p->execution.count) || lmb_cur_u32(&c, &p->execution.layers) ||
         p->execution.count > LMB_CLUSTER_MAX_NODES) return -1;
-    if (version == 2 && (lmb_cur_u32(&c, &p->execution.hybrid) || p->execution.hybrid != 1)) return -1;
+    if (version >= 2 && (lmb_cur_u32(&c, &p->execution.hybrid) || p->execution.hybrid > 1 ||
+        (version == 2 && !p->execution.hybrid))) return -1;
     for (uint32_t i = 0; i < p->execution.count; i++) {
         LmbExecutionNode *n = &p->execution.nodes[i]; uint32_t edge;
         if (lmb_inventory_string(&c, n->name, sizeof n->name) ||
@@ -95,23 +110,76 @@ static int home_resident_plan_load(const char *tracker, LmbResidentPlan *p) {
             lmb_cur_u64(&c, &n->reserved_bytes) || lmb_cur_u32(&c, &edge) || edge > 1) return -1;
         n->edge = (int)edge;
     }
+    if (version == 3) {
+        size_t size = 32 + p->execution.count * 32;
+        if (c.len - c.off != size) return -1;
+        memcpy(p->allocation, c.p + c.off, 32); c.off += 32;
+        memcpy(p->peer_keys, c.p + c.off, size - 32); c.off += size - 32;
+        if (!lmb_home_nonzero(p->allocation, 32)) return -1;
+        for (uint32_t i = 0; i < p->execution.count; i++)
+            if (!lmb_home_nonzero(p->peer_keys[i], 32)) return -1;
+    }
     return c.off == c.len && home_resident_plan_valid(p) ? 0 : -1;
 }
 
-static int home_resident_plan_chat(const LmbResidentPlan *p) {
+static int home_resident_plan_load(const char *tracker, LmbResidentPlan *p) {
+    char path[1200];
+    return home_resident_plan_path(path, sizeof path) ? -1 : home_resident_plan_read(path, tracker, p);
+}
+
+static int home_resident_library_directory(char *path, size_t cap) {
+    const char *base = getenv("HOME"); struct stat st;
+    if (!base || checked_printf(path, cap, "%s/.lumabri/resident-plans", base)) return -1;
+    if (mkdir(path, 0700) && errno != EEXIST) return -1;
+    return lstat(path, &st) || !S_ISDIR(st.st_mode) || st.st_uid != geteuid() || (st.st_mode & 077) ? -1 : 0;
+}
+
+static int home_resident_library_path(const LmbResidentPlan *p, char *path, size_t cap) {
+    char dir[1200], id[65]; uint8_t hash[64]; LmbBuf key = {0};
+    if (home_resident_library_directory(dir, sizeof dir)) return -1;
+    int rc = lmb_buf_str(&key, p->tracker) || lmb_buf_str(&key, p->model) ||
+        lmb_buf_str(&key, p->host_key) || lmb_buf_bytes(&key, p->allocation, 32);
+    if (!rc) { lmb_sha512(key.p, key.len, hash); lmb_hex(id, hash, 32); }
+    free(key.p);
+    return rc || checked_printf(path, cap, "%s/%s.plan", dir, id) ? -1 : 0;
+}
+
+static int home_resident_library_save(const LmbResidentPlan *p) {
+    char path[1400];
+    return home_resident_library_path(p, path, sizeof path) ? -1 : home_resident_plan_write(p, path);
+}
+
+static size_t home_resident_library_list(const char *tracker, LmbResidentPlan *plans, size_t cap) {
+    char dir[1200]; size_t n = 0;
+    if (home_resident_library_directory(dir, sizeof dir)) return 0;
+    DIR *d = opendir(dir); if (!d) return 0;
+    struct dirent *ent;
+    while (n < cap && (ent = readdir(d))) {
+        uint8_t hash[32]; char hex[65], path[1400];
+        if (strlen(ent->d_name) != 69 || strcmp(ent->d_name + 64, ".plan")) continue;
+        memcpy(hex, ent->d_name, 64); hex[64] = 0;
+        if (lmb_unhex(hash, hex, 32) || checked_printf(path, sizeof path, "%s/%s", dir, ent->d_name)) continue;
+        if (!home_resident_plan_read(path, tracker, &plans[n])) n++;
+    }
+    closedir(d); return n;
+}
+
+static int home_resident_plan_chat_mode(const LmbResidentPlan *p, int calibrate) {
     if (!home_resident_plan_valid(p)) return -1;
     char context[20], max_new[20];
     snprintf(context, sizeof context, "%u", p->context);
     snprintf(max_new, sizeof max_new, "%u", p->max_new);
     char *args[] = {"--host", (char *)p->host, "--host-key", (char *)p->host_key,
         "--host-root", (char *)p->root, "--model", (char *)p->model,
-        "--tracker", (char *)p->tracker, "--ctx", context, "--max-new", max_new};
+        "--tracker", (char *)p->tracker, "--ctx", context, "--max-new", max_new, "--calibrate"};
     /* A new conversation, not replay of another session's KV. The host
      * serializes admission and resets its state before accepting us. */
     g_execution_view = &p->execution;
-    int rc = cmd_chat((int)(sizeof args / sizeof *args), args);
+    int rc = cmd_chat((int)(sizeof args / sizeof *args) - !calibrate, args);
     g_execution_view = NULL;
     if (rc) home_fail("The retained plan is unavailable or changed. Keep its donors sharing, or prepare a new plan from Explore models. No weights were downloaded.");
     return rc;
 }
+
+static int home_resident_plan_chat(const LmbResidentPlan *p) { return home_resident_plan_chat_mode(p, 0); }
 #endif

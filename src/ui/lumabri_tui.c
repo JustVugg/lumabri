@@ -506,7 +506,7 @@ static void draw_workspace(const LmbTuiState *st, int tab, int sel, int detail,
         ui_text(14, 5, UI_TEXT, "One short test: at most 8 generated tokens, 20 seconds of inference.");
         ui_text(16, 5, UI_MUTED, "Donors must approve. Missing weights still need transfer and loading first.");
         ui_text(18, 5, UI_MUTED, "Preparation is not included in the 20-second limit and may take much longer.");
-        ui_text(20, 5, UI_MUTED, "Saves a short-run measurement for this plan, then releases its resources.");
+        ui_text(20, 5, UI_MUTED, "Saves a short-run measurement. Use Share resources to release resident weights.");
         ui_text(ui_h - 6, 5, UI_SAND, "Enter starts the request. Esc goes back without loading anything.");
     } else if (detail && sel < st->nmodels) {
         const LmbTuiModel *m = &st->models[sel];

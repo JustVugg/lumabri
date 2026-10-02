@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SOURCES = (
     "lumabri.c", "src/ui/lumabri_tui.c", "src/ui/lumabri_home_ui.h", "src/ui/lumabri_chat_editor.h",
     "lumabri_home_runtime.h", "lumabri_home.h", "lumabri_client.h",
+    "src/ui/lumabri_resident_ui.h", "src/runtime/lumabri_service.h", "src/runtime/lumabri_service_manager.h",
 )
 # Match comments and character literals too, so quoted text inside them is
 # never mistaken for an application string.

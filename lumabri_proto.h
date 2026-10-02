@@ -316,6 +316,7 @@ enum {
     LMB_HOME_START_HOST = 83, LMB_HOME_CANCEL = 84, LMB_HOME_PULSE = 85,
     LMB_HOME_DETACH = 86, /* close requester control; retain prepared weights */
     LMB_HOME_FEATURES = 87, LMB_HOME_HYBRID_ROUTES = 88, LMB_HOME_EXPERT = 89,
+    LMB_HOME_QUERY = 90, LMB_HOME_RELEASE = 91, /* pinned requester, exact allocation + root */
 };
 #define LMB_CAP_EXEC2 (1u << 0)
 #define LMB_ENC_F32  0u
