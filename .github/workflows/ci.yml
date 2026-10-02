@@ -142,6 +142,17 @@ jobs:
           name: tiny-olmoe-checkpoint
           path: colibri/c/olmoe_tiny_merged/*
           retention-days: 3
+      - name: V4.1 range boundary laboratory (not product support)
+        working-directory: lumabri
+        run: |
+          make test-v41-range ENGINE=../colibri/c
+          cc -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -pthread -I. -Ibuild -I../colibri/c tests/c/test_v41_range.c -o build/test_v41_range_san -lm
+          ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./build/test_v41_range_san build/v41-tiny
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tiny-v41-boundary-checkpoint
+          path: lumabri/build/v41-tiny/*
+          retention-days: 3
       - name: Segment failover gate — run
         working-directory: lumabri
         run: |
@@ -404,6 +415,20 @@ jobs:
         with:
           name: tiny-olmoe-checkpoint
           path: lumabri/build/home-flow-models/olmoe-tiny
+      - uses: actions/download-artifact@v4
+        with:
+          name: tiny-v41-boundary-checkpoint
+          path: lumabri/build/v41-tiny
+      - name: V4.1 range boundary oracle on native macOS
+        working-directory: lumabri
+        env:
+          OPENMP_MODE: ${{ matrix.openmp }}
+        run: |
+          if [ "$OPENMP_MODE" = disabled ]; then
+            make test-v41-range-existing ENGINE=../colibri/c CC=clang OMP_FLAGS= OMP_LIBS=
+          else
+            make test-v41-range-existing ENGINE=../colibri/c CC=clang
+          fi
       - name: Request, accept, fetch weights and chat on native macOS
         working-directory: lumabri
         run: |

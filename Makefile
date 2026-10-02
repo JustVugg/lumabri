@@ -707,6 +707,34 @@ test_sampling: tests/c/test_sampling.c lumabri_sampling.c lumabri_sampling.h
 .PHONY: segment-direct
 segment-direct: segment_node segment_chat
 
+# V4.1 boundary laboratory, deliberately NOT linked/registered in the product.
+# Reuses pinned upstream arithmetic through generated range hooks. Fixture
+# creation needs the upstream test dependencies (torch/safetensors/numpy/sympy).
+build/v41_range_core.c: tools/prepare_v41_range.py $(ENGINE)/deepseek_v41.c
+	python3 tools/prepare_v41_range.py --source $(ENGINE)/deepseek_v41.c --output $@
+
+build/test_v41_range: tests/c/test_v41_range.c engine_patches/v41_boundary.h engine_patches/v41_lifecycle.h build/v41_range_core.c build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) -O2 $(OMP_FLAGS) -pthread -I. -Ibuild -I$(ENGINE) tests/c/test_v41_range.c -o $@ -lm $(OMP_LIBS)
+
+build/v41_upstream: build/segment-sources build/segment-options
+	mkdir -p build
+	$(CC) $(CPPFLAGS) -O2 $(OMP_FLAGS) -pthread $(ENGINE)/deepseek_v41.c -o $@ -lm $(OMP_LIBS)
+
+build/v41-tiny/ref.json: $(ENGINE)/tools/make_dsv41_tiny.py $(ENGINE)/tools/dsv41_ref.py
+	python3 $(ENGINE)/tools/make_dsv41_tiny.py --out build/v41-tiny --emit-ref $@ --max-new 16 --prompt-len 8
+
+.PHONY: test-v41-range test-v41-range-existing
+test-v41-range: build/v41-tiny/ref.json
+	$(MAKE) test-v41-range-existing
+
+# Native CI downloads the reference generated on Linux; it must not require
+# PyTorch or regenerate a different reference on the target machine.
+test-v41-range-existing: build/test_v41_range build/v41_upstream
+	test -f build/v41-tiny/ref.json
+	SNAP=build/v41-tiny OMP_NUM_THREADS=1 CTX=128 V41_ENGRAM_ROWS=32 build/v41_upstream 8 build/v41-tiny/ref.json
+	OMP_NUM_THREADS=1 build/test_v41_range build/v41-tiny
+	OMP_NUM_THREADS=2 build/test_v41_range build/v41-tiny
+
 test-segment-direct-real: tracker maintainer liblumabri.so lumabri \
 		segment-direct test_sampling
 	./test_sampling
