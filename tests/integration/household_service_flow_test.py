@@ -15,7 +15,7 @@ import tempfile
 import termios
 import time
 
-from home_flow_test import TerminalText, hosted_turn_complete
+from home_flow_test import TerminalText, current_frame, hosted_turn_complete
 
 
 def main():
@@ -121,10 +121,20 @@ def main():
         base_args = ["models", "--models-dir", str(args.models_dir.resolve()), "--tracker", tracker,
                      "--context", "128", "--max-new", "8"]
         chat = Terminal("chatter", base_args)
-        until(lambda: chat.has("3 computers"), "signed inventory missing")
-        chat.send("\t\x1b[B\r\x1b[B\r\t")
-        time.sleep(.7); chat.send("\r")
-        until(lambda: chat.has("Plan: resident"), "resident preview missing")
+        until(lambda: "3 computers visible" in current_frame(chat), "signed inventory missing")
+        chat.send("\t")
+        until(lambda: "Nothing is selected automatically" in current_frame(chat), "computer selection missing")
+        chat.send("\x1b[B\r")
+        until(lambda: "3 computers visible · 1 selected" in current_frame(chat), "first donor selection missing")
+        chat.send("\x1b[B\r")
+        until(lambda: "3 computers visible · 2 selected" in current_frame(chat), "second donor selection missing")
+        chat.send("\t\r")
+        # A historical frame is not approval for a new inventory snapshot.
+        # Wait through brief reporter reconnects; never send a one-donor plan
+        # and then wait for two offers which that plan cannot produce.
+        until(lambda: "Plan: resident" in current_frame(chat) and
+              "3 computers visible · 2 selected" in current_frame(chat) and
+              current_frame(chat).count("GB reserved") == 2, "two-donor resident preview missing")
         chat.send("\r")
         until(lambda: a.has("Waiting for your approval") and b.has("Waiting for your approval"), "offers not delivered", 150)
         pending = service("a")["donor"]

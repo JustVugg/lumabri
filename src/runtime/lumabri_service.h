@@ -52,6 +52,27 @@ static int home_service_path(const char *role, const char *suffix, char *path, s
         checked_printf(path, cap, "%s/%s.%s", dir, role, suffix) ? -1 : 0;
 }
 
+/* Darwin's sun_path is only 104 bytes; normal macOS temporary homes can
+ * exceed that. Keep locks/journals in HOME and use a private short directory
+ * for the socket only. Never chdir(): other threads may be doing file I/O.
+ * Same-user kernel credentials still authenticate both ends. */
+static int home_service_socket_path(const char *role, char *path, size_t cap) {
+    char full[1200];
+    if (home_service_path(role, "sock", full, sizeof full)) return -1;
+    struct sockaddr_un limit;
+    if (strlen(full) < sizeof limit.sun_path)
+        return checked_printf(path, cap, "%s", full);
+    char directory[1200], canonical[PATH_MAX], short_dir[96], hex[33];
+    uint8_t digest[32]; LmbSha sha; struct stat st;
+    if (home_service_directory(directory, sizeof directory) || !realpath(directory, canonical)) return -1;
+    lmb_sha_init(&sha); lmb_sha_update(&sha, canonical, strlen(canonical)); lmb_sha_final(&sha, digest);
+    lmb_hex(hex, digest, 16);
+    if (checked_printf(short_dir, sizeof short_dir, "/tmp/lmb-ipc-%lu-%s", (unsigned long)geteuid(), hex)) return -1;
+    if (mkdir(short_dir, 0700) && errno != EEXIST) return -1;
+    if (lstat(short_dir, &st) || !S_ISDIR(st.st_mode) || st.st_uid != geteuid() || (st.st_mode & 077)) return -1;
+    return checked_printf(path, cap, "%s/%s.sock", short_dir, role);
+}
+
 /* A private directory plus kernel peer credentials, not a claimed PID or an
  * HTTP header. The socket is never exposed on the LAN. */
 static int home_service_peer(int fd) {
@@ -168,7 +189,7 @@ static int home_service_record(const char *role, HomeServiceSnapshot *s) {
 
 static int home_service_connect(const char *role) {
     struct sockaddr_un addr = {.sun_family = AF_UNIX};
-    if (home_service_path(role, "sock", addr.sun_path, sizeof addr.sun_path)) return -1;
+    if (home_service_socket_path(role, addr.sun_path, sizeof addr.sun_path)) return -1;
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) return -1;
     if (fcntl(fd, F_SETFD, FD_CLOEXEC) || fcntl(fd, F_SETFL, O_NONBLOCK)) { close(fd); return -1; }
@@ -221,7 +242,7 @@ static int home_service_open(HomeService *s, const char *role) {
     struct sockaddr_un addr = {.sun_family = AF_UNIX};
     if (home_service_directory(s->directory, sizeof s->directory) ||
         home_service_path(role, "lock", lock_path, sizeof lock_path) ||
-        home_service_path(role, "sock", s->socket_path, sizeof s->socket_path) ||
+        home_service_socket_path(role, s->socket_path, sizeof s->socket_path) ||
         checked_printf(addr.sun_path, sizeof addr.sun_path, "%s", s->socket_path) ||
         home_service_path(role, "state", s->journal, sizeof s->journal)) goto bad;
     s->lock = open(lock_path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);

@@ -82,6 +82,20 @@ def main():
             directory.chmod(0o777)
             assert run("start", check=False).returncode != 0
             directory.chmod(0o700)
+            # A real Darwin temp HOME, and longer user paths on either OS,
+            # must not be limited by sockaddr_un.sun_path (104/108 bytes).
+            long_home = home / ("long-home-" + "x" * 100)
+            long_home.mkdir()
+            env["HOME"] = str(long_home)
+            try:
+                run("start")
+                assert manager()["live"]
+                run("restart")
+                assert manager()["live"]
+                assert (long_home / ".lumabri/service/manager.state").exists()
+            finally:
+                run("stop", check=False)
+                env["HOME"] = temporary
         finally:
             if (home / ".lumabri/service").exists():
                 (home / ".lumabri/service").chmod(0o700)

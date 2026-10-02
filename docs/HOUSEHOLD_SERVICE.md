@@ -14,7 +14,10 @@ Prepared allocations remain with their donors when that transaction finishes.
 
 Each role has an exclusive file lock and a private Unix-domain control socket
 under `~/.lumabri/service`, with kernel-verified same-user credentials. The
-directory is mode 0700; socket, lock and journal files are private. Commands
+directory is mode 0700; socket, lock and journal files are private. The service
+uses a private hashed directory under `/tmp` for the socket only when a long
+home path exceeds the platform's Unix socket path limit. Locks and journals
+stay in the home directory; kernel credential checks remain mandatory. Commands
 are bounded and versioned. Mutations identify both the keeper incarnation and
 the immutable allocation: an old confirmation cannot accept or unload a new
 request. LAN encryption, endpoint pinning, household keys and donor consent

@@ -847,7 +847,7 @@ def main():
                         until(lambda: storage.has("What would you like to do?"))
                         storage.send("/")
                         until(lambda: storage.has("/storage"))
-                        storage.send("\x1b[A\r")
+                        storage.send("\x1b[B" * 5 + "\r")
                         until(lambda: storage.has("Household weight storage"))
                         storage.send("\x1b[B\r")
                         until(lambda: storage.has("Clear unused household weights?"))
