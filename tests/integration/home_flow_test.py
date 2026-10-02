@@ -51,15 +51,27 @@ def current_frame(terminal):
 
 def assert_stage_record(path, stages=2, expected_source=2):
     record = path.read_bytes()
-    assert record[:8] == b"LMB-CAL3", "new observation-source record was not written"
+    assert record[:8] == b"LMB-CAL4", "new link/preparation record was not written"
     assert hashlib.sha256(record[:-32]).digest() == record[-32:], "record checksum mismatch"
-    source = struct.unpack_from("<I", record, len(record) - 32 - 4)[0]
+    # Two Segment ranges, or no complete link chain for Hybrid accelerators.
+    link_count = stages
+    extension = 20 + 36 * link_count
+    source_at = len(record) - 32 - extension - 4
+    source = struct.unpack_from("<I", record, source_at)[0]
     assert source == expected_source, "measurement has the wrong probe/session source"
-    offset = len(record) - 32 - stages * 8 - 8
+    preparation, prepared_at, actual_links = struct.unpack_from("<ddI", record, source_at + 4)
+    assert actual_links == link_count, "actual Edge-to-Segment links were not observed"
+    assert math.isfinite(preparation) and 0 < preparation <= 86400, preparation
+    assert 0 < prepared_at <= time.time(), prepared_at
+    for i in range(link_count):
+        samples, p50, maximum, rate, measured_at = struct.unpack_from("<Idddd", record, source_at + 24 + 36 * i)
+        assert samples == 3 and 0 < p50 <= maximum and rate > 0 and measured_at > 0
+    offset = source_at - stages * 8 - 4
     assert offset >= 8 and struct.unpack_from("<I", record, offset)[0] == stages, \
         "the complete approved stage profile did not reach the calibration store"
     values = struct.unpack_from("<" + "d" * stages, record, offset + 4)
     assert all(math.isfinite(value) and value > 0 for value in values), values
+    return struct.unpack_from("<I", record, offset - 12)[0]  # observed turns under this exact key
 
 
 def main():

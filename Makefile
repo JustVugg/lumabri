@@ -38,6 +38,8 @@ test_weight_cache: tests/c/test_weight_cache.c src/runtime/lumabri_weight_cache.
 # Native household runtime (Colibri sources are a build-time dependency).
 household: tracker maintainer $(SHIM_LIB) lumabri segment_node segment_chat
 
+lumabri segment_node segment_chat test_calibration test_chat_ui: src/planner/lumabri_link_evidence.h
+
 .PHONY: test-runtime-probe
 test-runtime-probe: tests/c/test_runtime_probe.c lumabri_runtime_probe.h src/runtime/lumabri_backend_policy.h lumabri_segment.h
 	mkdir -p build/tests

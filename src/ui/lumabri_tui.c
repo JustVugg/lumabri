@@ -532,6 +532,15 @@ static void draw_workspace(const LmbTuiState *st, int tab, int sel, int detail,
                         (m->plan.hybrid ? " (chat host + full resident fallback)" : " (chat host)") :
                         (m->plan.hybrid ? " (expert accelerator)" : ""),
                     s->layer_begin, s->layer_end - 1, s->bytes_resident / 1e9);
+                int current = m->has_calibration && m->calibration_key_valid &&
+                    lmb_cal_matches(&m->calibration.key, &m->calibration_key);
+                if (current && m->calibration.link_count == m->plan.nslices &&
+                    lmb_link_current(&m->calibration.links[i], (double)time(NULL))) {
+                    const LmbLinkEvidence *v = &m->calibration.links[i];
+                    ui_printf(17 + (int)i * 2, 7, UI_MUTED, "Edge link: %.2f ms median · %.1f MB/s echo · last preparation %.1fs",
+                        v->rtt_p50_seconds * 1000, v->echo_bytes_per_second / 1e6, m->calibration.preparation_seconds);
+                } else if (current && m->calibration.link_count)
+                    ui_text(17 + (int)i * 2, 7, UI_MUTED, "Link observation expired; a new session measures it again.");
             }
             ui_text(ui_h - 6, 5, UI_SAND, "Enter requests this plan. Every participating donor must accept.");
         } else {

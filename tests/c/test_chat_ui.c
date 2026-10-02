@@ -23,10 +23,14 @@ int main(int argc, char **argv) {
         strcpy(k->node_id[0], "fixture"); strcpy(k->node_hardware_id[0], "fixture");
         strcpy(k->node_build_id[0], "fixture"); strcpy(k->node_backend[0], "cpu");
         m->calibration.decode_tok_s = 10; m->calibration.ttft_seconds = .1;
-        m->calibration.measured_at = 1; m->calibration.samples = 3;
+        m->calibration.measured_at = (double)time(NULL); m->calibration.samples = 3;
         m->calibration.prompt_tokens = 4; m->calibration.generated_tokens = 8;
         m->calibration.stage_count = 1; m->calibration.stage_decode_seconds[0] = .08;
         m->calibration.source = LMB_CAL_SOURCE_SESSION;
+        m->calibration.preparation_seconds = 1.25; m->calibration.prepared_at = m->calibration.measured_at;
+        m->calibration.link_count = 1;
+        double link_times[] = {.001, .002, .003};
+        assert(!lmb_link_observed(&m->calibration.links[0], link_times, .01, m->calibration.measured_at));
         assert(lmb_cal_valid(&m->calibration)); m->calibration_key = *k;
         st->models[1] = *m; strcpy(st->models[1].name, "changed-threads");
         st->models[1].calibration_key.threads[0]++;
@@ -364,9 +368,11 @@ int main(int argc, char **argv) {
         assert(loaded.execution.hybrid && lmb_execution_valid(&loaded.execution));
         plan.allocation[0] = 1;
         plan.peer_keys[0][0] = 2; plan.peer_keys[1][0] = 3;
+        plan.preparation_seconds = 2.25; plan.prepared_at = 1000;
         assert(!home_resident_plan_save(&plan));
         assert(!home_resident_plan_load(plan.tracker, &loaded));
         assert(!memcmp(loaded.allocation, plan.allocation, 32));
+        assert(loaded.preparation_seconds == 2.25 && loaded.prepared_at == 1000);
         assert(!memcmp(loaded.peer_keys, plan.peer_keys, sizeof plan.peer_keys));
         LmbResidentPlan library[4]; char library_path_a[1200], library_path_b[1200], library_directory[1200];
         assert(!home_resident_library_path(&plan, library_path_a, sizeof library_path_a));

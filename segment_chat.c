@@ -8,6 +8,7 @@
 #include "lumabri_secure.h"
 #include "lumabri_sampling.h"
 #include "segment_colibri.h"
+#include "src/planner/lumabri_link_evidence.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -30,6 +31,7 @@ typedef struct {
     size_t snapshot_bytes;
     uint64_t snapshot_sequence;
     uint64_t snapshot_position;
+    LmbLinkEvidence link;
 } RemoteSegment;
 
 typedef struct {
@@ -66,6 +68,7 @@ typedef struct {
     int stages_valid;
     size_t stage_count;
     StageObservation stages[LMB_SEG_ROUTE_MAX];
+    LmbLinkEvidence links[LMB_SEG_ROUTE_MAX];
 } GenerationResult;
 
 typedef enum {
@@ -504,6 +507,34 @@ static int remote_request(RemoteSegment *remote, uint32_t op,
  * OPEN and a malformed reply — costs an operator the whole diagnosis, because
  * the firewall fix and the compatibility fix look identical from here. Say
  * which one happened. */
+static void remote_measure_link(RemoteSegment *remote) {
+    memset(&remote->link, 0, sizeof remote->link);
+    if (remote->fd < 0 || remote->direct_failed) return;
+    uint8_t nonce[16], *bytes = malloc(LMB_LINK_BYTES);
+    if (!bytes) return;
+    lmb_random(nonce, sizeof nonce);
+    /* Non-compressible traffic without collecting or exposing user data. */
+    for (uint32_t i = 0; i < LMB_LINK_BYTES; i++) bytes[i] = nonce[i % 16] ^ (uint8_t)i;
+    double samples[4] = {0}; int bad = 0;
+    lmb_set_io_timeout(remote->fd, 250);
+    for (unsigned i = 0; i < 4; i++) {
+        LmbMsg reply = {0}; uint32_t n = i == 3 ? LMB_LINK_BYTES : 0;
+        double started = monotonic_seconds();
+        bad = lmb_send(remote->fd, LMB_LINK_PROBE, nonce, sizeof nonce, bytes, n) ||
+            lmb_recv(remote->fd, &reply) || reply.op != LMB_LINK_PROBE_R ||
+            reply.body_len != sizeof nonce || reply.pay_len != n ||
+            memcmp(reply.body, nonce, sizeof nonce) || (n && memcmp(reply.pay, bytes, n));
+        samples[i] = monotonic_seconds() - started;
+        lmb_msg_free(&reply);
+        if (bad) break;
+    }
+    free(bytes);
+    if (!bad) (void)lmb_link_observed(&remote->link, samples, samples[3], (double)time(NULL));
+    /* Probe failure is not inference failure, but a partial reply cannot be
+     * left on the RUN stream. Reconnect lazily without abandoning the session. */
+    lmb_close(remote->fd); remote->fd = -1;
+}
+
 static int remote_open(RemoteSegment *remote, const LmbSegId *session_id,
                        const uint8_t model_root[32],
                        const uint8_t tokenizer_root[32], uint32_t context,
@@ -572,6 +603,7 @@ static int remote_open(RemoteSegment *remote, const LmbSegId *session_id,
         remote->sequence = reply.next_sequence;
         remote->position = reply.next_position;
         remote->opened = 1;
+        remote_measure_link(remote);
         return 0;
     }
     lmb_msg_free(&msg);
@@ -1419,6 +1451,7 @@ static int segment_generate(ColiEdgeEngine *edge,
         result->stages[i].begin = active_chain[i].route.advert.layer_begin;
         result->stages[i].end = active_chain[i].route.advert.layer_end;
         result->stages[i].owner = active_chain[i].open.owner;
+        result->links[i] = active_chain[i].link;
     }
     if (prompt_count > context || wanted_tokens > context - prompt_count) {
         snprintf(error, error_size, "prompt plus output exceeds context (%u)",
@@ -1936,6 +1969,18 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
         fputc('\n', stderr); fflush(stderr);
         printf("DONE %u STAT %zu %.3f 0 0 %zu 0", request_id,
                result.token_count, lmb_metrics_decode_rate(&result.metrics), result.prompt_count);
+        int links_valid = result.stages_valid && result.stage_count && result.stage_count <= LMB_STAGE_PROFILE_MAX;
+        for (size_t i = 0; links_valid && i < result.stage_count; i++)
+            links_valid = lmb_link_current(&result.links[i], (double)time(NULL));
+        if (links_valid) {
+            printf(" LINKS1 %zu", result.stage_count);
+            for (size_t i = 0; i < result.stage_count; i++) {
+                const LmbLinkEvidence *v = &result.links[i];
+                printf(" %u %u %u %.9f %.9f %.3f %.0f", result.stages[i].begin,
+                    result.stages[i].end, v->samples, v->rtt_p50_seconds,
+                    v->rtt_max_seconds, v->echo_bytes_per_second, v->measured_at);
+            }
+        }
         if (result.stages_valid && result.metrics.decode_steps && result.stage_count <= LMB_STAGE_PROFILE_MAX) {
             printf(" STAGES1 %zu", result.stage_count);
             for (size_t i = 0; i < result.stage_count; i++) {

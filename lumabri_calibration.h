@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "lumabri_planner.h"
+#include "src/planner/lumabri_link_evidence.h"
 
 #define LMB_CAL_NODES_MAX 32
 enum { LMB_CAL_SOURCE_UNKNOWN = 0, LMB_CAL_SOURCE_PROBE = 1, LMB_CAL_SOURCE_SESSION = 2 };
@@ -62,6 +63,9 @@ typedef struct {
     uint32_t stage_count;        /* zero on legacy/no per-range observations */
     double stage_decode_seconds[LMB_CAL_NODES_MAX]; /* seconds per RUN, includes transport */
     uint32_t source;            /* origin of the latest observation; 0 for legacy records */
+    double preparation_seconds, prepared_at; /* COMMIT to whole-chain READY, zero = unknown */
+    uint32_t link_count;
+    LmbLinkEvidence links[LMB_CAL_NODES_MAX]; /* Edge to each actual Segment endpoint */
 } LmbCalibration;
 
 static LMB_UNUSED const char *lmb_cal_source_name(uint32_t source) {
@@ -102,6 +106,11 @@ static LMB_UNUSED int lmb_cal_key_valid(const LmbCalKey *k) {
 static LMB_UNUSED int lmb_cal_valid(const LmbCalibration *c) {
     if (!c || c->source > LMB_CAL_SOURCE_SESSION ||
         (c->stage_count && c->stage_count != c->key.nodes) || c->stage_count > LMB_CAL_NODES_MAX) return 0;
+    if (!isfinite(c->preparation_seconds) || c->preparation_seconds < 0 || c->preparation_seconds > 86400 ||
+        !isfinite(c->prepared_at) || c->prepared_at < 0 ||
+        (!!c->prepared_at != !!c->preparation_seconds) || c->prepared_at > c->measured_at ||
+        c->link_count > LMB_CAL_NODES_MAX || (c->link_count && c->link_count != c->key.nodes)) return 0;
+    for (uint32_t i = 0; i < c->link_count; i++) if (!lmb_link_valid(&c->links[i])) return 0;
     for (uint32_t i = 0; i < c->stage_count; i++)
         if (!isfinite(c->stage_decode_seconds[i]) || c->stage_decode_seconds[i] <= 0 ||
             c->stage_decode_seconds[i] > 1e9) return 0;

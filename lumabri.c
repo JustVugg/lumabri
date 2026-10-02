@@ -2704,7 +2704,7 @@ static volatile double g_first_token_at;
 
 static int stream_serve2(Engine *e, char *statline, size_t scap, char **captured) {
     SReader s = { e->from, {0}, 0, 0 };
-    char line[4096];
+    char line[16384]; /* bounded stage + link observations for 32 ranges */
     Cap cap = {0};
     if (statline && scap) statline[0] = 0;
     if (captured) *captured = NULL;
@@ -4952,7 +4952,7 @@ static int cmd_chat(int argc, char **argv) {
         }
 
         double m0 = g_eng.net_mb, r0 = nowd();
-        char stat[4096] = "";
+        char stat[16384] = "";
 
         if (eng.proto == PROTO_SERVE2) {
             char *reply = NULL;
@@ -5068,6 +5068,9 @@ static int cmd_chat(int argc, char **argv) {
                 lmb_cal_observation_count(&record, previous);
                 record.prompt_tokens = prompt_count; record.generated_tokens = metrics.generated_tokens;
                 record.stage_count = 0;
+                record.link_count = 0;
+                if (!lmb_links_parse(stat, record.key.nodes, record.key.layer_begin,
+                                      record.key.layer_end, record.links)) record.link_count = record.key.nodes;
                 LmbStageSample samples[LMB_STAGE_PROFILE_MAX]; uint32_t count = 0;
                 if (!lmb_stage_samples_parse(stat, samples, &count) && count == record.key.nodes) {
                     int valid = 1;
@@ -5444,14 +5447,14 @@ static int catalog_runtime_match(const LmbCalKey *key, const LmbMachineReport *r
     return missing;
 }
 
-static int catalog_runtime_revalidate(const LmbTuiState *st, const LmbCalKey *key,
+static int catalog_runtime_revalidate_tracker(const char *tracker, const LmbCalKey *key,
     char *why, size_t cap) {
     /* Two reporting periods; bounded independently of preparation progress. */
     double deadline = nowd() + 2 * LMB_INVENTORY_HEARTBEAT_MS / 1000.0;
     for (;;) {
         LmbMachineReport reports[LMB_INVENTORY_MAX]; uint32_t count = 0;
         int match = 1;
-        if (lmb_inventory_fetch(st->tracker, reports, &count))
+        if (lmb_inventory_fetch(tracker, reports, &count))
             snprintf(why, cap, "Household inventory unavailable");
         else match = catalog_runtime_match(key, reports, count, why, cap);
         if (!match) return 0;
@@ -5646,8 +5649,8 @@ static void catalog_resource_json(const LmbResourceFacts *f) {
     if (f->known & LMB_FACT_POWER)
         printf("{\"state\":\"declared_estimate\",\"watts\":%.3f}", f->power_milliwatts / 1000.0);
     else fputs("null", stdout);
-    /* Inventory currently has no endpoint-bound bandwidth/power sensor.
-     * A tracker RTT or a disk benchmark cannot substitute for either. */
+    /* Edge links belong to a model's execution ranges, not to a node in
+     * isolation. Energy still has no physical sensor observation. */
     fputs(",\"energy_joules\":null,\"link_to_edge\":null}", stdout);
 }
 
@@ -5657,8 +5660,9 @@ static void catalog_plan_evidence_json(const LmbTuiModel *m, uint32_t context, u
         lmb_cal_matches(&m->calibration.key, &m->calibration_key);
     fputs(",\"execution_evidence\":{\"gpu\":{\"state\":\"unavailable\","
           "\"reason\":\"No verified household GPU memory/execution contract\"},\"preparation_seconds\":", stdout);
-    /* This is distribution only. Warm-up/engine load are not measured yet. */
-    fputs("null,\"distribution_estimate_seconds\":", stdout);
+    if (current && m->calibration.preparation_seconds > 0) printf("%.6f", m->calibration.preparation_seconds);
+    else fputs("null", stdout);
+    fputs(",\"preparation_scope\":\"last_commit_to_chain_ready_excludes_approval_and_indexing\",\"distribution_estimate_seconds\":", stdout);
     if (m->planned && p->ready_known) printf("%.6f", p->ready_seconds);
     else fputs("null", stdout);
     fputs(",\"ranges\":[", stdout);
@@ -5681,6 +5685,15 @@ static void catalog_plan_evidence_json(const LmbTuiModel *m, uint32_t context, u
         if (current && m->calibration.stage_count == p->nslices)
             printf("%.9f", m->calibration.stage_decode_seconds[i]);
         else fputs("null", stdout);
+        fputs(",\"link_to_edge\":", stdout);
+        if (current && m->calibration.link_count == p->nslices &&
+            lmb_link_current(&m->calibration.links[i], (double)time(NULL))) {
+            const LmbLinkEvidence *v = &m->calibration.links[i];
+            printf("{\"state\":\"measured\",\"samples\":%u,\"rtt_p50_ms\":%.6f,\"rtt_max_ms\":%.6f,"
+                   "\"echo_effective_bytes_per_second\":%.3f,\"measured_at\":%.0f,\"payload_bytes_each_direction\":%u}",
+                   v->samples, 1000 * v->rtt_p50_seconds, 1000 * v->rtt_max_seconds,
+                   v->echo_bytes_per_second, v->measured_at, LMB_LINK_BYTES);
+        } else fputs("null", stdout);
         fputc('}', stdout);
     }
     fputs("]}", stdout);

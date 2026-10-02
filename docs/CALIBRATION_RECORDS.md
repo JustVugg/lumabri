@@ -68,11 +68,11 @@ Changing any matched condition makes a previous speed stale. The producer
 verifies where each field came from: structural validation alone would not
 make invented build IDs or a partial key authoritative.
 
-New `LMB-CAL3` records store the latest observation's origin (`short_probe` or
+New `LMB-CAL4` records store the latest observation's origin (`short_probe` or
 `real_session`) as well as optional complete per-range decode RUN averages.
 Completed turns update the last value and observation count under the exact
 same key; a changed key starts a new count. Counts are not a statistical error
-bound or concurrent-session capacity. `LMB-CAL1` and `LMB-CAL2` remain readable
+bound or concurrent-session capacity. `LMB-CAL1`, `LMB-CAL2` and `LMB-CAL3` remain readable
 without inventing their unknown measurement origin or missing stage costs. The `STAGES1` extension
 precedes `PERF1`; a malformed stage profile cannot influence placement, but
 does not discard otherwise valid end-to-end timing.
@@ -101,9 +101,32 @@ prices and estimated power, not billing receipts, incremental inference costs,
 live power readings or measured energy savings. No cost-based scheduling is
 enabled by publishing them.
 
-Endpoint-bound link measurements, preparation durations and energy sensors
-are not yet connected and remain explicitly unknown. A tracker RTT, disk
-benchmark or detected GPU cannot replace them. Household GPU execution stays
+The real Edge probes each direct Segment connection once when opening a session:
+three 16-byte echoes measure application RTT (median and maximum), followed by
+one 64 KiB echo. The effective byte rate counts both payload directions and
+includes framing, encryption and scheduling; it is not NIC bandwidth, download
+throughput, a p95 estimate or a promise for larger transfers. Requests are bounded
+before allocation, authenticated through the same connection as inference, limited
+to four echoes per connection, and never accept a target address. Each exchange
+has a 250 ms I/O timeout. Failure or an older peer leaves the metric unknown and
+reconnects before inference; it does not make chat depend on telemetry support.
+
+`LINKS1` observations reach the typed snapshot through the real host stream and
+`LMB-CAL4` records. Links belong to the exact Edge/range plan, not a tracker ping.
+They expire after five minutes or a relevant key change. Changed/failed-over
+routes cannot publish a partial old chain. The TUI and per-range JSON expose
+only current observations. A new session remeasures them.
+
+Preparation duration measures the requester's monotonic COMMIT-to-entire-chain-READY
+interval: transfer, loading and host startup, excluding source indexing and owner
+approval. It is saved in the private version-4 resident-plan record even when the
+TUI detaches, and carried into subsequent calibrated turns. It describes that
+preparation, not a prediction for a different cache state. Reopening a resident
+chat updates existing matching records after validating identities and current
+runtimes; old plans without content provenance do not fabricate observations.
+
+Live energy sensors remain unknown. A tracker RTT, disk benchmark or detected
+GPU cannot replace execution evidence. Household GPU execution stays
 unavailable until a matching adapter backend and memory contract pass execution
 tests. Thus this is the evidence foundation of the inventory milestone, not a
 claim that its hardware validation or the multi-model scheduler is complete.

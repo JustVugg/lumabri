@@ -25,10 +25,14 @@ assert measured["calibration"]["samples"] == 3
 assert measured["calibration"]["decode_tok_s"] == 10
 assert measured["calibration"]["stale_reason"] is None
 assert measured["execution_evidence"]["ranges"][0]["decode_run_seconds"] == .08
+assert measured["execution_evidence"]["preparation_seconds"] == 1.25
+assert measured["execution_evidence"]["ranges"][0]["link_to_edge"]["rtt_p50_ms"] == 2
 assert stale["calibration"]["state"] == "stale"
 assert stale["calibration"]["decode_tok_s"] is None
 assert stale["calibration"]["stale_reason"] == "the thread counts"
 assert stale["execution_evidence"]["ranges"][0]["decode_run_seconds"] is None
+assert stale["execution_evidence"]["preparation_seconds"] is None
+assert stale["execution_evidence"]["ranges"][0]["link_to_edge"] is None
 memory = measured["execution_evidence"]["ranges"][0]["memory"]
 assert memory["reserved_bytes"] == sum(memory[k] for k in (
     "weights_bytes", "context_session_bytes", "scratch_bytes", "guard_and_preparation_bytes"))
