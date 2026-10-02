@@ -1188,6 +1188,7 @@ static int home_request_chat_direct(LmbTuiState *st, int selected) {
     double last_draw = 0;
     started = nowd();
     LmbPrepareWatchdog preparation = {.started = started, .advanced = started};
+    double commit_started = 0;
     while (!g_stopping) {
         stage = !committed ? "waiting for donor approval" :
                 !host_started ? "loading the approved segments" : "starting the chat host";
@@ -1259,6 +1260,7 @@ static int home_request_chat_direct(LmbTuiState *st, int selected) {
         if (key == 1001 && first_visible > 0) first_visible--;
         if (key == 1002 && first_visible + visible < (int)s.count) first_visible++;
         if (!committed && accepted) {
+            commit_started = nowd(); /* Exclude the owner's approval time and source indexing. */
             for (uint32_t i = 0; i < s.count; i++)
                 if ((!plan.hybrid || i != s.edge) && home_session_send(&s, i, LMB_HOME_COMMIT)) goto done;
             committed = 1;
@@ -1277,6 +1279,8 @@ static int home_request_chat_direct(LmbTuiState *st, int selected) {
             host_started = 1;
         }
         if (host_started && phases[s.edge] == LMB_HOME_READY && host_ports[s.edge]) {
+            double preparation_seconds = nowd() - commit_started;
+            double prepared_at = (double)time(NULL);
             LmbExecutionView execution = { .count = s.count, .layers = m->shape.layers, .hybrid = plan.hybrid };
             for (uint32_t i = 0; i < s.count; i++) {
                 LmbExecutionNode *node = &execution.nodes[i];
@@ -1305,12 +1309,13 @@ static int home_request_chat_direct(LmbTuiState *st, int selected) {
                                  "--tracker", st->tracker, "--host-root", expected_root, "--calibrate"};
             if (home_resident_required()) {
                 LmbResidentPlan saved = {.context = st->context, .max_new = s.offers[s.edge].max_new,
-                    .execution = execution};
+                    .execution = execution, .preparation_seconds = preparation_seconds, .prepared_at = prepared_at};
                 snprintf(saved.tracker, sizeof saved.tracker, "%s", st->tracker);
                 snprintf(saved.host, sizeof saved.host, "%s", host);
                 snprintf(saved.host_key, sizeof saved.host_key, "%s", expected_host);
                 snprintf(saved.root, sizeof saved.root, "%s", expected_root);
                 snprintf(saved.model, sizeof saved.model, "%s", model);
+                snprintf(saved.content_id, sizeof saved.content_id, "%s", m->content_id);
                 memcpy(saved.allocation, id, 32);
                 memcpy(saved.peer_keys, s.peer_keys, s.count * 32);
                 if (home_resident_plan_save(&saved) || home_resident_library_save(&saved)) {
@@ -1321,6 +1326,8 @@ static int home_request_chat_direct(LmbTuiState *st, int selected) {
             if (home_background_job) { prepared = 1; result = 0; break; }
             g_execution_view = &execution;
             LmbCalibration measurement = {0}; char measurement_dir[1200];
+            measurement.preparation_seconds = preparation_seconds;
+            measurement.prepared_at = prepared_at;
             LmbTuiModel measured = *m;
             measured.plan = plan;
             measured.planned = 1; /* the actual revalidated plan, not an earlier UI snapshot */
@@ -1331,7 +1338,7 @@ static int home_request_chat_direct(LmbTuiState *st, int selected) {
                 !catalog_calibration_key(st, &measured, 0, NULL, &measurement.key);
             if (can_record) {
                 char why[200] = "";
-                can_record = !catalog_runtime_revalidate(st, &measurement.key, why, sizeof why);
+                can_record = !catalog_runtime_revalidate_tracker(st->tracker, &measurement.key, why, sizeof why);
                 if (!can_record) fprintf(stderr, "[calibration] %s.\n", why);
             }
             g_recording_calibration = can_record ? &measurement : NULL;
@@ -1436,6 +1443,8 @@ static int home_request_chat(LmbTuiState *st, int selected) {
     if (home_resident_plan_load(st->tracker, &saved) || strcmp(saved.model, status.name))
         return home_fail("Prepared plan changed; choose it from Resident models.");
     LmbCalibration measurement = {0}; char directory[1200], why[200] = "";
+    measurement.preparation_seconds = saved.preparation_seconds;
+    measurement.prepared_at = saved.prepared_at;
     uint8_t indexed[32], expected[32];
     /* The indexer ran in the keeper. Refresh its content evidence in this
      * process too; a pre-index catalogue legitimately had no content key. */
@@ -1443,7 +1452,7 @@ static int home_request_chat(LmbTuiState *st, int selected) {
         !lmb_unhex(expected, saved.root, 32) && !memcmp(indexed, expected, 32) &&
         !catalog_calibration_dir(directory) &&
         !catalog_calibration_key(st, &st->models[selected], 0, NULL, &measurement.key) &&
-        !catalog_runtime_revalidate(st, &measurement.key, why, sizeof why);
+        !catalog_runtime_revalidate_tracker(st->tracker, &measurement.key, why, sizeof why);
     g_recording_calibration = measured ? &measurement : NULL;
     g_calibration_directory = measured ? directory : NULL;
     rc = home_resident_plan_chat_mode(&saved, st->quick_calibration);

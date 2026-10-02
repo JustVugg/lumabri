@@ -9,6 +9,35 @@ typedef struct {
     uint64_t segment_bytes, edge_bytes, total_bytes;
 } LmbHomeReservation;
 
+typedef struct {
+    uint64_t weights, state, scratch, overhead, reserved;
+    int reservation_complete;
+} LmbMemoryEvidence;
+
+/* Adapter-derived estimates alongside, not confused with, the reservation.
+ * Preliminary local previews may not include the Edge reservation yet. */
+static LMB_UNUSED int lmb_memory_evidence(const LmbModelShape *shape,
+    uint32_t begin, uint32_t end, uint32_t context, uint32_t sessions,
+    int runs_edge, uint64_t reserved, LmbMemoryEvidence *out) {
+    if (!out) return -1;
+    memset(out, 0, sizeof *out);
+    if (!shape || (runs_edge != 0 && runs_edge != 1)) return -1;
+    LmbRangeCost c = lmb_estimate_segment(shape, begin, end, context, sessions);
+    if (runs_edge) {
+        LmbRangeCost edge = lmb_estimate_edge(shape, context, sessions);
+        c.ok = c.ok && edge.ok;
+        c.resident_bytes = lmb_size_add(c.resident_bytes, edge.resident_bytes);
+        c.state_bytes = lmb_size_add(c.state_bytes, edge.state_bytes);
+        c.scratch_bytes = lmb_size_add(c.scratch_bytes, edge.scratch_bytes);
+    }
+    uint64_t total = lmb_size_add(c.resident_bytes, lmb_size_add(c.state_bytes, c.scratch_bytes));
+    if (!c.ok || total == UINT64_MAX || reserved == UINT64_MAX) return -1;
+    *out = (LmbMemoryEvidence){.weights = c.resident_bytes, .state = c.state_bytes,
+        .scratch = c.scratch_bytes, .reserved = reserved, .reservation_complete = reserved >= total};
+    if (out->reservation_complete) out->overhead = reserved - total;
+    return 0;
+}
+
 static LMB_UNUSED uint64_t lmb_budget_add(uint64_t a, uint64_t b) {
     return lmb_size_add(a, b);
 }

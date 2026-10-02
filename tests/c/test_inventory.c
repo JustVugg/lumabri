@@ -4,6 +4,30 @@
 #include "lumabri_inventory.h"
 #include <assert.h>
 
+static void optional_facts(void) {
+    unsetenv("LUMABRI_COST_PER_HOUR"); unsetenv("LUMABRI_COST_CURRENCY");
+    unsetenv("LUMABRI_ESTIMATED_POWER_WATTS");
+    LmbResourceFacts f = lmb_resource_facts_local(-1);
+    assert(!f.known && lmb_resource_facts_valid(&f));
+    setenv("LUMABRI_COST_PER_HOUR", "0", 1); setenv("LUMABRI_COST_CURRENCY", "EUR", 1);
+    setenv("LUMABRI_ESTIMATED_POWER_WATTS", "12.125", 1);
+    f = lmb_resource_facts_local(0);
+    assert(f.known == 7 && f.load_milli == 0 && f.price_micro_per_hour == 0 &&
+           f.power_milliwatts == 12125 && lmb_resource_facts_valid(&f));
+    const char *invalid[] = {"-1", "nan", "inf", " 1", "1e2", "1,5", ".5", "1.", "1.0000001", "1000001", "18446744073709551615"};
+    for (unsigned i = 0; i < sizeof invalid / sizeof *invalid; i++) {
+        setenv("LUMABRI_COST_PER_HOUR", invalid[i], 1);
+        f = lmb_resource_facts_local(NAN);
+        assert(!(f.known & (LMB_FACT_LOAD | LMB_FACT_PRICE)) && lmb_resource_facts_valid(&f));
+    }
+    setenv("LUMABRI_COST_PER_HOUR", "1.234567", 1);
+    f = lmb_resource_facts_local(2.5); assert(f.price_micro_per_hour == 1234567 && f.load_milli == 2500);
+    setenv("LUMABRI_COST_CURRENCY", "eur", 1);
+    f = lmb_resource_facts_local(INFINITY); assert(!(f.known & (LMB_FACT_PRICE | LMB_FACT_LOAD)));
+    unsetenv("LUMABRI_COST_PER_HOUR"); unsetenv("LUMABRI_COST_CURRENCY");
+    unsetenv("LUMABRI_ESTIMATED_POWER_WATTS");
+}
+
 static LmbMachineReport fixture(void) {
     LmbMachineReport r = {0};
     r.identity[0] = 1;
@@ -21,6 +45,7 @@ static int decode(const LmbBuf *b) {
 }
 
 int main(int argc, char **argv) {
+    optional_facts();
     LmbMachineReport r = fixture();
     LmbBuf b = {0};
     assert(!lmb_inventory_pack(&b, &r));
@@ -48,10 +73,25 @@ int main(int argc, char **argv) {
     LmbCur cur = {b.p, b.len, 0}; LmbMachineReport got;
     assert(!lmb_inventory_unpack(&cur, &got) && got.runtime_threads == 2 &&
            !strcmp(got.runtime_id, r.runtime_id));
+    /* V3 has no optional facts: preserve absence, not an idle/free reading. */
+    b.p[0] = 3; b.len -= 24;
+    cur = (LmbCur){b.p, b.len, 0};
+    assert(!lmb_inventory_unpack(&cur, &got) && !got.facts.known && got.machine.load_one < 0 && cur.off == cur.len);
+    b.p[0] = 4; b.len += 24;
     for (size_t i = 0; i < b.len; i++) {
         LmbBuf cut = b; cut.len = i; assert(decode(&cut));
     }
     b.p[0] = 2; assert(decode(&b)); free(b.p);
+    for (unsigned i = 0; i < 6; i++) {
+        LmbMachineReport invalid = r;
+        if (i == 0) invalid.facts.known = 8;
+        if (i == 1) invalid.facts.load_milli = 1;
+        if (i == 2) { invalid.facts.known = LMB_FACT_LOAD; invalid.facts.load_milli = UINT32_MAX; }
+        if (i == 3) { invalid.facts.known = LMB_FACT_PRICE; memcpy(invalid.facts.currency, "eUR", 4); }
+        if (i == 4) invalid.facts.price_micro_per_hour = 1;
+        if (i == 5) { invalid.facts.known = LMB_FACT_POWER; invalid.facts.power_milliwatts = UINT32_MAX; }
+        b = (LmbBuf){0}; assert(!lmb_inventory_pack(&b, &invalid)); assert(decode(&b)); free(b.p);
+    }
     for (unsigned i = 0; i < 5; i++) {
         LmbMachineReport invalid = r;
         if (i == 0) invalid.runtime_threads = 0;

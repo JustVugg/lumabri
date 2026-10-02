@@ -1073,11 +1073,19 @@ static void *connection_worker(void *opaque) {
     Node *node = connection->node;
     int fd = connection->fd;
     free(connection);
+    unsigned link_probes = 0;
     for (;;) {
         LmbMsg msg = {0};
         if (lmb_recv(fd, &msg)) break;
         int rc;
-        if (node->home_accelerator && msg.op != LMB_HOME_EXPERT &&
+        if (msg.op == LMB_LINK_PROBE) {
+            /* Same authenticated, allocation-authorized connection as RUN.
+             * No destination supplied by a peer; never a network proxy.
+             * At most four echoes per connection, no unbounded reflection. */
+            if (++link_probes > 4 || msg.body_len != 16 ||
+                (msg.pay_len && msg.pay_len != (64u << 10))) rc = -1;
+            else rc = lmb_send(fd, LMB_LINK_PROBE_R, msg.body, msg.body_len, msg.pay, msg.pay_len);
+        } else if (node->home_accelerator && msg.op != LMB_HOME_EXPERT &&
             msg.op != LMB_HOME_FEATURES && msg.op != LMB_PING) {
             rc = lmb_send(fd, LMB_ERR, "approved expert RPCs only", 24, NULL, 0);
         } else if (msg.op == LMB_PING) {

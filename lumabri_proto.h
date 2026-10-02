@@ -317,6 +317,7 @@ enum {
     LMB_HOME_DETACH = 86, /* close requester control; retain prepared weights */
     LMB_HOME_FEATURES = 87, LMB_HOME_HYBRID_ROUTES = 88, LMB_HOME_EXPERT = 89,
     LMB_HOME_QUERY = 90, LMB_HOME_RELEASE = 91, /* pinned requester, exact allocation + root */
+    LMB_LINK_PROBE = 92, LMB_LINK_PROBE_R = 93, /* bounded authenticated echo */
 };
 #define LMB_CAP_EXEC2 (1u << 0)
 #define LMB_ENC_F32  0u
@@ -412,6 +413,10 @@ static void lmb_frame_caps(uint32_t op, uint32_t *body_cap, uint32_t *pay_cap) {
     *body_cap = LMB_MAX_SMALL_BODY;
     *pay_cap = 0;
     switch (op) {
+    case LMB_LINK_PROBE:
+    case LMB_LINK_PROBE_R:
+        *body_cap = 16; *pay_cap = 64u << 10;
+        break;
     case LMB_HOME_EXPERT:
         *body_cap = 80;
         *pay_cap = 256u << 10; /* One activation, at most 65536 float cells. */

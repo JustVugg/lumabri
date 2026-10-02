@@ -15,7 +15,7 @@ import tempfile
 import termios
 import time
 
-from home_flow_test import TerminalText, current_frame, hosted_turn_complete
+from home_flow_test import TerminalText, current_frame, hosted_turn_complete, assert_stage_record
 
 
 def main():
@@ -162,7 +162,9 @@ def main():
             until(lambda: chat.has("receives the text"), "normal prepared chat did not start")
             chat.send("hi\n")
             until(lambda: hosted_turn_complete(chat.text), "normal prepared chat did not generate", 120)
-            assert list((tmp / "chatter").rglob("*.cal")), "service preparation lost the content/calibration key"
+            records = list((tmp / "chatter").rglob("*.cal"))
+            assert len(records) == 1, "service preparation lost the content/calibration key"
+            assert assert_stage_record(records[0]) == 1, "background preparation telemetry lost"
             chat.send("/quit\n")
             until(lambda: chat.p.poll() is not None, "requester chat did not close")
         before = {name: service(name)["donor"] for name in ("a", "b")}
@@ -192,6 +194,8 @@ def main():
         until(lambda: resumed.has("receives the text"), "retained host did not answer")
         resumed.send("hi\n")
         until(lambda: hosted_turn_complete(resumed.text), "real generation failed after all TUI/manager restarts", 120)
+        if args.keep_requester:
+            assert assert_stage_record(records[0]) == 2, "resident real session did not update existing observations"
         resumed.text = ""; resumed.send("/quit\n")
         until(lambda: resumed.has("your workspace"), "chat did not close")
         resumed.send("\x1b[B" * 4 + "\r")

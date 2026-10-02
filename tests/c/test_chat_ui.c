@@ -5,6 +5,37 @@
 #include <assert.h>
 
 int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "planner-evidence")) {
+        LmbTuiState *st = calloc(1, sizeof *st); assert(st);
+        st->nnodes = 1; st->nmodels = 2; st->context = 128; st->sessions = 1;
+        LmbTuiModel *m = &st->models[0];
+        strcpy(m->name, "observed"); strcpy(m->shape.model_type, "olmoe"); strcpy(m->shape.segment_id, "olmoe");
+        m->shape.layers = 4; m->shape.hidden = 64; m->shape.vocab = 256;
+        m->shape.sizing_verified = m->shape.memory_contract = 1; m->shape.max_context = 128;
+        m->shape.edge_resident_bytes = 1000;
+        for (unsigned i = 0; i < 4; i++) m->shape.memory[i].resident_bytes = 1000;
+        m->planned = m->has_calibration = m->calibration_key_valid = 1;
+        m->plan.nslices = 1; m->plan.slices[0].layer_end = 4; m->plan.slices[0].bytes_resident = 1000000;
+        LmbCalKey *k = &m->calibration.key;
+        strcpy(k->model_root, "test-only"); strcpy(k->adapter, "olmoe");
+        strcpy(k->numeric_class, "test-only"); strcpy(k->build_id, "fixture"); strcpy(k->plan_kind, "segment");
+        k->adapter_abi = k->nodes = k->sessions = 1; k->context = 128; k->layer_end[0] = 4; k->threads[0] = 2;
+        strcpy(k->node_id[0], "fixture"); strcpy(k->node_hardware_id[0], "fixture");
+        strcpy(k->node_build_id[0], "fixture"); strcpy(k->node_backend[0], "cpu");
+        m->calibration.decode_tok_s = 10; m->calibration.ttft_seconds = .1;
+        m->calibration.measured_at = (double)time(NULL); m->calibration.samples = 3;
+        m->calibration.prompt_tokens = 4; m->calibration.generated_tokens = 8;
+        m->calibration.stage_count = 1; m->calibration.stage_decode_seconds[0] = .08;
+        m->calibration.source = LMB_CAL_SOURCE_SESSION;
+        m->calibration.preparation_seconds = 1.25; m->calibration.prepared_at = m->calibration.measured_at;
+        m->calibration.link_count = 1;
+        double link_times[] = {.001, .002, .003};
+        assert(!lmb_link_observed(&m->calibration.links[0], link_times, .01, m->calibration.measured_at));
+        assert(lmb_cal_valid(&m->calibration)); m->calibration_key = *k;
+        st->models[1] = *m; strcpy(st->models[1].name, "changed-threads");
+        st->models[1].calibration_key.threads[0]++;
+        catalog_json(st); free(st); return 0;
+    }
     if (argc == 4 && !strcmp(argv[1], "resident-deny-stale")) {
         assert(!lmb_secure_init());
         LmbResidentPlan plan, changed;
@@ -337,9 +368,11 @@ int main(int argc, char **argv) {
         assert(loaded.execution.hybrid && lmb_execution_valid(&loaded.execution));
         plan.allocation[0] = 1;
         plan.peer_keys[0][0] = 2; plan.peer_keys[1][0] = 3;
+        plan.preparation_seconds = 2.25; plan.prepared_at = 1000;
         assert(!home_resident_plan_save(&plan));
         assert(!home_resident_plan_load(plan.tracker, &loaded));
         assert(!memcmp(loaded.allocation, plan.allocation, 32));
+        assert(loaded.preparation_seconds == 2.25 && loaded.prepared_at == 1000);
         assert(!memcmp(loaded.peer_keys, plan.peer_keys, sizeof plan.peer_keys));
         LmbResidentPlan library[4]; char library_path_a[1200], library_path_b[1200], library_directory[1200];
         assert(!home_resident_library_path(&plan, library_path_a, sizeof library_path_a));

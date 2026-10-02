@@ -85,6 +85,15 @@ static void combined_capacity(void) {
     assert(!lmb_home_reservation(&m, bytes, 0, 8, 128, 1, &first));
     assert(!lmb_home_reservation(&m, bytes, 8, 16, 128, 0, &second));
     assert(!lmb_home_reservation(&m, bytes, 0, 16, 128, 1, &whole));
+    LmbMemoryEvidence evidence;
+    assert(!lmb_memory_evidence(&m, 0, 16, 128, 1, 1, whole.total_bytes, &evidence));
+    assert(evidence.reservation_complete && evidence.weights == 1608 * mib &&
+           evidence.reserved == evidence.weights + evidence.state + evidence.scratch + evidence.overhead);
+    assert(!lmb_memory_evidence(&m, 0, 16, 128, 1, 1, 1, &evidence));
+    assert(!evidence.reservation_complete && !evidence.overhead);
+    assert(lmb_memory_evidence(NULL, 0, 16, 128, 1, 1, whole.total_bytes, &evidence));
+    assert(!evidence.weights && !evidence.reservation_complete);
+    assert(lmb_memory_evidence(&m, 0, 16, 128, 1, 2, whole.total_bytes, &evidence));
     LmbClusterNode nodes[2] = {{.ram_budget_bytes = first.total_bytes},
                               {.ram_budget_bytes = second.total_bytes}};
     for (unsigned i = 0; i < 2; i++) {

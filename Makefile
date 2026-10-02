@@ -38,6 +38,8 @@ test_weight_cache: tests/c/test_weight_cache.c src/runtime/lumabri_weight_cache.
 # Native household runtime (Colibri sources are a build-time dependency).
 household: tracker maintainer $(SHIM_LIB) lumabri segment_node segment_chat
 
+lumabri segment_node segment_chat test_calibration test_chat_ui: src/planner/lumabri_link_evidence.h
+
 .PHONY: test-runtime-probe
 test-runtime-probe: tests/c/test_runtime_probe.c lumabri_runtime_probe.h src/runtime/lumabri_backend_policy.h lumabri_segment.h
 	mkdir -p build/tests
@@ -71,6 +73,7 @@ SECURE_DEPS = lumabri_secure.h lumabri_crypto.h
 HOME_NET_DEPS = lumabri_home_net.h lumabri_home_discovery.h lumabri_platform.h lumabri_wakeup.h lumabri_runtime_probe.h src/runtime/lumabri_resident_plan.h
 MACHINE_SRC = lumabri_machine.c
 MACHINE_DEPS = lumabri_machine.h $(MACHINE_SRC)
+lumabri tracker test_chat_ui test_inventory test_home: src/planner/lumabri_resource_facts.h
 PLANNER_ADAPTER_DEPS = $(wildcard planner_adapters/*.h)
 
 # Adapter contracts are included transitively by the planner. Rebuild every

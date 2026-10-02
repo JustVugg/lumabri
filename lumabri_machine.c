@@ -431,6 +431,7 @@ void lmb_machine_refresh_resources(LmbMachineProfile *profile, const char *disk_
     if (!statvfs(disk_path && *disk_path ? disk_path : ".", &disk))
         profile->disk_available_bytes = (uint64_t)disk.f_bavail * disk.f_frsize;
     double loads[1];
+    profile->load_one = -1.0;
     if (getloadavg(loads, 1) == 1) profile->load_one = loads[0];
 }
 
@@ -464,6 +465,7 @@ int lmb_machine_probe(LmbMachineProfile *profile, const char *disk_path,
         profile->disk_read_bps = disk_read_speed(
             disk_path && *disk_path ? disk_path : ".");
     double loads[1];
+    profile->load_one = -1.0;
     if (getloadavg(loads, 1) == 1) profile->load_one = loads[0];
     profile->tracker_rtt_ms = -1.0;
     if (tracker && *tracker) {
