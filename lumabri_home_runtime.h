@@ -23,6 +23,9 @@ static int home_fail(const char *fmt, ...) {
 }
 #include "src/runtime/lumabri_resident_plan.h"
 #include "src/runtime/lumabri_service.h"
+#define LMB_COMPUTE_BROKER_SERVER
+#include "src/runtime/lumabri_compute_broker.h"
+static LmbComputeBroker home_compute_broker;
 
 typedef struct {
     struct termios saved;
@@ -224,6 +227,7 @@ typedef struct HomeDonor {
     uint64_t pool_budget;
     uint32_t display_models;
     uint64_t display_reserved;
+    uint32_t display_compute, display_active, display_queued;
 } HomeDonor;
 
 static uint64_t home_donor_reserved(const HomeDonor *d) {
@@ -421,8 +425,11 @@ static void home_donor_screen(const HomeDonor *d, const char *name, uint64_t ram
         ui_begin("share resources");
         ui_printf(5, 5, UI_TEXT, "%s · up to %.1f GB RAM · CPU execution", name, ram / 1e9);
         ui_text(7, 5, UI_SAND, d->retained ? "Weights retained in RAM; ready for another chat" : lmb_home_phase_name(t->phase));
-        if (d->persistent && d->display_models > 1)
-            ui_printf(8, 5, UI_MUTED, "%u models · %.2f GB reserved in total · Tab changes the selected model · CPU time is shared",
+        if (d->persistent && d->display_models > 1 && d->display_compute)
+            ui_printf(8, 5, UI_MUTED, "%u models · %.2f GB reserved · CPU FIFO: %u active, %u waiting · Tab switches model",
+                      d->display_models, d->display_reserved / 1e9, d->display_active, d->display_queued);
+        else if (d->persistent && d->display_models > 1)
+            ui_printf(8, 5, UI_MUTED, "%u models · %.2f GB reserved · Compute admission unknown · Tab switches model",
                       d->display_models, d->display_reserved / 1e9);
         if (t->phase != LMB_HOME_IDLE) {
             char who[65]; lmb_hex(who, t->offer.requester, 32);
@@ -547,6 +554,17 @@ static int home_donor_offer(HomeDonor *d, int incoming, const char *tracker,
                 snprintf(busy.reason, sizeof busy.reason, "BUSY: this allocation already exists; no duplicate reservation was created.");
                 (void)home_status_send(incoming, &busy, 0, 0); return -1;
             }
+            /* A Hybrid coordinator waits for remote expert kernels inside
+             * its local RUN. Two such models can acquire opposite node
+             * permits and deadlock. Keep Hybrid exclusive until its remote
+             * waits can yield a compute grant; Segment models share fairly. */
+            if ((other->transaction.reservation_held || other->transaction.phase == LMB_HOME_PENDING) &&
+                (offer.hybrid_role || other->transaction.offer.hybrid_role)) {
+                LmbHomeTransaction busy = {.offer=offer, .phase=LMB_HOME_REJECTED};
+                snprintf(busy.reason, sizeof busy.reason,
+                    "BUSY: Hybrid currently requires exclusive compute. Use Segment for concurrent resident models.");
+                (void)home_status_send(incoming, &busy, 0, 0); return -1;
+            }
         }
     }
     if (!rc && d->retained && !strcmp(offer.tracker, tracker) && offer.ram_bytes <= ram) {
@@ -650,6 +668,10 @@ static void home_service_donor_snapshot(HomeService *service, const HomeDonor *d
     s->model_count = (uint32_t)(d->transaction.reservation_held || d->transaction.phase == LMB_HOME_PENDING);
     for (uint32_t i = 0; i < d->park_capacity; i++)
         s->model_count += d->parked[i].transaction.reservation_held || d->parked[i].transaction.phase == LMB_HOME_PENDING;
+    s->compute_enabled = home_compute_broker.started && !atomic_load(&home_compute_broker.stop);
+    s->compute_active = s->compute_enabled ? atomic_load(&home_compute_broker.active) : 0;
+    s->compute_queued = s->compute_enabled ? atomic_load(&home_compute_broker.queued) : 0;
+    s->compute_grants = atomic_load(&home_compute_broker.grants);
 }
 
 static int home_service_donor_ui(const char *tracker) {
@@ -674,7 +696,8 @@ static int home_service_donor_ui(const char *tracker) {
         }
         if (seen != s.revision) { seen = s.revision; choice = 1; }
         HomeDonor d = {.thread_capacity = s.threads, .retained = (int)s.retained, .persistent = 1,
-            .display_models = s.model_count, .display_reserved = s.reserved_total};
+            .display_models = s.model_count, .display_reserved = s.reserved_total,
+            .display_compute=s.compute_enabled, .display_active=s.compute_active, .display_queued=s.compute_queued};
         d.transaction.phase = (LmbHomePhase)s.phase; d.transaction.offer = s.offer;
         snprintf(d.transaction.reason, sizeof d.transaction.reason, "%.159s", s.detail);
         home_donor_screen(&d, s.name, s.ram, term.active, choice);
@@ -791,12 +814,28 @@ static int cmd_donor_inner(int argc, char **argv) {
         background ? "--donor-service" : NULL, NULL};
     pid_t reporter = home_spawn(worker_argv, NULL, report_log, NULL, -1);
     if (reporter <= 0) { close(listener); return home_fail("Cannot start the inventory reporter: %s.", strerror(errno)); }
+    if (background) {
+        char compute_path[1200];
+        int failed = home_service_socket_path("donor", compute_path, sizeof compute_path);
+        size_t length = failed ? 0 : strlen(compute_path);
+        if (length < 5 || strcmp(compute_path+length-5, ".sock")) failed = 1;
+        if (!failed) memcpy(compute_path+length-5, ".cpu", 5);
+        if (failed || lmb_compute_broker_start(&home_compute_broker, compute_path) ||
+            setenv("LUMABRI_COMPUTE_SOCKET", compute_path, 1)) {
+            lmb_compute_broker_stop(&home_compute_broker);
+            home_stop_child(&reporter); close(listener); home_service_close(&service);
+            return home_fail("Cannot start the private compute scheduler. No models were loaded.");
+        }
+    }
     g_stopping = 0; install_chat_signal_handlers(); signal(SIGPIPE, SIG_IGN);
     HomeTerminal term = {0}; if (!background) home_terminal_begin(&term);
     double redraw = 0;
     int donor_choice = 1; /* Enter alone must never accept a new allocation. */
     uint32_t next_model = 0;
     while (!g_stopping) {
+        if (background && atomic_load(&home_compute_broker.stop)) {
+            (void)home_fail("The private compute scheduler stopped. Allocations are being released."); break;
+        }
         if (waitpid(reporter, NULL, WNOHANG) == reporter) {
             (void)home_fail("The inventory reporter stopped. See %s. No new requests can be accepted.", report_log);
             break;
@@ -908,6 +947,7 @@ static int cmd_donor_inner(int argc, char **argv) {
     home_donor_disconnect(&d, "Donor closed.");
     for (uint32_t i = 0; i < d.park_capacity; i++) home_donor_disconnect(&parked[i], "Donor closed.");
     home_stop_child(&reporter); close(listener);
+    if (background) { lmb_compute_broker_stop(&home_compute_broker); unsetenv("LUMABRI_COMPUTE_SOCKET"); }
     if (background) {
         home_service_donor_snapshot(&service, &d);
         service.snapshot.state = home_error[0] ? HOME_SVC_FAILED : HOME_SVC_STOPPED;

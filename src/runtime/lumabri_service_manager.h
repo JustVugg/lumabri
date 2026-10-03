@@ -115,6 +115,9 @@ static int cmd_service(int argc, char **argv) {
             doctor_json_string(s.has_offer ? s.offer.model : "");
             printf(",\"model_count\":%u,\"reserved_total_bytes\":%llu", live ? s.model_count : 0,
                    (unsigned long long)(live ? s.reserved_total : 0));
+            printf(",\"compute\":{\"enabled\":%s,\"active\":%u,\"queued\":%u,\"grants\":%llu}",
+                live && s.compute_enabled ? "true" : "false", live ? s.compute_active : 0,
+                live ? s.compute_queued : 0, (unsigned long long)(live ? s.compute_grants : 0));
             fputs(",\"detail\":", stdout);
             doctor_json_string(s.detail); fputc('}', stdout);
         } else printf("%-8s %-12s %s%s\n", home_service_roles[i], state,

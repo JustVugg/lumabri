@@ -8,7 +8,7 @@
 #include <sys/file.h>
 
 #define HOME_SVC_VERSION 1u
-#define HOME_SVC_RECORD_VERSION 2u
+#define HOME_SVC_RECORD_VERSION 3u
 #define HOME_SVC_MAX 65536u
 enum { HOME_SVC_STATUS = 0, HOME_SVC_STOP, HOME_SVC_ACCEPT, HOME_SVC_DECLINE,
        HOME_SVC_UNLOAD, HOME_SVC_CANCEL, HOME_SVC_NEXT_MODEL };
@@ -23,6 +23,8 @@ typedef struct {
     int has_offer;
     uint32_t model_count;
     uint64_t reserved_total;
+    uint32_t compute_enabled, compute_active, compute_queued;
+    uint64_t compute_grants;
 } HomeServiceSnapshot;
 
 typedef struct {
@@ -114,6 +116,8 @@ static int home_service_pack(LmbBuf *b, const HomeServiceSnapshot *s) {
         s->phase > LMB_HOME_CLOSED || s->retained > 1 ||
         (s->has_offer && !lmb_home_offer_valid(&s->offer))) return -1;
     if (s->model_count > 4 || s->reserved_total > s->ram) return -1;
+    if (s->compute_enabled > 1 || s->compute_active > 1 || s->compute_queued > 32 ||
+        (!s->compute_enabled && (s->compute_active || s->compute_queued))) return -1;
     if (lmb_buf_u32(b, HOME_SVC_RECORD_VERSION) || lmb_buf_bytes(b, s->instance, 32) ||
         lmb_buf_u32(b, s->state) || lmb_buf_u32(b, s->phase) ||
         lmb_buf_u32(b, s->retained) || lmb_buf_u32(b, s->threads) ||
@@ -127,13 +131,15 @@ static int home_service_pack(LmbBuf *b, const HomeServiceSnapshot *s) {
     if (!rc) rc = lmb_buf_u32(b, (uint32_t)offer.len) || (offer.len && lmb_buf_bytes(b, offer.p, offer.len));
     free(offer.p);
     if (!rc) rc = lmb_buf_u32(b, s->model_count) || lmb_buf_u64(b, s->reserved_total);
+    if (!rc) rc = lmb_buf_u32(b, s->compute_enabled) || lmb_buf_u32(b, s->compute_active) ||
+        lmb_buf_u32(b, s->compute_queued) || lmb_buf_u64(b, s->compute_grants);
     return rc || b->len > HOME_SVC_MAX ? -1 : 0;
 }
 
 static int home_service_unpack(const uint8_t *bytes, size_t n, HomeServiceSnapshot *s) {
     memset(s, 0, sizeof *s);
     LmbCur c = {bytes, n, 0}; uint32_t v, has, size;
-    if (lmb_cur_u32(&c, &v) || (v != 1 && v != HOME_SVC_RECORD_VERSION) || c.len - c.off < 32) return -1;
+    if (lmb_cur_u32(&c, &v) || v < 1 || v > HOME_SVC_RECORD_VERSION || c.len - c.off < 32) return -1;
     memcpy(s->instance, c.p + c.off, 32); c.off += 32;
     if (lmb_cur_u32(&c, &s->state) || lmb_cur_u32(&c, &s->phase) ||
         lmb_cur_u32(&c, &s->retained) || lmb_cur_u32(&c, &s->threads) ||
@@ -148,14 +154,20 @@ static int home_service_unpack(const uint8_t *bytes, size_t n, HomeServiceSnapsh
     LmbCur offer = {c.p + c.off, size, 0};
     if ((has && lmb_home_offer_unpack(&offer, &s->offer)) || (!has && size)) return -1;
     c.off += size;
-    if (v == 2 && (lmb_cur_u32(&c, &s->model_count) || lmb_cur_u64(&c, &s->reserved_total))) return -1;
+    if (v >= 2 && (lmb_cur_u32(&c, &s->model_count) || lmb_cur_u64(&c, &s->reserved_total))) return -1;
+    if (v >= 3 && (lmb_cur_u32(&c, &s->compute_enabled) || lmb_cur_u32(&c, &s->compute_active) ||
+        lmb_cur_u32(&c, &s->compute_queued) || lmb_cur_u64(&c, &s->compute_grants))) return -1;
     if (c.off != c.len) return -1;
     LmbBuf check = {0}; int rc = home_service_pack(&check, s); free(check.p); return rc;
 }
 
 static int home_service_save(HomeService *s) {
     LmbBuf b = {0};
-    if (home_service_pack(&b, &s->snapshot)) { free(b.p); return -1; }
+    /* Live queue counters are RPC observations, not restart state. Persisting
+     * every kernel grant would add fsync traffic to resident inference. */
+    HomeServiceSnapshot journal = s->snapshot;
+    journal.compute_active = journal.compute_queued = 0; journal.compute_grants = 0;
+    if (home_service_pack(&b, &journal)) { free(b.p); return -1; }
     if (b.len == s->last_size && s->last && !memcmp(b.p, s->last, b.len)) { free(b.p); return 0; }
     char tmp[1240];
     if (checked_printf(tmp, sizeof tmp, "%s.XXXXXX", s->journal)) { free(b.p); return -1; }
