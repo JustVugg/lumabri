@@ -6,6 +6,12 @@
 #include <string.h>
 #include <dlfcn.h>
 #include <stdio.h>
+#include "lumabri_resident_guard.h"
+
+static LmbResidentGuard lmb_resident_process_guard;
+static inline int lmb_resident_memory_check(void) {
+    return lmb_resident_guard_check(&lmb_resident_process_guard);
+}
 
 static int lmb_resident_required(void) {
     const char *s = getenv("LUMABRI_RESIDENT_REQUIRED");
@@ -22,6 +28,6 @@ static int lmb_resident_seal(void) {
         fprintf(stderr, "[resident] cannot seal weight input; refusing READY\n");
         return -1;
     }
-    return 0;
+    return lmb_resident_guard_begin(&lmb_resident_process_guard);
 }
 #endif

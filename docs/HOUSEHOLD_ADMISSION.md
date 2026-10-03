@@ -1,11 +1,18 @@
 # Household admission and independent chats
 
-Admission is currently exclusive per participating computer and weight-cache
-directory, not globally exclusive across the household. Two selected donor
-groups can serve two independent chats if each group can hold a complete
-resident plan. No computer is added without selection and owner approval.
+The default background donor supports up to four independently approved
+allocations on a computer, within the summed RAM and preparation budget.
+Engines and mutable weight mirrors are separate; releasing one allocation does
+not release another. See [Household service](HOUSEHOLD_SERVICE.md). No computer
+is added without selection and owner approval. Each hosted model currently
+admits one chat at a time; memory capacity is not a concurrent throughput SLA.
 
-An authenticated offer for an occupied donor receives a rejected status with
+The older foreground diagnostic (`LUMABRI_HOME_FOREGROUND=1`) is exclusive per
+participating computer and weight-cache directory. The following BUSY and
+disjoint-group test exercises that diagnostic lifecycle, not the capacity of
+the default background donor.
+
+An authenticated offer for an occupied foreground donor receives a rejected status with
 `BUSY` and its own request ID. The admitted transaction, connection, resource
 leases and engines are unchanged. This applies while the owner is deciding,
 while weights are being prepared, and during an active chat. An unrelated

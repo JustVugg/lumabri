@@ -66,7 +66,7 @@ check-warnings:
 	$(MAKE) -B all test_relay_exec test_swarm_fed test_key_rotation \
 		test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 test_exec2 test_accum_order test_hybrid_parallel test_residency_report test_model_family test_planner test_cluster test_memory_budget test_calibration test_metrics \
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
-		test_meminfo test_compute_lease test_content_filter \
+		test_meminfo test_process_memory test_compute_lease test_content_filter \
 		test_scheduler test_run_gate test_inventory test_home test_chat_ui test_weight_cache test_planner_io \
 		CFLAGS='$(CFLAGS) -Werror'
 
@@ -566,6 +566,11 @@ test_relay_rate: tests/c/test_relay_rate.c lumabri_segment.c lumabri_segment.h \
 test_machine: tests/c/test_machine.c $(MACHINE_DEPS) lumabri_proto.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_machine.c $(MACHINE_SRC) -o $@
 
+test_process_memory: tests/c/test_process_memory.c src/runtime/lumabri_process_memory.h src/runtime/lumabri_resident_guard.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_process_memory.c -o $@
+
+test check-warnings: test_process_memory
+
 test_meminfo: tests/c/test_meminfo.c $(MACHINE_DEPS) lumabri_proto.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_meminfo.c $(MACHINE_SRC) -o $@
 
@@ -594,6 +599,7 @@ test-sanitize:
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_segment_discovery.c lumabri_segment_discovery.c lumabri_segment.c -o build/sanitize/test_segment_discovery
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_run_gate.c lumabri_run_gate.c -o build/sanitize/test_run_gate
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_meminfo.c $(MACHINE_SRC) -o build/sanitize/test_meminfo
+	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_process_memory.c -o build/sanitize/test_process_memory
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_compute_lease.c $(MACHINE_SRC) -o build/sanitize/test_compute_lease
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_content_filter.c -o build/sanitize/test_content_filter
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_scheduler.c -o build/sanitize/test_scheduler
@@ -603,6 +609,7 @@ test-sanitize:
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_segment_discovery
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_run_gate
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_meminfo
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_process_memory
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_compute_lease
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_content_filter
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_scheduler
@@ -626,7 +633,7 @@ HYBRID_ENGINE_DIR = build/segment-hybrid-colibri
 COLIBRI_SEGMENT_LIB = $(HYBRID_ENGINE_DIR)/build/segment/libcolibri_segment_edge.a
 HYBRID_ROOT = $(abspath .)
 SEGMENT_CFLAGS = $(CFLAGS) -I. -I$(ENGINE) $(OMP_FLAGS)
-SEGMENT_COMMON = segment_colibri.h src/runtime/lumabri_resident.h src/runtime/lumabri_backend_policy.h lumabri_segment.c lumabri_segment.h \
+SEGMENT_COMMON = segment_colibri.h src/runtime/lumabri_resident.h src/runtime/lumabri_process_memory.h src/runtime/lumabri_resident_guard.h src/runtime/lumabri_backend_policy.h lumabri_segment.c lumabri_segment.h \
 		lumabri_segment_discovery.c lumabri_segment_discovery.h \
 		lumabri_proto.h lumabri_sign.h lumabri_sha.h $(SECURE_DEPS)
 
@@ -903,6 +910,7 @@ test: all test_weight_cache test_key_rotation test_hedge test_local_fallback tes
 	bash ./tests/integration/rtt_refresh_test.sh
 	./test_segment_v2
 	./test_meminfo
+	./test_process_memory
 	./test_compute_lease
 	./test_content_filter
 	./test_scheduler
@@ -953,7 +961,7 @@ clean:
 	      test_model_family test_planner test_planner_io test_cluster test_memory_budget test_calibration test_catalogue_advice test_metrics test_inventory test_home test_home_expert test_chat_ui test_weight_cache segment_budget_probe \
 	      test_nat_adopt test_rtt_refresh \
 	      test_verify_failover test_segment_v2 test_segment_discovery test_sampling \
-	      test_swarm_detail test_relay_rate test_machine test_meminfo \
+	      test_swarm_detail test_relay_rate test_machine test_meminfo test_process_memory \
 	      test_compute_lease test_content_filter test_scheduler test_run_gate \
 	      test_segment_v2_tsan tracker_tsan \
 	      segment_node segment_chat test_backend_routes test_tcp_latency segment_node_asan segment_chat_asan \

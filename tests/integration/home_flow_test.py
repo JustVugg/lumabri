@@ -795,6 +795,20 @@ def main():
             until(lambda: reset_count() > resets_before_resume, message="second conversation was not reset in place")
             for path, count in boot_counts.items():
                 assert path.read_text(errors="replace").count("weight input sealed") == count, "resident engine rebooted"
+                evidence = []
+                for line in path.read_text(errors="replace").splitlines():
+                    if line.startswith("[resident-memory] event="):
+                        assert "fault=0 " in line, "resident memory fault: " + line
+                        evidence.append(json.loads(line[line.index("{"):]))
+                assert evidence, f"no OS memory evidence for {path}"
+                for memory in evidence:
+                    assert memory["schema"] == 1 and memory["rss_bytes"] is not None
+                    # Linux reports swap; macOS reports compression, not a
+                    # fabricated per-process swap counter. Sampling is not
+                    # a claim of an OS-level no-pageout guarantee.
+                    assert (memory["swap_bytes"] == 0 or memory["compressed_bytes"] == 0), memory
+                    assert memory["swap_bytes"] in (None, 0), memory
+                    assert memory["compressed_bytes"] in (None, 0), memory
             for donor in ("donor-a", "donor-b"):
                 for weight in (tmp / donor).rglob("*.safetensors"):
                     assert weight.stat().st_blocks == 0, f"weight payload reached disk: {weight}"

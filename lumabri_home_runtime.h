@@ -654,9 +654,21 @@ static int home_service_donor_ui(const char *tracker) {
     HomeTerminal term; home_terminal_begin(&term);
     HomeServiceSnapshot s = {0};
     int choice = 1, rc = 0; uint64_t seen = UINT64_MAX;
+    double startup_deadline = nowd() + 8;
     while (!g_stopping) {
-        if (home_service_query("donor", HOME_SVC_STATUS, NULL, &s) || strcmp(s.tracker, tracker)) {
+        if (home_service_query("donor", HOME_SVC_STATUS, NULL, &s)) {
+            /* Detach creates the singleton socket before its keeper has
+             * finished starting. A slow machine must not turn that bounded
+             * startup window into a permanent UI error. Retry only STATUS,
+             * never an acceptance/unload mutation or an established session. */
+            if (seen == UINT64_MAX && nowd() < startup_deadline) {
+                (void)poll(NULL, 0, 100);
+                continue;
+            }
             rc = home_fail("Sharing service unavailable or belongs to another household. Check service status before retrying."); break;
+        }
+        if (strcmp(s.tracker, tracker)) {
+            rc = home_fail("Sharing service belongs to another household. Stop it before joining a different household."); break;
         }
         if (seen != s.revision) { seen = s.revision; choice = 1; }
         HomeDonor d = {.thread_capacity = s.threads, .retained = (int)s.retained, .persistent = 1,

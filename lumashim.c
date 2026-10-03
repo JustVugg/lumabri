@@ -1988,7 +1988,7 @@ int lmb_weights_seal(void) {
     fprintf(stderr, "[resident] preparation block cache: %llu fetches, %llu hits; buffers released\n",
             (unsigned long long)direct_weight_fetches, (unsigned long long)direct_weight_hits);
     pthread_mutex_unlock(&direct_weight_lock);
-    fprintf(stderr, "[resident] weight input sealed; inference uses resident RAM only\n");
+    fprintf(stderr, "[resident] weight input sealed; assigned weights prepared in engine memory\n");
     return 0;
 }
 

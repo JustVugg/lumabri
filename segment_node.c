@@ -151,9 +151,9 @@ static uint64_t resident_memory_bytes(void) {
 }
 
 static int process_budget_exhausted(Node *node) {
-    uint64_t rss = resident_memory_bytes();
-    return node->process_memory_limit_bytes && rss &&
-           rss >= node->process_memory_limit_bytes;
+    if(!node->process_memory_limit_bytes)return 0;
+    LmbProcessMemory memory={0};(void)lmb_process_memory_probe(&memory,1);
+    return lmb_process_memory_charge(&memory)>=node->process_memory_limit_bytes;
 }
 
 /* OPEN and route publication stop at the reserve.  A RUN which already owns a
@@ -163,7 +163,8 @@ static int process_budget_exhausted(Node *node) {
  * governor's critical RAM/swap floor may interrupt a Colibri kernel. */
 static int run_should_cancel(void *opaque) {
     Node *node = opaque;
-    return g_stop || lmb_governor_abort_inflight(&node->governor);
+    return g_stop || atomic_load(&lmb_resident_process_guard.fault) ||
+           lmb_governor_abort_inflight(&node->governor);
 }
 
 static void *governor_worker(void *opaque) {
@@ -175,7 +176,8 @@ static void *governor_worker(void *opaque) {
     while (!g_stop && !node->registration.stop) {
         LmbGovernorState state = lmb_governor_poll(&node->governor);
         int process_limited = process_budget_exhausted(node);
-        int accepting = state == LMB_GOV_ACTIVE && !process_limited;
+        int residency_lost = lmb_resident_memory_check();
+        int accepting = state == LMB_GOV_ACTIVE && !process_limited && !residency_lost;
         pthread_mutex_lock(&node->registration.lock);
         if (accepting)
             node->registration.advert.flags &= ~LMB_SEG_ADVERT_DRAINING;
@@ -193,7 +195,9 @@ static void *governor_worker(void *opaque) {
                     lmb_governor_state_name(state),
                     accepting ? "accepting sessions" :
                                 "draining and refusing new work");
-            if (process_limited)
+            if(residency_lost)
+                fprintf(stderr," · reason: %s",lmb_resident_memory_reason_text(atomic_load(&lmb_resident_process_guard.fault)));
+            else if (process_limited)
                 fprintf(stderr, " · reason: process memory budget reached");
             else if (state != LMB_GOV_ACTIVE)
                 fprintf(stderr, " · reason: %s",
@@ -633,7 +637,7 @@ static int handle_open(Node *node, int fd, const LmbMsg *msg) {
             status = LMB_SEG_STATUS_QUOTA;
         } else if (!lmb_governor_accepting(&node->governor) ||
                    available_memory_bytes() < node->ram_reserve_bytes ||
-                   process_budget_exhausted(node)) {
+                   process_budget_exhausted(node) || lmb_resident_memory_check()) {
             status = LMB_SEG_STATUS_QUOTA;
         } else {
             ColiSegmentSessionOptions options = {
@@ -649,7 +653,9 @@ static int handle_open(Node *node, int fd, const LmbMsg *msg) {
                         engine_error(error));
                 status = LMB_SEG_STATUS_INTERNAL;
             } else {
-                status = lmb_seg_table_open(node->table, &open, now_ms());
+                status = process_budget_exhausted(node) || lmb_resident_memory_check()
+                    ? LMB_SEG_STATUS_QUOTA
+                    : lmb_seg_table_open(node->table, &open, now_ms());
                 if (status == LMB_SEG_STATUS_OK) {
                     pthread_mutex_lock(&slot->lock);
                     slot->used = 1;
@@ -708,7 +714,7 @@ static int handle_run(Node *node, int fd, const LmbMsg *msg) {
         if (!session || !output || bytes != msg->pay_len) {
             status = LMB_SEG_STATUS_INTERNAL;
         } else {
-            int admitted = lmb_run_gate_enter(&node->run_gate,
+            int admitted = lmb_resident_memory_check() ? -1 : lmb_run_gate_enter(&node->run_gate,
                                                node->run_wait_ms,
                                                run_should_cancel, node);
             if (admitted != 1) {
@@ -721,9 +727,11 @@ static int handle_run(Node *node, int fd, const LmbMsg *msg) {
                             node->advert.peer_name, node->advert.layer_begin,
                             node->advert.layer_end,
                             g_stop ? "process stopping" :
+                              atomic_load(&lmb_resident_process_guard.fault) ?
+                                lmb_resident_memory_reason_text(atomic_load(&lmb_resident_process_guard.fault)) :
                                 lmb_governor_reason_name(
                                     lmb_governor_reason(&node->governor)),
-                            g_stop ? "" : " reached the in-flight safety floor",
+                            g_stop || atomic_load(&lmb_resident_process_guard.fault) ? "" : " reached the in-flight safety floor",
                             (double)available_memory_bytes() / 1e9,
                             (double)node->ram_reserve_bytes / 1e9);
             }
@@ -752,7 +760,9 @@ static int handle_run(Node *node, int fd, const LmbMsg *msg) {
                         run.rows == 1 ? "" : "s",
                         (unsigned long long)run.position,
                         engine_error(error));
-                if (lmb_governor_abort_inflight(&node->governor)) {
+                if (atomic_load(&lmb_resident_process_guard.fault)) {
+                    status = LMB_SEG_STATUS_QUOTA;
+                } else if (lmb_governor_abort_inflight(&node->governor)) {
                     fprintf(stderr, "[segment-node %s] in-flight emergency: %s "
                                     "(available %.1f GB / reserve %.1f GB)\n",
                             node->advert.peer_name,
@@ -765,6 +775,7 @@ static int handle_run(Node *node, int fd, const LmbMsg *msg) {
                     status = LMB_SEG_STATUS_INTERNAL;
                 }
             }
+            if(admitted==1 && lmb_resident_memory_check())status=LMB_SEG_STATUS_QUOTA;
             if (admitted == 1) lmb_run_gate_leave(&node->run_gate);
         }
         if (status != LMB_SEG_STATUS_OK) {
@@ -780,11 +791,17 @@ static int handle_run(Node *node, int fd, const LmbMsg *msg) {
                  * flooding stderr once per token. Cached retries do not count. */
                 uint64_t completed = atomic_fetch_add_explicit(
                     &node->committed_runs, 1, memory_order_relaxed) + 1;
-                if (completed && !(completed & (completed - 1)))
+                if (completed && !(completed & (completed - 1))) {
                     fprintf(stderr, "[segment-node %s %u:%u] committed_runs=%llu backend_mask=0x%llx\n",
                             node->advert.peer_name, node->advert.layer_begin,
                             node->advert.layer_end, (unsigned long long)completed,
                             (unsigned long long)(node->cap.flags & COLI_SEGMENT_CAP_BACKEND_MASK));
+                    if (lmb_resident_process_guard.enabled) {
+                        LmbProcessMemory memory = {0};
+                        (void)lmb_process_memory_probe(&memory, 0);
+                        lmb_resident_guard_report(&lmb_resident_process_guard, "run", &memory);
+                    }
+                }
                 free(slot->cached_output);
                 slot->cached_output = output;
                 slot->cached_bytes = bytes;
@@ -1053,10 +1070,11 @@ static int handle_home_expert(Node *node, int fd, const LmbMsg *msg) {
         D != node->cap.state_width || !D || rows != 1 ||
         (uint64_t)D * sizeof(float) != msg->pay_len || expert > INT_MAX)
         return lmb_send(fd, LMB_ERR, "invalid Hybrid shape", 20, NULL, 0);
-    int admitted = lmb_run_gate_enter(&node->run_gate, node->run_wait_ms, run_should_cancel, node);
+    int admitted = lmb_resident_memory_check() ? -1 : lmb_run_gate_enter(&node->run_gate, node->run_wait_ms, run_should_cancel, node);
     if (admitted != 1) return lmb_send(fd, LMB_ERR, "Hybrid capacity busy", 20, NULL, 0);
     float *out = malloc((size_t)D * sizeof(float));
     int bad = !out || lmb_home_expert_apply((int)layer, (int)expert, (const float *)msg->pay, (int)D, out);
+    if(lmb_resident_memory_check())bad=1;
     int rc = bad ? lmb_send(fd, LMB_ERR, "Hybrid expert failed", 20, NULL, 0) :
         lmb_send(fd, LMB_EXEC_R, NULL, 0, out, (uint32_t)((size_t)D * sizeof(float)));
     free(out); lmb_run_gate_leave(&node->run_gate);
@@ -1524,18 +1542,20 @@ int main(int argc, char **argv) {
             backend_mask ? "cpu" : "auto",
             (unsigned long long)(node.cap.flags & LMB_EXEC_BACKEND_MASK));
     uint64_t engine_rss = resident_memory_bytes();
-    if (process_limit && engine_rss && engine_rss >= process_limit) {
-        fprintf(stderr, "[segment-node] engine RSS %.1f GB exhausted the "
+    LmbProcessMemory prepared_memory={0};(void)lmb_process_memory_probe(&prepared_memory,1);
+    uint64_t engine_charge=lmb_process_memory_charge(&prepared_memory);
+    if (process_limit && engine_charge >= process_limit) {
+        fprintf(stderr, "[segment-node] engine memory charge %.1f GB exhausted the "
                         "%.1f GB process budget before opening sessions\n",
-                (double)engine_rss / 1e9, (double)process_limit / 1e9);
+                (double)engine_charge / 1e9, (double)process_limit / 1e9);
         if (auto_range)
             (void)auto_range_release(tracker, model, name, engine_id,
                                      resolved_model_root);
         return 1;
     }
-    if (process_limit && process_limit > engine_rss)
+    if (process_limit && process_limit > engine_charge)
         node.session_memory_limit_bytes =
-            (process_limit - engine_rss) / max_sessions;
+            (process_limit - engine_charge) / max_sessions;
     fprintf(stderr, "[segment-node] governor: %.1f GB process budget · "
                     "%.1f MB per session\n",
             (double)process_limit / 1e9,

@@ -12,8 +12,9 @@ text. Reconnection verifies the encrypted peer identity and the host's root
 before sending any conversation text. Missing or changed hosts are reported;
 they never silently trigger a download or replace a donor's allocation.
 
-Use Explore models to prepare a different model. Donor owners explicitly
-unload their existing allocation first (`x`, while continuing to share).
+Use Explore models to prepare a different model. Background donors can approve
+up to four independent allocations within their summed sharing budget. `x`
+unloads only the selected allocation; the other models continue sharing.
 Only metadata, sparse maps, signed hashes and logs require disk headroom;
 household admission no longer reserves two full checkpoints on every donor.
 
@@ -69,12 +70,71 @@ After preparation the external weight input is sealed. Engine-owned tensors
 and explicitly retained ranges remain usable. An undeclared late external
 read is rejected instead of hiding missing preparation behind disk I/O.
 
-Retained anonymous memory is **not** a claim of OS-level `mlock`/no-swap.
-Memory reservation and no checkpoint reads are separate from operating-system
-pageout guarantees. Strict physical page locking and memory-pressure behavior
-still require platform-specific validation and admission policy.
+### Operating-system residency and pressure
+
+Checkpoint sealing, memory accounting and physical page locking are separate
+contracts. Model processes emit `[resident-memory]` records at preparation and
+sample memory before/after inference. Linux uses `/proc/self/status` for fast
+checks and `smaps_rollup` for detailed observations. macOS uses `TASK_VM_INFO`:
+compressed bytes and physical footprint are available, but current per-process
+swap is **unknown**, represented as JSON `null`, never copied from host totals.
+Major faults are cumulative observations, not a count of swapped model pages.
+
+The process-budget charge includes RSS plus known swapped/compressed bytes,
+or physical footprint if larger. It is conservative accounting, not a report
+of exact physical use. An allocation moved out of RSS does not create another
+reservation slot. Pending preparations remain reserved at the keeper level.
+Session creation checks the process budget again after allocating its state.
+
+`LUMABRI_RESIDENCY_POLICY=observe` (default) samples residency. Detected swap,
+compression or unavailable evidence latches a fault: no new inference is
+accepted, outputs from the affected run are discarded, and the allocation
+requires renewed preparation. A later zero counter does not silently clear it.
+This is **not a no-swap guarantee**: sampling cannot detect every transient
+pageout, and the observation covers the process, not identified weight pages.
+
+`LUMABRI_RESIDENCY_POLICY=locked` asks the OS to lock the dedicated model
+process's current and future mappings using `mlockall(MCL_CURRENT|MCL_FUTURE)`.
+If the OS denies this, preparation fails before READY, with no fallback to
+observe. The allowance must cover weights, session state, scratch and runtime
+mappings; later allocation failures are still possible. Lumabri does not raise
+privileges, disable swap, or change machine-wide limits. Configure the policy
+on each donor **before starting its sharing service**. Existing keepers retain
+their launch environment; changing the requesting TUI cannot alter them.
+
+Availability of `mlockall` in an SDK is not proof that the OS grants it. Native
+platform tests verify probes and refusal; a deployment claiming strict locking
+must also demonstrate successful preparation under its actual OS allowance.
+GPU device-memory residence is a separate backend contract; these counters
+describe host memory only. See the [Linux proc documentation](https://www.kernel.org/doc/html/latest/filesystems/proc.html)
+and Apple's [TASK_VM_INFO fields](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/mach/task_info.h).
 
 ## Evidence
+
+### October 3, 2026: process residency and independent models
+
+The Linux gate passed native memory probes, unknown/malformed counter handling,
+conservative accounting, latched residency loss, and explicit lock denial.
+A bounded child test had the kernel page out 4 MiB of its own anonymous memory;
+the live process guard detected the swap and refused inference. Another child
+obtained OS locking under its existing allowance. This does not certify the
+allowance for a full model or for other platforms. ASan/UBSan/LSan also passed;
+strict locking is refused in ASan binaries because its interceptors ignore
+locking calls.
+
+The real 7.4 GB OLMoE checkpoint passed the encrypted two-donor loopback flow
+with ranges `[0,7)` and `[7,16)`, context 128, source shutdown and a second
+conversation without reloading weights or writing their payloads to mirrors.
+Recorded Segment RSS was approximately 3.35 and 4.28 GB after preparation;
+the recorded Linux process swap counters were zero at READY and sampled RUNs.
+These are sampled observations, not a claim of strict locking for that run.
+
+Two independent OLMoE fixture checkpoints also coexisted on the same background
+donors with separate approvals, reservations and session state; manager restart
+retained them, and unloading the first did not interrupt a chat on the second.
+The initial service-status RPC has a bounded startup grace period: a keeper
+still starting must not leave a live sharing service behind an erroneous
+"unavailable" page. No approval or other mutation is retried automatically.
 
 The local nine-fixture matrix covers eight families plus Qwen3.8 FP8:
 OLMoE, Qwen3.6, Inkling, Kimi, GLM, GLM5.3, Qwen3.8 and DeepSeek V4.
