@@ -6,6 +6,32 @@ execution, cross-platform numerical compatibility, or concurrent capacity.
 
 ## Current release work
 
+The managed-inference roadmap supersedes the older single-chat LAN checklist
+below. Historical observations remain here as evidence, not current promises.
+
+- [x] Persistent manager and allocation keepers (#183): TUI detach and manager
+  restart do not replay approvals or reload live resident allocations.
+- [x] Colibri 1.12.1 integration (#184), resource/link/preparation observations
+  (#185), independent resident model allocations (#186), owned resident CPU
+  text adapter for DeepSeek V4.1 (#187). V4.1 reduced-checkpoint inference is
+  real inference; a full-size V4.1 deployment is not claimed without its data
+  and hardware.
+- [x] OS memory evidence and pressure checks (#188): pageout/compression is
+  charged and can revoke readiness. Optional locking fails closed. Sampled
+  zero swap is not a guarantee of pinned residency on every platform.
+- [ ] Bounded shared-model conversations: implementation includes explicit
+  1–8-slot approval and memory, isolated conversation/sampler state, whole-turn
+  FIFO, bounded cancellation/reset and BUSY. Local OLMoE reduced-checkpoint
+  gates pass at 1/2/4/8 slots; the complete 7.4-GB checkpoint passes with two
+  conversations in the installed Linux test package. Those were correctness
+  runs under other test load, not a throughput guarantee. Native CI and review
+  must pass before this item is marked delivered.
+- [ ] Global multi-model compute fairness, requirements-based placement and
+  cost comparison; authenticated multi-user API, web/private history and TUI
+  consuming the same service; recovery, elasticity, provider integration and
+  final declared-platform release gates. Provider credentials and spending
+  authority have explicitly been deferred by the operator.
+
 - [x] Runtime/preflight PR #151: installed engine thread-capacity query; no-OpenMP
   single-thread execution; adaptive RAM reserve; acknowledged actionable
   failure; pre-index donor reachability; build-option invalidation.

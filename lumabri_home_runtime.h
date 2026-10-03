@@ -336,7 +336,7 @@ static int home_donor_launch(HomeDonor *d, int edge) {
     char e_shim[1232], e_vroot[1232], e_cache[1232], e_cas[1232];
     char e_tracker[300], e_model[100], e_root[100], e_key[100], e_limit[100], e_log[1232];
     char range[40], port[20], addr[64], name[64], context[20], threads[20], ram[32];
-    char bytes[32], layers[20], max_new[20], e_omp[64], e_omp_limit[64];
+    char bytes[32], layers[20], max_new[20], sessions[20], e_omp[64], e_omp_limit[64];
     if (checked_printf(shim, sizeof shim, "%s/" LMB_SHIM_NAME, d->bin_dir) ||
         checked_printf(binary, sizeof binary, "%s/%s", d->bin_dir, edge ? "lumabri" : "segment_node") ||
         checked_printf(vroot, sizeof vroot, "%s/%s/vroot", d->cache_base, id) ||
@@ -391,16 +391,17 @@ static int home_donor_launch(HomeDonor *d, int edge) {
     snprintf(bytes, sizeof bytes, "%llu", (unsigned long long)o->model_bytes);
     snprintf(layers, sizeof layers, "%u", o->layers);
     snprintf(max_new, sizeof max_new, "%u", o->max_new);
+    snprintf(sessions, sizeof sessions, "%u", o->sessions ? o->sessions : 1);
     char *segment_argv[] = {binary, "--engine", (char *)family->segment_id,
         "--model-dir", vroot, "--model", (char *)o->model, "--range", range,
         "--port", port, "--tracker", (char *)o->tracker, "--advertise", addr,
         "--name", name, "--model-root", root, "--tokenizer-root", root,
-        "--context", context, "--max-rows", (char *)lmb_family_batch_rows(family->segment_id), "--sessions", "1",
+        "--context", context, "--max-rows", (char *)lmb_family_batch_rows(family->segment_id), "--sessions", sessions,
         "--threads", threads, "--memory-limit-mb", ram,
         "--model-bytes", bytes, "--model-layers", layers, NULL};
     char *host_argv[] = {binary, "host", "--model", (char *)o->model,
         "--tracker", (char *)o->tracker, "--port", port, "--ctx", context,
-        "--max-new", max_new, "--client-key", requester, NULL};
+        "--max-new", max_new, "--client-key", requester, "--sessions", sessions, NULL};
     if (edge) {
         /* The host itself must not be preloaded; model_boot passes the mirror
          * to its Edge child, while its own networking remains ordinary C. */
@@ -430,7 +431,8 @@ static void home_donor_screen(const HomeDonor *d, const char *name, uint64_t ram
             ui_printf(14, 5, UI_TEXT, "Layers %u–%u of %u · %.2f GB RAM · %.2f GB %s",
                 t->offer.begin, t->offer.end - 1, t->offer.layers, t->offer.ram_bytes / 1e9,
                 t->offer.disk_bytes / 1e9, home_resident_required() ? "metadata headroom" : "disk headroom");
-            ui_printf(16, 5, UI_MUTED, "%u context · one session · %u threads · up to %u new tokens per turn", t->offer.context,
+            ui_printf(16, 5, UI_MUTED, "%u context · %u session slot(s) · %u threads · up to %u new tokens per turn", t->offer.context,
+                      t->offer.sessions ? t->offer.sessions : 1,
                       t->offer.threads < d->thread_capacity ? t->offer.threads : d->thread_capacity, t->offer.max_new);
             ui_text(18, 5, UI_MUTED, t->offer.hybrid_role == LMB_HYBRID_ACCELERATOR ?
                 "Expert accelerator: approved layers only; weights remain in RAM." : t->offer.runs_edge ?
@@ -465,11 +467,11 @@ static void home_donor_screen(const HomeDonor *d, const char *name, uint64_t ram
         char who[65]; lmb_hex(who, t->offer.requester, 32);
         printf("\nRequester identity: %.24s…\nModel: %s (%s)\nLayers: %u–%u of %u\n"
                "RAM budget: %.2f GB · %s headroom: %.2f GB\n"
-               "Context: %u · one session · %u threads · up to %u new tokens per turn\n",
+               "Context: %u · %u session slot(s) · %u threads · up to %u new tokens per turn\n",
                who, t->offer.model, t->offer.model_type, t->offer.begin,
                t->offer.end - 1, t->offer.layers, t->offer.ram_bytes / 1e9,
                home_resident_required() ? "metadata" : "estimated disk",
-               t->offer.disk_bytes / 1e9, t->offer.context,
+               t->offer.disk_bytes / 1e9, t->offer.context, t->offer.sessions ? t->offer.sessions : 1,
                t->offer.threads < d->thread_capacity ? t->offer.threads : d->thread_capacity, t->offer.max_new);
         if (t->offer.runs_edge)
             puts("This computer also hosts chat and receives the conversation text.");
@@ -1073,8 +1075,8 @@ static int home_request_chat_direct(LmbTuiState *st, int selected) {
     LmbTuiModel *m = &st->models[selected];
     if (!m->checkpoint_inventory_ok)
         return home_fail("Cannot inventory the source checkpoint. Check its files and refresh the model list.");
-    if (!m->weights_present || !m->shape.sizing_verified || st->sessions != 1) {
-        return home_fail("This checkpoint needs verified sizing, local source weights and a one-session plan.");
+    if (!m->weights_present || !m->shape.sizing_verified || !st->sessions || st->sessions > LMB_HOST_MAX_SESSIONS) {
+        return home_fail("This checkpoint needs verified sizing, local source weights and 1–8 session slots.");
     }
     LmbClusterNode nodes[LMB_CLUSTER_MAX_NODES];
     uint32_t indices[LMB_CLUSTER_MAX_NODES], count = 0;
@@ -1086,6 +1088,8 @@ static int home_request_chat_direct(LmbTuiState *st, int selected) {
     /* Apply the reviewed snapshot, not a second independently chosen split.
      * Revalidate all reservations before any network side effect. */
     LmbClusterPlan plan = m->plan;
+    if (plan.sessions != st->sessions || (plan.hybrid && st->sessions != 1))
+        return home_fail("The plan's session limit changed. Refresh the model catalogue before approval.");
     if (!m->planned || !count || plan.nslices != count)
         return home_fail("No resident assignment for every selected computer. Refresh the plan and check each donor's offered RAM.");
     plan.edge_node = UINT32_MAX;
@@ -1220,6 +1224,7 @@ static int home_request_chat_direct(LmbTuiState *st, int selected) {
         snprintf(o->tracker, sizeof o->tracker, "%s", st->tracker);
         o->begin = slice->layer_begin; o->end = slice->layer_end; o->layers = m->shape.layers;
         o->context = st->context; o->threads = nodes[n].threads ? nodes[n].threads : 1;
+        o->sessions = st->sessions > 1 ? st->sessions : 0;
         if (o->threads > 256) o->threads = 256;
         o->max_new = st->quick_calibration ? LMB_QUICK_PROBE_TOKENS : (st->max_new ? st->max_new : 256);
         o->model_bytes = swarm.total_bytes;
@@ -1238,8 +1243,8 @@ static int home_request_chat_direct(LmbTuiState *st, int selected) {
             }
         }
         LmbHomeReservation reservation;
-        if (lmb_home_reservation(&m->shape, swarm.total_bytes, o->begin, o->end,
-                                o->context, o->runs_edge, &reservation)) {
+        if (lmb_home_reservation_sessions(&m->shape, swarm.total_bytes, o->begin, o->end,
+                                o->context, st->sessions, o->runs_edge, &reservation)) {
             home_fail("The model's memory requirements cannot be represented safely.");
             goto done;
         }
@@ -1336,8 +1341,8 @@ static int home_request_chat_direct(LmbTuiState *st, int selected) {
         }
         if (term.active) {
             ui_begin("prepare chat");
-            ui_printf(6, 5, UI_TEXT, "%s · %u computer(s) · one session", m->name, s.count);
-        } else if (!home_background_job) printf("LUMABRI / PREPARE CHAT\n\n%s · %u computer(s) · one session\n\n", m->name, s.count);
+            ui_printf(6, 5, UI_TEXT, "%s · %u computer(s) · %u session slot(s)", m->name, s.count, st->sessions);
+        } else if (!home_background_job) printf("LUMABRI / PREPARE CHAT\n\n%s · %u computer(s) · %u session slot(s)\n\n", m->name, s.count, st->sessions);
         char bar[29], detail[180];
         lmb_prepare_display(&progress.transfer, 0, nowd(), bar, detail, sizeof detail);
         const char *loading = !committed ? "Waiting for approval; no weights are loading" :
@@ -1431,7 +1436,7 @@ static int home_request_chat_direct(LmbTuiState *st, int selected) {
                                  "--role", "chat", "--max-new", token_limit, "--host-key", expected_host,
                                  "--tracker", st->tracker, "--host-root", expected_root, "--calibrate"};
             if (home_resident_required()) {
-                LmbResidentPlan saved = {.context = st->context, .max_new = s.offers[s.edge].max_new,
+                LmbResidentPlan saved = {.context = st->context, .sessions = st->sessions, .max_new = s.offers[s.edge].max_new,
                     .execution = execution, .preparation_seconds = preparation_seconds, .prepared_at = prepared_at};
                 snprintf(saved.tracker, sizeof saved.tracker, "%s", st->tracker);
                 snprintf(saved.host, sizeof saved.host, "%s", host);

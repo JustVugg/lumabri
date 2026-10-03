@@ -1530,6 +1530,13 @@ int main(int argc, char **argv) {
                                      resolved_model_root);
         return 1;
     }
+    if (max_sessions > 1 && !(node.cap.flags & COLI_SEGMENT_CAP_MULTI_SESSION)) {
+        fprintf(stderr, "Segment adapter does not support isolated multiple sessions; refusing READY\n");
+        (void)coli_segment_engine_close(node.engine, error, sizeof error);
+        if (auto_range)
+            (void)auto_range_release(tracker, model, name, engine_id, resolved_model_root);
+        return 1;
+    }
     if (!lmb_backend_matches(backend_mask, node.cap.flags)) {
         fprintf(stderr, "Segment backend does not match the approved CPU policy\n");
         (void)coli_segment_engine_close(node.engine, error, sizeof error);

@@ -382,9 +382,27 @@ static int lmb_write_full(int fd, const void *buf, size_t n) {
     return 0;
 }
 
+static _Thread_local uint64_t lmb_read_deadline_ms;
+
+static uint64_t lmb_io_monotonic_ms(void) {
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now)) return 0;
+    return (uint64_t)now.tv_sec * 1000u + (uint64_t)now.tv_nsec / 1000000u;
+}
+
 static int lmb_read_full(int fd, void *buf, size_t n) {
     uint8_t *p = (uint8_t *)buf;
     while (n) {
+        if (lmb_read_deadline_ms) {
+            uint64_t now = lmb_io_monotonic_ms();
+            if (!now || now >= lmb_read_deadline_ms) { errno = ETIMEDOUT; return -1; }
+            uint64_t left = lmb_read_deadline_ms-now;
+            struct pollfd ready = {fd, POLLIN, 0};
+            int rc = poll(&ready, 1, left < 1000 ? (int)left : 1000);
+            if (rc < 0 && errno != EINTR) return -1;
+            if (rc <= 0) continue;
+            if (!(ready.revents & POLLIN)) { errno = ECONNRESET; return -1; }
+        }
         ssize_t r = read(fd, p, n);
         if (r < 0) { if (errno == EINTR) continue; return -1; }
         if (r == 0) { errno = ECONNRESET; return -1; } /* EOF, not stale errno */
@@ -490,8 +508,12 @@ static int lmb_env_int(const char *name, int fallback, int lo, int hi);
  * this, the connection gate multiplied by a legal 64 MiB payload is still an
  * easy multi-gigabyte OOM. */
 static _Atomic uint64_t lmb_rx_inflight;
+/* Optional tighter application bound, scoped to the receiving thread. Both
+ * plaintext and authenticated readers apply it before allocating payloads. */
+static _Thread_local uint32_t lmb_rx_frame_limit = UINT32_MAX;
 
 static int lmb_rx_reserve(LmbMsg *m, uint32_t n) {
+    if (n > lmb_rx_frame_limit) { errno = EMSGSIZE; return -1; }
     if (!n) return 0;
     uint64_t cap = (uint64_t)lmb_env_int("LUMABRI_RX_BUDGET_MIB", 256, 16, 4096)
                    << 20;
@@ -561,6 +583,24 @@ static int lmb_recv(int fd, LmbMsg *m) {
         }
     }
     return 0;
+}
+
+static inline int lmb_recv_limited(int fd, LmbMsg *m, uint32_t limit) {
+    uint32_t previous = lmb_rx_frame_limit;
+    lmb_rx_frame_limit = limit < previous ? limit : previous;
+    int rc = lmb_recv(fd, m);
+    lmb_rx_frame_limit = previous;
+    return rc;
+}
+
+/* Absolute whole-frame deadline, not a timeout restarted by every byte. */
+static inline int lmb_recv_bounded(int fd, LmbMsg *m, uint32_t limit, uint32_t timeout_ms) {
+    uint64_t now = lmb_io_monotonic_ms(), previous = lmb_read_deadline_ms;
+    if (!now || !timeout_ms) { memset(m, 0, sizeof *m); errno = EINVAL; return -1; }
+    lmb_read_deadline_ms = previous && previous < now + timeout_ms ? previous : now + timeout_ms;
+    int rc = lmb_recv_limited(fd, m, limit);
+    lmb_read_deadline_ms = previous;
+    return rc;
 }
 
 static void lmb_msg_free(LmbMsg *m) {

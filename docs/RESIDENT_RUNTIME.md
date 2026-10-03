@@ -29,7 +29,10 @@ The host's Segment gateway advertises `LUMABRI_RESET 1`. Between clients the
 host drains any complete accepted request, sends a private RESET nonce and
 waits for its acknowledgement at a codec boundary. The gateway closes the
 old remote sessions and clears its conversation and sampler, without closing
-the Edge engine or the Segment engines. Generated DATA cannot impersonate
+the Edge engine or the Segment engines. For an approved multi-slot model,
+`LUMABRI_SLOTS N` and `RESET_SLOT nonce slot` restrict that operation to the
+disconnected conversation; weights remain shared and other slots retain their
+own state. See [Household admission](HOUSEHOLD_ADMISSION.md). Generated DATA cannot impersonate
 the acknowledgement. A damaged or legacy gateway is not reused with stale KV.
 
 Owner Stop, allocation-keeper exit, a failed preparation or explicit plan cancellation

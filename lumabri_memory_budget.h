@@ -4,6 +4,7 @@
 #define LUMABRI_MEMORY_BUDGET_H
 #include "lumabri_planner.h"
 #include "src/runtime/lumabri_prepare_limits.h"
+#include "src/runtime/lumabri_session_limits.h"
 
 typedef struct {
     uint64_t segment_bytes, edge_bytes, total_bytes;
@@ -59,13 +60,13 @@ static LMB_UNUSED uint64_t lmb_checkpoint_floor(uint64_t bytes,
     return lmb_budget_add(share, bytes / 20u);
 }
 
-static LMB_UNUSED int lmb_home_reservation(const LmbModelShape *shape,
+static LMB_UNUSED int lmb_home_reservation_sessions(const LmbModelShape *shape,
     uint64_t checkpoint_bytes, uint32_t begin, uint32_t end,
-    uint32_t context, int runs_edge, LmbHomeReservation *out) {
+    uint32_t context, uint32_t sessions, int runs_edge, LmbHomeReservation *out) {
     if (!out) return -1;
     memset(out, 0, sizeof *out);
-    if (!shape || (runs_edge != 0 && runs_edge != 1)) return -1;
-    LmbRangeCost segment = lmb_estimate_segment(shape, begin, end, context, 1);
+    if (!shape || !sessions || sessions > LMB_HOST_MAX_SESSIONS || (runs_edge != 0 && runs_edge != 1)) return -1;
+    LmbRangeCost segment = lmb_estimate_segment(shape, begin, end, context, sessions);
     if (!segment.ok) return -1;
     uint64_t floor = lmb_checkpoint_floor(checkpoint_bytes, shape->layers, begin, end);
     uint64_t live = lmb_budget_add(segment.state_bytes, segment.scratch_bytes);
@@ -74,10 +75,11 @@ static LMB_UNUSED int lmb_home_reservation(const LmbModelShape *shape,
     out->segment_bytes = lmb_budget_mib(lmb_budget_add(
         guarded > described ? guarded : described, LMB_PREPARE_CACHE_BYTES));
     if (runs_edge) {
-        LmbRangeCost edge = lmb_estimate_edge(shape, context, 1);
+        LmbRangeCost edge = lmb_estimate_edge(shape, context, sessions);
         if (!edge.ok) return -1;
         uint64_t cost = lmb_budget_add(edge.resident_bytes,
                         lmb_budget_add(edge.state_bytes, edge.scratch_bytes));
+        if (sessions > 1) cost = lmb_budget_add(cost, lmb_size_mul(sessions, LMB_HOST_SESSION_BYTES));
         out->edge_bytes = lmb_budget_mib(lmb_budget_add(
             lmb_budget_add(cost, UINT64_C(64) << 20), LMB_PREPARE_CACHE_BYTES));
     }
@@ -91,5 +93,11 @@ static LMB_UNUSED int lmb_home_reservation(const LmbModelShape *shape,
         return -1;
     }
     return 0;
+}
+
+static LMB_UNUSED int lmb_home_reservation(const LmbModelShape *shape,
+    uint64_t checkpoint_bytes, uint32_t begin, uint32_t end,
+    uint32_t context, int runs_edge, LmbHomeReservation *out) {
+    return lmb_home_reservation_sessions(shape, checkpoint_bytes, begin, end, context, 1, runs_edge, out);
 }
 #endif

@@ -16,7 +16,7 @@ static LMB_UNUSED int lmb_home_plan_hybrid(const LmbModelShape *shape, uint64_t 
     const LmbClusterPlan *seed, LmbClusterPlan *out) {
     if (!shape || !nodes || !seed || !out || count < 2 || count > 32 || seed->nslices != count ||
         seed->state != LMB_PLAN_RESIDENT || strcmp(shape->segment_id, "olmoe") ||
-        shape->experts_per_tok < 2 || seed->edge_node >= count || seed->hybrid) return -1;
+        shape->experts_per_tok < 2 || seed->edge_node >= count || seed->hybrid || seed->sessions != 1) return -1;
     LmbClusterPlan candidate = *seed;
     candidate.hybrid = 1; candidate.nslices = 1; candidate.fetch_bytes = 0;
     candidate.ready_known = 0; candidate.ready_seconds = 0;
@@ -65,7 +65,7 @@ static LMB_UNUSED int lmb_home_plan_selected(const LmbModelShape *shape,
     LmbClusterPlan *out) {
     if (!shape || !nodes || !seed || !out || !count || count > LMB_CLUSTER_MAX_NODES ||
         !shape->layers || shape->layers > LMB_PLAN_LAYER_MAX || count > shape->layers ||
-        seed->edge_node >= count || seed->nslices > count || seed->sessions != 1 ||
+        seed->edge_node >= count || seed->nslices > count || !seed->sessions || seed->sessions > LMB_HOST_MAX_SESSIONS ||
         !seed->data_available || (seed->goal != LMB_GOAL_ONE_SESSION &&
                                  seed->goal != LMB_GOAL_THROUGHPUT)) return -1;
     if (!costs && seed->nslices == count) {
@@ -96,10 +96,10 @@ static LMB_UNUSED int lmb_home_plan_selected(const LmbModelShape *shape,
     for (uint32_t begin = 0; begin < shape->layers; begin++)
         for (uint32_t end = begin + 1; end <= shape->layers; end++) {
             LmbHomeReservation r;
-            segment[begin * width + end] = lmb_home_reservation(shape, bytes, begin, end,
-                context, 0, &r) ? UINT64_MAX : r.total_bytes;
-            edge[begin * width + end] = lmb_home_reservation(shape, bytes, begin, end,
-                context, 1, &r) ? UINT64_MAX : r.total_bytes;
+            segment[begin * width + end] = lmb_home_reservation_sessions(shape, bytes, begin, end,
+                context, seed->sessions, 0, &r) ? UINT64_MAX : r.total_bytes;
+            edge[begin * width + end] = lmb_home_reservation_sessions(shape, bytes, begin, end,
+                context, seed->sessions, 1, &r) ? UINT64_MAX : r.total_bytes;
         }
     for (size_t i = 0; i < (count + 1) * width; i++) dp[i] = DBL_MAX;
     dp[0] = 0;
@@ -125,7 +125,7 @@ static LMB_UNUSED int lmb_home_plan_selected(const LmbModelShape *shape,
     }
     if (dp[count * width + shape->layers] == DBL_MAX) goto done;
     LmbClusterPlan candidate = {0};
-    candidate.goal = seed->goal; candidate.sessions = 1; candidate.data_available = 1;
+    candidate.goal = seed->goal; candidate.sessions = seed->sessions; candidate.data_available = 1;
     candidate.edge_node = seed->edge_node; candidate.nslices = count;
     uint32_t end = shape->layers;
     for (uint32_t i = count; i; i--) {

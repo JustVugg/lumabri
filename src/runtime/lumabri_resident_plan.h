@@ -6,7 +6,7 @@
 
 typedef struct {
     char tracker[256], host[64], host_key[65], root[65], model[64];
-    uint32_t context, max_new;
+    uint32_t context, max_new, sessions; /* 0 in older restart hints means one */
     LmbExecutionView execution;
     uint8_t allocation[32], peer_keys[LMB_CLUSTER_MAX_NODES][32];
     double preparation_seconds, prepared_at;
@@ -14,7 +14,7 @@ typedef struct {
 } LmbResidentPlan;
 
 static int home_resident_plan_valid(const LmbResidentPlan *p) {
-    if (!p || p->execution.count > LMB_CLUSTER_MAX_NODES) return 0;
+    if (!p || p->execution.count > LMB_CLUSTER_MAX_NODES || p->sessions > LMB_HOST_MAX_SESSIONS) return 0;
     if (!isfinite(p->preparation_seconds) || p->preparation_seconds < 0 || p->preparation_seconds > 86400 ||
         !isfinite(p->prepared_at) || p->prepared_at < 0 || (!!p->prepared_at != !!p->preparation_seconds)) return 0;
     if (lmb_home_nonzero(p->allocation, 32))
@@ -47,7 +47,8 @@ static int home_resident_plan_write(const LmbResidentPlan *p, const char *path) 
      * packing so allocation failure cannot produce a partial saved plan. */
     if (lmb_buf_reserve(&b, 65536)) return -1;
     int managed = lmb_home_nonzero(p->allocation, 32);
-    lmb_buf_u32(&b, managed ? 4 : p->execution.hybrid ? 2 : 1);
+    if (p->sessions && !managed) { free(b.p); return -1; }
+    lmb_buf_u32(&b, managed ? p->sessions ? 5 : 4 : p->execution.hybrid ? 2 : 1);
     lmb_buf_str(&b, p->tracker); lmb_buf_str(&b, p->host);
     lmb_buf_str(&b, p->host_key); lmb_buf_str(&b, p->root); lmb_buf_str(&b, p->model);
     lmb_buf_u32(&b, p->context); lmb_buf_u32(&b, p->max_new);
@@ -65,6 +66,7 @@ static int home_resident_plan_write(const LmbResidentPlan *p, const char *path) 
         lmb_cal_put_double(&b, p->preparation_seconds);
         lmb_cal_put_double(&b, p->prepared_at);
         lmb_buf_str(&b, p->content_id);
+        if (p->sessions) lmb_buf_u32(&b, p->sessions);
     }
     int fd = mkstemp(temporary), rc = -1;
     if (fd >= 0) {
@@ -100,7 +102,7 @@ static int home_resident_plan_read(const char *path, const char *tracker, LmbRes
     int rc = lmb_read_full(fd, bytes, length); close(fd);
     if (rc) return -1;
     LmbCur c = {bytes, length, 0}; uint32_t version;
-    if (lmb_cur_u32(&c, &version) || version < 1 || version > 4 ||
+    if (lmb_cur_u32(&c, &version) || version < 1 || version > 5 ||
         lmb_inventory_string(&c, p->tracker, sizeof p->tracker) || strcmp(tracker, p->tracker) ||
         lmb_inventory_string(&c, p->host, sizeof p->host) ||
         lmb_inventory_string(&c, p->host_key, sizeof p->host_key) ||
@@ -127,9 +129,10 @@ static int home_resident_plan_read(const char *path, const char *tracker, LmbRes
         if (!lmb_home_nonzero(p->allocation, 32)) return -1;
         for (uint32_t i = 0; i < p->execution.count; i++)
             if (!lmb_home_nonzero(p->peer_keys[i], 32)) return -1;
-        if (version == 4 && (lmb_cal_get_double(&c, &p->preparation_seconds) ||
+        if (version >= 4 && (lmb_cal_get_double(&c, &p->preparation_seconds) ||
                             lmb_cal_get_double(&c, &p->prepared_at) ||
                             lmb_inventory_string(&c, p->content_id, sizeof p->content_id))) return -1;
+        if (version == 5 && (lmb_cur_u32(&c, &p->sessions) || !p->sessions)) return -1;
     }
     return c.off == c.len && home_resident_plan_valid(p) ? 0 : -1;
 }
@@ -193,7 +196,7 @@ static int home_resident_plan_chat_mode(const LmbResidentPlan *p, int calibrate)
     if (!g_recording_calibration && p->content_id[0] && !catalog_calibration_dir(records) &&
         !lmb_cal_load(records, p->content_id, &resumed)) {
         LmbCalKey *k = &resumed.key;
-        int same = k->nodes == p->execution.count && k->context == p->context && k->sessions == 1 &&
+        int same = k->nodes == p->execution.count && k->context == p->context && k->sessions == (p->sessions ? p->sessions : 1) &&
             !strcmp(k->plan_kind, p->execution.hybrid ? "hybrid" : "segment");
         for (uint32_t i = 0; same && i < k->nodes; i++) {
             char peer[65]; lmb_hex(peer, p->peer_keys[i], 32);

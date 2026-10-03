@@ -10,6 +10,7 @@
 #include "segment_colibri.h"
 #include "src/planner/lumabri_link_evidence.h"
 #include "src/runtime/lumabri_v41_contract.h"
+#include "src/runtime/lumabri_serve_control.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -1844,12 +1845,17 @@ static int read_exact_stdin(void *output, size_t bytes) {
     return 0;
 }
 
-typedef struct { unsigned request_id; size_t emitted_bytes; } ServeGeneration;
+typedef struct {
+    unsigned request_id;
+    size_t emitted_bytes;
+    LmbServeControl *control;
+} ServeGeneration;
 
 static int serve_generation_event(void *opaque, GenerationEventKind kind,
                                   size_t current, size_t total,
                                   const void *data, size_t data_bytes) {
     ServeGeneration *serve = opaque;
+    if (serve->control && atomic_load(&serve->control->cancelled)) return -1;
     switch (kind) {
     case GEN_EVENT_PREFILL:
         printf("PROGRESS %u PREFILL %zu %zu\n", serve->request_id,
@@ -1885,23 +1891,41 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
                               const uint8_t model_root[32],
                               const uint8_t tokenizer_root[32],
                               uint32_t context, uint32_t max_rows,
-                              uint64_t seed) {
+                              uint64_t seed, uint32_t slots) {
     /* Report capabilities before READY, so a pipe reader cannot consume
      * readiness first and lose a later capability line. Direct CLI requests
      * for unavailable stochastic sampling still fail explicitly. */
-    printf("\nLUMABRI_RESET 1\nLUMABRI_SAMPLING %s\nLUMABRI_NUMERIC %u %s\n" SEGMENT_FRAME_READY "\nSTAT 0 0 0 0\n",
-           cap->flags & COLI_EDGE_CAP_LOGITS ? "LOGITS" : "GREEDY", cap->abi_version, cap->numeric_class);
+    if (!slots || slots > LMB_HOST_MAX_SESSIONS) return 1;
+    SegmentConversation *conversations = calloc(slots, sizeof *conversations);
+    LmbSampler *samplers = calloc(slots, sizeof *samplers);
+    if (!conversations || !samplers) { free(conversations); free(samplers); return 1; }
+    for (uint32_t i = 0; i < slots; i++) lmb_sampler_init(&samplers[i], seed);
+    /* The optional control reader uses read(2), never buffered stdio. */
+    if (slots > 1) setvbuf(stdin, NULL, _IONBF, 0);
+    printf("\nLUMABRI_RESET 1\nLUMABRI_SLOTS %u\nLUMABRI_SAMPLING %s\nLUMABRI_NUMERIC %u %s\n" SEGMENT_FRAME_READY "\nSTAT 0 0 0 0\n",
+           slots, cap->flags & COLI_EDGE_CAP_LOGITS ? "LOGITS" : "GREEDY", cap->abi_version, cap->numeric_class);
     fflush(stdout);
-    LmbSampler sampler;
-    lmb_sampler_init(&sampler, seed);
-    SegmentConversation conversation;
-    memset(&conversation, 0, sizeof conversation);
+    int result_code = 0;
     char header[512];
     while (fgets(header, sizeof header, stdin)) {
         char reset_id[65], reset_extra;
+        unsigned reset_slot;
+        /* A cancellation racing the final DONE may arrive after the control
+         * reader stopped. It refers to a completed turn, not another slot. */
+        unsigned cancelled_id;
+        if (slots > 1 && (sscanf(header, "CANCEL %u %c", &cancelled_id, &reset_extra) == 1 ||
+                          sscanf(header, "STOP %u %c", &cancelled_id, &reset_extra) == 1)) continue;
+        if (sscanf(header, "RESET_SLOT %64s %u %c", reset_id, &reset_slot, &reset_extra) == 2) {
+            if (reset_slot >= slots) { result_code = 1; break; }
+            conversation_reset(&conversations[reset_slot]);
+            lmb_sampler_init(&samplers[reset_slot], seed);
+            printf("RESET_DONE %s\n", reset_id); fflush(stdout);
+            continue;
+        }
         if (sscanf(header, "RESET %64s %c", reset_id, &reset_extra) == 1) {
-            conversation_reset(&conversation);
-            lmb_sampler_init(&sampler, seed);
+            for (uint32_t i = 0; i < slots; i++) {
+                conversation_reset(&conversations[i]); lmb_sampler_init(&samplers[i], seed);
+            }
             printf("RESET_DONE %s\n", reset_id);
             fflush(stdout);
             continue;
@@ -1913,22 +1937,23 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
         if (sscanf(header, "SUBMIT %u %u %zu %u %lf %lf %c",
                    &request_id, &slot, &prompt_bytes, &max_tokens,
                    &temperature, &top_p, &trailing) != 6 ||
-            !max_tokens || max_tokens > 4096 || prompt_bytes > (64u << 20) ||
+            slot >= slots || !max_tokens || max_tokens > 4096 || prompt_bytes > (64u << 20) ||
             !isfinite(temperature) || temperature < 0.0 || temperature > 100.0 ||
             !isfinite(top_p) || top_p <= 0.0 || top_p > 1.0) {
             printf("ERROR %u invalid Segment SUBMIT\n", request_id);
             fflush(stdout);
+            if (slots > 1) { result_code = 1; break; }
             continue;
         }
-        (void)slot;
+        SegmentConversation *conversation = &conversations[slot];
         char *prompt = malloc(prompt_bytes + 1);
         if (!prompt || read_exact_stdin(prompt, prompt_bytes)) {
-            free(prompt); conversation_reset(&conversation); return 1;
+            free(prompt); result_code = 1; break;
         }
         prompt[prompt_bytes] = 0;
         int terminator = fgetc(stdin);
         if (terminator != '\n') {
-            free(prompt); conversation_reset(&conversation); return 1;
+            free(prompt); result_code = 1; break;
         }
         printf("ACCEPT %u\n", request_id);
         fflush(stdout);
@@ -1938,7 +1963,11 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
         RemoteSegment chain[LMB_SEG_ROUTE_MAX];
         size_t chain_count = 0;
         char error[256] = {0};
-        GenerationResult result;
+        GenerationResult result = {0};
+        LmbServeControl control = {0};
+        if (slots > 1 && lmb_serve_control_start(&control, request_id)) {
+            free(prompt); result_code = 1; break;
+        }
         int bad = have <= 0 || !snapshot.complete ||
                   select_chain(&snapshot, cap->num_layers, context, max_rows,
                                chain, &chain_count);
@@ -1961,16 +1990,16 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
             printf("PROGRESS %u ROUTE %zu %zu %zu\n", request_id,
                    host_count, chain_count, relay_count);
             fflush(stdout);
-            if (conversation.active && conversation.route_generation !=
+            if (conversation->active && conversation->route_generation !=
                                        snapshot.route_generation)
                 route_print(stderr, "[segment-route]", &snapshot,
                             chain, chain_count);
-            ServeGeneration stream = { .request_id = request_id };
+            ServeGeneration stream = { .request_id = request_id, .control = &control };
             bad = segment_generate(edge, cap, chain, chain_count,
                                    model_root, tokenizer_root,
                                    context, max_rows, prompt, prompt_bytes,
                                    NULL, 0, max_tokens,
-                                   temperature, top_p, &sampler, &conversation,
+                                   temperature, top_p, &samplers[slot], conversation,
                                    discovery,
                                    &snapshot,
                                    snapshot.route_generation,
@@ -1984,15 +2013,22 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
              * generation). Users kept having to play detective across
              * /swarm and node logs to learn where their tokens went; the
              * answer belongs in the engine tail, one line per turn. */
-            if (!bad && conversation.active)
+            if (!bad && conversation->active)
                 route_print(stderr, "[segment-route] turn served by",
-                            &snapshot, conversation.chain,
-                            conversation.chain_count);
+                            &snapshot, conversation->chain,
+                            conversation->chain_count);
         }
+        lmb_serve_control_stop(&control);
         free(prompt);
+        if (atomic_load(&control.cancelled)) {
+            if (!bad) generation_result_free(&result);
+            conversation_reset(conversation);
+            snprintf(error, sizeof error, "request cancelled"); bad = 1;
+        }
         if (bad) {
             printf("ERROR %u %s\n", request_id, error);
             fflush(stdout);
+            if (atomic_load(&control.invalid)) { result_code = 1; break; }
             continue;
         }
         char metrics[192];
@@ -2030,8 +2066,9 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
         fflush(stdout);
         generation_result_free(&result);
     }
-    conversation_reset(&conversation);
-    return 0;
+    for (uint32_t i = 0; i < slots; i++) conversation_reset(&conversations[i]);
+    free(conversations); free(samplers);
+    return result_code;
 }
 
 int main(int argc, char **argv) {
@@ -2246,9 +2283,15 @@ int main(int argc, char **argv) {
                 serve_mode ? "[segment-route]" : "[lumabri]",
                 &snapshot, chain, chain_count);
     if (serve_mode) {
+        uint32_t slots = 1;
+        const char *slot_text = arg_value(argc, argv, "--sessions");
+        if (slot_text && lmb_parse_u32(slot_text, 1, LMB_HOST_MAX_SESSIONS, &slots)) {
+            fprintf(stderr, "invalid hosted session capacity\n");
+            lmb_seg_discovery_stop(discovery); coli_edge_engine_close(edge); free(expected); return 2;
+        }
         int result = segment_serve_loop(edge, &cap, discovery,
                                         model_root, tokenizer_root,
-                                        context, max_rows, seed);
+                                        context, max_rows, seed, slots);
         lmb_seg_discovery_stop(discovery);
         coli_edge_engine_close(edge);
         free(expected);

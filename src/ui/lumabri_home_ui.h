@@ -5,7 +5,7 @@
 #include "lumabri_home_discovery.h"
 #include "src/ui/lumabri_resident_ui.h"
 typedef struct {
-    char tracker[256], token[LMB_TOKEN_MAX + 1], models[512], ram[32];
+    char tracker[256], token[LMB_TOKEN_MAX + 1], models[512], ram[32], sessions[12];
     int owner;
 } HomeSettings;
 
@@ -21,6 +21,7 @@ static void home_settings_load(HomeSettings *s) {
     memset(s, 0, sizeof *s);
     snprintf(s->models, sizeof s->models, "%s/.lumabri/models", getenv("HOME") ? getenv("HOME") : ".");
     snprintf(s->ram, sizeof s->ram, "4");
+    snprintf(s->sessions, sizeof s->sessions, "1");
     char path[1200], line[1500];
     if (home_settings_path(path, sizeof path)) return;
     FILE *f = fopen(path, "r");
@@ -34,6 +35,8 @@ static void home_settings_load(HomeSettings *s) {
         else if (!strcmp(line, "models")) (void)checked_printf(s->models, sizeof s->models, "%s", eq);
         else if (!strcmp(line, "ram")) (void)checked_printf(s->ram, sizeof s->ram, "%s", eq);
         else if (!strcmp(line, "owner")) s->owner = !strcmp(eq, "1");
+        else if (!strcmp(line, "sessions") && strlen(eq) == 1 && eq[0] >= '1' && eq[0] <= '8')
+            snprintf(s->sessions, sizeof s->sessions, "%s", eq);
     }
     fclose(f);
 }
@@ -52,8 +55,8 @@ static int home_settings_save(const HomeSettings *s) {
     if (fd < 0) return -1;
     FILE *f = fdopen(fd, "w");
     if (!f) { close(fd); unlink(temporary); return -1; }
-    int bad = fprintf(f, "tracker=%s\ntoken=%s\nmodels=%s\nram=%s\nowner=%d\n",
-                      s->tracker, s->token, s->models, s->ram, s->owner) < 0;
+    int bad = fprintf(f, "tracker=%s\ntoken=%s\nmodels=%s\nram=%s\nowner=%d\nsessions=%s\n",
+                      s->tracker, s->token, s->models, s->ram, s->owner, s->sessions[0] ? s->sessions : "1") < 0;
     if (fflush(f) || fsync(fd)) bad = 1;
     if (fclose(f)) bad = 1;
     if (!bad && !rename(temporary, path)) return 0;
@@ -534,7 +537,12 @@ static int cmd_home(void) {
         } else if (key == 's') {
             HomeSettings next = s;
             if (home_field("Folder containing your model directories", next.models, sizeof next.models, 0) ||
-                home_field("Maximum RAM to offer, in GB", next.ram, sizeof next.ram, 0)) continue;
+                home_field("Maximum RAM to offer, in GB", next.ram, sizeof next.ram, 0) ||
+                home_field("Conversation slots per new model (1–8; one turn runs at a time, bounded FIFO queue)",
+                           next.sessions, sizeof next.sessions, 0)) continue;
+            if (strlen(next.sessions) != 1 || next.sessions[0] < '1' || next.sessions[0] > '8') {
+                snprintf(notice, sizeof notice, "Choose 1–8 conversation slots. Additional slots reserve separate conversation memory."); continue;
+            }
             char *end; double ram = strtod(next.ram, &end);
             if (*end || !isfinite(ram) || ram <= 0 || ram > 1048576) {
                 snprintf(notice, sizeof notice, "RAM limit must be a positive number of GB."); continue;
@@ -563,8 +571,8 @@ static int cmd_home(void) {
                 char *args[] = {"--join", s.tracker, "--ram-gb", s.ram};
                 rc = cmd_donor(4, args);
             } else {
-                char *args[] = {"--tracker", s.tracker, "--models-dir", s.models, "--computers"};
-                rc = cmd_models(key == 'p' ? 5 : 4, args);
+                char *args[] = {"--tracker", s.tracker, "--models-dir", s.models, "--sessions", s.sessions, "--computers"};
+                rc = cmd_models(key == 'p' ? 7 : 6, args);
             }
             if (g_stopping) break;
             install_chat_signal_handlers();
