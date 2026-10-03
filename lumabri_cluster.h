@@ -227,7 +227,7 @@ static LMB_UNUSED int lmb_home_plan_budgets(const LmbModelShape *shape,
     uint32_t context, LmbClusterPlan *plan) {
     if (!shape || !nodes || !plan || !count || count > LMB_CLUSTER_MAX_NODES ||
         !plan->nslices || plan->nslices > count || plan->edge_node >= count ||
-        plan->sessions != 1 || !plan->data_available) return -1;
+        !plan->sessions || plan->sessions > LMB_HOST_MAX_SESSIONS || !plan->data_available) return -1;
     LmbClusterPlan updated = *plan;
     LmbClusterPlan *destination = plan;
     plan = &updated; /* Invalid input never leaves a partially updated plan. */
@@ -249,8 +249,8 @@ static LMB_UNUSED int lmb_home_plan_budgets(const LmbModelShape *shape,
             if (plan->slices[j].node == s->node) return -1;
         LmbHomeReservation r;
         int edge = s->node == plan->edge_node;
-        if (lmb_home_reservation(shape, checkpoint_bytes, s->layer_begin,
-                                s->layer_end, context, edge, &r)) return -1;
+        if (lmb_home_reservation_sessions(shape, checkpoint_bytes, s->layer_begin,
+                                s->layer_end, context, plan->sessions, edge, &r)) return -1;
         if (plan->hybrid) r.total_bytes = lmb_budget_add(r.total_bytes, lmb_home_hybrid_extra(shape));
         next = s->layer_end; has_edge += (uint32_t)edge;
         s->bytes_resident = r.total_bytes;
@@ -288,7 +288,7 @@ static LMB_UNUSED int lmb_home_plan_source(const LmbModelShape *shape,
     out->state = LMB_PLAN_UNRUNNABLE;
     out->goal = goal; out->sessions = sessions;
     if (!shape || !nodes || !checkpoint_bytes || !count ||
-        count > LMB_CLUSTER_MAX_NODES || sessions != 1) return -1;
+        count > LMB_CLUSTER_MAX_NODES || !sessions || sessions > LMB_HOST_MAX_SESSIONS) return -1;
     LmbClusterPlan proportional;
     int original = lmb_plan_cluster_source(shape, nodes, count, context,
         sessions, goal, external_checkpoint, &proportional);
@@ -316,7 +316,7 @@ static LMB_UNUSED int lmb_home_plan_source(const LmbModelShape *shape,
                 order[pos] = i;
             }
             LmbClusterPlan candidate = {0};
-            candidate.goal = goal; candidate.sessions = 1;
+            candidate.goal = goal; candidate.sessions = sessions;
             candidate.edge_node = owner; candidate.data_available = 1;
             uint32_t next = 0;
             for (uint32_t j = 0; j < count && next < shape->layers; j++) {
@@ -328,8 +328,8 @@ static LMB_UNUSED int lmb_home_plan_source(const LmbModelShape *shape,
                 while (lo < hi) {
                     uint32_t mid = lo + (hi - lo) / 2 + (hi - lo) % 2;
                     LmbHomeReservation r;
-                    int fits = !lmb_home_reservation(shape, checkpoint_bytes,
-                        next, mid, context, nd == owner, &r) &&
+                    int fits = !lmb_home_reservation_sessions(shape, checkpoint_bytes,
+                        next, mid, context, sessions, nd == owner, &r) &&
                         r.total_bytes <= nodes[nd].ram_budget_bytes;
                     if (fits) lo = mid; else hi = mid - 1;
                 }

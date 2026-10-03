@@ -121,7 +121,10 @@ def main():
             owner.send(model_folder.encode() + b"\n")
             owner.expect("Maximum RAM to offer")
             owner.send(b"0.5\n")
+            owner.expect("Conversation slots per new model")
+            owner.send(b"2\n")
             owner.expect("Settings saved.")
+            assert owner.settings()["sessions"] == "2"
             assert owner.settings()["models"] == model_folder
             assert owner.settings()["ram"] == "0.5"
             owner.action(0)

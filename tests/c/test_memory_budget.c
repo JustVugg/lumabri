@@ -196,10 +196,10 @@ static void feasible_plans(void) {
     assert(p.edge_node == p.slices[0].node && p.slices[0].layer_end == 1);
     assert(!lmb_home_plan_budgets(&m, 1, nodes, 8, 128, &p));
 
-    /* No sources, extra sessions, invalid context/geometry and overflow
+    /* No sources, excessive sessions, invalid context/geometry and overflow
      * must never become approved plans through the alternative search. */
     assert(lmb_home_plan_source(&m, 1, nodes, 8, 128, 1, LMB_GOAL_ONE_SESSION, 0, &p));
-    assert(lmb_home_plan_source(&m, 1, nodes, 8, 128, 2, LMB_GOAL_ONE_SESSION, 1, &p));
+    assert(lmb_home_plan_source(&m, 1, nodes, 8, 128, 9, LMB_GOAL_ONE_SESSION, 1, &p));
     assert(lmb_home_plan_source(&m, 1, nodes, 8, 8192, 1, LMB_GOAL_ONE_SESSION, 1, &p));
     assert(lmb_home_plan_source(&m, 0, nodes, 8, 128, 1, LMB_GOAL_ONE_SESSION, 1, &p));
     assert(lmb_home_plan_source(NULL, 1, nodes, 8, 128, 1, LMB_GOAL_ONE_SESSION, 1, &p));
@@ -258,6 +258,15 @@ int main(void) {
     assert(!lmb_home_reservation(&m, bytes, 0, 4, 128, 1, &r));
     assert(r.segment_bytes >= 128 * mib + LMB_PREPARE_CACHE_BYTES);
     assert(r.edge_bytes >= 64 * mib + LMB_PREPARE_CACHE_BYTES);
+    LmbHomeReservation previous = r;
+    for (uint32_t slots = 2; slots <= LMB_HOST_MAX_SESSIONS; slots *= 2) {
+        LmbHomeReservation many;
+        assert(!lmb_home_reservation_sessions(&m, bytes, 0, 4, 128, slots, 1, &many));
+        assert(many.total_bytes > previous.total_bytes && many.edge_bytes > previous.edge_bytes);
+        assert(many.segment_bytes >= previous.segment_bytes);
+        previous = many;
+    }
+    assert(lmb_home_reservation_sessions(&m, bytes, 0, 4, 128, 9, 1, &previous));
     assert(!(r.segment_bytes % mib) && !(r.edge_bytes % mib));
     assert(r.total_bytes == r.segment_bytes + r.edge_bytes);
     assert(lmb_checkpoint_floor(101, 4, 1, 4) == 75 + 5);
@@ -290,6 +299,9 @@ int main(void) {
     p.slices[0].layer_begin = 0; p.data_available = 0;
     assert(lmb_home_plan_budgets(&m, bytes, &node, 1, 128, &p));
     p.data_available = 1; p.sessions = 2;
+    assert(!lmb_home_plan_budgets(&m, bytes, &node, 1, 128, &p));
+    assert(p.state == LMB_PLAN_UNRUNNABLE && p.missing_bytes > 1);
+    p.sessions = 9;
     assert(lmb_home_plan_budgets(&m, bytes, &node, 1, 128, &p));
 
     LmbClusterNode pair[2];

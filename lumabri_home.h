@@ -5,6 +5,7 @@
 #include "lumabri_inventory.h"
 #include "lumabri_families.h"
 #include "lumabri_home_hybrid.h"
+#include "src/runtime/lumabri_session_limits.h"
 
 #define LMB_HOME_VERSION 1u
 #define LMB_HOME_LEASE_MS 15000u
@@ -23,6 +24,7 @@ typedef struct {
     uint64_t ram_bytes, edge_ram_bytes, disk_bytes, model_bytes;
     uint32_t runs_edge;
     uint32_t hybrid_role;
+    uint32_t sessions; /* 0 is legacy single-session; wire v3 carries an explicit limit */
     LmbHybridRoutes hybrid;
 } LmbHomeOffer;
 
@@ -57,6 +59,8 @@ static LMB_MAYBE_UNUSED int lmb_home_nonzero(const uint8_t *p, size_t n) {
 }
 
 static LMB_MAYBE_UNUSED int lmb_home_offer_valid(const LmbHomeOffer *o) {
+    if (o->sessions > LMB_HOST_MAX_SESSIONS) return 0;
+    if (o->sessions > 1 && o->hybrid_role) return 0; /* not yet a validated multi-slot contract */
     if (o->hybrid_role > LMB_HYBRID_ACCELERATOR) return 0;
     if (o->hybrid_role) {
         const LmbModelFamily *f = lmb_family_for(o->model_type);
@@ -88,7 +92,7 @@ static LMB_MAYBE_UNUSED int lmb_home_offer_valid(const LmbHomeOffer *o) {
 }
 
 static LMB_MAYBE_UNUSED int lmb_home_offer_pack(LmbBuf *b, const LmbHomeOffer *o) {
-    if (!lmb_home_offer_valid(o) || lmb_buf_u32(b, o->hybrid_role ? 2u : LMB_HOME_VERSION)) return -1;
+    if (!lmb_home_offer_valid(o) || lmb_buf_u32(b, o->sessions ? 3u : o->hybrid_role ? 2u : LMB_HOME_VERSION)) return -1;
 #define HOME_KEY(f) if (lmb_buf_bytes(b, o->f, sizeof o->f)) return -1
     HOME_KEY(id); HOME_KEY(requester); HOME_KEY(edge_peer); HOME_KEY(model_root);
 #undef HOME_KEY
@@ -102,15 +106,16 @@ static LMB_MAYBE_UNUSED int lmb_home_offer_pack(LmbBuf *b, const LmbHomeOffer *o
 #define HOME_U64(f) if (lmb_buf_u64(b, o->f)) return -1
     HOME_U64(ram_bytes); HOME_U64(edge_ram_bytes); HOME_U64(disk_bytes); HOME_U64(model_bytes);
 #undef HOME_U64
-    if (o->hybrid_role && (lmb_buf_u32(b, o->hybrid_role) ||
+    if ((o->hybrid_role || o->sessions) && (lmb_buf_u32(b, o->hybrid_role) ||
         (o->hybrid_role == LMB_HYBRID_COORDINATOR && lmb_hybrid_routes_pack(b, &o->hybrid, 0)))) return -1;
+    if (o->sessions && lmb_buf_u32(b, o->sessions)) return -1;
     return 0;
 }
 
 static LMB_MAYBE_UNUSED int lmb_home_offer_unpack(LmbCur *c, LmbHomeOffer *o) {
     memset(o, 0, sizeof *o);
     uint32_t version;
-    if (lmb_cur_u32(c, &version) || (version != LMB_HOME_VERSION && version != 2u)) return -1;
+    if (lmb_cur_u32(c, &version) || version < 1 || version > 3) return -1;
 #define HOME_KEY(f) do { if (c->off > c->len || sizeof o->f > c->len - c->off) return -1; \
     memcpy(o->f, c->p + c->off, sizeof o->f); c->off += sizeof o->f; } while (0)
     HOME_KEY(id); HOME_KEY(requester); HOME_KEY(edge_peer); HOME_KEY(model_root);
@@ -125,8 +130,9 @@ static LMB_MAYBE_UNUSED int lmb_home_offer_unpack(LmbCur *c, LmbHomeOffer *o) {
 #define HOME_U64(f) if (lmb_cur_u64(c, &o->f)) return -1
     HOME_U64(ram_bytes); HOME_U64(edge_ram_bytes); HOME_U64(disk_bytes); HOME_U64(model_bytes);
 #undef HOME_U64
-    if (version == 2u && (lmb_cur_u32(c, &o->hybrid_role) || !o->hybrid_role ||
+    if (version >= 2u && (lmb_cur_u32(c, &o->hybrid_role) || (version == 2u && !o->hybrid_role) ||
         (o->hybrid_role == LMB_HYBRID_COORDINATOR && lmb_hybrid_routes_unpack(c, &o->hybrid, 0)))) return -1;
+    if (version == 3u && (lmb_cur_u32(c, &o->sessions) || !o->sessions)) return -1;
     return c->off == c->len && lmb_home_offer_valid(o) ? 0 : -1;
 }
 

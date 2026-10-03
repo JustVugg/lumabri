@@ -245,6 +245,22 @@ int main(int argc, char **argv) {
     assert(!lmb_metrics_parse(observed_stat, &long_metrics) && long_metrics.decode_steps == 8);
     fclose(long_stream);
     fclose(codec_sink);
+    /* Client slot selection is never authority. Rewrite slot zero using the
+     * assigned conversation, before any buffered bytes reach the shared Edge. */
+    LmbBuf captured = {0}; HostInput routed = {.capture=&captured};
+    HostState multiplex = {.slots=4, .routed_slot=3, .max_frame=1024, .max_new=8};
+    const char *request = "SUBMIT 17 0 2 8 0 1\nhi\n";
+    assert(!host_input(&routed, &codec_engine, &multiplex, (const uint8_t *)request, strlen(request)));
+    assert(routed.active && captured.len == strlen("SUBMIT 17 3 2 8 0 1\nhi\n"));
+    assert(!memcmp(captured.p, "SUBMIT 17 3 2 8 0 1\nhi\n", captured.len));
+    assert(host_input(&routed, &codec_engine, &multiplex, (const uint8_t *)"CANCEL 18\n", 10));
+    free(captured.p); captured = (LmbBuf){0}; routed = (HostInput){.capture=&captured};
+    request = "SUBMIT 1 1 0 8 0 1\n\n";
+    assert(host_input(&routed, &codec_engine, &multiplex, (const uint8_t *)request, strlen(request)));
+    assert(!captured.len);
+    routed = (HostInput){.capture=&captured}; request = "SUBMIT -1 0 0 8 0 1\n\n";
+    assert(host_input(&routed, &codec_engine, &multiplex, (const uint8_t *)request, strlen(request)));
+    assert(!captured.len);
     if (argc > 1 && !strcmp(argv[1], "host-codec")) {
         puts("HOST CODEC: PASS (fragmentation, payload boundaries, request/idle deadlines)");
         return 0;
@@ -396,6 +412,12 @@ int main(int argc, char **argv) {
         assert(!memcmp(loaded.allocation, plan.allocation, 32));
         assert(loaded.preparation_seconds == 2.25 && loaded.prepared_at == 1000);
         assert(!memcmp(loaded.peer_keys, plan.peer_keys, sizeof plan.peer_keys));
+        for (uint32_t slots = 1; slots <= LMB_HOST_MAX_SESSIONS; slots *= 2) {
+            plan.sessions = slots;
+            assert(!home_resident_plan_save(&plan));
+            assert(!home_resident_plan_load(plan.tracker, &loaded) && loaded.sessions == slots);
+        }
+        plan.sessions = 9; assert(!home_resident_plan_valid(&plan)); plan.sessions = 8;
         LmbResidentPlan library[4]; char library_path_a[1200], library_path_b[1200], library_directory[1200];
         assert(!home_resident_library_path(&plan, library_path_a, sizeof library_path_a));
         assert(!home_resident_library_save(&plan));

@@ -52,7 +52,31 @@ static void hybrid_permissions(void) {
     decoded = o; decoded.hybrid_role = LMB_HYBRID_ACCELERATOR; assert(!lmb_home_offer_valid(&decoded));
 }
 
+static void session_offers(void) {
+    uint32_t parsed;
+    assert(!lmb_session_limit_parse("8", 8, &parsed) && parsed == 8);
+    const char *invalid[] = {"0", "9", "2x", "-1", "+1", "", "18446744073709551616"};
+    for (unsigned i = 0; i < sizeof invalid / sizeof *invalid; i++)
+        assert(lmb_session_limit_parse(invalid[i], 8, &parsed));
+    for (uint32_t count = 1; count <= LMB_HOST_MAX_SESSIONS; count++) {
+        LmbHomeOffer o = fixture(), decoded;
+        o.sessions = count;
+        LmbBuf b = {0}; assert(!lmb_home_offer_pack(&b, &o));
+        assert(lmb_get32(b.p) == 3);
+        for (size_t n = 0; n < b.len; n++) {
+            LmbCur c = {b.p, n, 0}; assert(lmb_home_offer_unpack(&c, &decoded));
+        }
+        LmbCur c = {b.p, b.len, 0}; assert(!lmb_home_offer_unpack(&c, &decoded));
+        assert(!memcmp(&o, &decoded, sizeof o));
+        lmb_put32(b.p + b.len - 4, 0); c.off = 0; assert(lmb_home_offer_unpack(&c, &decoded));
+        lmb_put32(b.p + b.len - 4, 9); c.off = 0; assert(lmb_home_offer_unpack(&c, &decoded));
+        free(b.p);
+    }
+    LmbHomeOffer bad = fixture(); bad.sessions = 9; assert(!lmb_home_offer_valid(&bad));
+}
+
 int main(void) {
+    session_offers();
     hybrid_permissions();
     LmbHomeOffer o = fixture(), decoded;
     LmbBuf b = {0}; assert(!lmb_home_offer_pack(&b, &o));

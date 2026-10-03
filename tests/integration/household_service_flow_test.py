@@ -25,7 +25,13 @@ def main():
     parser.add_argument("--runtime-dir", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--keep-requester", action="store_true", help="also verify the normal post-preparation chat and saved calibration")
     parser.add_argument("--multi-model", action="store_true", help="two distinct checkpoints coexist on the same donors; unload only one")
+    parser.add_argument("--sessions", type=int, choices=(1, 2, 4, 8), default=1)
+    parser.add_argument("--donor-ram-gb", type=float, default=0.5)
+    parser.add_argument("--prepare-timeout", type=int, default=180)
+    parser.add_argument("--measure-sessions", action="store_true", help="also benchmark the single-slot baseline")
     args = parser.parse_args()
+    if not 30 <= args.prepare_timeout <= 3600:
+        parser.error("--prepare-timeout must be between 30 and 3600 seconds")
     runtime = args.runtime_dir.resolve()
     tmp = Path(tempfile.mkdtemp(prefix="lmb-service-flow-"))
     print(f"Artifacts: {tmp}", flush=True)
@@ -52,7 +58,7 @@ def main():
         home = tmp / name; (home / ".lumabri").mkdir(parents=True, exist_ok=True)
         settings = home / ".lumabri/home.conf"
         if not settings.exists():
-            settings.write_text(f"tracker={tracker}\ntoken=service-test\nmodels={args.models_dir.resolve()}\nram={1.0 if args.multi_model else 0.5}\nowner={int(name == 'owner')}\n")
+            settings.write_text(f"tracker={tracker}\ntoken=service-test\nmodels={args.models_dir.resolve()}\nram={max(1.0, args.donor_ram_gb) if args.multi_model else args.donor_ram_gb}\nowner={int(name == 'owner')}\n")
             settings.chmod(0o600)
         e = {**os.environ, "HOME": str(home), "LUMABRI_TOKEN": "service-test",
              "LUMABRI_ENCRYPT": "1", "LUMABRI_RESIDENT_REQUIRED": "1", "LUMABRI_HOME_HYBRID": "0",
@@ -124,7 +130,7 @@ def main():
         assert original_tracker["live"], original_tracker
         a, b = sharing("a"), sharing("b")
         base_args = ["models", "--models-dir", str(args.models_dir.resolve()), "--tracker", tracker,
-                     "--context", "128", "--max-new", "8"]
+                     "--context", "128", "--max-new", "8", "--sessions", str(args.sessions)]
         chat = Terminal("chatter", base_args)
         until(lambda: "3 computers visible" in current_frame(chat), "signed inventory missing")
         chat.send("\t")
@@ -157,7 +163,7 @@ def main():
         a = sharing("a")
         until(lambda: a.has("Waiting for your approval"), "pending approval did not survive reconnect")
         a.send("\x1b[A\r"); b.send("\x1b[A\r")
-        until(lambda: service("chatter")["prepare"]["state"] == "stopped", "preparation did not terminate", 180)
+        until(lambda: service("chatter")["prepare"]["state"] == "stopped", "preparation did not terminate", args.prepare_timeout)
         record = tmp / "chatter/.lumabri/resident-plan"
         assert record.exists(), (tmp / "chatter/.lumabri/service/prepare.log").read_text()[-5000:]
         if args.keep_requester:
@@ -200,6 +206,17 @@ def main():
             assert assert_stage_record(records[0]) == 2, "resident real session did not update existing observations"
         resumed.text = ""; resumed.send("/quit\n")
         until(lambda: resumed.has("your workspace"), "chat did not close")
+        if args.sessions > 1 or args.measure_sessions:
+            raw = record.read_bytes(); at = 4; names = []
+            for _ in range(5):
+                size = struct.unpack_from("<H", raw, at)[0]; at += 2
+                names.append(raw[at:at+size].decode()); at += size
+            benchmark = subprocess.run([str(runtime / "test_hosted_sessions"), names[1], names[2], str(args.sessions)],
+                                       env=env("chatter"), text=True, capture_output=True, timeout=180)
+            (tmp / "sessions.jsonl").write_text(benchmark.stdout)
+            (tmp / "sessions.stderr").write_text(benchmark.stderr)
+            assert benchmark.returncode == 0, benchmark.stderr
+            print(benchmark.stdout, flush=True)
         if args.multi_model:
             first_plan = tmp / "first.plan"; shutil.copyfile(record, first_plan); first_plan.chmod(0o600)
             configs = list(args.models_dir.glob("*/config.json"))

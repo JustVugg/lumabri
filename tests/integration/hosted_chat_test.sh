@@ -20,6 +20,15 @@ fail() { echo "HOSTED CHAT TEST: FAIL — $*" >&2
              echo "--- $(basename "$l")" >&2; tail -25 "$l" >&2; done; exit 1; }
 trap cleanup EXIT
 
+wait_submitted() {
+    local marker=$1
+    for _ in $(seq 1 300); do
+        [[ -s "$marker" ]] && return 0
+        sleep .05
+    done
+    fail "the first client never submitted to the engine"
+}
+
 # A stand-in host: it speaks the greeting and the serve codec, so this test
 # exercises OUR client and OUR lifecycle without needing a checkpoint. The
 # real engine is covered by the phase-2 and segment tests.
@@ -148,6 +157,13 @@ int main(void) {
         if (!strstr(payload, "<|im_start|>assistant\n<think>\n")) return 2;
         if (turns && !strstr(payload, "hello")) return 4;
         free(payload);
+        const char *marker = getenv("TEST_HOST_SUBMIT_PATH");
+        if (marker) {
+            FILE *f = fopen(marker, "w");
+            if (!f) return 5;
+            fputs("submitted\n", f);
+            if (fclose(f)) return 5;
+        }
         const char *delay = getenv("TEST_HOST_PREFILL_SECONDS");
         if (delay) sleep((unsigned)atoi(delay));
         printf("ACCEPT %s\nDATA %s 5\nhello\nDONE %s", id, id, id);
@@ -163,7 +179,7 @@ cc -O2 -o "$T/qwen36" "$T/qwen36.c"
 REAL_PORT=$(( PORT + 1 ))
 mkdir -p "$T/real-home"
 HOME="$T/real-home" LUMABRI_PEER_KEY="$T/real-host.key" \
-LUMABRI_KNOWN_HOSTS="$T/real-host.hosts" \
+LUMABRI_KNOWN_HOSTS="$T/real-host.hosts" TEST_HOST_SUBMIT_PATH="$T/real.submitted" \
     ./lumabri host --local "$T/model" --engine "$T/qwen36" \
     --port "$REAL_PORT" --max-new 8 >"$T/real-host.log" 2>&1 & PIDS+=("$!")
 for _ in $(seq 1 200); do
@@ -172,9 +188,12 @@ for _ in $(seq 1 200); do
 done
 grep -q "host ready" "$T/real-host.log" || fail "the real host did not start"
 
-( printf 'hi\nagain\nlegacy\n'; sleep 3; printf '/quit\n' ) | timeout 20 ./lumabri chat \
-    --host "127.0.0.1:$REAL_PORT" --plain >"$T/held.log" 2>&1 & held=$!
-sleep .5
+mkfifo "$T/held.in"
+timeout 30 ./lumabri chat --host "127.0.0.1:$REAL_PORT" --plain \
+    <"$T/held.in" >"$T/held.log" 2>&1 & held=$!; PIDS+=("$held")
+exec 4>"$T/held.in"
+printf 'hi\nagain\nlegacy\n' >&4
+wait_submitted "$T/real.submitted"
 started=$(date +%s)
 printf '/quit\n' | timeout 10 ./lumabri chat --host "127.0.0.1:$REAL_PORT" \
     --plain >"$T/real-busy.log" 2>&1 || true
@@ -182,6 +201,8 @@ elapsed=$(( $(date +%s) - started ))
 grep -qi "busy (0 sessions free)" "$T/real-busy.log" ||
     fail "the real host did not refuse its second client with BUSY"
 (( elapsed < 3 )) || fail "BUSY was queued for $elapsed seconds instead of immediate"
+printf '/quit\n' >&4
+exec 4>&-
 wait "$held" || true
 
 grep -q "greedy decoding" "$T/held.log" ||
@@ -200,6 +221,7 @@ start_slow_host() {
     mkdir -p "$T/$label-home"
     HOME="$T/$label-home" LUMABRI_PEER_KEY="$T/$label.key" \
     LUMABRI_KNOWN_HOSTS="$T/$label.hosts" TEST_HOST_PREFILL_SECONDS=3 \
+    TEST_HOST_SUBMIT_PATH="$T/$label.submitted" \
         ./lumabri host --local "$T/model" --engine "$T/qwen36" \
         --port "$port" --max-new 8 --idle-seconds "$idle" \
         --request-seconds "$request" >"$T/$label.log" 2>&1 & PIDS+=("$!")
@@ -212,13 +234,24 @@ start_slow_host() {
 SLOW_PORT=$(( PORT + 2 ))
 export LUMABRI_KNOWN_HOSTS="$T/slow-client.hosts"
 start_slow_host slow-host "$SLOW_PORT" 1 10
-( printf 'hi\n'; sleep 7; printf '/quit\n' ) | timeout 15 ./lumabri chat \
-    --host "127.0.0.1:$SLOW_PORT" --plain >"$T/slow-client.log" 2>&1 & slow_client=$!
-sleep .5
+mkfifo "$T/slow.in"
+timeout 20 ./lumabri chat --host "127.0.0.1:$SLOW_PORT" --plain \
+    <"$T/slow.in" >"$T/slow-client.log" 2>&1 & slow_client=$!; PIDS+=("$slow_client")
+exec 5>"$T/slow.in"
+printf 'hi\n' >&5
+wait_submitted "$T/slow-host.submitted"
 printf '/quit\n' | timeout 5 ./lumabri chat --host "127.0.0.1:$SLOW_PORT" \
     --plain >"$T/slow-busy.log" 2>&1 || true
 grep -qi "busy (0 sessions free)" "$T/slow-busy.log" ||
     fail "an active prefill lost its reserved session"
+# Keep stdin open until the host itself expires idle time after completion.
+# Waiting a fixed time before the handshake could give the second client the
+# first slot on a busy machine, testing the shell scheduler instead of BUSY.
+for _ in $(seq 1 240); do
+    grep -q 'idle session expired' "$T/slow-host.log" && break
+    sleep .05
+done
+exec 5>&-
 wait "$slow_client" || true
 grep -q hello "$T/slow-client.log" || fail "idle timeout interrupted active prefill"
 grep -q 'idle session expired' "$T/slow-host.log" ||

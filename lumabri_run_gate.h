@@ -27,8 +27,9 @@ int lmb_run_gate_init(LmbRunGate *gate, uint32_t capacity,
 void lmb_run_gate_destroy(LmbRunGate *gate);
 
 /* FIFO admission. Returns 1 when admitted, 0 on queue limit/timeout and -1
- * when cancellation was requested. wait_ms is a real interactive deadline,
- * not the transport's long safety timeout. */
+ * when cancellation was requested. wait_ms is a monotonic deadline, not the
+ * transport's long safety timeout. cancel must be thread-safe, non-blocking
+ * and must not reenter this gate: it can run in the releasing thread. */
 int lmb_run_gate_enter(LmbRunGate *gate, uint32_t wait_ms,
                        LmbRunCancelFn cancel, void *cancel_opaque);
 void lmb_run_gate_leave(LmbRunGate *gate);

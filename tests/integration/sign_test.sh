@@ -16,8 +16,34 @@ make -s all
 T=$(mktemp -d /tmp/lumabri-sign.XXXXXX)
 export LUMABRI_PEER_BINDINGS="$T/peer-bindings"
 PIDS=()
-cleanup() { kill "${PIDS[@]}" 2>/dev/null || true; rm -rf "$T"; }
+cleanup() {
+    local result=$?
+    if ((result)); then
+        for name in tracker.log origin.log shim.err rogue.log evil.log rogue2.log evil_shim.err; do
+            if [[ -f "$T/$name" ]]; then
+                echo "sign-test diagnostics: $name" >&2
+                tail -n 30 "$T/$name" >&2
+            fi
+        done
+    fi
+    if ((${#PIDS[@]})); then
+        kill "${PIDS[@]}" 2>/dev/null || true
+        wait "${PIDS[@]}" 2>/dev/null || true
+    fi
+    rm -rf "$T"
+}
 trap cleanup EXIT
+
+wait_log() {
+    local file=$1 pattern=$2 pid=$3
+    for _ in $(seq 1 300); do
+        grep -Fq "$pattern" "$file" && return 0
+        kill -0 "$pid" 2>/dev/null || return 1
+        sleep .1
+    done
+    echo "Timed out waiting for: $pattern" >&2
+    return 1
+}
 
 cat > "$T/t.c" <<'EOF'
 #include <stdio.h>
@@ -109,10 +135,10 @@ head -c 512 /dev/urandom > "$T/src/config.json"
 PUB=$(cat "$T/swarm.pub")
 
 ./tracker --port 7460 --pubkey "$T/swarm.pub" > "$T/tracker.log" 2>&1 & PIDS+=($!)
-sleep 0.3
+wait_log "$T/tracker.log" 'listening on' "${PIDS[0]}"
 ./maintainer --root "$T/src" --port 7461 --tracker 127.0.0.1:7460 --name origin \
              --key "$T/swarm.key" > "$T/origin.log" 2>&1 & PIDS+=($!)
-sleep 1.2
+wait_log "$T/tracker.log" '+ origin @' "${PIDS[1]}"
 env LD_PRELOAD="$PWD/liblumabri.so" LUMABRI_VROOT="$T/v" LUMABRI_CACHE="$T/c" \
     LUMABRI_TRACKER=127.0.0.1:7460 LUMABRI_MODEL=src \
     LUMABRI_BLOCK_MIB=1 LUMABRI_PUBKEY="$PUB" \
@@ -128,7 +154,7 @@ head -c $((3 * 1024 * 1024)) /dev/urandom > "$T/rogue/w.bin"
 ./maintainer --root "$T/rogue" --port 7462 --tracker 127.0.0.1:7460 \
              --name rogue --model-name src --include '*' \
              > "$T/rogue.log" 2>&1 & PIDS+=($!)
-sleep 1.5
+wait_log "$T/tracker.log" 'REJECTED: rogue' "${PIDS[2]}"
 grep -q "REJECTED: rogue" "$T/tracker.log" || {
     echo "   REJECTION FAILED: the tracker accepted unsigned truth"
     cat "$T/tracker.log"; exit 1; }
@@ -138,10 +164,10 @@ echo "· 3c) a LYING tracker is caught by the chatter's own key"
 # the rogue tracker has no operator key and invents its own truth: it takes
 # the rogue's (different) bytes as gospel and serves them unsigned
 ./tracker --port 7463 > "$T/evil.log" 2>&1 & PIDS+=($!)
-sleep 0.3
+wait_log "$T/evil.log" 'listening on' "${PIDS[3]}"
 ./maintainer --root "$T/rogue" --port 7464 --tracker 127.0.0.1:7463 \
              --name rogue2 --model-name src > "$T/rogue2.log" 2>&1 & PIDS+=($!)
-sleep 1.2
+wait_log "$T/evil.log" '+ rogue2 @' "${PIDS[4]}"
 set +e
 env LD_PRELOAD="$PWD/liblumabri.so" LUMABRI_VROOT="$T/v2" LUMABRI_CACHE="$T/c2" \
     LUMABRI_TRACKER=127.0.0.1:7463 LUMABRI_MODEL=src \
