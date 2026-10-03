@@ -20,7 +20,7 @@
 # invariance and exercises the one-node/two-node topology, but it does not
 # measure a LAN and accepts no remote-host option. Real LAN numbers require a
 # separate two-machine harness and must never be inferred from this output.
-set -euo pipefail
+set -Eeuo pipefail
 cd "$(dirname "$0")/../.."
 
 # The archive may also include optional Expert/Hybrid hooks. --direct-only
@@ -38,6 +38,7 @@ TOKENS="${SPLIT_TOKENS:-8}"
 THREADS_TOTAL="${SPLIT_THREADS:-4}"
 CONTEXT="${SPLIT_CONTEXT:-64}"
 ROUNDS="${SPLIT_ROUNDS:-3}"
+MAX_ROWS="${SPLIT_MAX_ROWS:-16}"
 
 TMP=$(mktemp -d /tmp/lumabri-segment-split.XXXXXX)
 PIDS=()
@@ -63,6 +64,15 @@ trap cleanup EXIT
     { echo "SEGMENT SPLIT TEST: SKIP (build segment_node, segment_chat, tracker)"; exit 0; }
 [[ -f "$MODEL_DIR/config.json" ]] ||
     { echo "SEGMENT SPLIT TEST: SKIP (no $MODEL_DIR)"; exit 0; }
+
+# The native no-OpenMP runtime accepts exactly one compute thread. Query the
+# actual binary rather than guessing from CPU count or the CI matrix label.
+capacity=$(OMP_NUM_THREADS="$THREADS_TOTAL" ./segment_node --thread-capacity)
+[[ "$capacity" =~ ^[1-9][0-9]*$ ]] || { echo "invalid runtime thread capacity" >&2; exit 1; }
+if (( THREADS_TOTAL > capacity )); then
+    echo "  runtime supports $capacity thread(s); clamping requested $THREADS_TOTAL."
+    THREADS_TOTAL=$capacity
+fi
 
 LAYERS=$(python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); print(c.get("text_config",c)["num_hidden_layers"])' "$MODEL_DIR/config.json")
 MTYPE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("model_type",""))' "$MODEL_DIR/config.json")
@@ -115,7 +125,7 @@ start_phase() {              # $1 = nodes, $2 = threads each, $3 = tag
             --port "$(( base + i ))" --tracker "127.0.0.1:$TRACKER" \
             --advertise "127.0.0.1:$(( base + i ))" --name "$tag-$i" \
             --model-root "$model_root" --tokenizer-root "$tokenizer_root" \
-            --context "$CONTEXT" --max-rows 16 --sessions 2 --threads "$threads" \
+            --context "$CONTEXT" --max-rows "$MAX_ROWS" --sessions 2 --threads "$threads" \
             >"$TMP/$tag-$i.log" 2>&1 &
         PIDS+=("$!")
         wait_port "$(( base + i ))"
@@ -134,16 +144,16 @@ stop_phase() {
 # One chat run: prints "<seconds> <token ids>"
 run_chat() {                 # $1 = threads, $2 = log name
     local threads=$1 log=$2 t0 t1
-    t0=$(date +%s.%N)
+    t0=$(python3 -c 'import time; print(time.monotonic())')
     OMP_NUM_THREADS="$threads" LUMABRI_PEER_KEY="$TMP/client.key" \
         LUMABRI_KNOWN_HOSTS="$TMP/client.hosts" ./segment_chat --engine "$ENGINE_ID" \
         --model-dir "$MODEL_DIR" --model "$MODEL_NAME" \
         --tracker "127.0.0.1:$TRACKER" \
         --model-root "$model_root" --tokenizer-root "$tokenizer_root" \
         --prompt-ids "$prompt" --tokens "$TOKENS" --context "$CONTEXT" \
-        --max-rows 16 --retry-first-run --direct-only --json \
+        --max-rows "$MAX_ROWS" --retry-first-run --direct-only --json \
         >"$TMP/$log.json" 2>"$TMP/$log.log"
-    t1=$(date +%s.%N)
+    t1=$(python3 -c 'import time; print(time.monotonic())')
     python3 - "$TMP/$log.json" "$t0" "$t1" <<'PY'
 import json,sys
 lines=[l for l in open(sys.argv[1],encoding='utf-8') if l.startswith('{')]
@@ -199,10 +209,15 @@ echo "   checkpoint is disk, every later one is page cache)"
 start_phase 1 "$THREADS_TOTAL" whole
 whole=$(best_of "$THREADS_TOTAL" whole)
 whole_s=${whole%% *}; oracle=${whole#* }
+if [[ -n "${SPLIT_EXPECT_IDS:-}" && "$oracle" != "$SPLIT_EXPECT_IDS" ]]; then
+    echo "SEGMENT SPLIT TEST: FAIL — runtime differs from independent local oracle" >&2
+    exit 1
+fi
 echo "  A  1 node,  $THREADS_TOTAL threads   ${whole_s}s"
 stop_phase
 
-# B) split across two, SAME total threads: isolates the cost of the boundary
+# B) same total threads when divisible by two. A single-thread runtime still
+# exercises both real topologies, but cannot isolate equal-thread overhead.
 half=$(( THREADS_TOTAL / 2 )); (( half < 1 )) && half=1
 start_phase 2 "$half" split
 split=$(best_of "$THREADS_TOTAL" split)
@@ -240,9 +255,14 @@ echo "  C  2 nodes, $THREADS_TOTAL+$THREADS_TOTAL threads   ${full_s}s"
 #
 # So the rule is: print the comparison only when the load average is below
 # the core count, and otherwise say plainly that this machine cannot answer.
-python3 - "$whole_s" "$split_s" "$full_s" <<'PY'
+python3 - "$whole_s" "$split_s" "$full_s" "$THREADS_TOTAL" "$half" <<'PY'
 import os, sys
 w, s, f = (float(x) for x in sys.argv[1:4])
+threads, half = map(int, sys.argv[4:6])
+if threads != half * 2:
+    print("  equal-thread boundary cost unavailable: one-node and two-node thread totals differ.")
+    print("  This run verifies token identity, not an equal-thread speed comparison.")
+    sys.exit(0)
 try:
     load = os.getloadavg()[0]
     cores = os.cpu_count() or 1

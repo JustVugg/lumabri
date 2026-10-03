@@ -395,7 +395,7 @@ static int home_donor_launch(HomeDonor *d, int edge) {
         "--model-dir", vroot, "--model", (char *)o->model, "--range", range,
         "--port", port, "--tracker", (char *)o->tracker, "--advertise", addr,
         "--name", name, "--model-root", root, "--tokenizer-root", root,
-        "--context", context, "--max-rows", "16", "--sessions", "1",
+        "--context", context, "--max-rows", (char *)lmb_family_batch_rows(family->segment_id), "--sessions", "1",
         "--threads", threads, "--memory-limit-mb", ram,
         "--model-bytes", bytes, "--model-layers", layers, NULL};
     char *host_argv[] = {binary, "host", "--model", (char *)o->model,

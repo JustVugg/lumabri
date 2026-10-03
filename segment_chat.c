@@ -9,6 +9,7 @@
 #include "lumabri_sampling.h"
 #include "segment_colibri.h"
 #include "src/planner/lumabri_link_evidence.h"
+#include "src/runtime/lumabri_v41_contract.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -32,6 +33,8 @@ typedef struct {
     uint64_t snapshot_sequence;
     uint64_t snapshot_position;
     LmbLinkEvidence link;
+    uint8_t *feedback; /* head only: committed tail delta of this conversation */
+    size_t feedback_bytes;
 } RemoteSegment;
 
 typedef struct {
@@ -868,6 +871,7 @@ static void remote_dispose(RemoteSegment *remote) {
     free(remote->snapshot);
     remote->snapshot = NULL;
     remote->snapshot_bytes = 0;
+    free(remote->feedback);remote->feedback=NULL;remote->feedback_bytes=0;
 }
 
 static void conversation_reset(SegmentConversation *conversation) {
@@ -900,6 +904,18 @@ static int chain_run_observed(RemoteSegment *chain, size_t count,
                      uint8_t **first, uint8_t **second, size_t bytes,
                      GenerationResult *observation, int decode) {
     uint8_t *input = *first, *output = *second;
+    size_t feedback_offset=0,feedback_bytes=0;
+    int feedback=count && !strcmp(chain[0].route.advert.state_schema,LMB_V41_SCHEMA);
+    if(feedback) {
+        if(rows!=1 || lmb_v41_feedback_slice(input,bytes,&feedback_offset,&feedback_bytes))return -1;
+        if(!chain[0].feedback) {
+            if(chain[0].position)return -1; /* no stale/new-route mixing */
+            chain[0].feedback=malloc(feedback_bytes);if(!chain[0].feedback)return -1;
+            chain[0].feedback_bytes=feedback_bytes;
+        }
+        if(chain[0].feedback_bytes!=feedback_bytes)return -1;
+        if(chain[0].position)memcpy(input+feedback_offset,chain[0].feedback,feedback_bytes);
+    }
     for (size_t i = 0; i < count; i++) {
         double started = observation ? monotonic_seconds() : 0;
         if (remote_run(&chain[i], tokens, rows, input, bytes, output)) {
@@ -915,6 +931,13 @@ static int chain_run_observed(RemoteSegment *chain, size_t count,
     }
     *first = input;
     *second = output;
+    if(feedback) {
+        size_t offset,length;
+        if(lmb_v41_feedback_slice(input,bytes,&offset,&length)||offset!=feedback_offset||length!=feedback_bytes)return -1;
+        /* Publish only after every segment committed the same token. Recovery
+         * creates a fresh chain and rebuilds feedback while replaying history. */
+        memcpy(chain[0].feedback,input+offset,length);
+    }
     return 0;
 }
 
@@ -929,6 +952,8 @@ static int chain_run(RemoteSegment *chain, size_t count,
 static int conversation_checkpoint(SegmentConversation *conversation,
                                    size_t token_count) {
     if (!conversation || !conversation->active) return -1;
+    for(size_t i=0;i<conversation->chain_count;i++)
+        if(!(conversation->chain[i].route.advert.capabilities&LMB_SEG_CAP_SNAPSHOT))return -1;
     RemoteCheckpoint checkpoints[LMB_SEG_ROUTE_MAX];
     memset(checkpoints, 0, sizeof checkpoints);
     size_t completed = 0;
@@ -2137,7 +2162,9 @@ int main(int argc, char **argv) {
     query.state_width = cap.state_width;
     query.required_capabilities = LMB_SEG_CAP_RANGE_NATIVE |
                                   LMB_SEG_CAP_MULTI_SESSION |
-                                  LMB_SEG_CAP_SNAPSHOT | segment_backend_mask;
+                                  segment_backend_mask;
+    if(strcmp(cap.state_schema,LMB_V41_SCHEMA))
+        query.required_capabilities |= LMB_SEG_CAP_SNAPSHOT;
     snprintf(query.engine_id, sizeof query.engine_id, "%s", cap.engine_id);
     snprintf(query.state_schema, sizeof query.state_schema, "%s", cap.state_schema);
     snprintf(query.numeric_class, sizeof query.numeric_class, "%s", cap.numeric_class);

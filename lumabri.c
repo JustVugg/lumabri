@@ -1005,7 +1005,7 @@ static int cmd_serve(int argc, char **argv) {
             if (!join) sargv[a++] = "--fallback";
             if (!advertise) sargv[a++] = "--relay-only";
             sargv[a++] = "--context";      sargv[a++] = context;
-            sargv[a++] = "--max-rows";     sargv[a++] = "16";
+            sargv[a++] = "--max-rows";     sargv[a++] = (char *)lmb_family_batch_rows(segment_engine);
             sargv[a++] = "--sessions";     sargv[a++] = session_text;
             sargv[a++] = "--threads";      sargv[a++] = thread_text;
             sargv[a++] = "--run-queue";    sargv[a++] = run_queue_text;
@@ -2444,7 +2444,8 @@ static EngKind engine_kind_of(const char *engine) {
     if (artifact_is(engine, "glm53") ||
         !strcmp(engine ? engine : "", "glm5_next") ||
         !strcmp(engine ? engine : "", "glm5_next_text")) return EK_GLM53;
-    if (artifact_is(engine, "deepseek_v4") || artifact_is(engine, "deepseek"))
+    if (artifact_is(engine, "deepseek_v4") || artifact_is(engine, "deepseek") ||
+        artifact_is(engine, "deepseek_v41") || !strcmp(engine ? engine : "", "deepseek_v41_text"))
         return EK_DEEPSEEK;
     if (artifact_is(engine, "olmoe")) return EK_OLMOE;
     if (artifact_is(engine, "qwen36") ||
@@ -3058,7 +3059,7 @@ static int segment_engine_spawn(const char *engine, const char *shim,
             "--model", (char *)model,
             "--tracker", (char *)tracker,
             "--context", context,
-            "--max-rows", "16",
+            "--max-rows", (char *)lmb_family_batch_rows(segment_id),
             "--discovery-timeout-ms", discovery_ms,
             NULL
         };
@@ -4247,7 +4248,7 @@ static int role_start_segment(const Role *r, const char *tracker,
     argv[a++] = "--auto-identity";
     if (relay_only) argv[a++] = "--relay-only";
     argv[a++] = "--context";       argv[a++] = context_text;
-    argv[a++] = "--max-rows";      argv[a++] = "16";
+    argv[a++] = "--max-rows";      argv[a++] = (char *)lmb_family_batch_rows(engine);
     argv[a++] = "--sessions";      argv[a++] = sessions_text;
     argv[a++] = "--threads";       argv[a++] = threads_text;
     argv[a++] = "--run-queue";     argv[a++] = run_queue_text;
