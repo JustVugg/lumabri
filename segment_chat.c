@@ -1902,8 +1902,12 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
     for (uint32_t i = 0; i < slots; i++) lmb_sampler_init(&samplers[i], seed);
     /* The optional control reader uses read(2), never buffered stdio. */
     if (slots > 1) setvbuf(stdin, NULL, _IONBF, 0);
-    printf("\nLUMABRI_RESET 1\nLUMABRI_SLOTS %u\nLUMABRI_SAMPLING %s\nLUMABRI_NUMERIC %u %s\n" SEGMENT_FRAME_READY "\nSTAT 0 0 0 0\n",
-           slots, cap->flags & COLI_EDGE_CAP_LOGITS ? "LOGITS" : "GREEDY", cap->abi_version, cap->numeric_class);
+    /* Preserve the established single-conversation greeting byte for byte.
+     * The extended codec is negotiated only when explicitly requested. */
+    fputs("\nLUMABRI_RESET 1\n", stdout);
+    if (slots > 1) printf("LUMABRI_SLOTS %u\n", slots);
+    printf("LUMABRI_SAMPLING %s\nLUMABRI_NUMERIC %u %s\n" SEGMENT_FRAME_READY "\nSTAT 0 0 0 0\n",
+           cap->flags & COLI_EDGE_CAP_LOGITS ? "LOGITS" : "GREEDY", cap->abi_version, cap->numeric_class);
     fflush(stdout);
     int result_code = 0;
     char header[512];
