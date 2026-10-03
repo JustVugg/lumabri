@@ -233,7 +233,7 @@ int main(int argc, char **argv) {
     }
     g_tracker = argv[1];
     TestNode nodes[2] = {
-        { .name = "rtt-node-a", .port = 8094, .ctrl_fd = -1, .delay_ms = 5 },
+        { .name = "rtt-node-a", .port = 8094, .ctrl_fd = -1, .delay_ms = 40 },
         { .name = "rtt-node-b", .port = 8095, .ctrl_fd = -1, .delay_ms = 300 }
     };
     for (int i = 0; i < 2; i++) pthread_create(&nodes[i].thread, NULL, node_server, &nodes[i]);
@@ -245,40 +245,10 @@ int main(int argc, char **argv) {
     int bad = atomic_load(&nodes[0].ready) != 1 || atomic_load(&nodes[1].ready) != 1;
     for (int i = 0; !bad && i < 2; i++) bad = node_register(&nodes[i]) != 0;
 
-    /* The phases below assert millisecond-scale routing margins. A loopback
-     * that cannot hold them (WSL2's virtual NIC regularly turns a 5 ms ping
-     * into 10-20 under any breeze) would fail the scheduler for the
-     * platform's sins: measure the host first and step aside loudly. CI
-     * runners hold the margin with room to spare, so the gate always runs
-     * where it gates. */
-    if (!bad) {
-        uint64_t worst = 0;
-        for (int i = 0; i < 20 && !bad; i++) {
-            double a = lumi_now();
-            LmbMsg m = {0};
-            int fd = lmb_connect("127.0.0.1:8094");   /* node A: nominal 5 ms */
-            if (fd < 0 || lmb_send(fd, LMB_PING, NULL, 0, NULL, 0) ||
-                lmb_recv(fd, &m)) {
-                if (fd >= 0) close(fd);
-                bad = 1;
-                break;
-            }
-            lmb_msg_free(&m);
-            close(fd);
-            uint64_t us = (uint64_t)((lumi_now() - a) * 1e6);
-            if (us > worst) worst = us;
-        }
-        atomic_store(&nodes[0].pings, 0);
-        atomic_store(&nodes[1].pings, 0);
-        atomic_store(&nodes[0].accepts, 0);
-        atomic_store(&nodes[1].accepts, 0);
-        if (!bad && worst > 15000) {
-            printf("STAGGERED RTT REFRESH: SKIP (loopback noise: a 5 ms ping "
-                   "took %.1f ms; this host cannot hold the test's margins)\n",
-                   (double)worst / 1000.0);
-            return 0;
-        }
-    }
+    /* Use deliberately separated service delays (40/300 ms, then 40/1 ms).
+     * This tests scheduler recovery, not the host's ability to distinguish
+     * 5 ms from 1 ms. Keep all attribution, pooled-socket and routing checks;
+     * never report a skipped noisy-host run as a passing regression. */
     L.n_layers = 1; L.n_experts = 1; L.hidden = 4; L.npeers = 2;
     L.initialized = 1; L.discovery = 0; L.hedge_ms = -1; L.verify_pct = 0;
     L.own = (int *)malloc(LUMI_MAX_REP * sizeof(int));
@@ -334,7 +304,7 @@ int main(int argc, char **argv) {
             bad = run_exec_calls(1) != 0 || L.hedges != 0 ||
                   L.peers[0].exec_observations != saved_observations[0] + 1 ||
                   L.peers[1].exec_observations != saved_observations[1];
-            atomic_store(&nodes[0].delay_ms, 5);
+            atomic_store(&nodes[0].delay_ms, 40);
             for (int i = 0; i < 2; i++) {
                 L.peers[i].latency = saved_latency[i];
                 L.peers[i].exec_observations = saved_observations[i];
