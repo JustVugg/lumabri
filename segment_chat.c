@@ -1520,6 +1520,9 @@ static int segment_generate(ColiEdgeEngine *edge,
         goto cleanup;
     }
     for (size_t offset = prefilled; offset < prompt_count; offset += max_rows) {
+        if(lmb_resident_memory_check()) {
+            snprintf(error,error_size,"Edge physical residency lost; resident preparation must be renewed");goto cleanup;
+        }
         uint32_t rows = (uint32_t)(prompt_count - offset);
         if (rows > max_rows) rows = max_rows;
         size_t bytes = lmb_state_bytes(rows, cap->state_width,
@@ -1595,6 +1598,9 @@ static int segment_generate(ColiEdgeEngine *edge,
             goto cleanup;
         }
     } else if (coli_edge_select(edge, &select, error, error_size)) goto cleanup;
+    if(lmb_resident_memory_check()) {
+        snprintf(error,error_size,"Edge physical residency lost; resident preparation must be renewed");goto cleanup;
+    }
     double first_selected_at=monotonic_seconds(), last_selected_at=first_selected_at;
     size_t generated_count = 1;
     if (event &&
@@ -1607,6 +1613,9 @@ static int segment_generate(ColiEdgeEngine *edge,
                wanted_tokens, NULL, 0))) goto cleanup;
     while (generated_count < wanted_tokens &&
            generated[generated_count - 1] != cap->eos_token_id) {
+        if(lmb_resident_memory_check()) {
+            snprintf(error,error_size,"Edge physical residency lost; resident preparation must be renewed");goto cleanup;
+        }
         int32_t token = generated[generated_count - 1];
         size_t bytes = lmb_state_bytes(1, cap->state_width, cap->state_dtype);
         ColiEdgeEmbedRequest embed = {
@@ -1655,6 +1664,9 @@ static int segment_generate(ColiEdgeEngine *edge,
             }
         } else if (coli_edge_select(edge, &select, error, error_size))
             goto cleanup;
+        if(lmb_resident_memory_check()) {
+            snprintf(error,error_size,"Edge physical residency lost; resident preparation must be renewed");goto cleanup;
+        }
         last_selected_at=monotonic_seconds();
         generated_count++;
         if (event &&

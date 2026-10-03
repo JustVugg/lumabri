@@ -524,8 +524,12 @@ increase real KV RAM substantially. These ranges consume real RAM and CPU; use
 
 `serve` gives every Segment child an explicit process budget computed as
 `(MemAvailable - LUMABRI_SEGMENT_MIN_FREE_MB) / slices`. The node forwards it
-to Colibri's engine options, divides the remaining post-engine RSS among its
-session slots, and cancels a run when RSS or the system reserve is crossed. A
+to Colibri's engine options and divides the remaining post-engine memory charge
+among its session slots. The charge includes known process swap/compression,
+not only RSS. Resident runs are refused after observed residency loss; the
+system governor also retains its in-flight critical reserve. See
+[OS residency policy](docs/RESIDENT_RUNTIME.md#operating-system-residency-and-pressure).
+A
 compute donor receives the total layer count with its tracker assignment and
 evaluates the assigned range—not a fixed quarter of the model. If it does not
 fit, the placement promise is released immediately and the chat starts the
