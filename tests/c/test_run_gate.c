@@ -7,6 +7,9 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <time.h>
+
+static int cancelled(void *opaque);
 
 typedef struct {
     LmbRunGate *gate;
@@ -15,11 +18,13 @@ typedef struct {
     _Atomic int *order_index;
     int *order;
     int result;
+    _Atomic int *stop;
 } Worker;
 
 static void *worker(void *opaque) {
     Worker *work = opaque;
-    work->result = lmb_run_gate_enter(work->gate, work->wait_ms, NULL, NULL);
+    work->result = lmb_run_gate_enter(work->gate, work->wait_ms,
+                                    work->stop ? cancelled : NULL, work->stop);
     if (work->result == 1) {
         int index = atomic_fetch_add(work->order_index, 1);
         work->order[index] = work->id;
@@ -33,6 +38,11 @@ static int cancelled(void *opaque) {
     return atomic_load((_Atomic int *)opaque);
 }
 
+static void wait_queued(LmbRunGate *gate, unsigned count) {
+    for (unsigned i = 0; i < 5000 && lmb_run_gate_queued(gate) != count; i++) usleep(1000);
+    assert(lmb_run_gate_queued(gate) == count);
+}
+
 int main(void) {
     LmbRunGate gate;
     assert(!lmb_run_gate_init(&gate, 1, 2));
@@ -41,16 +51,15 @@ int main(void) {
     _Atomic int index = 0;
     int order[2] = {-1, -1};
     Worker works[3] = {
-        { &gate, 1, 1000, &index, order, 0 },
-        { &gate, 2, 1000, &index, order, 0 },
-        { &gate, 3, 20, &index, order, 0 },
+        { &gate, 1, 5000, &index, order, 0, NULL },
+        { &gate, 2, 5000, &index, order, 0, NULL },
+        { &gate, 3, 20, &index, order, 0, NULL },
     };
     pthread_t threads[3];
     pthread_create(&threads[0], NULL, worker, &works[0]);
-    usleep(10000);
+    wait_queued(&gate, 1);
     pthread_create(&threads[1], NULL, worker, &works[1]);
-    usleep(10000);
-    assert(lmb_run_gate_queued(&gate) == 2);
+    wait_queued(&gate, 2);
     pthread_create(&threads[2], NULL, worker, &works[2]);
     pthread_join(threads[2], NULL);
     assert(works[2].result == 0); /* bounded queue rejects immediately */
@@ -62,13 +71,26 @@ int main(void) {
     assert(!lmb_run_gate_inflight(&gate) && !lmb_run_gate_queued(&gate));
 
     assert(lmb_run_gate_enter(&gate, 100, NULL, NULL) == 1);
-    Worker timeout = { &gate, 4, 20, &index, order, 0 };
+    Worker timeout = { &gate, 4, 20, &index, order, 0, NULL };
     pthread_create(&threads[0], NULL, worker, &timeout);
     pthread_join(threads[0], NULL);
     assert(timeout.result == 0);
     _Atomic int stop = 1;
     assert(lmb_run_gate_enter(&gate, 100, cancelled, &stop) == -1);
     lmb_run_gate_leave(&gate);
+    /* Free capacity is not authority to run an already-cancelled request. */
+    assert(lmb_run_gate_enter(&gate, 100, cancelled, &stop) == -1);
+    assert(!lmb_run_gate_inflight(&gate));
+    atomic_store(&stop, 0);
+    assert(lmb_run_gate_enter(&gate, 100, NULL, NULL) == 1);
+    Worker abandoning = {&gate, 5, 5000, &index, order, 0, &stop};
+    pthread_create(&threads[0], NULL, worker, &abandoning);
+    wait_queued(&gate, 1);
+    atomic_store(&stop, 1);
+    lmb_run_gate_leave(&gate);
+    pthread_join(threads[0], NULL);
+    assert(abandoning.result == -1);
+    assert(!lmb_run_gate_inflight(&gate) && !lmb_run_gate_queued(&gate));
     lmb_run_gate_destroy(&gate);
     puts("RUN GATE: PASS (FIFO, bounded queue, deadline, cancellation, telemetry)");
     return 0;

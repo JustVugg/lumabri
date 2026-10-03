@@ -50,6 +50,8 @@ jobs:
           ./test_serve_control
           make test_host_session_pool CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           ./test_host_session_pool
+          make test_run_gate CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
+          ./test_run_gate
           ./test_chat_ui host-codec
           ./test_chat_ui resident-plan
           python3 tests/integration/household_service_test.py
