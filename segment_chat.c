@@ -11,12 +11,38 @@
 #include "src/planner/lumabri_link_evidence.h"
 #include "src/runtime/lumabri_v41_contract.h"
 #include "src/runtime/lumabri_serve_control.h"
+#include "src/runtime/lumabri_compute_broker.h"
 
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+/* Only Edge kernels take the local permit. Tokenization, networking and
+ * waiting for remote Segment results must never hold it (including the
+ * loopback Segment on this very computer). Upstream Colibri is unchanged. */
+static LmbServeControl *home_edge_control;
+static int home_edge_cancel(void *unused) {
+    (void)unused;
+    return home_edge_control && atomic_load(&home_edge_control->cancelled);
+}
+#define LMB_EDGE_COMPUTE(name, type) \
+static int home_edge_##name(ColiEdgeEngine *edge, type *request, char *error, size_t size) { \
+    int permit = -1; \
+    if (lmb_compute_acquire(&permit, 30000, home_edge_cancel, NULL)) { \
+        snprintf(error, size, "Local compute admission unavailable or expired"); return -1; \
+    } \
+    int rc = coli_edge_##name(edge, request, error, size); \
+    lmb_compute_release(&permit); return rc; \
+}
+LMB_EDGE_COMPUTE(embed, const ColiEdgeEmbedRequest)
+LMB_EDGE_COMPUTE(select, ColiEdgeSelectRequest)
+LMB_EDGE_COMPUTE(logits, ColiEdgeLogitsRequest)
+#undef LMB_EDGE_COMPUTE
+#define coli_edge_embed home_edge_embed
+#define coli_edge_select home_edge_select
+#define coli_edge_logits home_edge_logits
 
 typedef struct {
     LmbSegRouteEntry route;
@@ -1972,6 +1998,7 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
         if (slots > 1 && lmb_serve_control_start(&control, request_id)) {
             free(prompt); result_code = 1; break;
         }
+        home_edge_control = &control;
         int bad = have <= 0 || !snapshot.complete ||
                   select_chain(&snapshot, cap->num_layers, context, max_rows,
                                chain, &chain_count);
@@ -2022,6 +2049,7 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
                             &snapshot, conversation->chain,
                             conversation->chain_count);
         }
+        home_edge_control = NULL;
         lmb_serve_control_stop(&control);
         free(prompt);
         if (atomic_load(&control.cancelled)) {

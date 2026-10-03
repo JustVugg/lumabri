@@ -52,6 +52,9 @@ jobs:
           ./test_host_session_pool
           make test_run_gate CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           ./test_run_gate
+          make test_compute_broker CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
+          ./test_compute_broker
+          ./test_chat_ui service-codec
           ./test_chat_ui host-codec
           ./test_chat_ui resident-plan
           python3 tests/integration/household_service_test.py
@@ -193,7 +196,7 @@ jobs:
           for sessions in 1 2 4 8; do
             python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester --sessions "$sessions" --measure-sessions
           done
-          python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester --multi-model
+          python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester --multi-model --sessions 4
           make segment_budget_probe
           python3 tests/integration/planner_tensor_contract_test.py --family olmoe --model build/home-flow-models/olmoe-tiny
           make swarm_probe
@@ -462,7 +465,7 @@ jobs:
           make test_hosted_sessions
           python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester --sessions 2
           python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models
-          python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester --multi-model
+          python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester --multi-model --sessions 4
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --repeat-cached --clear-cached --expect-metrics --expect-calibration
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --kill-donor
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --expect-selected-no-fit

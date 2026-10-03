@@ -13,6 +13,7 @@
 #include "segment_colibri.h"
 #include "lumabri_ready.h"
 #include "lumabri_home_net.h"
+#include "src/runtime/lumabri_compute_broker.h"
 
 #include <pthread.h>
 #include <dirent.h>
@@ -714,6 +715,7 @@ static int handle_run(Node *node, int fd, const LmbMsg *msg) {
         if (!session || !output || bytes != msg->pay_len) {
             status = LMB_SEG_STATUS_INTERNAL;
         } else {
+            uint64_t admission_began = lmb_compute_now();
             int admitted = lmb_resident_memory_check() ? -1 : lmb_run_gate_enter(&node->run_gate,
                                                node->run_wait_ms,
                                                run_should_cancel, node);
@@ -749,7 +751,12 @@ static int handle_run(Node *node, int fd, const LmbMsg *msg) {
                 .cancel_user_data = node,
             };
             char error[256] = "";
+            int permit = -1;
+            uint32_t remaining = lmb_compute_remaining(admission_began, node->run_wait_ms);
+            if (admitted == 1 && (!remaining || lmb_compute_acquire(&permit, remaining, run_should_cancel, node)))
+                status = LMB_SEG_STATUS_BUSY;
             if (admitted == 1 &&
+                status == LMB_SEG_STATUS_OK &&
                 coli_segment_run(session, &request, error, sizeof error)) {
                 /* Name the slice: an origin runs several of these at once and
                  * an unlabelled line cannot be attributed to a layer range. */
@@ -775,6 +782,7 @@ static int handle_run(Node *node, int fd, const LmbMsg *msg) {
                     status = LMB_SEG_STATUS_INTERNAL;
                 }
             }
+            lmb_compute_release(&permit);
             if(admitted==1 && lmb_resident_memory_check())status=LMB_SEG_STATUS_QUOTA;
             if (admitted == 1) lmb_run_gate_leave(&node->run_gate);
         }
@@ -1070,10 +1078,15 @@ static int handle_home_expert(Node *node, int fd, const LmbMsg *msg) {
         D != node->cap.state_width || !D || rows != 1 ||
         (uint64_t)D * sizeof(float) != msg->pay_len || expert > INT_MAX)
         return lmb_send(fd, LMB_ERR, "invalid Hybrid shape", 20, NULL, 0);
+    uint64_t admission_began = lmb_compute_now();
     int admitted = lmb_resident_memory_check() ? -1 : lmb_run_gate_enter(&node->run_gate, node->run_wait_ms, run_should_cancel, node);
     if (admitted != 1) return lmb_send(fd, LMB_ERR, "Hybrid capacity busy", 20, NULL, 0);
+    int permit = -1;
     float *out = malloc((size_t)D * sizeof(float));
-    int bad = !out || lmb_home_expert_apply((int)layer, (int)expert, (const float *)msg->pay, (int)D, out);
+    uint32_t remaining = lmb_compute_remaining(admission_began, node->run_wait_ms);
+    int bad = !out || !remaining || lmb_compute_acquire(&permit, remaining, run_should_cancel, node) ||
+        lmb_home_expert_apply((int)layer, (int)expert, (const float *)msg->pay, (int)D, out);
+    lmb_compute_release(&permit);
     if(lmb_resident_memory_check())bad=1;
     int rc = bad ? lmb_send(fd, LMB_ERR, "Hybrid expert failed", 20, NULL, 0) :
         lmb_send(fd, LMB_EXEC_R, NULL, 0, out, (uint32_t)((size_t)D * sizeof(float)));

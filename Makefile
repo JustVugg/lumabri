@@ -42,8 +42,13 @@ lumabri segment_node segment_chat test_calibration test_chat_ui: src/planner/lum
 segment_node segment_chat test_backend_routes test_home_expert: engine_patches/segment_owned.h src/runtime/lumabri_v41_contract.h
 segment_chat test_backend_routes: src/runtime/lumabri_serve_control.h
 lumabri segment_chat test_backend_routes test_chat_ui test_home test_home_monitor test_memory_budget test_cluster: src/runtime/lumabri_session_limits.h
+lumabri segment_node segment_chat test_chat_ui test_host_session_pool test-home-monitor: src/runtime/lumabri_compute_broker.h
 test check-warnings: test_serve_control
 test check-warnings: test_host_session_pool test_hosted_sessions
+test check-warnings: test_compute_broker
+
+test_compute_broker: tests/c/test_compute_broker.c src/runtime/lumabri_compute_broker.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_compute_broker.c -o $@
 
 test_serve_control: tests/c/test_serve_control.c src/runtime/lumabri_serve_control.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_serve_control.c -o $@
@@ -79,7 +84,7 @@ check-warnings:
 	$(MAKE) -B all test_relay_exec test_swarm_fed test_key_rotation \
 		test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 test_exec2 test_accum_order test_hybrid_parallel test_residency_report test_model_family test_planner test_cluster test_memory_budget test_calibration test_metrics \
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
-		test_meminfo test_process_memory test_serve_control test_host_session_pool test_hosted_sessions test_compute_lease test_content_filter \
+		test_meminfo test_process_memory test_serve_control test_host_session_pool test_hosted_sessions test_compute_broker test_compute_lease test_content_filter \
 		test_scheduler test_run_gate test_inventory test_home test_chat_ui test_weight_cache test_planner_io \
 		CFLAGS='$(CFLAGS) -Werror'
 
@@ -615,6 +620,7 @@ test-sanitize:
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_meminfo.c $(MACHINE_SRC) -o build/sanitize/test_meminfo
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_process_memory.c -o build/sanitize/test_process_memory
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_serve_control.c -o build/sanitize/test_serve_control
+	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_compute_broker.c -o build/sanitize/test_compute_broker
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_compute_lease.c $(MACHINE_SRC) -o build/sanitize/test_compute_lease
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_content_filter.c -o build/sanitize/test_content_filter
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_scheduler.c -o build/sanitize/test_scheduler
@@ -626,6 +632,7 @@ test-sanitize:
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_meminfo
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_process_memory
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_serve_control
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_compute_broker
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_compute_lease
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_content_filter
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_scheduler
@@ -930,6 +937,8 @@ test: all test_weight_cache test_key_rotation test_hedge test_local_fallback tes
 	./test_serve_control
 	./test_host_session_pool
 	./test_compute_lease
+	./test_compute_broker
+	./test_chat_ui service-codec
 	./test_content_filter
 	./test_scheduler
 	./test_run_gate
@@ -981,6 +990,7 @@ clean:
 	      test_verify_failover test_segment_v2 test_segment_discovery test_sampling \
 	      test_swarm_detail test_relay_rate test_machine test_meminfo test_process_memory test_serve_control test_host_session_pool test_hosted_sessions \
 	      test_compute_lease test_content_filter test_scheduler test_run_gate \
+	      test_compute_broker \
 	      test_segment_v2_tsan tracker_tsan \
 	      segment_node segment_chat test_backend_routes test_tcp_latency segment_node_asan segment_chat_asan \
 	      segment_node_tsan segment_chat_tsan \
