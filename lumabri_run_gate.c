@@ -1,5 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
-#ifdef __APPLE__
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
 #define _DARWIN_C_SOURCE
 #endif
 #include "lumabri_run_gate.h"
