@@ -592,6 +592,8 @@ jobs:
         if: failure()
         with:
           name: household-logs-${{ matrix.runner }}-${{ matrix.openmp }}
-          path: ${{ runner.temp }}/lumabri-home-flow-*/**/*.log
+          path: |
+            ${{ runner.temp }}/lumabri-home-flow-*/**/*.log
+            ${{ runner.temp }}/lmb-service-flow-*/**/*.log
           include-hidden-files: true
           retention-days: 3
