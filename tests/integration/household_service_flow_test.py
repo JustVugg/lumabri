@@ -328,11 +328,12 @@ def main():
             preview_args = [str(runtime / "lumabri"), "models", "--models-dir", str(combined),
                             "--tracker", tracker, "--context", "128", "--sessions", "2", "--json"]
             observed = []
-            def workload_ready():
+            def workload_ready(expected=1):
                 result = subprocess.run(preview_args, env=env("chatter"), capture_output=True, text=True, timeout=30)
                 assert result.returncode == 0, result.stderr
                 observed[:] = [n for n in json.loads(result.stdout)["nodes"] if n["workload"] is not None]
-                return len(observed) == 2 and all(n["workload"]["allocations"] == 1 for n in observed)
+                return len(observed) == 2 and all(n["workload"]["allocations"] == expected and
+                    n["workload"]["reserved_bytes"] > 0 for n in observed)
             until(workload_ready, "leased workload inventory did not show the retained model", 30)
             for n in observed:
                 assert n["workload"]["reserved_bytes"] > 0 and n["workload"]["compute_policy"] == "local_fifo"
@@ -383,6 +384,13 @@ def main():
                     env=env("chatter"), text=True, capture_output=True, timeout=20)
                 assert checked.returncode == 0, checked.stderr
                 return checked.stdout.strip()
+            # The first changed report can still describe a pending offer:
+            # both worker reports must contain the committed reservations
+            # before expecting the next turn to remain on one workload key.
+            preview_args = preview_args[:preview_args.index("--node")]
+            until(lambda: workload_ready(2) and sorted(n["workload"]["reserved_bytes"] for n in observed) ==
+                  sorted(s["reserved_total_bytes"] for s in second_live.values()),
+                  "both committed models have not reached the leased inventory", 30)
             until(lambda: first_calibration_state() == "stale", "adding second model retained first model speed", 30)
             parallel = Terminal("chatter", ["resident-chat", str(first_plan), tracker], program="test_chat_ui")
             until(lambda: parallel.has("receives the text"), "first model could not open a parallel conversation")
@@ -393,7 +401,7 @@ def main():
             assert all(service(name)["donor"]["compute"]["grants"] > prior_grants[name] for name in ("a", "b")), "mixed model turns bypassed node compute admission"
             parallel.send("/quit\n")
             until(lambda: parallel.p.poll() is not None, "parallel first-model chat did not close")
-            assert first_calibration_state() == "current", "new mixed-workload observation not bound to current models"
+            assert first_calibration_state() == "current", ("new mixed-workload observation not bound to current models", parallel.text[-4000:])
             assert assert_stage_record(records[0]) == 1, "changed workload inherited previous observation count"
             # The authenticated release names the first allocation, not the
             # keeper's currently selected second model.

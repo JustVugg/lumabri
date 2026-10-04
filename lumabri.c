@@ -82,6 +82,7 @@
 static LmbCalibration *g_recording_calibration;
 static const char *g_calibration_directory;
 static int catalog_workload_capture(const char *tracker, LmbCalKey *key, char *why, size_t cap);
+static int home_service_foreground(void);
 
 /* ---- terminal ----------------------------------------------------------- */
 
@@ -5587,7 +5588,11 @@ static int catalog_workload_capture(const char *tracker, LmbCalKey *key, char *w
                 if (strcmp(identity, key->node_id[j])) continue;
                 key->workload[j] = reports[i].workload;
                 key->workload[j].active = key->workload[j].queued = 0;
-                if (key->workload[j].known && !key->workload[j].allocations) pending = 1;
+                uint64_t required = g_execution_view && g_execution_view->count == key->nodes ?
+                    g_execution_view->nodes[j].reserved_bytes : 1;
+                if ((!key->workload[j].known && !home_service_foreground()) ||
+                    (key->workload[j].known && (!key->workload[j].allocations ||
+                     key->workload[j].reserved_bytes < required))) pending = 1;
                 break;
             }
         }
