@@ -41,8 +41,8 @@ Missing or stale sidecars withhold the measurement; they do not weaken the
 signed model checks or prevent an otherwise valid chat.
 
 Upgrade the tracker, requester and donors together: machine inventory is now
-version 4. Version 3 reports remain readable, but their missing load/cost
-fields are unknown. Older versions are rejected explicitly rather than treated
+version 5. Version 3 and 4 reports remain readable, but missing load/cost or
+workload fields stay unknown. Older versions are rejected explicitly rather than treated
 as a complete calibration identity. The Hosted greeting has optional numeric
 ABI metadata. An older host without metadata can still serve chat,
 but cannot produce these records.
@@ -98,8 +98,10 @@ and `LUMABRI_ESTIMATED_POWER_WATTS` (up to three fractional digits). Start the
 sharing service with them set to advertise them. Missing or invalid values
 stay unknown; explicit zero cost stays a declared zero. These are whole-machine
 prices and estimated power, not billing receipts, incremental inference costs,
-live power readings or measured energy savings. No cost-based scheduling is
-enabled by publishing them.
+live power readings or measured energy savings. Publishing them alone enables
+no cost-based execution changes. The read-only joint-model preview compares
+declared prices only when all eligible machines use one known currency; its
+whole-machine attribution is not an invoice or evidence of a saving.
 
 The real Edge probes each direct Segment connection once when opening a session:
 three 16-byte echoes measure application RTT (median and maximum), followed by

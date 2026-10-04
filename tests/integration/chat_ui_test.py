@@ -18,6 +18,14 @@ import unicodedata
 
 ROOT = Path(__file__).resolve().parents[2]
 subprocess.run(["./test_chat_ui", "model-pool"], cwd=ROOT, check=True)
+joint = json.loads(subprocess.check_output(["./test_chat_ui", "portfolio-preview"], cwd=ROOT, text=True))
+assert joint["state"] == "joint_resident_candidate" and joint["requires_approval"]
+assert joint["performance_validated"] is False and joint["decode_tok_s"] is None
+assert joint["declared_machine_cost"] == {"micro_units_per_hour": 100, "currency": "EUR"}
+assert len(joint["models"]) == 2 and joint["nodes"][0]["added_allocations"] == 2
+for node, facts in enumerate(joint["nodes"]):
+    assert facts["added_reserved_bytes"] <= facts["offered_ram_bytes"]
+    assert facts["added_reserved_bytes"] == sum(s["reserved_bytes"] for m in joint["models"] for s in m["slices"] if s["node"] == node)
 
 evidence = json.loads(subprocess.check_output(["./test_chat_ui", "planner-evidence"], cwd=ROOT, text=True))
 measured, stale = evidence["models"]

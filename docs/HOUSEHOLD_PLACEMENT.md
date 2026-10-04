@@ -68,3 +68,44 @@ Enter during invalidated-plan refresh cannot approve an unseen plan.
 These are loopback checks. Physical LAN speed and concurrent local/remote MoE
 work in an approved Hybrid allocation remain separate gates. Timing-guided
 Segment cuts do not themselves parallelize a single token's layers.
+
+## Joint resident-model preview
+
+The planner can now evaluate several new models against the **same** remaining
+RAM and allocation slots. `models --json` includes leased `workload` facts:
+existing allocations, reserved bytes, local compute policy, active/waiting
+kernels and a canonical allocation-set fingerprint. Unknown workload is `null`,
+not an idle machine. Selecting another model tab does not change the fingerprint;
+adding or releasing an allocation does. It contains no conversation text.
+
+Advanced read-only preview (repeat model names and signed node identities):
+
+```sh
+lumabri models --tracker HOST:PORT --models-dir CHECKPOINTS --json \
+  --node NODE_ID --node ANOTHER_NODE_ID \
+  --together MODEL_NAME --together OTHER_MODEL_NAME --sessions 2
+```
+
+No computer is selected implicitly. Only managed donors with known local FIFO
+admission are candidates. Unlike the single-model all-selected flow above,
+these explicit identities define an authorized candidate pool; the preview
+reports which machines each model would actually use. Up to eight models share a search over single-node
+placements and descending-RAM prefixes. It independently validates every range,
+then sums resident process budgets across models and checks the four-allocation
+limit including existing allocations. Offered RAM is already net of existing
+reservations: they are not subtracted twice. This path is CPU Segment only;
+inventoried VRAM never becomes usable capacity without an adapter contract.
+
+Where all eligible node prices are known and use one currency, candidate plans
+minimize declared whole-machine hourly cost, counted once per used machine.
+Otherwise the objective is resident feasibility with fewer machines, not a
+fabricated zero-cost ranking. Search is limited to 20,000 states and reports
+when that bound is reached. `no_candidate` means no plan in this candidate
+family was found, not a proof that every possible placement is impossible.
+
+This is **preview only**: no allocation, eviction, migration, approval or server
+purchase occurs. Plans expose inventory/runtime/allocation-set identities for
+revalidation. They are not executable approvals. They have no predicted tok/s
+or latency guarantee. Mixed-workload calibration, requirement-aware placement,
+transition costs/hysteresis and applying a complete joint plan remain distinct
+work before this becomes an automatic global scheduler.

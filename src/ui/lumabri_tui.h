@@ -18,6 +18,7 @@
 #include "lumabri_machine.h"
 #include "src/planner/lumabri_catalogue_advice.h"
 #include "src/planner/lumabri_resource_facts.h"
+#include "src/planner/lumabri_workload_facts.h"
 
 #define LMB_TUI_MAX_MODELS 64
 
@@ -45,6 +46,7 @@ typedef struct LmbTuiState {
     LmbClusterNode nodes[LMB_CLUSTER_MAX_NODES];
     LmbMachineProfile profiles[LMB_CLUSTER_MAX_NODES];
     LmbResourceFacts facts[LMB_CLUSTER_MAX_NODES];
+    LmbWorkloadFacts workloads[LMB_CLUSTER_MAX_NODES];
     char identities[LMB_CLUSTER_MAX_NODES][65];
     char runtime_ids[LMB_CLUSTER_MAX_NODES][65];
     uint32_t ages_ms[LMB_CLUSTER_MAX_NODES];

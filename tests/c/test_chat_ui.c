@@ -5,6 +5,27 @@
 #include <assert.h>
 
 int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "portfolio-preview")) {
+        LmbTuiState *st = calloc(1, sizeof *st); assert(st);
+        st->nnodes = st->nmodels = 2; st->inventory_ok = 1; st->context = 128; st->sessions = 2;
+        for (unsigned i = 0; i < 2; i++) {
+            LmbTuiModel *m = &st->models[i];
+            snprintf(m->name, sizeof m->name, "model-%u", i);
+            m->weights_present = m->checkpoint_inventory_ok = 1; m->checkpoint_bytes = 1000000;
+            strcpy(m->shape.model_type, "olmoe"); strcpy(m->shape.segment_id, "olmoe");
+            m->shape.layers = 4; m->shape.hidden = 64; m->shape.vocab = 128; m->shape.max_context = 4096;
+            m->shape.memory_contract = m->shape.sizing_verified = 1; m->shape.edge_resident_bytes = 8000000;
+            for (unsigned layer = 0; layer < 4; layer++) m->shape.memory[layer].resident_bytes = 100000000;
+            snprintf(st->identities[i], sizeof st->identities[i], "node-%u", i);
+            strcpy(st->selected_nodes[i], st->identities[i]);
+            strcpy(st->nodes[i].addr, "test-only"); st->nodes[i].threads = 2;
+            st->nodes[i].ram_budget_bytes = 3000000000;
+            st->workloads[i] = (LmbWorkloadFacts){.known=1,.compute_policy=LMB_COMPUTE_LOCAL_FIFO,.allocation_set={1}};
+            st->facts[i] = (LmbResourceFacts){.known=LMB_FACT_PRICE,.price_micro_per_hour=(i+1)*100,.currency="EUR"};
+        }
+        const char *names[] = {"model-0", "model-1"};
+        int rc = catalog_portfolio_json(st, names, 2); free(st); return rc;
+    }
     if (argc == 2 && !strcmp(argv[1], "service-codec")) {
         HomeServiceSnapshot input = {.state=HOME_SVC_RUNNING, .ram=1000,
             .model_count=2, .reserved_total=900, .compute_enabled=1,
@@ -15,13 +36,15 @@ int main(int argc, char **argv) {
         assert(!home_service_unpack(b.p, b.len, &output));
         assert(output.compute_active == 1 && output.compute_queued == 3 && output.compute_grants == 1234);
         for (size_t n = 0; n < b.len; n++) assert(home_service_unpack(b.p, n, &output));
+        lmb_put32(b.p, 3);
+        assert(!home_service_unpack(b.p, b.len-32, &output) && output.compute_grants == 1234);
         lmb_put32(b.p, 2); /* v2 had allocations but no compute observation */
-        assert(!home_service_unpack(b.p, b.len-20, &output));
+        assert(!home_service_unpack(b.p, b.len-52, &output));
         assert(output.model_count == 2 && output.reserved_total == 900 && !output.compute_enabled);
         lmb_put32(b.p, 1);
-        assert(!home_service_unpack(b.p, b.len-32, &output));
+        assert(!home_service_unpack(b.p, b.len-64, &output));
         assert(!output.model_count && !output.compute_enabled);
-        lmb_put32(b.p, 4); assert(home_service_unpack(b.p, b.len, &output));
+        lmb_put32(b.p, 5); assert(home_service_unpack(b.p, b.len, &output));
         free(b.p); b = (LmbBuf){0};
         input.compute_active = 2; assert(home_service_pack(&b, &input));
         input.compute_active = 1; input.compute_queued = 33; assert(home_service_pack(&b, &input));
@@ -40,7 +63,7 @@ int main(int argc, char **argv) {
         assert(!home_service_save(&service)); assert(!stat(service.journal, &after));
         assert(before.st_ino == after.st_ino); /* no replace/fsync for kernel counters */
         free(service.last); assert(!unlink(service.journal)); assert(!rmdir(directory));
-        puts("SERVICE CODEC: PASS (v1/v2/v3, strict bounds, counters stay out of durable state)"); return 0;
+        puts("SERVICE CODEC: PASS (v1/v2/v3/v4, strict bounds, counters stay out of durable state)"); return 0;
     }
     if (argc == 2 && !strcmp(argv[1], "model-pool")) {
         HomeDonor parked[3] = {0}, d = {.parked = parked, .park_capacity = 3, .pool_budget = 1000, .offer_revision = 3};
@@ -50,6 +73,14 @@ int main(int argc, char **argv) {
         home_donor_swap(&d, 0);
         assert(!d.transaction.reservation_held && d.offer_revision == 4 && home_donor_reserved(&d) == 400);
         d.transaction.reservation_held = 1; d.transaction.offer.ram_bytes = 300;
+        d.transaction.offer.id[0] = 2; parked[0].transaction.offer.id[0] = 1;
+        HomeService first = {0}, second = {0};
+        home_service_donor_snapshot(&first, &d);
+        home_donor_swap(&d, 0); home_service_donor_snapshot(&second, &d);
+        assert(!memcmp(first.snapshot.allocation_set, second.snapshot.allocation_set, 32));
+        home_donor_swap(&d, 0); d.transaction.offer.id[0]++;
+        home_service_donor_snapshot(&second, &d);
+        assert(memcmp(first.snapshot.allocation_set, second.snapshot.allocation_set, 32));
         assert(home_donor_room(&d, 400) == 100); /* reserve the loading allocation not yet in RSS */
         d.retained = 1; assert(home_donor_room(&d, 400) == 300);
         parked[1].transaction.reservation_held = 1; parked[1].transaction.offer.ram_bytes = 300;

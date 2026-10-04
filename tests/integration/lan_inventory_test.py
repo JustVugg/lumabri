@@ -95,6 +95,7 @@ def main():
                 assert node["ram_budget_bytes"] <= node["ram_available_bytes"]
                 assert not node["segment_gpu_verified"]
                 assert node["runtime_state"] == "unknown"  # inventory workers are not loaded engines
+                assert node["workload"] is None  # unknown, not zero occupied allocations
                 assert node["resource_facts"]["load_one"] is not None
                 assert node["resource_facts"]["energy_joules"] is None
                 assert node["resource_facts"]["link_to_edge"] is None

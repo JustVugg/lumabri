@@ -230,6 +230,32 @@ def main():
             config["_lumabri_test_variant"] = "independent-second-checkpoint"
             (second_model / "config.json").write_text(json.dumps(config))
             a, b = sharing("a"), sharing("b")
+            # Joint preview must not allocate memory or replay approvals.
+            combined = tmp / "joint-catalogue"; combined.mkdir()
+            (combined / configs[0].parent.name).symlink_to(configs[0].parent.resolve(), target_is_directory=True)
+            (combined / second_model.name).symlink_to(second_model, target_is_directory=True)
+            preview_args = [str(runtime / "lumabri"), "models", "--models-dir", str(combined),
+                            "--tracker", tracker, "--context", "128", "--sessions", "2", "--json"]
+            observed = []
+            def workload_ready():
+                result = subprocess.run(preview_args, env=env("chatter"), capture_output=True, text=True, timeout=30)
+                assert result.returncode == 0, result.stderr
+                observed[:] = [n for n in json.loads(result.stdout)["nodes"] if n["workload"] is not None]
+                return len(observed) == 2 and all(n["workload"]["allocations"] == 1 for n in observed)
+            until(workload_ready, "leased workload inventory did not show the retained model", 30)
+            for n in observed:
+                assert n["workload"]["reserved_bytes"] > 0 and n["workload"]["compute_policy"] == "local_fifo"
+                assert len(n["workload"]["allocation_set"]) == 64
+                preview_args.extend(["--node", n["identity"]])
+            preview_args.extend(["--together", configs[0].parent.name, "--together", second_model.name])
+            preview = subprocess.run(preview_args, env=env("chatter"), capture_output=True, text=True, timeout=30)
+            assert preview.returncode == 0, (preview.stderr, preview.stdout)
+            joint = json.loads(preview.stdout); (tmp / "joint-preview.json").write_text(preview.stdout)
+            assert joint["state"] == "joint_resident_candidate" and joint["requires_approval"]
+            assert not joint["performance_validated"] and joint["decode_tok_s"] is None
+            assert len(joint["models"]) == 2
+            assert all(n["added_reserved_bytes"] <= n["offered_ram_bytes"] for n in joint["nodes"])
+            assert all(service(name)["donor"]["model_count"] == 1 for name in ("a", "b")), "preview changed allocations"
             another = Terminal("chatter", ["models", "--models-dir", str(second_models), "--tracker", tracker,
                                             "--context", "128", "--max-new", "8"])
             until(lambda: "3 computers visible" in current_frame(another), "second-model inventory missing")

@@ -5,8 +5,9 @@
 #include "lumabri_proto.h"
 #include "lumabri_machine.h"
 #include "src/planner/lumabri_resource_facts.h"
+#include "src/planner/lumabri_workload_facts.h"
 
-#define LMB_INVENTORY_VERSION 4u
+#define LMB_INVENTORY_VERSION 5u
 #define LMB_INVENTORY_MAX 32u
 #define LMB_INVENTORY_TTL_MS 15000u
 #define LMB_INVENTORY_HEARTBEAT_MS 5000u
@@ -20,6 +21,7 @@ typedef struct {
     char runtime_id[65];        /* executable hashes + active donor epoch; empty = unknown */
     uint32_t runtime_threads;   /* queried installed engine, not detected CPU cores */
     LmbResourceFacts facts;
+    LmbWorkloadFacts workload;
 } LmbMachineReport;
 
 /* Lengths and control characters are checked before any field reaches a
@@ -60,7 +62,11 @@ static LMB_MAYBE_UNUSED int lmb_inventory_pack(LmbBuf *b,
            lmb_buf_u32(b, r->facts.known) || lmb_buf_u32(b, r->facts.load_milli) ||
            lmb_buf_u64(b, r->facts.price_micro_per_hour) ||
            lmb_buf_u32(b, r->facts.power_milliwatts) ||
-           lmb_buf_bytes(b, r->facts.currency, 4);
+           lmb_buf_bytes(b, r->facts.currency, 4) ||
+           lmb_buf_u32(b, r->workload.known) || lmb_buf_u32(b, r->workload.allocations) ||
+           lmb_buf_u32(b, r->workload.compute_policy) || lmb_buf_u32(b, r->workload.active) ||
+           lmb_buf_u32(b, r->workload.queued) || lmb_buf_u64(b, r->workload.reserved_bytes) ||
+           lmb_buf_bytes(b, r->workload.allocation_set, 32);
 }
 
 static LMB_MAYBE_UNUSED int lmb_inventory_unpack(LmbCur *c,
@@ -68,7 +74,7 @@ static LMB_MAYBE_UNUSED int lmb_inventory_unpack(LmbCur *c,
     memset(r, 0, sizeof *r);
     LmbMachineProfile *m = &r->machine;
     uint32_t version;
-    if (lmb_cur_u32(c, &version) || (version != 3 && version != LMB_INVENTORY_VERSION) ||
+    if (lmb_cur_u32(c, &version) || version < 3 || version > LMB_INVENTORY_VERSION ||
         c->len - c->off < sizeof r->identity) return -1;
     memcpy(r->identity, c->p + c->off, sizeof r->identity);
     c->off += sizeof r->identity;
@@ -95,6 +101,15 @@ static LMB_MAYBE_UNUSED int lmb_inventory_unpack(LmbCur *c,
             lmb_cur_u32(c, &r->facts.power_milliwatts) || c->off > c->len || c->len - c->off < 4) return -1;
         memcpy(r->facts.currency, c->p + c->off, 4); c->off += 4;
         if (!lmb_resource_facts_valid(&r->facts)) return -1;
+    }
+    if (version >= 5) {
+        LmbWorkloadFacts *w = &r->workload;
+        if (lmb_cur_u32(c, &w->known) || lmb_cur_u32(c, &w->allocations) ||
+            lmb_cur_u32(c, &w->compute_policy) || lmb_cur_u32(c, &w->active) ||
+            lmb_cur_u32(c, &w->queued) || lmb_cur_u64(c, &w->reserved_bytes) ||
+            c->off > c->len || c->len-c->off < 32) return -1;
+        memcpy(w->allocation_set, c->p+c->off, 32); c->off += 32;
+        if (!lmb_workload_valid(w, m->ram_total_bytes)) return -1;
     }
     m->load_one = r->facts.known & LMB_FACT_LOAD ? r->facts.load_milli / 1000.0 : -1;
     if (r->runtime_threads > 256 || (!!r->runtime_threads != !!r->runtime_id[0])) return -1;
