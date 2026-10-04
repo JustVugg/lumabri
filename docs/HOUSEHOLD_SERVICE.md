@@ -42,6 +42,11 @@ RAM or resume models automatically. No system-wide login service is installed.
   `s` stops the local sharing service. Pending offers remain declined by default.
 - **Preparation:** Esc detaches; `c` cancels the operation and releases its
   incomplete allocations. Closing the window is not cancellation.
+- **Explore models:** Space selects several models; `/prepare` reviews their
+  joint placement before requesting separate donor approvals. Models are
+  prepared sequentially. A rejection or cancellation keeps already-ready
+  models loaded and reports the completed count. See
+  [joint preparation](HOUSEHOLD_PLACEMENT.md#prepare-selected-models-from-the-tui).
 - **Resident models:** lists remembered plans for the current household.
   `r` asks every pinned donor about the exact allocation/root. An unavailable
   donor leaves the plan unconfirmed; no automatic download or replacement runs.
@@ -50,6 +55,13 @@ RAM or resume models automatically. No system-wide login service is installed.
   Partial release failures stay visible rather than being reported as success.
 - **/service:** shows status and can explicitly stop all local keepers.
 - CLI: `lumabri service status --json`, `start`, `restart`, `stop`.
+
+JSON `state`/`live` describe keeper reachability; `operation_state` reports the
+validated live or journalled operation state (`running`, `done`, `failed`,
+`stopped`, or `unknown` without a valid record). A nonresponding keeper is not
+proof that preparation completed. Invalid records are never partially displayed.
+The resident-model view refreshes saved plans while background work finishes;
+saved status still requires an authenticated readiness check before use.
 
 The resident library stores no conversation text, credentials or weights.
 The background donor keeper can retain up to four independently approved models

@@ -5,12 +5,19 @@
 #include <assert.h>
 
 int main(int argc, char **argv) {
-    if (argc == 2 && !strcmp(argv[1], "portfolio-preview")) {
+    if (argc == 2 && !strcmp(argv[1], "cancel-prepare")) {
+        HomeServiceSnapshot current, reply;
+        assert(!home_service_query("prepare", HOME_SVC_STATUS, NULL, &current));
+        return home_service_query("prepare", HOME_SVC_CANCEL, &current, &reply) != 0;
+    }
+    if (argc == 2 && (!strcmp(argv[1], "portfolio-preview") || !strcmp(argv[1], "joint-guards"))) {
         LmbTuiState *st = calloc(1, sizeof *st); assert(st);
         st->nnodes = st->nmodels = 2; st->inventory_ok = 1; st->context = 128; st->sessions = 2;
         for (unsigned i = 0; i < 2; i++) {
             LmbTuiModel *m = &st->models[i];
             snprintf(m->name, sizeof m->name, "model-%u", i);
+            snprintf(m->dir, sizeof m->dir, "/fixture/model-%u", i);
+            strcpy(st->selected_models[i], m->dir);
             m->weights_present = m->checkpoint_inventory_ok = 1; m->checkpoint_bytes = 1000000;
             strcpy(m->shape.model_type, "olmoe"); strcpy(m->shape.segment_id, "olmoe");
             m->shape.layers = 4; m->shape.hidden = 64; m->shape.vocab = 128; m->shape.max_context = 4096;
@@ -18,12 +25,50 @@ int main(int argc, char **argv) {
             for (unsigned layer = 0; layer < 4; layer++) m->shape.memory[layer].resident_bytes = 100000000;
             snprintf(st->identities[i], sizeof st->identities[i], "node-%u", i);
             strcpy(st->selected_nodes[i], st->identities[i]);
+            strcpy(st->runtime_ids[i], "fixture-runtime");
             strcpy(st->nodes[i].addr, "test-only"); st->nodes[i].threads = 2;
             st->nodes[i].ram_budget_bytes = 3000000000;
             st->workloads[i] = (LmbWorkloadFacts){.known=1,.compute_policy=LMB_COMPUTE_LOCAL_FIFO,.allocation_set={1}};
             st->facts[i] = (LmbResourceFacts){.known=LMB_FACT_PRICE,.price_micro_per_hour=(i+1)*100,.currency="EUR"};
         }
         const char *names[] = {"model-0", "model-1"};
+        if (!strcmp(argv[1], "joint-guards")) {
+            catalog_joint_refresh(st); assert(st->joint.ready && st->joint.plan.model_count == 2);
+            assert(lmb_tui_model_enabled(st, 0) && lmb_tui_model_enabled(st, 1));
+            LmbTuiState *now = malloc(sizeof *now); assert(now); memcpy(now, st, sizeof *now);
+            uint32_t map[LMB_CLUSTER_MAX_NODES]; char why[256];
+            assert(!home_joint_validate(st, now, 0, map, why, sizeof why));
+            now->runtime_ids[0][0] = 0; assert(home_joint_validate(st, now, 0, map, why, sizeof why));
+            memcpy(now, st, sizeof *now); now->workloads[0].known = 0;
+            assert(home_joint_validate(st, now, 0, map, why, sizeof why));
+            memcpy(now, st, sizeof *now); now->workloads[0].allocation_set[1] = 1;
+            assert(home_joint_validate(st, now, 0, map, why, sizeof why));
+            /* The first model changes allocation state, not the reviewed
+             * remaining ranges. Refresh facts without inventing a new plan. */
+            now->workloads[0].allocations = 1;
+            assert(!home_joint_validate(st, now, 1, map, why, sizeof why));
+            now->nodes[0].ram_budget_bytes = 1;
+            assert(home_joint_validate(st, now, 1, map, why, sizeof why));
+            memcpy(now, st, sizeof *now); now->workloads[0].allocations = 4;
+            assert(home_joint_validate(st, now, 1, map, why, sizeof why));
+            memcpy(now, st, sizeof *now); strcpy(now->identities[0], "different-peer");
+            assert(home_joint_validate(st, now, 0, map, why, sizeof why));
+            memcpy(now, st, sizeof *now); now->nodes[0].threads++;
+            assert(home_joint_validate(st, now, 0, map, why, sizeof why));
+            memcpy(now, st, sizeof *now);
+            assert(home_joint_prepare_next(st, now, 0, why, sizeof why) == 0);
+            assert(lmb_tui_node_enabled(now, 0) && !lmb_tui_node_enabled(now, 1));
+            assert(now->models[0].plan.edge_node == 0 && now->models[0].planned);
+            memcpy(now, st, sizeof *now);
+            strcpy(now->identities[0], "unused-node"); strcpy(now->identities[1], st->identities[0]);
+            assert(home_joint_prepare_next(st, now, 0, why, sizeof why) == 0);
+            assert(now->models[0].plan.edge_node == 1 && now->models[0].plan.slices[0].node == 1);
+            assert(lmb_tui_node_enabled(now, 1) && !lmb_tui_node_enabled(now, 0));
+            lmb_tui_invalidate_plans(st); assert(!st->joint.ready && lmb_tui_model_enabled(st, 0));
+            strcpy(st->selected_models[0], "/missing"); catalog_joint_refresh(st);
+            assert(!st->joint.ready && strstr(st->joint.reason, "disappeared"));
+            free(now); free(st); puts("JOINT GUARDS: PASS"); return 0;
+        }
         int rc = catalog_portfolio_json(st, names, 2); free(st); return rc;
     }
     if (argc == 2 && !strcmp(argv[1], "service-codec")) {
@@ -32,6 +77,9 @@ int main(int argc, char **argv) {
             .compute_active=1, .compute_queued=3, .compute_grants=1234};
         strcpy(input.role, "donor");
         LmbBuf b = {0}; HomeServiceSnapshot output;
+        strcpy(input.detail, "invalid\033[2J"); assert(home_service_pack(&b, &input));
+        strcpy(input.detail, "invalid · delimiter"); assert(home_service_pack(&b, &input));
+        input.detail[0] = 0;
         assert(!home_service_pack(&b, &input));
         assert(!home_service_unpack(b.p, b.len, &output));
         assert(output.compute_active == 1 && output.compute_queued == 3 && output.compute_grants == 1234);

@@ -485,6 +485,12 @@ static double refresh_clock(void) {
     return t.tv_sec + t.tv_nsec / 1e9;
 }
 
+static int joint_rows(const LmbTuiState *st) {
+    int rows = 0;
+    for (uint32_t i = 0; i < st->joint.plan.model_count; i++) rows += 1+(int)st->joint.plan.plans[i].nslices;
+    return rows;
+}
+
 /* Live catalogue uses the approved open canvas; text snapshots retain their
  * stable diagnostic format. Both read the same planner state. */
 static void draw_workspace(const LmbTuiState *st, int tab, int sel, int detail,
@@ -500,7 +506,35 @@ static void draw_workspace(const LmbTuiState *st, int tab, int sel, int detail,
     ui_text(7, 5, UI_MUTED, "Models     /     Computers     ·     Tab switches views");
     const char *status = st->inventory_ok ? "Donors must approve the allocation before anything is loaded." :
         "TRACKER OFFLINE · No requests can start; check the household address.";
-    if (detail == 2 && sel < st->nmodels) {
+    if (detail == 3) {
+        ui_text(9, 5, UI_SAND, "Prepare selected models together");
+        ui_text(11, 5, UI_MUTED, st->joint.reason[0] ? st->joint.reason : "Choose models with Space, then review the joint plan.");
+        const LmbPortfolioPlan *joint = &st->joint.plan;
+        int rows = ui_h-22; if (rows < 1) rows = 1;
+        int top = sel >= rows ? sel-rows+1 : 0;
+        int line = 0;
+        for (uint32_t m = 0; m < joint->model_count; m++) {
+            uint64_t memory = 0;
+            for (uint32_t i = 0; i < joint->plans[m].nslices; i++) memory += joint->plans[m].slices[i].bytes_resident;
+            uint32_t model = st->joint.model_indices[m];
+            if (line >= top && line < top+rows)
+                ui_printf(13+line-top, 5, line == sel ? UI_SAND : UI_TEXT, "%s · %u computers · %.2f GB reserved",
+                    st->models[model].name, joint->plans[m].nslices, memory/1e9);
+            line++;
+            for (uint32_t i = 0; i < joint->plans[m].nslices; i++, line++) {
+                const LmbSlice *slice = &joint->plans[m].slices[i];
+                uint32_t node = st->joint.node_indices[slice->node];
+                if (line >= top && line < top+rows)
+                    ui_printf(13+line-top, 7, line == sel ? UI_SAND : UI_MUTED, "%s%s · layers %u–%u · %.2f GB",
+                        st->nodes[node].name, slice->node == joint->plans[m].edge_node ? " (chat host)" : "",
+                        slice->layer_begin, slice->layer_end-1, slice->bytes_resident/1e9);
+            }
+        }
+        ui_text(ui_h-8, 5, UI_MUTED, "One model at a time. Every donor must approve each allocation.");
+        ui_text(ui_h-7, 5, UI_MUTED, "Completed models remain resident if a later preparation fails.");
+        ui_text(ui_h-6, 5, UI_SAND, st->joint.ready ? "Enter prepares this joint plan. Speed is not yet calibrated." :
+            "No preparation can start until a complete resident plan is available.");
+    } else if (detail == 2 && sel < st->nmodels) {
         ui_text(9, 5, UI_SAND, "Quick calibration");
         ui_printf(11, 5, UI_TEXT, "%s · the selected, approved Segment plan", st->models[sel].name);
         ui_text(14, 5, UI_TEXT, "One short test: at most 8 generated tokens, 20 seconds of inference.");
@@ -581,16 +615,22 @@ static void draw_workspace(const LmbTuiState *st, int tab, int sel, int detail,
             const char *advice = lmb_advice_text(st->models[i].advice_flags);
             snprintf(description, sizeof description, "%s · %s · %u layers%s%s", state_word(&st->models[i]), speed,
                 st->models[i].shape.layers, *advice ? " · " : "", advice);
-            ui_item(10 + (i - top) * 3, i == sel, st->models[i].name, description);
+            char title[96];
+            snprintf(title, sizeof title, "[%s] %s", lmb_tui_model_enabled(st, i) ? "✓" : " ", st->models[i].name);
+            ui_item(10 + (i - top) * 3, i == sel, title, description);
         }
-        ui_text(ui_h - 6, 5, UI_MUTED, "A plan before a download. Speed appears only with a matching calibration.");
+        ui_text(ui_h - 6, 5, UI_MUTED, "Space selects up to 8 models. /prepare reviews their combined plan.");
     }
     if (palette) {
         ui_begin("actions");
-        static const char *names[] = {"/models", "/computers", "/refresh", "/request", "/calibrate", "/back"};
+        static const char *names[] = {"/models", "/computers", "/refresh", "/request", "/calibrate", "/prepare", "/back"};
         static const char *helps[] = {"Browse this model folder", "Choose participating donors", "Refresh inventory and plans",
-            "Review the selected model before requesting chat", "Review an optional 8-token measurement", "Return to the workspace"};
-        for (int i = 0; i < 6; i++) ui_item(6 + i * 3, action_sel == i, names[i], helps[i]);
+            "Review the selected model before requesting chat", "Review an optional 8-token measurement",
+            "Review selected models as one resident plan", "Return to the workspace"};
+        int rows = (ui_h-11)/3; if (rows < 1) rows = 1;
+        int first = action_sel >= rows ? action_sel-rows+1 : 0;
+        for (int i = first; i < 7 && i < first+rows; i++)
+            ui_item(6 + (i-first)*3, action_sel == i, names[i], helps[i]);
     }
     ui_footer(status, "↑ ↓ move   Enter select / confirm   Tab switch   / actions   Esc back");
     if (ui_w < 60 || ui_h < 28) {
@@ -670,11 +710,13 @@ int lmb_tui_run(LmbTuiState *st, int snapshot, const char *keys) {
         if (job.next && atomic_load(&job.done)) {
             pthread_join(job.thread, NULL);
             int selection_changed = memcmp(job.next->selected_nodes, st->selected_nodes,
-                                             sizeof st->selected_nodes) != 0;
+                                             sizeof st->selected_nodes) != 0 ||
+                memcmp(job.next->selected_models, st->selected_models, sizeof st->selected_models) != 0;
             memcpy(job.next->selected_nodes, st->selected_nodes, sizeof st->selected_nodes);
+            memcpy(job.next->selected_models, st->selected_models, sizeof st->selected_models);
             if (selection_changed) lmb_tui_invalidate_plans(job.next);
             char selected_dir[512] = "";
-            if (!tab && sel < st->nmodels)
+            if (detail != 3 && !tab && sel < st->nmodels)
                 snprintf(selected_dir, sizeof selected_dir, "%s", st->models[sel].dir);
             /* Swap complete snapshots on the UI thread. The renderer never
              * races a network update or observes half a plan. */
@@ -688,9 +730,9 @@ int lmb_tui_run(LmbTuiState *st, int snapshot, const char *keys) {
                     }
                 if (!found) detail = 0;
             }
-            int count = tab ? (int)st->nnodes : st->nmodels;
-            if (!count) { sel = top = detail = 0; }
-            else if (sel >= count) { sel = count - 1; detail = 0; }
+            int count = detail == 3 ? joint_rows(st) : tab ? (int)st->nnodes : st->nmodels;
+            if (!count) { sel = top = 0; if (detail != 3) detail = 0; }
+            else if (sel >= count) { sel = count - 1; if (detail != 3) detail = 0; }
             if (top > sel) top = sel;
             refreshed = selection_changed ? 0 : refresh_clock();
         }
@@ -706,18 +748,26 @@ int lmb_tui_run(LmbTuiState *st, int snapshot, const char *keys) {
         if (k == '/') { palette = !palette; action_sel = 0; continue; }
         if (palette) {
             if (k == 27) { palette = 0; continue; }
-            if (k == 'j') action_sel = (action_sel + 1) % 6;
-            if (k == 'k') action_sel = (action_sel + 5) % 6;
+            if (k == 'j') action_sel = (action_sel + 1) % 7;
+            if (k == 'k') action_sel = (action_sel + 6) % 7;
             if (k != '\r' && k != '\n') continue;
             palette = 0;
-            if (action_sel == 5) break;
+            if (action_sel == 6) break;
             if (action_sel < 2) { tab = action_sel; sel = top = detail = 0; continue; }
             if (action_sel == 2) { refresh_start(&job, st); continue; }
+            if (action_sel == 5) { detail = 3; tab = 0; sel = 0; refresh_start(&job, st); continue; }
             if (!tab && st->nmodels) detail = action_sel == 4 ? 2 : 1;
             continue;
         }
         if (k == 27 && !detail) break;
         if (ui_w < 60 || ui_h < 28) continue;
+        if (detail == 3) {
+            if (k == 27) { detail = 0; sel = 0; continue; }
+            if (k == 'j' && sel+1 < joint_rows(st)) sel++;
+            if (k == 'k' && sel) sel--;
+            if ((k == '\r' || k == '\n') && st->joint.ready) { action = LMB_TUI_REQUEST_JOINT; break; }
+            continue;
+        }
         if ((k == 'c' || (detail && (k == '\r' || k == '\n'))) && !tab && st->nmodels && st->tracker[0]) {
             /* A selection invalidates its previous plan. An early Enter is
              * not approval for whatever an in-flight refresh later chooses. */
@@ -733,6 +783,17 @@ int lmb_tui_run(LmbTuiState *st, int snapshot, const char *keys) {
         if (tab && (k == '\r' || k == '\n')) k = ' ';
         switch (k) {
         case ' ':
+            if (!tab && sel < st->nmodels) {
+                int removed = 0;
+                for (uint32_t i = 0; i < LMB_PORTFOLIO_MODELS; i++)
+                    if (!strcmp(st->selected_models[i], st->models[sel].dir)) {
+                        st->selected_models[i][0] = 0; removed = 1; break;
+                    }
+                if (!removed) for (uint32_t i = 0; i < LMB_PORTFOLIO_MODELS; i++) if (!st->selected_models[i][0]) {
+                    memmove(st->selected_models[i], st->models[sel].dir, sizeof st->selected_models[i]); break;
+                }
+                lmb_tui_invalidate_plans(st); refresh_start(&job, st);
+            }
             if (tab && sel < (int)st->nnodes && st->identities[sel][0] && st->nodes[sel].addr[0]) {
                 int removed = 0;
                 for (uint32_t i = 0; i < LMB_CLUSTER_MAX_NODES; i++)

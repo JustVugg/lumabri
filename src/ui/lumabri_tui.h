@@ -19,6 +19,7 @@
 #include "src/planner/lumabri_catalogue_advice.h"
 #include "src/planner/lumabri_resource_facts.h"
 #include "src/planner/lumabri_workload_facts.h"
+#include "src/planner/lumabri_portfolio.h"
 
 #define LMB_TUI_MAX_MODELS 64
 
@@ -57,6 +58,8 @@ typedef struct LmbTuiState {
     int quick_calibration;
     int initial_tab;
     char selected_nodes[LMB_CLUSTER_MAX_NODES][65];
+    char selected_models[LMB_PORTFOLIO_MODELS][512];
+    LmbPortfolioSnapshot joint;
     uint32_t context, sessions, max_new;
     char root[512];                 /* where the checkpoints were found */
     char disk[512];
@@ -65,17 +68,26 @@ typedef struct LmbTuiState {
     void *refresh_context;
 } LmbTuiState;
 
-enum { LMB_TUI_REQUEST_CHAT = 10, LMB_TUI_REQUEST_CALIBRATION = 11 };
+enum { LMB_TUI_REQUEST_CHAT = 10, LMB_TUI_REQUEST_CALIBRATION = 11,
+       LMB_TUI_REQUEST_JOINT = 12 };
 
 /* Selection changes precede asynchronous planning. Never render a speed
  * attached to the previous selection during that refresh window. */
 static inline void lmb_tui_invalidate_plans(LmbTuiState *st) {
+    memset(&st->joint, 0, sizeof st->joint);
     for (int i = 0; i < st->nmodels; i++) {
         st->models[i].planned = 0;
         st->models[i].stage_cost_placement = 0;
         st->models[i].calibration_key_valid = 0;
         st->models[i].advice_flags = 0;
     }
+}
+
+static inline int lmb_tui_model_enabled(const LmbTuiState *st, int model) {
+    if (model < 0 || model >= st->nmodels || !st->models[model].dir[0]) return 0;
+    for (uint32_t i = 0; i < LMB_PORTFOLIO_MODELS; i++)
+        if (!strcmp(st->selected_models[i], st->models[model].dir)) return 1;
+    return 0;
 }
 
 static inline int lmb_tui_node_enabled(const LmbTuiState *st, uint32_t node) {
