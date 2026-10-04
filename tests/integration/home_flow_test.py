@@ -383,7 +383,7 @@ def main():
             assert not list((tmp / "chatter").rglob("home-source-*.log"))
             # Reviewing or dismissing the measurement is not consent to load.
             chat.text = ""; chat.send("\x1b")
-            until(lambda: chat.has("A plan before a download."))
+            until(lambda: "Space selects" in current_frame(chat) and "/prepare" in current_frame(chat))
             assert not engines_started("donor-a") and not engines_started("donor-b")
             chat.send("/")
             until(lambda: chat.has("/calibrate"))
@@ -843,7 +843,8 @@ def main():
                 view.send("\t")
                 until(lambda: view.has("Nothing is selected automatically"))
                 view.send("\x1b[B\r\t" if condition == "selection" else "\x1b[B\r\x1b[B\r\t")
-                until(lambda: view.has("A plan before a download."), message="catalogue did not reopen")
+                until(lambda: "Space selects" in current_frame(view) and "/prepare" in current_frame(view),
+                      message="catalogue did not reopen")
                 time.sleep(1); view.text = ""
                 until(lambda: "stale" in current_frame(view) if changed else ("tok/s" in current_frame(view) or "stale" in current_frame(view)), seconds=30,
                       message=f"changed {condition} did not invalidate the speed" if changed else "matching plan did not recover its measured speed")
