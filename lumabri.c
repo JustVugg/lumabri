@@ -5405,6 +5405,7 @@ static int catalog_inventory(LmbTuiState *st) {
     memset(st->runtime_ids, 0, sizeof st->runtime_ids);
     memset(st->ages_ms, 0, sizeof st->ages_ms);
     memset(st->facts, 0, sizeof st->facts);
+    memset(st->workloads, 0, sizeof st->workloads);
     catalog_self(&st->nodes[0], &st->profiles[0], st->disk[0] ? st->disk : ".");
     st->facts[0] = lmb_resource_facts_local(st->profiles[0].logical_cpus ? st->profiles[0].load_one : -1);
     st->nnodes = 1;
@@ -5445,6 +5446,7 @@ static int catalog_inventory(LmbTuiState *st) {
         node->disk_read_bps = r->machine.disk_read_bps;
         st->profiles[at] = r->machine;
         st->facts[at] = r->facts;
+        st->workloads[at] = r->workload;
         st->ages_ms[at] = r->age_ms;
         inventory_id_text(r->identity, st->identities[at]);
     }
@@ -5809,6 +5811,17 @@ static void catalog_json(const LmbTuiState *st) {
                (unsigned long long)p->disk_available_bytes,
                (unsigned long long)node->disk_read_bps, st->ages_ms[i]);
         catalog_resource_json(&st->facts[i]);
+        fputs(",\"workload\":", stdout);
+        const LmbWorkloadFacts *w = &st->workloads[i];
+        if (!w->known) fputs("null", stdout);
+        else {
+            char digest[65]; lmb_hex(digest, w->allocation_set, 32);
+            printf("{\"allocations\":%u,\"reserved_bytes\":%llu,\"compute_policy\":\"%s\","
+                   "\"active\":%u,\"queued\":%u,\"allocation_set\":\"%s\"}",
+                   w->allocations, (unsigned long long)w->reserved_bytes,
+                   w->compute_policy == LMB_COMPUTE_LOCAL_FIFO ? "local_fifo" : "unknown",
+                   w->active, w->queued, digest);
+        }
         fputs(",\"runtime_state\":", stdout);
         json_string(stdout, st->runtime_ids[i][0] ? "identified" : "unknown");
         fputc('}', stdout);
@@ -5859,10 +5872,13 @@ static void catalog_json(const LmbTuiState *st) {
 }
 
 #include "lumabri_home_runtime.h"
+#include "src/planner/lumabri_portfolio_catalogue.h"
 
 static int cmd_models(int argc, char **argv) {
     const char *root = NULL, *disk = ".", *keys = NULL, *tracker = NULL;
     uint32_t context = 4096, sessions = 1, max_new = 256;
+    const char *together[LMB_PORTFOLIO_MODELS], *node_ids[LMB_CLUSTER_MAX_NODES];
+    uint32_t ntogether = 0, nids = 0;
     /* The screen is the default and the listing is the fallback, not the
      * other way round: a plain list is what you want in a pipe or a log, and
      * a pipe is exactly where a full-screen interface is useless. */
@@ -5870,6 +5886,14 @@ static int cmd_models(int argc, char **argv) {
     for (int i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "--models-dir") && i + 1 < argc) root = argv[++i];
         else if (!strcmp(argv[i], "--tracker") && i + 1 < argc) tracker = argv[++i];
+        else if (!strcmp(argv[i], "--together") && i + 1 < argc && ntogether < LMB_PORTFOLIO_MODELS)
+            together[ntogether++] = argv[++i];
+        else if (!strcmp(argv[i], "--node") && i + 1 < argc && nids < LMB_CLUSTER_MAX_NODES) {
+            const char *id = argv[++i]; uint8_t decoded[32];
+            if (strlen(id) != 64 || lmb_unhex(decoded, id, sizeof decoded)) return 2;
+            for (uint32_t j = 0; j < nids; j++) if (!strcmp(id, node_ids[j])) return 2;
+            node_ids[nids++] = id;
+        }
         else if (!strcmp(argv[i], "--disk") && i + 1 < argc) disk = argv[++i];
         else if (!strcmp(argv[i], "--context") && i + 1 < argc)
             context = (uint32_t)atoi(argv[++i]);
@@ -5887,7 +5911,8 @@ static int cmd_models(int argc, char **argv) {
             fprintf(stderr, "usage: lumabri models [--models-dir DIR] "
                             "[--disk PATH] [--context N] [--sessions N] [--tracker H:P]\n"
                             "                      [--plain|--json] [--snapshot] "
-                            "[--keys SEQUENCE]\n");
+                            "[--keys SEQUENCE]\n"
+                            "  joint preview: --json --together NAME [--together NAME] --node ID [--node ID]\n");
             return 2;
         }
     }
@@ -5901,12 +5926,17 @@ static int cmd_models(int argc, char **argv) {
     memset(&st, 0, sizeof st);
     if (!max_new || max_new > 4096) return 2;
     st.context = context; st.sessions = sessions; st.max_new = max_new;
+    if (ntogether && (!json || !tracker || !nids)) {
+        fprintf(stderr, "Joint preview requires --json, --tracker and explicit --node selections.\n"); return 2;
+    }
+    for (uint32_t i = 0; i < nids; i++) snprintf(st.selected_nodes[i], sizeof st.selected_nodes[i], "%s", node_ids[i]);
     st.initial_tab = computers;
     if (checked_printf(st.root, sizeof st.root, "%s", root) ||
         checked_printf(st.disk, sizeof st.disk, "%s", disk) ||
         (tracker && checked_printf(st.tracker, sizeof st.tracker, "%s", tracker))) return 2;
     st.refresh = catalog_state_refresh;
     catalog_state_refresh(&st, NULL);
+    if (ntogether) return catalog_portfolio_json(&st, together, ntogether);
     if (!plain) {
         int action = lmb_tui_run(&st, snapshot, keys);
         if (action == LMB_TUI_REQUEST_CALIBRATION) st.quick_calibration = 1;
@@ -6022,8 +6052,17 @@ static int cmd_worker(int argc, char **argv) {
                 if (home_service_query("donor", HOME_SVC_STATUS, NULL, &keeper) ||
                     strcmp(keeper.tracker, tracker) || keeper.reserved_total > keeper.ram)
                     report.ram_budget_bytes = 0;
-                else if (report.ram_budget_bytes > keeper.ram - keeper.reserved_total)
-                    report.ram_budget_bytes = keeper.ram - keeper.reserved_total;
+                else {
+                    if (report.ram_budget_bytes > keeper.ram - keeper.reserved_total)
+                        report.ram_budget_bytes = keeper.ram - keeper.reserved_total;
+                    LmbWorkloadFacts workload = {.known=1, .allocations=keeper.model_count,
+                        .reserved_bytes=keeper.reserved_total,
+                        .compute_policy=keeper.compute_enabled ? LMB_COMPUTE_LOCAL_FIFO : LMB_COMPUTE_UNKNOWN,
+                        .active=keeper.compute_active, .queued=keeper.compute_queued};
+                    memcpy(workload.allocation_set, keeper.allocation_set, 32);
+                    if (keeper.state == HOME_SVC_RUNNING && lmb_workload_valid(&workload, report.machine.ram_total_bytes))
+                        report.workload = workload;
+                }
             }
             if (lmb_governor_manual_paused()) report.ram_budget_bytes = 0;
             LmbBuf body = {0}, signed_data = {0};

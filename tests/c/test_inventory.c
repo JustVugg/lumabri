@@ -73,15 +73,32 @@ int main(int argc, char **argv) {
     LmbCur cur = {b.p, b.len, 0}; LmbMachineReport got;
     assert(!lmb_inventory_unpack(&cur, &got) && got.runtime_threads == 2 &&
            !strcmp(got.runtime_id, r.runtime_id));
-    /* V3 has no optional facts: preserve absence, not an idle/free reading. */
+    /* V4 has no workload observations; V3 has no optional facts either. */
+    b.p[0] = 4; b.len -= 60;
+    cur = (LmbCur){b.p, b.len, 0};
+    assert(!lmb_inventory_unpack(&cur, &got) && !got.workload.known && cur.off == cur.len);
     b.p[0] = 3; b.len -= 24;
     cur = (LmbCur){b.p, b.len, 0};
     assert(!lmb_inventory_unpack(&cur, &got) && !got.facts.known && got.machine.load_one < 0 && cur.off == cur.len);
-    b.p[0] = 4; b.len += 24;
+    b.p[0] = 5; b.len += 84;
     for (size_t i = 0; i < b.len; i++) {
         LmbBuf cut = b; cut.len = i; assert(decode(&cut));
     }
     b.p[0] = 2; assert(decode(&b)); free(b.p);
+    r.workload = (LmbWorkloadFacts){.known=1, .allocations=2, .reserved_bytes=1000,
+        .compute_policy=LMB_COMPUTE_LOCAL_FIFO, .active=1, .queued=3, .allocation_set={1}};
+    b = (LmbBuf){0}; assert(!lmb_inventory_pack(&b, &r)); assert(!decode(&b)); free(b.p);
+    for (unsigned i = 0; i < 7; i++) {
+        LmbMachineReport invalid = r;
+        if (i == 0) invalid.workload.known = 0;
+        if (i == 1) invalid.workload.allocations = 5;
+        if (i == 2) invalid.workload.active = 2;
+        if (i == 3) invalid.workload.queued = 33;
+        if (i == 4) invalid.workload.reserved_bytes = invalid.machine.ram_total_bytes+1;
+        if (i == 5) invalid.workload.compute_policy = 0;
+        if (i == 6) memset(invalid.workload.allocation_set, 0, 32);
+        b = (LmbBuf){0}; assert(!lmb_inventory_pack(&b, &invalid)); assert(decode(&b)); free(b.p);
+    }
     for (unsigned i = 0; i < 6; i++) {
         LmbMachineReport invalid = r;
         if (i == 0) invalid.facts.known = 8;

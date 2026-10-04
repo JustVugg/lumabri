@@ -8,7 +8,7 @@
 #include <sys/file.h>
 
 #define HOME_SVC_VERSION 1u
-#define HOME_SVC_RECORD_VERSION 3u
+#define HOME_SVC_RECORD_VERSION 4u
 #define HOME_SVC_MAX 65536u
 enum { HOME_SVC_STATUS = 0, HOME_SVC_STOP, HOME_SVC_ACCEPT, HOME_SVC_DECLINE,
        HOME_SVC_UNLOAD, HOME_SVC_CANCEL, HOME_SVC_NEXT_MODEL };
@@ -25,6 +25,7 @@ typedef struct {
     uint64_t reserved_total;
     uint32_t compute_enabled, compute_active, compute_queued;
     uint64_t compute_grants;
+    uint8_t allocation_set[32];
 } HomeServiceSnapshot;
 
 typedef struct {
@@ -133,6 +134,7 @@ static int home_service_pack(LmbBuf *b, const HomeServiceSnapshot *s) {
     if (!rc) rc = lmb_buf_u32(b, s->model_count) || lmb_buf_u64(b, s->reserved_total);
     if (!rc) rc = lmb_buf_u32(b, s->compute_enabled) || lmb_buf_u32(b, s->compute_active) ||
         lmb_buf_u32(b, s->compute_queued) || lmb_buf_u64(b, s->compute_grants);
+    if (!rc) rc = lmb_buf_bytes(b, s->allocation_set, 32);
     return rc || b->len > HOME_SVC_MAX ? -1 : 0;
 }
 
@@ -157,6 +159,10 @@ static int home_service_unpack(const uint8_t *bytes, size_t n, HomeServiceSnapsh
     if (v >= 2 && (lmb_cur_u32(&c, &s->model_count) || lmb_cur_u64(&c, &s->reserved_total))) return -1;
     if (v >= 3 && (lmb_cur_u32(&c, &s->compute_enabled) || lmb_cur_u32(&c, &s->compute_active) ||
         lmb_cur_u32(&c, &s->compute_queued) || lmb_cur_u64(&c, &s->compute_grants))) return -1;
+    if (v >= 4) {
+        if (c.off > c.len || c.len-c.off < 32) return -1;
+        memcpy(s->allocation_set, c.p+c.off, 32); c.off += 32;
+    }
     if (c.off != c.len) return -1;
     LmbBuf check = {0}; int rc = home_service_pack(&check, s); free(check.p); return rc;
 }

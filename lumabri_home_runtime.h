@@ -672,6 +672,21 @@ static void home_service_donor_snapshot(HomeService *service, const HomeDonor *d
     s->compute_active = s->compute_enabled ? atomic_load(&home_compute_broker.active) : 0;
     s->compute_queued = s->compute_enabled ? atomic_load(&home_compute_broker.queued) : 0;
     s->compute_grants = atomic_load(&home_compute_broker.grants);
+    /* Tab changes the displayed allocation, not the workload identity. */
+    uint8_t ids[4][32]; uint32_t count = 0;
+    for (uint32_t i = 0; i <= d->park_capacity && count < 4; i++) {
+        const HomeDonor *model = i ? &d->parked[i-1] : d;
+        if (!model->transaction.reservation_held && model->transaction.phase != LMB_HOME_PENDING) continue;
+        uint32_t at = count++;
+        while (at && memcmp(ids[at-1], model->transaction.offer.id, 32) > 0) {
+            memcpy(ids[at], ids[at-1], 32); at--;
+        }
+        memcpy(ids[at], model->transaction.offer.id, 32);
+    }
+    LmbSha digest; lmb_sha_init(&digest);
+    lmb_sha_update(&digest, "lumabri-allocation-set-v1", sizeof "lumabri-allocation-set-v1");
+    lmb_sha_update(&digest, ids, count*32);
+    lmb_sha_final(&digest, s->allocation_set);
 }
 
 static int home_service_donor_ui(const char *tracker) {
