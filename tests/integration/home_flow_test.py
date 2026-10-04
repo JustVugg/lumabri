@@ -40,7 +40,7 @@ class TerminalText:
 def hosted_turn_complete(text):
     # cmd_chat prints timing, transport and final newline in separate calls.
     # A metric prefix is not completion, even on a fast tiny checkpoint.
-    return re.search(r" · hosted stream · no local checkpoint(?:\x1b\[[0-9;]*m)*\r?\n", text) is not None
+    return re.search(r"host prefill [^\r\n]* · [1-9][0-9]* generated tokens[^\r\n]* · hosted stream · no local checkpoint(?:\x1b\[[0-9;]*m)*\r?\n", text) is not None
 
 
 def current_frame(terminal):

@@ -5,6 +5,22 @@
 #include <assert.h>
 
 int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "reply-errors")) {
+        Cap overflow = {.len = SIZE_MAX - 2};
+        assert(cap_add(&overflow, "four", 4) && !overflow.p);
+        const char *frames[] = {"DATA 7 3\nabc\nERROR 7 cancelled\n", "DATA 7 3\nabc\nDONE 8\n", "DATA 7 3\nab"};
+        for (unsigned i = 0; i < 3; i++) {
+            FILE *input = tmpfile(); assert(input);
+            assert(fwrite(frames[i], 1, strlen(frames[i]), input) == strlen(frames[i]));
+            assert(!fflush(input)); rewind(input);
+            Engine e = {.from = fileno(input)}; strcpy(e.request_id, "7");
+            char stat[512] = "old metrics", *reply = (char *)1;
+            assert(stream_serve2(&e, stat, sizeof stat, &reply) == (i ? -1 : -2));
+            assert(!reply && !stat[0]); fclose(input);
+        }
+        puts("REPLY ERRORS: PASS (no successful capture or calibration on ERROR, wrong request or truncation)");
+        return 0;
+    }
     if (argc == 2 && !strcmp(argv[1], "cancel-prepare")) {
         HomeServiceSnapshot current, reply;
         assert(!home_service_query("prepare", HOME_SVC_STATUS, NULL, &current));

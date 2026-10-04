@@ -25,7 +25,10 @@ Signed leased inventory is sampled before and after a turn; observed changes
 or unavailable inventory withhold that turn's speed. These boundary samples
 are not continuous load monitoring: a short change between reports or other
 OS processes can still affect a turn. This is an observation, not a concurrency
-or latency guarantee. Changing
+or latency guarantee. A managed turn waits, within a bound, for a known workload
+whose reservation covers its approved slice: an older pending-offer report is
+not a ready execution observation. Unknown workload is permitted only in the
+explicit foreground diagnostic mode. Changing
 the selected computers immediately invalidates the displayed plan while a
 background refresh runs. A mismatching record says **stale** and exposes no
 numerical speed. A missing or unreadable record says **not calibrated**.

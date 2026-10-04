@@ -120,6 +120,15 @@ Shared-donor batching, weighted/global compute scheduling, automatic
 failover/replay, server-wide cost optimization and model eviction policies are
 separate work.
 
+The terminal now consumes a renderer-independent incremental reply reader.
+Each reply is bound to its submitted request ID; DATA payloads remain
+byte-counted even when text contains apparent protocol headers. Only a complete
+DONE frame commits conversation history or a speed observation. Engine ERROR,
+truncation, invalid frames and consumer cancellation cannot publish success.
+The terminal limits a reply to 64 MiB and telemetry lines to 4 MiB; unsupported
+DATA sideband extensions are rejected. This common reader is an API building
+block, not an HTTP endpoint or OpenAI compatibility claim.
+
 ## Next dependencies
 
 The next milestone is **inventory and measurements usable by the planner**:

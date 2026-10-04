@@ -275,7 +275,9 @@ static int home_resident_plan_chat_mode(const LmbResidentPlan *p, int calibrate)
     int rc = cmd_chat((int)(sizeof args / sizeof *args) - !calibrate, args);
     if (observing) { g_recording_calibration = NULL; g_calibration_directory = NULL; }
     g_execution_view = NULL;
-    if (rc) home_fail("The retained plan is unavailable or changed. Keep its donors sharing, or prepare a new plan from Explore models. No weights were downloaded.");
+    if (rc == CHAT_REQUEST_FAILED)
+        home_fail("The engine rejected the request. Check its message above (for example, the conversation may exceed the context limit). No incomplete reply or speed was saved; resident weights were not released.");
+    else if (rc) home_fail("The retained plan is unavailable or changed. Keep its donors sharing, or prepare a new plan from Explore models. No weights were downloaded.");
     return rc;
 }
 

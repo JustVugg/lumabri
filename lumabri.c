@@ -82,6 +82,7 @@
 static LmbCalibration *g_recording_calibration;
 static const char *g_calibration_directory;
 static int catalog_workload_capture(const char *tracker, LmbCalKey *key, char *why, size_t cap);
+static int home_service_foreground(void);
 
 /* ---- terminal ----------------------------------------------------------- */
 
@@ -2428,6 +2429,8 @@ typedef struct {
     EngineTransport transport;
     uint32_t numeric_abi;
     char numeric_class[97];
+    char request_id[64]; /* current serve-codec request, never a conversation owner */
+    uint32_t request_sequence;
 } Engine;
 
 static int artifact_is(const char *value, const char *name) {
@@ -2639,40 +2642,18 @@ static int stream_until_end(Engine *e, char *statline, size_t scap) {
     }
 }
 
-/* ---- serve codec (PROTO_SERVE2) client — DeepSeek V4 --------------------- */
-typedef struct { int fd; unsigned char b[16384]; size_t off, len; } SReader;
-
-static ssize_t sr_fill(SReader *s) {
-    if (s->off) { memmove(s->b, s->b + s->off, s->len - s->off); s->len -= s->off; s->off = 0; }
-    if (s->len >= sizeof s->b) return -1;              /* a header longer than the buffer */
-    ssize_t r = read(s->fd, s->b + s->len, sizeof s->b - s->len);
-    if (r > 0) s->len += (size_t)r;
-    return r;
-}
-/* One '\n'-terminated line. Only the first cap-1 bytes are kept in `out` (enough
- * to read the DATA/DONE/… keyword), but the WHOLE line is consumed — DeepSeek's
- * EMAP row is tens of KB of hex, far past any header, and must be swallowed, not
- * overflow the reader. -1 on EOF with nothing buffered. */
-static int sr_line(SReader *s, char *out, size_t cap) {
-    size_t got = 0;
-    for (;;) {
-        unsigned char *start = s->b + s->off, *nl = memchr(start, '\n', s->len - s->off);
-        size_t avail = nl ? (size_t)(nl - start) : s->len - s->off;
-        if (got < cap - 1) {
-            size_t room = cap - 1 - got, take = avail < room ? avail : room;
-            memcpy(out + got, start, take); got += take;
-        }
-        s->off += avail + (nl ? 1 : 0);
-        if (nl) { out[got] = 0; return (int)got; }
-        if (sr_fill(s) <= 0) { out[got] = 0; return got ? (int)got : -1; }
-    }
-}
+/* ---- serve codec client: UI is only a consumer of the shared reader ------ */
+#include "src/runtime/lumabri_reply_stream.h"
 /* A growable capture of the assistant's reply, to feed back as history. */
 typedef struct { char *p; size_t len, cap; } Cap;
 static int cap_add(Cap *c, const char *d, size_t n) {
+    if (c->len == SIZE_MAX || n > SIZE_MAX - c->len - 1) return -1;
     if (c->len + n + 1 > c->cap) {
         size_t nc = c->cap ? c->cap : 4096;
-        while (nc < c->len + n + 1) nc *= 2;
+        while (nc < c->len + n + 1) {
+            if (nc > SIZE_MAX / 2) { nc = c->len + n + 1; break; }
+            nc *= 2;
+        }
         char *np = realloc(c->p, nc);
         if (!np) return -1;
         c->p = np; c->cap = nc;
@@ -2691,21 +2672,11 @@ static int cap_addf(Cap *c, const char *fmt, ...) {
     return cap_add(c, tmp, (size_t)n);
 }
 
-static int sr_take(SReader *s, size_t n, int emit, Cap *cap) {   /* copy/discard n bytes */
-    while (n) {
-        if (s->off >= s->len && sr_fill(s) <= 0) return -1;
-        size_t avail = s->len - s->off, take = avail < n ? avail : n;
-        if (emit) live_write(s->b + s->off, take);
-        if (cap && cap_add(cap, (char *)s->b + s->off, take)) return -1;
-        s->off += take; n -= take;
-    }
-    return 0;
-}
-
 /* Read a serve-codec reply: DATA frames (the generated text) until DONE. Bare
  * dashboard lines (EMAP/TIERS/…) and ACCEPT are skipped. On success returns 0
  * with the STAT tail in statline and, if captured != NULL, the assistant text
- * malloc'd into *captured (for the conversation history). -1 if the engine died. */
+ * malloc'd into *captured (for the conversation history). -1 for an incomplete
+ * or invalid stream, -2 for a terminal engine ERROR. Neither yields history. */
 /* When the first token of the current reply arrived: everything before it
  * is prefill (the prompt crossing the layers), everything after is decode.
  * One number for both hid a 60 s prefill inside "0.2 tok/s". */
@@ -2713,60 +2684,65 @@ static int sr_take(SReader *s, size_t n, int emit, Cap *cap) {   /* copy/discard
 #include "lumabri_stage_metrics.h"
 static volatile double g_first_token_at;
 
+typedef struct { Engine *engine; Cap capture; int capturing; } TuiReply;
+static int tui_reply_data(void *arg, const unsigned char *data, size_t length) {
+    TuiReply *t = arg;
+    if (t->capturing && cap_add(&t->capture, (const char *)data, length)) return -1;
+    live_status("decode · %s", t->engine->segment ? "Segment in the swarm" : "expert/engine");
+    if (length && !g_first_token_at) g_first_token_at = nowd();
+    live_write(data, length); return 0;
+}
+static int tui_reply_error(void *arg, const char *message) {
+    (void)arg; printf("%s%s%s", C_RED, message, C_R); return 0;
+}
+static int tui_reply_progress(void *arg, const char *line) {
+    Engine *e = ((TuiReply *)arg)->engine;
+    unsigned id = 0;
+    char phase[24] = "";
+    size_t current = 0, total = 0, third = 0;
+    if (sscanf(line, "PROGRESS %u %23s %zu %zu %zu",
+               &id, phase, &current, &total, &third) >= 2) {
+        if (!strcmp(phase, "ROUTE"))
+            live_status("routing · %zu hosts · %zu segments · %s",
+                        current, total, third ? "relay" : "direct P2P");
+        else if (!strcmp(phase, "PREFILL"))
+            live_status("prefill · %zu/%zu token · %s", current, total,
+                        e->segment ? "Segment" : "expert");
+        else if (!strcmp(phase, "DECODE"))
+            live_status("decode · %zu token · %s", current,
+                        e->segment ? "Segment" : "expert");
+        else if (!strcmp(phase, "QUEUED"))
+            live_status("queued · shared model · admission deadline %.1fs", total / 1000.0);
+        else if (!strcmp(phase, "FAILOVER")) {
+            const char *peer = strstr(line, "FAILOVER ");
+            live_status("Segment recovery · reopening %s",
+                        peer ? peer + strlen("FAILOVER ") : "peer");
+        } else if (!strcmp(phase, "CHECKPOINT"))
+            live_status("KV checkpoint · %zu tokens saved", current);
+    }
+    return 0;
+}
+
 static int stream_serve2(Engine *e, char *statline, size_t scap, char **captured) {
-    SReader s = { e->from, {0}, 0, 0 };
-    char line[16384]; /* bounded stage + link observations for 32 ranges */
-    Cap cap = {0};
+    TuiReply view = {.engine = e, .capturing = captured != NULL};
+    LmbReplyStream stream;
+    LmbReplySink sink = {tui_reply_data, tui_reply_progress, tui_reply_error, &view};
     if (statline && scap) statline[0] = 0;
     if (captured) *captured = NULL;
     g_first_token_at = 0;
-    for (;;) {
-        if (sr_line(&s, line, sizeof line) < 0) { free(cap.p); return -1; }
-        if (!strncmp(line, "DATA ", 5)) {
-            live_status("decode · %s", e->segment ? "Segment in the swarm" :
-                                                "expert/engine");
-            char *sp = strchr(line + 5, ' ');            /* DATA <id> <bytes> */
-            size_t n = sp ? strtoull(sp + 1, NULL, 10) : 0;
-            if (n && g_first_token_at == 0) g_first_token_at = nowd();
-            if (sr_take(&s, n, 1, captured ? &cap : NULL) < 0) { free(cap.p); return -1; }
-            if (sr_take(&s, 1, 0, NULL) < 0) { free(cap.p); return -1; } /* frame '\n' */
-        } else if (!strncmp(line, "DONE ", 5)) {
-            char *st = strstr(line, "STAT ");
-            if (st && statline && scap) snprintf(statline, scap, "%s", st);
-            if (captured) *captured = cap.p; else free(cap.p);
-            return 0;
-        } else if (!strncmp(line, "ERROR ", 6)) {
-            char *msg = strchr(line + 6, ' ');            /* skip the id */
-            printf("%s%s%s", C_RED, msg ? msg + 1 : line + 6, C_R);
-            free(cap.p);
-            return 0;
-        } else if (!strncmp(line, "PROGRESS ", 9)) {
-            unsigned id = 0;
-            char phase[24] = "";
-            size_t current = 0, total = 0, third = 0;
-            if (sscanf(line, "PROGRESS %u %23s %zu %zu %zu",
-                       &id, phase, &current, &total, &third) >= 2) {
-                if (!strcmp(phase, "ROUTE"))
-                    live_status("routing · %zu hosts · %zu segments · %s",
-                                current, total, third ? "relay" : "direct P2P");
-                else if (!strcmp(phase, "PREFILL"))
-                    live_status("prefill · %zu/%zu token · %s", current, total,
-                                e->segment ? "Segment" : "expert");
-                else if (!strcmp(phase, "DECODE"))
-                    live_status("decode · %zu token · %s", current,
-                                e->segment ? "Segment" : "expert");
-                else if (!strcmp(phase, "QUEUED"))
-                    live_status("queued · shared model · admission deadline %.1fs", total / 1000.0);
-                else if (!strcmp(phase, "FAILOVER")) {
-                    const char *peer = strstr(line, "FAILOVER ");
-                    live_status("Segment recovery · reopening %s",
-                                peer ? peer + strlen("FAILOVER ") : "peer");
-                } else if (!strcmp(phase, "CHECKPOINT"))
-                    live_status("KV checkpoint · %zu tokens saved", current);
-            }
-        }
-        /* ACCEPT / EMAP / TIERS / HITS / HWINFO / PROF / other: skip */
+    if (lmb_reply_init(&stream, e->request_id[0] ? e->request_id : NULL, UINT64_C(64) << 20, sink)) return -1;
+    while (stream.status == LMB_REPLY_MORE) {
+        unsigned char bytes[16384];
+        ssize_t n = read(e->from, bytes, sizeof bytes);
+        if (n < 0 && errno == EINTR && !g_stopping) continue;
+        if (n <= 0 || g_stopping) { lmb_reply_eof(&stream); break; }
+        lmb_reply_feed(&stream, bytes, (size_t)n, NULL);
     }
+    if (stream.status != LMB_REPLY_DONE) { free(view.capture.p); return stream.status == LMB_REPLY_ERROR ? -2 : -1; }
+    if (statline && scap && strlen(stream.stat) >= scap) { free(view.capture.p); return -1; }
+    if (statline && scap) snprintf(statline, scap, "%s", stream.stat);
+    if (captured) *captured = view.capture.p; else free(view.capture.p);
+    return 0;
 }
 
 /* The serve-codec engines tokenize the SUBMIT payload as-is: coli_v4_prompt_build
@@ -2868,13 +2844,15 @@ static int serve2_prefix(Cap *c, EngKind k) {
 
 /* SUBMIT: prefix + history + this pending user turn. 0, or -1 on error. */
 static int submit_serve2(Engine *e, const char *history, const char *prompt, int max_new) {
-    static unsigned id = 0;
+    unsigned id = ++e->request_sequence;
+    if (!id) id = ++e->request_sequence;
     Cap c = {0};
     if (serve2_prefix(&c, e->kind) || cap_str(&c, history) ||
         serve2_turn(&c, e->kind, history[0] == 0, prompt, NULL)) { free(c.p); return -1; }
     char hdr[128];
     int hn = snprintf(hdr, sizeof hdr, "SUBMIT %u 0 %zu %d %.1f 0.95\n",
-                      ++id, c.len, max_new < 1 ? 1 : max_new, e->greedy_only ? 0.0 : 0.7);
+                      id, c.len, max_new < 1 ? 1 : max_new, e->greedy_only ? 0.0 : 0.7);
+    snprintf(e->request_id, sizeof e->request_id, "%u", id);
     int ok = hn >= 0 && (size_t)hn < sizeof hdr &&
              !engine_write_full(e->to, hdr, (size_t)hn) &&
              !engine_write_full(e->to, c.p, c.len) &&
@@ -4753,6 +4731,7 @@ static int model_boot(const char *tracker, const char *model, const char *shim,
     return 0;
 }
 
+enum { CHAT_REQUEST_FAILED = 3 };
 static int cmd_chat(int argc, char **argv) {
     g_stopping = 0;
     install_chat_signal_handlers();
@@ -5065,9 +5044,9 @@ static int cmd_chat(int argc, char **argv) {
                 break;
             }
             if (dead) {
-                chat_failed = 1;
-                fprintf(stderr, "\n%sengine exited%s\n", C_RED, C_R);
-                engine_diag(&eng, 0);
+                chat_failed = dead == -2 ? CHAT_REQUEST_FAILED : 1;
+                fprintf(stderr, "\n%s%s%s\n", C_RED, dead == -2 ? "request failed; incomplete reply was not added to history" : "engine stream ended or was invalid", C_R);
+                if (dead != -2) engine_diag(&eng, 0);
                 free(reply);
                 break;
             }
@@ -5587,7 +5566,11 @@ static int catalog_workload_capture(const char *tracker, LmbCalKey *key, char *w
                 if (strcmp(identity, key->node_id[j])) continue;
                 key->workload[j] = reports[i].workload;
                 key->workload[j].active = key->workload[j].queued = 0;
-                if (key->workload[j].known && !key->workload[j].allocations) pending = 1;
+                uint64_t required = g_execution_view && g_execution_view->count == key->nodes ?
+                    g_execution_view->nodes[j].reserved_bytes : 1;
+                if ((!key->workload[j].known && !home_service_foreground()) ||
+                    (key->workload[j].known && (!key->workload[j].allocations ||
+                     key->workload[j].reserved_bytes < required))) pending = 1;
                 break;
             }
         }
