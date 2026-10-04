@@ -74,12 +74,12 @@ def main():
         return e
 
     class Terminal(TerminalText):
-        def __init__(self, name, argv=None):
+        def __init__(self, name, argv=None, program="lumabri"):
             super().__init__()
             self.master, slave = pty.openpty()
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 140, 0, 0))
             self.log = open(tmp / f"{name}-{len(terminals)}.terminal.log", "wb")
-            self.p = subprocess.Popen([str(runtime / "lumabri"), *(argv or [])], cwd=runtime, env=env(name),
+            self.p = subprocess.Popen([str(runtime / program), *(argv or [])], cwd=runtime, env=env(name),
                                       stdin=slave, stdout=slave, stderr=slave)
             os.close(slave); terminals.append(self)
 
@@ -189,18 +189,21 @@ def main():
         retained = sum(service(name)["donor"]["model_count"] for name in ("a", "b"))
         assert retained == expected, "incomplete allocation survived or a ready allocation was unloaded"
         service("chatter", "restart")
+        assert not list((tmp / "chatter").rglob("*.cal")), "preparation fabricated a speed"
         for plan in plans:
-            raw = plan.read_bytes(); at = 4; fields = []
-            for _ in range(5):
-                size = struct.unpack_from("<H", raw, at)[0]; at += 2
-                fields.append(raw[at:at+size].decode()); at += size
-            conversation = Terminal("chatter", ["chat", "--host", fields[1], "--host-key", fields[2],
-                "--host-root", fields[3], "--model", fields[4], "--tracker", tracker, "--ctx", "128", "--max-new", "8"])
+            conversation = Terminal("chatter", ["resident-chat", str(plan), tracker], program="test_chat_ui")
             until(lambda: conversation.has("receives the text"), "joint resident host unavailable")
             conversation.send("hello\n")
             until(lambda: hosted_turn_complete(conversation.text), "joint model did not run real inference", 120)
             conversation.send("/quit\n")
             until(lambda: conversation.p.poll() is not None, "joint conversation did not close")
+            assert conversation.p.returncode == 0, conversation.text[-3000:]
+        observations = list((tmp / "chatter").rglob("*.cal"))
+        assert len(observations) == expected, "first retained-model chat did not create calibration"
+        for r in observations:
+            raw = r.read_bytes()
+            nodes = struct.unpack_from("<I", raw, len(raw) - 36)[0]
+            assert assert_stage_record(r, stages=nodes) == 1
         assert not list((tmp / "chatter").rglob("*.safetensors"))
         print(f"JOINT PREPARATION: PASS ({args.joint}, {expected} resident models, detached TUI, real inference)", flush=True)
 
@@ -306,6 +309,8 @@ def main():
             assert benchmark.returncode == 0, benchmark.stderr
             print(benchmark.stdout, flush=True)
         if args.multi_model:
+            records = list((tmp / "chatter").rglob("*.cal"))
+            assert len(records) == 1, "first resident model has no observed speed"
             first_plan = tmp / "first.plan"; shutil.copyfile(record, first_plan); first_plan.chmod(0o600)
             configs = list(args.models_dir.glob("*/config.json"))
             assert len(configs) == 1, "multi-model test expects one tiny checkpoint"
@@ -373,8 +378,13 @@ def main():
             for _ in range(5):
                 size = struct.unpack_from("<H", raw, at)[0]; at += 2
                 names.append(raw[at:at+size].decode()); at += size
-            parallel = Terminal("chatter", ["chat", "--host", names[1], "--host-key", names[2],
-                "--host-root", names[3], "--model", names[4], "--tracker", tracker, "--ctx", "128", "--max-new", "8"])
+            def first_calibration_state():
+                checked = subprocess.run([str(runtime / "test_chat_ui"), "resident-calibration-state", str(first_plan), tracker],
+                    env=env("chatter"), text=True, capture_output=True, timeout=20)
+                assert checked.returncode == 0, checked.stderr
+                return checked.stdout.strip()
+            until(lambda: first_calibration_state() == "stale", "adding second model retained first model speed", 30)
+            parallel = Terminal("chatter", ["resident-chat", str(first_plan), tracker], program="test_chat_ui")
             until(lambda: parallel.has("receives the text"), "first model could not open a parallel conversation")
             prior_grants = {name: service(name)["donor"]["compute"]["grants"] for name in ("a", "b")}
             another.text = ""; another.send("beta\n"); parallel.send("alpha\n")
@@ -383,6 +393,8 @@ def main():
             assert all(service(name)["donor"]["compute"]["grants"] > prior_grants[name] for name in ("a", "b")), "mixed model turns bypassed node compute admission"
             parallel.send("/quit\n")
             until(lambda: parallel.p.poll() is not None, "parallel first-model chat did not close")
+            assert first_calibration_state() == "current", "new mixed-workload observation not bound to current models"
+            assert assert_stage_record(records[0]) == 1, "changed workload inherited previous observation count"
             # The authenticated release names the first allocation, not the
             # keeper's currently selected second model.
             release = subprocess.run([str(runtime / "test_chat_ui"), "resident-release", str(first_plan), tracker],

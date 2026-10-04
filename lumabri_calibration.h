@@ -24,6 +24,7 @@
 #include <string.h>
 #include "lumabri_planner.h"
 #include "src/planner/lumabri_link_evidence.h"
+#include "src/planner/lumabri_workload_facts.h"
 
 #define LMB_CAL_NODES_MAX 32
 enum { LMB_CAL_SOURCE_UNKNOWN = 0, LMB_CAL_SOURCE_PROBE = 1, LMB_CAL_SOURCE_SESSION = 2 };
@@ -50,6 +51,7 @@ typedef struct {
     uint8_t from_disk[LMB_CAL_NODES_MAX];
     uint32_t context;
     uint32_t sessions;
+    LmbWorkloadFacts workload[LMB_CAL_NODES_MAX]; /* stable allocation facts, not live queue counters */
 } LmbCalKey;
 
 typedef struct {
@@ -96,6 +98,7 @@ static LMB_UNUSED int lmb_cal_key_valid(const LmbCalKey *k) {
     for (uint32_t i = 0; i < k->nodes; i++) {
         CAL_TEXT(node_id[i]); CAL_TEXT(node_hardware_id[i]);
         CAL_TEXT(node_build_id[i]); CAL_TEXT(node_backend[i]);
+        if (!lmb_workload_valid(&k->workload[i], UINT64_MAX) || k->workload[i].active || k->workload[i].queued) return 0;
         if (!k->threads[i] || k->layer_begin[i] >= k->layer_end[i] ||
             k->from_disk[i] > 1) return 0;
     }
@@ -156,6 +159,10 @@ static LMB_UNUSED const char *lmb_cal_mismatch(const LmbCalKey *a,
         if (a->threads[i] != b->threads[i])         return "the thread counts";
         if (a->from_disk[i] != b->from_disk[i])
             return "whether a range is resident or streamed";
+        const LmbWorkloadFacts *wa = &a->workload[i], *wb = &b->workload[i];
+        if (wa->known != wb->known || wa->allocations != wb->allocations ||
+            wa->compute_policy != wb->compute_policy || wa->reserved_bytes != wb->reserved_bytes ||
+            memcmp(wa->allocation_set, wb->allocation_set, 32)) return "the resident model workload";
     }
     return NULL;                /* every condition still holds */
 }

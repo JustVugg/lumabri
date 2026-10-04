@@ -1492,24 +1492,6 @@ static int home_request_chat_direct(LmbTuiState *st, int selected) {
             char *chat_argv[] = {"--host", host, "--model", model, "--ctx", ctx,
                                  "--role", "chat", "--max-new", token_limit, "--host-key", expected_host,
                                  "--tracker", st->tracker, "--host-root", expected_root, "--calibrate"};
-            if (home_resident_required()) {
-                LmbResidentPlan saved = {.context = st->context, .sessions = st->sessions, .max_new = s.offers[s.edge].max_new,
-                    .execution = execution, .preparation_seconds = preparation_seconds, .prepared_at = prepared_at};
-                snprintf(saved.tracker, sizeof saved.tracker, "%s", st->tracker);
-                snprintf(saved.host, sizeof saved.host, "%s", host);
-                snprintf(saved.host_key, sizeof saved.host_key, "%s", expected_host);
-                snprintf(saved.root, sizeof saved.root, "%s", expected_root);
-                snprintf(saved.model, sizeof saved.model, "%s", model);
-                snprintf(saved.content_id, sizeof saved.content_id, "%s", m->content_id);
-                memcpy(saved.allocation, id, 32);
-                memcpy(saved.peer_keys, s.peer_keys, s.count * 32);
-                if (home_resident_plan_save(&saved) || home_resident_library_save(&saved)) {
-                    home_fail("Cannot save the approved resident plan. Check home-directory permissions; no chat was started.");
-                    goto done;
-                }
-            }
-            if (home_background_job) { prepared = 1; result = 0; break; }
-            g_execution_view = &execution;
             LmbCalibration measurement = {0}; char measurement_dir[1200];
             measurement.preparation_seconds = preparation_seconds;
             measurement.prepared_at = prepared_at;
@@ -1526,6 +1508,35 @@ static int home_request_chat_direct(LmbTuiState *st, int selected) {
                 can_record = !catalog_runtime_revalidate_tracker(st->tracker, &measurement.key, why, sizeof why);
                 if (!can_record) fprintf(stderr, "[calibration] %s.\n", why);
             }
+            if (home_resident_required()) {
+                LmbResidentPlan saved = {.context = st->context, .sessions = st->sessions, .max_new = s.offers[s.edge].max_new,
+                    .execution = execution, .preparation_seconds = preparation_seconds, .prepared_at = prepared_at};
+                snprintf(saved.tracker, sizeof saved.tracker, "%s", st->tracker);
+                snprintf(saved.host, sizeof saved.host, "%s", host);
+                snprintf(saved.host_key, sizeof saved.host_key, "%s", expected_host);
+                snprintf(saved.root, sizeof saved.root, "%s", expected_root);
+                snprintf(saved.model, sizeof saved.model, "%s", model);
+                snprintf(saved.content_id, sizeof saved.content_id, "%s", m->content_id);
+                memcpy(saved.allocation, id, 32);
+                memcpy(saved.peer_keys, s.peer_keys, s.count * 32);
+                if (can_record) {
+                    const LmbCalKey *k = &measurement.key;
+                    snprintf(saved.observation.build_id, sizeof saved.observation.build_id, "%s", k->build_id);
+                    snprintf(saved.observation.adapter, sizeof saved.observation.adapter, "%s", k->adapter);
+                    saved.observation.goal = k->goal;
+                    for (uint32_t j = 0; j < s.count; j++) {
+                        snprintf(saved.observation.hardware[j], sizeof saved.observation.hardware[j], "%s", k->node_hardware_id[j]);
+                        snprintf(saved.observation.runtime[j], sizeof saved.observation.runtime[j], "%s", k->node_build_id[j]);
+                        saved.observation.threads[j] = k->threads[j];
+                    }
+                }
+                if (home_resident_plan_save(&saved) || home_resident_library_save(&saved)) {
+                    home_fail("Cannot save the approved resident plan. Check home-directory permissions; no chat was started.");
+                    goto done;
+                }
+            }
+            if (home_background_job) { prepared = 1; result = 0; break; }
+            g_execution_view = &execution;
             g_recording_calibration = can_record ? &measurement : NULL;
             g_calibration_directory = can_record ? measurement_dir : NULL;
             if (!can_record)

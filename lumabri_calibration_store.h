@@ -37,7 +37,7 @@ static LMB_UNUSED int lmb_cal_encode(const LmbCalibration *r, LmbBuf *out) {
 #define PUT(call) do { if (call) goto bad; } while (0)
 #define STR(f) PUT(lmb_buf_str(&b, k->f))
 #define U32(f) PUT(lmb_buf_u32(&b, k->f))
-    PUT(lmb_buf_bytes(&b, "LMB-CAL4", 8));
+    PUT(lmb_buf_bytes(&b, "LMB-CAL5", 8));
     STR(model_root); STR(adapter); U32(adapter_abi); STR(numeric_class);
     STR(commit_lumabri); STR(commit_colibri); STR(build_id); STR(plan_kind);
     U32(goal); U32(nodes); U32(edge_node); U32(context); U32(sessions);
@@ -65,6 +65,13 @@ static LMB_UNUSED int lmb_cal_encode(const LmbCalibration *r, LmbBuf *out) {
         PUT(lmb_cal_put_double(&b, v->echo_bytes_per_second));
         PUT(lmb_cal_put_double(&b, v->measured_at));
     }
+    for (uint32_t i = 0; i < k->nodes; i++) {
+        const LmbWorkloadFacts *w = &k->workload[i];
+        PUT(lmb_buf_u32(&b, w->known)); PUT(lmb_buf_u32(&b, w->allocations));
+        PUT(lmb_buf_u32(&b, w->compute_policy)); PUT(lmb_buf_u64(&b, w->reserved_bytes));
+        PUT(lmb_buf_bytes(&b, w->allocation_set, 32));
+    }
+    PUT(lmb_buf_u32(&b, k->nodes)); /* bounded fixed-width trailer, before the checksum */
     lmb_sha_init(&sha); lmb_sha_update(&sha, b.p, b.len); lmb_sha_final(&sha, digest);
     PUT(lmb_buf_bytes(&b, digest, sizeof digest));
     if (b.len > LMB_CAL_RECORD_MAX) goto bad;
@@ -81,8 +88,9 @@ static LMB_UNUSED int lmb_cal_decode(const void *data, size_t len, LmbCalibratio
     memset(out, 0, sizeof *out);
     if (!data || len < 40 || len > LMB_CAL_RECORD_MAX ||
         (memcmp(data, "LMB-CAL1", 8) && memcmp(data, "LMB-CAL2", 8) &&
-         memcmp(data, "LMB-CAL3", 8) && memcmp(data, "LMB-CAL4", 8))) return -1;
-    int version4 = !memcmp(data, "LMB-CAL4", 8);
+         memcmp(data, "LMB-CAL3", 8) && memcmp(data, "LMB-CAL4", 8) && memcmp(data, "LMB-CAL5", 8))) return -1;
+    int version5 = !memcmp(data, "LMB-CAL5", 8);
+    int version4 = version5 || !memcmp(data, "LMB-CAL4", 8);
     int version3 = version4 || !memcmp(data, "LMB-CAL3", 8);
     int version2 = version3 || !memcmp(data, "LMB-CAL2", 8);
     uint8_t digest[32]; LmbSha sha;
@@ -129,6 +137,17 @@ static LMB_UNUSED int lmb_cal_decode(const void *data, size_t len, LmbCalibratio
             GET(lmb_cal_get_double(&c, &v->echo_bytes_per_second));
             GET(lmb_cal_get_double(&c, &v->measured_at));
         }
+    }
+    if (version5) {
+        for (uint32_t i = 0; i < k->nodes; i++) {
+            LmbWorkloadFacts *w = &k->workload[i];
+            GET(lmb_cur_u32(&c, &w->known)); GET(lmb_cur_u32(&c, &w->allocations));
+            GET(lmb_cur_u32(&c, &w->compute_policy)); GET(lmb_cur_u64(&c, &w->reserved_bytes));
+            if (c.off > c.len || c.len-c.off < 32) return -1;
+            memcpy(w->allocation_set, c.p+c.off, 32); c.off += 32;
+        }
+        uint32_t count; GET(lmb_cur_u32(&c, &count));
+        if (count != k->nodes) return -1;
     }
     if (c.off != c.len || !lmb_cal_valid(&r)) return -1;
     *out = r; return 0;

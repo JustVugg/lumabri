@@ -143,6 +143,22 @@ int main(int argc, char **argv) {
         for (uint32_t i = 0; i < plan.execution.count; i++) assert(!home_resident_peer(&plan, i, 1));
         return 0;
     }
+    if (argc == 4 && !strcmp(argv[1], "resident-chat")) {
+        assert(!lmb_secure_init()); LmbResidentPlan plan;
+        assert(!home_resident_plan_read(argv[2], argv[3], &plan));
+        return home_resident_plan_chat(&plan);
+    }
+    if (argc == 4 && !strcmp(argv[1], "resident-calibration-state")) {
+        assert(!lmb_secure_init()); LmbResidentPlan plan; LmbCalKey key; LmbCalibration record;
+        char directory[1200], why[200];
+        assert(!home_resident_plan_read(argv[2], argv[3], &plan));
+        assert(!home_resident_observation_key(&plan, &key));
+        assert(!catalog_calibration_dir(directory) && !lmb_cal_load(directory, plan.content_id, &record));
+        key.adapter_abi = record.key.adapter_abi;
+        snprintf(key.numeric_class, sizeof key.numeric_class, "%s", record.key.numeric_class);
+        assert(!catalog_workload_capture(argv[3], &key, why, sizeof why));
+        printf("%s\n", lmb_cal_matches(&record.key, &key) ? "current" : "stale"); return 0;
+    }
     if (argc == 2 && !strcmp(argv[1], "planner-evidence")) {
         LmbTuiState *st = calloc(1, sizeof *st); assert(st);
         st->nnodes = 1; st->nmodels = 2; st->context = 128; st->sessions = 1;
@@ -534,6 +550,26 @@ int main(int argc, char **argv) {
             assert(!home_resident_plan_load(plan.tracker, &loaded) && loaded.sessions == slots);
         }
         plan.sessions = 9; assert(!home_resident_plan_valid(&plan)); plan.sessions = 8;
+        memset(plan.content_id, 'c', 64);
+        memset(plan.observation.build_id, 'd', 64);
+        snprintf(plan.observation.adapter, sizeof plan.observation.adapter, "olmoe");
+        for (uint32_t i = 0; i < plan.execution.count; i++) {
+            memset(plan.observation.hardware[i], 'e', 64);
+            memset(plan.observation.runtime[i], 'f', 64);
+            plan.observation.threads[i] = i + 1;
+        }
+        assert(!home_resident_plan_save(&plan));
+        assert(!home_resident_plan_load(plan.tracker, &loaded));
+        assert(!memcmp(&loaded.observation, &plan.observation, sizeof plan.observation));
+        LmbCalKey seed;
+        assert(!home_resident_observation_key(&loaded, &seed));
+        assert(seed.nodes == 2 && seed.sessions == 8 && seed.threads[1] == 2);
+        assert(!strcmp(seed.model_root, plan.content_id) && !strcmp(seed.adapter, "olmoe"));
+        assert(!seed.adapter_abi && !seed.numeric_class[0] && !lmb_cal_key_valid(&seed));
+        assert(!seed.workload[0].known); /* a saved plan never fabricates a current workload */
+        loaded.observation.threads[0] = 257; assert(!home_resident_plan_valid(&loaded));
+        loaded = plan; loaded.observation.runtime[0][0] = 'z'; assert(!home_resident_plan_valid(&loaded));
+        loaded = plan; loaded.observation.build_id[64] = 'd'; assert(!home_resident_plan_valid(&loaded));
         LmbResidentPlan library[4]; char library_path_a[1200], library_path_b[1200], library_directory[1200];
         assert(!home_resident_library_path(&plan, library_path_a, sizeof library_path_a));
         assert(!home_resident_library_save(&plan));

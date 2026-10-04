@@ -11,7 +11,20 @@ typedef struct {
     uint8_t allocation[32], peer_keys[LMB_CLUSTER_MAX_NODES][32];
     double preparation_seconds, prepared_at;
     char content_id[65]; /* source content identity, distinct from the named routing root */
+    /* Preparation provenance, not a speed or permission to recreate engines.
+     * Numeric ABI/class are learned only from the live authenticated Edge. */
+    struct {
+        char build_id[65], adapter[32];
+        uint32_t goal;
+        char hardware[LMB_CLUSTER_MAX_NODES][65], runtime[LMB_CLUSTER_MAX_NODES][65];
+        uint32_t threads[LMB_CLUSTER_MAX_NODES];
+    } observation;
 } LmbResidentPlan;
+
+static int home_resident_digest(const char value[65]) {
+    uint8_t bytes[32];
+    return memchr(value, 0, 65) && strlen(value) == 64 && !lmb_unhex(bytes, value, 32);
+}
 
 static int home_resident_plan_valid(const LmbResidentPlan *p) {
     if (!p || p->execution.count > LMB_CLUSTER_MAX_NODES || p->sessions > LMB_HOST_MAX_SESSIONS) return 0;
@@ -22,6 +35,14 @@ static int home_resident_plan_valid(const LmbResidentPlan *p) {
     uint8_t bytes[32];
     if (!memchr(p->content_id, 0, sizeof p->content_id) ||
         (p->content_id[0] && (strlen(p->content_id) != 64 || lmb_unhex(bytes, p->content_id, 32)))) return 0;
+    if (p->observation.build_id[0]) {
+        if (!p->sessions || !p->content_id[0] || !lmb_home_nonzero(p->allocation, 32) ||
+            !home_resident_digest(p->observation.build_id) || p->observation.goal > 1 ||
+            !lmb_cal_text(p->observation.adapter, sizeof p->observation.adapter)) return 0;
+        for (uint32_t i = 0; i < p->execution.count; i++)
+            if (!home_resident_digest(p->observation.hardware[i]) || !home_resident_digest(p->observation.runtime[i]) ||
+                !p->observation.threads[i] || p->observation.threads[i] > 256) return 0;
+    }
     return lmb_cal_text(p->tracker, sizeof p->tracker) &&
         lmb_cal_text(p->host, sizeof p->host) &&
         lmb_cal_text(p->model, sizeof p->model) &&
@@ -48,7 +69,7 @@ static int home_resident_plan_write(const LmbResidentPlan *p, const char *path) 
     if (lmb_buf_reserve(&b, 65536)) return -1;
     int managed = lmb_home_nonzero(p->allocation, 32);
     if (p->sessions && !managed) { free(b.p); return -1; }
-    lmb_buf_u32(&b, managed ? p->sessions ? 5 : 4 : p->execution.hybrid ? 2 : 1);
+    lmb_buf_u32(&b, p->observation.build_id[0] ? 6 : managed ? p->sessions ? 5 : 4 : p->execution.hybrid ? 2 : 1);
     lmb_buf_str(&b, p->tracker); lmb_buf_str(&b, p->host);
     lmb_buf_str(&b, p->host_key); lmb_buf_str(&b, p->root); lmb_buf_str(&b, p->model);
     lmb_buf_u32(&b, p->context); lmb_buf_u32(&b, p->max_new);
@@ -67,6 +88,14 @@ static int home_resident_plan_write(const LmbResidentPlan *p, const char *path) 
         lmb_cal_put_double(&b, p->prepared_at);
         lmb_buf_str(&b, p->content_id);
         if (p->sessions) lmb_buf_u32(&b, p->sessions);
+        if (p->observation.build_id[0]) {
+            lmb_buf_str(&b, p->observation.build_id); lmb_buf_str(&b, p->observation.adapter);
+            lmb_buf_u32(&b, p->observation.goal);
+            for (uint32_t i = 0; i < p->execution.count; i++) {
+                lmb_buf_str(&b, p->observation.hardware[i]); lmb_buf_str(&b, p->observation.runtime[i]);
+                lmb_buf_u32(&b, p->observation.threads[i]);
+            }
+        }
     }
     int fd = mkstemp(temporary), rc = -1;
     if (fd >= 0) {
@@ -102,7 +131,7 @@ static int home_resident_plan_read(const char *path, const char *tracker, LmbRes
     int rc = lmb_read_full(fd, bytes, length); close(fd);
     if (rc) return -1;
     LmbCur c = {bytes, length, 0}; uint32_t version;
-    if (lmb_cur_u32(&c, &version) || version < 1 || version > 5 ||
+    if (lmb_cur_u32(&c, &version) || version < 1 || version > 6 ||
         lmb_inventory_string(&c, p->tracker, sizeof p->tracker) || strcmp(tracker, p->tracker) ||
         lmb_inventory_string(&c, p->host, sizeof p->host) ||
         lmb_inventory_string(&c, p->host_key, sizeof p->host_key) ||
@@ -132,7 +161,17 @@ static int home_resident_plan_read(const char *path, const char *tracker, LmbRes
         if (version >= 4 && (lmb_cal_get_double(&c, &p->preparation_seconds) ||
                             lmb_cal_get_double(&c, &p->prepared_at) ||
                             lmb_inventory_string(&c, p->content_id, sizeof p->content_id))) return -1;
-        if (version == 5 && (lmb_cur_u32(&c, &p->sessions) || !p->sessions)) return -1;
+        if (version >= 5 && (lmb_cur_u32(&c, &p->sessions) || !p->sessions)) return -1;
+        if (version == 6) {
+            if (lmb_inventory_string(&c, p->observation.build_id, sizeof p->observation.build_id) ||
+                !p->observation.build_id[0] ||
+                lmb_inventory_string(&c, p->observation.adapter, sizeof p->observation.adapter) ||
+                lmb_cur_u32(&c, &p->observation.goal)) return -1;
+            for (uint32_t i = 0; i < p->execution.count; i++)
+                if (lmb_inventory_string(&c, p->observation.hardware[i], sizeof p->observation.hardware[i]) ||
+                    lmb_inventory_string(&c, p->observation.runtime[i], sizeof p->observation.runtime[i]) ||
+                    lmb_cur_u32(&c, &p->observation.threads[i])) return -1;
+        }
     }
     return c.off == c.len && home_resident_plan_valid(p) ? 0 : -1;
 }
@@ -179,6 +218,27 @@ static size_t home_resident_library_list(const char *tracker, LmbResidentPlan *p
     closedir(d); return n;
 }
 
+static int home_resident_observation_key(const LmbResidentPlan *p, LmbCalKey *key) {
+    memset(key, 0, sizeof *key);
+    if (!home_resident_plan_valid(p) || !p->observation.build_id[0]) return -1;
+    snprintf(key->model_root, sizeof key->model_root, "%s", p->content_id);
+    snprintf(key->adapter, sizeof key->adapter, "%s", p->observation.adapter);
+    snprintf(key->build_id, sizeof key->build_id, "%s", p->observation.build_id);
+    snprintf(key->plan_kind, sizeof key->plan_kind, "%s", p->execution.hybrid ? "hybrid" : "segment");
+    key->goal = p->observation.goal; key->context = p->context; key->sessions = p->sessions;
+    key->nodes = p->execution.count;
+    for (uint32_t i = 0; i < key->nodes; i++) {
+        lmb_hex(key->node_id[i], p->peer_keys[i], 32);
+        snprintf(key->node_hardware_id[i], sizeof key->node_hardware_id[i], "%s", p->observation.hardware[i]);
+        snprintf(key->node_build_id[i], sizeof key->node_build_id[i], "%s", p->observation.runtime[i]);
+        snprintf(key->node_backend[i], sizeof key->node_backend[i], "cpu");
+        key->threads[i] = p->observation.threads[i];
+        key->layer_begin[i] = p->execution.nodes[i].begin; key->layer_end[i] = p->execution.nodes[i].end;
+        if (p->execution.nodes[i].edge) key->edge_node = i;
+    }
+    return 0;
+}
+
 static int home_resident_plan_chat_mode(const LmbResidentPlan *p, int calibrate) {
     if (!home_resident_plan_valid(p)) return -1;
     char context[20], max_new[20];
@@ -194,7 +254,7 @@ static int home_resident_plan_chat_mode(const LmbResidentPlan *p, int calibrate)
     LmbBinaryDigest self = {0}; uint8_t hash[32]; char build[65];
     int observing = 0;
     if (!g_recording_calibration && p->content_id[0] && !catalog_calibration_dir(records) &&
-        !lmb_cal_load(records, p->content_id, &resumed)) {
+        (!home_resident_observation_key(p, &resumed.key) || !lmb_cal_load(records, p->content_id, &resumed))) {
         LmbCalKey *k = &resumed.key;
         int same = k->nodes == p->execution.count && k->context == p->context && k->sessions == (p->sessions ? p->sessions : 1) &&
             !strcmp(k->plan_kind, p->execution.hybrid ? "hybrid" : "segment");

@@ -81,6 +81,7 @@
  * cannot create an entry without an approved plan and actual numeric metadata. */
 static LmbCalibration *g_recording_calibration;
 static const char *g_calibration_directory;
+static int catalog_workload_capture(const char *tracker, LmbCalKey *key, char *why, size_t cap);
 
 /* ---- terminal ----------------------------------------------------------- */
 
@@ -5006,6 +5007,12 @@ static int cmd_chat(int argc, char **argv) {
             continue;
         }
         int is_reset = !strcmp(line, "/reset");
+        LmbCalKey turn_key; char observation_why[200] = "";
+        int turn_observed = 0;
+        if (!is_reset && g_recording_calibration && g_calibration_directory) {
+            turn_key = g_recording_calibration->key;
+            turn_observed = !catalog_workload_capture(tracker, &turn_key, observation_why, sizeof observation_why);
+        }
         if (quick_probe && lmb_probe_start(&probe_deadline, eng.to, LMB_QUICK_PROBE_SECONDS)) {
             fprintf(stderr, "Cannot start the calibration deadline; no measurement was submitted.\n");
             chat_failed = 1; break;
@@ -5136,9 +5143,10 @@ static int cmd_chat(int argc, char **argv) {
             chat_failed = 1; break;
         }
         if(metric_status==0) {
-            if (g_recording_calibration && g_calibration_directory && eng.numeric_abi &&
+            if (turn_observed && g_recording_calibration && g_calibration_directory && eng.numeric_abi &&
                 nstat >= 5 && prompt_count && lmb_metrics_decode_rate(&metrics) > 0) {
                 LmbCalibration record = *g_recording_calibration;
+                record.key = turn_key;
                 record.key.adapter_abi = eng.numeric_abi;
                 snprintf(record.key.numeric_class, sizeof record.key.numeric_class, "%s", eng.numeric_class);
                 record.decode_tok_s = lmb_metrics_decode_rate(&metrics);
@@ -5165,13 +5173,19 @@ static int cmd_chat(int argc, char **argv) {
                     }
                     if (valid) record.stage_count = count;
                 }
-                if (!lmb_cal_store(g_calibration_directory, &record)) {
+                LmbCalKey after = record.key;
+                if (catalog_workload_capture(tracker, &after, observation_why, sizeof observation_why) ||
+                    !lmb_cal_matches(&record.key, &after)) {
+                    fprintf(stderr, "[calibration] Workload changed or became unavailable during this turn; no speed saved.\n");
+                } else if (!lmb_cal_store(g_calibration_directory, &record)) {
                     *g_recording_calibration = record;
                     probe_recorded = 1;
                 } else fprintf(stderr, "[lumabri] Could not save this measurement; the reply is unaffected.\n");
             }
             if (g_recording_calibration && !eng.numeric_abi)
                 fprintf(stderr, "[calibration] No speed saved: the host did not supply its numeric ABI.\n");
+            else if (g_recording_calibration && !turn_observed)
+                fprintf(stderr, "[calibration] No speed saved: %.180s.\n", observation_why);
             printf("%s  host prefill %.1fs · %u generated tokens",C_DIM,
                    metrics.prefill_seconds,metrics.generated_tokens);
             double rate=lmb_metrics_decode_rate(&metrics);
@@ -5494,6 +5508,8 @@ static int catalog_calibration_key(const LmbTuiState *st, const LmbTuiModel *m,
         catalog_hardware_id(&st->profiles[n], st->nodes[n].addr, key->node_hardware_id[i]);
         key->layer_begin[i] = slice->layer_begin; key->layer_end[i] = slice->layer_end;
         key->threads[i] = st->nodes[n].threads > 256 ? 256 : st->nodes[n].threads;
+        key->workload[i] = st->workloads[n];
+        key->workload[i].active = key->workload[i].queued = 0;
     }
     /* ABI/numeric may be unknown until the real Edge greeting. All other
      * fields must already be bound; the writer validates the completed key. */
@@ -5547,6 +5563,39 @@ static int catalog_runtime_revalidate_tracker(const char *tracker, const LmbCalK
         if (match < 0 || g_stopping || nowd() >= deadline) return -1;
         struct timespec pause = {0, 250000000};
         nanosleep(&pause, NULL);
+    }
+}
+
+/* Leased observations at turn boundaries, not a promise of exclusive CPU use.
+ * An initial empty managed inventory can predate our READY allocation; wait
+ * at most two reporting periods before withholding this observation. */
+static int catalog_workload_capture(const char *tracker, LmbCalKey *key, char *why, size_t cap) {
+    if (!tracker || !*tracker || !key->nodes || key->nodes > LMB_CAL_NODES_MAX) {
+        snprintf(why, cap, "incomplete workload provenance"); return -1;
+    }
+    double deadline = nowd() + 2 * LMB_INVENTORY_HEARTBEAT_MS / 1000.0;
+    for (;;) {
+        LmbMachineReport reports[LMB_INVENTORY_MAX]; uint32_t count = 0;
+        if (lmb_inventory_fetch(tracker, reports, &count)) {
+            snprintf(why, cap, "household inventory unavailable"); return -1;
+        }
+        if (catalog_runtime_match(key, reports, count, why, cap)) return -1;
+        int pending = 0;
+        for (uint32_t j = 0; j < key->nodes; j++) {
+            for (uint32_t i = 0; i < count; i++) {
+                char identity[65]; lmb_hex(identity, reports[i].identity, 32);
+                if (strcmp(identity, key->node_id[j])) continue;
+                key->workload[j] = reports[i].workload;
+                key->workload[j].active = key->workload[j].queued = 0;
+                if (key->workload[j].known && !key->workload[j].allocations) pending = 1;
+                break;
+            }
+        }
+        if (!pending) return 0;
+        if (g_stopping || nowd() >= deadline) {
+            snprintf(why, cap, "the ready allocation is not yet in the managed workload inventory"); return -1;
+        }
+        (void)poll(NULL, 0, 200);
     }
 }
 

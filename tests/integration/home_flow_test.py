@@ -51,12 +51,14 @@ def current_frame(terminal):
 
 def assert_stage_record(path, stages=2, expected_source=2):
     record = path.read_bytes()
-    assert record[:8] == b"LMB-CAL4", "new link/preparation record was not written"
+    assert record[:8] == b"LMB-CAL5", "workload-bound record was not written"
     assert hashlib.sha256(record[:-32]).digest() == record[-32:], "record checksum mismatch"
     # Two Segment ranges, or no complete link chain for Hybrid accelerators.
     link_count = stages
     extension = 20 + 36 * link_count
-    source_at = len(record) - 32 - extension - 4
+    workload_nodes = struct.unpack_from("<I", record, len(record)-36)[0]
+    assert 0 < workload_nodes <= 32
+    source_at = len(record) - 32 - (4 + 52 * workload_nodes) - extension - 4
     source = struct.unpack_from("<I", record, source_at)[0]
     assert source == expected_source, "measurement has the wrong probe/session source"
     preparation, prepared_at, actual_links = struct.unpack_from("<ddI", record, source_at + 4)
