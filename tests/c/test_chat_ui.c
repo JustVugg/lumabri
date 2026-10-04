@@ -5,6 +5,43 @@
 #include <assert.h>
 
 int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "service-codec")) {
+        HomeServiceSnapshot input = {.state=HOME_SVC_RUNNING, .ram=1000,
+            .model_count=2, .reserved_total=900, .compute_enabled=1,
+            .compute_active=1, .compute_queued=3, .compute_grants=1234};
+        strcpy(input.role, "donor");
+        LmbBuf b = {0}; HomeServiceSnapshot output;
+        assert(!home_service_pack(&b, &input));
+        assert(!home_service_unpack(b.p, b.len, &output));
+        assert(output.compute_active == 1 && output.compute_queued == 3 && output.compute_grants == 1234);
+        for (size_t n = 0; n < b.len; n++) assert(home_service_unpack(b.p, n, &output));
+        lmb_put32(b.p, 2); /* v2 had allocations but no compute observation */
+        assert(!home_service_unpack(b.p, b.len-20, &output));
+        assert(output.model_count == 2 && output.reserved_total == 900 && !output.compute_enabled);
+        lmb_put32(b.p, 1);
+        assert(!home_service_unpack(b.p, b.len-32, &output));
+        assert(!output.model_count && !output.compute_enabled);
+        lmb_put32(b.p, 4); assert(home_service_unpack(b.p, b.len, &output));
+        free(b.p); b = (LmbBuf){0};
+        input.compute_active = 2; assert(home_service_pack(&b, &input));
+        input.compute_active = 1; input.compute_queued = 33; assert(home_service_pack(&b, &input));
+        input.compute_queued = 3; input.compute_enabled = 0; assert(home_service_pack(&b, &input));
+        input.compute_enabled = 1;
+        char directory[] = "/tmp/lmb-service-codec.XXXXXX"; assert(mkdtemp(directory));
+        HomeService service = {.snapshot=input};
+        snprintf(service.directory, sizeof service.directory, "%s", directory);
+        snprintf(service.journal, sizeof service.journal, "%s/state", directory);
+        assert(!home_service_save(&service));
+        assert(!home_service_unpack(service.last, service.last_size, &output));
+        assert(output.compute_enabled && !output.compute_active && !output.compute_queued && !output.compute_grants);
+        struct stat before, after; assert(!stat(service.journal, &before));
+        service.snapshot.compute_active = 0; service.snapshot.compute_queued = 9;
+        service.snapshot.compute_grants++;
+        assert(!home_service_save(&service)); assert(!stat(service.journal, &after));
+        assert(before.st_ino == after.st_ino); /* no replace/fsync for kernel counters */
+        free(service.last); assert(!unlink(service.journal)); assert(!rmdir(directory));
+        puts("SERVICE CODEC: PASS (v1/v2/v3, strict bounds, counters stay out of durable state)"); return 0;
+    }
     if (argc == 2 && !strcmp(argv[1], "model-pool")) {
         HomeDonor parked[3] = {0}, d = {.parked = parked, .park_capacity = 3, .pool_budget = 1000, .offer_revision = 3};
         for (unsigned i = 0; i < 3; i++) { parked[i] = d; parked[i].client = -1; }

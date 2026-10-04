@@ -177,6 +177,7 @@ def main():
             until(lambda: chat.p.poll() is not None, "requester chat did not close")
         before = {name: service(name)["donor"] for name in ("a", "b")}
         assert all(x["segment_pid"] and x["phase"] in (4, 6) for x in before.values()), before
+        assert all(x["compute"]["enabled"] for x in before.values()), "no private compute admission"
         for t in (a, b):
             t.p.terminate(); until(lambda: t.p.poll() is not None, "donor UI did not terminate")
         for name in ("owner", "a", "b", "chatter"):
@@ -202,6 +203,7 @@ def main():
         until(lambda: resumed.has("receives the text"), "retained host did not answer")
         resumed.send("hi\n")
         until(lambda: hosted_turn_complete(resumed.text), "real generation failed after all TUI/manager restarts", 120)
+        assert all(service(name)["donor"]["compute"]["grants"] > 0 for name in ("a", "b")), "real kernels bypassed compute admission"
         if args.keep_requester:
             assert assert_stage_record(records[0]) == 2, "resident real session did not update existing observations"
         resumed.text = ""; resumed.send("/quit\n")
@@ -262,9 +264,11 @@ def main():
             parallel = Terminal("chatter", ["chat", "--host", names[1], "--host-key", names[2],
                 "--host-root", names[3], "--model", names[4], "--tracker", tracker, "--ctx", "128", "--max-new", "8"])
             until(lambda: parallel.has("receives the text"), "first model could not open a parallel conversation")
+            prior_grants = {name: service(name)["donor"]["compute"]["grants"] for name in ("a", "b")}
             another.text = ""; another.send("beta\n"); parallel.send("alpha\n")
             until(lambda: hosted_turn_complete(another.text) and hosted_turn_complete(parallel.text),
                   "concurrent independent models failed to generate", 120)
+            assert all(service(name)["donor"]["compute"]["grants"] > prior_grants[name] for name in ("a", "b")), "mixed model turns bypassed node compute admission"
             parallel.send("/quit\n")
             until(lambda: parallel.p.poll() is not None, "parallel first-model chat did not close")
             # The authenticated release names the first allocation, not the

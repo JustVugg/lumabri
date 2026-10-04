@@ -64,14 +64,49 @@ Releasing one model or losing its requester cannot release another allocation.
 Only stopping the sharing service unloads all its models. Manager restart does
 not replay approvals or create duplicate reservations.
 
-This is memory-safe coexistence, not guaranteed per-model performance. Models
-share CPU time through the OS; their independent engines may compete when chats
-overlap. Previous single-model tok/s are historical observations, not a concurrent
-SLA. The current maximum is four models and one hosted chat per model. There is
-one preparation at a time per requesting local service. The legacy foreground
-diagnostic donor remains single-allocation. Shared-donor batching, fair global
-compute scheduling, automatic failover/replay, server-wide cost
-optimization and model eviction policies are separate work.
+The current limits are four resident Segment models and up to eight approved
+conversation slots per model. Weights are shared within a model; conversation
+state is not. There is one active turn per model, with bounded FIFO admission
+for waiting turns. Previous single-model tok/s are historical observations, not
+a concurrent SLA. There is one preparation at a time per requesting local
+service. The legacy foreground diagnostic donor remains single-allocation.
+
+## Compute admission across models
+
+The background donor owns a private same-user compute broker. All its managed
+Segment and Edge processes take a permit for each local kernel and release it
+before waiting on another node. One kernel team executes at a time on that
+donor; waiting kernels are FIFO, including when different resident models are
+used together. This conservative policy prevents their independently sized
+thread teams from running together. It is not CPU-time-weighted scheduling:
+a long prefill kernel can still delay another model. No global latency or
+throughput guarantee follows from a free conversation slot.
+
+At most 32 connected permit requests are retained, including the active owner
+and incomplete headers. An incomplete header expires after two seconds. Segment
+admission uses the same configured wait budget across its per-engine and donor
+queues (30 seconds by default); Edge admission waits at most 30 seconds and
+observes hosted cancellation. An active kernel is never evicted merely because
+its queue timeout has passed. Disconnecting or terminating its process releases
+the permit. Broker failure fails closed; the keeper stops its allocations rather
+than letting models bypass admission. Manager restart leaves the keeper and
+broker alive.
+
+`service status --json` exposes `compute.enabled`, `active`, `queued` and
+`grants` for each donor. They are live observations, not restart authority.
+Per-kernel counters do not trigger journal writes. Older service records remain
+readable, but have no compute-admission observation. This is local same-user IPC,
+not protection against an arbitrary program already running as that OS user.
+
+Hybrid retains an explicit restriction: it cannot coexist with another resident
+allocation on the same donor. Its coordinator may wait for remote experts
+inside a local kernel; allowing overlapping Hybrid models to hold opposite
+node permits would risk deadlock. Use Segment for concurrent resident models
+until that path can yield admission around remote waits.
+
+Shared-donor batching, weighted/global compute scheduling, automatic
+failover/replay, server-wide cost optimization and model eviction policies are
+separate work.
 
 ## Next dependencies
 
@@ -97,6 +132,7 @@ household scoping.
 ```sh
 python3 tests/integration/household_service_flow_test.py --models-dir /path/to/tiny-model-parent
 python3 tests/integration/household_service_flow_test.py --models-dir /path/to/tiny-model-parent --keep-requester --multi-model
+python3 tests/integration/household_service_flow_test.py --models-dir /path/to/tiny-model-parent --keep-requester --multi-model --sessions 4
 ```
 
 This real-engine gate creates an isolated tracker and two donors, closes the
@@ -108,3 +144,10 @@ release. Its processes, keys and homes are test-only. Loopback and tiny-model
 coverage do not certify physical-LAN performance, large-model capacity or
 native Windows support. Native macOS coverage is supplied by CI, not inferred
 from the Linux result.
+
+`test_compute_broker` covers FIFO admission, full queues, cancellation,
+deadlines, malformed/partial requests, process death, private sockets and
+fail-closed behavior. `test_chat_ui service-codec` checks record compatibility
+and ensures kernel counters cannot cause durable-state rewrites. The mixed-model
+flow additionally checks that real kernels obtained compute permits on both
+donors and that releasing one model leaves the other chat usable.
