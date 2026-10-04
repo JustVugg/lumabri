@@ -1131,7 +1131,7 @@ static int home_request_chat_direct(LmbTuiState *st, int selected) {
     if (!m->checkpoint_inventory_ok)
         return home_fail("Cannot inventory the source checkpoint. Check its files and refresh the model list.");
     if (!m->weights_present || !m->shape.sizing_verified || !st->sessions || st->sessions > LMB_HOST_MAX_SESSIONS) {
-        return home_fail("This checkpoint needs verified sizing, local source weights and 1–8 session slots.");
+        return home_fail("This checkpoint needs verified sizing, local source weights and 1-8 session slots.");
     }
     LmbClusterNode nodes[LMB_CLUSTER_MAX_NODES];
     uint32_t indices[LMB_CLUSTER_MAX_NODES], count = 0;
@@ -1202,7 +1202,7 @@ static int home_request_chat_direct(LmbTuiState *st, int selected) {
                (*p >= '0' && *p <= '9') || *p == '-')) *p = '_';
     if (home_background_job) {
         snprintf(home_background_job->snapshot.name, sizeof home_background_job->snapshot.name, "%s", model);
-        snprintf(home_background_job->snapshot.detail, sizeof home_background_job->snapshot.detail, "Indexing and verifying checkpoint identity");
+        home_service_preparation_detail(home_background_job, "Indexing and verifying checkpoint identity");
         if (home_service_save(home_background_job)) return home_fail("Cannot persist preparation identity. No donor was contacted.");
     }
     char dir[1024], maintainer[1200], ip[INET_ADDRSTRLEN], port[20], addr[64], name[64];
@@ -1404,8 +1404,10 @@ static int home_request_chat_direct(LmbTuiState *st, int selected) {
                               !host_started ? "Transferring weights and loading approved segments" :
                                               "Loading the chat host; segments are ready";
         if (home_background_job) {
-            snprintf(home_background_job->snapshot.detail, sizeof home_background_job->snapshot.detail,
+            char progress_detail[384];
+            snprintf(progress_detail, sizeof progress_detail,
                 "%.180s. %.180s", loading, committed ? detail : "Each donor must accept in Share resources");
+            home_service_preparation_detail(home_background_job, progress_detail);
             if (home_service_save(home_background_job)) { home_fail("Cannot persist preparation progress."); goto done; }
         }
         if (term.active) {
@@ -1564,6 +1566,58 @@ done:
     return result;
 }
 
+/* 0: completed, 1: detached/cancel requested, -1: failed. No chat side effect. */
+static int home_prepare_wait(const HomeServiceSnapshot *expected, const char *label,
+    HomeServiceSnapshot *result) {
+    HomeTerminal term; home_terminal_begin(&term);
+    int rc = 0;
+    HomeServiceSnapshot status = *expected;
+    for (;;) {
+        HomeServiceSnapshot observed;
+        int live = !home_service_query("prepare", HOME_SVC_STATUS, NULL, &observed);
+        if (!live && home_service_record("prepare", &observed)) {
+            home_fail("Cannot read preparation status. Check service diagnostics."); rc = -1; break;
+        }
+        if (memcmp(observed.instance, expected->instance, 32)) {
+            home_fail("The preparation operation changed; refresh Resident models."); rc = -1; break;
+        }
+        status = observed;
+        if (status.state != HOME_SVC_RUNNING) break;
+        ui_begin("prepare models");
+        ui_text(6, 5, UI_TEXT, label);
+        ui_text(9, 5, UI_SAND, status.detail);
+        ui_text(13, 5, UI_MUTED, "This operation continues if you close the interface.");
+        ui_footer("Donors must approve the reviewed allocation. No silent reload or replacement.",
+            "Esc detach   c cancel preparation and release incomplete allocations"); ui_present();
+        int key = home_key();
+        if (g_stopping || key == 27 || key == 3 || key == 'q') { rc = 1; break; }
+        if (key == 'c') {
+            rc = 1;
+            if (home_service_query("prepare", HOME_SVC_CANCEL, &status, &observed)) {
+                home_fail("Cancellation was not confirmed. Check the background operation before retrying."); rc = -1;
+            }
+            break;
+        }
+        if (!live) {
+            char path[1200]; int fd = -1;
+            if (!home_service_path("prepare", "lock", path, sizeof path)) fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+            int active = fd >= 0 && flock(fd, LOCK_EX | LOCK_NB);
+            if (fd >= 0) close(fd);
+            if (!active) {
+                home_fail("Preparation keeper stopped. Its previous approval will not be replayed. Check the donors before retrying.");
+                rc = -1; break;
+            }
+        }
+        (void)poll(NULL, 0, 100);
+    }
+    home_terminal_end(&term);
+    *result = status;
+    if (!rc && status.state != HOME_SVC_DONE) {
+        home_fail("%s", status.detail[0] ? status.detail : "Preparation did not finish."); rc = -1;
+    }
+    return rc;
+}
+
 static int home_request_chat(LmbTuiState *st, int selected) {
     if (home_service_foreground()) return home_request_chat_direct(st, selected);
     if (!home_resident_required()) return home_fail("Background preparation requires resident weights. Disk-cache diagnostics require LUMABRI_HOME_FOREGROUND=1.");
@@ -1587,41 +1641,9 @@ static int home_request_chat(LmbTuiState *st, int selected) {
         if (home_service_save(&job)) rc = 1;
         home_service_answer(&job); home_service_close(&job); _exit(rc);
     }
-    HomeTerminal term; home_terminal_begin(&term);
-    int rc = 0;
-    HomeServiceSnapshot status = job.snapshot;
-    for (;;) {
-        HomeServiceSnapshot observed;
-        int live = !home_service_query("prepare", HOME_SVC_STATUS, NULL, &observed);
-        if (!live && home_service_record("prepare", &observed)) { rc = home_fail("Cannot read preparation status. Check service diagnostics."); break; }
-        if (memcmp(observed.instance, job.snapshot.instance, 32)) { rc = home_fail("The preparation operation changed; refresh Resident models."); break; }
-        status = observed;
-        if (status.state != HOME_SVC_RUNNING) break;
-        ui_begin("prepare chat");
-        ui_printf(6, 5, UI_TEXT, "%s", st->models[selected].name);
-        ui_text(9, 5, UI_SAND, status.detail);
-        ui_text(13, 5, UI_MUTED, "This operation continues if you close the interface.");
-        ui_footer("Donors must approve the reviewed allocation. No silent reload or replacement.",
-            "Esc detach   c cancel preparation and release incomplete allocations"); ui_present();
-        int key = home_key();
-        if (g_stopping || key == 27 || key == 3 || key == 'q') { home_terminal_end(&term); return 0; }
-        if (key == 'c') {
-            if (home_service_query("prepare", HOME_SVC_CANCEL, &status, &observed))
-                rc = home_fail("Cancellation was not confirmed. Check the background operation before retrying.");
-            home_terminal_end(&term); return rc;
-        }
-        if (!live) {
-            char path[1200]; int fd = -1;
-            if (!home_service_path("prepare", "lock", path, sizeof path)) fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-            int active = fd >= 0 && flock(fd, LOCK_EX | LOCK_NB);
-            if (fd >= 0) close(fd);
-            if (!active) { rc = home_fail("Preparation keeper stopped. Its previous approval will not be replayed. Check the donors before retrying."); break; }
-        }
-        (void)poll(NULL, 0, 100);
-    }
-    home_terminal_end(&term);
-    if (rc) return rc;
-    if (status.state != HOME_SVC_DONE) return home_fail("%s", status.detail[0] ? status.detail : "Preparation did not finish.");
+    HomeServiceSnapshot status;
+    int rc = home_prepare_wait(&job.snapshot, st->models[selected].name, &status);
+    if (rc) return rc < 0 ? 1 : 0;
     LmbResidentPlan saved;
     if (home_resident_plan_load(st->tracker, &saved) || strcmp(saved.model, status.name))
         return home_fail("Prepared plan changed; choose it from Resident models.");

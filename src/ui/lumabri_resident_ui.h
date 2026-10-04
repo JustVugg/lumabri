@@ -49,6 +49,7 @@ static int home_resident_library_ui(const char *tracker) {
     HomeResidentProbe probe = {0}; pthread_t thread;
     HomeTerminal term; home_terminal_begin(&term);
     char notice[200] = "Only live, authenticated donor replies confirm a resident model.";
+    double refreshed = nowd();
     while (!g_stopping) {
         if (probing && atomic_load(&probe.done)) {
             pthread_join(thread, NULL); probing = 0;
@@ -61,9 +62,25 @@ static int home_resident_library_ui(const char *tracker) {
         }
         ui_begin("resident models");
         HomeServiceSnapshot operation;
-        int pending = !home_service_record("prepare", &operation) && operation.state == HOME_SVC_RUNNING;
+        int recorded = !home_service_record("prepare", &operation);
+        int pending = recorded && operation.state == HOME_SVC_RUNNING;
+        if (!probing && !confirm_unload && nowd()-refreshed >= 2) {
+            uint8_t old_ids[64][32]; int old_confirmed[64]; size_t old_count = count;
+            for (size_t i = 0; i < count; i++) memcpy(old_ids[i], plans[i].allocation, 32);
+            memcpy(old_confirmed, confirmed, sizeof confirmed);
+            char chosen[64] = "";
+            if (count) snprintf(chosen, sizeof chosen, "%s", plans[selected].model);
+            size_t new_count = home_resident_library_list(tracker, plans, 64);
+            if (!new_count && !home_resident_plan_load(tracker, &plans[0])) new_count = 1;
+            count = new_count; selected = 0;
+            for (size_t i = 0; i < count; i++) if (!strcmp(chosen, plans[i].model)) selected = (int)i;
+            memset(confirmed, 0, sizeof confirmed);
+            for (size_t i = 0; i < count; i++) for (size_t j = 0; j < old_count; j++)
+                if (!memcmp(plans[i].allocation, old_ids[j], 32)) { confirmed[i] = old_confirmed[j]; break; }
+            refreshed = nowd();
+        }
         ui_text(5, 5, UI_TEXT, "Approved plans · no implicit loading");
-        if (pending) ui_printf(7, 5, UI_SAND, "Preparation (last recorded): %.80s", operation.detail);
+        if (recorded) ui_printf(7, 5, UI_SAND, "Preparation (last recorded): %.100s", operation.detail);
         if (!count) ui_text(10, 5, UI_MUTED, "No saved plans for this household. Prepare one from Explore models.");
         int rows = (ui_h - 16) / 3; if (rows < 1) rows = 1;
         int first = selected >= rows ? selected - rows + 1 : 0;

@@ -107,6 +107,7 @@ lumabri test_chat_ui: src/planner/lumabri_catalogue_advice.h
 lumabri test_chat_ui: src/planner/lumabri_portfolio.h src/planner/lumabri_portfolio_catalogue.h
 lumabri test_chat_ui: src/runtime/lumabri_preload.h
 lumabri test_chat_ui: src/runtime/lumabri_service.h src/runtime/lumabri_service_manager.h
+lumabri test_chat_ui: src/runtime/lumabri_joint_prepare.h
 lumabri test_chat_ui: src/ui/lumabri_resident_ui.h
 lumabri segment_chat test_chat_ui: lumabri_metrics.h
 lumabri test_chat_ui: lumabri_run_gate.c lumabri_run_gate.h src/runtime/lumabri_host_sessions.h

@@ -18,6 +18,7 @@ import unicodedata
 
 ROOT = Path(__file__).resolve().parents[2]
 subprocess.run(["./test_chat_ui", "model-pool"], cwd=ROOT, check=True)
+subprocess.run(["./test_chat_ui", "joint-guards"], cwd=ROOT, check=True)
 joint = json.loads(subprocess.check_output(["./test_chat_ui", "portfolio-preview"], cwd=ROOT, text=True))
 assert joint["state"] == "joint_resident_candidate" and joint["requires_approval"]
 assert joint["performance_validated"] is False and joint["decode_tok_s"] is None

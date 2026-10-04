@@ -29,7 +29,8 @@ The memory seed search is bounded and deterministic, not exhaustive. A failed
 search means no resident plan was found, not a
 proof that every possible partition is impossible. It does not add computers
 outside the user's selection, combine CPU RAM with VRAM, weaken the memory
-guard, enable disk execution, or support multiple simultaneous sessions.
+guard or enable disk execution. Conversation slots have separate runtime
+admission; finding a memory fit is not a throughput guarantee.
 
 The binary search relies on the current adapters' nonnegative per-layer
 resident/state costs and fixed scratch: extending a range cannot reduce its
@@ -45,8 +46,8 @@ builds, hardware, node order, Edge owner, backend, threads, context and session
 count allow reuse as placement costs. Duration divided by layer count is a
 heuristic, including transport and queueing, not a measurement of a new range.
 The search minimizes the estimated sum for one session, or maximum stage for
-the throughput objective. The household still admits one session: the latter
-is solver behavior, not a new multi-session service.
+the throughput objective. Hosted conversation slots retain private state and
+share a bounded turn queue; the solver does not imply parallel kernel execution.
 
 Changed ranges make the old tok/s stale. The TUI labels timing-guided placement
 and requires recalibration of new ranges. Requests apply the displayed snapshot
@@ -107,5 +108,35 @@ This is **preview only**: no allocation, eviction, migration, approval or server
 purchase occurs. Plans expose inventory/runtime/allocation-set identities for
 revalidation. They are not executable approvals. They have no predicted tok/s
 or latency guarantee. Mixed-workload calibration, requirement-aware placement,
-transition costs/hysteresis and applying a complete joint plan remain distinct
-work before this becomes an automatic global scheduler.
+transition costs/hysteresis remain distinct work before this becomes an
+automatic global scheduler.
+
+## Prepare selected models from the TUI
+
+In Explore models, choose the authorized computers in the Computers tab.
+Use Space on each model to select up to eight, then open `/` actions and choose
+`/prepare`. The review shows each checkpoint and its exact computer/layer/RAM
+assignments. Arrow keys scroll the complete joint plan. Enter starts preparation;
+reviewing alone never sends an allocation offer.
+
+The private preparation keeper loads one model at a time through the existing
+authenticated approval protocol. It does not pick a different split after
+review. Before the first offer, runtime, hardware, address, thread capacity and
+existing allocation fingerprints must still match. Before every model, fresh
+inventory must leave enough RAM and allocation slots for the remaining plan.
+Each donor rechecks its own budget atomically and requires a separate approval.
+Inventory is an observation, not a distributed reservation lock.
+
+Closing the TUI does not interrupt preparation. `c` in the progress view or
+Resident models cancels the unfinished work. This is a sequential operation,
+**not an all-or-nothing transaction**: models already READY remain resident if
+a later model is declined, fails or is cancelled. The journal reports how many
+finished; their individual authenticated plans remain in Resident models.
+Restarting the manager never replays old approvals or unfinished offers.
+Open a conversation on each ready model from Resident models; joint preparation
+does not automatically open a chat or unload another model.
+
+Tests cover detached completion with two real tiny OLMoE checkpoints, refusal
+and cancellation of the second allocation while the first still generates,
+plus stale-runtime/workload/selection/budget guards. These are local integration
+checks, not a mixed-model latency SLO or a hardware release claim.

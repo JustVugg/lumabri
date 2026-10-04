@@ -34,6 +34,7 @@ typedef struct {
     HomeServiceSnapshot snapshot;
     uint8_t *last;
     size_t last_size;
+    uint32_t batch_completed, batch_total; /* preparation only; detail is journalled */
 } HomeService;
 
 static int home_service_role(const char *role) {
@@ -113,6 +114,8 @@ static int home_service_io(int fd, void *bytes, size_t length, int writing, doub
 }
 
 static int home_service_pack(LmbBuf *b, const HomeServiceSnapshot *s) {
+    if (lmb_inventory_text(s->role) || lmb_inventory_text(s->name) ||
+        lmb_inventory_text(s->tracker) || lmb_inventory_text(s->detail)) return -1;
     if (!home_service_role(s->role) || !s->state || s->state > HOME_SVC_STOPPED ||
         s->phase > LMB_HOME_CLOSED || s->retained > 1 ||
         (s->has_offer && !lmb_home_offer_valid(&s->offer))) return -1;
@@ -351,6 +354,12 @@ static int home_service_detach(HomeService *s, int inherited_fd) {
 
 static int home_service_ensure(void);
 static HomeService *home_background_job;
+static void home_service_preparation_detail(HomeService *job, const char *detail) {
+    if (job->batch_total)
+        snprintf(job->snapshot.detail, sizeof job->snapshot.detail, "%u/%u ready - %.450s",
+            job->batch_completed, job->batch_total, detail);
+    else snprintf(job->snapshot.detail, sizeof job->snapshot.detail, "%s", detail);
+}
 static int home_service_key(void) {
     if (!home_background_job) return -1;
     int op = home_service_poll(home_background_job);

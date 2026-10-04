@@ -25,6 +25,7 @@ def main():
     parser.add_argument("--runtime-dir", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--keep-requester", action="store_true", help="also verify the normal post-preparation chat and saved calibration")
     parser.add_argument("--multi-model", action="store_true", help="two distinct checkpoints coexist on the same donors; unload only one")
+    parser.add_argument("--joint", choices=("complete", "reject", "cancel"), help="select and prepare two models together from the TUI")
     parser.add_argument("--sessions", type=int, choices=(1, 2, 4, 8), default=1)
     parser.add_argument("--donor-ram-gb", type=float, default=0.5)
     parser.add_argument("--prepare-timeout", type=int, default=180)
@@ -121,6 +122,88 @@ def main():
         until(lambda: t.has("share resources"), "sharing client missing")
         return t
 
+    def joint_flow(a, b):
+        configs = list(args.models_dir.glob("*/config.json"))
+        assert len(configs) == 1
+        assert sum(p.stat().st_size for p in configs[0].parent.rglob("*") if p.is_file()) < 32 << 20
+        combined = tmp / "joint-models"; combined.mkdir()
+        (combined / "model-a").symlink_to(configs[0].parent.resolve(), target_is_directory=True)
+        shutil.copytree(configs[0].parent, combined / "model-b")
+        config = json.loads((combined / "model-b/config.json").read_text())
+        config["_lumabri_test_variant"] = "joint-second-checkpoint"
+        (combined / "model-b/config.json").write_text(json.dumps(config))
+        chat = Terminal("chatter", ["models", "--models-dir", str(combined), "--tracker", tracker,
+                                   "--context", "128", "--max-new", "8", "--sessions", str(args.sessions)])
+        until(lambda: "3 computers visible" in current_frame(chat), "joint inventory missing")
+        chat.send("\t")
+        until(lambda: "Nothing is selected automatically" in current_frame(chat), "joint node view missing")
+        chat.send("\x1b[B\r")
+        until(lambda: "1 selected" in current_frame(chat), "joint first donor selection missing")
+        chat.send("\x1b[B\r")
+        until(lambda: "2 selected" in current_frame(chat), "joint second donor selection missing")
+        chat.send("\t ")
+        until(lambda: "[✓] model-" in current_frame(chat), "first model checkbox missing")
+        chat.send("\x1b[B ")
+        until(lambda: "[✓] model-a" in current_frame(chat) and "[✓] model-b" in current_frame(chat), "second model checkbox missing")
+        chat.send("/" + "\x1b[B" * 5 + "\r")
+        until(lambda: "Enter prepares this joint plan" in current_frame(chat) and
+              "model-a" in current_frame(chat) and "model-b" in current_frame(chat) and
+              "layers" in current_frame(chat), "reviewed joint placement missing")
+        assert all(service(name)["donor"]["model_count"] == 0 for name in ("a", "b")), "review created allocations"
+        chat.send("\r")
+        until(lambda: any(service(n)["donor"]["phase"] == 1 for n in ("a", "b")), "joint first offer missing", 120)
+        # The keeper owns the batch; the TUI is not its lifecycle owner.
+        chat.p.terminate(); until(lambda: chat.p.poll() is not None, "joint requester did not detach")
+        library = tmp / "chatter/.lumabri/resident-plans"
+        handled = set(); rejected = False; cancelled = False
+        def drive():
+            nonlocal rejected, cancelled
+            ready = len(list(library.glob("*.plan"))) if library.exists() else 0
+            for name, terminal in (("a", a), ("b", b)):
+                state = service(name)["donor"]
+                key = (name, state["model"])
+                if state["phase"] != 1 or key in handled:
+                    continue
+                if "Waiting for your approval" not in current_frame(terminal):
+                    continue
+                handled.add(key)
+                if ready and args.joint == "reject":
+                    terminal.send("\r"); rejected = True
+                elif ready and args.joint == "cancel":
+                    result = subprocess.run([str(runtime / "test_chat_ui"), "cancel-prepare"],
+                        env=env("chatter"), text=True, capture_output=True, timeout=20)
+                    assert result.returncode == 0, result.stderr
+                    cancelled = True
+                else:
+                    terminal.send("\x1b[A\r")
+            return service("chatter")["prepare"].get("operation_state") in ("done", "failed")
+        until(drive, "joint preparation did not finish", args.prepare_timeout)
+        result = service("chatter")["prepare"]
+        expected = 2 if args.joint == "complete" else 1
+        assert result["operation_state"] == ("done" if args.joint == "complete" else "failed"), result
+        plans = sorted(library.glob("*.plan"))
+        assert len(plans) == expected, (result, plans)
+        assert f"{expected}/2 ready" in result["detail"], result
+        assert args.joint != "reject" or rejected
+        assert args.joint != "cancel" or cancelled
+        retained = sum(service(name)["donor"]["model_count"] for name in ("a", "b"))
+        assert retained == expected, "incomplete allocation survived or a ready allocation was unloaded"
+        service("chatter", "restart")
+        for plan in plans:
+            raw = plan.read_bytes(); at = 4; fields = []
+            for _ in range(5):
+                size = struct.unpack_from("<H", raw, at)[0]; at += 2
+                fields.append(raw[at:at+size].decode()); at += size
+            conversation = Terminal("chatter", ["chat", "--host", fields[1], "--host-key", fields[2],
+                "--host-root", fields[3], "--model", fields[4], "--tracker", tracker, "--ctx", "128", "--max-new", "8"])
+            until(lambda: conversation.has("receives the text"), "joint resident host unavailable")
+            conversation.send("hello\n")
+            until(lambda: hosted_turn_complete(conversation.text), "joint model did not run real inference", 120)
+            conversation.send("/quit\n")
+            until(lambda: conversation.p.poll() is not None, "joint conversation did not close")
+        assert not list((tmp / "chatter").rglob("*.safetensors"))
+        print(f"JOINT PREPARATION: PASS ({args.joint}, {expected} resident models, detached TUI, real inference)", flush=True)
+
     try:
         owner = Terminal("owner")
         until(lambda: owner.has("your workspace"), "household did not start")
@@ -129,6 +212,9 @@ def main():
         original_tracker = service("owner")["tracker"]
         assert original_tracker["live"], original_tracker
         a, b = sharing("a"), sharing("b")
+        if args.joint:
+            joint_flow(a, b)
+            return
         base_args = ["models", "--models-dir", str(args.models_dir.resolve()), "--tracker", tracker,
                      "--context", "128", "--max-new", "8", "--sessions", str(args.sessions)]
         chat = Terminal("chatter", base_args)

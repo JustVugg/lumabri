@@ -33,6 +33,15 @@ typedef struct {
     char currency[4];
 } LmbPortfolioPlan;
 
+/* Catalogue indices accompany a proposed plan; neither is an approval. */
+typedef struct {
+    LmbPortfolioPlan plan;
+    uint32_t node_count, node_indices[LMB_CLUSTER_MAX_NODES];
+    uint32_t model_indices[LMB_PORTFOLIO_MODELS];
+    int ready;
+    char reason[192];
+} LmbPortfolioSnapshot;
+
 typedef struct {
     LmbClusterPlan plan;
     uint32_t mask;

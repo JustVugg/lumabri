@@ -5573,6 +5573,7 @@ static void catalog_advice_refresh(LmbTuiState *st) {
     for (int i = 0; i < st->nmodels; i++) st->models[i].advice_flags = advice[i];
 }
 
+static void catalog_joint_refresh(LmbTuiState *st);
 static int catalog_state_refresh(LmbTuiState *st, void *unused) {
     (void)unused;
     /* Per-layer contracts make each entry larger. Do not place the entire
@@ -5668,6 +5669,7 @@ static int catalog_state_refresh(LmbTuiState *st, void *unused) {
         st->nmodels++;
     }
     catalog_advice_refresh(st);
+    catalog_joint_refresh(st);
     free(found);
     return 0;
 }
@@ -5873,6 +5875,7 @@ static void catalog_json(const LmbTuiState *st) {
 
 #include "lumabri_home_runtime.h"
 #include "src/planner/lumabri_portfolio_catalogue.h"
+#include "src/runtime/lumabri_joint_prepare.h"
 
 static int cmd_models(int argc, char **argv) {
     const char *root = NULL, *disk = ".", *keys = NULL, *tracker = NULL;
@@ -5939,6 +5942,7 @@ static int cmd_models(int argc, char **argv) {
     if (ntogether) return catalog_portfolio_json(&st, together, ntogether);
     if (!plain) {
         int action = lmb_tui_run(&st, snapshot, keys);
+        if (action == LMB_TUI_REQUEST_JOINT) return home_request_portfolio(&st);
         if (action == LMB_TUI_REQUEST_CALIBRATION) st.quick_calibration = 1;
         return action == LMB_TUI_REQUEST_CHAT || action == LMB_TUI_REQUEST_CALIBRATION ?
             home_request_chat(&st, st.action_model) : action;

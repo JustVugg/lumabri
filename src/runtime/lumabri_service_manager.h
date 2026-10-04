@@ -104,6 +104,7 @@ static int cmd_service(int argc, char **argv) {
         HomeServiceSnapshot s = {0};
         int live = !home_service_query(home_service_roles[i], HOME_SVC_STATUS, NULL, &s);
         int recorded = live || !home_service_record(home_service_roles[i], &s);
+        if (!recorded) memset(&s, 0, sizeof s); /* reject partially decoded records */
         const char *state = live ? "live" : recorded && s.state == HOME_SVC_RUNNING ? "interrupted" : "stopped";
         if (json) {
             char instance[65]; lmb_hex(instance, s.instance, 32);
@@ -119,7 +120,11 @@ static int cmd_service(int argc, char **argv) {
                 live && s.compute_enabled ? "true" : "false", live ? s.compute_active : 0,
                 live ? s.compute_queued : 0, (unsigned long long)(live ? s.compute_grants : 0));
             fputs(",\"detail\":", stdout);
-            doctor_json_string(s.detail); fputc('}', stdout);
+            doctor_json_string(s.detail);
+            fputs(",\"operation_state\":", stdout);
+            doctor_json_string(!recorded ? "unknown" : s.state == HOME_SVC_RUNNING ? "running" :
+                s.state == HOME_SVC_DONE ? "done" : s.state == HOME_SVC_FAILED ? "failed" : "stopped");
+            fputc('}', stdout);
         } else printf("%-8s %-12s %s%s\n", home_service_roles[i], state,
             live && s.has_offer ? s.offer.model : "", recorded && !live ? " (saved state is not a live allocation)" : "");
     }
