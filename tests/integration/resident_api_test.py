@@ -25,6 +25,8 @@ def verify_resident_api(runtime, env, tracker, first_model_name, artifacts, obse
     first = next(m for m in models if m["name"] == first_model_name)
     second = next(m for m in models if m["id"] != first["id"])
     alice, bob = cli("user-add", "alice"), cli("user-add", "bob")
+    operator = cli("user-add", "operator")
+    cli("operator-grant", "operator")
     cli("grant", "alice", first["id"], "--tracker", tracker)
     cli("grant", "bob", second["id"], "--tracker", tracker)
     with socket.socket() as reserving:
@@ -58,6 +60,18 @@ def verify_resident_api(runtime, env, tracker, first_model_name, artifacts, obse
         after = service("status")["api"]
         assert after["instance"] == before["instance"] and after["pid"] == before["pid"]
         assert request("/api/v1/models", "wrong")[0] == 401
+        assert request("/api/v1/workspace", "wrong")[0] == 401
+        assert request("/api/v1/workspace", alice)[0] == 403
+        assert json.loads(request("/api/v1/session", alice)[1])["operator"] is False
+        assert json.loads(request("/api/v1/session", operator)[1])["operator"] is True
+        status, data = request("/api/v1/workspace", operator)
+        workspace = json.loads(data)
+        assert status == 200 and workspace["inventory_ok"] and workspace["registry_ok"], workspace
+        assert len(workspace["allocations"]) == 2 and len(workspace["nodes"]) >= 2
+        assert all(n["machine_cost"] is None and n["energy_joules"] is None for n in workspace["nodes"])
+        assert not any(n["gpu_execution_verified"] for n in workspace["nodes"])
+        assert chat(operator, first["id"])[0] == 403, "operator visibility silently granted inference"
+        assert json.loads(request("/api/v1/conversations", operator)[1])["conversations"] == []
         for token, own in ((alice, first), (bob, second)):
             status, data = request("/api/v1/models", token)
             assert status == 200 and [m["id"] for m in json.loads(data)["models"]] == [own["id"]]
@@ -95,6 +109,7 @@ def verify_resident_api(runtime, env, tracker, first_model_name, artifacts, obse
                 assert saved["conversation"] == conversation and saved["revision"] == 1
                 path = "/api/v1/conversations/" + saved["id"]
                 assert request(path, bob)[0] == 404
+                assert request(path, operator)[0] == 404, "operator could read another user's conversation"
                 status, data = request(path, alice)
                 assert status == 200 and json.loads(data)["conversation"]["messages"][-1]["content"].encode() == raw
         assert assert_stage_record(observed_plan) >= before_samples + 6, "completed API turns did not update the planner"
@@ -102,6 +117,19 @@ def verify_resident_api(runtime, env, tracker, first_model_name, artifacts, obse
         status, data = chat(alice, first["id"], "overflow " * 200)
         assert status == 200 and b"event: error" in data and b"event: done" not in data
         assert observed_plan.read_bytes() == before_rejected, "rejected generation changed the speed record"
+        status, data = request("/api/v1/workspace", operator)
+        allocation = next(a for a in json.loads(data)["allocations"] if a["id"] == first["id"])
+        assert status == 200 and allocation["observation"]["state"] == "measured", allocation
+        assert allocation["observation"]["decode_tok_s"] > 0
+        assert allocation["observation"]["prompt_tokens"] > 0 and allocation["observation"]["generated_tokens"] == 8
+        cli("operator-revoke", "operator")
+        assert request("/api/v1/workspace", operator)[0] == 403
+        assert json.loads(request("/api/v1/session", operator)[1])["operator"] is False
+        cli("operator-grant", "operator")
+        cli("revoke", "operator")
+        assert request("/api/v1/workspace", operator)[0] == 401
+        replacement_operator = cli("user-add", "operator")
+        assert request("/api/v1/workspace", replacement_operator)[0] == 403, "recreated credential inherited operator access"
         # Interrupted transport releases only the current API conversation.
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
         conn.request("POST", "/api/v1/chat", json.dumps({"model": first["id"], "max_tokens": 8,

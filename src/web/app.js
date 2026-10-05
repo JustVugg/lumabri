@@ -4,6 +4,8 @@ const $ = id => document.getElementById(id);
 let token = "", models = [], conversations = [], current = null, busy = false, controller = null;
 let unsaved = false, navigation = 0;
 let partialNode = null;
+let operator = false, workspaceOpen = false, workspacePending = false, workspaceEpoch = 0;
+let workspaceExpires = 0;
 const utf8 = new TextEncoder();
 const say = text => { $("notice").textContent = text; };
 const errors = {
@@ -55,6 +57,8 @@ function controls() {
   $("model").disabled = !token || busy || Boolean(current);
   $("refresh").disabled = !token || busy;
   $("sign-out").disabled = busy;
+  $("workspace-open").hidden = !operator || !token;
+  $("workspace-open").disabled = busy;
   $("prompt").disabled = !canSend;
   $("send").disabled = !canSend;
   $("stop").hidden = !busy;
@@ -121,6 +125,8 @@ function renderMessages() {
 }
 async function refresh() {
   // Sequential calls leave the second per-user permit free for another tab.
+  operator = (await request("/api/v1/session")).operator === true;
+  if (!operator && workspaceOpen) closeWorkspace();
   models = (await request("/api/v1/models")).models;
   conversations = (await request("/api/v1/conversations")).conversations;
   renderModels(); renderHistory();
@@ -133,6 +139,7 @@ async function openConversation(id) {
     const loaded = await request(`/api/v1/conversations/${id}`);
     if (ticket !== navigation) return;
     current = loaded; unsaved = false;
+    closeWorkspace();
     renderModels(); renderHistory(); renderMessages(); say("");
     if (["pending", "interrupted"].includes(current.conversation.state))
       say("This response was not saved as complete. Retry sends the last question again; it does not resume a hidden generation.");
@@ -143,6 +150,7 @@ function newConversation() {
   if (busy) return;
   if (unsaved && !confirm("This answer is not saved. Leave it without exporting?")) return;
   navigation++; unsaved = false;
+  closeWorkspace();
   current = null; $("prompt").value = ""; say(""); renderModels(); renderHistory(); renderMessages(); $("prompt").focus();
   if (window.matchMedia("(max-width: 760px)").matches) sidebar(false);
 }
@@ -258,6 +266,7 @@ $("sign-out").onclick = () => {
   if (unsaved && !confirm("This answer is not saved. Sign out without exporting?")) return;
   navigation++; unsaved = false;
   token = ""; models = []; conversations = []; current = null;
+  operator = false; closeWorkspace(); clearWorkspace();
   $("login").hidden = false; $("chat").hidden = true; $("composer-area").hidden = true; $("sign-out").hidden = true;
   $("identity").textContent = "Not connected"; $("app").classList.remove("connected");
   $("prompt").value = ""; renderModels(); renderHistory(); renderMessages(); say("");
@@ -286,3 +295,101 @@ $("export").onclick = () => {
   link.href = url; link.download = `lumabri-chat-${current.id}.json`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
 };
 window.addEventListener("beforeunload", event => { if (busy || unsaved) { event.preventDefault(); event.returnValue = ""; } });
+
+function closeWorkspace() {
+  workspaceOpen = false; workspaceEpoch++;
+  $("workspace").hidden = true;
+  $("chat").hidden = !token; $("composer-area").hidden = !token;
+}
+function clearWorkspace() {
+  workspaceExpires = 0;
+  for (const id of ["workspace-summary", "workspace-nodes", "workspace-models", "workspace-allocations"]) $(id).replaceChildren();
+  $("workspace-status").textContent = "";
+}
+const gib = bytes => Number.isFinite(bytes) ? `${(bytes / 1073741824).toFixed(2)} GiB` : "Unknown";
+function workspaceCard(parent, title, facts) {
+  const card = document.createElement("article"); card.className = "workspace-card";
+  const heading = document.createElement("h3"); heading.textContent = title; card.append(heading);
+  const list = document.createElement("dl");
+  for (const [label, value] of facts) {
+    const term = document.createElement("dt"), detail = document.createElement("dd");
+    term.textContent = label; detail.textContent = value; list.append(term, detail);
+  }
+  card.append(list); parent.append(card);
+}
+function renderWorkspace(data) {
+  clearWorkspace();
+  if (data.inventory_ok && data.nodes.length) {
+    const oldest = Math.max(...data.nodes.map(node => node.age_ms));
+    workspaceExpires = Date.now() + Math.max(0, data.inventory_ttl_ms - oldest);
+  }
+  const time = new Date(data.captured_at * 1000).toLocaleTimeString();
+  $("workspace-status").textContent = !data.inventory_ok ? "Inventory unavailable — live resource values withheld." :
+    `Reports captured at ${time} · leases expire after ${data.inventory_ttl_ms / 1000}s · refreshed every 10s while visible`;
+  if (!data.registry_ok) $("workspace-status").textContent += " Model registry unavailable.";
+  workspaceCard($("workspace-summary"), "Service overview", [
+    ["Reporting computers", data.inventory_ok ? String(data.nodes.length) : "Unknown"],
+    ["Saved allocations", String(data.allocations.length)],
+    ["Managed model names", data.registry_ok ? String(data.models.length) : "Unknown"]]);
+  const names = new Map(data.nodes.map(node => [node.id, node.name]));
+  for (const node of data.nodes) {
+    const workload = node.workload;
+    workspaceCard($("workspace-nodes"), node.name, [
+      ["Hardware", `${node.cpu} · ${node.os} / ${node.arch}`],
+      ["Compute threads", node.runtime_threads ? `${node.runtime_threads} runtime / ${node.threads} detected` : "Runtime not verified"],
+      ["RAM", `${gib(node.ram_available_bytes)} available / ${gib(node.ram_total_bytes)} total`],
+      ["Offered / reserved RAM", `${gib(node.ram_offered_bytes)} / ${workload ? gib(workload.reserved_bytes) : "Unknown"}`],
+      ["GPU", `${node.gpu_detected} detected · ${gib(node.vram_inventory_bytes)} inventory · execution not verified`],
+      ["Workload", workload ? `${workload.allocations} allocations · ${workload.active} active · ${workload.queued} queued` : "Unknown"],
+      ["Machine cost", node.machine_cost ? `${node.machine_cost.currency} ${(node.machine_cost.micro_units_per_hour / 1000000).toFixed(4)}/h · declared` : "Not supplied"],
+      ["Power / energy", node.power ? `${node.power.watts} W · declared estimate; energy not measured` : "Not measured"],
+      ["Report age", `${(node.age_ms / 1000).toFixed(1)}s at capture`]]);
+  }
+  if (!data.nodes.length) $("workspace-nodes").textContent = "No current machine reports. Sharing and connectivity are managed by the local service.";
+  for (const model of data.models) workspaceCard($("workspace-models"), model.name, [
+    ["Adapter", model.adapter], ["Approved replica references", String(model.replicas)],
+    ["Context / output limit", `${model.context} / ${model.max_tokens} tokens`],
+    ["Revision", String(model.revision)], ["Readiness", "Saved route; actual hosts checked on request"]]);
+  if (!data.models.length) $("workspace-models").textContent = data.registry_ok ? "No managed model names registered yet." : "Registry unavailable.";
+  for (const allocation of data.allocations) {
+    const observation = allocation.observation;
+    const speed = observation.state === "measured" ? `${observation.decode_tok_s.toFixed(2)} tok/s · last ${observation.generated_tokens}-token reply (${observation.prompt_tokens}-token prompt), not capacity` :
+      observation.state === "obsolete" ? "Obsolete — configuration changed; observe a new turn" : "Not measured";
+    workspaceCard($("workspace-allocations"), allocation.name, [
+      ["Adapter", allocation.adapter || "Unknown"], ["Speed", speed],
+      ["Context / session limit", `${allocation.context} tokens / ${allocation.session_limit} configured slots`],
+      ["Last preparation", allocation.preparation_seconds === null ? "Not measured" : `${allocation.preparation_seconds.toFixed(2)}s · approval and indexing excluded`],
+      ...allocation.ranges.map(range => [range.edge ? "Edge + layers" : "Layers",
+        `${range.begin}–${range.end - 1} · ${names.get(range.node) || "Computer not reporting"} · ${gib(range.reserved_bytes)} reserved`])]);
+  }
+  if (!data.allocations.length) $("workspace-allocations").textContent = "No saved allocations for this household.";
+}
+async function refreshWorkspace() {
+  if (!workspaceOpen || !operator || !token || workspacePending || document.hidden) return;
+  workspacePending = true; $("workspace-refresh").disabled = true;
+  const epoch = workspaceEpoch;
+  try {
+    const data = await request("/api/v1/workspace");
+    if (epoch === workspaceEpoch && workspaceOpen) renderWorkspace(data);
+  } catch (error) {
+    if (epoch === workspaceEpoch && workspaceOpen) {
+      clearWorkspace(); $("workspace-status").textContent = `Workspace unavailable: ${error.message}`;
+    }
+  } finally { workspacePending = false; $("workspace-refresh").disabled = false; }
+}
+$("workspace-open").onclick = () => {
+  if (busy || !operator) return;
+  workspaceOpen = true; workspaceEpoch++; say("");
+  $("workspace").hidden = false; $("chat").hidden = true; $("composer-area").hidden = true;
+  clearWorkspace(); $("workspace-status").textContent = "Reading the local service…";
+  if (window.matchMedia("(max-width: 760px)").matches) sidebar(false);
+  refreshWorkspace();
+};
+$("workspace-refresh").onclick = refreshWorkspace;
+setInterval(refreshWorkspace, 10000);
+setInterval(() => {
+  if (workspaceOpen && workspaceExpires && Date.now() >= workspaceExpires) {
+    clearWorkspace(); $("workspace-status").textContent = "Machine reports expired — refreshing before showing resource values.";
+    refreshWorkspace();
+  }
+}, 1000);

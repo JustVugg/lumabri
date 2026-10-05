@@ -57,6 +57,7 @@ async def exercise(port, alice, bob, artifacts):
         await page.locator("#token").fill(alice)
         await page.locator("#login-form button").click()
         await expect(page.locator("#composer-area")).to_be_visible()
+        await expect(page.locator("#workspace-open")).to_be_hidden()
         await page.locator("#prompt").fill("First private question")
         await page.locator("#send").click()
         await expect(page.locator("#save-status")).to_have_text("Saved privately on this computer")
@@ -144,9 +145,52 @@ async def exercise(port, alice, bob, artifacts):
         await expect(page.locator("#composer-area")).to_be_visible()
         assert await page.locator("#history button").count() == 0
         assert "First private question" not in await page.locator("body").inner_text()
+        await expect(page.locator("#workspace-open")).to_be_visible()
+        # Real authorization plus an explicit display fixture, not a measured
+        # performance claim. The native service gate checks actual inventory.
+        workspace_online = True
+        async def workspace_fixture(route):
+            if not workspace_online:
+                await route.fulfill(status=503, json={"error": "workspace_unavailable"})
+                return
+            await route.fulfill(json={"schema": 1, "captured_at": int(time.time()), "inventory_ok": True,
+                "registry_ok": True, "inventory_ttl_ms": 15000,
+                "nodes": [{"id": "node-a", "name": "Studio workstation <script>bad()</script>",
+                    "cpu": "Intel Core i7", "os": "Linux", "arch": "x86_64", "age_ms": 1200,
+                    "threads": 12, "runtime_threads": 4, "ram_total_bytes": 32 * 2**30,
+                    "ram_available_bytes": 18 * 2**30, "ram_offered_bytes": 12 * 2**30,
+                    "gpu_detected": 1, "vram_inventory_bytes": 8 * 2**30,
+                    "workload": {"allocations": 2, "reserved_bytes": 10 * 2**30, "active": 1, "queued": 2},
+                    "machine_cost": None, "power": None}],
+                "models": [{"name": "OLMoE", "adapter": "olmoe", "replicas": 2,
+                    "context": 4096, "max_tokens": 256, "revision": 3}],
+                "allocations": [{"name": "OLMoE · approved allocation", "adapter": "olmoe",
+                    "context": 4096, "session_limit": 4, "preparation_seconds": 12.5,
+                    "observation": {"state": "obsolete", "decode_tok_s": None},
+                    "ranges": [{"node": "node-a", "begin": 0, "end": 16, "edge": True,
+                        "reserved_bytes": 10 * 2**30, "report_present": True}]}]})
+        await page.route("**/api/v1/workspace", workspace_fixture)
+        await page.locator("#workspace-open").click()
+        await expect(page.locator("#workspace")).to_be_visible()
+        await expect(page.locator("#workspace-nodes")).to_contain_text("2 queued")
+        await expect(page.locator("#workspace-allocations")).to_contain_text("Obsolete")
+        assert await page.locator("#workspace script").count() == 0
+        await page.screenshot(path=str(artifacts / "web-workspace.png"))
         await page.set_viewport_size({"width": 390, "height": 844})
         await page.locator("#collapse").click()
         assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        await page.screenshot(path=str(artifacts / "web-workspace-mobile.png"))
+        workspace_online = False
+        await page.locator("#workspace-refresh").click()
+        await expect(page.locator("#workspace-status")).to_contain_text("Workspace unavailable")
+        assert await page.locator("#workspace-nodes article").count() == 0, "failed refresh left stale resources visible"
+        await page.locator("#expand").click(); await page.locator("#new-chat").click()
+        await expect(page.locator("#workspace")).to_be_hidden()
+        await expect(page.locator("#composer-area")).to_be_visible()
+        await page.locator("#expand").click(); await page.locator("#sign-out").click()
+        await expect(page.locator("#workspace-open")).to_be_hidden()
+        assert await page.locator("#workspace-nodes article").count() == 0
+        await page.locator("#collapse").click()
         await page.screenshot(path=str(artifacts / "web-mobile.png"))
         assert not failures, failures
         await browser.close()
@@ -165,6 +209,8 @@ def main():
             file.write_bytes(file.read_bytes()[:72] + struct.pack("<I", 1) + bytes.fromhex(MODEL))
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0)); port = sock.getsockname()[1]
+        subprocess.run([str(ROOT / "lumabri"), "api", "operator-grant", "bob"], env=env,
+                       capture_output=True, text=True, check=True, timeout=10)
         server = subprocess.Popen([str(ROOT / "lumabri"), "api", "serve", "--tracker", "127.0.0.1:1", "--port", str(port)],
                                   env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         try:
@@ -178,7 +224,7 @@ def main():
             asyncio.run(exercise(port, *tokens, artifacts))
         finally:
             server.terminate(); server.wait(timeout=10); server.stderr.close()
-    print("WEB CHAT: PASS (compiled assets, live rendering, UTF-8, history, retry, cancellation, isolated users, no browser persistence, mobile)")
+    print("WEB CHAT: PASS (compiled assets, chat/history/cancel, private users, operator workspace, stale refresh, mobile)")
 
 
 if __name__ == "__main__":

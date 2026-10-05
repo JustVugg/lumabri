@@ -137,17 +137,21 @@ byte-counted even when text contains apparent protocol headers. Only a complete
 DONE frame commits conversation history or a speed observation. Engine ERROR,
 truncation, invalid frames and consumer cancellation cannot publish success.
 The terminal limits a reply to 64 MiB and telemetry lines to 4 MiB; unsupported
-DATA sideband extensions are rejected. This common reader is an API building
-block, not an HTTP endpoint or OpenAI compatibility claim.
+DATA sideband extensions are rejected. The [resident HTTP gateway and browser
+chat](RESIDENT_API.md) use this same reader, with their own smaller response
+limits. The gateway does not claim OpenAI compatibility.
 
-## Next dependencies
+## Measurements and management
 
-The next milestone is **inventory and measurements usable by the planner**:
-unify usable CPU/RAM and adapter-proven GPU/VRAM, per-model memory, links,
-load, preparation and per-range performance, plus optional cost/energy facts.
-Short probes seed observations and completed sessions update them; changed
-execution conditions make them stale. See [the evidence contract](CALIBRATION_RECORDS.md#planner-resource-evidence)
-for the implemented subset and remaining unknowns.
+Leased inventory reports usable CPU/RAM, runtime identity, load and optional
+cost/power declarations. Completed TUI and API turns update provenance-bound
+preparation, link and per-range observations; changed execution conditions
+make them stale. The operator-only browser workspace reads those same reports,
+saved allocations and managed replica references without opening engines.
+See [the evidence contract](CALIBRATION_RECORDS.md#planner-resource-evidence)
+and [the workspace API](RESIDENT_API.md#cluster-workspace) for boundaries.
+Verified household GPU execution, requirement-aware global placement,
+automatic capacity changes and provider provisioning remain separate work.
 
 The [DeepSeek V4.1 integration](DEEPSEEK_V41.md) adds a Lumabri-owned text CPU
 adapter with resident Engram tables and per-conversation cross-layer feedback.

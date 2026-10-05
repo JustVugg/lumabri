@@ -14,6 +14,7 @@
     <aside id="sidebar" aria-label="Conversations">
       <div class="brand"><img src="/logo.svg" alt="Lumabri" width="162" height="65"><button id="collapse" class="icon" aria-label="Collapse sidebar" title="Collapse sidebar">‹</button></div>
       <button id="new-chat" class="new-chat" disabled><span aria-hidden="true">＋</span> New conversation</button>
+      <button id="workspace-open" class="workspace-link" hidden>Computers &amp; models <span aria-hidden="true">↗</span></button>
       <div class="section-label">YOUR CONVERSATIONS</div>
       <nav id="history" aria-label="Saved conversations"><p class="muted">Connect to see your history.</p></nav>
       <div class="sidebar-footer"><span class="status-dot" aria-hidden="true"></span><span id="identity">Not connected</span><button id="sign-out" class="text-button" hidden>Sign out</button></div>
@@ -33,6 +34,17 @@
       <section id="chat" hidden aria-label="Chat">
         <div id="empty" class="welcome"><span class="eyebrow">READY WHEN YOU ARE</span><h1>What are we<br>working on?</h1><p>Select an approved resident model above, then start a conversation.</p></div>
         <div id="messages" aria-label="Conversation messages" aria-live="off"></div>
+      </section>
+      <section id="workspace" hidden aria-label="Cluster workspace">
+        <div class="workspace-heading"><div><span class="eyebrow">YOUR INFERENCE SERVICE</span><h1>Computers &amp; models</h1></div><button id="workspace-refresh">Refresh</button></div>
+        <p class="workspace-intro">Resource reports and saved allocations. No models are started, stopped or moved from this view.</p>
+        <p id="workspace-status" role="status"></p>
+        <div id="workspace-summary" class="workspace-summary"></div>
+        <h2>Computers</h2><div id="workspace-nodes" class="workspace-grid"></div>
+        <h2>Managed models</h2><div id="workspace-models" class="workspace-grid"></div>
+        <h2>Saved allocations</h2><p class="muted">An allocation is not a health check. Hosts and approvals are checked again before each request.</p>
+        <div id="workspace-allocations" class="workspace-grid"></div>
+        <p class="fine-print">Queue counts are leased machine observations, not reserved free capacity. Costs are operator declarations, not a bill. Detected GPUs are not treated as working inference backends.</p>
       </section>
       <div id="notice" role="status" aria-live="polite"></div>
       <div id="composer-area" hidden>

@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
 #include "src/runtime/lumabri_api_access.h"
+#include "src/runtime/lumabri_operator_access.h"
 #include <assert.h>
 
 int main(void) {
@@ -20,6 +21,15 @@ int main(void) {
     assert(!lmb_api_user_save(dir,&user));
     memcpy(user.allocations[1],allocation,32); user.count=2; assert(lmb_api_user_save(dir,&user)); user.count=1;
     assert(!lmb_api_authorize(dir,auth,&user) && lmb_api_user_allows(&user,allocation));
+    assert(!lmb_operator_allows(dir,&user));
+    assert(!lmb_operator_set(dir,&user,1) && lmb_operator_allows(dir,&user));
+    assert(!fchmodat(dir,"alice.operator",0644,0) && !lmb_operator_allows(dir,&user));
+    assert(!fchmodat(dir,"alice.operator",0600,0) && lmb_operator_allows(dir,&user));
+    LmbApiUser replacement=user; replacement.digest[0]^=1;
+    assert(!lmb_operator_allows(dir,&replacement)); /* same name, new credential */
+    assert(!lmb_operator_set(dir,&user,0) && !lmb_operator_allows(dir,&user));
+    assert(!symlinkat("alice.user",dir,".operator.pending"));
+    assert(lmb_operator_set(dir,&user,1)); assert(!unlinkat(dir,".operator.pending",0));
     char wrong[128]; strcpy(wrong,auth); wrong[strlen(wrong)-1]^=1;
     assert(lmb_api_authorize(dir,wrong,&user));
     assert(lmb_api_authorize(dir,"Bearer alice.short",&user));
