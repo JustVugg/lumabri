@@ -115,6 +115,8 @@ lumabri test_chat_ui: src/runtime/lumabri_preload.h
 lumabri test_chat_ui: src/runtime/lumabri_service.h src/runtime/lumabri_service_manager.h
 lumabri test_chat_ui: src/runtime/lumabri_joint_prepare.h
 lumabri test_chat_ui: src/ui/lumabri_resident_ui.h
+lumabri test_chat_ui: src/runtime/lumabri_resident_control.h
+lumabri test_chat_ui: src/runtime/lumabri_api.h src/runtime/lumabri_api_http.h src/runtime/lumabri_api_json.h src/runtime/lumabri_api_access.h
 lumabri segment_chat test_chat_ui: lumabri_metrics.h
 lumabri test_chat_ui: lumabri_run_gate.c lumabri_run_gate.h src/runtime/lumabri_host_sessions.h
 
@@ -528,6 +530,29 @@ test_hybrid_parallel: tests/c/test_hybrid_parallel.c src/runtime/lumabri_q8_refe
 test_inventory: tests/c/test_inventory.c lumabri_inventory.h lumabri_machine.h lumabri_proto.h lumabri_sign.h $(SECURE_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_inventory.c -o $@
 
+test_api_json: tests/c/test_api_json.c src/runtime/lumabri_api_json.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_api_json.c -o $@
+
+test_api_http: tests/c/test_api_http.c src/runtime/lumabri_api_http.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_api_http.c -o $@
+
+test_api_access: tests/c/test_api_access.c src/runtime/lumabri_api_access.h $(SECURE_DEPS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_api_access.c -o $@
+
+.PHONY: test-api test-api-gateway
+test-api: test_api_json test_api_http test_api_access
+	./test_api_json
+	./test_api_http
+	./test_api_access
+
+test: test-api
+
+test-api-gateway: lumabri test_chat_ui
+	./test_chat_ui api-codec
+	python3 tests/integration/api_gateway_test.py
+
+test: test-api-gateway
+
 test_home: tests/c/test_home.c lumabri_home.h lumabri_inventory.h lumabri_families.h lumabri_proto.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_home.c -o $@
 
@@ -640,6 +665,9 @@ test-sanitize:
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_portfolio.c -o build/sanitize/test_portfolio -lm
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_calibration.c -o build/sanitize/test_calibration -lm
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_reply_stream.c -o build/sanitize/test_reply_stream
+	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_api_json.c -o build/sanitize/test_api_json
+	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_api_http.c -o build/sanitize/test_api_http
+	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_api_access.c -o build/sanitize/test_api_access
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_hybrid_parallel.c -o build/sanitize/test_hybrid_parallel -lm
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_segment_v2
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_segment_discovery
@@ -655,6 +683,9 @@ test-sanitize:
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_portfolio
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_calibration
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_reply_stream
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_api_json
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_api_http
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_api_access
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_hybrid_parallel
 
 test-thread-sanitize:
@@ -1017,7 +1048,7 @@ clean:
 	      test_verify_failover test_segment_v2 test_segment_discovery test_sampling \
 	      test_swarm_detail test_relay_rate test_machine test_meminfo test_process_memory test_serve_control test_host_session_pool test_hosted_sessions \
 	      test_compute_lease test_content_filter test_scheduler test_run_gate \
-	      test_compute_broker test_portfolio test_reply_stream \
+	      test_compute_broker test_portfolio test_reply_stream test_api_json test_api_http test_api_access \
 	      test_segment_v2_tsan tracker_tsan \
 	      segment_node segment_chat test_backend_routes test_segment_close test_tcp_latency segment_node_asan segment_chat_asan \
 	      segment_node_tsan segment_chat_tsan \

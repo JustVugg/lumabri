@@ -26,12 +26,15 @@ def main():
     parser.add_argument("--runtime-dir", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--keep-requester", action="store_true", help="also verify the normal post-preparation chat and saved calibration")
     parser.add_argument("--multi-model", action="store_true", help="two distinct checkpoints coexist on the same donors; unload only one")
+    parser.add_argument("--api", action="store_true", help="exercise authenticated API users while the second model stays in its TUI")
     parser.add_argument("--joint", choices=("complete", "reject", "cancel"), help="select and prepare two models together from the TUI")
     parser.add_argument("--sessions", type=int, choices=(1, 2, 4, 8), default=1)
     parser.add_argument("--donor-ram-gb", type=float, default=0.5)
     parser.add_argument("--prepare-timeout", type=int, default=180)
     parser.add_argument("--measure-sessions", action="store_true", help="also benchmark the single-slot baseline")
     args = parser.parse_args()
+    if args.api and not (args.multi_model and args.keep_requester):
+        parser.error("--api requires --multi-model and --keep-requester")
     if not 30 <= args.prepare_timeout <= 3600:
         parser.error("--prepare-timeout must be between 30 and 3600 seconds")
     runtime = args.runtime_dir.resolve()
@@ -408,6 +411,9 @@ def main():
             until(lambda: parallel.p.poll() is not None, "parallel first-model chat did not close")
             assert first_calibration_state() == "current", ("new mixed-workload observation not bound to current models", parallel.text[-4000:])
             assert assert_stage_record(records[0]) == 1, "changed workload inherited previous observation count"
+            if args.api:
+                from resident_api_test import verify_resident_api
+                verify_resident_api(runtime, env("chatter"), tracker, names[4], tmp)
             # The authenticated release names the first allocation, not the
             # keeper's currently selected second model.
             release = subprocess.run([str(runtime / "test_chat_ui"), "resident-release", str(first_plan), tracker],
