@@ -5,6 +5,13 @@
 #include <assert.h>
 
 int main(int argc, char **argv) {
+    if (argc == 4 && !strcmp(argv[1], "api-hold-allocation")) {
+        int access=lmb_api_access_dir(argv[2],0), permit=-1; uint8_t id[32];
+        assert(access>=0 && strlen(argv[3])==64 && !lmb_unhex(id,argv[3],32));
+        assert(!lmb_replica_admit(access,id,&permit));
+        puts("ADMITTED"); fflush(stdout);
+        (void)getchar(); close(permit); close(access); return 0;
+    }
     if (argc == 2 && !strcmp(argv[1], "api-codec")) {
         const char *good="[{\"role\":\"user\",\"content\":\"hi\"},{\"role\":\"assistant\",\"content\":\"hello\"},{\"role\":\"user\",\"content\":\"next\"}]";
         LmbJson j; LmbJsonToken tokens[64]; Cap history={0}; char *prompt=NULL;

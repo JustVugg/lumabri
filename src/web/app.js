@@ -11,6 +11,8 @@ const errors = {
   model_not_authorized: "Your token does not have access to this model. Ask your cluster operator.",
   approved_allocation_unavailable: "A participating computer is unavailable. The model was not replaced or reloaded.",
   host_unavailable_or_busy: "The model's host is busy or unavailable. Try again when capacity is free.",
+  replicas_busy: "All approved replicas are serving another API request. Your question is saved; retry when capacity is free.",
+  admission_unavailable: "Local request admission could not be checked. No response was started.",
   resident_plan_not_found: "This saved model allocation is no longer available. Ask the operator to prepare and grant a new one.",
   conversation_changed_reload_before_editing: "This conversation changed in another window. Reopen it from the sidebar before sending.",
   conversation_limit_32: "Your history has reached 32 conversations. Export and delete one before creating another.",

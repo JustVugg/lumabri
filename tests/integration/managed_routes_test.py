@@ -3,9 +3,13 @@ No fake inference, no implicit preparation, no automatic generation replay.
 """
 import http.client
 import json
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+import select
 import socket
 import struct
 import subprocess
+import threading
 
 
 def verify_managed_routes(runtime, env, tracker, first_plan, third_plan, first_name, artifacts):
@@ -65,6 +69,20 @@ def verify_managed_routes(runtime, env, tracker, first_plan, third_plan, first_n
                                 env=env, text=True, capture_output=True, timeout=30)
         assert result.returncode == 0, result.stderr
 
+    held = []
+    def hold(allocation):
+        process = subprocess.Popen([str(runtime / "test_chat_ui"), "api-hold-allocation",
+                                    str(Path(env["HOME"]) / ".lumabri/api-access"), allocation],
+                                   env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        held.append(process)
+        assert select.select([process.stdout], [], [], 5)[0], "allocation permit not acquired"
+        assert process.stdout.readline() == b"ADMITTED\n", process.stderr.read()
+        return process
+
+    def unhold(process):
+        process.stdin.close(); assert process.wait(timeout=5) == 0
+        process.stdout.close(); process.stderr.close(); held.remove(process)
+
     try:
         command("start", "--port", str(port))
         status, data = request("/api/v1/models")
@@ -76,6 +94,32 @@ def verify_managed_routes(runtime, env, tracker, first_plan, third_plan, first_n
             assert chat(member["id"])[0] == 403, "logical grant authorized a raw allocation"
         status, data = chat(route["id"])
         assert status == 200 and b"event: done\n" in data and b"event: error\n" not in data, (status, data)
+        first_busy = hold(first["id"])
+        status, data = chat(route["id"])
+        assert status == 200 and b"event: done\n" in data, (status, data)
+        third_busy = hold(third["id"])
+        status, data = chat(route["id"])
+        assert status == 429 and json.loads(data)["error"] == "replicas_busy", (status, data)
+        # A second alias must not bypass the exact-allocation limit.
+        alias = json.loads(command("model-add", "olmoe-same-capacity", first["id"], third["id"]))
+        command("grant", "route-alice", alias["id"])
+        assert chat(alias["id"])[0] == 429
+        command("grant", "route-alice", first["id"])
+        assert chat(first["id"])[0] == 429, "raw allocation bypassed its existing permit"
+        command("model-remove", alias["id"])
+        unhold(first_busy); unhold(third_busy)
+        # Two actual gateway workers generate concurrently, not just fixture
+        # reservations. A barrier aligns submission; each model instance has
+        # its own conversation state and exact-allocation admission permit.
+        for _ in range(4):
+            barrier = threading.Barrier(2)
+            def concurrent_chat(_index):
+                barrier.wait(timeout=5)
+                return chat(route["id"])
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                replies = list(pool.map(concurrent_chat, range(2)))
+            assert all(status == 200 and b"event: done\n" in data and b"event: error\n" not in data
+                       for status, data in replies), replies
         saved_status, saved_data = request("/api/v1/conversations", body={"revision": 0, "conversation": {
             "model": route["id"], "title": "Replica availability", "state": "pending",
             "messages": [{"role": "user", "content": "hi"}]}})
@@ -95,6 +139,8 @@ def verify_managed_routes(runtime, env, tracker, first_plan, third_plan, first_n
         assert chat(route["id"])[0] == 404
         assert request("/api/v1/conversations/" + conversation_id)[0] == 200, "route removal lost history"
         assert request("/api/v1/conversations/" + conversation_id, bob)[0] == 404
-        print("MANAGED ROUTES: PASS (real OLMoE replicas, immutable checkpoint/numeric contract, stable grant, selective loss before submission, bounded unavailable, private history)", flush=True)
+        print("MANAGED ROUTES: PASS (real OLMoE replicas, immutable checkpoint/numeric contract, stable grant, occupied-replica routing, shared alias/raw admission, selective loss, bounded unavailable, private history)", flush=True)
     finally:
+        for process in held[:]:
+            unhold(process)
         cli("stop")

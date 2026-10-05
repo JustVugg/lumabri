@@ -4,6 +4,7 @@
 #ifndef LMB_MANAGED_MODELS_H
 #define LMB_MANAGED_MODELS_H
 #include "lumabri_model_routes.h"
+#include "lumabri_replica_admission.h"
 
 static int api_route_read(int access, const uint8_t id[32], const char *tracker, LmbModelRoute *route) {
     int dir=lmb_route_dir(access,0);
@@ -63,7 +64,8 @@ static int api_route_plan_matches(const LmbModelRoute *route, unsigned index, co
  * optimizer. Every selected donor and actual host is re-authenticated before
  * text leaves this process; a stale registry never recreates an allocation. */
 static int api_model_open(int access, const char *tracker, const uint8_t id[32], uint32_t max_new,
-                          Engine *engine, const char **error) {
+                          Engine *engine, int *permit, const char **error) {
+    *permit=-1;
     LmbModelRoute route; int rc=api_route_read(access,id,tracker,&route);
     if (rc!=LMB_ROUTE_OK && rc!=LMB_ROUTE_MISSING) { *error="model_registry_unavailable"; return 503; }
     LmbResidentPlan *plan=calloc(1,sizeof *plan);
@@ -72,18 +74,27 @@ static int api_model_open(int access, const char *tracker, const uint8_t id[32],
     if (rc==LMB_ROUTE_MISSING) {
         if (api_find_plan(tracker,id,plan)) { status=404; *error="resident_plan_not_found"; }
         else if (max_new>plan->max_new) { status=400; *error="max_tokens_exceeds_plan"; }
-        else if (!api_plan_open(plan,engine,max_new)) status=0;
+        else {
+            int admitted=lmb_replica_admit(access,plan->allocation,permit);
+            if (admitted==LMB_REPLICA_BUSY) { status=429; *error="replicas_busy"; }
+            else if (admitted) { *error="admission_unavailable"; }
+            else if (!api_plan_open(plan,engine,max_new)) status=0;
+        }
     } else if (max_new>route.max_new) { status=400; *error="max_tokens_exceeds_plan"; }
     else for (uint32_t i=0; i<route.count; i++) {
-        if (api_find_plan(tracker,route.replicas[i].allocation,plan) || !api_route_plan_matches(&route,i,plan) ||
-            api_plan_open(plan,engine,max_new)) continue;
-        if (!api_route_engine_matches(&route,engine)) { engine_stop(engine); continue; }
+        if (api_find_plan(tracker,route.replicas[i].allocation,plan) || !api_route_plan_matches(&route,i,plan)) continue;
+        int admitted=lmb_replica_admit(access,plan->allocation,permit);
+        if (admitted==LMB_REPLICA_BUSY) { status=429; *error="replicas_busy"; continue; }
+        if (admitted) { status=503; *error="admission_unavailable"; break; }
+        if (api_plan_open(plan,engine,max_new)) { close(*permit); *permit=-1; continue; }
+        if (!api_route_engine_matches(&route,engine)) { engine_stop(engine); close(*permit); *permit=-1; continue; }
         char model_id[65], allocation_id[65]; lmb_hex(model_id,route.id,32);
         lmb_hex(allocation_id,route.replicas[i].allocation,32);
         fprintf(stderr,"[model-route] model=%s revision=%u allocation=%s replica=%u/%u\n",
             model_id,route.revision,allocation_id,i+1,route.count);
         status=0; break;
     }
+    if (status && *permit>=0) { close(*permit); *permit=-1; }
     free(plan); return status;
 }
 /* Registration checks the real authenticated numeric contract without

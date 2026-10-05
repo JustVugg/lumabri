@@ -91,6 +91,30 @@ and no KV migration. A new user-initiated request can replay its own text
 history on another member. If no approved replica is available, HTTP 503 is
 returned; the gateway does not reload a model or replay old donor approvals.
 
+### Bounded turn admission
+
+The gateway admits one API turn per exact resident allocation at a time,
+across users, aliases, raw-allocation grants and gateway processes using the
+same access directory. A busy replica is skipped in favour of another approved
+member, instead of filling the first host's internal conversation queue while
+another replica is idle. If none can be admitted because capacity is held,
+the request receives HTTP 429 `replicas_busy` before submission. There is no
+additional implicit API queue or automatic resend.
+
+Admission is owned by kernel file locks and is released after local stream
+cleanup or worker-process death. No journal PID or stale counter recreates a
+reservation. The private `api-access/dispatch` directory has at most 32 fixed
+lease cells plus its lock; allocation churn does not grow it without bound.
+Partial, unlocked cell records after a crash are only replaceable hints.
+Unsafe files fail closed. Each admission attempt waits at most 100 ms for the
+dispatch bookkeeping lock before reporting contention.
+
+This is a gateway limit, not a claim that a replica is idle in the whole
+cluster: direct TUI chats, another operator and the host's cancellation cleanup
+still share its compute. Host admission, turn deadlines and the node-wide FIFO
+remain authoritative. Per-user and global gateway limits are unchanged; this
+does not certify a tok/s target or add new resident capacity.
+
 The browser shows the managed name and uses its stable ID for private history.
 A managed grant does not authorize direct access to its raw allocation IDs.
 Deleting the route leaves weights and existing private conversation records
@@ -170,7 +194,7 @@ Before streaming, errors use JSON `{"error":"CODE"}` and HTTP status:
 | 404 | Granted allocation has no saved resident plan |
 | 408 | Incomplete request body exceeded its receive deadline |
 | 409 | History revision conflict, occupied history lock or storage quota |
-| 429 | User already has two in-flight requests |
+| 429 | User already has two in-flight requests, or approved replicas are occupied |
 | 503 | Approved allocation unavailable, host busy, or submit failure |
 
 ## Bounds and isolation
@@ -203,7 +227,7 @@ The real two-model gate adds API users while a second model stays in its TUI:
 ```sh
 python3 tests/integration/household_service_flow_test.py \
   --models-dir build/home-flow-models --keep-requester \
-  --multi-model --sessions 4 --api
+  --multi-model --sessions 4 --api --replicas
 ```
 
 This uses real inference on tiny OLMoE checkpoints over loopback. It does not
