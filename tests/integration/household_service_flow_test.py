@@ -194,6 +194,21 @@ def main():
         assert retained == expected, "incomplete allocation survived or a ready allocation was unloaded"
         service("chatter", "restart")
         assert not list((tmp / "chatter").rglob("*.cal")), "preparation fabricated a speed"
+        # READY is local; leased inventory arrives on the next heartbeat.
+        # With two preparations, an older one-model report can be sufficient
+        # for a turn to begin but change during that turn. The runtime must
+        # discard that timing, not label it a stable two-model measurement.
+        # Establish the committed workload before testing persistence.
+        committed = sorted((service(name)["donor"]["model_count"],
+                            service(name)["donor"]["reserved_total_bytes"]) for name in ("a", "b"))
+        def joint_inventory_committed():
+            result = subprocess.run([str(runtime / "lumabri"), "models", "--models-dir", str(combined),
+                                     "--tracker", tracker, "--context", "128", "--sessions", str(args.sessions), "--json"],
+                                    env=env("chatter"), text=True, capture_output=True, timeout=30)
+            assert result.returncode == 0, result.stderr
+            reports = [node["workload"] for node in json.loads(result.stdout)["nodes"] if node["workload"] is not None]
+            return sorted((w["allocations"], w["reserved_bytes"]) for w in reports) == committed
+        until(joint_inventory_committed, "joint committed workload did not reach leased inventory", 30)
         for plan in plans:
             conversation = Terminal("chatter", ["resident-chat", str(plan), tracker], program="test_chat_ui")
             until(lambda: conversation.has("receives the text"), "joint resident host unavailable")
