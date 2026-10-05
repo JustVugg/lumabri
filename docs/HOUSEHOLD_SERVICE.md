@@ -83,6 +83,13 @@ for waiting turns. Previous single-model tok/s are historical observations, not
 a concurrent SLA. There is one preparation at a time per requesting local
 service. The legacy foreground diagnostic donor remains single-allocation.
 
+Reusing a conversation slot requires confirmed retirement of its remote
+Segment sessions, even after the previous TCP connection has expired. CLOSE
+reconnects to the same fenced allocation and retries BUSY or lost replies
+within a short bound. An unconfirmed retirement cannot produce RESET_DONE
+or silently open replacement sessions. It is reported as a failure; no
+memory/session quota is raised to hide a leaked reservation.
+
 ## Compute admission across models
 
 The background donor owns a private same-user compute broker. All its managed
