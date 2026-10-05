@@ -7,7 +7,8 @@ connection, chat templates and incremental reply decoder.
 
 This first endpoint is loopback-only (`127.0.0.1`). It is **not an OpenAI API**
 and must not be exposed through a public port forward. Remote TLS deployment
-and the web/private-history interface are separate work. Stopping this gateway
+is separate work. The bundled browser chat opens at `http://127.0.0.1:47380/`.
+Stopping this gateway
 cancels its requests, but does not unload models
 or stop conversations belonging to other clients.
 
@@ -56,7 +57,9 @@ Deleting a user does not delete or unload the resident model.
 
 ## HTTP contract, version 1
 
-All endpoints require `Authorization: Bearer TOKEN`. Model identities are
+All `/api/v1/` endpoints require `Authorization: Bearer TOKEN`. The four
+compiled static web assets are public, but expose no account or model data.
+Model identities are
 64-character allocation hex strings from `api list`.
 
 `GET /api/v1/models` returns only the caller's granted plans:
@@ -87,7 +90,9 @@ sent to an arbitrary URL or replacement host named in an HTTP request.
 
 Messages must alternate user/assistant, starting and ending with user. System,
 tool and multimodal messages are not supported in this version. The caller
-supplies its own history; the gateway stores no transcript. Each HTTP request
+supplies its own history; this inference endpoint does not itself store a
+transcript. The separate private-history endpoints below provide persistence.
+Each HTTP request
 gets an isolated hosted conversation, even for the same API user. This avoids
 cross-client KV sharing but replays the supplied history on each request.
 
@@ -118,6 +123,7 @@ Before streaming, errors use JSON `{"error":"CODE"}` and HTTP status:
 | 403 | Unapproved allocation or rejected browser Origin/Host |
 | 404 | Granted allocation has no saved resident plan |
 | 408 | Incomplete request body exceeded its receive deadline |
+| 409 | History revision conflict, occupied history lock or storage quota |
 | 429 | User already has two in-flight requests |
 | 503 | Approved allocation unavailable, host busy, or submit failure |
 
@@ -144,7 +150,8 @@ Before streaming, errors use JSON `{"error":"CODE"}` and HTTP status:
 
 `make test-api` covers bounded JSON/Unicode, HTTP framing and origin rules,
 private credential files, exact grants and revocation. `make test-api-gateway`
-exercises the actual listener, credentials, quotas and disconnect cleanup.
+exercises the actual listener, credentials, quotas, disconnect cleanup and
+private history, including revoked/recreated account isolation.
 The real two-model gate adds API users while a second model stays in its TUI:
 
 ```sh
@@ -155,3 +162,85 @@ python3 tests/integration/household_service_flow_test.py \
 
 This uses real inference on tiny OLMoE checkpoints over loopback. It does not
 certify a large-model LAN, datacenter workload or remote browser deployment.
+
+## Browser chat and private history
+
+After `api start`, open the printed loopback URL and enter the token from
+`user-add`. No separate web server, JavaScript build chain, external font or
+CDN is involved: HTML, CSS, JavaScript and the repository logo are compiled
+into the controller with a small native C build tool. The same binary remains
+relocatable. The browser never saves the token or transcripts in localStorage,
+sessionStorage or cookies; refreshing the page requires the token again.
+
+Choose an approved resident model, write a question and send. The page shows
+the user's message alongside the streaming reply, with Stop, New conversation,
+collapsible history, JSON export and confirmed deletion. Model selection is
+fixed within a conversation. The page sends at most 256 generated tokens per
+turn, reduced to the approved model limit. Missing/unloaded allocations are
+reported; the web page cannot authorize preparation or silently substitute a
+different model. Replaying a longer conversation can exhaust the approved
+context, in which case the request fails visibly; history is not trimmed.
+
+History is saved on the gateway's computer, **not end-to-end encrypted from
+the operator**. Its OS account and the inference host are trusted. Owner-only
+directories/files isolate API users; each credential digest has a separate
+namespace, so revoking and recreating a username never reveals old chats to
+the new credential. Revocation does not erase old data: export/delete before
+revocation if desired. Backups and OS-level disk encryption remain the
+operator's responsibility; deletion is not a secure erase of SSDs or backups.
+
+There are at most **32 conversations and 256 KiB per conversation** per
+credential namespace (about 8 MiB, plus bounded metadata/one transaction
+file). No automatic eviction occurs at quota. Each message is at most 64 KiB;
+the browser stops a response exceeding this private-history limit even though
+the inference endpoint allows a larger standalone output. Up to 65 questions
+are retained. History is not a server-signed proof of what a model generated.
+
+The browser saves the question before submitting inference. An answer becomes
+`complete` only on a matching DONE and a successful save. Stop, errors,
+disconnection or reload leave `pending`/`interrupted` visibly incomplete.
+Retry is an explicit new generation from the last question, excluding any
+partial assistant text. No hidden automatic replay occurs. If saving fails,
+visible text can still be exported; the page does not claim it was persisted.
+Concurrent edits use revision checks; an old tab cannot overwrite a newer
+revision silently.
+
+History endpoints:
+
+- `GET /api/v1/conversations`: metadata only, never all transcript text.
+- `POST /api/v1/conversations`: create with revision zero.
+- `GET /api/v1/conversations/ID`: read one private conversation.
+- `POST /api/v1/conversations/ID`: replace at the exact expected revision.
+- `DELETE /api/v1/conversations/ID`: body `{"revision":N}`; stale revision
+  returns 409. Unknown and another user's IDs both return 404.
+
+Create/update bodies have this shape; unknown/duplicate fields are rejected:
+
+```json
+{"revision":0,"conversation":{"model":"ALLOCATION_ID","title":"A question","state":"pending","messages":[{"role":"user","content":"Hello"}]}}
+```
+
+The reply contains `id` (32 lower-case hex characters), new `revision`,
+`updated` (server Unix seconds), and the saved `conversation`. States are
+`idle` (no messages), `pending` (ending in user), `complete` (ending in
+assistant) and `interrupted` (question or partial answer). Alternating roles,
+valid UTF-8 and all size bounds are checked independently of the browser.
+Escaped NUL bytes are preserved in archived assistant replies (a byte
+tokenizer can emit them). They are never accepted in keys, metadata, user
+prompts or the C-string inference interface. Such replies remain exportable;
+the browser asks for a new conversation rather than silently removing the
+byte when constructing the next prompt.
+Creating/updating requires an exact model grant; reading/deleting existing
+history does not require that the model still be available.
+
+`tests/integration/web_chat_test.py` exercises actual Chromium rendering,
+stream decoding, retry/Stop, private history, credential lifetime and mobile
+layout using **explicit generation fixtures**. It saves screenshots under
+`build/web-chat-artifacts`. The separate two-model OLMoE gate verifies real
+engine bytes round-trip through the same history API without crossing users.
+For the browser test only, install Playwright 1.62.0 and its Chromium build;
+these are developer/CI dependencies, never runtime package requirements.
+Set `LUMABRI_TEST_BROWSER=1` on the two-model service gate to also drive the
+browser against **real Colibri generation**, save/reload the answer, and check
+that the other API user cannot see it. The Linux CI enables this extra check;
+native macOS runs the real API/history gate without a browser dependency.

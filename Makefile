@@ -1,4 +1,5 @@
 CC      ?= cc
+HOSTCC  ?= cc
 CFLAGS  ?= -O2 -Wall -Wextra
 ENGINE  ?= ../colibri/c
 # Shared headers remain in the repository root during the staged layout cleanup.
@@ -95,7 +96,7 @@ check-warnings:
 		test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 test_exec2 test_accum_order test_hybrid_parallel test_residency_report test_model_family test_planner test_cluster test_memory_budget test_calibration test_metrics \
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
 		test_meminfo test_process_memory test_serve_control test_host_session_pool test_hosted_sessions test_compute_broker test_compute_lease test_content_filter \
-		test_scheduler test_run_gate test_inventory test_home test_chat_ui test_weight_cache test_planner_io test_portfolio test_reply_stream \
+		test_scheduler test_run_gate test_inventory test_home test_chat_ui test_weight_cache test_planner_io test_portfolio test_reply_stream test_chat_store \
 		CFLAGS='$(CFLAGS) -Werror'
 
 SECURE_DEPS = lumabri_secure.h lumabri_crypto.h
@@ -117,6 +118,15 @@ lumabri test_chat_ui: src/runtime/lumabri_joint_prepare.h
 lumabri test_chat_ui: src/ui/lumabri_resident_ui.h
 lumabri test_chat_ui: src/runtime/lumabri_resident_control.h
 lumabri test_chat_ui: src/runtime/lumabri_api.h src/runtime/lumabri_api_http.h src/runtime/lumabri_api_json.h src/runtime/lumabri_api_access.h
+lumabri test_chat_ui test_host_session_pool test-home-monitor: src/runtime/lumabri_chat_history.h src/runtime/lumabri_chat_store.h build/web_assets.h
+
+build/embed-web: tools/embed_web.c
+	mkdir -p build
+	$(HOSTCC) -O2 -Wall -Wextra -Werror tools/embed_web.c -o $@
+
+build/web_assets.h: build/embed-web src/web/index.html src/web/app.css src/web/app.js logo.svg
+	build/embed-web src/web/index.html src/web/app.css src/web/app.js logo.svg > $@.tmp
+	mv $@.tmp $@
 lumabri segment_chat test_chat_ui: lumabri_metrics.h
 lumabri test_chat_ui: lumabri_run_gate.c lumabri_run_gate.h src/runtime/lumabri_host_sessions.h
 
@@ -540,10 +550,14 @@ test_api_access: tests/c/test_api_access.c src/runtime/lumabri_api_access.h $(SE
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_api_access.c -o $@
 
 .PHONY: test-api test-api-gateway
-test-api: test_api_json test_api_http test_api_access
+test-api: test_api_json test_api_http test_api_access test_chat_store
 	./test_api_json
 	./test_api_http
 	./test_api_access
+	./test_chat_store
+
+test_chat_store: tests/c/test_chat_store.c src/runtime/lumabri_chat_store.h src/runtime/lumabri_api_access.h $(SECURE_DEPS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_chat_store.c -o $@
 
 test: test-api
 
@@ -551,6 +565,7 @@ test-api-gateway: lumabri test_chat_ui
 	./test_chat_ui api-codec
 	python3 tests/integration/api_gateway_test.py
 	python3 tests/integration/api_service_test.py
+	python3 tests/integration/chat_history_test.py
 
 test: test-api-gateway
 
@@ -669,6 +684,7 @@ test-sanitize:
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_api_json.c -o build/sanitize/test_api_json
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_api_http.c -o build/sanitize/test_api_http
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_api_access.c -o build/sanitize/test_api_access
+	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_chat_store.c -o build/sanitize/test_chat_store
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_hybrid_parallel.c -o build/sanitize/test_hybrid_parallel -lm
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_segment_v2
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_segment_discovery
@@ -687,6 +703,7 @@ test-sanitize:
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_api_json
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_api_http
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_api_access
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_chat_store
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_hybrid_parallel
 
 test-thread-sanitize:
@@ -1049,7 +1066,7 @@ clean:
 	      test_verify_failover test_segment_v2 test_segment_discovery test_sampling \
 	      test_swarm_detail test_relay_rate test_machine test_meminfo test_process_memory test_serve_control test_host_session_pool test_hosted_sessions \
 	      test_compute_lease test_content_filter test_scheduler test_run_gate \
-	      test_compute_broker test_portfolio test_reply_stream test_api_json test_api_http test_api_access \
+	      test_compute_broker test_portfolio test_reply_stream test_api_json test_api_http test_api_access test_chat_store \
 	      test_segment_v2_tsan tracker_tsan \
 	      segment_node segment_chat test_backend_routes test_segment_close test_tcp_latency segment_node_asan segment_chat_asan \
 	      segment_node_tsan segment_chat_tsan \
