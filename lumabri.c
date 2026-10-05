@@ -3783,7 +3783,7 @@ static void *host_client_pump(void *arg) {
 
 static int host_connect(const char *addr, const char *model_type, const char *expected_key,
                         const char *expected_root, Engine *e,
-                        int *requested_max_new) {
+                        int *requested_max_new, int announce) {
     memset(e, 0, sizeof *e);
     e->to = e->from = -1;
     e->pid = 0;
@@ -3872,8 +3872,8 @@ static int host_connect(const char *addr, const char *model_type, const char *ex
         lmb_close(fd); return -1;
     }
     if (host_max_new && requested_max_new && *requested_max_new > (int)host_max_new) {
-        printf("  %shost limit: max-new reduced from %d to %u%s\n", C_DIM,
-               *requested_max_new, host_max_new, C_R);
+        if (announce) printf("  %shost limit: max-new reduced from %d to %u%s\n", C_DIM,
+                             *requested_max_new, host_max_new, C_R);
         *requested_max_new = (int)host_max_new;
     }
     (void)host_max_frame;
@@ -3903,6 +3903,9 @@ static int host_connect(const char *addr, const char *model_type, const char *ex
     e->proto = codec == 2 || kind_is_serve2(e->kind) ? PROTO_SERVE2 : PROTO_FRAMED;
     g_signal_engine_fd = (sig_atomic_t)pair[0];
 
+    /* The same connection primitive serves interactive chat and structured
+     * administration. Do not put a terminal banner in a JSON response. */
+    if (!announce) return 0;
     printf("  %shost %s · %s · %s%s\n", C_DIM, addr, mtype,
            backend[0] ? backend : "cpu", C_R);
     if (e->greedy_only)
@@ -4888,7 +4891,7 @@ static int cmd_chat(int argc, char **argv) {
      * and the only way to actually mean it. */
     if (host_addr) {
         memset(&sw, 0, sizeof sw);
-        if (host_connect(host_addr, NULL, host_key, host_root, &eng, &max_new)) return 1;
+        if (host_connect(host_addr, NULL, host_key, host_root, &eng, &max_new, 1)) return 1;
         if (g_execution_view) lmb_execution_print(stdout, g_execution_view);
     } else if (model_boot(tracker, model, shim, engines_dir, engine_path,
                           local_dir, ctx, max_new, cap_experts, &eng, &sw))

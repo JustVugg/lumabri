@@ -117,7 +117,8 @@ static int api_find_plan(const char *tracker, const uint8_t allocation[32], LmbR
     }
     free(plans); return found==1 ? 0 : -1;
 }
-static int api_models(int fd, const char *tracker, const LmbApiUser *user) {
+#include "lumabri_managed_models.h"
+static int api_models(int fd, int access_dir, const char *tracker, const LmbApiUser *user) {
     LmbResidentPlan *plans=calloc(64,sizeof *plans); Cap body={0};
     if (!plans) { if (fd>=0) api_error(fd,500,"allocation_failed"); return -1; }
     size_t n=home_resident_library_list(tracker,plans,64); int bad=cap_str(&body,"{\"schema\":1,\"models\":["),comma=0;
@@ -129,6 +130,7 @@ static int api_models(int fd, const char *tracker, const LmbApiUser *user) {
             api_json_text(&body,p->model) || api_addf(&body,",\"context\":%u,\"max_tokens\":%u,"
                 "\"sessions\":%u,\"state\":\"saved_plan\"}",p->context,p->max_new,p->sessions ? p->sessions : 1);
     }
+    if (!bad) bad=api_route_append(&body,access_dir,tracker,user,&comma);
     if (!bad) bad=cap_str(&body,"]}\n");
     if (bad) { if (fd>=0) api_error(fd,500,"allocation_failed"); }
     else if (fd<0) bad=fputs(body.p,stdout)==EOF;
@@ -159,7 +161,7 @@ static int api_messages(const LmbJson *j, unsigned index, EngKind kind, Cap *his
 fail:
     free(user); return -1;
 }
-static void api_chat(int fd, const char *tracker, const LmbApiUser *user, const char *body, size_t length) {
+static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUser *user, const char *body, size_t length) {
     LmbJsonToken tokens[1024]; LmbJson j; int fields[3];
     const char *const keys[]={"model","messages","max_tokens"}; char id[65]; uint8_t allocation[32]; uint32_t max_new;
     if (lmb_json_parse(&j,body,length,tokens,1024) || lmb_json_fields(&j,0,keys,3,fields) ||
@@ -168,22 +170,11 @@ static void api_chat(int fd, const char *tracker, const LmbApiUser *user, const 
         api_error(fd,400,"invalid_chat_request"); return;
     }
     if (!lmb_api_user_allows(user,allocation)) { api_error(fd,403,"model_not_authorized"); return; }
-    LmbResidentPlan *plan=calloc(1,sizeof *plan);
-    if (!plan) { api_error(fd,500,"allocation_failed"); return; }
-    if (api_find_plan(tracker,allocation,plan)) { free(plan); api_error(fd,404,"resident_plan_not_found"); return; }
-    if (max_new>plan->max_new) { free(plan); api_error(fd,400,"max_tokens_exceeds_plan"); return; }
-    /* Verify live approval/root on every participating donor. No previous
-     * on-disk hint grants permission to recreate or substitute an allocation. */
-    for (uint32_t i=0; i<plan->execution.count; i++) if (home_resident_peer(plan,i,0)) {
-        free(plan); api_error(fd,503,"approved_allocation_unavailable"); return;
-    }
-    Engine engine; int requested=(int)max_new;
-    if (host_connect(plan->host,NULL,plan->host_key,plan->root,&engine,&requested)) {
-        free(plan); api_error(fd,503,"host_unavailable_or_busy"); return;
-    }
-    free(plan); Cap history={0}; char *prompt=NULL;
-    if (engine.proto!=PROTO_SERVE2 || requested!=(int)max_new ||
-        api_messages(&j,(unsigned)fields[1],engine.kind,&history,&prompt)) {
+    Engine engine; const char *error=NULL;
+    int status=api_model_open(access_dir,tracker,allocation,max_new,&engine,&error);
+    if (status) { api_error(fd,(unsigned)status,error); return; }
+    Cap history={0}; char *prompt=NULL;
+    if (api_messages(&j,(unsigned)fields[1],engine.kind,&history,&prompt)) {
         api_error(fd,400,"unsupported_messages_or_limits"); goto finished;
     }
     if (submit_serve2(&engine,history.p ? history.p : "",prompt,(int)max_new)) {
@@ -245,7 +236,7 @@ static void api_connection(int fd, int access_dir, unsigned port, const char *tr
     int history=!strncmp(request.path,history_path,history_prefix) &&
         (!request.path[history_prefix] || request.path[history_prefix]=='/');
     if (!strcmp(request.method,"GET") && !strcmp(request.path,"/api/v1/models") && !request.length)
-        api_models(fd,tracker,&user);
+        api_models(fd,access_dir,tracker,&user);
     else if (history && !strcmp(request.method,"GET") && !request.length)
         api_history(fd,access_dir,&user,&request,NULL,0);
     else if (((!strcmp(request.method,"POST") && !strcmp(request.path,"/api/v1/chat")) ||
@@ -264,7 +255,7 @@ static void api_connection(int fd, int access_dir, unsigned port, const char *tr
             body[at]=0;
             if (at!=request.length) api_error(fd,408,"request_body_timeout");
             else if (history) api_history(fd,access_dir,&user,&request,body,at);
-            else api_chat(fd,tracker,&user,body,at);
+            else api_chat(fd,access_dir,tracker,&user,body,at);
             lmb_api_wipe(body,(size_t)request.length+1); free(body);
         }
     } else api_error(fd,400,"unsupported_endpoint_or_framing");
@@ -369,21 +360,26 @@ static int cmd_api(int argc, char **argv) {
     if (!argc) goto usage;
     HomeSettings settings; home_settings_load(&settings);
     const char *tracker=settings.tracker; unsigned port=47380;
-    char *args[3]={0}; unsigned count=0;
+    char *args[LMB_ROUTE_REPLICAS+1]={0}; unsigned count=0;
     for (int i=1; i<argc; i++) {
         if (!strcmp(argv[i],"--tracker") && i+1<argc) tracker=argv[++i];
         else if (!strcmp(argv[i],"--port") && i+1<argc) {
             char *end; unsigned long value=strtoul(argv[++i],&end,10);
             if (!*argv[i] || *end || !value || value>65535) goto usage;
             port=(unsigned)value;
-        } else if (count<3) args[count++]=argv[i]; else goto usage;
+        } else if (count<LMB_ROUTE_REPLICAS+1) args[count++]=argv[i]; else goto usage;
     }
     if (!strcmp(tracker,settings.tracker) && home_settings_activate(&settings)) return 1;
     if (!strcmp(argv[0],"stop") && !count) return home_service_stop_role("api") ? 1 : 0;
-    if (!strcmp(argv[0],"list") && !count && *tracker) return api_models(-1,tracker,NULL) ? 1 : 0;
     char path[1200];
     if (checked_printf(path,sizeof path,"%s/.lumabri/api-access",getenv("HOME") ? getenv("HOME") : ".")) return 1;
     int dir=lmb_api_access_dir(path,1); if (dir<0) { fprintf(stderr,"Cannot open private API access directory\n"); return 1; }
+    if (!strcmp(argv[0],"list") && !count && *tracker) {
+        int rc=api_models(-1,dir,tracker,NULL); close(dir); return rc ? 1 : 0;
+    }
+    if (!strcmp(argv[0],"model-add") || !strcmp(argv[0],"model-set") || !strcmp(argv[0],"model-remove")) {
+        int rc=api_route_admin(dir,argv[0],tracker,args,count); close(dir); return rc;
+    }
     if ((!strcmp(argv[0],"serve") || !strcmp(argv[0],"start")) && !count && *tracker) {
         int rc=!strcmp(argv[0],"start") ? api_start(dir,port,tracker) : api_serve(dir,port,tracker,NULL);
         close(dir); return rc;
@@ -397,9 +393,10 @@ static int cmd_api(int argc, char **argv) {
         char file[40]; snprintf(file,sizeof file,"%s.user",args[0]); rc=unlinkat(dir,file,0);
         if (!rc) rc=fsync(dir);
     } else if (!strcmp(argv[0],"grant") && count==2 && *tracker) {
-        LmbApiUser user; LmbResidentPlan *plan=calloc(1,sizeof *plan); uint8_t allocation[32];
+        LmbApiUser user; LmbResidentPlan *plan=calloc(1,sizeof *plan); LmbModelRoute route; uint8_t allocation[32];
         if (plan && strlen(args[1])==64 && !lmb_unhex(allocation,args[1],32) &&
-            !lmb_api_user_load(dir,args[0],&user) && !api_find_plan(tracker,allocation,plan)) {
+            !lmb_api_user_load(dir,args[0],&user) &&
+            (!api_route_read(dir,allocation,tracker,&route) || !api_find_plan(tracker,allocation,plan))) {
             if (lmb_api_user_allows(&user,allocation)) rc=0;
             else if (user.count<LMB_API_MODELS_MAX) { memcpy(user.allocations[user.count++],allocation,32); rc=lmb_api_user_save(dir,&user); }
         }
@@ -410,8 +407,11 @@ static int cmd_api(int argc, char **argv) {
     return rc ? 1 : 0;
 usage:
     fprintf(stderr,"lumabri api list [--tracker HOST:PORT]\n"
+        "lumabri api model-add NAME APPROVED_ALLOCATION... [--tracker HOST:PORT]\n"
+        "lumabri api model-set MODEL_ID APPROVED_ALLOCATION... [--tracker HOST:PORT]\n"
+        "lumabri api model-remove MODEL_ID [--tracker HOST:PORT]\n"
         "lumabri api user-add NAME\n"
-        "lumabri api grant NAME ALLOCATION [--tracker HOST:PORT]\n"
+        "lumabri api grant NAME MODEL_OR_ALLOCATION_ID [--tracker HOST:PORT]\n"
         "lumabri api revoke NAME\n"
         "lumabri api start [--tracker HOST:PORT] [--port 47380]\n"
         "lumabri api stop\n"

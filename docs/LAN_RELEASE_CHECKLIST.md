@@ -31,9 +31,16 @@ below. Historical observations remain here as evidence, not current promises.
   (#192), workload-bound measurements and acknowledged session retirement
   (#193), shared strict reply decoder (#194), authenticated resident API (#195).
   A cost-aware preview is not yet an automatic global placement/cost controller.
-- [ ] Permanent API keeper and bundled web/private history: local integration
-  includes real OLMoE, separate users, TUI coexistence and saved replies.
-  Delivery requires the corresponding exact-head native CI and normal merges.
+- [x] Permanent API keeper (#196): authenticated same-user control, independent
+  TUI/manager lifetime, isolated stop and crash/occupied-port handling.
+- [ ] Bundled web/private history (#197): local integration includes real
+  OLMoE, separate users, TUI coexistence and saved replies. Delivery requires
+  exact-head native CI and normal merge.
+- [ ] Managed model identities over independently approved resident replicas:
+  bounded operator registry, immutable checkpoint/numeric semantics and
+  pre-submission availability routing. This is not automatic global placement,
+  mid-response recovery or elasticity. Delivery requires the real OLMoE replica
+  gate and exact-head native CI.
 - [ ] Requirements-based global placement and measured cost comparison;
   TUI/web/application management through one public service interface;
   recovery, elasticity, provider integration and

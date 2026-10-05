@@ -48,19 +48,60 @@ failure, not a second listening instance. Logs are in the private
 
 `user-add` prints a bearer token **once**. Keep it private. Only its SHA-512
 digest is saved, in owner-only files under `~/.lumabri/api-access`. Grants name
-exact allocation identities, not model names or a wildcard. Re-preparing a
-model creates a new allocation and requires a new grant.
+exact allocation or managed-model identities, not names or a wildcard.
+Re-preparing a raw allocation requires a new grant. A managed identity can
+retain its grant across explicitly approved replica changes, as below.
 
 `./lumabri api revoke alice` revokes future requests. It does not retroactively
 cancel an already authenticated request; those are bounded to five minutes.
 Deleting a user does not delete or unload the resident model.
+
+## Stable model identities and approved replicas
+
+An operator can expose several independently approved allocations of the
+**same checkpoint** under one stable identity:
+
+```sh
+./lumabri api model-add olmoe APPROVED_ALLOCATION_A APPROVED_ALLOCATION_B
+./lumabri api grant alice MODEL_ID_FROM_MODEL_ADD
+./lumabri api model-set MODEL_ID_FROM_MODEL_ADD APPROVED_ALLOCATION_B
+./lumabri api model-remove MODEL_ID_FROM_MODEL_ADD
+```
+
+These commands accept `--tracker HOST:PORT`. They never load or unload weights,
+create a server, or replace a donor's approval. `model-add` and `model-set`
+authenticate all members and query the running hosts before atomically saving
+the set. Each member must have the same source content identity, adapter,
+numeric ABI/class and greedy policy. Routing roots may differ: the exact
+allocation, signed root and host identity are stored separately for each
+member. Changing checkpoint or numeric semantics requires a new model ID and
+new user grants. Registered plans must have current provenance (version 6).
+
+Up to 32 managed models and eight replicas per model are supported. Names are
+1–32 lowercase letters, digits, `_` or `-`. Private revisioned records reside
+under `~/.lumabri/api-access/models`; concurrent updates fail rather than
+overwriting an intervening change. The ordered set is an operator preference,
+**not** a measured speed, cost or load-balancing optimizer.
+
+For each new chat request, the gateway rechecks the live allocation and host,
+then tries the next approved member if the previous one cannot be opened.
+This happens **before submitting any prompt**. Once submitted, an error or
+disconnect ends that response: there is no hidden automatic generation retry
+and no KV migration. A new user-initiated request can replay its own text
+history on another member. If no approved replica is available, HTTP 503 is
+returned; the gateway does not reload a model or replay old donor approvals.
+
+The browser shows the managed name and uses its stable ID for private history.
+A managed grant does not authorize direct access to its raw allocation IDs.
+Deleting the route leaves weights and existing private conversation records
+untouched; it prevents further inference under that ID.
 
 ## HTTP contract, version 1
 
 All `/api/v1/` endpoints require `Authorization: Bearer TOKEN`. The four
 compiled static web assets are public, but expose no account or model data.
 Model identities are
-64-character allocation hex strings from `api list`.
+64-character allocation or managed-model hex strings from `api list`.
 
 `GET /api/v1/models` returns only the caller's granted plans:
 
@@ -72,6 +113,11 @@ Model identities are
 each inference, the gateway checks every donor's live allocation/root and
 authenticates the expected Edge identity and checkpoint. Client text is never
 sent to an arbitrary URL or replacement host named in an HTTP request.
+Managed records use `state: "saved_route"`, `replicas` and `revision` instead;
+`sessions: null` deliberately avoids claiming live or aggregate capacity.
+Their advertised context and output limit are the minimum of their members.
+Operator `api list` also includes content/numeric metadata and allocation IDs;
+the user-facing catalogue omits that operator-only detail.
 
 `POST /api/v1/chat`, with `Content-Type: application/json` and a bounded
 `Content-Length`, accepts:
