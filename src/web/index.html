@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Lumabri — Your conversations</title>
+  <link rel="icon" href="/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="app" id="app">
+    <aside id="sidebar" aria-label="Conversations">
+      <div class="brand"><img src="/logo.svg" alt="Lumabri" width="162" height="65"><button id="collapse" class="icon" aria-label="Collapse sidebar" title="Collapse sidebar">‹</button></div>
+      <button id="new-chat" class="new-chat" disabled><span aria-hidden="true">＋</span> New conversation</button>
+      <div class="section-label">YOUR CONVERSATIONS</div>
+      <nav id="history" aria-label="Saved conversations"><p class="muted">Connect to see your history.</p></nav>
+      <div class="sidebar-footer"><span class="status-dot" aria-hidden="true"></span><span id="identity">Not connected</span><button id="sign-out" class="text-button" hidden>Sign out</button></div>
+    </aside>
+    <main>
+      <header>
+        <button id="expand" class="icon" aria-label="Expand sidebar" title="Expand sidebar" hidden>☰</button>
+        <div class="model-control"><label for="model">Resident model</label><select id="model" disabled><option value="">No models loaded</option></select></div>
+        <div class="header-right"><span class="local-label">ON YOUR COMPUTERS</span><button id="refresh" class="icon" aria-label="Refresh models and history" title="Refresh" disabled>↻</button></div>
+      </header>
+      <section id="login" class="welcome">
+        <span class="eyebrow">YOUR MODELS. YOUR SPACE.</span><h1>A conversation,<br>closer to home.</h1>
+        <p>Chat with models already approved on your computers.<br>Your history stays with your local Lumabri service.</p>
+        <form id="login-form"><label for="token">Your access token</label><div class="token-row"><input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="name.token" required><button type="submit" class="primary">Connect →</button></div></form>
+        <p class="fine-print">Ask your cluster operator for a token. It is kept only in this page's memory. The computer hosting inference receives your conversation.</p>
+      </section>
+      <section id="chat" hidden aria-label="Chat">
+        <div id="empty" class="welcome"><span class="eyebrow">READY WHEN YOU ARE</span><h1>What are we<br>working on?</h1><p>Select an approved resident model above, then start a conversation.</p></div>
+        <div id="messages" aria-label="Conversation messages" aria-live="off"></div>
+      </section>
+      <div id="notice" role="status" aria-live="polite"></div>
+      <div id="composer-area" hidden>
+        <div class="conversation-actions"><span id="save-status">History is saved on this computer.</span><button id="retry" class="text-button" hidden>Retry last question</button><button id="export" class="text-button" disabled>Export</button><button id="delete" class="text-button danger" disabled>Delete</button></div>
+        <form id="composer"><label class="sr-only" for="prompt">Your message</label><textarea id="prompt" rows="1" maxlength="16000" placeholder="Message your model…" disabled></textarea><button id="stop" type="button" hidden>Stop</button><button id="send" class="primary" type="submit" disabled aria-label="Send message">↑</button></form>
+        <p class="composer-note">Enter to send · Shift + Enter for a new line. Responses can be wrong; check important information.</p>
+      </div>
+    </main>
+  </div>
+</body>
+</html>

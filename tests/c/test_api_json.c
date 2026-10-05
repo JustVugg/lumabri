@@ -31,6 +31,9 @@ int main(void) {
     char deep[65]; memset(deep,'[',32); memset(deep+32,']',32); deep[64]=0;
     assert(lmb_json_parse(&j,deep,64,tokens,256));
     const char nul[]={'"','x',0,'"'}; assert(lmb_json_parse(&j,nul,sizeof nul,tokens,256));
+    const unsigned char escaped_nul[]="\\u0000"; size_t written=0;
+    assert(!lmb_json_decode_mode(escaped_nul,6,NULL,0,&written,1) && written==1);
+    assert(lmb_json_decode_mode(escaped_nul,6,value,sizeof value,NULL,1)); /* no C-string truncation */
     for (size_t i=0; i<strlen(valid)-2; i++) assert(lmb_json_parse(&j,valid,i,tokens,256));
     puts("API JSON: PASS (bounded syntax, strict schema keys, Unicode, integer overflow, depth and token limits)");
     return 0;

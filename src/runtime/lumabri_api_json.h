@@ -1,7 +1,8 @@
 /* Bounded JSON syntax/UTF-8 reader for the managed API. No file/network I/O.
  * Tokens reference the caller-owned input, which must outlive the document.
- * Decoding rejects NUL (our public text interface uses C strings), malformed
- * UTF-8 and unpaired surrogates; it never repairs a request silently. */
+ * Ordinary decoding rejects NUL (our public text interface uses C strings), malformed
+ * UTF-8 and unpaired surrogates; it never repairs a request silently. An
+ * archival-only syntax mode preserves escaped NUL without C-string extraction. */
 #ifndef LMB_API_JSON_H
 #define LMB_API_JSON_H
 #include <stddef.h>
@@ -16,6 +17,7 @@ typedef struct {
     size_t size, at;
     LmbJsonToken *tokens;
     unsigned count, capacity;
+    int allow_nul; /* archival JSON only; C-string extraction always rejects it */
 } LmbJson;
 
 /* Return one scalar's byte length, or zero for invalid/incomplete UTF-8. */
@@ -41,7 +43,7 @@ static inline int lmb_json_hex4(const unsigned char *p, uint32_t *value) {
     *value=v; return 0;
 }
 /* Decode one string body. NULL output validates and counts without allocating. */
-static inline int lmb_json_decode(const unsigned char *p, size_t n, char *out, size_t cap, size_t *written) {
+static inline int lmb_json_decode_mode(const unsigned char *p, size_t n, char *out, size_t cap, size_t *written, int allow_nul) {
     size_t at=0, used=0;
     while (at<n) {
         unsigned char bytes[4]; unsigned length=1;
@@ -66,7 +68,7 @@ static inline int lmb_json_decode(const unsigned char *p, size_t n, char *out, s
                         low<0xdc00 || low>0xdfff) return -1;
                     scalar=0x10000+((scalar-0xd800)<<10)+(low-0xdc00); at+=6;
                 } else if (scalar>=0xdc00 && scalar<=0xdfff) return -1;
-                if (!scalar) return -1;
+                if (!scalar && (!allow_nul || out)) return -1;
                 if (scalar<0x80) bytes[0]=(unsigned char)scalar;
                 else if (scalar<0x800) {
                     length=2; bytes[0]=(unsigned char)(0xc0|(scalar>>6)); bytes[1]=(unsigned char)(0x80|(scalar&63));
@@ -94,6 +96,9 @@ static inline int lmb_json_decode(const unsigned char *p, size_t n, char *out, s
     if (written) *written=used;
     return 0;
 }
+static inline int lmb_json_decode(const unsigned char *p, size_t n, char *out, size_t cap, size_t *written) {
+    return lmb_json_decode_mode(p,n,out,cap,written,0);
+}
 static inline void lmb_json_space(LmbJson *j) {
     while (j->at<j->size && (j->text[j->at]==' ' || j->text[j->at]=='\n' ||
            j->text[j->at]=='\r' || j->text[j->at]=='\t')) j->at++;
@@ -108,7 +113,7 @@ static inline int lmb_json_value(LmbJson *j, unsigned depth) {
         while (j->at<j->size && j->text[j->at]!='"') {
             if (j->text[j->at++]=='\\') { if (j->at==j->size) return -1; j->at++; }
         }
-        if (j->at==j->size || lmb_json_decode(j->text+t->begin,j->at-t->begin,NULL,0,NULL)) return -1;
+        if (j->at==j->size || lmb_json_decode_mode(j->text+t->begin,j->at-t->begin,NULL,0,NULL,j->allow_nul)) return -1;
         t->end=j->at++;
     } else if (c=='{' || c=='[') {
         unsigned end=c=='{' ? '}' : ']'; t->kind=c=='{' ? LMB_JSON_OBJECT : LMB_JSON_ARRAY;

@@ -19,16 +19,24 @@ below. Historical observations remain here as evidence, not current promises.
 - [x] OS memory evidence and pressure checks (#188): pageout/compression is
   charged and can revoke readiness. Optional locking fails closed. Sampled
   zero swap is not a guarantee of pinned residency on every platform.
-- [ ] Bounded shared-model conversations: implementation includes explicit
+- [x] Bounded shared-model conversations (#189): implementation includes explicit
   1–8-slot approval and memory, isolated conversation/sampler state, whole-turn
   FIFO, bounded cancellation/reset and BUSY. Local OLMoE reduced-checkpoint
   gates pass at 1/2/4/8 slots; the complete 7.4-GB checkpoint passes with two
   conversations in the installed Linux test package. Those were correctness
-  runs under other test load, not a throughput guarantee. Native CI and review
-  must pass before this item is marked delivered.
-- [ ] Global multi-model compute fairness, requirements-based placement and
-  cost comparison; authenticated multi-user API, web/private history and TUI
-  consuming the same service; recovery, elasticity, provider integration and
+  runs under other test load, not a throughput guarantee. Native Linux and
+  macOS Intel/ARM CI passed before normal merge.
+- [x] Same-user machine-wide bounded compute admission (#190), workload/cost
+  inventory and read-only joint preview (#191), joint all-party preparation
+  (#192), workload-bound measurements and acknowledged session retirement
+  (#193), shared strict reply decoder (#194), authenticated resident API (#195).
+  A cost-aware preview is not yet an automatic global placement/cost controller.
+- [ ] Permanent API keeper and bundled web/private history: local integration
+  includes real OLMoE, separate users, TUI coexistence and saved replies.
+  Delivery requires the corresponding exact-head native CI and normal merges.
+- [ ] Requirements-based global placement and measured cost comparison;
+  TUI/web/application management through one public service interface;
+  recovery, elasticity, provider integration and
   final declared-platform release gates. Provider credentials and spending
   authority have explicitly been deferred by the operator.
 

@@ -1,6 +1,7 @@
 /* Authenticated loopback gateway to ALREADY approved resident allocations.
  * One bounded child per HTTP request. No model loading, donor approval,
- * endpoint supplied by clients, persistent chat state or shared Engine globals.
+ * endpoint supplied by clients or shared Engine globals. Private transcripts
+ * are separate from model authority and engine conversation state.
  * Requires the controller's Engine/template and resident-plan helpers. */
 #ifndef LUMABRI_API_H
 #define LUMABRI_API_H
@@ -8,6 +9,7 @@
 #include "lumabri_api_json.h"
 #include "lumabri_api_access.h"
 #include "lumabri_resident_control.h"
+#include "build/web_assets.h"
 
 #define LMB_API_CHILDREN 16u
 #define LMB_API_TURN_SECONDS 300u
@@ -55,6 +57,27 @@ static int api_json_text(Cap *c, const char *s) {
         else if (cap_add(c,(const char *)p,1)) return -1;
     }
     return cap_str(c,"\"");
+}
+#include "lumabri_chat_history.h"
+
+/* Only these compiled assets are public. No generic file-serving path and no
+ * redirects, external scripts, cookies, CORS or browser-persisted credentials. */
+static int api_web(int fd, const LmbApiHttp *request) {
+    if (strcmp(request->method,"GET") || request->length) return 0;
+    const unsigned char *data=NULL; size_t size=0; const char *type=NULL;
+    if (!strcmp(request->path,"/")) { data=lmb_web_html; size=sizeof lmb_web_html-1; type="text/html; charset=utf-8"; }
+    else if (!strcmp(request->path,"/app.css")) { data=lmb_web_css; size=sizeof lmb_web_css-1; type="text/css; charset=utf-8"; }
+    else if (!strcmp(request->path,"/app.js")) { data=lmb_web_js; size=sizeof lmb_web_js-1; type="text/javascript; charset=utf-8"; }
+    else if (!strcmp(request->path,"/logo.svg")) { data=lmb_web_logo; size=sizeof lmb_web_logo-1; type="image/svg+xml"; }
+    if (!data) return 0;
+    char header[1024];
+    int n=snprintf(header,sizeof header,"HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %zu\r\n"
+        "Connection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n"
+        "Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; "
+        "connect-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'\r\n"
+        "X-Frame-Options: DENY\r\n\r\n",type,size);
+    if (n>0 && (size_t)n<sizeof header && !api_write(fd,header,(size_t)n)) (void)api_write(fd,data,size);
+    return 1;
 }
 static int api_event(int fd, const char *event, const char *json) {
     char header[96]; int n=snprintf(header,sizeof header,"event: %s\ndata: ",event);
@@ -211,14 +234,22 @@ static void api_connection(int fd, int access_dir, unsigned port, const char *tr
     LmbApiHttp request;
     if (!complete || lmb_api_http_parse(&request,header,length)) { api_error(fd,400,"invalid_http_request"); return; }
     if (lmb_api_http_origin(&request,port)) { api_error(fd,403,"origin_or_host_rejected"); return; }
+    if (api_web(fd,&request)) return;
     LmbApiUser user;
     if (lmb_api_authorize(access_dir,request.authorization,&user)) { api_error(fd,401,"authentication_required"); return; }
     lmb_api_wipe(header,sizeof header); lmb_api_wipe(request.authorization,sizeof request.authorization);
     int permit=lmb_api_user_permit(access_dir,user.name,2);
     if (permit<0) { api_error(fd,429,"user_request_limit"); return; }
+    const char *history_path="/api/v1/conversations";
+    size_t history_prefix=strlen(history_path);
+    int history=!strncmp(request.path,history_path,history_prefix) &&
+        (!request.path[history_prefix] || request.path[history_prefix]=='/');
     if (!strcmp(request.method,"GET") && !strcmp(request.path,"/api/v1/models") && !request.length)
         api_models(fd,tracker,&user);
-    else if (!strcmp(request.method,"POST") && !strcmp(request.path,"/api/v1/chat") &&
+    else if (history && !strcmp(request.method,"GET") && !request.length)
+        api_history(fd,access_dir,&user,&request,NULL,0);
+    else if (((!strcmp(request.method,"POST") && !strcmp(request.path,"/api/v1/chat")) ||
+              (history && (!strcmp(request.method,"POST") || !strcmp(request.method,"DELETE")))) &&
              request.has_length && request.length && request.json) {
         char *body=malloc((size_t)request.length+1); size_t at=0;
         deadline=lmb_io_monotonic_ms()+5000;
@@ -232,6 +263,7 @@ static void api_connection(int fd, int access_dir, unsigned port, const char *tr
             }
             body[at]=0;
             if (at!=request.length) api_error(fd,408,"request_body_timeout");
+            else if (history) api_history(fd,access_dir,&user,&request,body,at);
             else api_chat(fd,tracker,&user,body,at);
             lmb_api_wipe(body,(size_t)request.length+1); free(body);
         }

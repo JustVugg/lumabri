@@ -4,6 +4,7 @@ The second model keeps its TUI conversation while API users use the first.
 import base64
 import http.client
 import json
+import os
 from pathlib import Path
 import socket
 import shutil
@@ -63,6 +64,9 @@ def verify_resident_api(runtime, env, tracker, first_model_name, artifacts):
         assert chat(bob, first["id"])[0] == 403
         assert chat(alice, second["id"])[0] == 403
         assert request("/api/v1/chat", alice, '{"model":"x","model":"x"}')[0] == 400
+        if os.environ.get("LUMABRI_TEST_BROWSER") == "1":
+            from resident_web_test import verify_resident_browser
+            verify_resident_browser(port, alice, bob, first["id"], artifacts)
         # More opens than available slots verifies acknowledged retirement.
         for turn in range(6):
             status, data = chat(alice, first["id"])
@@ -77,6 +81,19 @@ def verify_resident_api(runtime, env, tracker, first_model_name, artifacts):
             assert events and events[-1][0] == "done" and all(e[0] in ("delta", "done") for e in events), events
             raw = b"".join(base64.b64decode(e[1]["bytes"], validate=True) for e in events if e[0] == "delta")
             assert raw and "STAT " in events[-1][1]["stats"]
+            if turn == 0:
+                conversation = {"model": first["id"], "title": "Real OLMoE API response", "state": "complete",
+                                "messages": [{"role": "user", "content": "hi"},
+                                             {"role": "assistant", "content": raw.decode("utf-8")}]}
+                status, data = request("/api/v1/conversations", alice,
+                                       json.dumps({"revision": 0, "conversation": conversation}))
+                assert status == 200, (status, data)
+                saved = json.loads(data)
+                assert saved["conversation"] == conversation and saved["revision"] == 1
+                path = "/api/v1/conversations/" + saved["id"]
+                assert request(path, bob)[0] == 404
+                status, data = request(path, alice)
+                assert status == 200 and json.loads(data)["conversation"]["messages"][-1]["content"].encode() == raw
         # Interrupted transport releases only the current API conversation.
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
         conn.request("POST", "/api/v1/chat", json.dumps({"model": first["id"], "max_tokens": 8,
@@ -89,7 +106,7 @@ def verify_resident_api(runtime, env, tracker, first_model_name, artifacts):
         cli("revoke", "alice")
         assert request("/api/v1/models", alice)[0] == 401
         assert request("/api/v1/models", bob)[0] == 200
-        print("RESIDENT API: PASS (real OLMoE, approved allocations, distinct users, TUI coexistence, manager restart, streaming, repeated close, cancellation, revoke)", flush=True)
+        print("RESIDENT API: PASS (real OLMoE, approved allocations, distinct users, private history, TUI coexistence, manager restart, streaming, repeated close, cancellation, revoke)", flush=True)
     finally:
         cli("stop")
         assert not service("status")["api"]["live"]

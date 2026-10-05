@@ -1,6 +1,6 @@
 <img src="logo.svg" alt="lumabri: tiny engine, immense swarm" width="524">
 
-# Your computers. One shared model.
+# Your computers. Your models.
 
 Lumabri connects your computers into a private household cluster using
 [Colibri](https://github.com/JustVugg/colibri). Choose a model, select the
@@ -82,15 +82,17 @@ limit, saves the observed speed and releases the plan. Transferring and
 loading missing weights happens first and can take much longer. This is a
 short-run indication, not a guarantee for long conversations.
 
-Each participating computer currently admits **one CPU, resident Segment plan** with
-verified model sizing and source weights on the requesting computer. It
+Each participating computer can retain independently budgeted **CPU, resident
+Segment allocations**, with verified model sizing and source weights on the
+requesting computer. It
 distributes contiguous layer ranges, not isolated experts. Each donor keeps
 the state for its layers; the chosen chat host receives the conversation text.
 The chat connection itself does not mount or download a checkpoint.
-Separate donor groups can run independent chats at the same time, provided
-each group can hold its model. An occupied computer returns `BUSY`; it does
-not replace its existing request or chat. Sharing one donor between sessions
-and automatic recovery after a donor failure are not implemented yet.
+Up to four model allocations can coexist on one donor within its total budget;
+each plan explicitly reserves 1–8 isolated conversation slots. Compute uses
+bounded queues, not a promise that every slot runs at the single-user speed.
+Exhausted capacity returns `BUSY` rather than replacing a running model.
+Automatic household recovery after losing a donor is not implemented yet.
 
 The donor queries its installed Segment runtime before sharing. A runtime
 built without OpenMP uses one execution thread; CPU core count is not a
@@ -126,6 +128,16 @@ Inside chat, your messages and the streamed answers stay in the transcript.
 Type **/** for command suggestions, use arrows to choose and Tab to complete.
 **/help**, **/debug**, **/reset** and **/quit** provide help, diagnostics, a new
 conversation and exit.
+
+### Browser chat
+
+Prepared resident models are also available through the authenticated local
+API and its bundled chat page. An operator creates a user token, grants it
+specific allocations and runs `lumabri api start`; open the printed local URL.
+The page provides model selection, streaming, Stop, collapsible private
+history and export. No separate web server or browser-side AI engine is needed.
+See [setup, limits and privacy](docs/RESIDENT_API.md). This endpoint is
+loopback-only: do not expose it directly to the internet.
 
 Household chat also shows the approved layer allocation. **/plan** displays
 each compute donor, its layer range, reserved RAM and the Edge/chat host.
