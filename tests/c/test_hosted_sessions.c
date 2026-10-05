@@ -107,9 +107,24 @@ int main(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN); assert(!lmb_secure_init());
     Client *clients = calloc(slots, sizeof *clients), *oracle = calloc(1, sizeof *oracle);
     assert(clients && oracle);
-    unsigned available;
+    unsigned available=0;
     for (unsigned i = 0; i < slots; i++) {
         clients[i].fd = connect_host(argv[1], key, &available);
+        /* The previous TUI returning to its menu is not an acknowledgement
+         * that the host worker has observed TCP EOF. Wait for an actually
+         * idle host before measuring; never relax the exact slot counts or
+         * hide a persistent leaked reservation. Later opens remain strict. */
+        if (!i) {
+            double deadline=seconds()+5;
+            while (clients[i].fd>=0 && available<slots && seconds()<deadline) {
+                lmb_close(clients[i].fd);
+                struct timespec delay={0,100000000}; nanosleep(&delay,NULL);
+                clients[i].fd=connect_host(argv[1],key,&available);
+            }
+        }
+        if (clients[i].fd<0 || available!=slots-i)
+            fprintf(stderr,"initial Hosted admission: client=%u expected=%u available=%u fd=%d\n",
+                    i,slots-i,available,clients[i].fd);
         assert(clients[i].fd >= 0 && available == slots-i);
     }
     int extra = connect_host(argv[1], key, &available);
