@@ -187,6 +187,8 @@ jobs:
         working-directory: lumabri
         run: |
           ./test_backend_routes
+          make test_segment_close ENGINE=../colibri/c
+          ./test_segment_close
           python3 tests/integration/backend_policy_test.py
           test "$(OMP_NUM_THREADS=1 ./segment_node --thread-capacity)" = 1
           test "$(OMP_NUM_THREADS=4 OMP_THREAD_LIMIT=1 ./segment_node --thread-capacity)" = 1
@@ -462,6 +464,8 @@ jobs:
         working-directory: lumabri
         run: |
           ./test_backend_routes
+          make test_segment_close ENGINE=../colibri/c
+          ./test_segment_close
           python3 tests/integration/backend_policy_test.py
           test "$(OMP_NUM_THREADS=1 ./segment_node --thread-capacity)" = 1
           test "$(OMP_NUM_THREADS=4 OMP_THREAD_LIMIT=1 ./segment_node --thread-capacity)" = 1

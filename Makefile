@@ -746,6 +746,12 @@ test_backend_routes: tests/c/test_backend_routes.c segment_chat.c lumabri_metric
 		lumabri_segment_discovery.c lumabri_sampling.c \
 		$(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
 
+test_segment_close: tests/c/test_segment_close.c segment_chat.c lumabri_metrics.h lumabri_stage_metrics.h \
+		lumabri_sampling.c lumabri_sampling.h $(SEGMENT_COMMON) $(COLIBRI_SEGMENT_LIB)
+	$(CC) $(CPPFLAGS) $(SEGMENT_CFLAGS) -pthread tests/c/test_segment_close.c lumabri_segment.c \
+		lumabri_segment_discovery.c lumabri_sampling.c \
+		$(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
+
 test_sampling: tests/c/test_sampling.c lumabri_sampling.c lumabri_sampling.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_sampling.c lumabri_sampling.c -o $@ -lm
 
@@ -1004,7 +1010,7 @@ clean:
 	      test_compute_lease test_content_filter test_scheduler test_run_gate \
 	      test_compute_broker test_portfolio \
 	      test_segment_v2_tsan tracker_tsan \
-	      segment_node segment_chat test_backend_routes test_tcp_latency segment_node_asan segment_chat_asan \
+	      segment_node segment_chat test_backend_routes test_segment_close test_tcp_latency segment_node_asan segment_chat_asan \
 	      segment_node_tsan segment_chat_tsan \
 	      olmoe_p2p colibri_p2p inkling_p2p kimi_k3_p2p deepseek_p2p qwen36_p2p \
 	      expert_node expert_node_glm expert_node_inkling expert_node_kimi \
