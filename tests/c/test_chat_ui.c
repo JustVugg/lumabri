@@ -5,6 +5,32 @@
 #include <assert.h>
 
 int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "api-codec")) {
+        const char *good="[{\"role\":\"user\",\"content\":\"hi\"},{\"role\":\"assistant\",\"content\":\"hello\"},{\"role\":\"user\",\"content\":\"next\"}]";
+        LmbJson j; LmbJsonToken tokens[64]; Cap history={0}; char *prompt=NULL;
+        assert(!lmb_json_parse(&j,good,strlen(good),tokens,64));
+        assert(!api_messages(&j,0,EK_OLMOE,&history,&prompt));
+        assert(strstr(history.p,"hi") && strstr(history.p,"hello") && !strcmp(prompt,"next"));
+        free(history.p); free(prompt);
+        const char *bad[]={"[]","[{\"role\":\"system\",\"content\":\"x\"}]",
+            "[{\"role\":\"user\",\"content\":\"x\"},{\"role\":\"assistant\",\"content\":\"y\"}]",
+            "[{\"role\":\"user\",\"content\":\"x\",\"unknown\":0}]"};
+        for (unsigned i=0;i<sizeof bad/sizeof *bad;i++) {
+            history=(Cap){0}; prompt=NULL;
+            assert(!lmb_json_parse(&j,bad[i],strlen(bad[i]),tokens,64));
+            assert(api_messages(&j,0,EK_OLMOE,&history,&prompt)); free(history.p); free(prompt);
+        }
+        int pair[2]; assert(!socketpair(AF_UNIX,SOCK_STREAM,0,pair));
+        unsigned char bytes[600]; memset(bytes,'a',sizeof bytes);
+        assert(!api_delta(&pair[0],bytes,sizeof bytes));
+        char result[2048]; ssize_t got=read(pair[1],result,sizeof result-1); assert(got>0); result[got]=0;
+        assert(strstr(result,"event: delta\n") && strstr(result,"YWFhYWFh") && strlen(result)>800);
+        close(pair[0]); close(pair[1]);
+        Cap large={0}; assert(!api_addf(&large,"%0120u",1) && large.len==120); free(large.p);
+        large=(Cap){0}; assert(!api_json_text(&large,"caf\xc3\xa9\n"));
+        assert(!strcmp(large.p,"\"caf\xc3\xa9\\u000a\"")); free(large.p);
+        puts("API CODEC: PASS (exact existing templates, bounded messages, roles, lossless byte deltas)"); return 0;
+    }
     if (argc == 2 && !strcmp(argv[1], "reply-errors")) {
         Cap overflow = {.len = SIZE_MAX - 2};
         assert(cap_add(&overflow, "four", 4) && !overflow.p);
