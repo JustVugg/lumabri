@@ -27,6 +27,7 @@ def main():
     parser.add_argument("--keep-requester", action="store_true", help="also verify the normal post-preparation chat and saved calibration")
     parser.add_argument("--multi-model", action="store_true", help="two distinct checkpoints coexist on the same donors; unload only one")
     parser.add_argument("--api", action="store_true", help="exercise authenticated API users while the second model stays in its TUI")
+    parser.add_argument("--replicas", action="store_true", help="also approve a third allocation and test same-checkpoint routing after selective unload")
     parser.add_argument("--joint", choices=("complete", "reject", "cancel"), help="select and prepare two models together from the TUI")
     parser.add_argument("--sessions", type=int, choices=(1, 2, 4, 8), default=1)
     parser.add_argument("--donor-ram-gb", type=float, default=0.5)
@@ -35,6 +36,8 @@ def main():
     args = parser.parse_args()
     if args.api and not (args.multi_model and args.keep_requester):
         parser.error("--api requires --multi-model and --keep-requester")
+    if args.replicas and not args.api:
+        parser.error("--replicas requires --api")
     if not 30 <= args.prepare_timeout <= 3600:
         parser.error("--prepare-timeout must be between 30 and 3600 seconds")
     runtime = args.runtime_dir.resolve()
@@ -388,6 +391,7 @@ def main():
                   "same donors did not receive second-model offers", 150)
             a.send("\x1b[A\r"); b.send("\x1b[A\r")
             until(lambda: another.has("receives the text"), "second model did not start", 180)
+            second_plan = tmp / "second.plan"; shutil.copyfile(record, second_plan); second_plan.chmod(0o600)
             another.send("hello second model\n")
             until(lambda: hosted_turn_complete(another.text), "second model did not generate", 120)
             second_live = {name: service(name)["donor"] for name in ("a", "b")}
@@ -429,13 +433,49 @@ def main():
             if args.api:
                 from resident_api_test import verify_resident_api
                 verify_resident_api(runtime, env("chatter"), tracker, names[4], tmp)
+            if args.replicas:
+                # Same byte-for-byte checkpoint, but a separate approval and
+                # signed routing root. Never copy a production model here.
+                third_models = tmp / "replica-models"
+                shutil.copytree(configs[0].parent, third_models / "replica-checkpoint")
+                replica = Terminal("chatter", ["models", "--models-dir", str(third_models), "--tracker", tracker,
+                                               "--context", "128", "--max-new", "8", "--sessions", "2"])
+                until(lambda: "3 computers visible" in current_frame(replica), "replica inventory missing")
+                replica.send("\t")
+                until(lambda: "Nothing is selected automatically" in current_frame(replica), "replica selection missing")
+                replica.send("\x1b[B\r")
+                until(lambda: "1 selected" in current_frame(replica), "replica first donor missing")
+                replica.send("\x1b[B\r")
+                until(lambda: "2 selected" in current_frame(replica), "replica second donor missing")
+                replica.send("\t\r")
+                until(lambda: "Plan: resident" in current_frame(replica) and current_frame(replica).count("GB reserved") == 2,
+                      "third allocation did not fit beside two tiny models")
+                replica.send("\r")
+                until(lambda: "Waiting for your approval" in current_frame(a) and "Waiting for your approval" in current_frame(b),
+                      "replica missing independent donor approval", 150)
+                a.send("\x1b[A\r"); b.send("\x1b[A\r")
+                until(lambda: replica.has("receives the text"), "approved replica did not start", args.prepare_timeout)
+                third_plan = tmp / "third.plan"; shutil.copyfile(record, third_plan); third_plan.chmod(0o600)
+                replica.send("/quit\n")
+                until(lambda: replica.p.poll() is not None, "replica TUI did not close")
+                assert all(service(name)["donor"]["model_count"] == 3 for name in ("a", "b"))
+                from managed_routes_test import verify_managed_routes
+                verify_managed_routes(runtime, env("chatter"), tracker, first_plan, third_plan, names[4], tmp)
             # The authenticated release names the first allocation, not the
             # keeper's currently selected second model.
-            release = subprocess.run([str(runtime / "test_chat_ui"), "resident-release", str(first_plan), tracker],
-                                     env=env("chatter"), text=True, capture_output=True, timeout=20)
-            assert release.returncode == 0, release.stderr
+            if not args.replicas:
+                release = subprocess.run([str(runtime / "test_chat_ui"), "resident-release", str(first_plan), tracker],
+                                         env=env("chatter"), text=True, capture_output=True, timeout=20)
+                assert release.returncode == 0, release.stderr
             assert all(service(name)["donor"]["model_count"] == 1 for name in ("a", "b"))
-            assert all(service(name)["donor"]["segment_pid"] == second_live[name]["segment_pid"] for name in ("a", "b")), "unload killed the other model"
+            if args.replicas:
+                # Status describes the currently displayed allocation, which
+                # is now the released third model, not the retained second.
+                # Verify its original processes and run its still-open chat.
+                for name in ("a", "b"):
+                    os.kill(second_live[name]["segment_pid"], 0)
+            else:
+                assert all(service(name)["donor"]["segment_pid"] == second_live[name]["segment_pid"] for name in ("a", "b")), "unload killed the other model"
             # This fixture has a 128-token context. Reset before the third
             # formatted turn; an overflow ERROR is not a successful chat.
             another.text = ""; another.send("/reset\n")
@@ -444,7 +484,9 @@ def main():
             until(lambda: hosted_turn_complete(another.text), "second model stopped after first model unloaded", 120)
             another.send("/quit\n")
             until(lambda: another.p.poll() is not None, "second chat did not close")
-            release = subprocess.run([str(runtime / "test_chat_ui"), "resident-release", str(record), tracker],
+            # A replica preparation updates the "most recent plan" shortcut.
+            # Save the original second plan before opening a third model.
+            release = subprocess.run([str(runtime / "test_chat_ui"), "resident-release", str(second_plan), tracker],
                                      env=env("chatter"), text=True, capture_output=True, timeout=20)
             assert release.returncode == 0, release.stderr
             assert all(not service(name)["donor"]["reserved_total_bytes"] for name in ("a", "b"))
