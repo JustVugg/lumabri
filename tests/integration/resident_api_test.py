@@ -9,9 +9,10 @@ from pathlib import Path
 import socket
 import shutil
 import subprocess
+from home_flow_test import assert_stage_record
 
 
-def verify_resident_api(runtime, env, tracker, first_model_name, artifacts):
+def verify_resident_api(runtime, env, tracker, first_model_name, artifacts, observed_plan):
     def cli(*args):
         result = subprocess.run([str(runtime / "lumabri"), "api", *args], env=env,
                                 text=True, capture_output=True, timeout=20)
@@ -68,6 +69,7 @@ def verify_resident_api(runtime, env, tracker, first_model_name, artifacts):
             from resident_web_test import verify_resident_browser
             verify_resident_browser(port, alice, bob, first["id"], artifacts)
         # More opens than available slots verifies acknowledged retirement.
+        before_samples = assert_stage_record(observed_plan)
         for turn in range(6):
             status, data = chat(alice, first["id"])
             assert status == 200, (status, data)
@@ -81,6 +83,7 @@ def verify_resident_api(runtime, env, tracker, first_model_name, artifacts):
             assert events and events[-1][0] == "done" and all(e[0] in ("delta", "done") for e in events), events
             raw = b"".join(base64.b64decode(e[1]["bytes"], validate=True) for e in events if e[0] == "delta")
             assert raw and "STAT " in events[-1][1]["stats"]
+            assert events[-1][1]["observation_saved"], "valid stable-workload API turn was not observed"
             if turn == 0:
                 conversation = {"model": first["id"], "title": "Real OLMoE API response", "state": "complete",
                                 "messages": [{"role": "user", "content": "hi"},
@@ -94,6 +97,11 @@ def verify_resident_api(runtime, env, tracker, first_model_name, artifacts):
                 assert request(path, bob)[0] == 404
                 status, data = request(path, alice)
                 assert status == 200 and json.loads(data)["conversation"]["messages"][-1]["content"].encode() == raw
+        assert assert_stage_record(observed_plan) >= before_samples + 6, "completed API turns did not update the planner"
+        before_rejected = observed_plan.read_bytes()
+        status, data = chat(alice, first["id"], "overflow " * 200)
+        assert status == 200 and b"event: error" in data and b"event: done" not in data
+        assert observed_plan.read_bytes() == before_rejected, "rejected generation changed the speed record"
         # Interrupted transport releases only the current API conversation.
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
         conn.request("POST", "/api/v1/chat", json.dumps({"model": first["id"], "max_tokens": 8,

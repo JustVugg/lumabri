@@ -64,7 +64,7 @@ static int api_route_plan_matches(const LmbModelRoute *route, unsigned index, co
  * optimizer. Every selected donor and actual host is re-authenticated before
  * text leaves this process; a stale registry never recreates an allocation. */
 static int api_model_open(int access, const char *tracker, const uint8_t id[32], uint32_t max_new,
-                          Engine *engine, int *permit, const char **error) {
+                          Engine *engine, int *permit, LmbResidentPlan *selected, const char **error) {
     *permit=-1;
     LmbModelRoute route; int rc=api_route_read(access,id,tracker,&route);
     if (rc!=LMB_ROUTE_OK && rc!=LMB_ROUTE_MISSING) { *error="model_registry_unavailable"; return 503; }
@@ -95,6 +95,7 @@ static int api_model_open(int access, const char *tracker, const uint8_t id[32],
         status=0; break;
     }
     if (status && *permit>=0) { close(*permit); *permit=-1; }
+    if (!status && selected) *selected=*plan;
     free(plan); return status;
 }
 /* Registration checks the real authenticated numeric contract without

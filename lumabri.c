@@ -82,6 +82,7 @@
 static LmbCalibration *g_recording_calibration;
 static const char *g_calibration_directory;
 static int catalog_workload_capture(const char *tracker, LmbCalKey *key, char *why, size_t cap);
+static int catalog_workload_capture_once(const char *tracker, LmbCalKey *key, char *why, size_t cap);
 static int home_service_foreground(void);
 
 /* ---- terminal ----------------------------------------------------------- */
@@ -4735,6 +4736,26 @@ static int model_boot(const char *tracker, const char *model, const char *shim,
 }
 
 enum { CHAT_REQUEST_FAILED = 3 };
+#include "src/planner/lumabri_turn_observation.h"
+static int catalog_record_turn(LmbCalibration *observation, const LmbCalKey *before,
+    const char *directory, const char *tracker, const Engine *engine, const char *stat,
+    double ttft, uint32_t source) {
+    LmbCalibration record, prior;
+    if (lmb_turn_observation(&record,observation,before,stat,engine->numeric_abi,
+        engine->numeric_class,ttft,(double)time(NULL),source)) return 0;
+    if (!lmb_cal_valid(observation) && !lmb_cal_load(directory,record.key.model_root,&prior))
+        lmb_cal_observation_count(&record,&prior);
+    LmbCalKey after=record.key; char why[200];
+    if (catalog_workload_capture_once(tracker,&after,why,sizeof why) || !lmb_cal_matches(&record.key,&after)) {
+        fprintf(stderr,"[calibration] Workload changed or became unavailable during this turn; no speed saved.\n");
+        return 0;
+    }
+    if (lmb_cal_store(directory,&record)) {
+        fprintf(stderr,"[lumabri] Could not save this measurement; the reply is unaffected.\n"); return 0;
+    }
+    *observation=record; return 1;
+}
+
 static int cmd_chat(int argc, char **argv) {
     g_stopping = 0;
     install_chat_signal_handlers();
@@ -5127,42 +5148,9 @@ static int cmd_chat(int argc, char **argv) {
         if(metric_status==0) {
             if (turn_observed && g_recording_calibration && g_calibration_directory && eng.numeric_abi &&
                 nstat >= 5 && prompt_count && lmb_metrics_decode_rate(&metrics) > 0) {
-                LmbCalibration record = *g_recording_calibration;
-                record.key = turn_key;
-                record.key.adapter_abi = eng.numeric_abi;
-                snprintf(record.key.numeric_class, sizeof record.key.numeric_class, "%s", eng.numeric_class);
-                record.decode_tok_s = lmb_metrics_decode_rate(&metrics);
-                record.ttft_seconds = first > r0 ? first - r0 : metrics.prefill_seconds;
-                record.measured_at = (double)time(NULL);
-                record.source = quick_probe ? LMB_CAL_SOURCE_PROBE : LMB_CAL_SOURCE_SESSION;
-                LmbCalibration prior;
-                const LmbCalibration *previous = g_recording_calibration;
-                if (!lmb_cal_valid(previous) && !lmb_cal_load(g_calibration_directory, record.key.model_root, &prior))
-                    previous = &prior;
-                lmb_cal_observation_count(&record, previous);
-                record.prompt_tokens = prompt_count; record.generated_tokens = metrics.generated_tokens;
-                record.stage_count = 0;
-                record.link_count = 0;
-                if (!lmb_links_parse(stat, record.key.nodes, record.key.layer_begin,
-                                      record.key.layer_end, record.links)) record.link_count = record.key.nodes;
-                LmbStageSample samples[LMB_STAGE_PROFILE_MAX]; uint32_t count = 0;
-                if (!lmb_stage_samples_parse(stat, samples, &count) && count == record.key.nodes) {
-                    int valid = 1;
-                    for (uint32_t i = 0; i < count; i++) {
-                        if (samples[i].begin != record.key.layer_begin[i] || samples[i].end != record.key.layer_end[i] ||
-                            samples[i].calls != metrics.decode_steps) valid = 0;
-                        record.stage_decode_seconds[i] = samples[i].seconds / samples[i].calls;
-                    }
-                    if (valid) record.stage_count = count;
-                }
-                LmbCalKey after = record.key;
-                if (catalog_workload_capture(tracker, &after, observation_why, sizeof observation_why) ||
-                    !lmb_cal_matches(&record.key, &after)) {
-                    fprintf(stderr, "[calibration] Workload changed or became unavailable during this turn; no speed saved.\n");
-                } else if (!lmb_cal_store(g_calibration_directory, &record)) {
-                    *g_recording_calibration = record;
-                    probe_recorded = 1;
-                } else fprintf(stderr, "[lumabri] Could not save this measurement; the reply is unaffected.\n");
+                probe_recorded = catalog_record_turn(g_recording_calibration,&turn_key,g_calibration_directory,
+                    tracker,&eng,stat,first>r0 ? first-r0 : metrics.prefill_seconds,
+                    quick_probe ? LMB_CAL_SOURCE_PROBE : LMB_CAL_SOURCE_SESSION);
             }
             if (g_recording_calibration && !eng.numeric_abi)
                 fprintf(stderr, "[calibration] No speed saved: the host did not supply its numeric ABI.\n");
@@ -5551,7 +5539,7 @@ static int catalog_runtime_revalidate_tracker(const char *tracker, const LmbCalK
 /* Leased observations at turn boundaries, not a promise of exclusive CPU use.
  * An initial empty managed inventory can predate our READY allocation; wait
  * at most two reporting periods before withholding this observation. */
-static int catalog_workload_capture(const char *tracker, LmbCalKey *key, char *why, size_t cap) {
+static int catalog_workload_capture_mode(const char *tracker, LmbCalKey *key, char *why, size_t cap, int wait_ready) {
     if (!tracker || !*tracker || !key->nodes || key->nodes > LMB_CAL_NODES_MAX) {
         snprintf(why, cap, "incomplete workload provenance"); return -1;
     }
@@ -5578,11 +5566,17 @@ static int catalog_workload_capture(const char *tracker, LmbCalKey *key, char *w
             }
         }
         if (!pending) return 0;
-        if (g_stopping || nowd() >= deadline) {
+        if (!wait_ready || g_stopping || nowd() >= deadline) {
             snprintf(why, cap, "the ready allocation is not yet in the managed workload inventory"); return -1;
         }
         (void)poll(NULL, 0, 200);
     }
+}
+static int catalog_workload_capture(const char *tracker, LmbCalKey *key, char *why, size_t cap) {
+    return catalog_workload_capture_mode(tracker,key,why,cap,1);
+}
+static int catalog_workload_capture_once(const char *tracker, LmbCalKey *key, char *why, size_t cap) {
+    return catalog_workload_capture_mode(tracker,key,why,cap,0);
 }
 
 static void catalog_advice_refresh(LmbTuiState *st) {

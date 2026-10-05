@@ -9,6 +9,7 @@
 #include "lumabri_calibration_store.h"
 #include "lumabri_checkpoint_identity.h"
 #include "src/planner/lumabri_stage_placement.h"
+#include "src/planner/lumabri_turn_observation.h"
 
 static int bad;
 #define CHECK(c, ...) do { if (!(c)) { fprintf(stderr, __VA_ARGS__); \
@@ -37,6 +38,27 @@ static LmbCalKey base(void) {
         k.from_disk[i] = 0;
     }
     return k;
+}
+
+static void turn_tests(void) {
+    LmbCalibration seed={.key=base()}, record;
+    const char *stat="STAT 9 4 0 0 20 0 STAGES1 2 0 22 8 0.8 22 44 8 1.2 PERF1 9 8 15 2 17.2";
+    CHECK(!lmb_turn_observation(&record,&seed,&seed.key,stat,1,"cpu-test",15.5,1000,LMB_CAL_SOURCE_SESSION), "valid completed turn rejected");
+    CHECK(record.generated_tokens==9 && record.prompt_tokens==20 && record.decode_tok_s==4 &&
+          record.ttft_seconds==15.5 && record.stage_count==2 && record.samples==1, "turn fields diverged");
+    seed=record;
+    CHECK(!lmb_turn_observation(&record,&seed,&seed.key,stat,1,"cpu-test",16,1001,LMB_CAL_SOURCE_SESSION) &&
+          record.samples==2, "same-condition completed turn not counted");
+    LmbCalKey changed=seed.key; changed.context/=2;
+    CHECK(!lmb_turn_observation(&record,&seed,&changed,stat,1,"cpu-test",16,1001,LMB_CAL_SOURCE_SESSION) &&
+          record.samples==1, "different plan inherited previous sample count");
+    const char *invalid[]={"STAT 9 4 0 0 20", "STAT 8 4 0 0 20 PERF1 9 8 15 2 17.2",
+        "STAT 9 4 0 0 0 PERF1 9 8 15 2 17.2", "STAT 9 4 0 0 99999999999999999999999 PERF1 9 8 15 2 17.2",
+        "STAT 1 4 0 0 20 PERF1 1 0 15 0 15", "STAT 9 nan 0 0 20 PERF1 9 8 15 2 17.2"};
+    for (size_t i=0;i<sizeof invalid/sizeof *invalid;i++)
+        CHECK(lmb_turn_observation(&record,&seed,&seed.key,invalid[i],1,"cpu-test",15,1001,LMB_CAL_SOURCE_SESSION), "invalid observation accepted: %zu",i);
+    CHECK(lmb_turn_observation(&record,&seed,&seed.key,stat,0,"cpu-test",15,1001,LMB_CAL_SOURCE_SESSION), "missing ABI accepted");
+    CHECK(lmb_turn_observation(&record,&seed,&seed.key,stat,1,"cpu-test",NAN,1001,LMB_CAL_SOURCE_SESSION), "invalid first-byte timing accepted");
 }
 
 static void identity_tests(void) {
@@ -448,6 +470,7 @@ int main(void) {
     CHECK(!lmb_cal_valid(&have), "invalid measurement date accepted");
 
     record_tests();
+    turn_tests();
     identity_tests();
 
     printf("CALIBRATION KEY: %s\n", bad ? "FAIL" : "PASS");

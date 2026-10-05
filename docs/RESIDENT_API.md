@@ -173,7 +173,7 @@ event: delta
 data: {"bytes":"SGVsbG8="}
 
 event: done
-data: {"stats":"STAT ..."}
+data: {"stats":"STAT ...","observation_saved":true}
 ```
 
 `bytes` is base64, preserving exact engine output even when a DATA frame splits
@@ -183,6 +183,23 @@ An engine ERROR produces `event: error` with a message, never `done`. A closed
 connection without `done` is an incomplete response, not a completed answer.
 Disconnecting/aborting the HTTP request closes only its hosted conversation.
 There is no automatic generation retry that could duplicate visible tokens.
+
+Completed API/browser turns use the same observation builder as TUI turns.
+The planner can reuse their decode timings, actual prompt/output counts,
+per-range timings, links and preparation evidence only under the exact
+checkpoint/build/runtime/context/session/workload key. API time to first text
+includes gateway admission and host setup; decode speed comes from the engine's
+versioned timing, never from network chunk size or byte counts. This is an
+observation of that workload, not a concurrency or SLO guarantee.
+
+`observation_saved` is false when provenance or timings are missing, the
+runtime/workload changes during the turn, the output cannot measure decode,
+or the private record cannot be saved. This does not turn a completed response
+into an error. ERROR, cancellation and truncated streams never update speed.
+API observation checks use the currently leased inventory without waiting for
+a future heartbeat; stale/missing information remains unmeasured. No extra
+calibration prompt is generated. The store retains the latest observation per
+checkpoint, not an aggregate across different replica plans.
 
 Before streaming, errors use JSON `{"error":"CODE"}` and HTTP status:
 
