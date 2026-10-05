@@ -12,6 +12,7 @@ import socket
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import termios
 import time
@@ -410,9 +411,8 @@ def main():
             assert release.returncode == 0, release.stderr
             assert all(service(name)["donor"]["model_count"] == 1 for name in ("a", "b"))
             assert all(service(name)["donor"]["segment_pid"] == second_live[name]["segment_pid"] for name in ("a", "b")), "unload killed the other model"
-            # This fixture has a 128-token context. Reset the second chat
-            # before a third formatted turn; an ERROR about context overflow
-            # is not evidence that releasing the first model preserved it.
+            # This fixture has a 128-token context. Reset before the third
+            # formatted turn; an overflow ERROR is not a successful chat.
             another.text = ""; another.send("/reset\n")
             until(lambda: another.has("new conversation"), "second chat did not reset")
             another.text = ""; another.send("still here?\n")
@@ -440,6 +440,9 @@ def main():
         assert not list((tmp / "chatter").rglob("*.safetensors")), "client downloaded a checkpoint"
         print("HOUSEHOLD SERVICE FLOW: PASS (approval survives reconnect, detached preparation, real model after TUI/manager exit and crash, exact live library, authenticated unload)", flush=True)
     finally:
+        if sys.exc_info()[0] is not None:
+            for log in sorted(tmp.glob("*/.lumabri/home/engines.log")):
+                print(f"Engine diagnostics: {log}\n{log.read_text(errors='replace')[-12000:]}", flush=True)
         for t in terminals:
             if t.p.poll() is None:
                 t.p.terminate()

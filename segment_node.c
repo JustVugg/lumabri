@@ -673,6 +673,21 @@ static int handle_open(Node *node, int fd, const LmbMsg *msg) {
         }
         pthread_mutex_unlock(&node->sessions_lock);
     }
+    if (status == LMB_SEG_STATUS_QUOTA) {
+        LmbProcessMemory memory = {0}; (void)lmb_process_memory_probe(&memory, 1);
+        pthread_mutex_lock(&node->registration.lock);
+        uint32_t active = node->registration.advert.active_sessions;
+        pthread_mutex_unlock(&node->registration.lock);
+        fprintf(stderr, "[segment-node %s %u:%u] OPEN quota: sessions=%u/%u governor=%s "
+                        "available=%llu reserve=%llu charged=%llu budget=%llu residency_fault=%d\n",
+            node->advert.peer_name, node->advert.layer_begin, node->advert.layer_end,
+            active, node->advert.max_sessions,
+            lmb_governor_reason_name(lmb_governor_reason(&node->governor)),
+            (unsigned long long)available_memory_bytes(), (unsigned long long)node->ram_reserve_bytes,
+            (unsigned long long)lmb_process_memory_charge(&memory),
+            (unsigned long long)node->process_memory_limit_bytes,
+            atomic_load(&lmb_resident_process_guard.fault));
+    }
     LmbSegReply reply = make_reply(&open.session_id, &open.request_id,
                                    &open.owner, status);
     if (status == LMB_SEG_STATUS_OK || status == LMB_SEG_STATUS_DUPLICATE)
