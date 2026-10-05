@@ -310,6 +310,10 @@ def main():
             assert benchmark.returncode == 0, benchmark.stderr
             print(benchmark.stdout, flush=True)
         if args.multi_model:
+            # Engine TCP idle timeout is 15 seconds in this fixture. Keep
+            # the remote conversation slots alive but let their sockets
+            # expire before reusing them, reproducing the native quota leak.
+            time.sleep(16)
             records = list((tmp / "chatter").rglob("*.cal"))
             assert len(records) == 1, "first resident model has no observed speed"
             first_plan = tmp / "first.plan"; shutil.copyfile(record, first_plan); first_plan.chmod(0o600)

@@ -871,8 +871,8 @@ static int remote_restore(RemoteSegment *remote, const RemoteCheckpoint *source)
     return 0;
 }
 
-static void remote_close(RemoteSegment *remote) {
-    if (!remote->opened) return;
+static int remote_close(RemoteSegment *remote) {
+    if (!remote->opened) return 0;
     LmbSegControl control;
     memset(&control, 0, sizeof control);
     control.session_id = remote->open.session_id;
@@ -881,32 +881,75 @@ static void remote_close(RemoteSegment *remote) {
     control.sequence = remote->sequence;
     uint8_t *body = NULL;
     uint32_t body_len = 0;
+    int closed = 0;
+    /* A retained conversation can outlive its idle TCP connection. CLOSE
+     * used to send once on that dead descriptor, ignore BUSY/transport
+     * failure, then forget the session. Repeated resets filled the remote
+     * quota for its entire TTL. Retire the exact fenced session on a fresh
+     * connection, with bounded idempotent retry and checked acknowledgement. */
+    uint64_t prior_deadline = lmb_read_deadline_ms;
+    uint64_t deadline = lmb_io_monotonic_ms() + 1500;
+    if (prior_deadline && prior_deadline < deadline) deadline = prior_deadline;
     if (!lmb_seg_control_encode(&control, &body, &body_len)) {
-        LmbMsg reply = {0};
-        if (!remote_request(remote, LMB_SEG_CLOSE, body, body_len,
-                            NULL, 0, &reply))
-            lmb_msg_free(&reply);
+        for (unsigned attempt = 0; attempt < 4 && lmb_io_monotonic_ms() < deadline; attempt++) {
+            lmb_read_deadline_ms = deadline;
+            if (remote->fd >= 0) lmb_close(remote->fd);
+            remote->fd = -1;
+            if (remote->route.transport & LMB_SEG_TRANSPORT_DIRECT) {
+                remote->fd = lmb_connect_ms_io(remote->route.advert.addr, 250, 250);
+                remote->direct_failed = remote->fd < 0;
+            }
+            lmb_read_deadline_ms = deadline;
+            LmbMsg message = {0}; LmbSegReply reply;
+            int bad = remote_request(remote, LMB_SEG_CLOSE, body, body_len, NULL, 0, &message);
+            int matched = !bad && message.op == LMB_SEG_CLOSE_R && !message.pay_len &&
+                !lmb_seg_reply_decode(message.body, message.body_len, &reply) &&
+                lmb_seg_id_equal(&reply.session_id, &control.session_id) &&
+                lmb_seg_id_equal(&reply.request_id, &control.request_id) &&
+                reply.route_generation == control.owner.route_generation;
+            closed = matched && (reply.status == LMB_SEG_STATUS_OK || reply.status == LMB_SEG_STATUS_NOT_FOUND);
+            int retry = bad || (matched && reply.status == LMB_SEG_STATUS_BUSY);
+            lmb_msg_free(&message);
+            if (closed || !retry) break;
+            (void)poll(NULL, 0, 20);
+        }
     }
+    lmb_read_deadline_ms = prior_deadline;
     free(body);
     if (remote->fd >= 0) lmb_close(remote->fd);
     remote->fd = -1;
-    remote->opened = 0;
+    if (closed) remote->opened = 0;
+    else fprintf(stderr, "[segment-session] CLOSE not confirmed for %s [%u:%u]; session is not forgotten\n",
+                 remote->route.advert.peer_name, remote->route.advert.layer_begin, remote->route.advert.layer_end);
+    return closed ? 0 : -1;
 }
 
-static void remote_dispose(RemoteSegment *remote) {
-    remote_close(remote);
+static int remote_dispose(RemoteSegment *remote) {
+    int rc = remote_close(remote);
     free(remote->snapshot);
     remote->snapshot = NULL;
     remote->snapshot_bytes = 0;
     free(remote->feedback);remote->feedback=NULL;remote->feedback_bytes=0;
+    return rc;
 }
 
-static void conversation_reset(SegmentConversation *conversation) {
-    if (!conversation) return;
+static int conversation_reset(SegmentConversation *conversation) {
+    if (!conversation) return 0;
+    int failed = 0;
+    uint64_t prior_deadline = lmb_read_deadline_ms, deadline = lmb_io_monotonic_ms() + 8000;
+    lmb_read_deadline_ms = prior_deadline && prior_deadline < deadline ? prior_deadline : deadline;
     for (size_t i = 0; i < conversation->chain_count; i++)
-        remote_dispose(&conversation->chain[i]);
+        if (remote_dispose(&conversation->chain[i])) failed = 1;
+    lmb_read_deadline_ms = prior_deadline;
     free(conversation->committed_tokens);
-    memset(conversation, 0, sizeof *conversation);
+    if (!failed) memset(conversation, 0, sizeof *conversation);
+    else {
+        /* Preserve failed CLOSE identities for a later reset. Never open
+         * replacement sessions while pretending these reservations vanished. */
+        conversation->active = 0; conversation->committed_tokens = NULL;
+        conversation->committed_count = conversation->checkpoint_count = 0;
+    }
+    return failed ? -1 : 0;
 }
 
 static int conversation_route_equal(const SegmentConversation *conversation,
@@ -1466,7 +1509,10 @@ static int segment_generate(ColiEdgeEngine *edge,
              !memcmp(conversation->committed_tokens, prompt_tokens,
                      conversation->committed_count * sizeof *prompt_tokens));
         if (!same_prefix) {
-            conversation_reset(conversation);
+            if (conversation_reset(conversation)) {
+                snprintf(error, error_size, "Previous Segment session could not be released; retry after the donor is reachable");
+                goto cleanup;
+            }
             memcpy(conversation->chain, chain,
                    chain_count * sizeof *conversation->chain);
             conversation->chain_count = chain_count;
@@ -1947,15 +1993,17 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
                           sscanf(header, "STOP %u %c", &cancelled_id, &reset_extra) == 1)) continue;
         if (sscanf(header, "RESET_SLOT %64s %u %c", reset_id, &reset_slot, &reset_extra) == 2) {
             if (reset_slot >= slots) { result_code = 1; break; }
-            conversation_reset(&conversations[reset_slot]);
+            if (conversation_reset(&conversations[reset_slot])) { result_code = 1; break; }
             lmb_sampler_init(&samplers[reset_slot], seed);
             printf("RESET_DONE %s\n", reset_id); fflush(stdout);
             continue;
         }
         if (sscanf(header, "RESET %64s %c", reset_id, &reset_extra) == 1) {
             for (uint32_t i = 0; i < slots; i++) {
-                conversation_reset(&conversations[i]); lmb_sampler_init(&samplers[i], seed);
+                if (conversation_reset(&conversations[i])) result_code = 1;
+                lmb_sampler_init(&samplers[i], seed);
             }
+            if (result_code) break;
             printf("RESET_DONE %s\n", reset_id);
             fflush(stdout);
             continue;
