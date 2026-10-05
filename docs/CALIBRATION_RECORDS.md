@@ -19,6 +19,16 @@ numeric/runtime metadata cannot create a speed record.
 Checkpoint content, adapter/numeric ABI, executable binaries, donor identity,
 hardware, addresses, threads, ordered layer ranges, Edge placement, execution
 mode, context limit and session count are bound to the observation. Changing
+the resident allocation set, its total reservation or the node compute policy
+also invalidates it. Live active/queued counts are not stable identities.
+Signed leased inventory is sampled before and after a turn; observed changes
+or unavailable inventory withhold that turn's speed. These boundary samples
+are not continuous load monitoring: a short change between reports or other
+OS processes can still affect a turn. This is an observation, not a concurrency
+or latency guarantee. A managed turn waits, within a bound, for a known workload
+whose reservation covers its approved slice: an older pending-offer report is
+not a ready execution observation. Unknown workload is permitted only in the
+explicit foreground diagnostic mode. Changing
 the selected computers immediately invalidates the displayed plan while a
 background refresh runs. A mismatching record says **stale** and exposes no
 numerical speed. A missing or unreadable record says **not calibrated**.
@@ -68,7 +78,10 @@ Changing any matched condition makes a previous speed stale. The producer
 verifies where each field came from: structural validation alone would not
 make invented build IDs or a partial key authoritative.
 
-New `LMB-CAL4` records store the latest observation's origin (`short_probe` or
+New `LMB-CAL5` records also bind stable managed-workload facts for every node.
+Unknown facts in older/foreground diagnostic inventory remain explicitly unknown;
+they never match known managed facts. `LMB-CAL4` records remain readable with
+unknown workload provenance. Records store the latest observation's origin (`short_probe` or
 `real_session`) as well as optional complete per-range decode RUN averages.
 Completed turns update the last value and observation count under the exact
 same key; a changed key starts a new count. Counts are not a statistical error
@@ -114,18 +127,24 @@ has a 250 ms I/O timeout. Failure or an older peer leaves the metric unknown and
 reconnects before inference; it does not make chat depend on telemetry support.
 
 `LINKS1` observations reach the typed snapshot through the real host stream and
-`LMB-CAL4` records. Links belong to the exact Edge/range plan, not a tracker ping.
+`LMB-CAL5` records. Links belong to the exact Edge/range plan, not a tracker ping.
 They expire after five minutes or a relevant key change. Changed/failed-over
 routes cannot publish a partial old chain. The TUI and per-range JSON expose
 only current observations. A new session remeasures them.
 
 Preparation duration measures the requester's monotonic COMMIT-to-entire-chain-READY
 interval: transfer, loading and host startup, excluding source indexing and owner
-approval. It is saved in the private version-4 resident-plan record even when the
+approval. It is saved in the private resident-plan record even when the
 TUI detaches, and carried into subsequent calibrated turns. It describes that
 preparation, not a prediction for a different cache state. Reopening a resident
-chat updates existing matching records after validating identities and current
-runtimes; old plans without content provenance do not fabricate observations.
+chat updates observations after validating identities and current runtimes.
+Version-6 resident plans retain preparation-time adapter, requester binary,
+node hardware/runtime and approved thread counts. Thus the first chat after
+detached or joint preparation can create a record without an earlier calibration.
+The live Edge supplies numeric ABI/class; saved provenance alone is not a speed.
+Older plans may update an existing matching record but do not invent missing
+preparation provenance. Saving a plan never stores conversation text or permits
+recreating an allocation without approval.
 
 Live energy sensors remain unknown. A tracker RTT, disk benchmark or detected
 GPU cannot replace execution evidence. Household GPU execution stays

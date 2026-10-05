@@ -105,7 +105,8 @@ static void record_tests(void) {
     CHECK(lmb_cal_decode(encoded.p, encoded.len, &got) && !got.samples, "corrupt record accepted");
     encoded.p[12] ^= 1;
     /* CAL1 remains readable, but never fabricates per-stage observations. */
-    size_t legacy_len = encoded.len - 28; /* empty stages, source, CAL4 preparation/link fields */
+    size_t workload_bytes = 4 + r.key.nodes*52;
+    size_t legacy_len = encoded.len - 28 - workload_bytes; /* stages, source, preparation/links, workloads */
     uint8_t *legacy = malloc(legacy_len);
     CHECK(legacy != NULL, "cannot allocate legacy fixture");
     if (legacy) {
@@ -126,7 +127,7 @@ static void record_tests(void) {
     LmbBuf v2 = {0};
     CHECK(!lmb_cal_encode(&staged, &v2), "cannot prepare CAL2 fixture");
     if (v2.p) {
-        v2.len -= 24; memcpy(v2.p, "LMB-CAL2", 8);
+        v2.len -= 24 + workload_bytes; memcpy(v2.p, "LMB-CAL2", 8);
         LmbSha sha; lmb_sha_init(&sha); lmb_sha_update(&sha, v2.p, v2.len - 32);
         lmb_sha_final(&sha, v2.p + v2.len - 32);
         CHECK(!lmb_cal_decode(v2.p, v2.len, &got) && got.stage_count == 2 && !got.source,
@@ -136,13 +137,50 @@ static void record_tests(void) {
     LmbBuf v3 = {0};
     CHECK(!lmb_cal_encode(&staged, &v3), "cannot prepare CAL3 fixture");
     if (v3.p) {
-        v3.len -= 20; memcpy(v3.p, "LMB-CAL3", 8);
+        v3.len -= 20 + workload_bytes; memcpy(v3.p, "LMB-CAL3", 8);
         LmbSha sha; lmb_sha_init(&sha); lmb_sha_update(&sha, v3.p, v3.len - 32);
         lmb_sha_final(&sha, v3.p + v3.len - 32);
         CHECK(!lmb_cal_decode(v3.p, v3.len, &got) && got.source == r.source &&
               !got.link_count && !got.preparation_seconds, "CAL3 invented link/preparation evidence");
         free(v3.p);
     }
+    LmbBuf v4 = {0};
+    CHECK(!lmb_cal_encode(&staged, &v4), "cannot prepare CAL4 fixture");
+    if (v4.p) {
+        v4.len -= workload_bytes; memcpy(v4.p, "LMB-CAL4", 8);
+        LmbSha sha; lmb_sha_init(&sha); lmb_sha_update(&sha, v4.p, v4.len - 32);
+        lmb_sha_final(&sha, v4.p + v4.len - 32);
+        CHECK(!lmb_cal_decode(v4.p, v4.len, &got) && got.source == r.source &&
+              !got.key.workload[0].known, "CAL4 invented resident workload evidence");
+        free(v4.p);
+    }
+    LmbCalibration busy = staged; LmbBuf busy_bytes = {0};
+    busy.key.workload[0] = (LmbWorkloadFacts){.known = 1, .allocations = 2,
+        .compute_policy = LMB_COMPUTE_LOCAL_FIFO, .reserved_bytes = 123456, .allocation_set = {42}};
+    CHECK(!lmb_cal_encode(&busy, &busy_bytes) &&
+        !lmb_cal_decode(busy_bytes.p, busy_bytes.len, &got) && lmb_cal_matches(&busy.key, &got.key),
+        "resident workload lost in calibration round trip");
+    CHECK(!lmb_cal_matches(&busy.key, &staged.key), "unknown workload reused a co-resident speed");
+    if (busy_bytes.p) {
+        busy_bytes.p[busy_bytes.len - 36] ^= 1;
+        LmbSha sha; lmb_sha_init(&sha); lmb_sha_update(&sha, busy_bytes.p, busy_bytes.len - 32);
+        lmb_sha_final(&sha, busy_bytes.p + busy_bytes.len - 32);
+        CHECK(lmb_cal_decode(busy_bytes.p, busy_bytes.len, &got), "wrong workload node count accepted");
+        free(busy_bytes.p);
+    }
+    LmbCalKey same = busy.key;
+    same.workload[0].reserved_bytes++;
+    CHECK(!lmb_cal_matches(&busy.key, &same), "changed resident budget retained speed");
+    same = busy.key; same.workload[0].allocation_set[1] = 1;
+    CHECK(!lmb_cal_matches(&busy.key, &same), "replaced allocation retained speed");
+    same = busy.key; same.workload[0].allocations--;
+    CHECK(!lmb_cal_matches(&busy.key, &same), "released model retained speed");
+    same = busy.key; same.workload[0].compute_policy = 0;
+    CHECK(!lmb_cal_matches(&busy.key, &same), "changed compute policy retained speed");
+    same = busy.key; same.workload[0].active = 1;
+    CHECK(!lmb_cal_key_valid(&same), "live queue counter entered stable calibration identity");
+    same = busy.key; same.workload[0].known = 0;
+    CHECK(!lmb_cal_key_valid(&same), "unknown workload carried trusted fields");
     LmbCalibration telemetry = staged; LmbBuf evidence = {0};
     telemetry.preparation_seconds = 1.5; telemetry.prepared_at = telemetry.measured_at;
     telemetry.link_count = 2;

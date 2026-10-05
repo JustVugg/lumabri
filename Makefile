@@ -39,6 +39,7 @@ test_weight_cache: tests/c/test_weight_cache.c src/runtime/lumabri_weight_cache.
 household: tracker maintainer $(SHIM_LIB) lumabri segment_node segment_chat
 
 lumabri segment_node segment_chat test_calibration test_chat_ui: src/planner/lumabri_link_evidence.h
+lumabri test_calibration test_chat_ui test_portfolio: src/planner/lumabri_workload_facts.h
 segment_node segment_chat test_backend_routes test_home_expert: engine_patches/segment_owned.h src/runtime/lumabri_v41_contract.h
 segment_chat test_backend_routes: src/runtime/lumabri_serve_control.h
 lumabri segment_chat test_backend_routes test_chat_ui test_home test_home_monitor test_memory_budget test_cluster: src/runtime/lumabri_session_limits.h
@@ -632,6 +633,7 @@ test-sanitize:
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_scheduler.c -o build/sanitize/test_scheduler
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_planner_io.c -o build/sanitize/test_planner_io
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_portfolio.c -o build/sanitize/test_portfolio -lm
+	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_calibration.c -o build/sanitize/test_calibration -lm
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_hybrid_parallel.c -o build/sanitize/test_hybrid_parallel -lm
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_segment_v2
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_segment_discovery
@@ -645,6 +647,7 @@ test-sanitize:
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_scheduler
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_planner_io
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_portfolio
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_calibration
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_hybrid_parallel
 
 test-thread-sanitize:
@@ -740,6 +743,12 @@ test_home_expert: tests/c/test_home_expert.c segment_node.c $(SEGMENT_COMMON) $(
 test_backend_routes: tests/c/test_backend_routes.c segment_chat.c lumabri_metrics.h lumabri_stage_metrics.h \
 		lumabri_sampling.c lumabri_sampling.h $(SEGMENT_COMMON) $(COLIBRI_SEGMENT_LIB)
 	$(CC) $(CPPFLAGS) $(SEGMENT_CFLAGS) -pthread tests/c/test_backend_routes.c lumabri_segment.c \
+		lumabri_segment_discovery.c lumabri_sampling.c \
+		$(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
+
+test_segment_close: tests/c/test_segment_close.c segment_chat.c lumabri_metrics.h lumabri_stage_metrics.h \
+		lumabri_sampling.c lumabri_sampling.h $(SEGMENT_COMMON) $(COLIBRI_SEGMENT_LIB)
+	$(CC) $(CPPFLAGS) $(SEGMENT_CFLAGS) -pthread tests/c/test_segment_close.c lumabri_segment.c \
 		lumabri_segment_discovery.c lumabri_sampling.c \
 		$(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
 
@@ -1001,7 +1010,7 @@ clean:
 	      test_compute_lease test_content_filter test_scheduler test_run_gate \
 	      test_compute_broker test_portfolio \
 	      test_segment_v2_tsan tracker_tsan \
-	      segment_node segment_chat test_backend_routes test_tcp_latency segment_node_asan segment_chat_asan \
+	      segment_node segment_chat test_backend_routes test_segment_close test_tcp_latency segment_node_asan segment_chat_asan \
 	      segment_node_tsan segment_chat_tsan \
 	      olmoe_p2p colibri_p2p inkling_p2p kimi_k3_p2p deepseek_p2p qwen36_p2p \
 	      expert_node expert_node_glm expert_node_inkling expert_node_kimi \
