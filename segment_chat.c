@@ -50,6 +50,7 @@ typedef struct {
     int direct_failed;
     int opened;
     int failure_transport;
+    int open_stale; /* authenticated, matching OPEN rejection; never a RUN retry */
     char transport_error[256];
     char operation_error[320];
     LmbSegOpen open;
@@ -569,6 +570,7 @@ static int remote_open(RemoteSegment *remote, const LmbSegId *session_id,
                        const uint8_t model_root[32],
                        const uint8_t tokenizer_root[32], uint32_t context,
                        uint32_t max_rows, char *why, size_t why_size) {
+    remote->open_stale = 0;
     const LmbSegAdvert *advert = &remote->route.advert;
     LmbSegOpen *open = &remote->open;
     memset(open, 0, sizeof *open);
@@ -617,6 +619,9 @@ static int remote_open(RemoteSegment *remote, const LmbSegId *session_id,
                  "message (op %u)", advert->peer_name, msg.op);
     } else if (reply.status != LMB_SEG_STATUS_OK &&
                reply.status != LMB_SEG_STATUS_DUPLICATE) {
+        remote->open_stale = reply.status == LMB_SEG_STATUS_STALE_OWNER && !msg.pay_len &&
+            lmb_seg_id_equal(&reply.session_id, session_id) &&
+            lmb_seg_id_equal(&reply.request_id, &open->request_id);
         snprintf(why, why_size, "%s rejected OPEN [%u:%u]: %s",
                  advert->peer_name, advert->layer_begin, advert->layer_end,
                  segment_status_name(reply.status));
@@ -640,6 +645,48 @@ static int remote_open(RemoteSegment *remote, const LmbSegId *session_id,
     if (remote->fd >= 0) lmb_close(remote->fd);
     remote->fd = -1;
     return -1;
+}
+
+/* Discovery can lag an unrelated registration between READY and the first
+ * OPEN. Refresh only the generation of the SAME lease/endpoint/contract.
+ * No new donor, ownership epoch, RUN or prompt is retried by this path. */
+static int open_route_refreshable(const LmbSegRouteEntry *old, const LmbSegRouteEntry *next) {
+    const LmbSegAdvert *a=&old->advert, *b=&next->advert;
+    return lmb_seg_id_equal(&old->owner.lease_id,&next->owner.lease_id) &&
+        old->owner.fencing_epoch==next->owner.fencing_epoch &&
+        old->owner.route_generation<=next->owner.route_generation &&
+        old->transport==next->transport && !strcmp(a->peer_name,b->peer_name) &&
+        !strcmp(a->addr,b->addr) && !strcmp(a->model,b->model) &&
+        !memcmp(a->model_root,b->model_root,32) && !memcmp(a->tokenizer_root,b->tokenizer_root,32) &&
+        a->layer_begin==b->layer_begin && a->layer_end==b->layer_end &&
+        a->max_context==b->max_context && a->max_rows==b->max_rows &&
+        a->state_dtype==b->state_dtype && a->state_width==b->state_width &&
+        a->max_sessions==b->max_sessions && a->flags==b->flags && a->capabilities==b->capabilities &&
+        !strcmp(a->engine_id,b->engine_id) && !strcmp(a->state_schema,b->state_schema) &&
+        !strcmp(a->numeric_class,b->numeric_class);
+}
+typedef int (*OpenRefreshFn)(void *, LmbSegRouteSnapshot *);
+static int open_refresh_discovery(void *opaque, LmbSegRouteSnapshot *snapshot) {
+    return lmb_seg_discovery_refresh_now(opaque,snapshot);
+}
+static int remote_open_current(RemoteSegment *remote, const LmbSegId *session_id,
+    const uint8_t model_root[32], const uint8_t tokenizer_root[32], uint32_t context,
+    uint32_t max_rows, OpenRefreshFn refresh, void *opaque, char *why, size_t why_size) {
+    for (unsigned attempt=0;;attempt++) {
+        if (!remote_open(remote,session_id,model_root,tokenizer_root,context,max_rows,why,why_size)) return 0;
+        if (!remote->open_stale || !refresh || !opaque || attempt==2) return -1;
+        LmbSegRouteSnapshot *snapshot=calloc(1,sizeof *snapshot);
+        if (!snapshot) return -1;
+        int found=0;
+        if (refresh(opaque,snapshot)>0 && snapshot->complete && snapshot->count<=LMB_SEG_ROUTE_MAX) {
+            for (uint32_t i=0;i<snapshot->count;i++) if (open_route_refreshable(&remote->route,&snapshot->entries[i])) {
+                remote->route=snapshot->entries[i]; found=1; break;
+            }
+        }
+        free(snapshot);
+        if (!found) return -1;
+        fprintf(stderr,"[segment-session] OPEN generation refreshed for the same approved lease (attempt %u/2)\n",attempt+1);
+    }
 }
 
 static int remote_run(RemoteSegment *remote, const int32_t *tokens,
@@ -1534,8 +1581,8 @@ static int segment_generate(ColiEdgeEngine *edge,
         lmb_random(session_id.bytes, sizeof session_id.bytes);
         for (; opened < active_count; opened++) {
             active_chain[opened].fd = -1;
-            if (remote_open(&active_chain[opened], &session_id, model_root,
-                            tokenizer_root, context, max_rows,
+            if (remote_open_current(&active_chain[opened], &session_id, model_root,
+                            tokenizer_root, context, max_rows, open_refresh_discovery, discovery,
                             error, error_size))
                 goto cleanup;
         }
