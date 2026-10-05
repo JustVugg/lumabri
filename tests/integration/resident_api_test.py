@@ -4,9 +4,10 @@ The second model keeps its TUI conversation while API users use the first.
 import base64
 import http.client
 import json
+from pathlib import Path
 import socket
+import shutil
 import subprocess
-import time
 
 
 def verify_resident_api(runtime, env, tracker, first_model_name, artifacts):
@@ -26,9 +27,12 @@ def verify_resident_api(runtime, env, tracker, first_model_name, artifacts):
     cli("grant", "bob", second["id"], "--tracker", tracker)
     with socket.socket() as reserving:
         reserving.bind(("127.0.0.1", 0)); port = reserving.getsockname()[1]
-    log = open(artifacts / "resident-api.log", "wb")
-    server = subprocess.Popen([str(runtime / "lumabri"), "api", "serve", "--tracker", tracker,
-                               "--port", str(port)], env=env, stdout=log, stderr=log)
+    def service(action):
+        result = subprocess.run([str(runtime / "lumabri"), "service", action,
+                                 *(["--json"] if action == "status" else [])],
+                                env=env, text=True, capture_output=True, timeout=20)
+        assert result.returncode == 0, result.stderr
+        return {s["role"]: s for s in json.loads(result.stdout)["services"]} if action == "status" else None
 
     def request(path, token, body=None, extra=None):
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
@@ -45,14 +49,12 @@ def verify_resident_api(runtime, env, tracker, first_model_name, artifacts):
                        "messages": [{"role": "user", "content": prompt}]}))
 
     try:
-        deadline = time.monotonic() + 10
-        while True:
-            try:
-                with socket.create_connection(("127.0.0.1", port), timeout=.3):
-                    break
-            except OSError:
-                assert server.poll() is None and time.monotonic() < deadline
-                time.sleep(.1)
+        cli("start", "--tracker", tracker, "--port", str(port))
+        before = service("status")["api"]
+        assert before["live"] and before["phase"] == 2
+        service("restart")
+        after = service("status")["api"]
+        assert after["instance"] == before["instance"] and after["pid"] == before["pid"]
         assert request("/api/v1/models", "wrong")[0] == 401
         for token, own in ((alice, first), (bob, second)):
             status, data = request("/api/v1/models", token)
@@ -87,11 +89,10 @@ def verify_resident_api(runtime, env, tracker, first_model_name, artifacts):
         cli("revoke", "alice")
         assert request("/api/v1/models", alice)[0] == 401
         assert request("/api/v1/models", bob)[0] == 200
-        print("RESIDENT API: PASS (real OLMoE, approved allocations, distinct users, TUI coexistence, streaming, repeated close, cancellation, revoke)", flush=True)
+        print("RESIDENT API: PASS (real OLMoE, approved allocations, distinct users, TUI coexistence, manager restart, streaming, repeated close, cancellation, revoke)", flush=True)
     finally:
-        server.terminate()
-        try:
-            server.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            server.kill(); server.wait()
-        log.close()
+        cli("stop")
+        assert not service("status")["api"]["live"]
+        source = Path(env["HOME"]) / ".lumabri/service/api.log"
+        if source.exists():
+            shutil.copyfile(source, artifacts / "resident-api.log")

@@ -550,6 +550,7 @@ test: test-api
 test-api-gateway: lumabri test_chat_ui
 	./test_chat_ui api-codec
 	python3 tests/integration/api_gateway_test.py
+	python3 tests/integration/api_service_test.py
 
 test: test-api-gateway
 

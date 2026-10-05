@@ -6447,7 +6447,7 @@ int main(int argc, char **argv) {
         "lumabri: your computers, one shared model\n\n"
         "  lumabri                                                    household workspace\n"
         "  lumabri service [status|start|restart|stop]                 private background service\n"
-        "  lumabri api [list|user-add|grant|revoke|serve]              authenticated local inference API\n"
+        "  lumabri api [start|stop|list|user-add|grant|revoke|serve]   authenticated local inference API\n"
         "  lumabri machine [--json] [--tracker HOST:PORT]             profile this machine\n"
         "  lumabri worker --join HOST:PORT [--ram-gb N]              publish LAN inventory\n"
         "  lumabri models --tracker HOST:PORT                       cluster planning preview\n"

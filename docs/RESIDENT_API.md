@@ -6,9 +6,9 @@ The TUI and gateway use the same authenticated allocation checks, hosted
 connection, chat templates and incremental reply decoder.
 
 This first endpoint is loopback-only (`127.0.0.1`). It is **not an OpenAI API**
-and must not be exposed through a public port forward. Remote TLS deployment,
-a managed gateway lifetime and the web/private-history interface are separate
-work. Stopping this gateway cancels its requests, but does not unload models
+and must not be exposed through a public port forward. Remote TLS deployment
+and the web/private-history interface are separate work. Stopping this gateway
+cancels its requests, but does not unload models
 or stop conversations belonging to other clients.
 
 ## Operator setup
@@ -20,13 +20,30 @@ The same OS account that prepared them can then run:
 ./lumabri api list
 ./lumabri api user-add alice
 ./lumabri api grant alice ALLOCATION_ID_FROM_LIST
-./lumabri api serve
+./lumabri api start
 ```
 
-The configured household is reused. `list`, `grant` and `serve` accept
+The configured household is reused. `list`, `grant`, `start` and `serve` accept
 `--tracker HOST:PORT`; with a different explicit tracker, provide its household
-credential using the existing `LUMABRI_TOKEN` mechanism. `serve --port N`
+credential using the existing `LUMABRI_TOKEN` mechanism. `start --port N`
 changes the default port 47380, not the loopback binding.
+
+`start` detaches an authenticated same-user keeper. Closing the terminal/TUI or
+running `lumabri service restart` does not stop it or duplicate it. Repeating
+`start` with the same household and port reuses the keeper; a different
+configuration is rejected until explicitly stopped. `lumabri service status
+--json` lists the `api` role (phase 1: starting, phase 2: listening).
+
+`lumabri api stop` stops only the gateway and cancels its HTTP requests. Loaded
+models and other clients remain active. `lumabri service stop` also stops the
+gateway as part of stopping the household. For foreground diagnostics,
+`lumabri api serve` remains available without registering a keeper.
+
+A crashed keeper is reported as interrupted, not silently healthy. Run `api
+start` to replace it; a journal PID is never used to kill or adopt a process,
+and old donor approvals are never replayed. A port conflict is a startup
+failure, not a second listening instance. Logs are in the private
+`~/.lumabri/service/api.log` file. Boot-time autostart is not installed.
 
 `user-add` prints a bearer token **once**. Keep it private. Only its SHA-512
 digest is saved, in owner-only files under `~/.lumabri/api-access`. Grants name
