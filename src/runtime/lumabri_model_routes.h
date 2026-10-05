@@ -9,6 +9,11 @@
 #define LMB_ROUTE_MAX 32u
 #define LMB_ROUTE_REPLICAS 8u
 #define LMB_ROUTE_BYTES 4096u
+enum { LMB_ROUTE_ORDERED=0, LMB_ROUTE_OBSERVED_DECODE=1, LMB_ROUTE_DECLARED_COST=2 };
+static inline const char *lmb_route_policy_name(uint32_t policy) {
+    return policy==LMB_ROUTE_ORDERED ? "ordered" : policy==LMB_ROUTE_OBSERVED_DECODE ? "observed-decode" :
+        policy==LMB_ROUTE_DECLARED_COST ? "declared-cost" : "invalid";
+}
 typedef struct {
     uint8_t allocation[32], root[32], host_key[32];
 } LmbModelReplica;
@@ -16,6 +21,7 @@ typedef struct {
     uint8_t id[32], content[32];
     char name[33], tracker[256], adapter[32], numeric_class[97];
     uint32_t revision, numeric_abi, context, max_new, greedy_only, count;
+    uint32_t policy;
     LmbModelReplica replicas[LMB_ROUTE_REPLICAS];
 } LmbModelRoute;
 enum { LMB_ROUTE_OK=0, LMB_ROUTE_MISSING, LMB_ROUTE_CONFLICT, LMB_ROUTE_QUOTA, LMB_ROUTE_UNSAFE, LMB_ROUTE_BUSY };
@@ -33,7 +39,8 @@ static inline int lmb_route_valid(const LmbModelRoute *r) {
         !lmb_api_username(r->name) || !lmb_route_text(r->tracker,sizeof r->tracker) ||
         !lmb_route_text(r->adapter,sizeof r->adapter) || !lmb_route_text(r->numeric_class,sizeof r->numeric_class) ||
         !r->revision || !r->numeric_abi || !r->context || r->context>(1u<<20) ||
-        !r->max_new || r->max_new>(1u<<20) || r->greedy_only>1 || !r->count || r->count>LMB_ROUTE_REPLICAS) return 0;
+        !r->max_new || r->max_new>(1u<<20) || r->greedy_only>1 || !r->count || r->count>LMB_ROUTE_REPLICAS ||
+        r->policy>LMB_ROUTE_DECLARED_COST) return 0;
     for (uint32_t i=0; i<r->count; i++) {
         const LmbModelReplica *p=&r->replicas[i];
         if (!lmb_route_nonzero(p->allocation) || !lmb_route_nonzero(p->root) || !lmb_route_nonzero(p->host_key)) return 0;
@@ -54,15 +61,16 @@ static inline int lmb_route_string(LmbCur *c, char *text, size_t cap) {
 }
 static inline int lmb_route_encode(const LmbModelRoute *r, LmbBuf *b) {
     if (!lmb_route_valid(r) || lmb_buf_reserve(b,LMB_ROUTE_BYTES)) return -1;
-    return lmb_buf_bytes(b,"LMBROUT1",8) || lmb_buf_bytes(b,r->id,32) || lmb_buf_bytes(b,r->content,32) ||
+    return lmb_buf_bytes(b,"LMBROUT2",8) || lmb_buf_bytes(b,r->id,32) || lmb_buf_bytes(b,r->content,32) ||
         lmb_buf_u32(b,r->revision) || lmb_buf_str(b,r->name) || lmb_buf_str(b,r->tracker) ||
         lmb_buf_str(b,r->adapter) || lmb_buf_str(b,r->numeric_class) || lmb_buf_u32(b,r->numeric_abi) ||
         lmb_buf_u32(b,r->context) || lmb_buf_u32(b,r->max_new) || lmb_buf_u32(b,r->greedy_only) || lmb_buf_u32(b,r->count) ||
-        lmb_buf_bytes(b,r->replicas,(size_t)r->count*sizeof *r->replicas) ? -1 : 0;
+        lmb_buf_bytes(b,r->replicas,(size_t)r->count*sizeof *r->replicas) || lmb_buf_u32(b,r->policy) ? -1 : 0;
 }
 static inline int lmb_route_decode(const void *bytes, size_t n, LmbModelRoute *r) {
     memset(r,0,sizeof *r);
-    if (n<8 || n>LMB_ROUTE_BYTES || memcmp(bytes,"LMBROUT1",8)) return -1;
+    if (n<8 || n>LMB_ROUTE_BYTES || (memcmp(bytes,"LMBROUT1",8) && memcmp(bytes,"LMBROUT2",8))) return -1;
+    int version2=!memcmp(bytes,"LMBROUT2",8);
     LmbCur c={bytes,n,8};
     if (lmb_cur_bytes(&c,r->id,32) || lmb_cur_bytes(&c,r->content,32) ||
         lmb_cur_u32(&c,&r->revision) || lmb_route_string(&c,r->name,sizeof r->name) ||
@@ -70,6 +78,7 @@ static inline int lmb_route_decode(const void *bytes, size_t n, LmbModelRoute *r
         lmb_route_string(&c,r->numeric_class,sizeof r->numeric_class) || lmb_cur_u32(&c,&r->numeric_abi) ||
         lmb_cur_u32(&c,&r->context) || lmb_cur_u32(&c,&r->max_new) || lmb_cur_u32(&c,&r->greedy_only) || lmb_cur_u32(&c,&r->count) ||
         r->count>LMB_ROUTE_REPLICAS || lmb_cur_bytes(&c,r->replicas,(size_t)r->count*sizeof *r->replicas) ||
+        (version2 && lmb_cur_u32(&c,&r->policy)) ||
         c.off!=n || !lmb_route_valid(r)) return -1;
     return 0;
 }

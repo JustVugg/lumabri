@@ -220,7 +220,7 @@ def main():
             conversation.send("/quit\n")
             until(lambda: conversation.p.poll() is not None, "joint conversation did not close")
             assert conversation.p.returncode == 0, conversation.text[-3000:]
-        observations = list((tmp / "chatter").rglob("*.cal"))
+        observations = list((tmp / "chatter/.lumabri/calibrations").glob("*.cal"))
         assert len(observations) == expected, "first retained-model chat did not create calibration"
         for r in observations:
             raw = r.read_bytes()
@@ -281,7 +281,7 @@ def main():
             until(lambda: chat.has("receives the text"), "normal prepared chat did not start")
             chat.send("hi\n")
             until(lambda: hosted_turn_complete(chat.text), "normal prepared chat did not generate", 120)
-            records = list((tmp / "chatter").rglob("*.cal"))
+            records = list((tmp / "chatter/.lumabri/calibrations").glob("*.cal"))
             assert len(records) == 1, "service preparation lost the content/calibration key"
             assert assert_stage_record(records[0]) == 1, "background preparation telemetry lost"
             chat.send("/quit\n")
@@ -335,7 +335,7 @@ def main():
             # the remote conversation slots alive but let their sockets
             # expire before reusing them, reproducing the native quota leak.
             time.sleep(16)
-            records = list((tmp / "chatter").rglob("*.cal"))
+            records = list((tmp / "chatter/.lumabri/calibrations").glob("*.cal"))
             assert len(records) == 1, "first resident model has no observed speed"
             first_plan = tmp / "first.plan"; shutil.copyfile(record, first_plan); first_plan.chmod(0o600)
             configs = list(args.models_dir.glob("*/config.json"))

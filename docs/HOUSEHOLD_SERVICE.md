@@ -153,6 +153,35 @@ and [the workspace API](RESIDENT_API.md#cluster-workspace) for boundaries.
 Verified household GPU execution, requirement-aware global placement,
 automatic capacity changes and provider provisioning remain separate work.
 
+### Planned extension: Colibri policy agent (not implemented)
+
+After the managed-service release baseline, a Colibri-backed agent may make
+capacity decisions from queue lengths, observed latency, resource pressure and
+costs. System One is a candidate decision interface; the agent checkpoint
+(for example Clef) and its actual runtime/tool support must be verified before
+integration. This extension is not a new prerequisite for the current release.
+
+The intended final mode is autonomous **within operator-authorized policy**,
+not unrestricted shell or cloud access. Typed tools will request an evaluated
+plan, prepare capacity on authorized machines, scale approved replicas, drain
+them and release idle resources. The deterministic service must validate every
+action against budgets, minimum/maximum capacity, permissions, live operation
+revisions, cooldowns and active sessions. Provider credentials stay in the
+executor, not in model prompts. Conversation text and untrusted worker labels
+cannot grant permissions or become executable instructions.
+
+Start with recorded-load evaluation and shadow decisions, then explicit
+operator approval, then bounded automatic execution with an audit trail,
+idempotent operations and an immediate off switch. Agent timeout, malformed
+output, overload or unavailability must leave the normal controller running.
+Reserve resources for this control path; inference saturation must not starve
+the controller which would add capacity. It is never consulted per token.
+
+Fast decisions do not make server startup or model preparation instantaneous.
+Warm reserve, admission limits, measured preparation times, fault recovery and
+draining are still necessary. Targets are measurable latency/availability and
+cost objectives, not an unconditional promise of zero slowdown or outages.
+
 The [DeepSeek V4.1 integration](DEEPSEEK_V41.md) adds a Lumabri-owned text CPU
 adapter with resident Engram tables and per-conversation cross-layer feedback.
 It uses the same approval and service lifecycle, without aliasing V4.1 to V4.

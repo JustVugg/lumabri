@@ -16,7 +16,8 @@ static int api_route_record(Cap *body, const LmbModelRoute *route, int comma, in
     char id[65], content[65]; lmb_hex(id,route->id,32); lmb_hex(content,route->content,32);
     int bad=api_addf(body,"%s{\"id\":\"%s\",\"name\":",comma ? "," : "",id) || api_json_text(body,route->name) ||
         api_addf(body,",\"context\":%u,\"max_tokens\":%u,\"sessions\":null,\"replicas\":%u,"
-            "\"state\":\"saved_route\",\"revision\":%u",route->context,route->max_new,route->count,route->revision);
+            "\"state\":\"saved_route\",\"revision\":%u,\"policy\":\"%s\"",route->context,route->max_new,route->count,
+            route->revision,lmb_route_policy_name(route->policy));
     if (operator && !bad) {
         bad=api_addf(body,",\"content_id\":\"%s\",\"adapter\":",content) || api_json_text(body,route->adapter) ||
             cap_str(body,",\"numeric_class\":") || api_json_text(body,route->numeric_class) || cap_str(body,",\"allocations\":[");
@@ -60,8 +61,9 @@ static int api_route_plan_matches(const LmbModelRoute *route, unsigned index, co
         !memcmp(plan->allocation,replica->allocation,32) && !strcmp(plan->observation.adapter,route->adapter) &&
         plan->context>=route->context && plan->max_new>=route->max_new;
 }
-/* The ordered replica set is an operator policy, not a claimed cost/speed
- * optimizer. Every selected donor and actual host is re-authenticated before
+#include "lumabri_route_evidence.h"
+/* Preferences only reorder independently approved replicas. Every selected
+ * donor and actual host is re-authenticated before
  * text leaves this process; a stale registry never recreates an allocation. */
 static int api_model_open(int access, const char *tracker, const uint8_t id[32], uint32_t max_new,
                           Engine *engine, int *permit, LmbResidentPlan *selected, const char **error) {
@@ -81,7 +83,10 @@ static int api_model_open(int access, const char *tracker, const uint8_t id[32],
             else if (!api_plan_open(plan,engine,max_new)) status=0;
         }
     } else if (max_new>route.max_new) { status=400; *error="max_tokens_exceeds_plan"; }
-    else for (uint32_t i=0; i<route.count; i++) {
+    else {
+      uint32_t order[LMB_ROUTE_REPLICAS]; api_route_order(tracker,&route,order);
+      for (uint32_t attempt=0; attempt<route.count; attempt++) {
+        uint32_t i=order[attempt];
         if (api_find_plan(tracker,route.replicas[i].allocation,plan) || !api_route_plan_matches(&route,i,plan)) continue;
         int admitted=lmb_replica_admit(access,plan->allocation,permit);
         if (admitted==LMB_REPLICA_BUSY) { status=429; *error="replicas_busy"; continue; }
@@ -93,10 +98,27 @@ static int api_model_open(int access, const char *tracker, const uint8_t id[32],
         fprintf(stderr,"[model-route] model=%s revision=%u allocation=%s replica=%u/%u\n",
             model_id,route.revision,allocation_id,i+1,route.count);
         status=0; break;
+      }
     }
     if (status && *permit>=0) { close(*permit); *permit=-1; }
     if (!status && selected) *selected=*plan;
     free(plan); return status;
+}
+static int api_route_policy(int access, const char *tracker, char *const *args, unsigned count) {
+    if (count!=2 || !*tracker) return 1;
+    uint8_t id[32]; uint32_t policy;
+    for (policy=0;policy<=LMB_ROUTE_DECLARED_COST;policy++)
+        if (!strcmp(args[1],lmb_route_policy_name(policy))) break;
+    if (policy>LMB_ROUTE_DECLARED_COST || strlen(args[0])!=64 || lmb_unhex(id,args[0],32)) return 1;
+    int dir=lmb_route_dir(access,0); if (dir<0) return 1;
+    LmbModelRoute route; int rc=lmb_route_load(dir,id,&route);
+    if (!rc && (strcmp(route.tracker,tracker) || route.revision==UINT32_MAX)) rc=LMB_ROUTE_UNSAFE;
+    if (!rc) {
+        uint32_t expected=route.revision; route.revision++; route.policy=policy;
+        rc=lmb_route_save(dir,&route,expected);
+        if (!rc) { Cap record={0}; rc=api_route_record(&record,&route,0,1); if (!rc) puts(record.p); free(record.p); }
+    }
+    close(dir); return rc ? 1 : 0;
 }
 /* Registration checks the real authenticated numeric contract without
  * submitting a prompt. No half-validated replica set is persisted. */

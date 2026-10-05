@@ -13,6 +13,12 @@ int main(void) {
     assert(!lmb_route_encode(&route,&data)); assert(data.len<LMB_ROUTE_BYTES);
     LmbModelRoute decoded;
     assert(!lmb_route_decode(data.p,data.len,&decoded));
+    assert(decoded.policy==LMB_ROUTE_ORDERED);
+    data.p[7]='1';
+    assert(!lmb_route_decode(data.p,data.len-4,&decoded) && decoded.policy==LMB_ROUTE_ORDERED);
+    assert(lmb_route_decode(data.p,data.len,&decoded)); /* no ambiguous trailer */
+    data.p[7]='2';
+    assert(!lmb_route_decode(data.p,data.len,&decoded));
     LmbBuf encoded={0}; assert(!lmb_route_encode(&decoded,&encoded));
     assert(encoded.len==data.len && !memcmp(encoded.p,data.p,data.len)); free(encoded.p);
     for (size_t n=0; n<data.len; n++) assert(lmb_route_decode(data.p,n,&decoded));
@@ -30,7 +36,9 @@ int main(void) {
     changed=route; changed.revision=2; changed.numeric_abi++;
     assert(lmb_route_save(dir,&changed,1)==LMB_ROUTE_CONFLICT);
     changed=route; changed.revision=2; changed.count=1;
+    changed.policy=LMB_ROUTE_OBSERVED_DECODE;
     assert(!lmb_route_save(dir,&changed,1));
+    assert(!lmb_route_load(dir,route.id,&decoded) && decoded.policy==LMB_ROUTE_OBSERVED_DECODE);
     assert(lmb_route_save(dir,&changed,1)==LMB_ROUTE_CONFLICT);
     route=changed; changed.id[0]=9; changed.revision=1;
     assert(lmb_route_save(dir,&changed,0)==LMB_ROUTE_CONFLICT); /* duplicate name */

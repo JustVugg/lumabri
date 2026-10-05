@@ -4737,6 +4737,7 @@ static int model_boot(const char *tracker, const char *model, const char *shim,
 
 enum { CHAT_REQUEST_FAILED = 3 };
 #include "src/planner/lumabri_turn_observation.h"
+#include "src/planner/lumabri_calibration_profiles.h"
 static int catalog_record_turn(LmbCalibration *observation, const LmbCalKey *before,
     const char *directory, const char *tracker, const Engine *engine, const char *stat,
     double ttft, uint32_t source) {
@@ -4753,6 +4754,8 @@ static int catalog_record_turn(LmbCalibration *observation, const LmbCalKey *bef
     if (lmb_cal_store(directory,&record)) {
         fprintf(stderr,"[lumabri] Could not save this measurement; the reply is unaffected.\n"); return 0;
     }
+    if (lmb_cal_profile_store(directory,&record))
+        fprintf(stderr,"[calibration] Replica observation history was not updated; latest measurement is saved.\n");
     *observation=record; return 1;
 }
 
