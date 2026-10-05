@@ -68,14 +68,44 @@ int main(int argc, char **argv) {
         if (served >= busy_after) { close(fd); continue; }
         served++;
         /* the serve codec remains inside HOST_STREAM frames. */
+        char header[512], request_id[64];
+        size_t header_len = 0, remaining = 0;
+        int invalid = 0;
         for (;;) {
             LmbMsg stream = {0};
             if (lmb_recv(fd, &stream) || stream.op != LMB_HOST_STREAM ||
                 !stream.pay_len) { lmb_msg_free(&stream); break; }
+            /* Transport frames can split a SUBMIT at any byte. Echo its ID
+             * only after the complete payload, never one reply per frame. */
+            for (size_t i = 0; i < stream.pay_len && !invalid; ++i) {
+                unsigned char ch = stream.pay[i];
+                if (remaining) {
+                    if (--remaining) continue;
+                    if (ch != '\n') { invalid = 1; break; }
+                    char reply[512];
+                    int length = snprintf(reply, sizeof reply,
+                        "ACCEPT %s\nDATA %s 5\nhello\nDONE %s STAT 9 4 0 0 20 0 PERF1 9 8 15 2 17.2\n",
+                        request_id, request_id, request_id);
+                    if (length <= 0 || (size_t)length >= sizeof reply ||
+                        lmb_send(fd, LMB_HOST_STREAM, NULL, 0, reply, (uint32_t)length)) invalid = 1;
+                } else if (ch == '\n') {
+                    unsigned slot, max_new;
+                    size_t bytes;
+                    float temperature, top_p;
+                    int consumed = 0;
+                    header[header_len] = 0;
+                    if (sscanf(header, "SUBMIT %63s %u %zu %u %f %f%n", request_id,
+                               &slot, &bytes, &max_new, &temperature, &top_p, &consumed) != 6 ||
+                        header[consumed] || bytes > 1048576) { invalid = 1; break; }
+                    remaining = bytes + 1;
+                    header_len = 0;
+                } else {
+                    if (!ch || header_len + 1 >= sizeof header) { invalid = 1; break; }
+                    header[header_len++] = (char)ch;
+                }
+            }
             lmb_msg_free(&stream);
-            const char *reply = "ACCEPT 0\nDATA 0 5\nhello\nDONE 0 STAT 9 4 0 0 20 0 PERF1 9 8 15 2 17.2\n";
-            if (lmb_send(fd, LMB_HOST_STREAM, NULL, 0,
-                         reply, (uint32_t)strlen(reply))) break;
+            if (invalid) break;
         }
         lmb_close(fd);
     }
@@ -157,6 +187,10 @@ int main(void) {
         if (!strstr(payload, "<|im_start|>assistant\n<think>\n")) return 2;
         if (turns && !strstr(payload, "hello")) return 4;
         free(payload);
+        if (turns == 3) {
+            printf("ERROR %s test_request_rejected\n", id);
+            continue;
+        }
         const char *marker = getenv("TEST_HOST_SUBMIT_PATH");
         if (marker) {
             FILE *f = fopen(marker, "w");
@@ -201,9 +235,11 @@ elapsed=$(( $(date +%s) - started ))
 grep -qi "busy (0 sessions free)" "$T/real-busy.log" ||
     fail "the real host did not refuse its second client with BUSY"
 (( elapsed < 3 )) || fail "BUSY was queued for $elapsed seconds instead of immediate"
-printf '/quit\n' >&4
+printf 'reject this turn\n' >&4
 exec 4>&-
-wait "$held" || true
+held_status=0
+wait "$held" || held_status=$?
+(( held_status == 3 )) || fail "engine ERROR was not a distinct failed request (status $held_status)"
 
 grep -q "greedy decoding" "$T/held.log" ||
     fail "greedy-only capability did not reach the client"
@@ -213,6 +249,11 @@ grep -q "timing unavailable; no speed recorded" "$T/held.log" ||
     fail "an unavailable observation produced a speed"
 grep -q "decode speed not measured" "$T/held.log" ||
     fail "a one-token reply manufactured a decode rate or lost its history"
+grep -q "test_request_rejected" "$T/held.log" || fail "engine error reason was lost"
+grep -q "request failed; incomplete reply was not added to history" "$T/held.log" ||
+    fail "a terminal ERROR was reported as a successful turn"
+[[ $(grep -c 'hosted stream · no local checkpoint' "$T/held.log") == 3 ]] ||
+    fail "a rejected fourth turn emitted success telemetry"
 
 # A silent prefill longer than the idle limit is still active work. Exercise
 # the real bridge and encrypted client, not just its state-machine helpers.

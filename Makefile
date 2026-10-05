@@ -48,6 +48,11 @@ test check-warnings: test_serve_control
 test check-warnings: test_host_session_pool test_hosted_sessions
 test check-warnings: test_compute_broker
 test check-warnings: test_portfolio
+test check-warnings: test_reply_stream
+lumabri test_chat_ui: src/runtime/lumabri_reply_stream.h
+
+test_reply_stream: tests/c/test_reply_stream.c src/runtime/lumabri_reply_stream.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_reply_stream.c -o $@
 
 test_portfolio: tests/c/test_portfolio.c src/planner/lumabri_portfolio.h src/planner/lumabri_stage_placement.h src/planner/lumabri_resource_facts.h src/planner/lumabri_workload_facts.h lumabri_cluster.h lumabri_memory_budget.h lumabri_planner.h $(wildcard planner_adapters/*.h)
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_portfolio.c -o $@ -lm
@@ -90,7 +95,7 @@ check-warnings:
 		test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 test_exec2 test_accum_order test_hybrid_parallel test_residency_report test_model_family test_planner test_cluster test_memory_budget test_calibration test_metrics \
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
 		test_meminfo test_process_memory test_serve_control test_host_session_pool test_hosted_sessions test_compute_broker test_compute_lease test_content_filter \
-		test_scheduler test_run_gate test_inventory test_home test_chat_ui test_weight_cache test_planner_io test_portfolio \
+		test_scheduler test_run_gate test_inventory test_home test_chat_ui test_weight_cache test_planner_io test_portfolio test_reply_stream \
 		CFLAGS='$(CFLAGS) -Werror'
 
 SECURE_DEPS = lumabri_secure.h lumabri_crypto.h
@@ -634,6 +639,7 @@ test-sanitize:
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_planner_io.c -o build/sanitize/test_planner_io
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_portfolio.c -o build/sanitize/test_portfolio -lm
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_calibration.c -o build/sanitize/test_calibration -lm
+	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_reply_stream.c -o build/sanitize/test_reply_stream
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_hybrid_parallel.c -o build/sanitize/test_hybrid_parallel -lm
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_segment_v2
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_segment_discovery
@@ -648,6 +654,7 @@ test-sanitize:
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_planner_io
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_portfolio
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_calibration
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_reply_stream
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_hybrid_parallel
 
 test-thread-sanitize:
@@ -942,6 +949,8 @@ test: all test_weight_cache test_key_rotation test_hedge test_local_fallback tes
 	./test_memory_budget
 	./test_weight_cache
 	./test_calibration
+	./test_reply_stream
+	./test_chat_ui reply-errors
 	./test_catalogue_advice
 	./test_metrics
 	./test_hybrid_parallel
@@ -1008,7 +1017,7 @@ clean:
 	      test_verify_failover test_segment_v2 test_segment_discovery test_sampling \
 	      test_swarm_detail test_relay_rate test_machine test_meminfo test_process_memory test_serve_control test_host_session_pool test_hosted_sessions \
 	      test_compute_lease test_content_filter test_scheduler test_run_gate \
-	      test_compute_broker test_portfolio \
+	      test_compute_broker test_portfolio test_reply_stream \
 	      test_segment_v2_tsan tracker_tsan \
 	      segment_node segment_chat test_backend_routes test_segment_close test_tcp_latency segment_node_asan segment_chat_asan \
 	      segment_node_tsan segment_chat_tsan \

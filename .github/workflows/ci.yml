@@ -73,6 +73,9 @@ jobs:
           ./test_planner_io
           ./test_cluster
           ./test_calibration
+          make test_reply_stream CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
+          ./test_reply_stream
+          ./test_chat_ui reply-errors
           make test_catalogue_advice CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           ./test_catalogue_advice
           ./test_inventory
