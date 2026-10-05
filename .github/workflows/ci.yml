@@ -77,6 +77,7 @@ jobs:
           ./test_reply_stream
           make test-api CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           python3 tests/integration/api_gateway_test.py
+          python3 tests/integration/api_service_test.py
           ./test_chat_ui api-codec
           ./test_chat_ui reply-errors
           make test_catalogue_advice CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'

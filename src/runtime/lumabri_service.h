@@ -39,7 +39,7 @@ typedef struct {
 
 static int home_service_role(const char *role) {
     return !strcmp(role, "manager") || !strcmp(role, "donor") ||
-           !strcmp(role, "tracker") || !strcmp(role, "prepare");
+           !strcmp(role, "tracker") || !strcmp(role, "prepare") || !strcmp(role, "api");
 }
 
 static int home_service_directory(char *dir, size_t cap) {

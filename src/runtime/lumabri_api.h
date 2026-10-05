@@ -238,16 +238,29 @@ static void api_connection(int fd, int access_dir, unsigned port, const char *tr
     } else api_error(fd,400,"unsupported_endpoint_or_framing");
     close(permit);
 }
-static int api_serve(int access_dir, unsigned port, const char *tracker) {
+static int api_serve(int access_dir, unsigned port, const char *tracker, HomeService *keeper) {
     int listener=socket(AF_INET,SOCK_STREAM,0); if (listener<0) return 1;
     struct sockaddr_in address={0}; address.sin_family=AF_INET;
     address.sin_addr.s_addr=htonl(INADDR_LOOPBACK); address.sin_port=htons((uint16_t)port);
     int one=1; (void)setsockopt(listener,SOL_SOCKET,SO_REUSEADDR,&one,sizeof one);
-    if (bind(listener,(struct sockaddr *)&address,sizeof address) || listen(listener,16)) { close(listener); return 1; }
+    if (fcntl(listener,F_SETFD,FD_CLOEXEC) ||
+        bind(listener,(struct sockaddr *)&address,sizeof address) || listen(listener,16)) {
+        fprintf(stderr,"[api] Cannot listen on 127.0.0.1:%u: %s\n",port,strerror(errno)); close(listener); return 1;
+    }
     signal(SIGTERM,api_stop); signal(SIGINT,api_stop); api_stopping=0;
     pid_t children[LMB_API_CHILDREN]={0};
+    if (keeper) {
+        keeper->snapshot.phase=2; /* API role: 1 starting, 2 listening */
+        snprintf(keeper->snapshot.detail,sizeof keeper->snapshot.detail,"Listening on %s; approved resident models only.",keeper->snapshot.name);
+        if (home_service_save(keeper)) { close(listener); return 1; }
+    }
     printf("[api] http://127.0.0.1:%u · bearer authentication · approved resident models only\n",port); fflush(stdout);
     while (!api_stopping) {
+        if (keeper) {
+            int op=home_service_poll(keeper);
+            if (op==HOME_SVC_STOP) break;
+            home_service_answer(keeper);
+        }
         for (unsigned i=0; i<LMB_API_CHILDREN; i++) if (children[i] && waitpid(children[i],NULL,WNOHANG)==children[i]) children[i]=0;
         struct pollfd p={listener,POLLIN,0}; int rc=poll(&p,1,250);
         if (rc<0 && errno==EINTR) continue;
@@ -259,6 +272,13 @@ static int api_serve(int access_dir, unsigned port, const char *tracker) {
         fflush(NULL); pid_t child=fork();
         if (!child) {
             close(listener); signal(SIGTERM,SIG_DFL); signal(SIGINT,SIG_DFL); signal(SIGALRM,SIG_DFL);
+            /* Requests do not own the keeper lock/socket. A gateway crash
+             * must not leave its singleton lock held by orphaned requests. */
+            if (keeper) {
+                if (keeper->listener>=0) close(keeper->listener);
+                if (keeper->lock>=0) close(keeper->lock);
+                if (keeper->reply>=0) close(keeper->reply);
+            }
             alarm(LMB_API_TURN_SECONDS); /* hard lifetime even during a stalled host handshake */
             api_connection(client,access_dir,port,tracker); shutdown(client,SHUT_RDWR); close(client); fflush(NULL); _exit(0);
         }
@@ -268,6 +288,50 @@ static int api_serve(int access_dir, unsigned port, const char *tracker) {
     for (unsigned i=0; i<LMB_API_CHILDREN; i++) if (children[i]) (void)kill(children[i],SIGTERM);
     for (unsigned i=0; i<LMB_API_CHILDREN; i++) if (children[i]) while (waitpid(children[i],NULL,0)<0 && errno==EINTR) { }
     return 0;
+}
+static int api_start(int access_dir, unsigned port, const char *tracker) {
+    if (strlen(tracker)>=sizeof ((HomeServiceSnapshot *)0)->tracker) return 1;
+    if (home_service_foreground() || home_service_ensure()) {
+        fprintf(stderr,"Cannot start the API keeper; use api serve for foreground operation\n"); return 1;
+    }
+    char endpoint[64]; snprintf(endpoint,sizeof endpoint,"http://127.0.0.1:%u",port);
+    HomeServiceSnapshot observed;
+    if (!home_service_query("api",HOME_SVC_STATUS,NULL,&observed)) {
+        if (strcmp(observed.tracker,tracker) || strcmp(observed.name,endpoint)) {
+            fprintf(stderr,"Another API configuration is active; stop it explicitly before changing the household or port\n"); return 1;
+        }
+        return observed.phase==2 ? 0 : 1;
+    }
+    HomeService keeper;
+    if (home_service_open(&keeper,"api")) {
+        /* A concurrent start can be between taking the lock and readiness. */
+        for (unsigned i=0; i<40; i++) {
+            if (!home_service_query("api",HOME_SVC_STATUS,NULL,&observed) && observed.phase==2 &&
+                !strcmp(observed.tracker,tracker) && !strcmp(observed.name,endpoint)) return 0;
+            (void)poll(NULL,0,50);
+        }
+        return 1;
+    }
+    snprintf(keeper.snapshot.name,sizeof keeper.snapshot.name,"%s",endpoint);
+    snprintf(keeper.snapshot.tracker,sizeof keeper.snapshot.tracker,"%s",tracker);
+    snprintf(keeper.snapshot.detail,sizeof keeper.snapshot.detail,"Starting authenticated loopback API");
+    keeper.snapshot.phase=1;
+    if (home_service_save(&keeper)) { home_service_close(&keeper); return 1; }
+    int detached=home_service_detach(&keeper,access_dir);
+    if (detached<0) { home_service_close(&keeper); return 1; }
+    if (detached) {
+        for (unsigned i=0; i<60; i++) {
+            if (!home_service_query("api",HOME_SVC_STATUS,NULL,&observed) && observed.phase==2 &&
+                !strcmp(observed.tracker,tracker) && !strcmp(observed.name,endpoint)) { puts(endpoint); return 0; }
+            (void)poll(NULL,0,50);
+        }
+        fprintf(stderr,"API did not become ready; inspect lumabri service status and api.log\n"); return 1;
+    }
+    int rc=api_serve(access_dir,port,tracker,&keeper);
+    keeper.snapshot.state=rc ? HOME_SVC_FAILED : HOME_SVC_STOPPED; keeper.snapshot.phase=0;
+    snprintf(keeper.snapshot.detail,sizeof keeper.snapshot.detail,"API %s; resident models were not unloaded.",rc ? "failed" : "stopped");
+    (void)home_service_save(&keeper); home_service_answer(&keeper); home_service_close(&keeper);
+    close(access_dir); _exit(rc ? 1 : 0);
 }
 static int cmd_api(int argc, char **argv) {
     if (!argc) goto usage;
@@ -283,11 +347,15 @@ static int cmd_api(int argc, char **argv) {
         } else if (count<3) args[count++]=argv[i]; else goto usage;
     }
     if (!strcmp(tracker,settings.tracker) && home_settings_activate(&settings)) return 1;
+    if (!strcmp(argv[0],"stop") && !count) return home_service_stop_role("api") ? 1 : 0;
     if (!strcmp(argv[0],"list") && !count && *tracker) return api_models(-1,tracker,NULL) ? 1 : 0;
     char path[1200];
     if (checked_printf(path,sizeof path,"%s/.lumabri/api-access",getenv("HOME") ? getenv("HOME") : ".")) return 1;
     int dir=lmb_api_access_dir(path,1); if (dir<0) { fprintf(stderr,"Cannot open private API access directory\n"); return 1; }
-    if (!strcmp(argv[0],"serve") && !count && *tracker) { int rc=api_serve(dir,port,tracker); close(dir); return rc; }
+    if ((!strcmp(argv[0],"serve") || !strcmp(argv[0],"start")) && !count && *tracker) {
+        int rc=!strcmp(argv[0],"start") ? api_start(dir,port,tracker) : api_serve(dir,port,tracker,NULL);
+        close(dir); return rc;
+    }
     int lock=lmb_api_access_lock(dir),rc=1;
     if (lock<0) { close(dir); fprintf(stderr,"API access database is busy or unsafe\n"); return 1; }
     if (!strcmp(argv[0],"user-add") && count==1) {
@@ -313,7 +381,9 @@ usage:
         "lumabri api user-add NAME\n"
         "lumabri api grant NAME ALLOCATION [--tracker HOST:PORT]\n"
         "lumabri api revoke NAME\n"
-        "lumabri api serve [--tracker HOST:PORT] [--port 47380]\n");
+        "lumabri api start [--tracker HOST:PORT] [--port 47380]\n"
+        "lumabri api stop\n"
+        "lumabri api serve [--tracker HOST:PORT] [--port 47380]   foreground diagnostics\n");
     return 2;
 }
 #endif

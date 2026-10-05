@@ -5,7 +5,7 @@
 #ifndef LUMABRI_SERVICE_MANAGER_H
 #define LUMABRI_SERVICE_MANAGER_H
 
-static const char *const home_service_roles[] = {"manager", "donor", "tracker", "prepare"};
+static const char *const home_service_roles[] = {"manager", "donor", "tracker", "prepare", "api"};
 
 static void home_service_reconcile(HomeService *manager) {
     unsigned live = 0, interrupted = 0;
@@ -92,7 +92,7 @@ static int cmd_service(int argc, char **argv) {
     }
     if (!strcmp(action, "stop")) {
         int rc = 0;
-        const char *roles[] = {"prepare", "donor", "tracker", "manager"};
+        const char *roles[] = {"prepare", "api", "donor", "tracker", "manager"};
         for (unsigned i = 0; i < sizeof roles / sizeof *roles; i++)
             if (home_service_stop_role(roles[i])) { fprintf(stderr, "Cannot confirm %s stopped.\n", roles[i]); rc = 1; }
         return rc;
