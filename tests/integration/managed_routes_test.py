@@ -10,6 +10,7 @@ import socket
 import struct
 import subprocess
 import threading
+import time
 
 
 def verify_managed_routes(runtime, env, tracker, first_plan, third_plan, first_name, artifacts):
@@ -65,6 +66,20 @@ def verify_managed_routes(runtime, env, tracker, first_plan, third_plan, first_n
         return request("/api/v1/chat", body={"model": model, "max_tokens": 8,
                                             "messages": [{"role": "user", "content": "hi"}]})
 
+    def observe_replica(label):
+        status, data = chat(route["id"])
+        (artifacts / ("route-observation-" + label + ".log")).write_bytes(data)
+        assert status == 200 and b"event: error\n" not in data, (label, status, data)
+        done = [json.loads(block.split(b"\ndata: ", 1)[1])
+                for block in data.split(b"\n\n") if block.startswith(b"event: done\n")]
+        # A successful replay is NOT a measurement of this replica. In
+        # particular, macOS may compress an idle process on a shared runner;
+        # the residency guard must refuse it, not silently relax its policy.
+        # Fail at the unmet prerequisite and preserve the actual SSE evidence,
+        # instead of later reporting a mysterious missing policy observation.
+        assert len(done) == 1 and done[0]["recovery_attempts"] == 0 and done[0]["observation_saved"], (
+            label, "replica did not produce a saved no-replay observation; inspect resident-memory logs", status, data)
+
     def release(plan):
         result = subprocess.run([str(runtime / "test_chat_ui"), "resident-release", str(plan), tracker],
                                 env=env, text=True, capture_output=True, timeout=30)
@@ -93,11 +108,9 @@ def verify_managed_routes(runtime, env, tracker, first_plan, third_plan, first_n
         assert status == 200 and json.loads(data) == {"schema": 1, "models": []}
         for member in (first, third, other):
             assert chat(member["id"])[0] == 403, "logical grant authorized a raw allocation"
-        status, data = chat(route["id"])
-        assert status == 200 and b"event: done\n" in data and b"event: error\n" not in data, (status, data)
+        observe_replica("first")
         first_busy = hold(first["id"])
-        status, data = chat(route["id"])
-        assert status == 200 and b"event: done\n" in data, (status, data)
+        observe_replica("alternate")
         # Both actual replicas have now produced matching-length observations
         # under this resident workload. Preferences must use them, without
         # changing allocation permissions or treating missing prices as free.
@@ -125,6 +138,36 @@ def verify_managed_routes(runtime, env, tracker, first_plan, third_plan, first_n
         assert chat(first["id"])[0] == 429, "raw allocation bypassed its existing permit"
         command("model-remove", alias["id"])
         unhold(first_busy); unhold(third_busy)
+        # Drain is enforced by the actual host, not merely this HTTP gateway:
+        # aliases and direct Hosted clients share the same admission boundary.
+        def drain(member):
+            initial = json.loads(command("replica", member["id"], "status"))
+            assert initial["state"] == "accepting" and not initial["weights_unloaded"]
+            changed = json.loads(command("replica", member["id"], "drain"))
+            assert changed["instance"] == initial["instance"] and changed["revision"] == initial["revision"] + 1
+            deadline = time.monotonic() + 5
+            while changed["state"] != "drained":
+                assert time.monotonic() < deadline, changed
+                time.sleep(.05)
+                changed = json.loads(command("replica", member["id"], "status"))
+            assert changed["connections"] == changed["admitted_requests"] == 0
+            return changed
+
+        before_log = len(policy_log.read_text())
+        first_drained = drain(first)
+        status, data = chat(route["id"])
+        assert status == 200 and b"event: done\n" in data and b"event: error\n" not in data, (status, data)
+        assert "allocation=" + third["id"] in policy_log.read_text()[before_log:], "draining replica admitted new inference"
+        third_drained = drain(third)
+        status, data = chat(route["id"])
+        assert status == 429 and json.loads(data)["error"] == "replicas_busy", (status, data)
+        for member, previous in ((first, first_drained), (third, third_drained)):
+            resumed = json.loads(command("replica", member["id"], "resume"))
+            assert resumed["state"] == "accepting" and resumed["instance"] == previous["instance"]
+            assert resumed["revision"] == previous["revision"] + 1 and not resumed["weights_unloaded"]
+        status, data = chat(route["id"])
+        assert status == 200 and b"event: done\n" in data and b"event: error\n" not in data, (status, data)
+        print("MANAGED DRAIN: PASS (real resident hosts refuse new turns, alternate approved replica, no capacity, resume same engines)", flush=True)
         # Two actual gateway workers generate concurrently, not just fixture
         # reservations. A barrier aligns submission; each model instance has
         # its own conversation state and exact-allocation admission permit.

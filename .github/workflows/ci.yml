@@ -48,8 +48,9 @@ jobs:
           ./test_process_memory
           make test_serve_control CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           ./test_serve_control
-          make test_host_session_pool CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
+          make test_host_session_pool test_host_drain CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           ./test_host_session_pool
+          ./test_host_drain
           make test_run_gate CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           ./test_run_gate
           make test_compute_broker CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
@@ -224,6 +225,7 @@ jobs:
             trap 'mv -f segment_chat.real segment_chat' EXIT
             python3 tests/integration/recovery_proxy_install_test.py
             python3 tests/integration/recovery_codec_proxy.py --install segment_chat
+            python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester --multi-model --sessions 1 --api --replicas --recovery
             LUMABRI_TEST_BROWSER=1 python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester --multi-model --sessions 4 --api --replicas --recovery
           )
           for outcome in complete reject cancel; do

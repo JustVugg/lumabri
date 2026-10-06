@@ -2026,13 +2026,17 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
     LmbSampler *samplers = calloc(slots, sizeof *samplers);
     if (!conversations || !samplers) { free(conversations); free(samplers); return 1; }
     for (uint32_t i = 0; i < slots; i++) lmb_sampler_init(&samplers[i], seed);
-    /* The optional control reader uses read(2), never buffered stdio. */
-    if (slots > 1) setvbuf(stdin, NULL, _IONBF, 0);
+    /* Hosted single-slot sessions need the same cancellation semantics as
+     * multi-slot hosts. Keep plain CLI pipes compatible: EOF after one SUBMIT
+     * is not cancellation there, and buffered input may contain later turns. */
+    const char *host_slots=getenv("LUMABRI_HOST_SESSIONS");
+    int controlled=slots>1 || (host_slots && *host_slots);
+    if (controlled) setvbuf(stdin, NULL, _IONBF, 0);
     /* The optional seeded SUBMIT field is accepted only by clients that
      * discover this explicit capability; ordinary six-field SUBMIT remains. */
     fputs("\nLUMABRI_RESET 1\n", stdout);
     fputs("LUMABRI_REQUEST_SEED 1\n", stdout);
-    if (slots > 1) printf("LUMABRI_SLOTS %u\n", slots);
+    if (controlled) printf("LUMABRI_SLOTS %u\n", slots);
     printf("LUMABRI_SAMPLING %s\nLUMABRI_NUMERIC %u %s\n" SEGMENT_FRAME_READY "\nSTAT 0 0 0 0\n",
            cap->flags & COLI_EDGE_CAP_LOGITS ? "LOGITS" : "GREEDY", cap->abi_version, cap->numeric_class);
     fflush(stdout);
@@ -2044,8 +2048,8 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
         /* A cancellation racing the final DONE may arrive after the control
          * reader stopped. It refers to a completed turn, not another slot. */
         unsigned cancelled_id;
-        if (slots > 1 && (sscanf(header, "CANCEL %u %c", &cancelled_id, &reset_extra) == 1 ||
-                          sscanf(header, "STOP %u %c", &cancelled_id, &reset_extra) == 1)) continue;
+        if (controlled && (sscanf(header, "CANCEL %u %c", &cancelled_id, &reset_extra) == 1 ||
+                           sscanf(header, "STOP %u %c", &cancelled_id, &reset_extra) == 1)) continue;
         if (sscanf(header, "RESET_SLOT %64s %u %c", reset_id, &reset_slot, &reset_extra) == 2) {
             if (reset_slot >= slots) { result_code = 1; break; }
             if (conversation_reset(&conversations[reset_slot])) { result_code = 1; break; }
@@ -2101,7 +2105,7 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
         char error[256] = {0};
         GenerationResult result = {0};
         LmbServeControl control = {0};
-        if (slots > 1 && lmb_serve_control_start(&control, request_id)) {
+        if (controlled && lmb_serve_control_start(&control, request_id)) {
             free(prompt); result_code = 1; break;
         }
         home_edge_control = &control;

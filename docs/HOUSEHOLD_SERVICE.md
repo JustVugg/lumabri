@@ -156,14 +156,21 @@ See [the evidence contract](CALIBRATION_RECORDS.md#planner-resource-evidence)
 and [the workspace API](RESIDENT_API.md#cluster-workspace) for boundaries.
 Verified household GPU execution, requirement-aware global placement,
 automatic capacity changes and provider provisioning remain separate work.
+Approved host drain/resume now gates both TUI and API admission without
+cancelling admitted turns; it retains weights and is not donor/server release.
+See [host drain](RESIDENT_API.md#drain-an-approved-host-without-interrupting-admitted-turns).
 
-### Planned extension: Colibri policy agent (not implemented)
+### Planned extension: vendor-independent agentic orchestration (not implemented)
 
-After the managed-service release baseline, a Colibri-backed agent may make
-capacity decisions from queue lengths, observed latency, resource pressure and
-costs. System One is a candidate decision interface; the agent checkpoint
-(for example Clef) and its actual runtime/tool support must be verified before
-integration. This extension is not a new prerequisite for the current release.
+After the managed-service release baseline, an external, interchangeable agent
+may make capacity decisions from queue lengths, observed latency, resource
+pressure and costs. Codex, Claude Code or another decision system are possible
+clients, not built-in dependencies or integrations claimed to exist today.
+Colibri remains the inference engine; the controller agent need not run on it.
+Agents will use the same authenticated, typed management API/CLI; an MCP
+adapter may expose that contract without introducing separate permissions.
+Actual client/tool support must be verified before integration. This extension
+is not a new prerequisite for the current release.
 
 The intended final mode is autonomous **within operator-authorized policy**,
 not unrestricted shell or cloud access. Typed tools will request an evaluated

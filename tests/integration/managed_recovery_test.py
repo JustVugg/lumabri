@@ -16,6 +16,8 @@ def verify_recovery(env, first, third, route, chat, request, cli, command, port,
         models = {first["name"]: {"mode": mode, "wait": wait}}
         if secondary:
             models[third["name"]] = {"mode": secondary}
+        elif mode in ("typed", "diverge", "truncate"):
+            models[third["name"]] = {"mode": "observe"}
         pending = control.with_suffix(".pending")
         pending.write_text(json.dumps({"nonce": nonce, "models": models}))
         pending.replace(control)
@@ -53,6 +55,7 @@ def verify_recovery(env, first, third, route, chat, request, cli, command, port,
         status, data = chat(route["id"])
         parsed = events(data); kinds = [kind for kind, _ in parsed]
         original = record(nonce, first)
+        print("RECOVERY CASE:", mode, secondary, flush=True)
         assert status == 200, (status, data)
         assert calibrations() == before, "failed/recovered turn replaced a no-replay timing"
         if mode == "typed" and secondary is None:
@@ -62,7 +65,11 @@ def verify_recovery(env, first, third, route, chat, request, cli, command, port,
             assert done["recovery_attempts"] == 1 and done["stats_scope"] == "final_attempt_only"
             assert done["observation_saved"] is False
         else:
-            assert kinds[-1] == "error" and "done" not in kinds, data
+            diagnostic = None
+            if kinds[-1] != "error" or "done" in kinds:
+                path = control.parent / (nonce + "-" + third["name"] + ".json")
+                diagnostic = json.loads(path.read_text()) if path.exists() else "secondary fault never activated"
+            assert kinds[-1] == "error" and "done" not in kinds, (mode, secondary, original, diagnostic, data)
             assert deltas(parsed) == base64.b64decode(original["visible"]), (parsed, original)
             assert ("recovering" in kinds) == (mode != "nonretryable"), data
             if mode == "diverge" or secondary == "short":

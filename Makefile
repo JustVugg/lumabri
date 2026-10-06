@@ -46,7 +46,7 @@ segment_chat test_backend_routes: src/runtime/lumabri_serve_control.h
 lumabri segment_chat test_backend_routes test_chat_ui test_home test_home_monitor test_memory_budget test_cluster: src/runtime/lumabri_session_limits.h
 lumabri segment_node segment_chat test_chat_ui test_host_session_pool test-home-monitor: src/runtime/lumabri_compute_broker.h
 test check-warnings: test_serve_control
-test check-warnings: test_host_session_pool test_hosted_sessions
+test check-warnings: test_host_session_pool test_hosted_sessions test_host_drain
 test check-warnings: test_compute_broker
 test check-warnings: test_portfolio
 test check-warnings: test_reply_stream
@@ -69,6 +69,9 @@ test_hosted_sessions: tests/c/test_hosted_sessions.c lumabri_proto.h lumabri_sec
 
 test_host_session_pool: tests/c/test_host_session_pool.c lumabri src/runtime/lumabri_host_sessions.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_host_session_pool.c src/ui/lumabri_tui.c $(MACHINE_SRC) lumabri_run_gate.c -o $@
+
+test_host_drain: tests/c/test_host_drain.c lumabri src/runtime/lumabri_host_sessions.h src/runtime/lumabri_host_control.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_host_drain.c src/ui/lumabri_tui.c $(MACHINE_SRC) lumabri_run_gate.c -o $@
 
 .PHONY: test-runtime-probe
 test-runtime-probe: tests/c/test_runtime_probe.c lumabri_runtime_probe.h src/runtime/lumabri_backend_policy.h lumabri_segment.h
@@ -95,7 +98,7 @@ check-warnings:
 	$(MAKE) -B all test_relay_exec test_swarm_fed test_key_rotation \
 		test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 test_exec2 test_accum_order test_hybrid_parallel test_residency_report test_model_family test_planner test_cluster test_memory_budget test_calibration test_metrics \
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
-		test_meminfo test_process_memory test_serve_control test_host_session_pool test_hosted_sessions test_compute_broker test_compute_lease test_content_filter \
+		test_meminfo test_process_memory test_serve_control test_host_session_pool test_hosted_sessions test_host_drain test_compute_broker test_compute_lease test_content_filter \
 		test_scheduler test_run_gate test_inventory test_home test_chat_ui test_weight_cache test_planner_io test_portfolio test_reply_stream test_chat_store test_model_routes test_replica_admission test_replica_rank test_replay_prefix \
 		CFLAGS='$(CFLAGS) -Werror'
 
@@ -122,6 +125,7 @@ lumabri test_chat_ui: src/runtime/lumabri_api.h src/runtime/lumabri_api_http.h s
 lumabri test_chat_ui test_host_session_pool test-home-monitor test_api_access: src/runtime/lumabri_operator_access.h src/runtime/lumabri_workspace.h
 lumabri test_chat_ui test_host_session_pool test-home-monitor: src/runtime/lumabri_model_routes.h src/runtime/lumabri_managed_models.h src/runtime/lumabri_replica_admission.h
 lumabri test_chat_ui test_host_session_pool test-home-monitor: src/runtime/lumabri_route_evidence.h src/planner/lumabri_replica_rank.h src/planner/lumabri_calibration_profiles.h
+lumabri test_chat_ui test_host_session_pool test-home-monitor: src/runtime/lumabri_host_control.h
 lumabri test_chat_ui test_host_session_pool test-home-monitor segment_chat test_segment_close: src/runtime/lumabri_request_seed.h src/runtime/lumabri_replay_prefix.h
 lumabri test_chat_ui test_host_session_pool test-home-monitor: src/runtime/lumabri_chat_history.h src/runtime/lumabri_chat_store.h build/web_assets.h
 
@@ -686,7 +690,7 @@ test-doctor: all
 	bash ./tests/integration/doctor_test.sh
 
 SANITIZE_FLAGS = -O1 -g -Wall -Wextra -fno-omit-frame-pointer -fsanitize=address,undefined
-test-sanitize:
+test-sanitize: build/web_assets.h
 	mkdir -p build/sanitize
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_segment_v2.c lumabri_segment.c -o build/sanitize/test_segment_v2
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_segment_discovery.c lumabri_segment_discovery.c lumabri_segment.c -o build/sanitize/test_segment_discovery
@@ -694,6 +698,7 @@ test-sanitize:
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_meminfo.c $(MACHINE_SRC) -o build/sanitize/test_meminfo
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_process_memory.c -o build/sanitize/test_process_memory
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_serve_control.c -o build/sanitize/test_serve_control
+	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_host_drain.c src/ui/lumabri_tui.c $(MACHINE_SRC) lumabri_run_gate.c -o build/sanitize/test_host_drain
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_compute_broker.c -o build/sanitize/test_compute_broker
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_compute_lease.c $(MACHINE_SRC) -o build/sanitize/test_compute_lease
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_content_filter.c -o build/sanitize/test_content_filter
@@ -717,6 +722,7 @@ test-sanitize:
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_meminfo
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_process_memory
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_serve_control
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/sanitize/test_host_drain
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_compute_broker
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_compute_lease
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_content_filter
@@ -1040,6 +1046,7 @@ test: all test_weight_cache test_key_rotation test_hedge test_local_fallback tes
 	./test_process_memory
 	./test_serve_control
 	./test_host_session_pool
+	./test_host_drain
 	./test_compute_lease
 	./test_compute_broker
 	./test_portfolio
@@ -1093,7 +1100,7 @@ clean:
 	      test_model_family test_planner test_planner_io test_cluster test_memory_budget test_calibration test_catalogue_advice test_metrics test_inventory test_home test_home_expert test_chat_ui test_weight_cache segment_budget_probe \
 	      test_nat_adopt test_rtt_refresh \
 	      test_verify_failover test_segment_v2 test_segment_discovery test_sampling \
-	      test_swarm_detail test_relay_rate test_machine test_meminfo test_process_memory test_serve_control test_host_session_pool test_hosted_sessions \
+	      test_swarm_detail test_relay_rate test_machine test_meminfo test_process_memory test_serve_control test_host_session_pool test_hosted_sessions test_host_drain \
 	      test_compute_lease test_content_filter test_scheduler test_run_gate \
 	      test_compute_broker test_portfolio test_reply_stream test_api_json test_api_http test_api_access test_chat_store test_model_routes test_replica_admission test_replica_rank test_replay_prefix \
 	      test_segment_v2_tsan tracker_tsan \

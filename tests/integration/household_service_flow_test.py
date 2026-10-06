@@ -293,6 +293,25 @@ def main():
             assert assert_stage_record(records[0]) == 1, "background preparation telemetry lost"
             chat.send("/quit\n")
             until(lambda: chat.p.poll() is not None, "requester chat did not close")
+        # Exercise cmd_host's real one-slot startup too. A manually built pool
+        # would miss accidentally routing the normal single-slot host to the
+        # legacy, non-controllable acceptor.
+        def api_command(*words):
+            result = subprocess.run([str(runtime / "lumabri"), "api", *words, "--tracker", tracker],
+                                    env=env("chatter"), text=True, capture_output=True, timeout=20)
+            assert result.returncode == 0, (words, result.stderr, result.stdout)
+            return json.loads(result.stdout)
+        saved = api_command("list")["models"]
+        assert len(saved) == 1, saved
+        allocation = saved[0]["id"]
+        initial_host = api_command("replica", allocation, "status")
+        assert initial_host["state"] == "accepting"
+        api_command("replica", allocation, "drain")
+        until(lambda: api_command("replica", allocation, "status")["state"] == "drained",
+              "host did not drain", 10)
+        resumed_host = api_command("replica", allocation, "resume")
+        assert resumed_host["instance"] == initial_host["instance"] and resumed_host["state"] == "accepting"
+        assert not resumed_host["weights_unloaded"]
         before = {name: service(name)["donor"] for name in ("a", "b")}
         assert all(x["segment_pid"] and x["phase"] in (4, 6) for x in before.values()), before
         assert all(x["compute"]["enabled"] for x in before.values()), "no private compute admission"

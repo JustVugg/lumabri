@@ -8,7 +8,7 @@
 typedef struct HostSessionPool HostSessionPool;
 typedef struct {
     HostSessionPool *pool;
-    int fd, used, reset_needed;
+    int fd, used, reset_needed, admitted;
     uint32_t index;
 } HostSessionSlot;
 
@@ -20,8 +20,45 @@ struct HostSessionPool {
     pthread_cond_t empty;
     HostSessionSlot slots[LMB_HOST_MAX_SESSIONS];
     uint32_t workers;
+    LmbHostControl control;
     _Atomic int stop, failed;
 };
+
+static int host_session_draining(HostSessionPool *pool) {
+    pthread_mutex_lock(&pool->lock);
+    int draining=(int)pool->control.draining;
+    pthread_mutex_unlock(&pool->lock);
+    return draining;
+}
+
+static void host_session_control(int fd, HostSessionPool *pool, const LmbMsg *request) {
+    const HostState *h=&pool->host;
+    uint8_t root[32], expected_root[32], instance[32]; uint32_t version,action; uint64_t expected;
+    LmbCur c={request->body,request->body_len,0};
+    /* A household token alone is not allocation ownership. Require both the
+     * pinned original requester and the exact approved checkpoint root. */
+    if (!h->client_key || !h->model_root || strlen(h->model_root)!=64 ||
+        !lmb_secure_peer_matches(fd,h->client_key) || lmb_unhex(expected_root,h->model_root,32) ||
+        request->pay_len || request->body_len!=LMB_HOST_CONTROL_REQUEST_BYTES ||
+        lmb_cur_u32(&c,&version) || version!=LMB_HOST_CONTROL_VERSION ||
+        lmb_cur_u32(&c,&action) || action>LMB_HOST_CONTROL_RESUME ||
+        lmb_cur_bytes(&c,root,32) || memcmp(root,expected_root,32) ||
+        lmb_cur_bytes(&c,instance,32) || lmb_cur_u64(&c,&expected) || c.off!=c.len) return;
+    pthread_mutex_lock(&pool->lock);
+    uint32_t status=lmb_host_control_apply(&pool->control,action,instance,expected) ? LMB_HOST_CONTROL_CONFLICT : 0;
+    LmbHostControl snapshot=pool->control; snapshot.connections=pool->workers;
+    pthread_mutex_unlock(&pool->lock);
+    if (action) {
+        char instance_text[65]; lmb_hex(instance_text,snapshot.instance,32);
+        fprintf(stderr,"[host-control] action=%s instance=%s revision=%llu conflict=%u connections=%u admitted=%u\n",
+            action==LMB_HOST_CONTROL_DRAIN ? "drain" : "resume",instance_text,
+            (unsigned long long)snapshot.revision,status,snapshot.connections,snapshot.requests);
+    }
+    LmbBuf body={0};
+    if (!lmb_host_control_reply(&body,status,root,&snapshot))
+        (void)lmb_send(fd,LMB_HOST_CONTROL_R,body.p,(uint32_t)body.len,NULL,0);
+    free(body.p);
+}
 
 static int host_session_cancelled(void *opaque) {
     HostSessionSlot *slot = opaque;
@@ -37,6 +74,7 @@ static int host_session_cancelled(void *opaque) {
 static int host_session_receive(HostSessionSlot *slot, HostState *h, HostInput *in) {
     double deadline = nowd() + h->idle_seconds;
     while (!g_stopping && !atomic_load(&slot->pool->stop) && nowd() < deadline) {
+        if (host_session_draining(slot->pool)) return -1;
         struct pollfd p = {slot->fd, POLLIN, 0};
         int ready = poll(&p, 1, 100);
         if (ready < 0 && errno == EINTR) continue;
@@ -68,6 +106,14 @@ static void *host_session_worker(void *opaque) {
         LmbBuf pending = {0};
         HostInput input = {.capture=&pending}; HostOutput output = {0};
         if (host_session_receive(slot, &h, &input)) { free(pending.p); break; }
+        pthread_mutex_lock(&pool->lock);
+        int draining=(int)pool->control.draining;
+        if (!draining) { slot->admitted=1; pool->control.requests++; }
+        pthread_mutex_unlock(&pool->lock);
+        if (draining) {
+            host_session_error(slot->fd,input.request_id,"host draining; request not admitted");
+            free(pending.p); break;
+        }
         double queued_at = nowd();
         char queued[128];
         int n = snprintf(queued, sizeof queued, "PROGRESS %s QUEUED %u %u\n",
@@ -99,6 +145,9 @@ static void *host_session_worker(void *opaque) {
             slot->index, queue_seconds, nowd()-input.started, !broken && !input.active);
         if (!broken && !input.active) {
             lmb_run_gate_leave(&pool->turns);
+            pthread_mutex_lock(&pool->lock);
+            slot->admitted=0; pool->control.requests--;
+            pthread_mutex_unlock(&pool->lock);
             continue;
         }
         /* Disconnect/timeout cancels only the active slot. Drain its terminal
@@ -107,15 +156,31 @@ static void *host_session_worker(void *opaque) {
         if (!broken && !g_stopping && !atomic_load(&pool->stop)) {
             char cancel[96];
             n = snprintf(cancel, sizeof cancel, "CANCEL %s\n", input.request_id);
-            if (n <= 0 || (size_t)n >= sizeof cancel || host_engine_write(h.engine, cancel, (size_t)n) ||
+            if ((h.engine->session_slots && (n <= 0 || (size_t)n >= sizeof cancel ||
+                 host_engine_write(h.engine, cancel, (size_t)n))) ||
                 host_reset_conversation(h.engine, &h, &input, &output)) broken = 1;
         }
         if (broken) { atomic_store(&pool->failed, 1); atomic_store(&pool->stop, 1); }
         lmb_run_gate_leave(&pool->turns);
         break;
     }
+    int reset_needed=1;
+    /* Preserve the original single-conversation lifetime: closing a client
+     * retires its KV now, not when another client happens to arrive. This
+     * slot remains occupied, so no other worker can write the one-slot engine.
+     * Multi-slot cleanup still resets under the shared turn gate on reuse. */
+    if (h.slots==1 && !g_stopping && !atomic_load(&pool->stop)) {
+        HostInput empty={0}; HostOutput ack={0};
+        if (!host_reset_conversation(h.engine,&h,&empty,&ack)) {
+            reset_needed=0;
+            fprintf(stderr,"[host] conversation reset; resident weights retained\n");
+        } else if (!g_stopping && !atomic_load(&pool->stop)) {
+            atomic_store(&pool->failed,1); atomic_store(&pool->stop,1);
+        }
+    }
     pthread_mutex_lock(&pool->lock);
-    lmb_close(slot->fd); slot->fd = -1; slot->used = 0; slot->reset_needed = 1;
+    if (slot->admitted) { slot->admitted=0; pool->control.requests--; }
+    lmb_close(slot->fd); slot->fd = -1; slot->used = 0; slot->reset_needed = reset_needed;
     pool->workers--; pthread_cond_broadcast(&pool->empty);
     pthread_mutex_unlock(&pool->lock);
     return NULL;
@@ -123,6 +188,8 @@ static void *host_session_worker(void *opaque) {
 
 static int host_sessions_run(int listener, const HostState *h, uint32_t queue_ms) {
     HostSessionPool pool = {.host=*h, .queue_ms=queue_ms};
+    pool.host.pooled=1;
+    pool.control.revision=1; lmb_random(pool.control.instance,sizeof pool.control.instance);
     if (pthread_mutex_init(&pool.lock, NULL)) return 1;
     if (pthread_cond_init(&pool.empty, NULL)) { pthread_mutex_destroy(&pool.lock); return 1; }
     if (lmb_run_gate_init(&pool.turns, 1, h->slots-1)) {
@@ -144,13 +211,20 @@ static int host_sessions_run(int listener, const HostState *h, uint32_t queue_ms
         if (!ready) continue;
         int fd = accept(listener, NULL, NULL);
         if (fd < 0) continue;
-        if (host_read_hello(fd, h)) { lmb_close(fd); continue; }
+        LmbMsg request={0};
+        if (host_read_request(fd,h,&request)) { lmb_close(fd); continue; }
+        if (request.op==LMB_HOST_CONTROL) {
+            host_session_control(fd,&pool,&request); lmb_msg_free(&request); lmb_close(fd); continue;
+        }
+        int invalid=request.op!=LMB_HOST_HELLO || request.body_len || request.pay_len;
+        lmb_msg_free(&request);
+        if (invalid) { lmb_close(fd); continue; }
         pthread_mutex_lock(&pool.lock);
         HostSessionSlot *slot = NULL;
         for (uint32_t i = 0; i < h->slots; i++) if (!pool.slots[i].used) { slot = &pool.slots[i]; break; }
         HostState greeting = *h;
         greeting.sessions_free = h->slots-pool.workers;
-        if (!slot) {
+        if (!slot || pool.control.draining) {
             pthread_mutex_unlock(&pool.lock);
             (void)host_greet(fd, h, 1); lmb_close(fd); continue;
         }

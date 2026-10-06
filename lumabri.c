@@ -3227,9 +3227,12 @@ typedef struct {
     const uint8_t *client_key; /* optional identity bound by an accepted home plan */
     const char *model_root; /* authenticated accepted checkpoint, not a peer's label */
     uint32_t slots, routed_slot, sessions_free;
+    int pooled; /* return from bridge after one turn, including a one-slot pool */
 } HostState;
 
-static int host_read_hello(int fd, const HostState *h) {
+#include "src/runtime/lumabri_host_control.h"
+
+static int host_read_request(int fd, const HostState *h, LmbMsg *request) {
     lmb_set_io_timeout(fd, 2000);
     uint64_t prior_deadline = lmb_read_deadline_ms, now = lmb_io_monotonic_ms();
     if (!now) return -1;
@@ -3251,11 +3254,18 @@ static int host_read_hello(int fd, const HostState *h) {
             rc = !lmb_token_equal(supplied, expected);
         }
         lmb_msg_free(&m);
-        if (!rc) rc = lmb_send(fd, LMB_OK, NULL, 0, NULL, 0) || lmb_recv_bounded(fd, &m, 0, 2000);
+        if (!rc) rc = lmb_send(fd, LMB_OK, NULL, 0, NULL, 0) ||
+            lmb_recv_bounded(fd, &m, LMB_HOST_CONTROL_REQUEST_BYTES, 2000);
     } else if (token && *token) rc = -1;
-    if (!rc) rc = m.op != LMB_HOST_HELLO || m.body_len || m.pay_len;
+    if (!rc) { *request=m; return 0; }
     lmb_msg_free(&m);
-    return rc ? -1 : 0;
+    return -1;
+}
+
+static int host_read_hello(int fd, const HostState *h) {
+    LmbMsg request={0};
+    int rc=host_read_request(fd,h,&request) || request.op!=LMB_HOST_HELLO || request.body_len || request.pay_len;
+    lmb_msg_free(&request); return rc ? -1 : 0;
 }
 
 static int host_greet(int fd, const HostState *h, int busy) {
@@ -3298,9 +3308,11 @@ typedef struct {
 } HostInput;
 
 /* A stalled Edge must not hold every admitted conversation indefinitely. Only
- * the turn-gate owner writes this nonblocking pipe in multi-session mode. */
+ * the turn-gate owner writes a pool's nonblocking pipe, including one slot. */
 static int host_engine_write(Engine *e, const void *data, size_t bytes) {
-    if (e->session_slots <= 1) return engine_write_full(e->to, data, bytes);
+    int flags=fcntl(e->to,F_GETFL,0);
+    if (flags<0) return -1;
+    if (!(flags & O_NONBLOCK)) return engine_write_full(e->to, data, bytes);
     const uint8_t *p = data; double deadline = nowd() + 5;
     while (bytes) {
         if (g_stopping || nowd() >= deadline) { errno = ETIMEDOUT; return -1; }
@@ -3359,14 +3371,16 @@ static int host_header(HostInput *in, Engine *e, const HostState *h) {
     }
     fields = sscanf(in->header, "CANCEL %63s %c", id, &extra);
     if (fields == 1) {
-        if (h->slots > 1 && (!in->active || strcmp(id, in->request_id))) return -1;
+        if ((h->pooled || h->slots > 1) && (!in->active || strcmp(id, in->request_id))) return -1;
+        if (h->pooled && !e->session_slots) return -1; /* legacy single: close + drain/reset */
         int rc = host_input_write(in, e, in->header, in->header_len);
         in->header_len = 0;
         return rc;
     }
     fields = sscanf(in->header, "STOP %63s %c", id, &extra);
     if (fields == 1) {
-        if (h->slots > 1 && (!in->active || strcmp(id, in->request_id))) return -1;
+        if ((h->pooled || h->slots > 1) && (!in->active || strcmp(id, in->request_id))) return -1;
+        if (h->pooled && !e->session_slots) return -1;
         int rc = host_input_write(in, e, in->header, in->header_len);
         in->header_len = 0;
         return rc;
@@ -3524,7 +3538,7 @@ static int host_bridge(int fd, Engine *e, const HostState *h,
             if (completed) last_input = nowd();
             if (lmb_send(fd, LMB_HOST_STREAM, NULL, 0, buf, (uint32_t)got))
                 break;
-            if (completed && h->slots > 1) break;
+            if (completed && (h->pooled || h->slots > 1)) break;
         }
         if ((p[0].revents | p[1].revents) & (POLLERR | POLLHUP)) break;
     }
@@ -3680,13 +3694,16 @@ static int cmd_host(int argc, char **argv) {
     HostState h = { &eng, mtype, host_engine, 0, max_frame,
                     (uint32_t)max_new, idle_seconds, request_seconds,
                     client_key ? allowed_client : NULL,
-                    getenv("LUMABRI_EXPECT_MODEL_ROOT"), session_slots, 0, session_slots };
-    if (session_slots > 1) {
-        if (max_frame > (1u << 20)) {
+                    getenv("LUMABRI_EXPECT_MODEL_ROOT"), session_slots, 0, session_slots, 0 };
+    /* Older one-slot codecs omit LUMABRI_SLOTS; zero is the legacy single
+     * conversation dialect, not lack of capacity. RESET still gates reuse. */
+    int slots_match=eng.session_slots==session_slots || (session_slots==1 && !eng.session_slots);
+    if (session_slots > 1 || (eng.segment && eng.reset_supported && slots_match)) {
+        if (session_slots > 1 && max_frame > (1u << 20)) {
             fprintf(stderr, "[host] multi-session frames are limited to 1 MiB per approved slot\n");
             close(lfd); engine_stop(&eng); return 1;
         }
-        if (!eng.segment || eng.session_slots != session_slots || !eng.reset_supported) {
+        if (!eng.segment || !slots_match || !eng.reset_supported) {
             fprintf(stderr, "[host] requested multiple sessions but the engine did not advertise matching isolated slots\n");
             close(lfd); engine_stop(&eng); return 1;
         }
@@ -3796,6 +3813,8 @@ static void *host_client_pump(void *arg) {
     return NULL;
 }
 
+/* Preserve authenticated BUSY separately from transport/contract failures. */
+#define HOST_CONNECT_BUSY 1
 static int host_connect(const char *addr, const char *model_type, const char *expected_key,
                         const char *expected_root, Engine *e,
                         int *requested_max_new, int announce) {
@@ -3884,7 +3903,7 @@ static int host_connect(const char *addr, const char *model_type, const char *ex
     }
     if (!sessions_free) {
         fprintf(stderr, "[lumabri] host %s is busy (0 sessions free)\n", addr);
-        lmb_close(fd); return -1;
+        lmb_close(fd); return HOST_CONNECT_BUSY;
     }
     if (host_max_new && requested_max_new && *requested_max_new > (int)host_max_new) {
         if (announce) printf("  %shost limit: max-new reduced from %d to %u%s\n", C_DIM,
