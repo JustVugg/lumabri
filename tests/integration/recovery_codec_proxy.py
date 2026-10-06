@@ -81,6 +81,9 @@ def main():
                         pass
                 if fault:
                     generated.extend(data)
+                    if fault["mode"] == "observe":
+                        out.write(line + data + b"\n"); out.flush()
+                        continue
                     if not visible and data and fault["mode"] != "short":
                         visible = data[:1]
                         if fault["mode"] == "diverge":
@@ -104,7 +107,7 @@ def main():
                         time.sleep(.02)
                 if mode == "truncate":
                     return 0
-                if mode == "short":
+                if mode in ("short", "observe"):
                     out.write(line)
                 else:
                     reason = b"invalid request fixture" if mode == "nonretryable" else b"LMB_REPLICA_UNAVAILABLE injected real-output boundary"
