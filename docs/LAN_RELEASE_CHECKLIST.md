@@ -33,14 +33,26 @@ below. Historical observations remain here as evidence, not current promises.
   A cost-aware preview is not yet an automatic global placement/cost controller.
 - [x] Permanent API keeper (#196): authenticated same-user control, independent
   TUI/manager lifetime, isolated stop and crash/occupied-port handling.
-- [ ] Bundled web/private history (#197): local integration includes real
-  OLMoE, separate users, TUI coexistence and saved replies. Delivery requires
-  exact-head native CI and normal merge.
-- [ ] Managed model identities over independently approved resident replicas:
+- [x] Bundled web/private history (#197): real OLMoE, separate users,
+  TUI coexistence and saved replies; native CI passed before normal merge.
+- [x] Managed model identities over independently approved resident replicas
+  (#198), with exact-allocation shared admission across aliases (#199):
   bounded operator registry, immutable checkpoint/numeric semantics and
   pre-submission availability routing. This is not automatic global placement,
-  mid-response recovery or elasticity. Delivery requires the real OLMoE replica
-  gate and exact-head native CI.
+  mid-response recovery or elasticity. Real OLMoE replica gates and native CI
+  passed before normal merge.
+- [x] Session observations (#200): completed API turns update the same
+  provenance-bound evidence as the TUI; all eight checks passed before merge.
+- [x] Read-only operator workspace (#201) and measured/declared-cost replica
+  preferences (#202): all eight checks passed on each final head before their
+  ordered normal merges. These are not global optimization or proven savings.
+- [ ] Bounded managed API replay (#203): implemented and locally tested,
+  awaiting exact-head CI and normal merge. Replay does not restart keepers or
+  prepare capacity.
+- [ ] Authenticated host drain/resume: one-slot and multi-slot hosts finish
+  admitted work and refuse new turns. Local encrypted and OLMoE tiny gates
+  pass; native CI/merge are still required. This retains weights and is not
+  node-level drain, automatic eviction or server release.
 - [ ] Requirements-based global placement and measured cost comparison;
   TUI/web/application management through one public service interface;
   recovery, elasticity, provider integration and
@@ -53,7 +65,11 @@ below. Historical observations remain here as evidence, not current promises.
 - [x] Native Intel/ARM CI with and without OpenMP and isolated two-donor flow (#151).
 - [ ] Rerun the physical Windows/WSL + macOS 12.6 trial on the final build.
 
-## Remaining roadmap gates
+## Historical LAN gate inventory (superseded by managed release work above)
+
+This older inventory is retained for context, not as the current completion
+count or evidence that a later-tested path remains unimplemented. The current
+resident product does not use checkpoint disk reads during inference.
 
 1. Actual two-compute-node physical LAN chain: local oracle, split oracle,
    per-node layer ranges and memory, fixed-thread and full-hardware timings.

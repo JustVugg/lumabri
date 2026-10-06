@@ -153,8 +153,57 @@ route now uses version two, which older binaries do not understand.
 For each new chat request, the gateway rechecks the live allocation and host,
 then tries the next approved member if the previous one cannot be opened.
 This initial selection happens **before submitting any prompt**. If no approved
-replica is available, HTTP 503 is returned; the gateway does not reload a model
-or replay old donor approvals.
+replica is available, HTTP 503 is returned, or HTTP 429 `replicas_busy` when
+at least one usable candidate refuses admission as BUSY. The gateway does not
+reload a model or replay old donor approvals.
+
+### Drain an approved host without interrupting admitted turns
+
+The local operator can control an exact saved allocation:
+
+```sh
+./lumabri api replica ALLOCATION_ID status
+./lumabri api replica ALLOCATION_ID drain
+./lumabri api replica ALLOCATION_ID resume
+```
+
+Use `--tracker HOST:PORT` when not using the configured household. Each command
+returns a versioned JSON observation: host instance/revision, `accepting`,
+`draining` or `drained`, connected conversations and admitted requests. A drain
+acknowledgement is not completion: poll status until `drained` if completion is
+needed. Queries do not open an inference session or touch the model weights.
+
+Only the original approved requester identity can control the host, over the
+encrypted connection and with the exact signed allocation root. A shared
+household token alone is insufficient. Updates compare the observed process
+instance and revision; a concurrent change fails instead of overwriting it.
+The wire protocol permits retry of a lost mutation reply at the same fence.
+Unreachable, old or incompatible hosts are **unknown**, never assumed idle.
+
+Drain is serialized with actual host admission, so it applies to both direct
+TUI clients and API aliases. It refuses new connections with BUSY, closes idle
+conversations and rejects turns not yet fully received/admitted. Already
+admitted active or queued turns retain their normal cancellation/deadline
+rules and can finish; draining does not cancel them. After those clients leave,
+status is `drained`. Resume admits new conversations on the same resident
+engine; prior conversation state is reset before reuse. Other model hosts on
+the same donor are unaffected. Both one-slot and multi-slot Segment hosts
+use this pool; legacy non-Segment hosts do not support this control.
+Hosted one-slot codecs advertise their slot and handle cancellation like the
+multi-slot codec. Standalone single-slot CLI pipes keep their existing EOF
+semantics. Older single-slot engines without that control capability are
+drained/reset on disconnect instead of receiving an unsupported CANCEL.
+An authenticated BUSY response (including drain or cancellation cleanup) stays
+HTTP 429 `replicas_busy` at the API boundary; it is not reported as an unavailable
+allocation. A pinned-identity or checkpoint mismatch remains a failure, not BUSY.
+
+This is a host admission primitive, **not automatic scale-down**. It does not
+send donor RELEASE, reclaim RAM, stop a server or certify that unrelated direct
+Segment clients are idle. No HTTP mutation permission is implied by the
+read-only workspace operator grant. Node-level drain, policy/cooldown/minimum
+capacity decisions and provider lifecycle remain separate requirements before
+automatic resource release. State is scoped to the running host instance,
+not a persistent policy that should be replayed after a replacement process.
 
 ### Bounded, visible response recovery
 
@@ -316,8 +365,8 @@ Before streaming, errors use JSON `{"error":"CODE"}` and HTTP status:
 | 404 | Granted allocation has no saved resident plan |
 | 408 | Incomplete request body exceeded its receive deadline |
 | 409 | History revision conflict, occupied history lock or storage quota |
-| 429 | User already has two in-flight requests, or approved replicas are occupied |
-| 503 | Approved allocation unavailable, host busy, or submit failure |
+| 429 | User already has two in-flight requests, or approved replicas are occupied/draining |
+| 503 | Approved allocation unavailable or submit failure |
 
 ## Bounds and isolation
 

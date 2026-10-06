@@ -45,7 +45,8 @@ static int api_plan_open(const LmbResidentPlan *plan, Engine *engine, uint32_t m
     if (max_new>plan->max_new) return -1;
     for (uint32_t i=0; i<plan->execution.count; i++) if (home_resident_peer(plan,i,0)) return -1;
     int requested=(int)max_new;
-    if (host_connect(plan->host,NULL,plan->host_key,plan->root,engine,&requested,0)) return -1;
+    int connected=host_connect(plan->host,NULL,plan->host_key,plan->root,engine,&requested,0);
+    if (connected) return connected;
     if (requested!=(int)max_new || engine->proto!=PROTO_SERVE2) { engine_stop(engine); return -1; }
     return 0;
 }
@@ -94,7 +95,11 @@ static int api_model_open_ex(int access, const char *tracker, const uint8_t id[3
             int admitted=lmb_replica_admit(access,plan->allocation,permit);
             if (admitted==LMB_REPLICA_BUSY) { status=429; *error="replicas_busy"; }
             else if (admitted) { *error="admission_unavailable"; }
-            else if (!api_plan_open(plan,engine,max_new)) status=0;
+            else {
+                int opened=api_plan_open(plan,engine,max_new);
+                if (!opened) status=0;
+                else if (opened==HOST_CONNECT_BUSY) { status=429; *error="replicas_busy"; }
+            }
         }
     } else if (max_new>route.max_new) { status=400; *error="max_tokens_exceeds_plan"; }
     else {
@@ -109,7 +114,11 @@ static int api_model_open_ex(int access, const char *tracker, const uint8_t id[3
         int admitted=lmb_replica_admit(access,plan->allocation,permit);
         if (admitted==LMB_REPLICA_BUSY) { status=429; *error="replicas_busy"; continue; }
         if (admitted) { status=503; *error="admission_unavailable"; break; }
-        if (api_plan_open(plan,engine,max_new)) { close(*permit); *permit=-1; continue; }
+        int opened=api_plan_open(plan,engine,max_new);
+        if (opened) {
+            if (opened==HOST_CONNECT_BUSY) { status=429; *error="replicas_busy"; }
+            close(*permit); *permit=-1; continue;
+        }
         if (!api_route_engine_matches(&route,engine) || (require_seed && !engine->request_seed_supported)) {
             engine_stop(engine); close(*permit); *permit=-1; continue;
         }
@@ -144,6 +153,36 @@ static int api_route_policy(int access, const char *tracker, char *const *args, 
         if (!rc) { Cap record={0}; rc=api_route_record(&record,&route,0,1); if (!rc) puts(record.p); free(record.p); }
     }
     close(dir); return rc ? 1 : 0;
+}
+/* Local operator only. A saved plan selects the pinned endpoint; the actual
+ * host still authenticates its original requester. This never sends RELEASE
+ * to donors: drained Edge turns are not proof of idle direct Segment users. */
+static int api_replica_control(const char *tracker, char *const *args, unsigned count) {
+    uint8_t allocation[32]; uint32_t action=LMB_HOST_CONTROL_QUERY;
+    if (!*tracker || count<1 || count>2 || strlen(args[0])!=64 || lmb_unhex(allocation,args[0],32)) return 1;
+    if (count==2) {
+        if (!strcmp(args[1],"drain")) action=LMB_HOST_CONTROL_DRAIN;
+        else if (!strcmp(args[1],"resume")) action=LMB_HOST_CONTROL_RESUME;
+        else if (strcmp(args[1],"status")) return 1;
+    }
+    LmbResidentPlan *plan=calloc(1,sizeof *plan); if (!plan) return 1;
+    LmbHostControl observed={0},result={0};
+    int bad=api_find_plan(tracker,allocation,plan) ||
+        lmb_host_control_rpc(plan->host,plan->host_key,plan->root,LMB_HOST_CONTROL_QUERY,NULL,&observed);
+    if (!bad && action) bad=lmb_host_control_rpc(plan->host,plan->host_key,plan->root,action,&observed,&result);
+    else result=observed;
+    free(plan);
+    if (bad) {
+        fprintf(stderr,"Host control unavailable or changed concurrently. No idle state is assumed and no weights were unloaded.\n");
+        return 1;
+    }
+    char instance[65]; lmb_hex(instance,result.instance,32);
+    printf("{\"schema\":1,\"allocation\":\"%s\",\"instance\":\"%s\",\"revision\":%llu,"
+        "\"state\":\"%s\",\"connections\":%u,\"admitted_requests\":%u,\"weights_unloaded\":false}\n",
+        args[0],instance,(unsigned long long)result.revision,
+        !result.draining ? "accepting" : result.requests || result.connections ? "draining" : "drained",
+        result.connections,result.requests);
+    return 0;
 }
 /* Registration checks the real authenticated numeric contract without
  * submitting a prompt. No half-validated replica set is persisted. */

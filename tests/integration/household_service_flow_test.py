@@ -54,7 +54,9 @@ def main():
         try:
             for port in range(base, base + 64):
                 sock = socket.socket(); sockets.append(sock)
-                sock.bind(("127.0.0.1", port))
+                # Match the runtime's wildcard listener: loopback-only bind
+                # can succeed while another interface already owns this port.
+                sock.bind(("0.0.0.0", port))
             break
         except OSError:
             continue
@@ -291,6 +293,25 @@ def main():
             assert assert_stage_record(records[0]) == 1, "background preparation telemetry lost"
             chat.send("/quit\n")
             until(lambda: chat.p.poll() is not None, "requester chat did not close")
+        # Exercise cmd_host's real one-slot startup too. A manually built pool
+        # would miss accidentally routing the normal single-slot host to the
+        # legacy, non-controllable acceptor.
+        def api_command(*words):
+            result = subprocess.run([str(runtime / "lumabri"), "api", *words, "--tracker", tracker],
+                                    env=env("chatter"), text=True, capture_output=True, timeout=20)
+            assert result.returncode == 0, (words, result.stderr, result.stdout)
+            return json.loads(result.stdout)
+        saved = api_command("list")["models"]
+        assert len(saved) == 1, saved
+        allocation = saved[0]["id"]
+        initial_host = api_command("replica", allocation, "status")
+        assert initial_host["state"] == "accepting"
+        api_command("replica", allocation, "drain")
+        until(lambda: api_command("replica", allocation, "status")["state"] == "drained",
+              "host did not drain", 10)
+        resumed_host = api_command("replica", allocation, "resume")
+        assert resumed_host["instance"] == initial_host["instance"] and resumed_host["state"] == "accepting"
+        assert not resumed_host["weights_unloaded"]
         before = {name: service(name)["donor"] for name in ("a", "b")}
         assert all(x["segment_pid"] and x["phase"] in (4, 6) for x in before.values()), before
         assert all(x["compute"]["enabled"] for x in before.values()), "no private compute admission"
@@ -463,7 +484,14 @@ def main():
                 third_plan = tmp / "third.plan"; shutil.copyfile(record, third_plan); third_plan.chmod(0o600)
                 replica.send("/quit\n")
                 until(lambda: replica.p.poll() is not None, "replica TUI did not close")
-                assert all(service(name)["donor"]["model_count"] == 3 for name in ("a", "b"))
+                replica_live = {name: service(name)["donor"] for name in ("a", "b")}
+                assert all(s["model_count"] == 3 for s in replica_live.values())
+                # As with the second model, READY precedes the inventory
+                # heartbeat. Do not benchmark while the leased workload still
+                # describes two allocations or pending (larger) reservations.
+                until(lambda: workload_ready(3) and sorted(n["workload"]["reserved_bytes"] for n in observed) ==
+                      sorted(s["reserved_total_bytes"] for s in replica_live.values()),
+                      "three committed models have not reached the leased inventory", 30)
                 from managed_routes_test import verify_managed_routes
                 verify_managed_routes(runtime, env("chatter"), tracker, first_plan, third_plan, names[4], tmp)
             # The authenticated release names the first allocation, not the

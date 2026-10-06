@@ -10,6 +10,7 @@ import socket
 import struct
 import subprocess
 import threading
+import time
 
 
 def verify_managed_routes(runtime, env, tracker, first_plan, third_plan, first_name, artifacts):
@@ -125,6 +126,36 @@ def verify_managed_routes(runtime, env, tracker, first_plan, third_plan, first_n
         assert chat(first["id"])[0] == 429, "raw allocation bypassed its existing permit"
         command("model-remove", alias["id"])
         unhold(first_busy); unhold(third_busy)
+        # Drain is enforced by the actual host, not merely this HTTP gateway:
+        # aliases and direct Hosted clients share the same admission boundary.
+        def drain(member):
+            initial = json.loads(command("replica", member["id"], "status"))
+            assert initial["state"] == "accepting" and not initial["weights_unloaded"]
+            changed = json.loads(command("replica", member["id"], "drain"))
+            assert changed["instance"] == initial["instance"] and changed["revision"] == initial["revision"] + 1
+            deadline = time.monotonic() + 5
+            while changed["state"] != "drained":
+                assert time.monotonic() < deadline, changed
+                time.sleep(.05)
+                changed = json.loads(command("replica", member["id"], "status"))
+            assert changed["connections"] == changed["admitted_requests"] == 0
+            return changed
+
+        before_log = len(policy_log.read_text())
+        first_drained = drain(first)
+        status, data = chat(route["id"])
+        assert status == 200 and b"event: done\n" in data and b"event: error\n" not in data, (status, data)
+        assert "allocation=" + third["id"] in policy_log.read_text()[before_log:], "draining replica admitted new inference"
+        third_drained = drain(third)
+        status, data = chat(route["id"])
+        assert status == 429 and json.loads(data)["error"] == "replicas_busy", (status, data)
+        for member, previous in ((first, first_drained), (third, third_drained)):
+            resumed = json.loads(command("replica", member["id"], "resume"))
+            assert resumed["state"] == "accepting" and resumed["instance"] == previous["instance"]
+            assert resumed["revision"] == previous["revision"] + 1 and not resumed["weights_unloaded"]
+        status, data = chat(route["id"])
+        assert status == 200 and b"event: done\n" in data and b"event: error\n" not in data, (status, data)
+        print("MANAGED DRAIN: PASS (real resident hosts refuse new turns, alternate approved replica, no capacity, resume same engines)", flush=True)
         # Two actual gateway workers generate concurrently, not just fixture
         # reservations. A barrier aligns submission; each model instance has
         # its own conversation state and exact-allocation admission permit.
