@@ -15,6 +15,26 @@ import sys
 import time
 
 
+def install(target):
+    """Pin the test interpreter, avoiding Apple's arm64e /usr/bin/env loader.
+
+    The real native engine is arm64 and its injected weight loader is too.
+    Routing that injection through an arm64e system executable fails before
+    Python can run. CI's setup-python interpreter matches its native build.
+    Only install beside an explicitly saved real engine, never overwrite it.
+    """
+    target = Path(target)
+    interpreter = str(Path(sys.executable).resolve())
+    if any(c.isspace() for c in interpreter) or len(os.fsencode(interpreter)) > 120:
+        raise ValueError("test interpreter path cannot be represented by a portable shebang")
+    if target.name != "segment_chat" or not target.with_name("segment_chat.real").is_file():
+        raise ValueError("save the real engine as segment_chat.real in a disposable test runtime first")
+    source = Path(__file__).read_bytes().split(b"\n", 1)[1]
+    with target.open("xb") as installed:
+        installed.write(b"#!" + os.fsencode(interpreter) + b"\n" + source)
+        os.fchmod(installed.fileno(), 0o755)
+
+
 def main():
     real = str(Path(__file__).with_name("segment_chat.real"))
     if "--serve" not in sys.argv or not os.environ.get("LUMABRI_TEST_RECOVERY_CONTROL"):
@@ -23,7 +43,7 @@ def main():
     control = Path(os.environ["LUMABRI_TEST_RECOVERY_CONTROL"])
     child_env = dict(os.environ)
     if sys.platform == "darwin":
-        # The test's /usr/bin/env interpreter boundary can strip DYLD_*.
+        # Interpreter boundaries can strip DYLD_*.
         # Restore only the disposable candidate's own loader for its real
         # Segment child, as the normal native Lumabri launcher already does.
         directory = Path(real).parent
@@ -107,4 +127,7 @@ def main():
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    if len(sys.argv) == 3 and sys.argv[1] == "--install":
+        install(sys.argv[2])
+    else:
+        raise SystemExit(main())
