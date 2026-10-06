@@ -82,3 +82,4 @@ test_inventory
 test_home
 test_home_expert
 test_chat_ui
+test_node_control

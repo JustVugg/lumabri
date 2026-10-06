@@ -14,6 +14,7 @@
 #include "lumabri_ready.h"
 #include "lumabri_home_net.h"
 #include "src/runtime/lumabri_compute_broker.h"
+#include "src/runtime/lumabri_node_control.h"
 
 #include <pthread.h>
 #include <dirent.h>
@@ -24,6 +25,7 @@
 #include <string.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #ifdef __APPLE__
 #include <mach/mach.h>
 #endif
@@ -115,6 +117,9 @@ typedef struct {
     _Atomic uint64_t expert_runs;
     int home_accelerator;
     uint8_t home_allocation[32];
+    int control_fd;
+    LmbNodeControl control; /* protected by sessions_lock, including Hybrid admission */
+    _Atomic int manual_draining; /* governor publication, not an admission lock */
     TrackerRegistration registration;
 } Node;
 
@@ -178,8 +183,10 @@ static void *governor_worker(void *opaque) {
         LmbGovernorState state = lmb_governor_poll(&node->governor);
         int process_limited = process_budget_exhausted(node);
         int residency_lost = lmb_resident_memory_check();
-        int accepting = state == LMB_GOV_ACTIVE && !process_limited && !residency_lost;
+        int accepting = state == LMB_GOV_ACTIVE && !process_limited && !residency_lost &&
+                        !atomic_load(&node->manual_draining);
         pthread_mutex_lock(&node->registration.lock);
+        if (atomic_load(&node->manual_draining)) accepting=0;
         if (accepting)
             node->registration.advert.flags &= ~LMB_SEG_ADVERT_DRAINING;
         else
@@ -228,6 +235,66 @@ static void stop_handler(int sig) {
     int fd = g_listen_fd;
     g_listen_fd = -1;
     if (fd >= 0) (close)(fd);
+}
+
+/* This descriptor is inherited from the allocation keeper, not opened from
+ * a filesystem path or a peer-supplied endpoint. Data-plane authentication
+ * remains unchanged: the requester gains no Segment RUN capability. */
+static int node_control_fd(void) {
+    const char *text=getenv("LUMABRI_NODE_CONTROL_FD");
+    if (!text || !*text) return -1;
+    char *end; errno=0; long fd=strtol(text,&end,10);
+    struct sockaddr_un address; socklen_t size=sizeof address;
+    int type=0; socklen_t type_size=sizeof type;
+    if (errno || *end || fd<3 || fd>INT_MAX ||
+        getsockname((int)fd,(struct sockaddr *)&address,&size) || address.sun_family!=AF_UNIX ||
+        getsockopt((int)fd,SOL_SOCKET,SO_TYPE,&type,&type_size) || type!=SOCK_STREAM ||
+        fcntl((int)fd,F_SETFD,FD_CLOEXEC)) return -2;
+    unsetenv("LUMABRI_NODE_CONTROL_FD"); return (int)fd;
+}
+
+static void *node_control_worker(void *opaque) {
+    Node *node=opaque;
+    while (!g_stop && !node->registration.stop) {
+        struct pollfd ready={node->control_fd,POLLIN,0};
+        int rc=poll(&ready,1,100);
+        if (rc<0 && errno==EINTR) continue;
+        if (rc<0 || (ready.revents & (POLLERR|POLLHUP|POLLNVAL))) break;
+        if (!rc) continue;
+        uint8_t request[LMB_NODE_CONTROL_REQUEST_BYTES], reply[LMB_NODE_CONTROL_REPLY_BYTES];
+        uint64_t deadline=lmb_io_monotonic_ms()+2000;
+        if (lmb_node_control_io(node->control_fd,request,sizeof request,0,deadline) ||
+            lmb_get32(request)!=LMB_NODE_CONTROL_VERSION || lmb_get32(request+4)>LMB_NODE_CONTROL_RESUME) break;
+        uint32_t action=lmb_get32(request+4);
+        if (pthread_mutex_trylock(&node->sessions_lock)) {
+            /* Engine session creation can be slow. Do not poison the private
+             * channel by waiting past its deadline, or invent idle counts. */
+            memset(reply,0,sizeof reply); lmb_put32(reply,LMB_NODE_CONTROL_VERSION);
+            lmb_put32(reply+4,LMB_NODE_CONTROL_BUSY);
+            if (lmb_node_control_io(node->control_fd,reply,sizeof reply,1,deadline)) break;
+            continue;
+        }
+        uint32_t status=lmb_node_control_apply(&node->control,action,request+8,lmb_node_control_u64(request+40)) ?
+            LMB_NODE_CONTROL_CONFLICT : 0;
+        atomic_store(&node->manual_draining,(int)node->control.draining);
+        LmbNodeControl snapshot=node->control;
+        snapshot.sessions=0;
+        for (size_t i=0;i<NODE_SESSIONS_MAX;i++) snapshot.sessions+=(node->sessions[i].used!=0);
+        if (snapshot.draining) {
+            pthread_mutex_lock(&node->registration.lock);
+            node->registration.advert.flags |= LMB_SEG_ADVERT_DRAINING;
+            pthread_mutex_unlock(&node->registration.lock);
+        }
+        pthread_mutex_unlock(&node->sessions_lock);
+        lmb_node_control_reply(reply,status,&snapshot);
+        if (action) fprintf(stderr,"[segment-control] action=%s revision=%llu conflict=%u sessions=%u experts=%u\n",
+            action==LMB_NODE_CONTROL_DRAIN ? "drain" : "resume",(unsigned long long)snapshot.revision,
+            status,snapshot.sessions,snapshot.experts);
+        if (lmb_node_control_io(node->control_fd,reply,sizeof reply,1,deadline)) break;
+    }
+    /* A lost control channel is unknown capacity, never permission to evict
+     * resident weights or abort established conversations. */
+    return NULL;
 }
 
 static int owner_same_lease(const LmbSegOwner *a, const LmbSegOwner *b) {
@@ -634,6 +701,8 @@ static int handle_open(Node *node, int fd, const LmbMsg *msg) {
         NodeSession *slot = session_find(node, &open.session_id);
         if (slot) {
             status = lmb_seg_table_open(node->table, &open, now_ms());
+        } else if (node->control.draining) {
+            status = LMB_SEG_STATUS_QUOTA;
         } else if (!(slot = session_empty(node))) {
             status = LMB_SEG_STATUS_QUOTA;
         } else if (!lmb_governor_accepting(&node->governor) ||
@@ -1093,9 +1162,18 @@ static int handle_home_expert(Node *node, int fd, const LmbMsg *msg) {
         D != node->cap.state_width || !D || rows != 1 ||
         (uint64_t)D * sizeof(float) != msg->pay_len || expert > INT_MAX)
         return lmb_send(fd, LMB_ERR, "invalid Hybrid shape", 20, NULL, 0);
+    pthread_mutex_lock(&node->sessions_lock);
+    int draining=(int)node->control.draining;
+    if (!draining) node->control.experts++;
+    pthread_mutex_unlock(&node->sessions_lock);
+    if (draining) return lmb_send(fd,LMB_ERR,"Hybrid draining",15,NULL,0);
     uint64_t admission_began = lmb_compute_now();
     int admitted = lmb_resident_memory_check() ? -1 : lmb_run_gate_enter(&node->run_gate, node->run_wait_ms, run_should_cancel, node);
-    if (admitted != 1) return lmb_send(fd, LMB_ERR, "Hybrid capacity busy", 20, NULL, 0);
+    if (admitted != 1) {
+        int rc=lmb_send(fd, LMB_ERR, "Hybrid capacity busy", 20, NULL, 0);
+        pthread_mutex_lock(&node->sessions_lock); node->control.experts--; pthread_mutex_unlock(&node->sessions_lock);
+        return rc;
+    }
     int permit = -1;
     float *out = malloc((size_t)D * sizeof(float));
     uint32_t remaining = lmb_compute_remaining(admission_began, node->run_wait_ms);
@@ -1106,6 +1184,7 @@ static int handle_home_expert(Node *node, int fd, const LmbMsg *msg) {
     int rc = bad ? lmb_send(fd, LMB_ERR, "Hybrid expert failed", 20, NULL, 0) :
         lmb_send(fd, LMB_EXEC_R, NULL, 0, out, (uint32_t)((size_t)D * sizeof(float)));
     free(out); lmb_run_gate_leave(&node->run_gate);
+    pthread_mutex_lock(&node->sessions_lock); node->control.experts--; pthread_mutex_unlock(&node->sessions_lock);
     if (!bad && !rc) {
         uint64_t n = atomic_fetch_add(&node->expert_runs, 1) + 1;
         if (!(n & (n-1))) fprintf(stderr, "[home-hybrid] resident_expert_calls=%llu range=%u:%u\n",
@@ -1489,6 +1568,10 @@ int main(int argc, char **argv) {
     preflight_signal(&preflight_fd, 'P');
     Node node;
     memset(&node, 0, sizeof node);
+    node.control_fd=node_control_fd();
+    if (node.control_fd==-2) { fprintf(stderr,"Invalid inherited Segment control channel\n"); return 1; }
+    node.control.revision=1; lmb_random(node.control.instance,sizeof node.control.instance);
+    atomic_init(&node.manual_draining,0);
     atomic_init(&node.committed_runs, 0);
     atomic_init(&node.expert_runs, 0);
     for (size_t i = 0; i < NODE_CONNECTIONS_MAX; i++) node.connection_fds[i] = -1;
@@ -1648,7 +1731,7 @@ int main(int argc, char **argv) {
     }
     g_listen_fd = lmb_home_take_listener((int)port);
     if (g_listen_fd < 0) { perror("segment listen"); return 1; }
-    pthread_t registration_thread, reaper_thread, governor_thread;
+    pthread_t registration_thread, reaper_thread, governor_thread, control_thread;
     if (pthread_create(&registration_thread, NULL, registration_worker,
                        registration)) {
         fprintf(stderr, "cannot start tracker registration\n"); return 1;
@@ -1665,6 +1748,13 @@ int main(int argc, char **argv) {
         pthread_join(reaper_thread, NULL);
         pthread_join(registration_thread, NULL);
         return 1;
+    }
+    int control_started=node.control_fd>=0 && !pthread_create(&control_thread,NULL,node_control_worker,&node);
+    if (node.control_fd>=0 && !control_started) {
+        fprintf(stderr,"Cannot start private Segment control\n");
+        g_stop=1; registration->stop=1;
+        pthread_join(governor_thread,NULL); pthread_join(reaper_thread,NULL);
+        pthread_join(registration_thread,NULL); (close)(node.control_fd); return 1;
     }
     printf("[segment-node] %s %s layers %u:%u at %s (tracker %s)\n",
            engine_id, model, begin, end, advertise, tracker);
@@ -1693,6 +1783,9 @@ int main(int argc, char **argv) {
         pthread_detach(thread);
     }
     registration->stop = 1;
+    if (control_started) {
+        shutdown(node.control_fd,SHUT_RDWR); pthread_join(control_thread,NULL); (close)(node.control_fd);
+    }
     pthread_join(governor_thread, NULL);
     pthread_join(reaper_thread, NULL);
     pthread_join(registration_thread, NULL);

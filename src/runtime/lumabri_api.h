@@ -472,6 +472,9 @@ static int cmd_api(int argc, char **argv) {
     if (!strcmp(argv[0],"replica")) {
         int rc=api_replica_control(tracker,args,count); close(dir); return rc;
     }
+    if (!strcmp(argv[0],"segments")) {
+        int rc=api_segments_control(tracker,args,count); close(dir); return rc;
+    }
     if ((!strcmp(argv[0],"serve") || !strcmp(argv[0],"start")) && !count && *tracker) {
         int rc=!strcmp(argv[0],"start") ? api_start(dir,port,tracker) : api_serve(dir,port,tracker,NULL);
         close(dir); return rc;
@@ -507,6 +510,7 @@ usage:
         "lumabri api model-remove MODEL_ID [--tracker HOST:PORT]\n"
         "lumabri api model-policy MODEL_ID ordered|observed-decode|declared-cost [--tracker HOST:PORT]\n"
         "lumabri api replica ALLOCATION_ID [status|drain|resume] [--tracker HOST:PORT]\n"
+        "lumabri api segments ALLOCATION_ID [status|drain|resume] [--tracker HOST:PORT]\n"
         "lumabri api user-add NAME\n"
         "lumabri api operator-grant NAME    read-only cluster visibility, no inference grant\n"
         "lumabri api operator-revoke NAME\n"

@@ -154,9 +154,40 @@ static int api_route_policy(int access, const char *tracker, char *const *args, 
     }
     close(dir); return rc ? 1 : 0;
 }
-/* Local operator only. A saved plan selects the pinned endpoint; the actual
- * host still authenticates its original requester. This never sends RELEASE
- * to donors: drained Edge turns are not proof of idle direct Segment users. */
+/* Local operator only. Each keeper authenticates the original requester and
+ * exact allocation before contacting its own Segment child. Partial failure
+ * is reported, not interpreted as idle and not silently rolled back. */
+static int api_segments_control(const char *tracker, char *const *args, unsigned count) {
+    uint8_t allocation[32]; uint32_t action=LMB_NODE_CONTROL_QUERY;
+    if (!*tracker || count<1 || count>2 || strlen(args[0])!=64 || lmb_unhex(allocation,args[0],32)) return 1;
+    if (count==2) {
+        if (!strcmp(args[1],"drain")) action=LMB_NODE_CONTROL_DRAIN;
+        else if (!strcmp(args[1],"resume")) action=LMB_NODE_CONTROL_RESUME;
+        else if (strcmp(args[1],"status")) return 1;
+    }
+    LmbResidentPlan *plan=calloc(1,sizeof *plan); if (!plan) return 1;
+    if (api_find_plan(tracker,allocation,plan)) { free(plan); return 1; }
+    printf("{\"schema\":1,\"allocation\":\"%s\",\"weights_unloaded\":false,\"nodes\":[",args[0]);
+    int failed=0;
+    for (uint32_t i=0;i<plan->execution.count;i++) {
+        LmbNodeControl observed={0},result={0};
+        int bad=home_resident_node_control(plan,i,LMB_NODE_CONTROL_QUERY,NULL,&observed);
+        if (!bad && action) bad=home_resident_node_control(plan,i,action,&observed,&result);
+        else result=observed;
+        printf("%s{\"index\":%u,",i ? "," : "",i);
+        if (bad) { failed=1; printf("\"state\":\"unknown\"}"); continue; }
+        char instance[65]; lmb_hex(instance,result.instance,32);
+        printf("\"instance\":\"%s\",\"revision\":%llu,\"state\":\"%s\",\"sessions\":%u,\"admitted_experts\":%u}",
+            instance,(unsigned long long)result.revision,
+            !result.draining ? "accepting" : result.sessions || result.experts ? "draining" : "drained",
+            result.sessions,result.experts);
+    }
+    printf("]}\n"); free(plan);
+    if (failed) fprintf(stderr,"Some segment states are unknown or changed concurrently. Successful mutations remain in effect; no weights were unloaded.\n");
+    return failed;
+}
+/* Host admission is separate from node session/Hybrid admission. Neither
+ * operation below nor api_segments_control grants authority to RELEASE. */
 static int api_replica_control(const char *tracker, char *const *args, unsigned count) {
     uint8_t allocation[32]; uint32_t action=LMB_HOST_CONTROL_QUERY;
     if (!*tracker || count<1 || count>2 || strlen(args[0])!=64 || lmb_unhex(allocation,args[0],32)) return 1;

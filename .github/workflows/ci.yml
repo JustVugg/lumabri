@@ -48,9 +48,10 @@ jobs:
           ./test_process_memory
           make test_serve_control CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           ./test_serve_control
-          make test_host_session_pool test_host_drain CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
+          make test_host_session_pool test_host_drain test_node_control CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           ./test_host_session_pool
           ./test_host_drain
+          ./test_node_control
           make test_run_gate CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           ./test_run_gate
           make test_compute_broker CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'

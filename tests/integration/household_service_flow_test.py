@@ -284,6 +284,12 @@ def main():
         until(lambda: service("chatter")["prepare"]["state"] == "stopped", "preparation did not terminate", args.prepare_timeout)
         record = tmp / "chatter/.lumabri/resident-plan"
         assert record.exists(), (tmp / "chatter/.lumabri/service/prepare.log").read_text()[-5000:]
+        def api_command(*words):
+            result = subprocess.run([str(runtime / "lumabri"), "api", *words, "--tracker", tracker],
+                                    env=env("chatter"), text=True, capture_output=True, timeout=20)
+            assert result.returncode == 0, (words, result.stderr, result.stdout)
+            return json.loads(result.stdout)
+
         if args.keep_requester:
             until(lambda: chat.has("receives the text"), "normal prepared chat did not start")
             chat.send("hi\n")
@@ -291,16 +297,33 @@ def main():
             records = list((tmp / "chatter/.lumabri/calibrations").glob("*.cal"))
             assert len(records) == 1, "service preparation lost the content/calibration key"
             assert assert_stage_record(records[0]) == 1, "background preparation telemetry lost"
+            allocation=api_command("list")["models"][0]["id"]
+            initial_nodes=api_command("segments",allocation,"status")["nodes"]
+            assert len(initial_nodes)==2 and all(n["sessions"]==1 and n["state"]=="accepting" for n in initial_nodes), initial_nodes
+            guards=subprocess.run([str(runtime/"test_chat_ui"),"resident-node-guards",str(record),tracker],
+                                  env=env("chatter"),capture_output=True,text=True,timeout=30)
+            assert guards.returncode==0,guards.stderr
+            outsider=subprocess.run([str(runtime/"lumabri"),"api","segments",allocation,"drain","--tracker",tracker],
+                env={**env("chatter"),"LUMABRI_PEER_KEY":str(tmp/"outsider.key")},capture_output=True,text=True,timeout=30)
+            assert outsider.returncode and all(n["state"]=="unknown" for n in json.loads(outsider.stdout)["nodes"]), outsider.stderr
+            assert api_command("segments",allocation,"status")["nodes"]==initial_nodes, "household token controlled another requester's segments"
+            draining_nodes=api_command("segments",allocation,"drain")["nodes"]
+            assert all(n["state"]=="draining" and n["sessions"]==1 for n in draining_nodes), draining_nodes
+            # Existing KV is deliberately not idle capacity. Resume before a
+            # new user turn: retokenization/route changes may legitimately
+            # rebuild that turn with a NEW OPEN, which drain must reject.
+            resumed_nodes=api_command("segments",allocation,"resume")["nodes"]
+            for before_node,after_node in zip(initial_nodes,resumed_nodes):
+                assert after_node["state"]=="accepting" and after_node["instance"]==before_node["instance"]
+                assert after_node["revision"]==before_node["revision"]+2
+            chat.text=""; chat.send("hi again\n")
+            until(lambda: hosted_turn_complete(chat.text), "conversation did not resume after segment drain", 120)
+            print("SEGMENT CONTROL: PASS (real inherited channel, live KV not idle, same engine resume)",flush=True)
             chat.send("/quit\n")
             until(lambda: chat.p.poll() is not None, "requester chat did not close")
         # Exercise cmd_host's real one-slot startup too. A manually built pool
         # would miss accidentally routing the normal single-slot host to the
         # legacy, non-controllable acceptor.
-        def api_command(*words):
-            result = subprocess.run([str(runtime / "lumabri"), "api", *words, "--tracker", tracker],
-                                    env=env("chatter"), text=True, capture_output=True, timeout=20)
-            assert result.returncode == 0, (words, result.stderr, result.stdout)
-            return json.loads(result.stdout)
         saved = api_command("list")["models"]
         assert len(saved) == 1, saved
         allocation = saved[0]["id"]
@@ -342,7 +365,7 @@ def main():
         until(lambda: hosted_turn_complete(resumed.text), "real generation failed after all TUI/manager restarts", 120)
         assert all(service(name)["donor"]["compute"]["grants"] > 0 for name in ("a", "b")), "real kernels bypassed compute admission"
         if args.keep_requester:
-            assert assert_stage_record(records[0]) == 2, "resident real session did not update existing observations"
+            assert assert_stage_record(records[0]) == 3, "resident real session did not update both preceding real turns"
         resumed.text = ""; resumed.send("/quit\n")
         until(lambda: resumed.has("your workspace"), "chat did not close")
         if args.sessions > 1 or args.measure_sessions:

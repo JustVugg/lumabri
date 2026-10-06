@@ -53,6 +53,11 @@ below. Historical observations remain here as evidence, not current promises.
   admitted work and refuse new turns. Local encrypted and OLMoE tiny gates
   pass; native CI/merge are still required. This retains weights and is not
   node-level drain, automatic eviction or server release.
+- [ ] Owner-authenticated Segment control: live KV/admitted Hybrid counts and
+  fenced drain/resume through the allocation keeper's inherited child channel.
+  Local one/four-slot OLMoE, wrong-owner/root/allocation checks, protocol and
+  admission tests pass. Native CI and normal merge remain required; this does
+  not implement coordinated retirement, RAM eviction or server release.
 - [ ] Requirements-based global placement and measured cost comparison;
   TUI/web/application management through one public service interface;
   recovery, elasticity, provider integration and
