@@ -46,9 +46,9 @@ below. Historical observations remain here as evidence, not current promises.
 - [x] Read-only operator workspace (#201) and measured/declared-cost replica
   preferences (#202): all eight checks passed on each final head before their
   ordered normal merges. These are not global optimization or proven savings.
-- [ ] Bounded managed API replay (#203): implemented and locally tested,
-  awaiting exact-head CI and normal merge. Replay does not restart keepers or
-  prepare capacity.
+- [x] Bounded managed API replay (#203): all eight checks passed on the final
+  head before normal merge. Replay validates the visible prefix on an already
+  approved replica; it does not restart keepers or prepare capacity.
 - [ ] Authenticated host drain/resume: one-slot and multi-slot hosts finish
   admitted work and refuse new turns. Local encrypted and OLMoE tiny gates
   pass; native CI/merge are still required. This retains weights and is not

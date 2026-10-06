@@ -164,9 +164,23 @@ static void *host_session_worker(void *opaque) {
         lmb_run_gate_leave(&pool->turns);
         break;
     }
+    int reset_needed=1;
+    /* Preserve the original single-conversation lifetime: closing a client
+     * retires its KV now, not when another client happens to arrive. This
+     * slot remains occupied, so no other worker can write the one-slot engine.
+     * Multi-slot cleanup still resets under the shared turn gate on reuse. */
+    if (h.slots==1 && !g_stopping && !atomic_load(&pool->stop)) {
+        HostInput empty={0}; HostOutput ack={0};
+        if (!host_reset_conversation(h.engine,&h,&empty,&ack)) {
+            reset_needed=0;
+            fprintf(stderr,"[host] conversation reset; resident weights retained\n");
+        } else if (!g_stopping && !atomic_load(&pool->stop)) {
+            atomic_store(&pool->failed,1); atomic_store(&pool->stop,1);
+        }
+    }
     pthread_mutex_lock(&pool->lock);
     if (slot->admitted) { slot->admitted=0; pool->control.requests--; }
-    lmb_close(slot->fd); slot->fd = -1; slot->used = 0; slot->reset_needed = 1;
+    lmb_close(slot->fd); slot->fd = -1; slot->used = 0; slot->reset_needed = reset_needed;
     pool->workers--; pthread_cond_broadcast(&pool->empty);
     pthread_mutex_unlock(&pool->lock);
     return NULL;

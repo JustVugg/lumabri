@@ -189,6 +189,8 @@ status is `drained`. Resume admits new conversations on the same resident
 engine; prior conversation state is reset before reuse. Other model hosts on
 the same donor are unaffected. Both one-slot and multi-slot Segment hosts
 use this pool; legacy non-Segment hosts do not support this control.
+Single-slot hosts reset conversation state when the client disconnects, as
+before; multi-slot hosts reset the isolated slot under the turn gate on reuse.
 Hosted one-slot codecs advertise their slot and handle cancellation like the
 multi-slot codec. Standalone single-slot CLI pipes keep their existing EOF
 semantics. Older single-slot engines without that control capability are
