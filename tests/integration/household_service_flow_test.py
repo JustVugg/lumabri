@@ -54,7 +54,9 @@ def main():
         try:
             for port in range(base, base + 64):
                 sock = socket.socket(); sockets.append(sock)
-                sock.bind(("127.0.0.1", port))
+                # Match the runtime's wildcard listener: loopback-only bind
+                # can succeed while another interface already owns this port.
+                sock.bind(("0.0.0.0", port))
             break
         except OSError:
             continue
@@ -463,7 +465,14 @@ def main():
                 third_plan = tmp / "third.plan"; shutil.copyfile(record, third_plan); third_plan.chmod(0o600)
                 replica.send("/quit\n")
                 until(lambda: replica.p.poll() is not None, "replica TUI did not close")
-                assert all(service(name)["donor"]["model_count"] == 3 for name in ("a", "b"))
+                replica_live = {name: service(name)["donor"] for name in ("a", "b")}
+                assert all(s["model_count"] == 3 for s in replica_live.values())
+                # As with the second model, READY precedes the inventory
+                # heartbeat. Do not benchmark while the leased workload still
+                # describes two allocations or pending (larger) reservations.
+                until(lambda: workload_ready(3) and sorted(n["workload"]["reserved_bytes"] for n in observed) ==
+                      sorted(s["reserved_total_bytes"] for s in replica_live.values()),
+                      "three committed models have not reached the leased inventory", 30)
                 from managed_routes_test import verify_managed_routes
                 verify_managed_routes(runtime, env("chatter"), tracker, first_plan, third_plan, names[4], tmp)
             # The authenticated release names the first allocation, not the
