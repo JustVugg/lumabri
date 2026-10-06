@@ -118,6 +118,7 @@ static int api_find_plan(const char *tracker, const uint8_t allocation[32], LmbR
     free(plans); return found==1 ? 0 : -1;
 }
 #include "lumabri_managed_models.h"
+#include "lumabri_workspace.h"
 static int api_models(int fd, int access_dir, const char *tracker, const LmbApiUser *user) {
     LmbResidentPlan *plans=calloc(64,sizeof *plans); Cap body={0};
     if (!plans) { if (fd>=0) api_error(fd,500,"allocation_failed"); return -1; }
@@ -259,7 +260,13 @@ static void api_connection(int fd, int access_dir, unsigned port, const char *tr
     size_t history_prefix=strlen(history_path);
     int history=!strncmp(request.path,history_path,history_prefix) &&
         (!request.path[history_prefix] || request.path[history_prefix]=='/');
-    if (!strcmp(request.method,"GET") && !strcmp(request.path,"/api/v1/models") && !request.length)
+    if (!strcmp(request.method,"GET") && !strcmp(request.path,"/api/v1/session") && !request.length)
+        (void)api_response(fd,200,lmb_operator_allows(access_dir,&user) ?
+            "{\"schema\":1,\"operator\":true}" : "{\"schema\":1,\"operator\":false}");
+    else if (!strcmp(request.method,"GET") && !strcmp(request.path,"/api/v1/workspace") && !request.length) {
+        if (lmb_operator_allows(access_dir,&user)) (void)api_workspace(fd,access_dir,tracker);
+        else api_error(fd,403,"operator_permission_required");
+    } else if (!strcmp(request.method,"GET") && !strcmp(request.path,"/api/v1/models") && !request.length)
         api_models(fd,access_dir,tracker,&user);
     else if (history && !strcmp(request.method,"GET") && !request.length)
         api_history(fd,access_dir,&user,&request,NULL,0);
@@ -401,6 +408,9 @@ static int cmd_api(int argc, char **argv) {
     if (!strcmp(argv[0],"list") && !count && *tracker) {
         int rc=api_models(-1,dir,tracker,NULL); close(dir); return rc ? 1 : 0;
     }
+    if (!strcmp(argv[0],"workspace") && !count && *tracker) {
+        int rc=api_workspace(-1,dir,tracker); close(dir); return rc ? 1 : 0;
+    }
     if (!strcmp(argv[0],"model-add") || !strcmp(argv[0],"model-set") || !strcmp(argv[0],"model-remove")) {
         int rc=api_route_admin(dir,argv[0],tracker,args,count); close(dir); return rc;
     }
@@ -413,6 +423,9 @@ static int cmd_api(int argc, char **argv) {
     if (!strcmp(argv[0],"user-add") && count==1) {
         char token[98]; rc=lmb_api_user_create(dir,args[0],token);
         if (!rc) { puts(token); lmb_api_wipe(token,sizeof token); }
+    } else if ((!strcmp(argv[0],"operator-grant") || !strcmp(argv[0],"operator-revoke")) && count==1) {
+        LmbApiUser user;
+        if (!lmb_api_user_load(dir,args[0],&user)) rc=lmb_operator_set(dir,&user,!strcmp(argv[0],"operator-grant"));
     } else if (!strcmp(argv[0],"revoke") && count==1 && lmb_api_username(args[0])) {
         char file[40]; snprintf(file,sizeof file,"%s.user",args[0]); rc=unlinkat(dir,file,0);
         if (!rc) rc=fsync(dir);
@@ -435,6 +448,9 @@ usage:
         "lumabri api model-set MODEL_ID APPROVED_ALLOCATION... [--tracker HOST:PORT]\n"
         "lumabri api model-remove MODEL_ID [--tracker HOST:PORT]\n"
         "lumabri api user-add NAME\n"
+        "lumabri api operator-grant NAME    read-only cluster visibility, no inference grant\n"
+        "lumabri api operator-revoke NAME\n"
+        "lumabri api workspace [--tracker HOST:PORT]\n"
         "lumabri api grant NAME MODEL_OR_ALLOCATION_ID [--tracker HOST:PORT]\n"
         "lumabri api revoke NAME\n"
         "lumabri api start [--tracker HOST:PORT] [--port 47380]\n"

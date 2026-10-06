@@ -1,5 +1,39 @@
 # Resident inference API
 
+## Cluster workspace
+
+The bundled browser has an operator-only **Computers & models** view. Explicitly
+grant this read-only capability to an existing API credential:
+
+```sh
+lumabri api operator-grant operator-name
+lumabri api operator-revoke operator-name
+lumabri api workspace --tracker HOST:PORT
+```
+
+`GET /api/v1/session` reports the credential's visibility capability;
+`GET /api/v1/workspace` requires it. This grants neither inference nor access to
+another user's conversation history. Inference still needs a separate model
+grant. Revoking/recreating a username does not inherit its old operator grant.
+The local CLI can read the same typed snapshot without issuing an API token.
+
+The snapshot includes leased machine reports, memory reservations and observed
+queues, saved allocations and range assignments, managed replica references,
+and configuration-bound measurements from real turns. A missing inventory or
+registry is explicitly unavailable. A saved plan does not prove readiness;
+actual hosts and donor approvals are checked when a chat is requested. Stale
+calibrations have no current speed value. These are last matching observations,
+not a concurrency or latency guarantee. The panel refreshes every ten seconds
+only while visible and removes old values if a refresh fails.
+
+Whole-machine prices and power estimates remain operator declarations. Missing
+prices are not zero cost, currencies are not added together, energy is not
+invented from those estimates, and GPU detection is not verified execution.
+The view cannot start, stop, prepare or move models. No cloud resources or
+paid provisioning are introduced.
+
+## Inference gateway
+
 The local gateway exposes **already approved resident allocations**. It does
 not download a model, approve a donor, change placement or evict weights.
 The TUI and gateway use the same authenticated allocation checks, hosted

@@ -46,6 +46,15 @@ def main():
                     time.sleep(.05)
             assert request("invalid")[0] == 401
             status, body = request(); assert status == 200 and json.loads(body) == {"schema": 1, "models": []}
+            assert request(path="/api/v1/workspace")[0] == 403
+            assert json.loads(request(path="/api/v1/session")[1])["operator"] is False
+            assert cli("operator-grant", "alice").returncode == 0
+            status, body = request(path="/api/v1/workspace")
+            workspace = json.loads(body)
+            assert status == 200 and workspace["inventory_ok"] is False and workspace["nodes"] == []
+            assert workspace["registry_ok"] and workspace["models"] == [] and workspace["allocations"] == []
+            assert cli("operator-revoke", "alice").returncode == 0
+            assert request(path="/api/v1/workspace")[0] == 403
             assert request(headers={"Origin": "http://evil.test"})[0] == 403
             assert request(headers={"Host": "evil.test"})[0] == 403
             assert request(method="POST", path="/api/v1/chat", body='{}')[0] == 400
