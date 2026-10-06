@@ -2427,6 +2427,7 @@ typedef struct {
     int reset_supported; /* explicit gateway capability; never assume from family */
     uint32_t session_slots; /* negotiated codec slots; 0 means legacy */
     int greedy_only; /* actual Edge capability, not a model-name assumption */
+    int request_seed_supported;
     EngineTransport transport;
     uint32_t numeric_abi;
     char numeric_class[97];
@@ -2502,6 +2503,7 @@ static int engine_wait_ready(Engine *e) {
     e->reset_supported = 0;
     e->session_slots = 0;
     e->greedy_only = 0;
+    e->request_seed_supported = 0;
     e->numeric_abi = 0; e->numeric_class[0] = 0;
     size_t cap = 8192, len = 0;
     char *buf = malloc(cap);
@@ -2525,6 +2527,7 @@ static int engine_wait_ready(Engine *e) {
                 slots[used] == '\n' && count >= 1 && count <= LMB_HOST_MAX_SESSIONS)
                 e->session_slots = count;
             e->greedy_only = strstr(buf, "\nLUMABRI_SAMPLING GREEDY\n") != NULL;
+            e->request_seed_supported = strstr(buf, "\nLUMABRI_REQUEST_SEED 1\n") != NULL;
             const char *numeric = strstr(buf, "\nLUMABRI_NUMERIC ");
             if (numeric) {
                 unsigned abi = 0; char value[97] = ""; int consumed = 0;
@@ -2843,16 +2846,19 @@ static int serve2_prefix(Cap *c, EngKind k) {
     return 0;
 }
 
+#include "src/runtime/lumabri_request_seed.h"
 /* SUBMIT: prefix + history + this pending user turn. 0, or -1 on error. */
-static int submit_serve2(Engine *e, const char *history, const char *prompt, int max_new) {
+static int submit_serve2_seeded(Engine *e, const char *history, const char *prompt, int max_new, const uint64_t *seed) {
+    if (seed && !e->request_seed_supported) return -1;
     unsigned id = ++e->request_sequence;
     if (!id) id = ++e->request_sequence;
     Cap c = {0};
     if (serve2_prefix(&c, e->kind) || cap_str(&c, history) ||
         serve2_turn(&c, e->kind, history[0] == 0, prompt, NULL)) { free(c.p); return -1; }
-    char hdr[128];
-    int hn = snprintf(hdr, sizeof hdr, "SUBMIT %u 0 %zu %d %.1f 0.95\n",
-                      id, c.len, max_new < 1 ? 1 : max_new, e->greedy_only ? 0.0 : 0.7);
+    char hdr[160], suffix[24]="";
+    if (seed) snprintf(suffix,sizeof suffix," %llu",(unsigned long long)*seed);
+    int hn = snprintf(hdr, sizeof hdr, "SUBMIT %u 0 %zu %d %.1f 0.95%s\n",
+                      id, c.len, max_new < 1 ? 1 : max_new, e->greedy_only ? 0.0 : 0.7,suffix);
     snprintf(e->request_id, sizeof e->request_id, "%u", id);
     int ok = hn >= 0 && (size_t)hn < sizeof hdr &&
              !engine_write_full(e->to, hdr, (size_t)hn) &&
@@ -2860,6 +2866,9 @@ static int submit_serve2(Engine *e, const char *history, const char *prompt, int
              !engine_write_full(e->to, "\n", 1);             /* payload terminator */
     free(c.p);
     return ok ? 0 : -1;
+}
+static int submit_serve2(Engine *e, const char *history, const char *prompt, int max_new) {
+    return submit_serve2_seeded(e,history,prompt,max_new,NULL);
 }
 
 /* Append this finished turn to the running conversation. Returns the new
@@ -3261,7 +3270,8 @@ static int host_greet(int fd, const HostState *h, int busy) {
     lmb_buf_u32(&b, 2);       /* SUBMIT/DATA/DONE, independent of model family */
     /* Optional capability word after codec. Older clients reject the extra
      * field rather than silently request unsupported stochastic sampling. */
-    if (h->engine->greedy_only || h->engine->numeric_abi) lmb_buf_u32(&b, (uint32_t)h->engine->greedy_only);
+    if (h->engine->greedy_only || h->engine->numeric_abi || h->engine->request_seed_supported)
+        lmb_buf_u32(&b, (uint32_t)h->engine->greedy_only | (h->engine->request_seed_supported ? 2u : 0u));
     if (h->engine->numeric_abi) {
         lmb_buf_u32(&b, 0x314d554e); /* NUM1, optional measured runtime metadata */
         lmb_buf_u32(&b, h->engine->numeric_abi);
@@ -3317,9 +3327,11 @@ static int host_header(HostInput *in, Engine *e, const HostState *h) {
     unsigned slot = 0, max_new = 0;
     unsigned long long bytes = 0;
     float temp = 0, top_p = 0;
-    int fields = sscanf(in->header, "SUBMIT %63s %u %llu %u %f %f %c",
-                        id, &slot, &bytes, &max_new, &temp, &top_p, &extra);
-    if (fields == 6) {
+    char seed_text[24]=""; uint64_t seed=0;
+    int fields = sscanf(in->header, "SUBMIT %63s %u %llu %u %f %f %23s %c",
+                        id, &slot, &bytes, &max_new, &temp, &top_p, seed_text, &extra);
+    if (fields == 6 || fields == 7) {
+        if (fields==7 && (!e->request_seed_supported || lmb_request_seed(seed_text,&seed))) return -1;
         if (in->active || slot != 0 || bytes > h->max_frame || max_new < 1 ||
             max_new > h->max_new || !isfinite(temp) || !isfinite(top_p) ||
             temp < 0 || top_p <= 0 || top_p > 1) {
@@ -3331,8 +3343,10 @@ static int host_header(HostInput *in, Engine *e, const HostState *h) {
             for (const char *p = id; *p; p++) if (*p < '0' || *p > '9') return -1;
             errno = 0; unsigned long number = strtoul(id, NULL, 10);
             if (errno || number > UINT_MAX) return -1;
-            int size = snprintf(in->header, sizeof in->header, "SUBMIT %s %u %llu %u %.9g %.9g\n",
-                id, h->routed_slot, bytes, max_new, (double)temp, (double)top_p);
+            char suffix[24]="";
+            if (fields==7) snprintf(suffix,sizeof suffix," %llu",(unsigned long long)seed);
+            int size = snprintf(in->header, sizeof in->header, "SUBMIT %s %u %llu %u %.9g %.9g%s\n",
+                id, h->routed_slot, bytes, max_new, (double)temp, (double)top_p,suffix);
             if (size < 0 || (size_t)size >= sizeof in->header) return -1;
             in->header_len = (size_t)size;
         }
@@ -3836,7 +3850,7 @@ static int host_connect(const char *addr, const char *model_type, const char *ex
         lmb_msg_free(&m); lmb_close(fd); return -1;
     }
     uint32_t sampling_flags = 0;
-    if (c.off < c.len && (lmb_cur_u32(&c, &sampling_flags) || sampling_flags > 1)) {
+    if (c.off < c.len && (lmb_cur_u32(&c, &sampling_flags) || (sampling_flags & ~3u))) {
         fprintf(stderr, "[lumabri] unsupported host sampling capabilities\n");
         lmb_msg_free(&m); lmb_close(fd); return -1;
     }
@@ -3898,7 +3912,8 @@ static int host_connect(const char *addr, const char *model_type, const char *ex
     pthread_detach(thread);
     e->to = e->from = pair[0];
     e->kind = kind_id;
-    e->greedy_only = (int)sampling_flags;
+    e->greedy_only = (int)(sampling_flags&1u);
+    e->request_seed_supported = (sampling_flags&2u)!=0;
     e->numeric_abi = numeric_abi;
     snprintf(e->numeric_class, sizeof e->numeric_class, "%s", numeric_class);
     e->proto = codec == 2 || kind_is_serve2(e->kind) ? PROTO_SERVE2 : PROTO_FRAMED;

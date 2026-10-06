@@ -88,6 +88,8 @@ retain its grant across explicitly approved replica changes, as below.
 
 `./lumabri api revoke alice` revokes future requests. It does not retroactively
 cancel an already authenticated request; those are bounded to five minutes.
+Automatic recovery rechecks the credential and grant before resubmitting text;
+a revocation prevents that new disclosure even within an existing request.
 Deleting a user does not delete or unload the resident model.
 
 ## Stable model identities and approved replicas
@@ -150,11 +152,44 @@ route now uses version two, which older binaries do not understand.
 
 For each new chat request, the gateway rechecks the live allocation and host,
 then tries the next approved member if the previous one cannot be opened.
-This happens **before submitting any prompt**. Once submitted, an error or
-disconnect ends that response: there is no hidden automatic generation retry
-and no KV migration. A new user-initiated request can replay its own text
-history on another member. If no approved replica is available, HTTP 503 is
-returned; the gateway does not reload a model or replay old donor approvals.
+This initial selection happens **before submitting any prompt**. If no approved
+replica is available, HTTP 503 is returned; the gateway does not reload a model
+or replay old donor approvals.
+
+### Bounded, visible response recovery
+
+For managed models with multiple approved replicas, a lost codec connection or
+an explicitly typed `LMB_REPLICA_UNAVAILABLE` engine error can replay the request
+on a different member. At most three allocations are attempted within the
+existing five-minute request deadline. A `recovering` SSE event makes the
+interruption visible. There is **no KV migration**: the prompt/history are
+reprocessed, so recovery adds latency and computation.
+
+All attempts use one request-private sampling seed on runtimes advertising
+`LUMABRI_REQUEST_SEED 1`. Independently of that seed, every byte of the already
+delivered prefix must match before any continuation is published. Matched bytes
+are suppressed. A divergent or shorter replay ends with `error`, never `done`;
+the browser retains an interrupted conversation for explicit user action.
+Frame boundaries and partial UTF-8 characters do not reset this comparison.
+The temporary prefix is bounded to 8 MiB and is not telemetry or calibration.
+
+Every retry revalidates donor approval, signed root, content identity, numeric
+ABI/class, host identity and the current API credential/grant. The replica must
+belong to both the original request's set and the current operator-approved set.
+Newly added replicas are not adopted mid-response. Removed/revoked members,
+busy allocations and previously attempted allocations are excluded. A browser
+disconnect, cancellation, malformed stream or ordinary engine error does not
+trigger another attempt. Exhausted capacity preserves the visible partial
+answer and reports an error; it does not prepare new resources.
+
+An older runtime without the seed capability can participate in automatic
+recovery only for an explicitly greedy model. Raw allocation requests have no
+alternative set and do not recover automatically. This recovery loop is in the
+API/browser path; direct hosted TUI conversations retain their existing behavior.
+Update clients and household hosts together: older clients reject the new
+sampling-capability bit rather than silently misinterpret it. Updated clients
+can still use older hosts without the new seeded-SUBMIT field. Colibri is not
+modified; seed negotiation lives in Lumabri's codec and Segment gateway.
 
 ### Bounded turn admission
 
@@ -238,7 +273,7 @@ event: delta
 data: {"bytes":"SGVsbG8="}
 
 event: done
-data: {"stats":"STAT ...","observation_saved":true}
+data: {"stats":"STAT ...","observation_saved":true,"recovery_attempts":0,"stats_scope":"single_attempt"}
 ```
 
 `bytes` is base64, preserving exact engine output even when a DATA frame splits
@@ -247,7 +282,12 @@ decoder** per response. `done` is emitted only after a matching engine DONE.
 An engine ERROR produces `event: error` with a message, never `done`. A closed
 connection without `done` is an incomplete response, not a completed answer.
 Disconnecting/aborting the HTTP request closes only its hosted conversation.
-There is no automatic generation retry that could duplicate visible tokens.
+During recovery, `event: recovering` carries a human-readable `message` before
+the next attempt. Keep the same streaming UTF-8 decoder: already emitted bytes
+will not be sent twice. Successful recovery reports `recovery_attempts > 0`,
+`stats_scope: "final_attempt_only"` and `observation_saved: false`. Those engine
+statistics exclude earlier attempts and must not be presented as end-to-end
+recovery speed. Recovered turns never overwrite a no-replay calibration.
 
 Completed API/browser turns use the same observation builder as TUI turns.
 The planner can reuse their decode timings, actual prompt/output counts,

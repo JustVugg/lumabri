@@ -184,7 +184,12 @@ async function consumeStream(response, onText) {
           bytes += decoded.length;
           if (bytes > 65536) throw new Error("Response exceeded the conversation limit; the partial answer is preserved.");
           onText(text.decode(decoded, {stream: true}));
-        } else if (kind === "done") { onText(text.decode()); done = true; }
+        } else if (kind === "recovering") {
+          say("A replica stopped. Recovering on another approved computer; checking the text already shown…");
+        } else if (kind === "done") {
+          onText(text.decode()); done = true;
+          if (value.recovery_attempts) say("Recovered on another approved replica. The text already shown was verified and was not repeated.");
+        }
         else if (kind === "error") throw new Error(value.message || "Generation failed");
         else throw new Error("Unknown response event");
       }

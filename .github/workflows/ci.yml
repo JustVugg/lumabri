@@ -219,7 +219,12 @@ jobs:
           for sessions in 1 2 4 8; do
             python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester --sessions "$sessions" --measure-sessions
           done
-          LUMABRI_TEST_BROWSER=1 python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester --multi-model --sessions 4 --api --replicas
+          (
+            mv segment_chat segment_chat.real
+            trap 'mv -f segment_chat.real segment_chat' EXIT
+            install -m 755 tests/integration/recovery_codec_proxy.py segment_chat
+            LUMABRI_TEST_BROWSER=1 python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester --multi-model --sessions 4 --api --replicas --recovery
+          )
           for outcome in complete reject cancel; do
             python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint "$outcome" --donor-ram-gb 1 --sessions 2
           done
@@ -493,7 +498,12 @@ jobs:
           make test_hosted_sessions
           python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester --sessions 2
           python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models
-          python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester --multi-model --sessions 4 --api --replicas
+          (
+            mv segment_chat segment_chat.real
+            trap 'mv -f segment_chat.real segment_chat' EXIT
+            install -m 755 tests/integration/recovery_codec_proxy.py segment_chat
+            python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester --multi-model --sessions 4 --api --replicas --recovery
+          )
           python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --donor-ram-gb 1 --sessions 2
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --repeat-cached --clear-cached --expect-metrics --expect-calibration
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --kill-donor
