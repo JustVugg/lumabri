@@ -42,7 +42,7 @@ static void *queued_expert(void *opaque) {
     return NULL;
 }
 static void drain_queued_expert(Node *node, uint8_t *body) {
-    assert(lmb_run_gate_enter(&node->run_gate,0,NULL,NULL)==1);
+    assert(lmb_run_gate_enter(&node->run_gate,1000,NULL,NULL)==1);
     node->run_wait_ms=3000;
     QueuedExpert work={node,body}; pthread_t thread;
     assert(!pthread_create(&thread,NULL,queued_expert,&work));

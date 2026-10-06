@@ -233,6 +233,9 @@ instances, failed reads and lost channels are also unknown, never drained.
 Drain rejects new Segment OPENs and new Hybrid expert calls. Existing session
 retries, RUN/CLOSE and previously admitted expert work keep their usual limits;
 drain itself does not cancel a kernel. Resume uses the same resident engine.
+`accepting` describes this manual admission policy, not a capacity or health
+certificate: memory pressure, residency loss and the existing compute/session
+limits can still refuse work. Resume never clears those independent guards.
 For a whole replica, first drain its host and wait for admitted turns to finish,
 then drain its segments. Do not drain segments first: a newly admitted turn may
 need to OPEN or rebuild its state. Multi-slot hosts may retain idle KV until
