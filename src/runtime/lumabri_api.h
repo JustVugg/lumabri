@@ -170,8 +170,8 @@ static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUs
         api_error(fd,400,"invalid_chat_request"); return;
     }
     if (!lmb_api_user_allows(user,allocation)) { api_error(fd,403,"model_not_authorized"); return; }
-    Engine engine; const char *error=NULL;
-    int status=api_model_open(access_dir,tracker,allocation,max_new,&engine,&error);
+    Engine engine; const char *error=NULL; int permit=-1;
+    int status=api_model_open(access_dir,tracker,allocation,max_new,&engine,&permit,&error);
     if (status) { api_error(fd,(unsigned)status,error); return; }
     Cap history={0}; char *prompt=NULL;
     if (api_messages(&j,(unsigned)fields[1],engine.kind,&history,&prompt)) {
@@ -209,6 +209,7 @@ static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUs
         (void)api_event(fd,"error","{\"message\":\"Stream interrupted; response is incomplete\"}");
 finished:
     free(history.p); free(prompt); engine_stop(&engine);
+    if (permit>=0) close(permit);
 }
 static void api_connection(int fd, int access_dir, unsigned port, const char *tracker) {
     struct timeval timeout={5,0};

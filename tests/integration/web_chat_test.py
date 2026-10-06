@@ -34,6 +34,9 @@ async def exercise(port, alice, bob, artifacts):
 
         async def engine_fixture(route):
             requests.append(route.request.post_data_json)
+            if mode == "busy":
+                await route.fulfill(status=429, json={"error": "replicas_busy"})
+                return
             if mode == "wait":
                 await asyncio.sleep(2)
             wire = ""
@@ -113,6 +116,21 @@ async def exercise(port, alice, bob, artifacts):
         await expect(page.locator("#save-status")).to_contain_text("reply contains a NUL byte")
         await expect(page.locator("#prompt")).to_be_disabled()
         assert (await page.locator(".assistant .content").last.text_content()).endswith("\0")
+        await page.locator("#new-chat").click()
+        # Busy is a saved question with explicit manual retry, never a hidden
+        # engine submission loop or an empty completed assistant message.
+        mode = "busy"; before_busy = len(requests)
+        await page.locator("#prompt").fill("Capacity question"); await page.locator("#send").click()
+        await expect(page.locator("#stop")).to_be_hidden()
+        await expect(page.locator("#notice")).to_contain_text("All approved replicas")
+        await expect(page.locator("#retry")).to_be_visible()
+        await expect(page.locator(".message.user")).to_have_count(1)
+        await expect(page.locator(".message.assistant")).to_have_count(0)
+        assert len(requests) == before_busy + 1
+        mode = "complete"; await page.locator("#retry").click()
+        await expect(page.locator("#stop")).to_be_hidden()
+        await expect(page.locator("#retry")).to_be_hidden()
+        await expect(page.locator(".message.user")).to_have_count(1)
         await page.locator("#new-chat").click()
         # Cancellation must leave an interrupted question and permit retry.
         mode = "wait"
