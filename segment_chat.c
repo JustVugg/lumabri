@@ -80,6 +80,7 @@ typedef struct {
 
 #include "lumabri_metrics.h"
 #include "lumabri_stage_metrics.h"
+#include "src/runtime/lumabri_request_seed.h"
 
 typedef struct {
     uint32_t begin, end;
@@ -97,6 +98,7 @@ typedef struct {
     double decode_seconds;
     LmbGenerationMetrics metrics;
     int stages_valid;
+    int replica_unavailable;
     size_t stage_count;
     StageObservation stages[LMB_SEG_ROUTE_MAX];
     LmbLinkEvidence links[LMB_SEG_ROUTE_MAX];
@@ -1558,6 +1560,7 @@ static int segment_generate(ColiEdgeEngine *edge,
         if (!same_prefix) {
             if (conversation_reset(conversation)) {
                 snprintf(error, error_size, "Previous Segment session could not be released; retry after the donor is reachable");
+                result->replica_unavailable=1;
                 goto cleanup;
             }
             memcpy(conversation->chain, chain,
@@ -1583,8 +1586,10 @@ static int segment_generate(ColiEdgeEngine *edge,
             active_chain[opened].fd = -1;
             if (remote_open_current(&active_chain[opened], &session_id, model_root,
                             tokenizer_root, context, max_rows, open_refresh_discovery, discovery,
-                            error, error_size))
+                            error, error_size)) {
+                result->replica_unavailable=1;
                 goto cleanup;
+            }
         }
         if (conversation) conversation->active = 1;
     } else {
@@ -1672,6 +1677,7 @@ static int segment_generate(ColiEdgeEngine *edge,
             if (!error[0])
                 snprintf(error, error_size,
                          "Segment peer failed and recovery was unavailable");
+            result->replica_unavailable=1;
             goto cleanup;
         }
         if (failed) {
@@ -1679,7 +1685,7 @@ static int segment_generate(ColiEdgeEngine *edge,
             first = buffer_a; second = buffer_b;
             if (chain_run(active_chain, active_count,
                           prompt_tokens + offset, rows,
-                          &first, &second, bytes)) goto cleanup;
+                          &first, &second, bytes)) { result->replica_unavailable=1; goto cleanup; }
         }
         final_state = first;
         final_rows = rows;
@@ -1763,13 +1769,14 @@ static int segment_generate(ColiEdgeEngine *edge,
             if (!error[0])
                 snprintf(error, error_size,
                          "Segment peer failed and recovery was unavailable");
+            result->replica_unavailable=1;
             goto cleanup;
         }
         if (failed) {
             if (coli_edge_embed(edge, &embed, error, error_size)) goto cleanup;
             first = buffer_a; second = buffer_b;
             if (chain_run(active_chain, active_count, &token, 1,
-                          &first, &second, bytes)) goto cleanup;
+                          &first, &second, bytes)) { result->replica_unavailable=1; goto cleanup; }
         }
         select.input = first;
         select.token_ids = generated + generated_count;
@@ -2021,9 +2028,10 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
     for (uint32_t i = 0; i < slots; i++) lmb_sampler_init(&samplers[i], seed);
     /* The optional control reader uses read(2), never buffered stdio. */
     if (slots > 1) setvbuf(stdin, NULL, _IONBF, 0);
-    /* Preserve the established single-conversation greeting byte for byte.
-     * The extended codec is negotiated only when explicitly requested. */
+    /* The optional seeded SUBMIT field is accepted only by clients that
+     * discover this explicit capability; ordinary six-field SUBMIT remains. */
     fputs("\nLUMABRI_RESET 1\n", stdout);
+    fputs("LUMABRI_REQUEST_SEED 1\n", stdout);
     if (slots > 1) printf("LUMABRI_SLOTS %u\n", slots);
     printf("LUMABRI_SAMPLING %s\nLUMABRI_NUMERIC %u %s\n" SEGMENT_FRAME_READY "\nSTAT 0 0 0 0\n",
            cap->flags & COLI_EDGE_CAP_LOGITS ? "LOGITS" : "GREEDY", cap->abi_version, cap->numeric_class);
@@ -2058,10 +2066,12 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
         unsigned request_id = 0, slot = 0, max_tokens = 0;
         size_t prompt_bytes = 0;
         double temperature = 0.0, top_p = 0.0;
+        char seed_text[24]=""; uint64_t request_seed=0;
         char trailing = 0;
-        if (sscanf(header, "SUBMIT %u %u %zu %u %lf %lf %c",
+        int fields=sscanf(header, "SUBMIT %u %u %zu %u %lf %lf %23s %c",
                    &request_id, &slot, &prompt_bytes, &max_tokens,
-                   &temperature, &top_p, &trailing) != 6 ||
+                   &temperature, &top_p, seed_text, &trailing);
+        if ((fields!=6 && fields!=7) || (fields==7 && lmb_request_seed(seed_text,&request_seed)) ||
             slot >= slots || !max_tokens || max_tokens > 4096 || prompt_bytes > (64u << 20) ||
             !isfinite(temperature) || temperature < 0.0 || temperature > 100.0 ||
             !isfinite(top_p) || top_p <= 0.0 || top_p > 1.0) {
@@ -2071,6 +2081,7 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
             continue;
         }
         SegmentConversation *conversation = &conversations[slot];
+        if (fields==7) lmb_sampler_init(&samplers[slot],request_seed);
         char *prompt = malloc(prompt_bytes + 1);
         if (!prompt || read_exact_stdin(prompt, prompt_bytes)) {
             free(prompt); result_code = 1; break;
@@ -2097,9 +2108,11 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
         int bad = have <= 0 || !snapshot.complete ||
                   select_chain(&snapshot, cap->num_layers, context, max_rows,
                                chain, &chain_count);
-        if (bad)
+        if (bad) {
             snprintf(error, sizeof error,
                      "no complete compatible Segment chain");
+            result.replica_unavailable=1;
+        }
         if (!bad) {
             size_t relay_count = 0, host_count = 0;
             for (size_t i = 0; i < chain_count; i++) {
@@ -2151,9 +2164,11 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
             if (!bad) generation_result_free(&result);
             conversation_reset(conversation);
             snprintf(error, sizeof error, "request cancelled"); bad = 1;
+            result.replica_unavailable=0;
         }
         if (bad) {
-            printf("ERROR %u %s\n", request_id, error);
+            printf("ERROR %u %s%s\n", request_id,
+                result.replica_unavailable ? LMB_REPLICA_RETRYABLE : "",error);
             fflush(stdout);
             if (atomic_load(&control.invalid)) { result_code = 1; break; }
             continue;

@@ -13,6 +13,33 @@ int main(int argc, char **argv) {
         (void)getchar(); close(permit); close(access); return 0;
     }
     if (argc == 2 && !strcmp(argv[1], "api-codec")) {
+        Engine seeded={.request_seed_supported=1};
+        HostState host={.engine=&seeded,.slots=4,.routed_slot=2,.max_frame=4096,.max_new=64};
+        const char *headers[]={"SUBMIT 1 0 3 8 0.7 0.95 18446744073709551615\n",
+            "SUBMIT 1 0 3 8 0.7 0.95\n", "SUBMIT 1 0 3 8 0.7 0.95 -1\n",
+            "SUBMIT 1 0 3 8 0.7 0.95 18446744073709551616\n", "SUBMIT 1 0 3 8 0.7 0.95 1 extra\n"};
+        for (unsigned i=0;i<sizeof headers/sizeof *headers;i++) {
+            LmbBuf capture={0}; HostInput input={.capture=&capture};
+            snprintf(input.header,sizeof input.header,"%s",headers[i]); input.header_len=strlen(input.header);
+            assert((host_header(&input,&seeded,&host)==0)==(i<2));
+            if (i<2) {
+                assert(input.payload_left==3 && capture.len>0);
+                assert(!strncmp((char *)capture.p,"SUBMIT 1 2 3 8 ",15));
+                if (!i) assert(capture.len>=21 && !memcmp(capture.p+capture.len-21,"18446744073709551615\n",21));
+            } else assert(!capture.len);
+            free(capture.p);
+        }
+        LmbBuf capture={0}; HostInput input={.capture=&capture}; seeded.request_seed_supported=0;
+        snprintf(input.header,sizeof input.header,"%s",headers[0]); input.header_len=strlen(input.header);
+        assert(host_header(&input,&seeded,&host) && !capture.len);
+        LmbModelRoute original={.id={1},.content={2},.count=1,.numeric_abi=2,.adapter="olmoe",.numeric_class="cpu"};
+        original.replicas[0].allocation[0]=3; original.replicas[0].root[0]=4; original.replicas[0].host_key[0]=5;
+        LmbModelRoute current=original; assert(api_recovery_member(&original,&current,0));
+        current.replicas[0].host_key[0]++; assert(!api_recovery_member(&original,&current,0));
+        current=original; current.content[0]++; assert(!api_recovery_member(&original,&current,0));
+        current=original; current.numeric_class[0]++; assert(!api_recovery_member(&original,&current,0));
+        current=original; current.count=2; current.replicas[1]=current.replicas[0]; current.replicas[1].allocation[0]++;
+        assert(!api_recovery_member(&original,&current,1));
         const char *good="[{\"role\":\"user\",\"content\":\"hi\"},{\"role\":\"assistant\",\"content\":\"hello\"},{\"role\":\"user\",\"content\":\"next\"}]";
         LmbJson j; LmbJsonToken tokens[64]; Cap history={0}; char *prompt=NULL;
         assert(!lmb_json_parse(&j,good,strlen(good),tokens,64));
@@ -506,7 +533,7 @@ int main(int argc, char **argv) {
     assert(lmb_probe_stop(&deadline) && !probe_stat[0] && !probe_reply);
     close(probe_pair[0]); close(probe_pair[1]);
     const char *boot[] = {
-        "\nLUMABRI_SAMPLING LOGITS\nLUMABRI_NUMERIC 2 cpu-test\n" FRAME_READY "\n",
+        "\nLUMABRI_REQUEST_SEED 1\nLUMABRI_SAMPLING LOGITS\nLUMABRI_NUMERIC 2 cpu-test\n" FRAME_READY "\n",
         "\nLUMABRI_SAMPLING GREEDY\nLUMABRI_NUMERIC 2 cpu-test\n" FRAME_READY "\n",
         "\nLUMABRI_NUMERIC 0 cpu-test\n" FRAME_READY "\n",
         "\n" FRAME_READY "\n",
@@ -519,6 +546,7 @@ int main(int argc, char **argv) {
         assert(!engine_wait_ready(&engine)); close(ready[0]);
         assert(engine.numeric_abi == (i < 2 ? 2u : 0u));
         assert(engine.greedy_only == (i == 1));
+        assert(engine.request_seed_supported == (i == 0));
         assert(i < 2 ? !strcmp(engine.numeric_class, "cpu-test") : !engine.numeric_class[0]);
     }
     const char *io_env = getenv("LUMABRI_IO_TIMEOUT_MS");

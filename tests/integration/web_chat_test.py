@@ -43,8 +43,11 @@ async def exercise(port, alice, bob, artifacts):
             # Exact UTF-8 preservation across byte-codec DATA frames.
             for data in (b"Hello ", b"\xe2", b"\x82\xac", b" <script>alert(1)</script>"):
                 wire += "event: delta\ndata: " + json.dumps({"bytes": base64.b64encode(data).decode()}) + "\n\n"
+                if mode == "recovered" and data == b"\xe2":
+                    wire += 'event: recovering\ndata: {"message":"Replaying approved replica"}\n\n'
             if mode == "nul": wire += 'event: delta\ndata: {"bytes":"AA=="}\n\n'
-            if mode in ("complete", "nul"): wire += 'event: done\ndata: {"stats":"fixture"}\n\n'
+            if mode == "recovered": wire += 'event: done\ndata: {"stats":"fixture","recovery_attempts":1,"observation_saved":false}\n\n'
+            elif mode in ("complete", "nul"): wire += 'event: done\ndata: {"stats":"fixture"}\n\n'
             elif mode == "error": wire += 'event: error\ndata: {"message":"explicit fixture failure"}\n\n'
             try: await route.fulfill(status=200, content_type="text/event-stream", body=wire)
             except Exception:
@@ -134,6 +137,13 @@ async def exercise(port, alice, bob, artifacts):
         await expect(page.locator(".message.user")).to_have_count(1)
         await page.locator("#new-chat").click()
         # Cancellation must leave an interrupted question and permit retry.
+        mode = "recovered"
+        await page.locator("#prompt").fill("Recover on an approved replica"); await page.locator("#send").click()
+        await expect(page.locator("#stop")).to_be_hidden()
+        await expect(page.locator(".assistant .content")).to_have_text("Hello € <script>alert(1)</script>")
+        await expect(page.locator("#notice")).to_contain_text("Recovered")
+        await expect(page.locator("#save-status")).to_have_text("Saved privately on this computer")
+        await page.locator("#new-chat").click()
         mode = "wait"
         await page.locator("#prompt").fill("Please stop"); await page.locator("#send").click()
         await expect(page.locator("#stop")).to_be_visible(); await page.locator("#stop").click()

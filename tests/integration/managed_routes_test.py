@@ -1,5 +1,5 @@
 """Real resident replica selection, invoked inside the approved household flow.
-No fake inference, no implicit preparation, no automatic generation replay.
+No fake inference or implicit preparation. Optional bounded replay fault gate.
 """
 import http.client
 import json
@@ -142,6 +142,9 @@ def verify_managed_routes(runtime, env, tracker, first_plan, third_plan, first_n
             "messages": [{"role": "user", "content": "hi"}]}})
         assert saved_status == 200, saved_data
         conversation_id = json.loads(saved_data)["id"]
+        if env.get("LUMABRI_TEST_RECOVERY_CONTROL"):
+            from managed_recovery_test import verify_recovery
+            verify_recovery(env, first, third, route, chat, request, cli, command, port, alice)
         release(first_plan)
         # The preferred allocation is gone. A fresh request must succeed on
         # the independently approved replica, with no reapproval or reload.

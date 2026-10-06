@@ -1,6 +1,7 @@
 /* Logical model registry and bounded selection among already approved
- * replicas. No loading, credit, provisioning, KV migration or hidden retry
- * after text generation. Requires the gateway's plan/Engine/JSON helpers. */
+ * replicas. No loading, credit, provisioning or KV migration. The gateway can
+ * visibly replay with an immutable contract and verified byte prefix.
+ * Requires the gateway's plan/Engine/JSON helpers. */
 #ifndef LMB_MANAGED_MODELS_H
 #define LMB_MANAGED_MODELS_H
 #include "lumabri_model_routes.h"
@@ -65,8 +66,21 @@ static int api_route_plan_matches(const LmbModelRoute *route, unsigned index, co
 /* Preferences only reorder independently approved replicas. Every selected
  * donor and actual host is re-authenticated before
  * text leaves this process; a stale registry never recreates an allocation. */
-static int api_model_open(int access, const char *tracker, const uint8_t id[32], uint32_t max_new,
-                          Engine *engine, int *permit, LmbResidentPlan *selected, const char **error) {
+static int api_recovery_member(const LmbModelRoute *contract, const LmbModelRoute *current, uint32_t member) {
+    if (!current || member>=current->count || current->count>LMB_ROUTE_REPLICAS) return 0;
+    if (!contract) return 1;
+    if (contract->count>LMB_ROUTE_REPLICAS) return 0;
+    if (memcmp(contract->id,current->id,32) || memcmp(contract->content,current->content,32) ||
+        strcmp(contract->adapter,current->adapter) || strcmp(contract->numeric_class,current->numeric_class) ||
+        contract->numeric_abi!=current->numeric_abi || contract->greedy_only!=current->greedy_only) return 0;
+    for (uint32_t i=0;i<contract->count;i++)
+        if (!memcmp(&contract->replicas[i],&current->replicas[member],sizeof contract->replicas[i])) return 1;
+    return 0;
+}
+static int api_model_open_ex(int access, const char *tracker, const uint8_t id[32], uint32_t max_new,
+                          Engine *engine, int *permit, LmbResidentPlan *selected, const char **error,
+                          const LmbModelRoute *contract, const uint8_t *excluded, uint32_t excluded_count, int require_seed,
+                          LmbModelRoute *used_route) {
     *permit=-1;
     LmbModelRoute route; int rc=api_route_read(access,id,tracker,&route);
     if (rc!=LMB_ROUTE_OK && rc!=LMB_ROUTE_MISSING) { *error="model_registry_unavailable"; return 503; }
@@ -74,7 +88,7 @@ static int api_model_open(int access, const char *tracker, const uint8_t id[32],
     if (!plan) { *error="allocation_failed"; return 500; }
     int status=503; *error="approved_allocation_unavailable";
     if (rc==LMB_ROUTE_MISSING) {
-        if (api_find_plan(tracker,id,plan)) { status=404; *error="resident_plan_not_found"; }
+        if (contract || api_find_plan(tracker,id,plan)) { status=404; *error="resident_plan_not_found"; }
         else if (max_new>plan->max_new) { status=400; *error="max_tokens_exceeds_plan"; }
         else {
             int admitted=lmb_replica_admit(access,plan->allocation,permit);
@@ -87,12 +101,18 @@ static int api_model_open(int access, const char *tracker, const uint8_t id[32],
       uint32_t order[LMB_ROUTE_REPLICAS]; api_route_order(tracker,&route,order);
       for (uint32_t attempt=0; attempt<route.count; attempt++) {
         uint32_t i=order[attempt];
+        int skipped=0;
+        for (uint32_t k=0;k<excluded_count;k++)
+            if (!memcmp(route.replicas[i].allocation,excluded+32*k,32)) skipped=1;
+        if (skipped || !api_recovery_member(contract,&route,i)) continue;
         if (api_find_plan(tracker,route.replicas[i].allocation,plan) || !api_route_plan_matches(&route,i,plan)) continue;
         int admitted=lmb_replica_admit(access,plan->allocation,permit);
         if (admitted==LMB_REPLICA_BUSY) { status=429; *error="replicas_busy"; continue; }
         if (admitted) { status=503; *error="admission_unavailable"; break; }
         if (api_plan_open(plan,engine,max_new)) { close(*permit); *permit=-1; continue; }
-        if (!api_route_engine_matches(&route,engine)) { engine_stop(engine); close(*permit); *permit=-1; continue; }
+        if (!api_route_engine_matches(&route,engine) || (require_seed && !engine->request_seed_supported)) {
+            engine_stop(engine); close(*permit); *permit=-1; continue;
+        }
         char model_id[65], allocation_id[65]; lmb_hex(model_id,route.id,32);
         lmb_hex(allocation_id,route.replicas[i].allocation,32);
         fprintf(stderr,"[model-route] model=%s revision=%u allocation=%s replica=%u/%u\n",
@@ -102,7 +122,12 @@ static int api_model_open(int access, const char *tracker, const uint8_t id[32],
     }
     if (status && *permit>=0) { close(*permit); *permit=-1; }
     if (!status && selected) *selected=*plan;
+    if (!status && used_route) { memset(used_route,0,sizeof *used_route); if (!rc) *used_route=route; }
     free(plan); return status;
+}
+static int api_model_open(int access, const char *tracker, const uint8_t id[32], uint32_t max_new,
+    Engine *engine, int *permit, LmbResidentPlan *selected, const char **error, LmbModelRoute *used_route) {
+    return api_model_open_ex(access,tracker,id,max_new,engine,permit,selected,error,NULL,NULL,0,0,used_route);
 }
 static int api_route_policy(int access, const char *tracker, char *const *args, unsigned count) {
     if (count!=2 || !*tracker) return 1;

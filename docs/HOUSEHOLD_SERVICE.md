@@ -127,8 +127,12 @@ inside a local kernel; allowing overlapping Hybrid models to hold opposite
 node permits would risk deadlock. Use Segment for concurrent resident models
 until that path can yield admission around remote waits.
 
-Shared-donor batching, weighted/global compute scheduling, automatic
-failover/replay, server-wide cost optimization and model eviction policies are
+The API can visibly replay an interrupted turn on another already approved
+replica, with a stable request seed and byte-for-byte prefix validation; see
+[the recovery contract](RESIDENT_API.md#bounded-visible-response-recovery).
+This does not restart failed keepers, prepare alternate allocations or migrate
+KV state. Shared-donor batching, weighted/global compute scheduling, broader
+fault recovery, server-wide cost optimization and eviction policies remain
 separate work.
 
 The terminal now consumes a renderer-independent incremental reply reader.

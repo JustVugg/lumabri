@@ -94,6 +94,10 @@ int main(int argc, char **argv) {
     close(pipefd[0]); wait_count(&broker.active, 1);
     assert(!kill(child, SIGKILL)); assert(waitpid(child, NULL, 0) == child);
     assert(!lmb_compute_acquire(&held, 5000, NULL, NULL));
+    /* The grant byte is sent before the broker publishes its telemetry.
+     * Receiving it does not synchronize with that later atomic increment. */
+    uint64_t grants_deadline = lmb_compute_now()+5000;
+    while (atomic_load(&broker.grants) != 7 && lmb_compute_now() < grants_deadline) usleep(1000);
     assert(atomic_load(&broker.grants) == 7);
     lmb_compute_release(&held); wait_count(&broker.active, 0);
 

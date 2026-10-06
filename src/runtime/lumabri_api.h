@@ -162,14 +162,25 @@ static int api_messages(const LmbJson *j, unsigned index, EngKind kind, Cap *his
 fail:
     free(user); return -1;
 }
-typedef struct { int fd; double first; } ApiObservedStream;
-static int api_observed_delta(void *opaque, const unsigned char *bytes, size_t length) {
+#include "lumabri_replay_prefix.h"
+typedef struct {
+    int fd; double first; LmbReplayPrefix replay;
+    char error[LMB_REPLY_HEADER]; int retryable;
+} ApiObservedStream;
+static int api_emitted_delta(void *opaque, const unsigned char *bytes, size_t length) {
     ApiObservedStream *stream=opaque;
     if (length && !stream->first) stream->first=nowd();
     return api_delta(&stream->fd,bytes,length);
 }
+static int api_observed_delta(void *opaque, const unsigned char *bytes, size_t length) {
+    ApiObservedStream *stream=opaque;
+    return lmb_replay_feed(&stream->replay,bytes,length,api_emitted_delta,stream);
+}
 static int api_observed_error(void *opaque, const char *message) {
-    ApiObservedStream *stream=opaque; return api_engine_error(&stream->fd,message);
+    ApiObservedStream *stream=opaque;
+    stream->retryable=!strncmp(message,LMB_REPLICA_RETRYABLE,strlen(LMB_REPLICA_RETRYABLE));
+    snprintf(stream->error,sizeof stream->error,"%s",message);
+    return 0; /* The request loop emits one terminal error, or visible recovery. */
 }
 static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUser *user, const char *body, size_t length) {
     double started=nowd();
@@ -184,8 +195,14 @@ static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUs
     LmbResidentPlan *selected=calloc(1,sizeof *selected);
     if (!selected) { api_error(fd,500,"allocation_failed"); return; }
     Engine engine; const char *error=NULL; int permit=-1;
-    int status=api_model_open(access_dir,tracker,allocation,max_new,&engine,&permit,selected,&error);
+    LmbModelRoute contract;
+    int status=api_model_open(access_dir,tracker,allocation,max_new,&engine,&permit,selected,&error,&contract);
     if (status) { api_error(fd,(unsigned)status,error); free(selected); return; }
+    int seeded=engine.request_seed_supported;
+    int recoverable=(seeded || engine.greedy_only) && contract.count>1;
+    uint64_t request_seed=0; if (seeded) lmb_random((uint8_t *)&request_seed,sizeof request_seed);
+    uint8_t attempted[3][32]; uint32_t attempts=1;
+    memcpy(attempted[0],selected->allocation,32);
     LmbCalibration *observation=calloc(1,sizeof *observation); char records[1200], why[200]; int observing=0;
     g_execution_view=&selected->execution;
     if (observation && !home_resident_observation_seed(selected,observation,records) &&
@@ -194,42 +211,77 @@ static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUs
     if (api_messages(&j,(unsigned)fields[1],engine.kind,&history,&prompt)) {
         api_error(fd,400,"unsupported_messages_or_limits"); goto finished;
     }
-    if (submit_serve2(&engine,history.p ? history.p : "",prompt,(int)max_new)) {
+    if (submit_serve2_seeded(&engine,history.p ? history.p : "",prompt,(int)max_new,seeded ? &request_seed : NULL)) {
         api_error(fd,503,"submit_failed"); goto finished;
     }
     const char *header="HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\n"
         "Connection: close\r\nX-Content-Type-Options: nosniff\r\nX-Accel-Buffering: no\r\n\r\n";
     if (api_write(fd,header,strlen(header))) goto finished;
-    ApiObservedStream observed={fd,0};
+    ApiObservedStream observed={.fd=fd,.replay={.limit=UINT64_C(8)<<20}};
     LmbReplyStream stream; LmbReplySink sink={api_observed_delta,NULL,api_observed_error,&observed};
-    if (lmb_reply_init(&stream,engine.request_id,UINT64_C(8)<<20,sink)) goto finished;
-    while (stream.status==LMB_REPLY_MORE && !api_stopping) {
+    int client_closed=0;
+    for (;;) {
+      int transport_failed=0;
+      if (lmb_reply_init(&stream,engine.request_id,UINT64_C(8)<<20,sink)) break;
+      observed.error[0]=0; observed.retryable=0;
+      while (stream.status==LMB_REPLY_MORE && !api_stopping) {
         struct pollfd pollers[2]={{engine.from,POLLIN,0},{fd,POLLIN,0}};
         int rc=poll(pollers,2,1000);
         if (rc<0 && errno==EINTR) continue;
-        if (rc<0) break;
+        if (rc<0) { transport_failed=1; break; }
         /* No pipelining or half-closed request bodies. A browser AbortController
          * disconnect cancels this conversation, never another user's slot. */
-        if (pollers[1].revents&(POLLIN|POLLHUP|POLLERR|POLLNVAL)) break;
+        if (pollers[1].revents&(POLLIN|POLLHUP|POLLERR|POLLNVAL)) { client_closed=1; break; }
         if (pollers[0].revents&(POLLIN|POLLHUP|POLLERR|POLLNVAL)) {
             unsigned char bytes[16384]; ssize_t got=read(engine.from,bytes,sizeof bytes);
             if (got<0 && errno==EINTR) continue;
-            if (got<=0) break;
+            if (got<=0) { transport_failed=1; break; }
             lmb_reply_feed(&stream,bytes,(size_t)got,NULL);
         }
+      }
+      if (client_closed || api_stopping || stream.status==LMB_REPLY_DONE || stream.status==LMB_REPLY_ABORTED ||
+          !recoverable || attempts>=3 || !(transport_failed || (stream.status==LMB_REPLY_ERROR && observed.retryable))) break;
+      /* Recheck revocation and the current model membership before sending
+       * any text again. A newly added replica is not implicitly adopted by
+       * an in-flight turn; the original immutable contract bounds recovery. */
+      LmbApiUser current;
+      if (lmb_api_user_load(access_dir,user->name,&current) || memcmp(current.digest,user->digest,sizeof user->digest) ||
+          !lmb_api_user_allows(&current,allocation)) { snprintf(observed.error,sizeof observed.error,"Access revoked during recovery"); break; }
+      struct pollfd client={fd,POLLIN,0};
+      if (poll(&client,1,0)!=0) { client_closed=1; break; }
+      if (api_event(fd,"recovering","{\"message\":\"Replica interrupted; replaying on another approved replica and verifying the visible prefix\"}")) { client_closed=1; break; }
+      engine_stop(&engine); if (permit>=0) close(permit); permit=-1;
+      status=api_model_open_ex(access_dir,tracker,allocation,max_new,&engine,&permit,selected,&error,
+          &contract,&attempted[0][0],attempts,seeded,NULL);
+      if (status) { snprintf(observed.error,sizeof observed.error,"Replica unavailable; no other approved capacity can recover this response"); break; }
+      client.revents=0;
+      if (poll(&client,1,0)!=0) { client_closed=1; break; }
+      if (lmb_api_user_load(access_dir,user->name,&current) || memcmp(current.digest,user->digest,sizeof user->digest) ||
+          !lmb_api_user_allows(&current,allocation)) { snprintf(observed.error,sizeof observed.error,"Access revoked during recovery"); break; }
+      memcpy(attempted[attempts++],selected->allocation,32);
+      lmb_replay_begin(&observed.replay);
+      if (submit_serve2_seeded(&engine,history.p ? history.p : "",prompt,(int)max_new,seeded ? &request_seed : NULL)) {
+          snprintf(observed.error,sizeof observed.error,"Recovery submission failed; response remains incomplete"); break;
+      }
     }
-    if (stream.status==LMB_REPLY_DONE) {
+    if (!client_closed && !api_stopping && stream.status==LMB_REPLY_DONE && lmb_replay_complete(&observed.replay)) {
         int observation_saved=0;
-        if (observing && observed.first>started)
+        if (attempts==1 && observing && observed.first>started)
             observation_saved=catalog_record_turn(observation,&observation->key,records,tracker,&engine,stream.stat,
                                                   observed.first-started,LMB_CAL_SOURCE_SESSION);
         Cap payload={0};
         if (!cap_str(&payload,"{\"stats\":") && !api_json_text(&payload,stream.stat) &&
-            !api_addf(&payload,",\"observation_saved\":%s}",observation_saved ? "true" : "false"))
+            !api_addf(&payload,",\"observation_saved\":%s,\"recovery_attempts\":%u,\"stats_scope\":\"%s\"}",
+                observation_saved ? "true" : "false",attempts-1,attempts>1 ? "final_attempt_only" : "single_attempt"))
             (void)api_event(fd,"done",payload.p);
         free(payload.p);
-    } else if (stream.status!=LMB_REPLY_ERROR && stream.status!=LMB_REPLY_ABORTED)
-        (void)api_event(fd,"error","{\"message\":\"Stream interrupted; response is incomplete\"}");
+    } else if (!client_closed && !api_stopping) {
+        const char *reason=observed.replay.mismatch || (stream.status==LMB_REPLY_DONE && !lmb_replay_complete(&observed.replay)) ?
+            "Recovery did not reproduce the visible prefix; response remains incomplete" :
+            observed.error[0] ? observed.error : "Stream interrupted; response is incomplete";
+        (void)api_engine_error(&fd,reason);
+    }
+    lmb_replay_free(&observed.replay);
 finished:
     free(history.p); free(prompt); engine_stop(&engine);
     if (permit>=0) close(permit);
