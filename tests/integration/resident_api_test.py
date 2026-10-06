@@ -9,6 +9,7 @@ from pathlib import Path
 import socket
 import shutil
 import subprocess
+import time
 from home_flow_test import assert_stage_record
 
 
@@ -137,8 +138,18 @@ def verify_resident_api(runtime, env, tracker, first_model_name, artifacts, obse
                      {"Authorization": "Bearer " + alice, "Content-Type": "application/json"})
         assert conn.getresponse().status == 200
         conn.close()
-        status, data = chat(alice, first["id"])
-        assert status == 200 and b"event: done" in data
+        # Closing the HTTP socket requests cancellation; it is not an ACK
+        # that the gateway worker has already reset/closed its host slot and
+        # released the exact-allocation permit. An immediate new turn may
+        # correctly receive BUSY until that bounded asynchronous cleanup ends.
+        deadline = time.monotonic() + 5
+        while True:
+            status, data = chat(alice, first["id"])
+            if status != 429 or json.loads(data).get("error") != "replicas_busy":
+                break
+            assert time.monotonic() < deadline, ("cancelled allocation stayed busy", status, data)
+            time.sleep(.02)
+        assert status == 200 and b"event: done" in data and b"event: error" not in data, (status, data)
         cli("revoke", "alice")
         assert request("/api/v1/models", alice)[0] == 401
         assert request("/api/v1/models", bob)[0] == 200
