@@ -103,6 +103,7 @@ SECURE_DEPS = lumabri_secure.h lumabri_crypto.h
 HOME_NET_DEPS = lumabri_home_net.h lumabri_home_discovery.h lumabri_platform.h lumabri_wakeup.h lumabri_runtime_probe.h src/runtime/lumabri_resident_plan.h
 MACHINE_SRC = lumabri_machine.c
 MACHINE_DEPS = lumabri_machine.h $(MACHINE_SRC)
+lumabri test_chat_ui test_host_session_pool test-home-monitor test_calibration: src/planner/lumabri_turn_observation.h
 lumabri tracker test_chat_ui test_inventory test_home: src/planner/lumabri_resource_facts.h src/planner/lumabri_workload_facts.h
 PLANNER_ADAPTER_DEPS = $(wildcard planner_adapters/*.h)
 

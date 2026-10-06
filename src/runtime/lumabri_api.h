@@ -161,7 +161,17 @@ static int api_messages(const LmbJson *j, unsigned index, EngKind kind, Cap *his
 fail:
     free(user); return -1;
 }
+typedef struct { int fd; double first; } ApiObservedStream;
+static int api_observed_delta(void *opaque, const unsigned char *bytes, size_t length) {
+    ApiObservedStream *stream=opaque;
+    if (length && !stream->first) stream->first=nowd();
+    return api_delta(&stream->fd,bytes,length);
+}
+static int api_observed_error(void *opaque, const char *message) {
+    ApiObservedStream *stream=opaque; return api_engine_error(&stream->fd,message);
+}
 static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUser *user, const char *body, size_t length) {
+    double started=nowd();
     LmbJsonToken tokens[1024]; LmbJson j; int fields[3];
     const char *const keys[]={"model","messages","max_tokens"}; char id[65]; uint8_t allocation[32]; uint32_t max_new;
     if (lmb_json_parse(&j,body,length,tokens,1024) || lmb_json_fields(&j,0,keys,3,fields) ||
@@ -170,9 +180,15 @@ static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUs
         api_error(fd,400,"invalid_chat_request"); return;
     }
     if (!lmb_api_user_allows(user,allocation)) { api_error(fd,403,"model_not_authorized"); return; }
+    LmbResidentPlan *selected=calloc(1,sizeof *selected);
+    if (!selected) { api_error(fd,500,"allocation_failed"); return; }
     Engine engine; const char *error=NULL; int permit=-1;
-    int status=api_model_open(access_dir,tracker,allocation,max_new,&engine,&permit,&error);
-    if (status) { api_error(fd,(unsigned)status,error); return; }
+    int status=api_model_open(access_dir,tracker,allocation,max_new,&engine,&permit,selected,&error);
+    if (status) { api_error(fd,(unsigned)status,error); free(selected); return; }
+    LmbCalibration *observation=calloc(1,sizeof *observation); char records[1200], why[200]; int observing=0;
+    g_execution_view=&selected->execution;
+    if (observation && !home_resident_observation_seed(selected,observation,records) &&
+        !catalog_workload_capture_once(tracker,&observation->key,why,sizeof why)) observing=1;
     Cap history={0}; char *prompt=NULL;
     if (api_messages(&j,(unsigned)fields[1],engine.kind,&history,&prompt)) {
         api_error(fd,400,"unsupported_messages_or_limits"); goto finished;
@@ -183,7 +199,8 @@ static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUs
     const char *header="HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\n"
         "Connection: close\r\nX-Content-Type-Options: nosniff\r\nX-Accel-Buffering: no\r\n\r\n";
     if (api_write(fd,header,strlen(header))) goto finished;
-    LmbReplyStream stream; LmbReplySink sink={api_delta,NULL,api_engine_error,&fd};
+    ApiObservedStream observed={fd,0};
+    LmbReplyStream stream; LmbReplySink sink={api_observed_delta,NULL,api_observed_error,&observed};
     if (lmb_reply_init(&stream,engine.request_id,UINT64_C(8)<<20,sink)) goto finished;
     while (stream.status==LMB_REPLY_MORE && !api_stopping) {
         struct pollfd pollers[2]={{engine.from,POLLIN,0},{fd,POLLIN,0}};
@@ -201,8 +218,13 @@ static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUs
         }
     }
     if (stream.status==LMB_REPLY_DONE) {
+        int observation_saved=0;
+        if (observing && observed.first>started)
+            observation_saved=catalog_record_turn(observation,&observation->key,records,tracker,&engine,stream.stat,
+                                                  observed.first-started,LMB_CAL_SOURCE_SESSION);
         Cap payload={0};
-        if (!cap_str(&payload,"{\"stats\":") && !api_json_text(&payload,stream.stat) && !cap_str(&payload,"}"))
+        if (!cap_str(&payload,"{\"stats\":") && !api_json_text(&payload,stream.stat) &&
+            !api_addf(&payload,",\"observation_saved\":%s}",observation_saved ? "true" : "false"))
             (void)api_event(fd,"done",payload.p);
         free(payload.p);
     } else if (stream.status!=LMB_REPLY_ERROR && stream.status!=LMB_REPLY_ABORTED)
@@ -210,6 +232,7 @@ static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUs
 finished:
     free(history.p); free(prompt); engine_stop(&engine);
     if (permit>=0) close(permit);
+    g_execution_view=NULL; free(observation); free(selected);
 }
 static void api_connection(int fd, int access_dir, unsigned port, const char *tracker) {
     struct timeval timeout={5,0};

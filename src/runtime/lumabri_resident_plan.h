@@ -239,6 +239,29 @@ static int home_resident_observation_key(const LmbResidentPlan *p, LmbCalKey *ke
     return 0;
 }
 
+/* Shared provenance preparation, without waiting for an inventory heartbeat.
+ * Callers must still validate the actual runtime/workload before observing. */
+static int home_resident_observation_seed(const LmbResidentPlan *p, LmbCalibration *resumed, char records[1200]) {
+    char binary[1200], bin_dir[1024], build[65]; LmbBinaryDigest self={0}; uint8_t hash[32];
+    memset(resumed,0,sizeof *resumed);
+    if (!p->content_id[0] || catalog_calibration_dir(records) ||
+        (home_resident_observation_key(p,&resumed->key) && lmb_cal_load(records,p->content_id,resumed))) return -1;
+    LmbCalKey *k=&resumed->key;
+    int same=k->nodes==p->execution.count && k->context==p->context && k->sessions==(p->sessions ? p->sessions : 1) &&
+        !strcmp(k->plan_kind,p->execution.hybrid ? "hybrid" : "segment");
+    for (uint32_t i=0;same && i<k->nodes;i++) {
+        char peer[65]; lmb_hex(peer,p->peer_keys[i],32);
+        same=!strcmp(peer,k->node_id[i]) && p->execution.nodes[i].begin==k->layer_begin[i] &&
+            p->execution.nodes[i].end==k->layer_end[i] && !!p->execution.nodes[i].edge==(i==k->edge_node);
+    }
+    exe_dir(bin_dir,sizeof bin_dir);
+    same=same && !checked_printf(binary,sizeof binary,"%s/lumabri",bin_dir) && !lmb_binary_digest(binary,&self,hash);
+    if (same) { lmb_hex(build,hash,32); same=!strcmp(build,k->build_id); }
+    if (!same) return -1;
+    resumed->preparation_seconds=p->preparation_seconds; resumed->prepared_at=p->prepared_at;
+    return 0;
+}
+
 static int home_resident_plan_chat_mode(const LmbResidentPlan *p, int calibrate) {
     if (!home_resident_plan_valid(p)) return -1;
     char context[20], max_new[20];
@@ -250,27 +273,11 @@ static int home_resident_plan_chat_mode(const LmbResidentPlan *p, int calibrate)
     /* A new conversation, not replay of another session's KV. The host
      * serializes admission and resets its state before accepting us. */
     g_execution_view = &p->execution;
-    LmbCalibration resumed = {0}; char records[1200], why[200], binary[1200], bin_dir[1024];
-    LmbBinaryDigest self = {0}; uint8_t hash[32]; char build[65];
+    LmbCalibration resumed = {0}; char records[1200], why[200];
     int observing = 0;
-    if (!g_recording_calibration && p->content_id[0] && !catalog_calibration_dir(records) &&
-        (!home_resident_observation_key(p, &resumed.key) || !lmb_cal_load(records, p->content_id, &resumed))) {
-        LmbCalKey *k = &resumed.key;
-        int same = k->nodes == p->execution.count && k->context == p->context && k->sessions == (p->sessions ? p->sessions : 1) &&
-            !strcmp(k->plan_kind, p->execution.hybrid ? "hybrid" : "segment");
-        for (uint32_t i = 0; same && i < k->nodes; i++) {
-            char peer[65]; lmb_hex(peer, p->peer_keys[i], 32);
-            same = !strcmp(peer, k->node_id[i]) && p->execution.nodes[i].begin == k->layer_begin[i] &&
-                p->execution.nodes[i].end == k->layer_end[i] && !!p->execution.nodes[i].edge == (i == k->edge_node);
-        }
-        exe_dir(bin_dir, sizeof bin_dir);
-        same = same && !checked_printf(binary, sizeof binary, "%s/lumabri", bin_dir) &&
-            !lmb_binary_digest(binary, &self, hash);
-        if (same) { lmb_hex(build, hash, 32); same = !strcmp(build, k->build_id); }
-        if (same && !catalog_runtime_revalidate_tracker(p->tracker, k, why, sizeof why)) {
-            resumed.preparation_seconds = p->preparation_seconds; resumed.prepared_at = p->prepared_at;
-            g_recording_calibration = &resumed; g_calibration_directory = records; observing = 1;
-        }
+    if (!g_recording_calibration && !home_resident_observation_seed(p,&resumed,records) &&
+        !catalog_runtime_revalidate_tracker(p->tracker,&resumed.key,why,sizeof why)) {
+        g_recording_calibration=&resumed; g_calibration_directory=records; observing=1;
     }
     int rc = cmd_chat((int)(sizeof args / sizeof *args) - !calibrate, args);
     if (observing) { g_recording_calibration = NULL; g_calibration_directory = NULL; }

@@ -432,7 +432,7 @@ def main():
             assert assert_stage_record(records[0]) == 1, "changed workload inherited previous observation count"
             if args.api:
                 from resident_api_test import verify_resident_api
-                verify_resident_api(runtime, env("chatter"), tracker, names[4], tmp)
+                verify_resident_api(runtime, env("chatter"), tracker, names[4], tmp, records[0])
             if args.replicas:
                 # Same byte-for-byte checkpoint, but a separate approval and
                 # signed routing root. Never copy a production model here.
