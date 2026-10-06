@@ -77,6 +77,8 @@ static int workspace_observation(Cap *body, const LmbWorkspace *s, const LmbResi
     if (current) {
         seed.key.adapter_abi=prior.key.adapter_abi;
         snprintf(seed.key.numeric_class,sizeof seed.key.numeric_class,"%s",prior.key.numeric_class);
+        LmbCalibration matching;
+        if (!lmb_cal_profile_load(records,&seed.key,&matching)) prior=matching;
         current=lmb_cal_matches(&seed.key,&prior.key);
     }
     if (!current) return cap_str(body,"{\"state\":\"obsolete\",\"decode_tok_s\":null}");

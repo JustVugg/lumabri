@@ -40,6 +40,7 @@ def verify_managed_routes(runtime, env, tracker, first_plan, third_plan, first_n
     route = json.loads(command("model-add", "olmoe-managed", first["id"], third["id"]))
     assert route["replicas"] == 2 and route["allocations"] == [first["id"], third["id"]]
     assert route["sessions"] is None and route["state"] == "saved_route" and route["revision"] == 1
+    assert route["policy"] == "ordered"
     assert route["numeric_class"] and route["adapter"] == "olmoe" and len(route["content_id"]) == 64
     command("model-set", route["id"], other["id"], ok=False)
     command("model-add", "olmoe-managed", third["id"], ok=False)
@@ -97,6 +98,22 @@ def verify_managed_routes(runtime, env, tracker, first_plan, third_plan, first_n
         first_busy = hold(first["id"])
         status, data = chat(route["id"])
         assert status == 200 and b"event: done\n" in data, (status, data)
+        # Both actual replicas have now produced matching-length observations
+        # under this resident workload. Preferences must use them, without
+        # changing allocation permissions or treating missing prices as free.
+        policy = json.loads(command("model-policy", route["id"], "observed-decode"))
+        assert policy["revision"] == 3 and policy["policy"] == "observed-decode"
+        command("model-policy", route["id"], "made-up", ok=False)
+        status, data = chat(route["id"])
+        assert status == 200 and b"event: done\n" in data, (status, data)
+        policy_log = Path(env["HOME"]) / ".lumabri/service/api.log"
+        assert "evidence=recent_matching_decode_observations" in policy_log.read_text(), policy_log.read_text()
+        policy = json.loads(command("model-policy", route["id"], "declared-cost"))
+        assert policy["revision"] == 4 and policy["policy"] == "declared-cost"
+        status, data = chat(route["id"])
+        assert status == 200 and b"event: done\n" in data, (status, data)
+        assert "evidence=prices_missing_or_mixed_currency" in policy_log.read_text()
+        assert json.loads(command("model-policy", route["id"], "ordered"))["revision"] == 5
         third_busy = hold(third["id"])
         status, data = chat(route["id"])
         assert status == 429 and json.loads(data)["error"] == "replicas_busy", (status, data)
@@ -131,7 +148,7 @@ def verify_managed_routes(runtime, env, tracker, first_plan, third_plan, first_n
         status, data = chat(route["id"])
         assert status == 200 and b"event: done\n" in data and b"event: error\n" not in data, (status, data)
         reduced = json.loads(command("model-set", route["id"], third["id"]))
-        assert reduced["revision"] == 3 and reduced["replicas"] == 1
+        assert reduced["revision"] == 6 and reduced["replicas"] == 1 and reduced["policy"] == "ordered"
         release(third_plan)
         status, data = chat(route["id"])
         assert status == 503 and json.loads(data)["error"] == "approved_allocation_unavailable", (status, data)
@@ -139,7 +156,7 @@ def verify_managed_routes(runtime, env, tracker, first_plan, third_plan, first_n
         assert chat(route["id"])[0] == 404
         assert request("/api/v1/conversations/" + conversation_id)[0] == 200, "route removal lost history"
         assert request("/api/v1/conversations/" + conversation_id, bob)[0] == 404
-        print("MANAGED ROUTES: PASS (real OLMoE replicas, immutable checkpoint/numeric contract, stable grant, occupied-replica routing, shared alias/raw admission, selective loss, bounded unavailable, private history)", flush=True)
+        print("MANAGED ROUTES: PASS (real OLMoE replicas, matching observations, explicit preferences, unknown costs, immutable contracts, stable grants, bounded shared admission, selective loss, private history)", flush=True)
     finally:
         for process in held[:]:
             unhold(process)

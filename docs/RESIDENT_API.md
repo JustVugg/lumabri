@@ -114,8 +114,39 @@ new user grants. Registered plans must have current provenance (version 6).
 Up to 32 managed models and eight replicas per model are supported. Names are
 1–32 lowercase letters, digits, `_` or `-`. Private revisioned records reside
 under `~/.lumabri/api-access/models`; concurrent updates fail rather than
-overwriting an intervening change. The ordered set is an operator preference,
-**not** a measured speed, cost or load-balancing optimizer.
+overwriting an intervening change. The default preference is the operator's
+order. It can be changed without loading, moving or unloading any weights:
+
+```sh
+./lumabri api model-policy MODEL_ID ordered
+./lumabri api model-policy MODEL_ID observed-decode
+./lumabri api model-policy MODEL_ID declared-cost
+```
+
+`observed-decode` prefers the faster **last observed decode**, only when all
+available approved plans have comparable observations: exact build, hardware,
+threads, resident allocation set, ranges, context and configured sessions;
+matching prompt/output lengths; at least eight generated tokens; no older than
+five minutes. A five-percent preference band retains the requested order for
+near-equal rates. It does not predict TTFT for a different prompt or certify
+concurrent capacity. Missing, changed or incomparable observations restore
+the operator's order, rather than manufacturing an estimate.
+
+`declared-cost` prefers the lower sum of declared whole-machine hourly prices
+for the replica's participating computers (each counted once). Every candidate
+must have known prices in the same currency. This is a resource-footprint
+preference, **not incremental cost or a saving**: the other replicas are still
+resident and their computers still incur costs. It has no performance SLO.
+Missing/mixed-currency prices restore the operator's order. Gateway logs state
+which preference and evidence were used; normal users cannot change policy.
+
+Completed turns retain up to sixteen exact-configuration observations per
+checkpoint in private fixed-size slots, at most 512 KiB plus a 32 KiB temporary
+record. New configurations replace the oldest slot; an older delayed writer
+cannot replace a newer same-key observation. Only timing, counts and machine
+provenance are stored, never prompt or answer text. The existing latest-record
+file remains readable. Old version-one routes load with `ordered`; saving a
+route now uses version two, which older binaries do not understand.
 
 For each new chat request, the gateway rechecks the live allocation and host,
 then tries the next approved member if the previous one cannot be opened.
