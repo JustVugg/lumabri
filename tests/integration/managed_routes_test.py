@@ -66,6 +66,20 @@ def verify_managed_routes(runtime, env, tracker, first_plan, third_plan, first_n
         return request("/api/v1/chat", body={"model": model, "max_tokens": 8,
                                             "messages": [{"role": "user", "content": "hi"}]})
 
+    def observe_replica(label):
+        status, data = chat(route["id"])
+        (artifacts / ("route-observation-" + label + ".log")).write_bytes(data)
+        assert status == 200 and b"event: error\n" not in data, (label, status, data)
+        done = [json.loads(block.split(b"\ndata: ", 1)[1])
+                for block in data.split(b"\n\n") if block.startswith(b"event: done\n")]
+        # A successful replay is NOT a measurement of this replica. In
+        # particular, macOS may compress an idle process on a shared runner;
+        # the residency guard must refuse it, not silently relax its policy.
+        # Fail at the unmet prerequisite and preserve the actual SSE evidence,
+        # instead of later reporting a mysterious missing policy observation.
+        assert len(done) == 1 and done[0]["recovery_attempts"] == 0 and done[0]["observation_saved"], (
+            label, "replica did not produce a saved no-replay observation; inspect resident-memory logs", status, data)
+
     def release(plan):
         result = subprocess.run([str(runtime / "test_chat_ui"), "resident-release", str(plan), tracker],
                                 env=env, text=True, capture_output=True, timeout=30)
@@ -94,11 +108,9 @@ def verify_managed_routes(runtime, env, tracker, first_plan, third_plan, first_n
         assert status == 200 and json.loads(data) == {"schema": 1, "models": []}
         for member in (first, third, other):
             assert chat(member["id"])[0] == 403, "logical grant authorized a raw allocation"
-        status, data = chat(route["id"])
-        assert status == 200 and b"event: done\n" in data and b"event: error\n" not in data, (status, data)
+        observe_replica("first")
         first_busy = hold(first["id"])
-        status, data = chat(route["id"])
-        assert status == 200 and b"event: done\n" in data, (status, data)
+        observe_replica("alternate")
         # Both actual replicas have now produced matching-length observations
         # under this resident workload. Preferences must use them, without
         # changing allocation permissions or treating missing prices as free.
