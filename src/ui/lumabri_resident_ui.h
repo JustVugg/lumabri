@@ -8,11 +8,16 @@
 typedef struct {
     LmbResidentPlan plan;
     _Atomic int done, cancel;
-    int ok, release;
+    int ok, release, release_status;
 } HomeResidentProbe;
 
 static void *home_resident_probe(void *arg) {
     HomeResidentProbe *p = arg; p->ok = 1;
+    if (p->release) {
+        p->release_status=home_managed_retire(p->plan.tracker,p->plan.allocation);
+        p->ok=p->release_status==0;
+        atomic_store(&p->done,1); return NULL;
+    }
     for (uint32_t i = 0; i < p->plan.execution.count; i++) {
         if (atomic_load(&p->cancel)) { p->ok = 0; break; }
         if (home_resident_peer(&p->plan, i, p->release)) p->ok = 0;
@@ -36,7 +41,8 @@ static int home_resident_library_ui(const char *tracker) {
             confirmed[probe_index] = probe.release ? -1 : probe.ok ? 1 : -1;
             snprintf(notice, sizeof notice, "%s", probe.release ? probe.ok ?
                 "All donors confirmed release. Their sharing services remain available." :
-                "Some releases were not confirmed. The saved plan remains; check the donors." : probe.ok ?
+                probe.release_status==1 ? "Waiting for admitted chats to finish. Use x again to reconcile this release." :
+                "Release unconfirmed. Its journal is kept; use x again to reconcile. No forced stop was used." : probe.ok ?
                 "Every donor confirmed this exact approved allocation is ready." :
                 "Not all donors confirmed readiness. No weights were reloaded.");
         }
@@ -72,7 +78,7 @@ static int home_resident_library_ui(const char *tracker) {
                 "Ready at last check" : confirmed[i] < 0 ? "Unavailable / unconfirmed" : "Saved · not checked", plans[i].execution.count, ram / 1e9);
             ui_item(10 + ((int)i - first) * 3, selected == (int)i, plans[i].model, detail);
         }
-        ui_footer(confirm_unload ? "Release this model on ALL its approved donors? Active chats will stop. Enter confirms; Esc cancels." : notice,
+        ui_footer(confirm_unload ? "Drain this allocation, finish admitted chats, then release RAM? Enter confirms; Esc cancels." : notice,
             probing ? "Checking authenticated donors…   Esc back" :
             "↑ ↓ choose   r verify   Enter chat   x unload   c cancel background preparation   Esc back");
         ui_present();

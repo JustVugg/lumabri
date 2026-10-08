@@ -161,8 +161,11 @@ cancelling admitted turns; it retains weights and is not donor/server release.
 See [host drain](RESIDENT_API.md#drain-an-approved-host-without-interrupting-admitted-turns).
 Keepers also expose [Segment drain and live session counts](RESIDENT_API.md#inspect-and-drain-the-approved-segment-allocations)
 through a private channel to each owned engine. KV between turns and queued
-Hybrid calls remain counted. This is not yet coordinated retirement or an
-automatic scaling policy; no idle observation alone authorizes releasing RAM.
+Hybrid calls remain counted. Coordinated retirement first seals host and nodes
+and then releases that exact allocation. The resident library, local CLI and
+explicitly authorized browser management use the same durable coordinator;
+read-only operators and inference users cannot release resources. This is not
+an automatic scaling policy; no idle observation alone authorizes releasing RAM.
 
 ### Planned extension: vendor-independent agentic orchestration (not implemented)
 

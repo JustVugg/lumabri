@@ -5,6 +5,18 @@
 #include <assert.h>
 
 int main(int argc, char **argv) {
+    if (argc==4 && !strcmp(argv[1],"resident-hold")) {
+        assert(!lmb_secure_init()); LmbResidentPlan plan; Engine engine;
+        assert(!home_resident_plan_read(argv[2],argv[3],&plan));
+        assert(!api_plan_open(&plan,&engine,1));
+        puts("CONNECTED"); fflush(stdout); (void)getchar(); engine_stop(&engine); return 0;
+    }
+    if (argc==4 && !strcmp(argv[1],"resident-retire")) {
+        assert(!lmb_secure_init()); LmbResidentPlan plan;
+        assert(!home_resident_plan_read(argv[2],argv[3],&plan));
+        int rc=home_managed_retire(argv[3],plan.allocation);
+        printf("%d\n",rc); return rc<0 ? 1 : 0;
+    }
     if (argc == 4 && !strcmp(argv[1], "api-hold-allocation")) {
         int access=lmb_api_access_dir(argv[2],0), permit=-1; uint8_t id[32];
         assert(access>=0 && strlen(argv[3])==64 && !lmb_unhex(id,argv[3],32));
@@ -13,6 +25,22 @@ int main(int argc, char **argv) {
         (void)getchar(); close(permit); close(access); return 0;
     }
     if (argc == 2 && !strcmp(argv[1], "api-codec")) {
+        LmbHostControl fence; uint32_t action=0; uint8_t allocation[32]={1}; char id[65],path[128],body[512];
+        lmb_hex(id,allocation,32); snprintf(path,sizeof path,"/api/v1/allocations/%s/control",id);
+        assert(!lmb_management_path(path,allocation) && allocation[0]==1);
+        assert(lmb_management_path("/api/v1/allocations/../../control",allocation));
+        const char *revisions[]={"\"18446744073709551615\"","\"1\"","\"9007199254740993\"",
+            "\"18446744073709551616\"","1","\"01\"","\"0\"","\"-1\"","\"1e2\"","\"\""};
+        for (unsigned i=0;i<sizeof revisions/sizeof *revisions;i++) {
+            snprintf(body,sizeof body,"{\"action\":\"drain\",\"instance\":\"%s\",\"revision\":%s}",id,revisions[i]);
+            assert((lmb_management_request(body,strlen(body),&action,&fence)==0)==(i<3));
+            if (!i) assert(fence.revision==UINT64_MAX && action==LMB_HOST_CONTROL_DRAIN);
+        }
+        snprintf(body,sizeof body,"{\"action\":\"drain\",\"instance\":\"%s\",\"revision\":\"1\",\"action\":\"retire\"}",id);
+        assert(lmb_management_request(body,strlen(body),&action,&fence));
+        snprintf(body,sizeof body,"{\"action\":\"retire\",\"instance\":\"%s\",\"revision\":\"1\",\"endpoint\":\"attacker\"}",id);
+        assert(lmb_management_request(body,strlen(body),&action,&fence));
+        memset(body,' ',sizeof body); assert(lmb_management_request(body,sizeof body,&action,&fence));
         Engine seeded={.request_seed_supported=1};
         HostState host={.engine=&seeded,.slots=4,.routed_slot=2,.max_frame=4096,.max_new=64};
         const char *headers[]={"SUBMIT 1 0 3 8 0.7 0.95 18446744073709551615\n",

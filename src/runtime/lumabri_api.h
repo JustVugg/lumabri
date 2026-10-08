@@ -30,7 +30,7 @@ static int api_response(int fd, unsigned status, const char *body) {
     char header[512];
     int n=snprintf(header,sizeof header,"HTTP/1.1 %u %s\r\nContent-Type: application/json\r\n"
         "Content-Length: %zu\r\nConnection: close\r\nCache-Control: no-store\r\n"
-        "X-Content-Type-Options: nosniff\r\n\r\n",status,status==200 ? "OK" : "Request failed",strlen(body));
+        "X-Content-Type-Options: nosniff\r\n\r\n",status,status==200 ? "OK" : status==202 ? "Accepted" : "Request failed",strlen(body));
     return n<0 || (size_t)n>=sizeof header || api_write(fd,header,(size_t)n) || api_write(fd,body,strlen(body)) ? -1 : 0;
 }
 static void api_error(int fd, unsigned status, const char *code) {
@@ -120,6 +120,19 @@ static int api_find_plan(const char *tracker, const uint8_t allocation[32], LmbR
 #include "lumabri_managed_models.h"
 #include "lumabri_retirement.h"
 #include "lumabri_workspace.h"
+#include "lumabri_management.h"
+/* The local TUI has the process owner's authority, not a borrowed web user's
+ * token. It invokes the same durable operation with a short observation
+ * deadline; an interrupted observation never falls back to forced release. */
+static int home_managed_retire(const char *tracker, const uint8_t allocation[32]) {
+    char path[1200]; uint64_t now=lmb_io_monotonic_ms(),prior=lmb_read_deadline_ms;
+    if (!now || checked_printf(path,sizeof path,"%s/.lumabri/api-access",getenv("HOME") ? getenv("HOME") : ".")) return -1;
+    int dir=lmb_api_access_dir(path,1); if (dir<0) return -1;
+    LmbRetirement progress={0}; int conflict=0;
+    lmb_read_deadline_ms=prior && prior<now+8000 ? prior : now+8000;
+    int rc=api_retirement_execute(dir,tracker,allocation,NULL,&progress,&conflict);
+    lmb_read_deadline_ms=prior; close(dir); return rc;
+}
 static int api_models(int fd, int access_dir, const char *tracker, const LmbApiUser *user) {
     LmbResidentPlan *plans=calloc(64,sizeof *plans); Cap body={0};
     if (!plans) { if (fd>=0) api_error(fd,500,"allocation_failed"); return -1; }
@@ -270,6 +283,12 @@ static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUs
         if (attempts==1 && observing && observed.first>started)
             observation_saved=catalog_record_turn(observation,&observation->key,records,tracker,&engine,stream.stat,
                                                   observed.first-started,LMB_CAL_SOURCE_SESSION);
+        /* Do not publish completion and recycle the gateway permit ahead of
+         * the remote host's conversation cleanup. Back-to-back request pairs
+         * otherwise see a false BUSY on an already completed replica. */
+        if (engine_finish(&engine)) fprintf(stderr,"[api] host cleanup observation timed out\n");
+        if (permit>=0) close(permit);
+        permit=-1;
         Cap payload={0};
         if (!cap_str(&payload,"{\"stats\":") && !api_json_text(&payload,stream.stat) &&
             !api_addf(&payload,",\"observation_saved\":%s,\"recovery_attempts\":%u,\"stats_scope\":\"%s\"}",
@@ -313,9 +332,16 @@ static void api_connection(int fd, int access_dir, unsigned port, const char *tr
     size_t history_prefix=strlen(history_path);
     int history=!strncmp(request.path,history_path,history_prefix) &&
         (!request.path[history_prefix] || request.path[history_prefix]=='/');
-    if (!strcmp(request.method,"GET") && !strcmp(request.path,"/api/v1/session") && !request.length)
-        (void)api_response(fd,200,lmb_operator_allows(access_dir,&user) ?
-            "{\"schema\":1,\"operator\":true}" : "{\"schema\":1,\"operator\":false}");
+    int management=!strncmp(request.path,"/api/v1/allocations/",20);
+    if (management && !strcmp(request.method,"POST") && !lmb_management_allows(access_dir,&user))
+        api_error(fd,403,"management_permission_required");
+    else if (!strcmp(request.method,"GET") && !strcmp(request.path,"/api/v1/session") && !request.length) {
+        char response[96]; snprintf(response,sizeof response,"{\"schema\":1,\"operator\":%s,\"management\":%s}",
+            lmb_operator_allows(access_dir,&user) ? "true" : "false",lmb_management_allows(access_dir,&user) ? "true" : "false");
+        (void)api_response(fd,200,response);
+    }
+    else if (management && !strcmp(request.method,"GET") && !request.length)
+        api_management(fd,access_dir,tracker,&user,&request,NULL,0);
     else if (!strcmp(request.method,"GET") && !strcmp(request.path,"/api/v1/workspace") && !request.length) {
         if (lmb_operator_allows(access_dir,&user)) (void)api_workspace(fd,access_dir,tracker);
         else api_error(fd,403,"operator_permission_required");
@@ -323,7 +349,8 @@ static void api_connection(int fd, int access_dir, unsigned port, const char *tr
         api_models(fd,access_dir,tracker,&user);
     else if (history && !strcmp(request.method,"GET") && !request.length)
         api_history(fd,access_dir,&user,&request,NULL,0);
-    else if (((!strcmp(request.method,"POST") && !strcmp(request.path,"/api/v1/chat")) ||
+    else if (management && request.length>512) api_error(fd,413,"management_request_too_large");
+    else if (((!strcmp(request.method,"POST") && (!strcmp(request.path,"/api/v1/chat") || management)) ||
               (history && (!strcmp(request.method,"POST") || !strcmp(request.method,"DELETE")))) &&
              request.has_length && request.length && request.json) {
         char *body=malloc((size_t)request.length+1); size_t at=0;
@@ -338,6 +365,7 @@ static void api_connection(int fd, int access_dir, unsigned port, const char *tr
             }
             body[at]=0;
             if (at!=request.length) api_error(fd,408,"request_body_timeout");
+            else if (management) api_management(fd,access_dir,tracker,&user,&request,body,at);
             else if (history) api_history(fd,access_dir,&user,&request,body,at);
             else api_chat(fd,access_dir,tracker,&user,body,at);
             lmb_api_wipe(body,(size_t)request.length+1); free(body);
@@ -491,6 +519,9 @@ static int cmd_api(int argc, char **argv) {
     } else if ((!strcmp(argv[0],"operator-grant") || !strcmp(argv[0],"operator-revoke")) && count==1) {
         LmbApiUser user;
         if (!lmb_api_user_load(dir,args[0],&user)) rc=lmb_operator_set(dir,&user,!strcmp(argv[0],"operator-grant"));
+    } else if ((!strcmp(argv[0],"manage-grant") || !strcmp(argv[0],"manage-revoke")) && count==1) {
+        LmbApiUser user;
+        if (!lmb_api_user_load(dir,args[0],&user)) rc=lmb_management_set(dir,&user,!strcmp(argv[0],"manage-grant"));
     } else if (!strcmp(argv[0],"revoke") && count==1 && lmb_api_username(args[0])) {
         char file[40]; snprintf(file,sizeof file,"%s.user",args[0]); rc=unlinkat(dir,file,0);
         if (!rc) rc=fsync(dir);
@@ -519,6 +550,8 @@ usage:
         "lumabri api user-add NAME\n"
         "lumabri api operator-grant NAME    read-only cluster visibility, no inference grant\n"
         "lumabri api operator-revoke NAME\n"
+        "lumabri api manage-grant NAME      allocation lifecycle control and visibility; no inference/history grant\n"
+        "lumabri api manage-revoke NAME\n"
         "lumabri api workspace [--tracker HOST:PORT]\n"
         "lumabri api grant NAME MODEL_OR_ALLOCATION_ID [--tracker HOST:PORT]\n"
         "lumabri api revoke NAME\n"

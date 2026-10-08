@@ -294,6 +294,53 @@ This is a controlled release primitive, not automatic elasticity or cloud
 deprovisioning. It does not delete model checkpoints, CAS caches or chat history,
 nor authorize an HTTP inference user to perform management mutations.
 
+### Shared allocation management
+
+The **Computers & models** workspace can inspect, drain, resume and deliberately
+release an exact saved allocation. Management is a separate local-owner grant:
+
+```sh
+lumabri api manage-grant operator-name
+lumabri api manage-revoke operator-name
+```
+
+It includes workspace visibility but does not authorize inference or access to
+another user's private conversations. An ordinary inference grant or read-only
+`operator-grant` cannot mutate allocations. Grants are bound to the current
+credential digest; replacing a user does not transfer an old management grant.
+
+`GET /api/v1/allocations/ALLOCATION_ID/control` requires operator or management
+permission. A live observation includes `instance`, `revision`, `state`,
+`connections` and `admitted_requests`. Revision is a **decimal string**, not a
+JavaScript number, so the full uint64 fence survives browser serialization.
+Only a management principal can POST to the same endpoint:
+
+```json
+{"action":"drain","instance":"<64 hex characters from GET>","revision":"1"}
+```
+
+The only actions are `drain`, `resume` and `retire`. Fields are mandatory;
+unknown or repeated fields and bodies larger than 512 bytes are rejected.
+Clients cannot supply endpoints, checkpoint roots, shell commands or new donor
+approvals. A changed instance/revision yields HTTP 409 and requires inspection
+before an explicit retry; no replacement process is silently adopted.
+
+The browser fetches the fence and asks for confirmation before mutation.
+`retire` calls the same durable coordinator as the CLI and the TUI's resident
+library unload action. HTTP 202 `retirement_pending` means not yet complete;
+HTTP 200 `released` includes the saved release receipt. A timed-out or failed
+response may follow partial progress: inspect and explicitly reconcile the
+same retirement, never assume that no action happened or fall back to forced
+release. GET after retirement reads the plan-bound journal without contacting
+an already stopped host. Resuming an allocation whose retirement has begun is
+rejected. Idle connections are closed during drain; admitted turns finish.
+
+The resident-library TUI retains its local owner authority and uses that same
+typed coordinator and journal, not a second release algorithm. This does not
+yet route every TUI operation through HTTP, add remote model preparation or
+implement an automatic scaling policy. Share-resources service stop remains
+an explicit owner operation which can interrupt its allocations.
+
 ### Bounded, visible response recovery
 
 For managed models with multiple approved replicas, a lost codec connection or
@@ -339,8 +386,13 @@ another replica is idle. If none can be admitted because capacity is held,
 the request receives HTTP 429 `replicas_busy` before submission. There is no
 additional implicit API queue or automatic resend.
 
-Admission is owned by kernel file locks and is released after local stream
-cleanup or worker-process death. No journal PID or stale counter recreates a
+Admission is owned by kernel file locks. After successful generation, the API
+half-closes the Hosted connection and observes remote closure before releasing
+the permit and publishing `done`. One-slot hosts reset their conversation before
+closing, so a completed turn does not recycle its permit while RESET still owns
+the host slot. This cleanup observation is bounded to 35 seconds; cancellation,
+transport loss and worker-process death do not invent an idle-host receipt.
+No journal PID or stale counter recreates a
 reservation. The private `api-access/dispatch` directory has at most 32 fixed
 lease cells plus its lock; allocation churn does not grow it without bound.
 Partial, unlocked cell records after a crash are only replaceable hints.

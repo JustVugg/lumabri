@@ -67,6 +67,12 @@ below. Historical observations remain here as evidence, not current promises.
   warning-as-error rebuild and focused ASan/UBSan/leak checks pass locally.
   Native CI and normal merge remain required. Automatic scaling policy and
   cloud/server release are separate work.
+- [ ] Shared management: explicit digest-bound management grants, fenced
+  allocation inspect/drain/resume/retire via HTTP and browser, and the same
+  typed retirement coordinator in the resident-library TUI. Ordinary inference
+  and read-only operator permissions do not authorize mutation. This does not
+  yet unify every preparation/configuration action through HTTP. Final
+  regression, native CI and review remain required.
 - [ ] Requirements-based global placement and measured cost comparison;
   TUI/web/application management through one public service interface;
   recovery, elasticity, provider integration and

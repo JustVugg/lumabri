@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[2]
 MODEL = "01" * 32
 
 
-async def exercise(port, alice, bob, artifacts):
+async def exercise(port, alice, bob, artifacts, env):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(viewport={"width": 1365, "height": 900}, color_scheme="light")
@@ -174,7 +174,7 @@ async def exercise(port, alice, bob, artifacts):
                     "machine_cost": None, "power": None}],
                 "models": [{"name": "OLMoE", "adapter": "olmoe", "replicas": 2,
                     "context": 4096, "max_tokens": 256, "revision": 3}],
-                "allocations": [{"name": "OLMoE · approved allocation", "adapter": "olmoe",
+                "allocations": [{"id": MODEL, "name": "OLMoE · approved allocation", "adapter": "olmoe",
                     "context": 4096, "session_limit": 4, "preparation_seconds": 12.5,
                     "observation": {"state": "obsolete", "decode_tok_s": None},
                     "ranges": [{"node": "node-a", "begin": 0, "end": 16, "edge": True,
@@ -185,7 +185,44 @@ async def exercise(port, alice, bob, artifacts):
         await expect(page.locator("#workspace-nodes")).to_contain_text("2 queued")
         await expect(page.locator("#workspace-allocations")).to_contain_text("Obsolete")
         assert await page.locator("#workspace script").count() == 0
+        assert await page.locator(".allocation-actions button").count() == 0, "read-only operator got mutation controls"
         await page.screenshot(path=str(artifacts / "web-workspace.png"))
+        # Real credential-bound management grant; explicit transport fixture
+        # below exercises browser confirmation and exact uint64 fences. The
+        # native resident flow separately invokes actual host/keeper handlers.
+        subprocess.run([str(ROOT / "lumabri"), "api", "manage-grant", "bob"], env=env,
+                       capture_output=True, text=True, check=True, timeout=10)
+        await page.locator("#refresh").click()
+        await page.locator("#workspace-refresh").click()
+        await expect(page.locator(".allocation-actions button")).to_have_count(4)
+        management_requests = []
+        control_state = {"schema": 1, "allocation": MODEL, "instance": "02" * 32,
+                         "revision": "9007199254740993", "state": "accepting"}
+        async def control_fixture(route):
+            if route.request.method == "POST":
+                body = route.request.post_data_json
+                assert body["instance"] == control_state["instance"] and body["revision"] == control_state["revision"]
+                assert set(body) == {"action", "instance", "revision"}
+                management_requests.append(body)
+                control_state["revision"] = str(int(control_state["revision"]) + 1)
+                control_state["state"] = {"drain": "drained", "resume": "accepting", "retire": "released"}[body["action"]]
+            await route.fulfill(json=control_state)
+        await page.route("**/api/v1/allocations/*/control", control_fixture)
+        page.once("dialog", lambda dialog: dialog.dismiss())
+        await page.get_by_role("button", name="Release RAM", exact=True).click()
+        await expect(page.get_by_role("button", name="Release RAM", exact=True)).to_be_enabled()
+        assert not management_requests, "cancelled confirmation mutated the allocation"
+        for action, label, state in (("drain", "Drain", "drained"), ("resume", "Resume", "accepting"), ("retire", "Release RAM", "released")):
+            page.once("dialog", lambda dialog: dialog.accept())
+            await page.get_by_role("button", name=label, exact=True).click()
+            await expect(page.locator("#notice")).to_contain_text(": " + state)
+            assert management_requests[-1]["action"] == action
+        assert management_requests[0]["revision"] == "9007199254740993", "browser rounded the fence"
+        await page.screenshot(path=str(artifacts / "web-management.png"))
+        subprocess.run([str(ROOT / "lumabri"), "api", "manage-revoke", "bob"], env=env,
+                       capture_output=True, text=True, check=True, timeout=10)
+        await page.locator("#refresh").click(); await page.locator("#workspace-refresh").click()
+        await expect(page.locator(".allocation-actions button")).to_have_count(0)
         await page.set_viewport_size({"width": 390, "height": 844})
         await page.locator("#collapse").click()
         assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth")
@@ -231,7 +268,7 @@ def main():
                 except OSError:
                     assert server.poll() is None and time.monotonic() < until
                     time.sleep(.05)
-            asyncio.run(exercise(port, *tokens, artifacts))
+            asyncio.run(exercise(port, *tokens, artifacts, env))
         finally:
             server.terminate(); server.wait(timeout=10); server.stderr.close()
     print("WEB CHAT: PASS (compiled assets, chat/history/cancel, private users, operator workspace, stale refresh, mobile)")

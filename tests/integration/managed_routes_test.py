@@ -108,6 +108,26 @@ def verify_managed_routes(runtime, env, tracker, first_plan, third_plan, first_n
         assert status == 200 and json.loads(data) == {"schema": 1, "models": []}
         for member in (first, third, other):
             assert chat(member["id"])[0] == 403, "logical grant authorized a raw allocation"
+        control_path = "/api/v1/allocations/" + first["id"] + "/control"
+        assert request(control_path)[0] == 403
+        assert request(control_path, body={"action": "retire"})[0] == 403
+        cli("operator-grant", "route-bob")
+        assert request(control_path, bob)[0] == 200
+        assert request(control_path, bob, {"action": "retire"})[0] == 403, "read-only operator gained control"
+        cli("manage-grant", "route-bob")
+        assert json.loads(request("/api/v1/session", bob)[1])["management"] is True
+        assert request("/api/v1/chat", bob, {"model": first["id"], "max_tokens": 8,
+                       "messages": [{"role": "user", "content": "hi"}]})[0] == 403, "management granted inference"
+        assert request(control_path, bob, {"action": "retire"})[0] == 400
+        observed = json.loads(request(control_path, bob)[1])
+        assert isinstance(observed["revision"], str), "64-bit revision lost precision in JSON"
+        stale = {"action": "retire", "instance": observed["instance"], "revision": str(int(observed["revision"]) + 100)}
+        assert request(control_path, bob, stale)[0] == 409
+        assert request(control_path, bob, {**stale, "action": "drain"})[0] == 409
+        assert json.loads(request(control_path, bob)[1])["state"] == "accepting"
+        cli("manage-revoke", "route-bob")
+        assert request(control_path, bob, stale)[0] == 403
+        cli("manage-grant", "route-bob")
         observe_replica("first")
         first_busy = hold(first["id"])
         observe_replica("alternate")
@@ -143,8 +163,13 @@ def verify_managed_routes(runtime, env, tracker, first_plan, third_plan, first_n
         def drain(member):
             initial = json.loads(command("replica", member["id"], "status"))
             assert initial["state"] == "accepting" and not initial["weights_unloaded"]
-            changed = json.loads(command("replica", member["id"], "drain"))
-            assert changed["instance"] == initial["instance"] and changed["revision"] == initial["revision"] + 1
+            path = "/api/v1/allocations/" + member["id"] + "/control"
+            mutation = {"action": "drain", "instance": initial["instance"], "revision": str(initial["revision"])}
+            status, data = request(path, bob, mutation)
+            assert status == 200, data
+            changed = json.loads(data)
+            assert changed["instance"] == initial["instance"] and int(changed["revision"]) == initial["revision"] + 1
+            assert request(path, bob, mutation)[0] == 200, "lost-reply retry was not idempotent"
             deadline = time.monotonic() + 5
             while changed["state"] != "drained":
                 assert time.monotonic() < deadline, changed
@@ -164,7 +189,7 @@ def verify_managed_routes(runtime, env, tracker, first_plan, third_plan, first_n
         for member, previous in ((first, first_drained), (third, third_drained)):
             resumed = json.loads(command("replica", member["id"], "resume"))
             assert resumed["state"] == "accepting" and resumed["instance"] == previous["instance"]
-            assert resumed["revision"] == previous["revision"] + 1 and not resumed["weights_unloaded"]
+            assert resumed["revision"] == int(previous["revision"]) + 1 and not resumed["weights_unloaded"]
         status, data = chat(route["id"])
         assert status == 200 and b"event: done\n" in data and b"event: error\n" not in data, (status, data)
         print("MANAGED DRAIN: PASS (real resident hosts refuse new turns, alternate approved replica, no capacity, resume same engines)", flush=True)
@@ -199,13 +224,41 @@ def verify_managed_routes(runtime, env, tracker, first_plan, third_plan, first_n
         # It seals the host, retires its retained KV, seals both real nodes,
         # and persists acknowledgements before freeing the Edge keeper last.
         deadline=time.monotonic()+30
+        path = "/api/v1/allocations/" + third["id"] + "/control"
+        connected = subprocess.Popen([str(runtime / "test_chat_ui"), "resident-hold", str(third_plan), tracker],
+                                     env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        held.append(connected)
+        assert select.select([connected.stdout], [], [], 10)[0], "host connection was not opened"
+        assert connected.stdout.readline() == b"CONNECTED\n"
+        fence = json.loads(request(path, bob)[1])
+        assert fence["connections"] == 1 and fence["admitted_requests"] == 0
+        retirement_request = {"action": "retire", "instance": fence["instance"], "revision": fence["revision"]}
+        status, data = request(path, bob, retirement_request)
+        # An idle connection is not admitted inference: host drain closes it
+        # without waiting for user input. Depending on observation timing the
+        # retirement is already complete or needs another explicit reconcile.
+        # Deterministic active/queued work retention lives in test_host_drain.
+        assert status in (200, 202), (status, data)
+        assert json.loads(data)["state"] in ("released", "retirement_pending")
+        assert json.loads(request(path, bob)[1])["state"] in ("released", "retirement_pending")
+        assert request(path, bob, {**retirement_request, "action": "resume"})[0] == 409
+        unhold(connected)
         while True:
-            retired=json.loads(command("retire",third["id"]))
+            status, data = request(path, bob, retirement_request)
+            assert status in (200, 202), (status, data)
+            retired=json.loads(data)
             if retired["complete"]: break
-            assert retired["state"]=="waiting_for_admitted_work" and time.monotonic()<deadline, retired
+            assert retired["state"]=="retirement_pending" and time.monotonic()<deadline, retired
             time.sleep(.05)
         assert retired["state"]=="released" and retired["released_node_mask"]==3
-        assert json.loads(command("retire",third["id"]))==retired, "completed retirement replayed destructive work"
+        assert json.loads(request(path, bob, retirement_request)[1])==retired, "completed retirement replayed destructive work"
+        assert json.loads(request(path, bob)[1])==retired, "inspection did not read the completed journal"
+        cli_retired=json.loads(command("retire",third["id"]))
+        assert all(retired[key]==value for key,value in cli_retired.items()), "CLI and API used different retirement state"
+        tui_retired = subprocess.run([str(runtime / "test_chat_ui"), "resident-retire", str(third_plan), tracker],
+                                    env=env, text=True, capture_output=True, timeout=15)
+        assert tui_retired.returncode == 0 and tui_retired.stdout.strip() == "0", tui_retired.stderr
+        assert request(path, bob, {**retirement_request, "action": "resume"})[0] == 409
         # Simulate a coordinator dying after keeper release but before its
         # acknowledgement was saved. Retain the exact live-process seals;
         # rewind only the local release-progress fields, not donor state.
@@ -215,7 +268,7 @@ def verify_managed_routes(runtime, env, tracker, first_plan, third_plan, first_n
         struct.pack_into("<IIII",checkpoint,72,4,0,2,0)  # RELEASE, no saved acknowledgements
         journal.write_bytes(checkpoint)
         reconciled=json.loads(command("retire",third["id"]))
-        assert reconciled==retired, ("lost acknowledgements were not reconciled",reconciled)
+        assert reconciled==cli_retired, ("lost acknowledgements were not reconciled",reconciled)
         print("COORDINATED RETIREMENT: PASS (host and two nodes sealed, retained KV closed, exact release, lost-ack reconciliation)",flush=True)
         status, data = chat(route["id"])
         assert status == 503 and json.loads(data)["error"] == "approved_allocation_unavailable", (status, data)

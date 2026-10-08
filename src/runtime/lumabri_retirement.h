@@ -178,12 +178,15 @@ static int lmb_retirement_run(int dir, const char *name, const LmbResidentPlan *
     }
     return 0;
 }
-static int api_retire(int access, const char *tracker, char *const *args, unsigned count) {
-    uint8_t id[32], hash[64]; char hex[65],name[80];
-    if (count!=1 || !*tracker || strlen(args[0])!=64 || lmb_unhex(id,args[0],32)) return 1;
+/* Shared service operation. A browser starts with a live host fence; the
+ * persisted operation then owns its subsequent fences, including retries
+ * after a lost response. A stale first request cannot retire a replaced host. */
+static int api_retirement_execute(int access, const char *tracker, const uint8_t id[32],
+    const LmbHostControl *expected, LmbRetirement *result, int *conflict) {
+    uint8_t hash[64]; char hex[65],name[80]; *conflict=0;
     lmb_hex(hex,id,32); snprintf(name,sizeof name,"%s.retire",hex);
     LmbResidentPlan *p=calloc(1,sizeof *p); LmbRetirement r={0};
-    if (!p) return 1;
+    if (!p) return -1;
     int dir=lmb_retirement_dir(access),lock=dir<0 ? -1 : lmb_api_access_lock(dir),status=-1;
     if (lock<0 || api_find_plan(tracker,id,p) || lmb_retirement_plan_hash(p,hash)) goto done;
     int loaded=lmb_retirement_load(dir,name,&r);
@@ -193,16 +196,29 @@ static int api_retire(int access, const char *tracker, char *const *args, unsign
         memcpy(r.plan_hash,hash,64); r.count=p->execution.count;
         LmbHostControl host={0};
         if (lmb_host_control_rpc(p->host,p->host_key,p->root,0,NULL,&host)) goto done;
+        if (expected && (memcmp(host.instance,expected->instance,32) || host.revision!=expected->revision)) {
+            *conflict=1; goto done;
+        }
         r.host=lmb_retirement_host_state(&host);
         for (uint32_t i=0;i<r.count;i++) if (home_resident_node_control(p,i,0,NULL,&r.nodes[i])) goto done;
         if (lmb_retirement_store(dir,name,&r)) goto done;
     }
     if (memcmp(r.plan_hash,hash,64) || r.count!=p->execution.count) goto done;
+    if (expected && (memcmp(r.host.instance,expected->instance,32) || expected->revision>r.host.revision)) {
+        *conflict=1; goto done;
+    }
     status=lmb_retirement_run(dir,name,p,&r);
 done:
     if (lock>=0) close(lock);
     if (dir>=0) close(dir);
     free(p);
+    *result=r; return status;
+}
+static int api_retire(int access, const char *tracker, char *const *args, unsigned count) {
+    uint8_t id[32]; char hex[65];
+    if (count!=1 || !*tracker || strlen(args[0])!=64 || lmb_unhex(id,args[0],32)) return 1;
+    lmb_hex(hex,id,32); LmbRetirement r={0}; int conflict=0;
+    int status=api_retirement_execute(access,tracker,id,NULL,&r,&conflict);
     printf("{\"schema\":1,\"allocation\":\"%s\",\"state\":\"%s\",\"phase\":%u,\"released_node_mask\":%u,\"complete\":%s}\n",
         hex,status<0 ? "unknown_or_conflict" : status ? "waiting_for_admitted_work" : "released",r.phase,r.released,
         !status && r.phase==LMB_RET_DONE ? "true" : "false");
