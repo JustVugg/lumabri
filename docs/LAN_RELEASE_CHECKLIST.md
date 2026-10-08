@@ -58,7 +58,7 @@ below. Historical observations remain here as evidence, not current promises.
   Local one/four-slot OLMoE, wrong-owner/root/allocation checks, protocol and
   admission tests pass. All eight native CI checks passed before normal merge; this does
   not implement coordinated retirement, RAM eviction or server release.
-- [ ] Coordinated allocation retirement: irreversible idle fences, retained
+- [x] Coordinated allocation retirement (#206): irreversible idle fences, retained
   conversation cleanup, exact-owner keeper release and a durable operation
   journal. Local four-slot OLMoE reduced-checkpoint flow passes with two models
   on the same donors, selective retirement and reconciliation after lost
@@ -67,16 +67,21 @@ below. Historical observations remain here as evidence, not current promises.
   warning-as-error rebuild and focused ASan/UBSan/leak checks pass locally.
   Native Linux CI exposed a completed-turn/host-reset admission race. A delayed
   codec-reset regression and the local one-slot OLMoE two-replica flow pass
-  with graceful remote close before recycling the API permit; final native
-  validation of this correction is still pending.
-  Native CI and normal merge remain required. Automatic scaling policy and
-  cloud/server release are separate work.
+  with graceful remote close before recycling the API permit. The Darwin
+  half-close path preserves that cleanup barrier. All eight checks passed on
+  final head `1e1a61e` before normal merge `941a2d0`. Automatic scaling policy
+  and cloud/server release are separate work.
 - [ ] Shared management: explicit digest-bound management grants, fenced
   allocation inspect/drain/resume/retire via HTTP and browser, and the same
   typed retirement coordinator in the resident-library TUI. Ordinary inference
   and read-only operator permissions do not authorize mutation. This does not
-  yet unify every preparation/configuration action through HTTP. Final
-  regression, native CI and review remain required.
+  yet unify every preparation/configuration action through HTTP. Full local
+  regression, warning-as-error build, focused sanitizers and the real OLMoE
+  two-model/four-slot API flow passed. Native CI exposed a stale library-test
+  expectation for forced unload. The revised real OLMoE library gate passes
+  locally with one, two and eight slots, including inert cancelled confirmation
+  and CLI reconciliation of the TUI's shared journal. Final native CI and
+  review remain required.
 - [ ] Requirements-based global placement and measured cost comparison;
   TUI/web/application management through one public service interface;
   recovery, elasticity, provider integration and

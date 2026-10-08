@@ -66,8 +66,10 @@ saved status still requires an authenticated readiness check before use.
 The resident library stores no conversation text, credentials or weights.
 The [resident inference API](RESIDENT_API.md) can grant named local API users
 access to exact approved allocations, without repeating donor approvals or
-loading a new model. It currently binds only to loopback and stores no chat
-history; it is not an OpenAI-compatible or public-network endpoint.
+loading a new model. It currently binds only to loopback. Its bundled web chat
+stores private, per-user history separately from resident plans; management
+permission does not grant access to another user's conversations. It is not
+an OpenAI-compatible or public-network endpoint.
 The background donor keeper can retain up to four independently approved models
 on the same machine, provided their summed reservations fit its sharing budget
 and current memory permits preparation. Pending loads remain reserved before
