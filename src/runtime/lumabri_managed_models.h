@@ -179,6 +179,7 @@ static int api_segments_control(const char *tracker, char *const *args, unsigned
         char instance[65]; lmb_hex(instance,result.instance,32);
         printf("\"instance\":\"%s\",\"revision\":%llu,\"state\":\"%s\",\"sessions\":%u,\"admitted_experts\":%u}",
             instance,(unsigned long long)result.revision,
+            result.draining==LMB_NODE_CONTROL_RETIRED ? "retired" :
             !result.draining ? "accepting" : result.sessions || result.experts ? "draining" : "drained",
             result.sessions,result.experts);
     }
@@ -211,6 +212,7 @@ static int api_replica_control(const char *tracker, char *const *args, unsigned 
     printf("{\"schema\":1,\"allocation\":\"%s\",\"instance\":\"%s\",\"revision\":%llu,"
         "\"state\":\"%s\",\"connections\":%u,\"admitted_requests\":%u,\"weights_unloaded\":false}\n",
         args[0],instance,(unsigned long long)result.revision,
+        result.draining==LMB_HOST_CONTROL_RETIRED ? "retired" :
         !result.draining ? "accepting" : result.requests || result.connections ? "draining" : "drained",
         result.connections,result.requests);
     return 0;

@@ -230,6 +230,7 @@ typedef struct HomeDonor {
     int persistent; /* rendering only: the service is not owned by this view */
     uint64_t offer_revision;
     int client, lease, weight_lease, segment_port, host_port, segment_ready, host_ready, node_control;
+    LmbNodeControl retired_receipt; /* idempotent acknowledgement while this allocation occupies its slot */
     pid_t segment, host;
     char bin_dir[1024], cache_base[1024], disk[512], ip[INET_ADDRSTRLEN];
     char log[1200];
@@ -309,6 +310,34 @@ static void home_donor_disconnect(HomeDonor *d, const char *reason) {
         (void)home_status_send(d->client, &d->transaction, 0, 0);
         lmb_close(d->client); d->client = -1;
     }
+}
+
+/* Called only after exact allocation/root/original-requester authentication.
+ * The node's seal cannot be resumed, so no new OPEN or expert admission can
+ * race the idle observation and owned-child shutdown. Never use HOME_RELEASE
+ * as a fallback if this proof is missing. */
+static void home_donor_retired_release(HomeDonor *d, int incoming, const uint8_t *body) {
+    const uint8_t *request=body+64;
+    if (lmb_get32(request)!=LMB_NODE_CONTROL_VERSION || lmb_get32(request+4)!=LMB_NODE_CONTROL_QUERY) return;
+    uint8_t reply[64+LMB_NODE_CONTROL_REPLY_BYTES],query[LMB_NODE_CONTROL_REQUEST_BYTES];
+    LmbNodeControl state={0};
+    if (d->transaction.phase==LMB_HOME_CLOSED && !d->transaction.reservation_held && !d->segment && !d->host)
+        state=d->retired_receipt;
+    else {
+        if (d->segment<=0 || d->node_control<0 ||
+            (d->transaction.phase!=LMB_HOME_READY && d->transaction.phase!=LMB_HOME_SEGMENT_READY)) return;
+        lmb_node_control_request(query,LMB_NODE_CONTROL_QUERY,NULL);
+        if (lmb_node_control_local(&d->node_control,query,reply+64) ||
+            lmb_node_control_decode(reply+64,LMB_NODE_CONTROL_REPLY_BYTES,&state)) return;
+    }
+    if (!state.revision || state.draining!=LMB_NODE_CONTROL_RETIRED || state.sessions || state.experts ||
+        memcmp(state.instance,request+8,32) || state.revision!=lmb_node_control_u64(request+40)) return;
+    d->retired_receipt=state;
+    if (d->transaction.phase!=LMB_HOME_CLOSED)
+        home_donor_disconnect(d,"Retired by the original requester after fenced idle admission.");
+    if (d->segment || d->host || d->transaction.reservation_held) return;
+    memcpy(reply,body,64); lmb_node_control_reply(reply+64,0,&state);
+    (void)lmb_send(incoming,LMB_HOME_RETIRED_RELEASE_R,reply,sizeof reply,NULL,0);
 }
 
 static int home_donor_can_retain(const HomeDonor *d) {
@@ -535,9 +564,9 @@ static int home_donor_offer(HomeDonor *d, int incoming, const char *tracker,
         if (!rc) rc = lmb_send(incoming, LMB_OK, NULL, 0, NULL, 0) || lmb_recv(incoming, &m);
     }
     if (!rc) {
-        if (m.op == LMB_HOME_QUERY || m.op == LMB_HOME_RELEASE || m.op == LMB_HOME_NODE_CONTROL) {
+        if (m.op == LMB_HOME_QUERY || m.op == LMB_HOME_RELEASE || m.op == LMB_HOME_NODE_CONTROL || m.op==LMB_HOME_RETIRED_RELEASE) {
             HomeDonor *target = d;
-            uint32_t expected_bytes=m.op==LMB_HOME_NODE_CONTROL ? 64+LMB_NODE_CONTROL_REQUEST_BYTES : 64;
+            uint32_t expected_bytes=(m.op==LMB_HOME_NODE_CONTROL || m.op==LMB_HOME_RETIRED_RELEASE) ? 64+LMB_NODE_CONTROL_REQUEST_BYTES : 64;
             if (m.body_len == expected_bytes && memcmp(m.body, d->transaction.offer.id, 32))
                 for (uint32_t i = 0; i < d->park_capacity; i++)
                     if (!memcmp(m.body, d->parked[i].transaction.offer.id, 32)) { target = &d->parked[i]; break; }
@@ -549,12 +578,13 @@ static int home_donor_offer(HomeDonor *d, int incoming, const char *tracker,
                 !memcmp(m.body + 32, target->transaction.offer.model_root, 32) &&
                 lmb_secure_peer_matches(incoming, target->transaction.offer.requester);
             if (permitted) {
-                if (m.op==LMB_HOME_NODE_CONTROL) {
+                if (m.op==LMB_HOME_RETIRED_RELEASE) home_donor_retired_release(target,incoming,m.body);
+                else if (m.op==LMB_HOME_NODE_CONTROL) {
                     uint8_t response[64+LMB_NODE_CONTROL_REPLY_BYTES];
                     const uint8_t *request=m.body+64;
                     if (target->segment>0 && target->node_control>=0 &&
                         (target->transaction.phase==LMB_HOME_READY || target->transaction.phase==LMB_HOME_SEGMENT_READY) &&
-                        lmb_get32(request)==LMB_NODE_CONTROL_VERSION && lmb_get32(request+4)<=LMB_NODE_CONTROL_RESUME &&
+                        lmb_get32(request)==LMB_NODE_CONTROL_VERSION && lmb_get32(request+4)<=LMB_NODE_CONTROL_RETIRE &&
                         !lmb_node_control_local(&target->node_control,request,response+64)) {
                         memcpy(response,m.body,64);
                         (void)lmb_send(incoming,LMB_HOME_NODE_CONTROL_R,response,sizeof response,NULL,0);
@@ -630,6 +660,7 @@ static int home_donor_offer(HomeDonor *d, int incoming, const char *tracker,
     if (!rc) rc = lmb_home_offer_begin(&d->transaction, &offer, tracker,
                                        ram, disk, (uint64_t)(nowd() * 1000));
     if (rc) return -1;
+    memset(&d->retired_receipt,0,sizeof d->retired_receipt);
     d->offer_revision++;
     d->client = incoming;
     return home_status_send(incoming, &d->transaction, 0, 0);

@@ -41,17 +41,32 @@ static void host_session_control(int fd, HostSessionPool *pool, const LmbMsg *re
         !lmb_secure_peer_matches(fd,h->client_key) || lmb_unhex(expected_root,h->model_root,32) ||
         request->pay_len || request->body_len!=LMB_HOST_CONTROL_REQUEST_BYTES ||
         lmb_cur_u32(&c,&version) || version!=LMB_HOST_CONTROL_VERSION ||
-        lmb_cur_u32(&c,&action) || action>LMB_HOST_CONTROL_RESUME ||
+        lmb_cur_u32(&c,&action) || action>LMB_HOST_CONTROL_RETIRE ||
         lmb_cur_bytes(&c,root,32) || memcmp(root,expected_root,32) ||
         lmb_cur_bytes(&c,instance,32) || lmb_cur_u64(&c,&expected) || c.off!=c.len) return;
     pthread_mutex_lock(&pool->lock);
+    pool->control.connections=pool->workers;
     uint32_t status=lmb_host_control_apply(&pool->control,action,instance,expected) ? LMB_HOST_CONTROL_CONFLICT : 0;
     LmbHostControl snapshot=pool->control; snapshot.connections=pool->workers;
     pthread_mutex_unlock(&pool->lock);
+    /* The acceptor serializes controls. RETIRE seals admission irreversibly
+     * only with no workers, so no other writer owns the codec. Acknowledge it
+     * after every retained slot has confirmed RESET/CLOSE. A failed reset
+     * makes the host unavailable, never a positive retirement receipt. */
+    if (!status && action==LMB_HOST_CONTROL_RETIRE) {
+        for (uint32_t i=0;i<h->slots;i++) if (pool->slots[i].reset_needed) {
+            HostState reset=*h; reset.routed_slot=i;
+            HostInput in={0}; HostOutput out={0};
+            if (host_reset_conversation(h->engine,&reset,&in,&out)) {
+                atomic_store(&pool->failed,1); atomic_store(&pool->stop,1); return;
+            }
+            pool->slots[i].reset_needed=0;
+        }
+    }
     if (action) {
         char instance_text[65]; lmb_hex(instance_text,snapshot.instance,32);
         fprintf(stderr,"[host-control] action=%s instance=%s revision=%llu conflict=%u connections=%u admitted=%u\n",
-            action==LMB_HOST_CONTROL_DRAIN ? "drain" : "resume",instance_text,
+            action==LMB_HOST_CONTROL_RETIRE ? "retire" : action==LMB_HOST_CONTROL_DRAIN ? "drain" : "resume",instance_text,
             (unsigned long long)snapshot.revision,status,snapshot.connections,snapshot.requests);
     }
     LmbBuf body={0};

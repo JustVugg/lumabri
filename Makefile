@@ -129,6 +129,7 @@ lumabri test_chat_ui test_host_session_pool test-home-monitor test_api_access: s
 lumabri test_chat_ui test_host_session_pool test-home-monitor: src/runtime/lumabri_model_routes.h src/runtime/lumabri_managed_models.h src/runtime/lumabri_replica_admission.h
 lumabri test_chat_ui test_host_session_pool test-home-monitor: src/runtime/lumabri_route_evidence.h src/planner/lumabri_replica_rank.h src/planner/lumabri_calibration_profiles.h
 lumabri test_chat_ui test_host_session_pool test-home-monitor: src/runtime/lumabri_host_control.h
+lumabri test_chat_ui test_host_session_pool test_host_drain test-home-monitor: src/runtime/lumabri_retirement.h
 lumabri segment_node test_chat_ui test_home_expert test_host_session_pool test-home-monitor: src/runtime/lumabri_node_control.h
 lumabri test_chat_ui test_host_session_pool test-home-monitor segment_chat test_segment_close: src/runtime/lumabri_request_seed.h src/runtime/lumabri_replay_prefix.h
 lumabri test_chat_ui test_host_session_pool test-home-monitor: src/runtime/lumabri_chat_history.h src/runtime/lumabri_chat_store.h build/web_assets.h

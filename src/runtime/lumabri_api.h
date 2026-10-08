@@ -118,6 +118,7 @@ static int api_find_plan(const char *tracker, const uint8_t allocation[32], LmbR
     free(plans); return found==1 ? 0 : -1;
 }
 #include "lumabri_managed_models.h"
+#include "lumabri_retirement.h"
 #include "lumabri_workspace.h"
 static int api_models(int fd, int access_dir, const char *tracker, const LmbApiUser *user) {
     LmbResidentPlan *plans=calloc(64,sizeof *plans); Cap body={0};
@@ -475,6 +476,9 @@ static int cmd_api(int argc, char **argv) {
     if (!strcmp(argv[0],"segments")) {
         int rc=api_segments_control(tracker,args,count); close(dir); return rc;
     }
+    if (!strcmp(argv[0],"retire")) {
+        int rc=api_retire(dir,tracker,args,count); close(dir); return rc;
+    }
     if ((!strcmp(argv[0],"serve") || !strcmp(argv[0],"start")) && !count && *tracker) {
         int rc=!strcmp(argv[0],"start") ? api_start(dir,port,tracker) : api_serve(dir,port,tracker,NULL);
         close(dir); return rc;
@@ -509,6 +513,7 @@ usage:
         "lumabri api model-set MODEL_ID APPROVED_ALLOCATION... [--tracker HOST:PORT]\n"
         "lumabri api model-remove MODEL_ID [--tracker HOST:PORT]\n"
         "lumabri api model-policy MODEL_ID ordered|observed-decode|declared-cost [--tracker HOST:PORT]\n"
+        "lumabri api retire ALLOCATION_ID [--tracker HOST:PORT]\n"
         "lumabri api replica ALLOCATION_ID [status|drain|resume] [--tracker HOST:PORT]\n"
         "lumabri api segments ALLOCATION_ID [status|drain|resume] [--tracker HOST:PORT]\n"
         "lumabri api user-add NAME\n"

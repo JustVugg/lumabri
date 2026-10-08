@@ -264,7 +264,7 @@ static void *node_control_worker(void *opaque) {
         uint8_t request[LMB_NODE_CONTROL_REQUEST_BYTES], reply[LMB_NODE_CONTROL_REPLY_BYTES];
         uint64_t deadline=lmb_io_monotonic_ms()+2000;
         if (lmb_node_control_io(node->control_fd,request,sizeof request,0,deadline) ||
-            lmb_get32(request)!=LMB_NODE_CONTROL_VERSION || lmb_get32(request+4)>LMB_NODE_CONTROL_RESUME) break;
+            lmb_get32(request)!=LMB_NODE_CONTROL_VERSION || lmb_get32(request+4)>LMB_NODE_CONTROL_RETIRE) break;
         uint32_t action=lmb_get32(request+4);
         if (pthread_mutex_trylock(&node->sessions_lock)) {
             /* Engine session creation can be slow. Do not poison the private
@@ -274,12 +274,12 @@ static void *node_control_worker(void *opaque) {
             if (lmb_node_control_io(node->control_fd,reply,sizeof reply,1,deadline)) break;
             continue;
         }
+        node->control.sessions=0;
+        for (size_t i=0;i<NODE_SESSIONS_MAX;i++) node->control.sessions+=(node->sessions[i].used!=0);
         uint32_t status=lmb_node_control_apply(&node->control,action,request+8,lmb_node_control_u64(request+40)) ?
             LMB_NODE_CONTROL_CONFLICT : 0;
         atomic_store(&node->manual_draining,(int)node->control.draining);
         LmbNodeControl snapshot=node->control;
-        snapshot.sessions=0;
-        for (size_t i=0;i<NODE_SESSIONS_MAX;i++) snapshot.sessions+=(node->sessions[i].used!=0);
         if (snapshot.draining) {
             pthread_mutex_lock(&node->registration.lock);
             node->registration.advert.flags |= LMB_SEG_ADVERT_DRAINING;
@@ -288,7 +288,7 @@ static void *node_control_worker(void *opaque) {
         pthread_mutex_unlock(&node->sessions_lock);
         lmb_node_control_reply(reply,status,&snapshot);
         if (action) fprintf(stderr,"[segment-control] action=%s revision=%llu conflict=%u sessions=%u experts=%u\n",
-            action==LMB_NODE_CONTROL_DRAIN ? "drain" : "resume",(unsigned long long)snapshot.revision,
+            action==LMB_NODE_CONTROL_RETIRE ? "retire" : action==LMB_NODE_CONTROL_DRAIN ? "drain" : "resume",(unsigned long long)snapshot.revision,
             status,snapshot.sessions,snapshot.experts);
         if (lmb_node_control_io(node->control_fd,reply,sizeof reply,1,deadline)) break;
     }

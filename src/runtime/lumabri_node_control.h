@@ -8,6 +8,8 @@
 #define LMB_NODE_CONTROL_QUERY 0u
 #define LMB_NODE_CONTROL_DRAIN 1u
 #define LMB_NODE_CONTROL_RESUME 2u
+#define LMB_NODE_CONTROL_RETIRE 3u
+#define LMB_NODE_CONTROL_RETIRED 2u
 #define LMB_NODE_CONTROL_CONFLICT 1u
 #define LMB_NODE_CONTROL_BUSY 2u
 #define LMB_NODE_CONTROL_REQUEST_BYTES 48u
@@ -27,9 +29,11 @@ static LMB_MAYBE_UNUSED void lmb_node_control_put64(uint8_t *p, uint64_t value) 
 static LMB_MAYBE_UNUSED int lmb_node_control_apply(LmbNodeControl *s, uint32_t action,
                                                   const uint8_t instance[32], uint64_t revision) {
     if (action==LMB_NODE_CONTROL_QUERY) return 0;
-    if (action>LMB_NODE_CONTROL_RESUME || !revision || memcmp(instance,s->instance,32)) return -1;
-    uint32_t draining=action==LMB_NODE_CONTROL_DRAIN;
+    if (action>LMB_NODE_CONTROL_RETIRE || !revision || memcmp(instance,s->instance,32)) return -1;
+    uint32_t draining=action==LMB_NODE_CONTROL_RETIRE ? LMB_NODE_CONTROL_RETIRED : action==LMB_NODE_CONTROL_DRAIN;
     if (s->revision>1 && revision==s->revision-1 && s->draining==draining) return 0;
+    if (s->draining==LMB_NODE_CONTROL_RETIRED ||
+        (action==LMB_NODE_CONTROL_RETIRE && (!s->draining || s->sessions || s->experts))) return -1;
     if (revision!=s->revision || s->revision==UINT64_MAX) return -1;
     s->draining=draining; s->revision++; return 0;
 }
@@ -55,7 +59,8 @@ static LMB_MAYBE_UNUSED int lmb_node_control_decode(const uint8_t *in, size_t by
     memcpy(s->instance,in+8,32); s->revision=lmb_node_control_u64(in+40);
     s->draining=lmb_get32(in+48); s->sessions=lmb_get32(in+52); s->experts=lmb_get32(in+56);
     uint8_t nonzero=0; for (unsigned i=0;i<32;i++) nonzero|=s->instance[i];
-    if (!nonzero || !s->revision || s->draining>1 || s->sessions>256 || s->experts>256) return -1;
+    if (!nonzero || !s->revision || s->draining>LMB_NODE_CONTROL_RETIRED || s->sessions>256 || s->experts>256 ||
+        (s->draining==LMB_NODE_CONTROL_RETIRED && (s->sessions || s->experts))) return -1;
     return (int)lmb_get32(in+4);
 }
 /* Raw AF_UNIX only, never an encrypted network descriptor. Absolute deadline

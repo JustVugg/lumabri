@@ -246,10 +246,53 @@ state is unknown or changed concurrently; mutations already accepted elsewhere
 remain in effect and are not silently rolled back. Revision fences prevent an
 old mutation from crossing a newer drain/resume or engine replacement.
 
-This control **does not release weights or stop a server**. Explicit owner
-unload still exists separately and can interrupt work. Safe automatic release
-needs a coordinated, fenced retirement operation and the model's authorized
-minimum/maximum/cooldown policy; those are not implemented by these commands.
+These drain/resume controls **do not release weights or stop a server**.
+Explicit owner unload still exists separately and can interrupt work. The
+coordinated operation below is a separate irreversible request, not an implicit
+side effect of a drain observation. Automatic scaling still requires an
+authorized minimum/maximum/cooldown policy.
+
+### Coordinated retirement of an exact approved allocation
+
+```sh
+lumabri api retire ALLOCATION_ID --tracker HOUSEHOLD:PORT
+```
+
+This local operator command deliberately removes that allocation, including
+its Edge process. It does not select replacement capacity or protect a model's
+minimum replica count: an automatic policy must enforce those requirements
+before calling it. Other allocations on the same computers remain untouched.
+
+The sequence is host drain, finish admitted work, irreversible host seal and
+acknowledged cleanup of every retained codec slot; then drain and irreversible
+idle seal on every Segment; finally release non-Edge keepers and the Edge keeper
+last. Node seals require zero retained sessions and zero admitted expert calls,
+including queued ones. Existing direct Segment conversations must close or
+expire normally. A seal cannot be resumed, and no ordinary forced RELEASE is
+used as fallback. A keeper rechecks the sealed process instance/revision over
+its private channel immediately before stopping its owned processes.
+
+The command returns versioned JSON with `complete`, a phase, and an acknowledged
+node-release bitmask. `waiting_for_admitted_work` means accepted but incomplete:
+repeat the same command after the work finishes. `unknown_or_conflict` and a
+nonzero exit mean an unreachable/incompatible peer, concurrent modification or
+local persistence failure; they never mean that RAM was freed. Successful
+drains or seals on other participants remain in effect.
+
+Private atomic journals under `~/.lumabri/api-access/retirements` bind the plan,
+peer identities/endpoints and live process fences. Progress is persisted before
+the next external action. Repeating a completed operation returns its receipt
+without contacting or stopping engines again. Incomplete retries use the same
+fences: a replacement process is not silently adopted and old approvals are
+never replayed. The keeper retains a lost-release-reply receipt while the closed
+allocation occupies its slot; if it is replaced or its keeper loses that state,
+an unacknowledged release stays unknown instead of being guessed complete.
+Journals are bounded to 256 operations of at most 4 KiB each plus one transaction
+file; at that limit new operations refuse to start rather than evicting evidence.
+
+This is a controlled release primitive, not automatic elasticity or cloud
+deprovisioning. It does not delete model checkpoints, CAS caches or chat history,
+nor authorize an HTTP inference user to perform management mutations.
 
 ### Bounded, visible response recovery
 
