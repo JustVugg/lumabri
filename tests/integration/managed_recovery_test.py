@@ -64,6 +64,9 @@ def verify_recovery(env, first, third, route, chat, request, cli, command, port,
             done = parsed[-1][1]
             assert done["recovery_attempts"] == 1 and done["stats_scope"] == "final_attempt_only"
             assert done["observation_saved"] is False
+            assert done["timing"]["token_notifications"] is None
+            assert done["timing"]["token_notification_gaps"] is None, "replayed prefix became visible-token latency"
+            assert done["timing"]["completion_seconds"] >= done["timing"]["ttft_seconds"] >= 0
         else:
             diagnostic = None
             if kinds[-1] != "error" or "done" in kinds:
@@ -123,5 +126,7 @@ def verify_recovery(env, first, third, route, chat, request, cli, command, port,
     assert status == 200 and parsed[-1][0] == "done" and any(kind == "recovering" for kind, _ in parsed), data
     assert deltas(parsed) == base64.b64decode(original["oracle"]), (parsed, original)
     assert parsed[-1][1]["recovery_attempts"] == 1 and calibrations() == before
+    assert parsed[-1][1]["timing"]["token_notifications"] is None
+    assert parsed[-1][1]["timing"]["token_notification_gaps"] is None
     control.unlink()
     print("MANAGED RECOVERY: PASS (real OLMoE sampling replay, typed failure, codec EOF, exact output oracle, divergent/short prefix, no capacity, cancellation, revocation, no replay-cost calibration)", flush=True)

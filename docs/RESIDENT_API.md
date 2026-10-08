@@ -487,6 +487,30 @@ includes gateway admission and host setup; decode speed comes from the engine's
 versioned timing, never from network chunk size or byte counts. This is an
 observation of that workload, not a concurrency or SLO guarantee.
 
+The `done` event also includes `timing`, observed by the gateway's monotonic
+clock. `ttft_seconds` is time from entry to chat processing (after the HTTP
+body was read) to first nonempty visible text; `generation_seconds` ends at
+the validated engine DONE, and `completion_seconds` additionally includes
+recording the observation and closing/resetting the remote conversation.
+These are neither browser-display timings nor pure kernel timings. The client
+must measure its own network/request overhead separately.
+
+`first_token_notification_seconds`, `token_notifications` and
+`token_notification_gaps` describe consecutive engine DECODE notifications,
+not DATA fragments or estimated tokens from byte counts. Gaps use exact
+nearest-rank p50/p95 over all recorded intervals, up to 4096 intervals per
+response. Missing/out-of-order telemetry or a mismatch with PERF1 withholds
+token timings without breaking an otherwise valid reply. A single-token
+reply or a response exceeding the gap buffer has null gap quantiles; replay
+withholds all token-notification statistics because hidden prefix work is not
+new user-visible output. Transport batching can produce zero observed gaps.
+
+The real-engine service gate records solo and mixed two-model bursts at 2, 4
+and 8 clients in `mixed-capacity.json`, including client latency and rejected
+requests. Percentiles are explicitly success-only. This reduced-checkpoint
+loopback artifact is not yet a persisted, production concurrency envelope for
+the global planner and does not change admission limits automatically.
+
 `observation_saved` is false when provenance or timings are missing, the
 runtime/workload changes during the turn, the output cannot measure decode,
 or the private record cannot be saved. This does not turn a completed response

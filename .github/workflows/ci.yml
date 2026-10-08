@@ -77,6 +77,8 @@ jobs:
           ./test_calibration
           make test_reply_stream CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           ./test_reply_stream
+          make test_metrics CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
+          ./test_metrics
           make test-api CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           python3 tests/integration/api_gateway_test.py
           python3 tests/integration/api_service_test.py

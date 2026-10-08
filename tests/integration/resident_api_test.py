@@ -99,6 +99,10 @@ def verify_resident_api(runtime, env, tracker, first_model_name, artifacts, obse
             raw = b"".join(base64.b64decode(e[1]["bytes"], validate=True) for e in events if e[0] == "delta")
             assert raw and "STAT " in events[-1][1]["stats"]
             assert events[-1][1]["observation_saved"], "valid stable-workload API turn was not observed"
+            timing = events[-1][1]["timing"]
+            assert timing["scope"] == "gateway_observed" and timing["token_notifications"] == 8, timing
+            assert 0 <= timing["ttft_seconds"] <= timing["generation_seconds"] <= timing["completion_seconds"], timing
+            assert timing["token_notification_gaps"]["count"] == 7, timing
             if turn == 0:
                 conversation = {"model": first["id"], "title": "Real OLMoE API response", "state": "complete",
                                 "messages": [{"role": "user", "content": "hi"},

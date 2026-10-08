@@ -143,6 +143,7 @@ build/web_assets.h: build/embed-web src/web/index.html src/web/app.css src/web/a
 	build/embed-web src/web/index.html src/web/app.css src/web/app.js logo.svg > $@.tmp
 	mv $@.tmp $@
 lumabri segment_chat test_chat_ui: lumabri_metrics.h
+lumabri test_chat_ui test_host_session_pool test_host_drain test-home-monitor: src/runtime/lumabri_response_metrics.h
 lumabri test_chat_ui: lumabri_run_gate.c lumabri_run_gate.h src/runtime/lumabri_host_sessions.h
 
 lumabri: $(HOME_NET_DEPS) src/runtime/lumabri_probe_deadline.h lumabri.c src/ui/lumabri_tui.c src/ui/lumabri_tui.h src/ui/lumabri_visual.h src/ui/lumabri_chat_editor.h src/ui/lumabri_execution_view.h lumabri_proto.h lumabri_sign.h \
@@ -545,7 +546,7 @@ test_catalogue_advice: tests/c/test_catalogue_advice.c src/planner/lumabri_catal
 test_tcp_latency: tests/c/test_tcp_latency.c $(SECURE_DEPS) lumabri_proto.h lumabri_sign.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_tcp_latency.c -o $@
 
-test_metrics: tests/c/test_metrics.c lumabri_metrics.h lumabri_stage_metrics.h
+test_metrics: tests/c/test_metrics.c lumabri_metrics.h lumabri_stage_metrics.h src/runtime/lumabri_response_metrics.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_metrics.c -o $@
 
 test_hybrid_parallel: tests/c/test_hybrid_parallel.c src/runtime/lumabri_q8_reference.h lumabri_client.h lumabri_proto.h lumabri_sign.h $(SECURE_DEPS)
@@ -713,6 +714,7 @@ test-sanitize: build/web_assets.h
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_planner_io.c -o build/sanitize/test_planner_io
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_portfolio.c -o build/sanitize/test_portfolio -lm
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_calibration.c -o build/sanitize/test_calibration -lm
+	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_metrics.c -o build/sanitize/test_metrics -lm
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_reply_stream.c -o build/sanitize/test_reply_stream
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_api_json.c -o build/sanitize/test_api_json
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_api_http.c -o build/sanitize/test_api_http
@@ -738,6 +740,7 @@ test-sanitize: build/web_assets.h
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_planner_io
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_portfolio
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_calibration
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/sanitize/test_metrics
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_reply_stream
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_api_json
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_api_http

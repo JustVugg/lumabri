@@ -482,6 +482,15 @@ def main():
             if args.api:
                 from resident_api_test import verify_resident_api
                 verify_resident_api(runtime, env("chatter"), tracker, names[4], tmp, records[0])
+                # Keep TUI/API coexistence above, then release the idle TUI
+                # connection so the single-slot second host can join the
+                # controlled mixed-API load. Weights stay resident.
+                another.send("/quit\n")
+                until(lambda: another.p.poll() is not None, "second-model TUI did not release its conversation")
+                from mixed_capacity_test import verify_mixed_capacity
+                verify_mixed_capacity(runtime, env("chatter"), tracker, tmp)
+                another = Terminal("chatter", ["resident-chat", str(second_plan), tracker], program="test_chat_ui")
+                until(lambda: another.has("receives the text"), "second-model TUI did not reconnect after capacity measurement")
             if args.replicas:
                 # Same byte-for-byte checkpoint, but a separate approval and
                 # signed routing root. Never copy a production model here.

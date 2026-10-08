@@ -177,14 +177,39 @@ fail:
     free(user); return -1;
 }
 #include "lumabri_replay_prefix.h"
+#include "lumabri_response_metrics.h"
 typedef struct {
     int fd; double first; LmbReplayPrefix replay;
+    LmbResponseMetrics timing;
     char error[LMB_REPLY_HEADER]; int retryable;
 } ApiObservedStream;
 static int api_emitted_delta(void *opaque, const unsigned char *bytes, size_t length) {
     ApiObservedStream *stream=opaque;
-    if (length && !stream->first) stream->first=nowd();
+    double now=nowd();
+    if (length && !stream->first) stream->first=now;
+    lmb_response_text(&stream->timing,now,length);
     return api_delta(&stream->fd,bytes,length);
+}
+static int api_observed_progress(void *opaque, const char *line) {
+    ApiObservedStream *stream=opaque;
+    lmb_response_progress(&stream->timing,line,nowd()); return 0;
+}
+static int api_response_timing(Cap *payload, LmbResponseMetrics *timing, const char *stat,
+    uint32_t attempts, double generation_end, double completed) {
+    LmbResponseSummary s;
+    if (lmb_response_summary(timing,stat,attempts,generation_end,completed,&s))
+        return cap_str(payload,",\"timing\":null");
+    if (api_addf(payload,",\"timing\":{\"scope\":\"gateway_observed\",\"generation_seconds\":%.9f,"
+        "\"completion_seconds\":%.9f,\"ttft_seconds\":",s.generation_seconds,s.completion_seconds)) return -1;
+    if (s.text_known ? api_addf(payload,"%.9f",s.ttft_seconds) : cap_str(payload,"null")) return -1;
+    if (cap_str(payload,",\"first_token_notification_seconds\":")) return -1;
+    if (s.token_times_known ? api_addf(payload,"%.9f",s.token_first_seconds) : cap_str(payload,"null")) return -1;
+    if (cap_str(payload,",\"token_notifications\":")) return -1;
+    if (s.token_times_known ? api_addf(payload,"%u",s.tokens) : cap_str(payload,"null")) return -1;
+    if (cap_str(payload,",\"token_notification_gaps\":")) return -1;
+    if (!s.quantiles_known) return cap_str(payload,"null}");
+    return api_addf(payload,"{\"count\":%u,\"p50_seconds\":%.9f,\"p95_seconds\":%.9f,"
+        "\"method\":\"nearest_rank_all_gaps\"}}",s.gaps,s.gap_p50_seconds,s.gap_p95_seconds);
 }
 static int api_observed_delta(void *opaque, const unsigned char *bytes, size_t length) {
     ApiObservedStream *stream=opaque;
@@ -231,8 +256,8 @@ static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUs
     const char *header="HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\n"
         "Connection: close\r\nX-Content-Type-Options: nosniff\r\nX-Accel-Buffering: no\r\n\r\n";
     if (api_write(fd,header,strlen(header))) goto finished;
-    ApiObservedStream observed={.fd=fd,.replay={.limit=UINT64_C(8)<<20}};
-    LmbReplyStream stream; LmbReplySink sink={api_observed_delta,NULL,api_observed_error,&observed};
+    ApiObservedStream observed={.fd=fd,.replay={.limit=UINT64_C(8)<<20},.timing={.started=started}};
+    LmbReplyStream stream; LmbReplySink sink={api_observed_delta,api_observed_progress,api_observed_error,&observed};
     int client_closed=0;
     for (;;) {
       int transport_failed=0;
@@ -279,6 +304,7 @@ static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUs
       }
     }
     if (!client_closed && !api_stopping && stream.status==LMB_REPLY_DONE && lmb_replay_complete(&observed.replay)) {
+        double generation_end=nowd();
         int observation_saved=0;
         if (attempts==1 && observing && observed.first>started)
             observation_saved=catalog_record_turn(observation,&observation->key,records,tracker,&engine,stream.stat,
@@ -291,8 +317,9 @@ static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUs
         permit=-1;
         Cap payload={0};
         if (!cap_str(&payload,"{\"stats\":") && !api_json_text(&payload,stream.stat) &&
-            !api_addf(&payload,",\"observation_saved\":%s,\"recovery_attempts\":%u,\"stats_scope\":\"%s\"}",
-                observation_saved ? "true" : "false",attempts-1,attempts>1 ? "final_attempt_only" : "single_attempt"))
+            !api_addf(&payload,",\"observation_saved\":%s,\"recovery_attempts\":%u,\"stats_scope\":\"%s\"",
+                observation_saved ? "true" : "false",attempts-1,attempts>1 ? "final_attempt_only" : "single_attempt") &&
+            !api_response_timing(&payload,&observed.timing,stream.stat,attempts,generation_end,nowd()) && !cap_str(&payload,"}"))
             (void)api_event(fd,"done",payload.p);
         free(payload.p);
     } else if (!client_closed && !api_stopping) {
