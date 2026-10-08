@@ -339,8 +339,13 @@ another replica is idle. If none can be admitted because capacity is held,
 the request receives HTTP 429 `replicas_busy` before submission. There is no
 additional implicit API queue or automatic resend.
 
-Admission is owned by kernel file locks and is released after local stream
-cleanup or worker-process death. No journal PID or stale counter recreates a
+Admission is owned by kernel file locks. After successful generation, the API
+half-closes the Hosted connection and observes remote closure before releasing
+the permit and publishing `done`. One-slot hosts reset their conversation before
+closing, so a completed turn does not recycle its permit while RESET still owns
+the host slot. This cleanup observation is bounded to 35 seconds; cancellation,
+transport loss and worker-process death do not invent an idle-host receipt.
+No journal PID or stale counter recreates a
 reservation. The private `api-access/dispatch` directory has at most 32 fixed
 lease cells plus its lock; allocation churn does not grow it without bound.
 Partial, unlocked cell records after a crash are only replaceable hints.

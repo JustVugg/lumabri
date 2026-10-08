@@ -270,6 +270,12 @@ static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUs
         if (attempts==1 && observing && observed.first>started)
             observation_saved=catalog_record_turn(observation,&observation->key,records,tracker,&engine,stream.stat,
                                                   observed.first-started,LMB_CAL_SOURCE_SESSION);
+        /* Do not publish completion and recycle the gateway permit ahead of
+         * the remote host's conversation cleanup. Back-to-back request pairs
+         * otherwise see a false BUSY on an already completed replica. */
+        if (engine_finish(&engine)) fprintf(stderr,"[api] host cleanup observation timed out\n");
+        if (permit>=0) close(permit);
+        permit=-1;
         Cap payload={0};
         if (!cap_str(&payload,"{\"stats\":") && !api_json_text(&payload,stream.stat) &&
             !api_addf(&payload,",\"observation_saved\":%s,\"recovery_attempts\":%u,\"stats_scope\":\"%s\"}",

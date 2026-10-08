@@ -11,8 +11,10 @@ static void codec(int input, int output, int release, const _Atomic int *reset_f
     setvbuf(in,NULL,_IONBF,0); setvbuf(out,NULL,_IONBF,0);
     char line[512],nonce[65]; unsigned id,slot; size_t size;
     while (fgets(line,sizeof line,in)) {
-        if (sscanf(line,"RESET_SLOT %64s %u",nonce,&slot)==2 || sscanf(line,"RESET %64s",nonce)==1)
-            fprintf(out,"RESET_DONE %s\n",atomic_load(reset_fault) ? "wrong-nonce" : nonce);
+        if (sscanf(line,"RESET_SLOT %64s %u",nonce,&slot)==2 || sscanf(line,"RESET %64s",nonce)==1) {
+            if (atomic_load(reset_fault)==2) (void)poll(NULL,0,250);
+            fprintf(out,"RESET_DONE %s\n",atomic_load(reset_fault)==1 ? "wrong-nonce" : nonce);
+        }
         else if (sscanf(line,"SUBMIT %u %u %zu",&id,&slot,&size)==3) {
             char prompt[32]={0}; assert(size<sizeof prompt && fread(prompt,1,size,in)==size && fgetc(in)=='\n');
             fprintf(out,"ACCEPT %u\n",id);
@@ -43,6 +45,14 @@ static void send_prompt(int fd, unsigned id, const char *prompt) {
     char frame[128]; int n=snprintf(frame,sizeof frame,"SUBMIT %u 0 %zu 8 0 1\n%s\n",id,strlen(prompt),prompt);
     assert(n>0 && (size_t)n<sizeof frame && !lmb_send(fd,LMB_HOST_STREAM,NULL,0,frame,(uint32_t)n));
 }
+static void expect_engine(Engine *engine, const char *needle) {
+    char bytes[8192]=""; size_t used=0;
+    while (!strstr(bytes,needle)) {
+        struct pollfd p={engine->from,POLLIN,0}; assert(poll(&p,1,3000)>0);
+        ssize_t n=read(engine->from,bytes+used,sizeof bytes-1-used);
+        assert(n>0); used+=(size_t)n; bytes[used]=0;
+    }
+}
 static void run_pool(unsigned slots, int reject_retirement_reset) {
     char tmp[]="/tmp/lmb-host-drain-XXXXXX"; assert(mkdtemp(tmp));
     char host_file[256],client_file[256],other_file[256],known[256];
@@ -72,7 +82,7 @@ static void run_pool(unsigned slots, int reject_retirement_reset) {
         Engine engine={.pid=child,.to=to[1],.from=from[0],.segment=1,.reset_supported=1,.session_slots=slots,
             .numeric_abi=1,.numeric_class="test-drain-cpu"};
         HostState state={.engine=&engine,.slots=slots,.max_frame=1024,.max_new=8,.idle_seconds=10,
-            .request_seconds=20,.client_key=client_key,.model_root=root};
+            .request_seconds=20,.client_key=client_key,.model_root=root,.model_type="olmoe",.engine_kind="olmoe"};
         int rc=host_sessions_run(listener,&state,5000);
         close(listener); close(engine.to); close(engine.from); kill(child,SIGTERM); waitpid(child,NULL,0); _exit(rc);
     }
@@ -91,6 +101,25 @@ static void run_pool(unsigned slots, int reject_retirement_reset) {
     char wrong[65]; memset(wrong,'b',64); wrong[64]=0;
     assert(lmb_host_control_rpc(address,host_hex,wrong,0,NULL,&observed)<0);
     assert(lmb_host_control_rpc(address,wrong,root,0,NULL,&observed)<0);
+    if (slots==1) {
+        /* Deterministic reproduction of the CI race: DONE precedes slow
+         * RESET. The real encrypted socket pump must wait for remote cleanup
+         * before its caller can recycle the exact-allocation permit. */
+        atomic_store(reset_fault,2);
+        for (unsigned turn=0;turn<3;turn++) {
+            Engine client; int limit=8;
+            assert(!host_connect(address,"olmoe",host_hex,root,&client,&limit,0));
+            const char *submit="SUBMIT 9 0 2 8 0 1\nhi\n";
+            assert(!engine_write_full(client.to,submit,strlen(submit)));
+            expect_engine(&client,"DONE 9 ");
+            double began=nowd(); assert(!engine_finish(&client));
+            assert(nowd()-began>=.20 && nowd()-began<5);
+            assert(!lmb_host_control_rpc(address,host_hex,root,0,NULL,&observed));
+            assert(!observed.connections && !observed.requests && !observed.draining);
+        }
+        atomic_store(reset_fault,0);
+        puts("HOST COMPLETION: PASS (slow RESET acknowledged before back-to-back encrypted clients reuse the slot)");
+    }
     int a=connect_client(address,0), b=-1,c=-1;
     send_prompt(a,1,"hold"); expect_frame(a,"ACCEPT 1\n");
     if (slots>1) {

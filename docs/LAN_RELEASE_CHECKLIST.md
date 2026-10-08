@@ -65,6 +65,10 @@ below. Historical observations remain here as evidence, not current promises.
   release acknowledgements. Focused tests refuse retirement with retained KV,
   admitted Hybrid work or a missing codec reset acknowledgement. Full regression,
   warning-as-error rebuild and focused ASan/UBSan/leak checks pass locally.
+  Native Linux CI exposed a completed-turn/host-reset admission race. A delayed
+  codec-reset regression and the local one-slot OLMoE two-replica flow pass
+  with graceful remote close before recycling the API permit; final native
+  validation of this correction is still pending.
   Native CI and normal merge remain required. Automatic scaling policy and
   cloud/server release are separate work.
 - [ ] Requirements-based global placement and measured cost comparison;
