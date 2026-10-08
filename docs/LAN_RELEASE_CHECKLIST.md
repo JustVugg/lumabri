@@ -53,10 +53,10 @@ below. Historical observations remain here as evidence, not current promises.
   final head before normal merge. One-slot and multi-slot hosts finish
   admitted work and refuse new turns. This retains weights and is not
   node-level drain, automatic eviction or server release.
-- [ ] Owner-authenticated Segment control: live KV/admitted Hybrid counts and
+- [x] Owner-authenticated Segment control (#205): live KV/admitted Hybrid counts and
   fenced drain/resume through the allocation keeper's inherited child channel.
   Local one/four-slot OLMoE, wrong-owner/root/allocation checks, protocol and
-  admission tests pass. Native CI and normal merge remain required; this does
+  admission tests pass. All eight native CI checks passed before normal merge; this does
   not implement coordinated retirement, RAM eviction or server release.
 - [ ] Coordinated allocation retirement: irreversible idle fences, retained
   conversation cleanup, exact-owner keeper release and a durable operation
@@ -64,7 +64,8 @@ below. Historical observations remain here as evidence, not current promises.
   on the same donors, selective retirement and reconciliation after lost
   release acknowledgements. Focused tests refuse retirement with retained KV,
   admitted Hybrid work or a missing codec reset acknowledgement. Full regression,
-  native CI and normal merge remain required. Automatic scaling policy and
+  warning-as-error rebuild and focused ASan/UBSan/leak checks pass locally.
+  Native CI and normal merge remain required. Automatic scaling policy and
   cloud/server release are separate work.
 - [ ] Requirements-based global placement and measured cost comparison;
   TUI/web/application management through one public service interface;
