@@ -2,6 +2,33 @@
  * Saved plans are hints, never authority to recreate an allocation. */
 #ifndef LUMABRI_RESIDENT_CONTROL_H
 #define LUMABRI_RESIDENT_CONTROL_H
+#include "lumabri_node_control.h"
+static int home_resident_node_control(const LmbResidentPlan *p, uint32_t i, uint32_t action,
+                                      const LmbNodeControl *expected, LmbNodeControl *out) {
+    if (!home_resident_plan_valid(p) || !lmb_home_nonzero(p->allocation,32) ||
+        i>=p->execution.count || !lmb_home_nonzero(p->peer_keys[i],32) ||
+        action>LMB_NODE_CONTROL_RESUME || (action && !expected)) return -1;
+    uint64_t now=lmb_io_monotonic_ms(),prior=lmb_read_deadline_ms;
+    if (!now) return -1;
+    lmb_read_deadline_ms=prior && prior<now+6000 ? prior : now+6000;
+    int fd=lmb_connect_ms_io(p->execution.nodes[i].address,1000,3000);
+    if (fd<0) { lmb_read_deadline_ms=prior; return -1; }
+    uint8_t body[64+LMB_NODE_CONTROL_REQUEST_BYTES]; memcpy(body,p->allocation,32);
+    lmb_node_control_request(body+64,action,expected);
+    LmbMsg msg={0}; LmbNodeControl decoded={0}; int status=-1;
+    int bad=lmb_unhex(body+32,p->root,32) || !lmb_secure_peer_matches(fd,p->peer_keys[i]) || lmb_auth(fd) ||
+        lmb_send(fd,LMB_HOME_NODE_CONTROL,body,sizeof body,NULL,0) ||
+        lmb_recv_bounded(fd,&msg,64+LMB_NODE_CONTROL_REPLY_BYTES,3000) ||
+        msg.op!=LMB_HOME_NODE_CONTROL_R || msg.pay_len || msg.body_len!=64+LMB_NODE_CONTROL_REPLY_BYTES ||
+        memcmp(body,msg.body,64);
+    if (!bad) status=lmb_node_control_decode(msg.body+64,msg.body_len-64,&decoded);
+    if (!bad && !status && action) bad=memcmp(decoded.instance,expected->instance,32) ||
+        expected->revision==UINT64_MAX || decoded.revision!=expected->revision+1 ||
+        decoded.draining!=(action==LMB_NODE_CONTROL_DRAIN);
+    lmb_msg_free(&msg); lmb_close(fd); lmb_read_deadline_ms=prior;
+    if (bad || status<0) return -1;
+    *out=decoded; return status;
+}
 static int home_resident_peer(const LmbResidentPlan *p, uint32_t i, int release) {
     if (!home_resident_plan_valid(p) || !lmb_home_nonzero(p->allocation, 32) ||
         i >= p->execution.count || !lmb_home_nonzero(p->peer_keys[i], 32)) return -1;

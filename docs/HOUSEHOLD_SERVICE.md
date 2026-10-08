@@ -159,6 +159,10 @@ automatic capacity changes and provider provisioning remain separate work.
 Approved host drain/resume now gates both TUI and API admission without
 cancelling admitted turns; it retains weights and is not donor/server release.
 See [host drain](RESIDENT_API.md#drain-an-approved-host-without-interrupting-admitted-turns).
+Keepers also expose [Segment drain and live session counts](RESIDENT_API.md#inspect-and-drain-the-approved-segment-allocations)
+through a private channel to each owned engine. KV between turns and queued
+Hybrid calls remain counted. This is not yet coordinated retirement or an
+automatic scaling policy; no idle observation alone authorizes releasing RAM.
 
 ### Planned extension: vendor-independent agentic orchestration (not implemented)
 

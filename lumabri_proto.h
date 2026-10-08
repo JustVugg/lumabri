@@ -319,6 +319,7 @@ enum {
     LMB_HOME_QUERY = 90, LMB_HOME_RELEASE = 91, /* pinned requester, exact allocation + root */
     LMB_LINK_PROBE = 92, LMB_LINK_PROBE_R = 93, /* bounded authenticated echo */
     LMB_HOST_CONTROL = 94, LMB_HOST_CONTROL_R = 95, /* approved requester only; fenced drain/resume */
+    LMB_HOME_NODE_CONTROL = 96, LMB_HOME_NODE_CONTROL_R = 97, /* keeper -> owned Segment channel */
 };
 #define LMB_CAP_EXEC2 (1u << 0)
 #define LMB_ENC_F32  0u

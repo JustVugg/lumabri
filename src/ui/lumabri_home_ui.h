@@ -180,7 +180,7 @@ static int home_tracker_resume(HomeSettings *s, pid_t *child, char *notice, size
             int detached = home_service_detach(&keeper, probe);
             if (detached < 0) { close(probe); home_service_close(&keeper); return -1; }
             if (!detached) {
-                pid_t tracker_pid = home_spawn(args, NULL, log, NULL, probe);
+                pid_t tracker_pid = home_spawn(args, NULL, log, NULL, probe, -1);
                 keeper.snapshot.host_pid = (uint64_t)(tracker_pid > 0 ? tracker_pid : 0);
                 while (tracker_pid > 0 && !g_stopping) {
                     if (waitpid(tracker_pid, NULL, WNOHANG) == tracker_pid) break;
@@ -195,7 +195,7 @@ static int home_tracker_resume(HomeSettings *s, pid_t *child, char *notice, size
             close(probe); probe = -1;
             *child = 0;
         } else {
-        *child = home_spawn(args, NULL, log, NULL, probe);
+        *child = home_spawn(args, NULL, log, NULL, probe, -1);
         }
         int ready = 0;
         for (int attempt = 0; attempt < 20 && !g_stopping; attempt++) {

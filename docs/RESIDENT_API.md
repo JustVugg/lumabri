@@ -202,10 +202,54 @@ allocation. A pinned-identity or checkpoint mismatch remains a failure, not BUSY
 This is a host admission primitive, **not automatic scale-down**. It does not
 send donor RELEASE, reclaim RAM, stop a server or certify that unrelated direct
 Segment clients are idle. No HTTP mutation permission is implied by the
-read-only workspace operator grant. Node-level drain, policy/cooldown/minimum
-capacity decisions and provider lifecycle remain separate requirements before
-automatic resource release. State is scoped to the running host instance,
-not a persistent policy that should be replayed after a replacement process.
+read-only workspace operator grant. The node controls below, a coordinated
+retirement operation, policy/cooldown/minimum capacity decisions and provider
+lifecycle are separate requirements before automatic resource release. State
+is scoped to the running host instance, not a persistent policy replayed after
+a replacement process.
+
+### Inspect and drain the approved Segment allocations
+
+```sh
+lumabri api segments ALLOCATION_ID status --tracker HOUSEHOLD:PORT
+lumabri api segments ALLOCATION_ID drain --tracker HOUSEHOLD:PORT
+lumabri api segments ALLOCATION_ID resume --tracker HOUSEHOLD:PORT
+```
+
+These local operator commands contact each allocation keeper, pinned to the
+saved peer identity and checkpoint root. The keeper additionally checks the
+original requester's identity and allocation ID. The household token alone
+cannot inspect or control somebody else's allocation. The keeper forwards the
+bounded operation over a private inherited socket to its own Segment child;
+the Segment network listener still permits only the approved Edge identity.
+
+Each node reports its live process instance, revision, resident session count
+and admitted Hybrid expert requests, including queued ones. `drained` requires
+explicit drain plus zero sessions and zero admitted expert requests. A retained
+KV between two RUNs is **not** idle capacity. Slow session creation returns an
+unknown/busy result instead of assuming zero use. Unsupported runtimes, stale
+instances, failed reads and lost channels are also unknown, never drained.
+
+Drain rejects new Segment OPENs and new Hybrid expert calls. Existing session
+retries, RUN/CLOSE and previously admitted expert work keep their usual limits;
+drain itself does not cancel a kernel. Resume uses the same resident engine.
+`accepting` describes this manual admission policy, not a capacity or health
+certificate: memory pressure, residency loss and the existing compute/session
+limits can still refuse work. Resume never clears those independent guards.
+For a whole replica, first drain its host and wait for admitted turns to finish,
+then drain its segments. Do not drain segments first: a newly admitted turn may
+need to OPEN or rebuild its state. Multi-slot hosts may retain idle KV until
+slot reuse or session expiry, so host `drained` alone is not segment `drained`.
+
+The command reports each node independently. A nonzero exit means at least one
+state is unknown or changed concurrently; mutations already accepted elsewhere
+remain in effect and are not silently rolled back. Revision fences prevent an
+old mutation from crossing a newer drain/resume or engine replacement.
+
+This control **does not release weights or stop a server**. Explicit owner
+unload still exists separately and can interrupt work. Safe automatic release
+needs a coordinated, fenced retirement operation and the model's authorized
+minimum/maximum/cooldown policy; those are not implemented by these commands.
 
 ### Bounded, visible response recovery
 

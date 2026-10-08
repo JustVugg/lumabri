@@ -101,10 +101,16 @@ static int home_control_io_ms(int fallback) {
     return ms > 10000 ? 10000 : ms;
 }
 
-/* Consumes listener, including on failure; other child descriptors stay CLOEXEC. */
-static pid_t home_spawn(char *const argv[], char *const envv[], const char *log, int *ready_fd, int listener) {
+#include "src/runtime/lumabri_node_control.h"
+/* Consumes listener and private control child end, including on failure;
+ * unrelated inherited descriptors remain CLOEXEC. */
+static pid_t home_spawn(char *const argv[], char *const envv[], const char *log, int *ready_fd, int listener, int control) {
     int ready[2] = {-1, -1};
-    if (ready_fd && pipe(ready)) { if (listener >= 0) close(listener); return -1; }
+    if (ready_fd && pipe(ready)) {
+        if (listener >= 0) close(listener);
+        if (control >= 0) (close)(control);
+        return -1;
+    }
     if (ready_fd) (void)fcntl(ready[0], F_SETFD, FD_CLOEXEC);
     pid_t parent = getpid(), pid = fork();
     if (!pid) {
@@ -151,6 +157,12 @@ static pid_t home_spawn(char *const argv[], char *const envv[], const char *log,
             snprintf(descriptor, sizeof descriptor, "%d", listener);
             setenv("LUMABRI_HOME_LISTEN_FD", descriptor, 1);
         } else unsetenv("LUMABRI_HOME_LISTEN_FD");
+        if (control >= 0) {
+            char descriptor[32];
+            if (fcntl(control,F_SETFD,0)) _exit(125);
+            snprintf(descriptor,sizeof descriptor,"%d",control);
+            setenv("LUMABRI_NODE_CONTROL_FD",descriptor,1);
+        } else unsetenv("LUMABRI_NODE_CONTROL_FD");
         if (ready_fd) {
             char descriptor[32];
             close(ready[0]);
@@ -160,6 +172,7 @@ static pid_t home_spawn(char *const argv[], char *const envv[], const char *log,
         execv(argv[0], argv); _exit(127);
     }
     if (listener >= 0) close(listener);
+    if (control >= 0) (close)(control);
     if (ready_fd) {
         close(ready[1]);
         if (pid < 0) close(ready[0]);
@@ -216,7 +229,7 @@ typedef struct HomeDonor {
     int retained; /* owner's sharing lifetime, independent of any chat */
     int persistent; /* rendering only: the service is not owned by this view */
     uint64_t offer_revision;
-    int client, lease, weight_lease, segment_port, host_port, segment_ready, host_ready;
+    int client, lease, weight_lease, segment_port, host_port, segment_ready, host_ready, node_control;
     pid_t segment, host;
     char bin_dir[1024], cache_base[1024], disk[512], ip[INET_ADDRSTRLEN];
     char log[1200];
@@ -279,6 +292,7 @@ static void home_donor_release(HomeDonor *d, LmbHomePhase why, const char *reaso
     d->hybrid_routes_ready = 0; memset(&d->hybrid_routes, 0, sizeof d->hybrid_routes);
     d->retained = 0;
     home_stop_child(&d->host); home_stop_child(&d->segment);
+    if (d->node_control >= 0) { (close)(d->node_control); d->node_control=-1; }
     if (d->segment_ready >= 0) { close(d->segment_ready); d->segment_ready = -1; }
     if (d->host_ready >= 0) { close(d->host_ready); d->host_ready = -1; }
     if (d->lease >= 0) { close(d->lease); d->lease = -1; }
@@ -410,11 +424,17 @@ static int home_donor_launch(HomeDonor *d, int edge) {
         /* The host itself must not be preloaded; model_boot passes the mirror
          * to its Edge child, while its own networking remains ordinary C. */
         envv[0] = LMB_PRELOAD_ENV "=";
-        d->host = home_spawn(host_argv, envv, d->log, &d->host_ready, listener);
+        d->host = home_spawn(host_argv, envv, d->log, &d->host_ready, listener, -1);
         d->host_port = chosen_port;
         return d->host > 0 ? 0 : -1;
     }
-    d->segment = home_spawn(segment_argv, envv, d->log, &d->segment_ready, listener);
+    int control[2];
+    if (socketpair(AF_UNIX,SOCK_STREAM,0,control)) { close(listener); return -1; }
+    if (fcntl(control[0],F_SETFD,FD_CLOEXEC) || fcntl(control[1],F_SETFD,FD_CLOEXEC)) {
+        (close)(control[0]); (close)(control[1]); close(listener); return -1;
+    }
+    d->segment = home_spawn(segment_argv, envv, d->log, &d->segment_ready, listener, control[1]);
+    if (d->segment>0) d->node_control=control[0]; else (close)(control[0]);
     d->segment_port = chosen_port;
     return d->segment > 0 ? 0 : -1;
 }
@@ -515,21 +535,34 @@ static int home_donor_offer(HomeDonor *d, int incoming, const char *tracker,
         if (!rc) rc = lmb_send(incoming, LMB_OK, NULL, 0, NULL, 0) || lmb_recv(incoming, &m);
     }
     if (!rc) {
-        if (m.op == LMB_HOME_QUERY || m.op == LMB_HOME_RELEASE) {
+        if (m.op == LMB_HOME_QUERY || m.op == LMB_HOME_RELEASE || m.op == LMB_HOME_NODE_CONTROL) {
             HomeDonor *target = d;
-            if (m.body_len == 64 && memcmp(m.body, d->transaction.offer.id, 32))
+            uint32_t expected_bytes=m.op==LMB_HOME_NODE_CONTROL ? 64+LMB_NODE_CONTROL_REQUEST_BYTES : 64;
+            if (m.body_len == expected_bytes && memcmp(m.body, d->transaction.offer.id, 32))
                 for (uint32_t i = 0; i < d->park_capacity; i++)
                     if (!memcmp(m.body, d->parked[i].transaction.offer.id, 32)) { target = &d->parked[i]; break; }
             /* A remembered endpoint is not authority. Only the original
              * authenticated requester can inspect/release THIS allocation. */
-            int permitted = m.body_len == 64 && !m.pay_len &&
+            int permitted = m.body_len == expected_bytes && !m.pay_len &&
                 lmb_home_offer_valid(&target->transaction.offer) &&
                 !memcmp(m.body, target->transaction.offer.id, 32) &&
                 !memcmp(m.body + 32, target->transaction.offer.model_root, 32) &&
                 lmb_secure_peer_matches(incoming, target->transaction.offer.requester);
             if (permitted) {
-                if (m.op == LMB_HOME_RELEASE) home_donor_disconnect(target, "Released by the original requester.");
-                (void)home_status_send(incoming, &target->transaction, target->segment_port, target->host_port);
+                if (m.op==LMB_HOME_NODE_CONTROL) {
+                    uint8_t response[64+LMB_NODE_CONTROL_REPLY_BYTES];
+                    const uint8_t *request=m.body+64;
+                    if (target->segment>0 && target->node_control>=0 &&
+                        (target->transaction.phase==LMB_HOME_READY || target->transaction.phase==LMB_HOME_SEGMENT_READY) &&
+                        lmb_get32(request)==LMB_NODE_CONTROL_VERSION && lmb_get32(request+4)<=LMB_NODE_CONTROL_RESUME &&
+                        !lmb_node_control_local(&target->node_control,request,response+64)) {
+                        memcpy(response,m.body,64);
+                        (void)lmb_send(incoming,LMB_HOME_NODE_CONTROL_R,response,sizeof response,NULL,0);
+                    }
+                } else {
+                    if (m.op == LMB_HOME_RELEASE) home_donor_disconnect(target, "Released by the original requester.");
+                    (void)home_status_send(incoming, &target->transaction, target->segment_port, target->host_port);
+                }
             }
             lmb_msg_free(&m); return -1;
         }
@@ -760,7 +793,7 @@ static int cmd_donor_inner(int argc, char **argv) {
         if (!home_service_query("donor", HOME_SVC_STATUS, NULL, &existing))
             return home_service_donor_ui(tracker);
     }
-    HomeDonor d = {0}; d.client = d.lease = d.weight_lease = d.segment_ready = d.host_ready = -1;
+    HomeDonor d = {0}; d.client = d.lease = d.weight_lease = d.segment_ready = d.host_ready = d.node_control = -1;
     exe_dir(d.bin_dir, sizeof d.bin_dir);
     const char *services[] = {"segment_node", "segment_chat"};
     char service_path[1200];
@@ -827,7 +860,7 @@ static int cmd_donor_inner(int argc, char **argv) {
         "--name", (char *)name, "--ram-gb", budget, "--disk", d.cache_base,
         "--control-address", addr, "--runtime-epoch", d.runtime_epoch,
         background ? "--donor-service" : NULL, NULL};
-    pid_t reporter = home_spawn(worker_argv, NULL, report_log, NULL, -1);
+    pid_t reporter = home_spawn(worker_argv, NULL, report_log, NULL, -1, -1);
     if (reporter <= 0) { close(listener); return home_fail("Cannot start the inventory reporter: %s.", strerror(errno)); }
     if (background) {
         char compute_path[1200];
@@ -1221,7 +1254,7 @@ static int home_request_chat_direct(LmbTuiState *st, int selected) {
         "--advertise", addr, "--key", kp, NULL};
     HomeTerminal term; home_terminal_begin(&term);
     g_stopping = 0; install_chat_signal_handlers(); signal(SIGPIPE, SIG_IGN);
-    s.source = home_spawn(source_argv, NULL, logfile, NULL, source_listener);
+    s.source = home_spawn(source_argv, NULL, logfile, NULL, source_listener, -1);
     int result = -1, prepared = 0, heartbeat_started = 0;
     pthread_t heartbeat;
     const char *stage = "starting the checkpoint source";

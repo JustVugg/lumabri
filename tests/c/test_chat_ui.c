@@ -219,6 +219,24 @@ int main(int argc, char **argv) {
         for (uint32_t i = 0; i < plan.execution.count; i++) assert(!home_resident_peer(&plan, i, 1));
         return 0;
     }
+    if (argc==4 && !strcmp(argv[1],"resident-node-guards")) {
+        assert(!lmb_secure_init()); LmbResidentPlan plan,changed; LmbNodeControl state;
+        assert(!home_resident_plan_read(argv[2],argv[3],&plan));
+        for (uint32_t i=0;i<plan.execution.count;i++) {
+            assert(!home_resident_node_control(&plan,i,0,NULL,&state));
+            changed=plan; changed.root[0]=changed.root[0]=='a' ? 'b' : 'a';
+            assert(home_resident_node_control(&changed,i,0,NULL,&state)<0);
+            changed=plan; changed.allocation[0]^=1;
+            assert(home_resident_node_control(&changed,i,0,NULL,&state)<0);
+            changed=plan; changed.peer_keys[i][0]^=1;
+            assert(home_resident_node_control(&changed,i,0,NULL,&state)<0);
+            assert(!home_resident_node_control(&plan,i,0,NULL,&state));
+            LmbNodeControl wrong=state; wrong.instance[0]^=1;
+            assert(home_resident_node_control(&plan,i,LMB_NODE_CONTROL_DRAIN,&wrong,&state)==LMB_NODE_CONTROL_CONFLICT);
+            assert(!state.draining);
+        }
+        puts("RESIDENT NODE GUARDS: PASS (exact root/allocation, pinned keeper, stale process instance)"); return 0;
+    }
     if (argc == 4 && !strcmp(argv[1], "resident-chat")) {
         assert(!lmb_secure_init()); LmbResidentPlan plan;
         assert(!home_resident_plan_read(argv[2], argv[3], &plan));
