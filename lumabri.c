@@ -3816,12 +3816,14 @@ static void *host_client_pump(void *arg) {
         int n = poll(p, 2, 1000);
         if (n < 0) { if (errno == EINTR) continue; break; }
         if (!n) continue;
-        if (p[0].revents & POLLIN) {
+        if (p[0].revents & (POLLIN|POLLHUP)) {
             ssize_t got = read(pump->local_fd, bytes, sizeof bytes);
-            if (!got && !(p[0].revents & POLLHUP)) {
-                /* The caller still owns the read side: graceful completion,
-                 * not cancellation. EOF on the wire lets the host reset its
-                 * conversation before it closes its side of the connection. */
+            if (!got) {
+                /* Darwin can report POLLHUP for a write-side half-close too.
+                 * Do not infer cancellation from that flag: propagate EOF,
+                 * then let the host close after RESET. An abrupt local stop
+                 * still returns immediately; forwarding to its closed read
+                 * side fails, or this detached pump hits its bounded deadline. */
                 if (shutdown(pump->network_fd,SHUT_WR)) break;
                 closing=1; close_deadline=nowd()+32;
             } else if (got<=0 || lmb_send(pump->network_fd,LMB_HOST_STREAM,
@@ -3837,7 +3839,8 @@ static void *host_client_pump(void *arg) {
             }
             lmb_msg_free(&m);
         }
-        if ((p[0].revents | p[1].revents) & (POLLERR | POLLHUP)) break;
+        if ((p[1].revents & (POLLERR|POLLHUP)) ||
+            (!closing && (p[0].revents & (POLLERR|POLLHUP)))) break;
     }
     shutdown(pump->local_fd, SHUT_RDWR);
     close(pump->local_fd);
