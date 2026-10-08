@@ -49,15 +49,28 @@ below. Historical observations remain here as evidence, not current promises.
 - [x] Bounded managed API replay (#203): all eight checks passed on the final
   head before normal merge. Replay validates the visible prefix on an already
   approved replica; it does not restart keepers or prepare capacity.
-- [ ] Authenticated host drain/resume: one-slot and multi-slot hosts finish
-  admitted work and refuse new turns. Local encrypted and OLMoE tiny gates
-  pass; native CI/merge are still required. This retains weights and is not
+- [x] Authenticated host drain/resume (#204): all eight checks passed on the
+  final head before normal merge. One-slot and multi-slot hosts finish
+  admitted work and refuse new turns. This retains weights and is not
   node-level drain, automatic eviction or server release.
-- [ ] Owner-authenticated Segment control: live KV/admitted Hybrid counts and
+- [x] Owner-authenticated Segment control (#205): live KV/admitted Hybrid counts and
   fenced drain/resume through the allocation keeper's inherited child channel.
   Local one/four-slot OLMoE, wrong-owner/root/allocation checks, protocol and
-  admission tests pass. Native CI and normal merge remain required; this does
+  admission tests pass. All eight native CI checks passed before normal merge; this does
   not implement coordinated retirement, RAM eviction or server release.
+- [ ] Coordinated allocation retirement: irreversible idle fences, retained
+  conversation cleanup, exact-owner keeper release and a durable operation
+  journal. Local four-slot OLMoE reduced-checkpoint flow passes with two models
+  on the same donors, selective retirement and reconciliation after lost
+  release acknowledgements. Focused tests refuse retirement with retained KV,
+  admitted Hybrid work or a missing codec reset acknowledgement. Full regression,
+  warning-as-error rebuild and focused ASan/UBSan/leak checks pass locally.
+  Native Linux CI exposed a completed-turn/host-reset admission race. A delayed
+  codec-reset regression and the local one-slot OLMoE two-replica flow pass
+  with graceful remote close before recycling the API permit; final native
+  validation of this correction is still pending.
+  Native CI and normal merge remain required. Automatic scaling policy and
+  cloud/server release are separate work.
 - [ ] Requirements-based global placement and measured cost comparison;
   TUI/web/application management through one public service interface;
   recovery, elasticity, provider integration and

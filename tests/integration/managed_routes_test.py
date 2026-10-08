@@ -195,7 +195,28 @@ def verify_managed_routes(runtime, env, tracker, first_plan, third_plan, first_n
         assert status == 200 and b"event: done\n" in data and b"event: error\n" not in data, (status, data)
         reduced = json.loads(command("model-set", route["id"], third["id"]))
         assert reduced["revision"] == 6 and reduced["replicas"] == 1 and reduced["policy"] == "ordered"
-        release(third_plan)
+        # Only the coordinated path may claim a non-interrupting release.
+        # It seals the host, retires its retained KV, seals both real nodes,
+        # and persists acknowledgements before freeing the Edge keeper last.
+        deadline=time.monotonic()+30
+        while True:
+            retired=json.loads(command("retire",third["id"]))
+            if retired["complete"]: break
+            assert retired["state"]=="waiting_for_admitted_work" and time.monotonic()<deadline, retired
+            time.sleep(.05)
+        assert retired["state"]=="released" and retired["released_node_mask"]==3
+        assert json.loads(command("retire",third["id"]))==retired, "completed retirement replayed destructive work"
+        # Simulate a coordinator dying after keeper release but before its
+        # acknowledgement was saved. Retain the exact live-process seals;
+        # rewind only the local release-progress fields, not donor state.
+        journal=Path(env["HOME"])/".lumabri/api-access/retirements"/(third["id"]+".retire")
+        checkpoint=bytearray(journal.read_bytes())
+        assert checkpoint[:8]==b"LMBRET1\0" and struct.unpack_from("<I",checkpoint,80)[0]==2
+        struct.pack_into("<IIII",checkpoint,72,4,0,2,0)  # RELEASE, no saved acknowledgements
+        journal.write_bytes(checkpoint)
+        reconciled=json.loads(command("retire",third["id"]))
+        assert reconciled==retired, ("lost acknowledgements were not reconciled",reconciled)
+        print("COORDINATED RETIREMENT: PASS (host and two nodes sealed, retained KV closed, exact release, lost-ack reconciliation)",flush=True)
         status, data = chat(route["id"])
         assert status == 503 and json.loads(data)["error"] == "approved_allocation_unavailable", (status, data)
         command("model-remove", route["id"])

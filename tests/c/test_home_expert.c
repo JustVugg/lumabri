@@ -89,8 +89,6 @@ static void node_control_test(Node *node) {
     lmb_node_control_request(request_wire,LMB_NODE_CONTROL_DRAIN,&current);
     assert(!lmb_node_control_local(&pair[0],request_wire,reply_wire));
     assert(!lmb_node_control_decode(reply_wire,sizeof reply_wire,&current) && current.draining);
-    node->registration.stop=1; pthread_join(control,NULL);
-    close(pair[0]); close(pair[1]); node->registration.stop=0;
     LmbSegOpen open={.session_id={{1}},.request_id={{2}},.owner={.lease_id={{3}},.fencing_epoch=1,.route_generation=1},
         .model_root={2},.tokenizer_root={4},.layer_begin=2,.layer_end=3,.context_tokens=64,
         .max_rows=1,.state_dtype=LMB_SEG_DTYPE_F32,.state_width=4,.ttl_ms=30000,
@@ -107,9 +105,29 @@ static void node_control_test(Node *node) {
     node->sessions[0].used=1; node->sessions[0].id=open.session_id;
     open_request(node,&open,LMB_SEG_STATUS_DUPLICATE); /* live conversation retry is still allowed */
     assert(!run_should_cancel(node)); /* drain alone does not abort admitted kernels */
-    node->sessions[0].used=0; lmb_seg_table_destroy(node->table); node->table=NULL;
-    node->control.draining=0;
-    puts("NODE ADMISSION: PASS (private channel, busy is unknown, new OPEN refused, existing OPEN retained, no drain cancellation)");
+    /* RETIRE must use actual retained KV, not an old snapshot or just the
+     * count of kernels currently running. Even idle KV prevents sealing. */
+    lmb_node_control_request(request_wire,LMB_NODE_CONTROL_RETIRE,&current);
+    assert(!lmb_node_control_local(&pair[0],request_wire,reply_wire));
+    LmbNodeControl reply;
+    assert(lmb_node_control_decode(reply_wire,sizeof reply_wire,&reply)==LMB_NODE_CONTROL_CONFLICT && reply.sessions==1);
+    pthread_mutex_lock(&node->sessions_lock);
+    node->sessions[0].used=0; node->control.experts=1;
+    pthread_mutex_unlock(&node->sessions_lock);
+    assert(!lmb_node_control_local(&pair[0],request_wire,reply_wire));
+    assert(lmb_node_control_decode(reply_wire,sizeof reply_wire,&reply)==LMB_NODE_CONTROL_CONFLICT && reply.experts==1);
+    pthread_mutex_lock(&node->sessions_lock); node->control.experts=0; pthread_mutex_unlock(&node->sessions_lock);
+    assert(!lmb_node_control_local(&pair[0],request_wire,reply_wire));
+    assert(!lmb_node_control_decode(reply_wire,sizeof reply_wire,&reply) && reply.draining==LMB_NODE_CONTROL_RETIRED);
+    assert(reply.revision==current.revision+1 && !reply.sessions && !reply.experts);
+    open_request(node,&open,LMB_SEG_STATUS_QUOTA);
+    lmb_node_control_request(request_wire,LMB_NODE_CONTROL_RESUME,&reply);
+    assert(!lmb_node_control_local(&pair[0],request_wire,reply_wire));
+    assert(lmb_node_control_decode(reply_wire,sizeof reply_wire,&reply)==LMB_NODE_CONTROL_CONFLICT);
+    node->registration.stop=1; pthread_join(control,NULL);
+    close(pair[0]); close(pair[1]); node->registration.stop=0;
+    lmb_seg_table_destroy(node->table); node->table=NULL;
+    puts("NODE ADMISSION: PASS (private channel, busy is unknown, retained KV and expert counts block retirement, irreversible idle seal)");
 }
 int main(void) {
     Node *node = calloc(1, sizeof *node); assert(node);

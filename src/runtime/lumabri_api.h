@@ -118,6 +118,7 @@ static int api_find_plan(const char *tracker, const uint8_t allocation[32], LmbR
     free(plans); return found==1 ? 0 : -1;
 }
 #include "lumabri_managed_models.h"
+#include "lumabri_retirement.h"
 #include "lumabri_workspace.h"
 static int api_models(int fd, int access_dir, const char *tracker, const LmbApiUser *user) {
     LmbResidentPlan *plans=calloc(64,sizeof *plans); Cap body={0};
@@ -269,6 +270,12 @@ static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUs
         if (attempts==1 && observing && observed.first>started)
             observation_saved=catalog_record_turn(observation,&observation->key,records,tracker,&engine,stream.stat,
                                                   observed.first-started,LMB_CAL_SOURCE_SESSION);
+        /* Do not publish completion and recycle the gateway permit ahead of
+         * the remote host's conversation cleanup. Back-to-back request pairs
+         * otherwise see a false BUSY on an already completed replica. */
+        if (engine_finish(&engine)) fprintf(stderr,"[api] host cleanup observation timed out\n");
+        if (permit>=0) close(permit);
+        permit=-1;
         Cap payload={0};
         if (!cap_str(&payload,"{\"stats\":") && !api_json_text(&payload,stream.stat) &&
             !api_addf(&payload,",\"observation_saved\":%s,\"recovery_attempts\":%u,\"stats_scope\":\"%s\"}",
@@ -475,6 +482,9 @@ static int cmd_api(int argc, char **argv) {
     if (!strcmp(argv[0],"segments")) {
         int rc=api_segments_control(tracker,args,count); close(dir); return rc;
     }
+    if (!strcmp(argv[0],"retire")) {
+        int rc=api_retire(dir,tracker,args,count); close(dir); return rc;
+    }
     if ((!strcmp(argv[0],"serve") || !strcmp(argv[0],"start")) && !count && *tracker) {
         int rc=!strcmp(argv[0],"start") ? api_start(dir,port,tracker) : api_serve(dir,port,tracker,NULL);
         close(dir); return rc;
@@ -509,6 +519,7 @@ usage:
         "lumabri api model-set MODEL_ID APPROVED_ALLOCATION... [--tracker HOST:PORT]\n"
         "lumabri api model-remove MODEL_ID [--tracker HOST:PORT]\n"
         "lumabri api model-policy MODEL_ID ordered|observed-decode|declared-cost [--tracker HOST:PORT]\n"
+        "lumabri api retire ALLOCATION_ID [--tracker HOST:PORT]\n"
         "lumabri api replica ALLOCATION_ID [status|drain|resume] [--tracker HOST:PORT]\n"
         "lumabri api segments ALLOCATION_ID [status|drain|resume] [--tracker HOST:PORT]\n"
         "lumabri api user-add NAME\n"

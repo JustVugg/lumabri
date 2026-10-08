@@ -7,7 +7,7 @@ static int home_resident_node_control(const LmbResidentPlan *p, uint32_t i, uint
                                       const LmbNodeControl *expected, LmbNodeControl *out) {
     if (!home_resident_plan_valid(p) || !lmb_home_nonzero(p->allocation,32) ||
         i>=p->execution.count || !lmb_home_nonzero(p->peer_keys[i],32) ||
-        action>LMB_NODE_CONTROL_RESUME || (action && !expected)) return -1;
+        action>LMB_NODE_CONTROL_RETIRE || (action && !expected)) return -1;
     uint64_t now=lmb_io_monotonic_ms(),prior=lmb_read_deadline_ms;
     if (!now) return -1;
     lmb_read_deadline_ms=prior && prior<now+6000 ? prior : now+6000;
@@ -24,7 +24,7 @@ static int home_resident_node_control(const LmbResidentPlan *p, uint32_t i, uint
     if (!bad) status=lmb_node_control_decode(msg.body+64,msg.body_len-64,&decoded);
     if (!bad && !status && action) bad=memcmp(decoded.instance,expected->instance,32) ||
         expected->revision==UINT64_MAX || decoded.revision!=expected->revision+1 ||
-        decoded.draining!=(action==LMB_NODE_CONTROL_DRAIN);
+        decoded.draining!=(action==LMB_NODE_CONTROL_RETIRE ? LMB_NODE_CONTROL_RETIRED : action==LMB_NODE_CONTROL_DRAIN);
     lmb_msg_free(&msg); lmb_close(fd); lmb_read_deadline_ms=prior;
     if (bad || status<0) return -1;
     *out=decoded; return status;
@@ -49,5 +49,26 @@ static int home_resident_peer(const LmbResidentPlan *p, uint32_t i, int release)
     if (!bad) bad = release ? phase != LMB_HOME_CLOSED || segment || host :
         !segment || (p->execution.nodes[i].edge ? phase != LMB_HOME_READY || !host : phase != LMB_HOME_SEGMENT_READY);
     lmb_msg_free(&msg); return bad ? -1 : 0;
+}
+static int home_resident_retired_release(const LmbResidentPlan *p, uint32_t i, const LmbNodeControl *expected) {
+    if (!home_resident_plan_valid(p) || i>=p->execution.count || !expected ||
+        expected->draining!=LMB_NODE_CONTROL_RETIRED || !expected->revision || expected->sessions || expected->experts) return -1;
+    uint64_t now=lmb_io_monotonic_ms(),prior=lmb_read_deadline_ms;
+    if (!now) return -1;
+    lmb_read_deadline_ms=prior && prior<now+10000 ? prior : now+10000;
+    int fd=lmb_connect_ms_io(p->execution.nodes[i].address,1000,8000);
+    if (fd<0) { lmb_read_deadline_ms=prior; return -1; }
+    uint8_t body[64+LMB_NODE_CONTROL_REQUEST_BYTES]; memcpy(body,p->allocation,32);
+    lmb_node_control_request(body+64,LMB_NODE_CONTROL_QUERY,expected);
+    LmbMsg msg={0}; LmbNodeControl actual={0};
+    int bad=lmb_unhex(body+32,p->root,32) || !lmb_secure_peer_matches(fd,p->peer_keys[i]) || lmb_auth(fd) ||
+        lmb_send(fd,LMB_HOME_RETIRED_RELEASE,body,sizeof body,NULL,0) ||
+        lmb_recv_bounded(fd,&msg,64+LMB_NODE_CONTROL_REPLY_BYTES,8000) || msg.pay_len ||
+        msg.op!=LMB_HOME_RETIRED_RELEASE_R || msg.body_len!=64+LMB_NODE_CONTROL_REPLY_BYTES || memcmp(body,msg.body,64) ||
+        lmb_node_control_decode(msg.body+64,LMB_NODE_CONTROL_REPLY_BYTES,&actual) ||
+        actual.draining!=LMB_NODE_CONTROL_RETIRED || actual.revision!=expected->revision ||
+        memcmp(actual.instance,expected->instance,32) || actual.sessions || actual.experts;
+    lmb_msg_free(&msg); lmb_close(fd); lmb_read_deadline_ms=prior;
+    return bad ? -1 : 0;
 }
 #endif

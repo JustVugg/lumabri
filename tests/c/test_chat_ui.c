@@ -234,6 +234,9 @@ int main(int argc, char **argv) {
             LmbNodeControl wrong=state; wrong.instance[0]^=1;
             assert(home_resident_node_control(&plan,i,LMB_NODE_CONTROL_DRAIN,&wrong,&state)==LMB_NODE_CONTROL_CONFLICT);
             assert(!state.draining);
+            wrong=state; wrong.draining=LMB_NODE_CONTROL_RETIRED;
+            assert(home_resident_retired_release(&plan,i,&wrong)<0); /* forged seal cannot unload live work */
+            assert(!home_resident_node_control(&plan,i,0,NULL,&state) && !state.draining);
         }
         puts("RESIDENT NODE GUARDS: PASS (exact root/allocation, pinned keeper, stale process instance)"); return 0;
     }

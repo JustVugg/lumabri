@@ -3195,6 +3195,31 @@ static void engine_stop(Engine *e) {
     e->pid = 0;
 }
 
+/* A completed API turn must retain its allocation permit until the host has
+ * closed the conversation. The socket pump propagates this half-close and
+ * waits for the host's EOF (after one-slot RESET), rather than merely closing
+ * a local descriptor while the remote slot is still occupied. Cancellation
+ * continues to use engine_stop(), without waiting for graceful cleanup. */
+static int engine_finish(Engine *e) {
+    if (e->transport != ENGINE_SOCKET || e->to < 0) { engine_stop(e); return 0; }
+    int clean=0;
+    if (!shutdown(e->to,SHUT_WR)) {
+        double deadline=nowd()+35;
+        while (!g_stopping && nowd()<deadline) {
+            struct pollfd p={e->from,POLLIN,0};
+            int ready=poll(&p,1,100);
+            if (ready<0 && errno==EINTR) continue;
+            if (ready<0) break;
+            if (!ready) continue;
+            char bytes[16384]; ssize_t got=read(e->from,bytes,sizeof bytes);
+            if (!got) { clean=1; break; }
+            if (got<0 && errno!=EINTR) break;
+        }
+    }
+    engine_stop(e);
+    return clean ? 0 : -1;
+}
+
 /* model_boot is defined with the chat command below; the host uses the same
  * one, because a host IS a chat whose terminal happens to be a socket. */
 static int model_boot(const char *tracker, const char *model, const char *shim,
@@ -3782,17 +3807,27 @@ typedef struct { int local_fd, network_fd; } HostPump;
 static void *host_client_pump(void *arg) {
     HostPump *pump = (HostPump *)arg;
     char bytes[16384];
+    int closing=0; double close_deadline=0;
     for (;;) {
+        if (closing && nowd()>=close_deadline) break;
         struct pollfd p[2] = {
-            { pump->local_fd, POLLIN, 0 }, { pump->network_fd, POLLIN, 0 }
+            { closing ? -1 : pump->local_fd, POLLIN, 0 }, { pump->network_fd, POLLIN, 0 }
         };
         int n = poll(p, 2, 1000);
         if (n < 0) { if (errno == EINTR) continue; break; }
         if (!n) continue;
-        if (p[0].revents & POLLIN) {
+        if (p[0].revents & (POLLIN|POLLHUP)) {
             ssize_t got = read(pump->local_fd, bytes, sizeof bytes);
-            if (got <= 0 || lmb_send(pump->network_fd, LMB_HOST_STREAM,
-                                     NULL, 0, bytes, (uint32_t)got)) break;
+            if (!got) {
+                /* Darwin can report POLLHUP for a write-side half-close too.
+                 * Do not infer cancellation from that flag: propagate EOF,
+                 * then let the host close after RESET. An abrupt local stop
+                 * still returns immediately; forwarding to its closed read
+                 * side fails, or this detached pump hits its bounded deadline. */
+                if (shutdown(pump->network_fd,SHUT_WR)) break;
+                closing=1; close_deadline=nowd()+32;
+            } else if (got<=0 || lmb_send(pump->network_fd,LMB_HOST_STREAM,
+                                         NULL,0,bytes,(uint32_t)got)) break;
         }
         if (p[1].revents & POLLIN) {
             LmbMsg m = {0};
@@ -3804,7 +3839,8 @@ static void *host_client_pump(void *arg) {
             }
             lmb_msg_free(&m);
         }
-        if ((p[0].revents | p[1].revents) & (POLLERR | POLLHUP)) break;
+        if ((p[1].revents & (POLLERR|POLLHUP)) ||
+            (!closing && (p[0].revents & (POLLERR|POLLHUP)))) break;
     }
     shutdown(pump->local_fd, SHUT_RDWR);
     close(pump->local_fd);

@@ -320,6 +320,7 @@ enum {
     LMB_LINK_PROBE = 92, LMB_LINK_PROBE_R = 93, /* bounded authenticated echo */
     LMB_HOST_CONTROL = 94, LMB_HOST_CONTROL_R = 95, /* approved requester only; fenced drain/resume */
     LMB_HOME_NODE_CONTROL = 96, LMB_HOME_NODE_CONTROL_R = 97, /* keeper -> owned Segment channel */
+    LMB_HOME_RETIRED_RELEASE = 98, LMB_HOME_RETIRED_RELEASE_R = 99, /* irreversible idle-node fence */
 };
 #define LMB_CAP_EXEC2 (1u << 0)
 #define LMB_ENC_F32  0u

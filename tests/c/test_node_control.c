@@ -22,7 +22,7 @@ int main(void) {
     LmbNodeControl parsed;
     assert(!lmb_node_control_decode(reply,sizeof reply,&parsed) && parsed.sessions==2 && parsed.experts==3);
     assert(lmb_node_control_decode(reply,sizeof reply-1,&parsed)<0);
-    lmb_put32(reply+48,2); assert(lmb_node_control_decode(reply,sizeof reply,&parsed)<0);
+    lmb_put32(reply+48,3); assert(lmb_node_control_decode(reply,sizeof reply,&parsed)<0);
     memset(reply,0,sizeof reply); lmb_put32(reply,1); lmb_put32(reply+4,LMB_NODE_CONTROL_BUSY);
     assert(lmb_node_control_decode(reply,sizeof reply,&parsed)==LMB_NODE_CONTROL_BUSY && !parsed.revision);
     reply[8]=1; assert(lmb_node_control_decode(reply,sizeof reply,&parsed)<0);
@@ -30,6 +30,18 @@ int main(void) {
     assert(lmb_node_control_apply(&state,LMB_NODE_CONTROL_DRAIN,state.instance,UINT64_MAX));
     lmb_node_control_reply(reply,1,&state);
     assert(lmb_node_control_decode(reply,sizeof reply,&parsed)==1 && parsed.revision==UINT64_MAX);
+    LmbNodeControl seal={.instance={5},.revision=1,.sessions=1};
+    assert(lmb_node_control_apply(&seal,LMB_NODE_CONTROL_RETIRE,seal.instance,1));
+    assert(!lmb_node_control_apply(&seal,LMB_NODE_CONTROL_DRAIN,seal.instance,1));
+    assert(lmb_node_control_apply(&seal,LMB_NODE_CONTROL_RETIRE,seal.instance,2));
+    seal.sessions=0; seal.experts=1;
+    assert(lmb_node_control_apply(&seal,LMB_NODE_CONTROL_RETIRE,seal.instance,2));
+    seal.experts=0;
+    assert(!lmb_node_control_apply(&seal,LMB_NODE_CONTROL_RETIRE,seal.instance,2));
+    assert(seal.draining==LMB_NODE_CONTROL_RETIRED && seal.revision==3);
+    assert(!lmb_node_control_apply(&seal,LMB_NODE_CONTROL_RETIRE,seal.instance,2));
+    assert(lmb_node_control_apply(&seal,LMB_NODE_CONTROL_RESUME,seal.instance,3));
+    assert(lmb_node_control_apply(&seal,LMB_NODE_CONTROL_DRAIN,seal.instance,3));
     /* Fragmented reply over the actual inherited-channel protocol. */
     int pair[2]; assert(!socketpair(AF_UNIX,SOCK_STREAM,0,pair));
     pid_t child=fork(); assert(child>=0);
