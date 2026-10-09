@@ -112,7 +112,13 @@ def main():
                 else:
                     reason = b"invalid request fixture" if mode == "nonretryable" else b"LMB_REPLICA_UNAVAILABLE injected real-output boundary"
                     out.write(b"ERROR " + line.split()[1] + b" " + reason + b"\n")
-                out.flush(); fault = None
+                out.flush()
+                if mode == "nonretryable":
+                    # Delay forwarding the real engine's RESET_DONE. The
+                    # gateway must not finish this error response before its
+                    # allocation becomes reusable by the very next request.
+                    time.sleep(.25)
+                fault = None
             elif fault and line.startswith(b"ERROR "):
                 # A genuine engine failure/cancellation is not a fixture's
                 # successful oracle and must never be swallowed by the proxy.
