@@ -124,6 +124,31 @@ def verify_mixed_capacity(runtime, env, tracker, artifacts):
         report["inventory_after"] = snapshot()
         assert {a["id"] for a in report["inventory_before"]["allocations"]} == {
             a["id"] for a in report["inventory_after"]["allocations"]}, "benchmark changed resident allocations"
+        # The production C probe uses the same real gateway admission and
+        # timing paths. Its bounded durable observations feed the planner;
+        # these are not imported JSON fixtures or claims about full models.
+        ids = [m["id"] for m in models]
+        measured = json.loads(cli("capacity-measure", "joint-baseline", "2", "3", "8", *ids))
+        assert measured["state"] == "measured" and measured["stable"], measured
+        assert all(m["completed"] == m["timing_samples"] == 3 for m in measured["models"]), measured
+        checked = json.loads(cli("capacity-check", "joint-baseline", "30000", "30000", "300"))
+        assert checked["state"] == "observed_workload_passed", checked
+        overloaded = json.loads(cli("capacity-measure", "joint-overloaded", "8", "3", "8", *ids))
+        assert overloaded["state"] == "measured" and sum(m["rejected"] for m in overloaded["models"]) > 0, overloaded
+        checked_overload = json.loads(cli("capacity-check", "joint-overloaded", "30000", "30000", "300"))
+        assert checked_overload["state"] == "requests_rejected_or_failed", checked_overload
+        selected = json.loads(cli("capacity-select", "30000", "30000", "300", "joint-baseline", "joint-overloaded"))
+        assert selected["selected"] == "joint-baseline" and not selected["applied"], selected
+        assert selected["candidates"][1]["state"] == "workload_not_comparable", selected
+        repeat = json.loads(cli("capacity-measure", "joint-repeat", "2", "3", "8", *ids))
+        assert repeat["state"] == "measured", repeat
+        selected = json.loads(cli("capacity-select", "30000", "30000", "300", "joint-baseline", "joint-repeat"))
+        assert selected["selected"] == "joint-baseline", selected
+        assert all(c["state"] == "observed_workload_passed" for c in selected["candidates"]), selected
+        assert selected["objective"] == "operator_order_prices_unknown_or_mixed", selected
+        assert "resident allocations and conversations unchanged" in cli("capacity-remove", "joint-repeat")
+        assert {a["id"] for a in snapshot()["allocations"]} == {a["id"] for a in report["inventory_before"]["allocations"]}
+        report["production_probe"] = {"baseline": measured, "overloaded": overloaded, "selection": selected}
         report["run_complete"] = True
     finally:
         try:

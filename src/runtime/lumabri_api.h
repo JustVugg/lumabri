@@ -326,6 +326,12 @@ static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUs
         const char *reason=observed.replay.mismatch || (stream.status==LMB_REPLY_DONE && !lmb_replay_complete(&observed.replay)) ?
             "Recovery did not reproduce the visible prefix; response remains incomplete" :
             observed.error[0] ? observed.error : "Stream interrupted; response is incomplete";
+        /* Terminal errors have the same cleanup boundary as DONE. Releasing
+         * the permit before RESET makes the next ordered request skip this
+         * still-occupied replica, even though the previous stream has ended. */
+        if (engine_finish(&engine)) fprintf(stderr,"[api] error cleanup observation timed out\n");
+        if (permit>=0) close(permit);
+        permit=-1;
         (void)api_engine_error(&fd,reason);
     }
     lmb_replay_free(&observed.replay);
@@ -495,18 +501,19 @@ static int api_start(int access_dir, unsigned port, const char *tracker) {
     (void)home_service_save(&keeper); home_service_answer(&keeper); home_service_close(&keeper);
     close(access_dir); _exit(rc ? 1 : 0);
 }
+#include "lumabri_capacity_probe.h"
 static int cmd_api(int argc, char **argv) {
     if (!argc) goto usage;
     HomeSettings settings; home_settings_load(&settings);
     const char *tracker=settings.tracker; unsigned port=47380;
-    char *args[LMB_ROUTE_REPLICAS+1]={0}; unsigned count=0;
+    char *args[LMB_CAPACITY_MODELS+4]={0}; unsigned count=0;
     for (int i=1; i<argc; i++) {
         if (!strcmp(argv[i],"--tracker") && i+1<argc) tracker=argv[++i];
         else if (!strcmp(argv[i],"--port") && i+1<argc) {
             char *end; unsigned long value=strtoul(argv[++i],&end,10);
             if (!*argv[i] || *end || !value || value>65535) goto usage;
             port=(unsigned)value;
-        } else if (count<LMB_ROUTE_REPLICAS+1) args[count++]=argv[i]; else goto usage;
+        } else if (count<sizeof args/sizeof *args) args[count++]=argv[i]; else goto usage;
     }
     if (!strcmp(tracker,settings.tracker) && home_settings_activate(&settings)) return 1;
     if (!strcmp(argv[0],"stop") && !count) return home_service_stop_role("api") ? 1 : 0;
@@ -518,6 +525,24 @@ static int cmd_api(int argc, char **argv) {
     }
     if (!strcmp(argv[0],"workspace") && !count && *tracker) {
         int rc=api_workspace(-1,dir,tracker); close(dir); return rc ? 1 : 0;
+    }
+    if (!strcmp(argv[0],"capacity-measure") && *tracker) {
+        int rc=api_capacity_measure(dir,tracker,args,count); close(dir); return rc;
+    }
+    if (!strcmp(argv[0],"capacity-check") && *tracker) {
+        int rc=api_capacity_check(dir,tracker,args,count); close(dir); return rc;
+    }
+    if (!strcmp(argv[0],"capacity-select") && *tracker) {
+        int rc=api_capacity_select(dir,tracker,args,count); close(dir); return rc;
+    }
+    if (!strcmp(argv[0],"capacity-remove") && count==1) {
+        int records=lmb_capacity_dir(dir,0),guard=records<0 ? -1 : lmb_capacity_lock(records);
+        int rc=guard<0 ? -1 : lmb_capacity_remove(records,args[0]);
+        if (guard>=0) close(guard);
+        if (records>=0) close(records);
+        close(dir);
+        if (!rc) puts("Capacity observation removed; resident allocations and conversations unchanged.");
+        return rc ? 1 : 0;
     }
     if (!strcmp(argv[0],"model-add") || !strcmp(argv[0],"model-set") || !strcmp(argv[0],"model-remove")) {
         int rc=api_route_admin(dir,argv[0],tracker,args,count); close(dir); return rc;
@@ -580,6 +605,10 @@ usage:
         "lumabri api manage-grant NAME      allocation lifecycle control and visibility; no inference/history grant\n"
         "lumabri api manage-revoke NAME\n"
         "lumabri api workspace [--tracker HOST:PORT]\n"
+        "lumabri api capacity-measure NAME CLIENTS ROUNDS MAX_TOKENS APPROVED_ALLOCATION... [--tracker HOST:PORT]\n"
+        "lumabri api capacity-check NAME TTFT_MS GAP_MS MAX_AGE_SECONDS [--tracker HOST:PORT]\n"
+        "lumabri api capacity-select TTFT_MS GAP_MS MAX_AGE_SECONDS BASELINE CANDIDATE... [--tracker HOST:PORT]\n"
+        "lumabri api capacity-remove NAME    remove only a saved capacity observation\n"
         "lumabri api grant NAME MODEL_OR_ALLOCATION_ID [--tracker HOST:PORT]\n"
         "lumabri api revoke NAME\n"
         "lumabri api start [--tracker HOST:PORT] [--port 47380]\n"
