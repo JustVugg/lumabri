@@ -18,17 +18,14 @@ static int workspace_capture(int access, const char *tracker, LmbWorkspace *s) {
     s->plan_count=home_resident_library_list(tracker,s->plans,64);
     int dir=lmb_route_dir(access,0);
     if (dir<0) { s->registry_ok=errno==ENOENT; return 0; }
-    int lock=lmb_api_access_lock(dir);
-    if (lock<0) { close(dir); return 0; }
-    uint8_t ids[LMB_ROUTE_MAX][32]; size_t count=0;
-    s->registry_ok=!lmb_route_list(dir,ids,&count);
-    for (size_t i=0;i<count && s->registry_ok;i++) {
-        LmbModelRoute route;
-        if (lmb_route_load(dir,ids[i],&route)) s->registry_ok=0;
-        else if (!strcmp(route.tracker,tracker)) s->routes[s->route_count++]=route;
+    LmbRouteRegistry *snapshot=calloc(1,sizeof *snapshot);
+    s->registry_ok=snapshot && !lmb_route_registry_read(dir,snapshot);
+    for (uint32_t i=0;s->registry_ok && i<snapshot->count;i++) {
+        const LmbModelRoute *route=&snapshot->routes[i];
+        if (!strcmp(route->tracker,tracker)) s->routes[s->route_count++]=*route;
     }
     if (!s->registry_ok) s->route_count=0;
-    close(lock); close(dir); return 0;
+    free(snapshot); close(dir); return 0;
 }
 static const LmbMachineReport *workspace_node(const LmbWorkspace *s, const uint8_t id[32]) {
     for (uint32_t i=0;i<s->node_count;i++) if (!memcmp(id,s->nodes[i].identity,32)) return &s->nodes[i];

@@ -87,14 +87,17 @@ below. Historical observations remain here as evidence, not current promises.
   recovery, elasticity, provider integration and
   final declared-platform release gates. Provider credentials and spending
   authority have explicitly been deferred by the operator.
-- [ ] Gateway per-response latency: time to first visible text, generation
+- [x] Gateway per-response latency (#208): time to first visible text, generation
   and cleanup-inclusive completion, and bounded exact token-notification gap
   p50/p95. Replay/missing telemetry do not fabricate token timing. Local
   two-model OLMoE reduced-checkpoint flow passes solo baselines and mixed
   2/4/8-client bursts, preserving each rejection in the artifact. Unit and
-  focused sanitizer tests pass. Native CI, persisted mixed-load envelopes and
-  their use in requirement-aware planning remain to be completed; this is not
-  a certified production capacity figure.
+  focused sanitizer tests pass. Terminal engine errors also await actual host
+  reset before recycling an API permit; a delayed-reset regression and real
+  one-slot recovery gate pass. All eight checks passed on final head `e6953b2`
+  before normal merge `34ac5ed`. The first macOS ARM no-OpenMP job correctly
+  refused OS-compressed model pages; the repeated native gate passed without
+  weakening residency enforcement. This is not a certified production capacity figure.
 - [ ] Persisted joint capacity observations and bounded selection: explicit
   local-owner C probe uses real gateway admission/cleanup on approved models;
   records all outcomes, per-model latency tails and exact runtime/workload
@@ -103,6 +106,16 @@ below. Historical observations remain here as evidence, not current promises.
   pass. Recommendations are limited to comparable measured portfolios and do
   not apply placements or promise SLOs. Final native CI, new-placement search,
   automatic policy application and sustained workload/cost validation remain.
+- [ ] Explicit atomic measured-portfolio application: one shared owner/management
+  operation for CLI and authenticated HTTP revalidates the whole observed model
+  mix and all route revisions before one registry publication. Real OLMoE
+  reduced-checkpoint flows pass at one and four slots, switching to an actual
+  independently approved replica, serving both models and retaining all RAM
+  allocations. Unauthorized/stale/conflicting requests remain inert. Registry
+  unit tests and ASan/UBSan/leak checks cover private bounded snapshots, legacy
+  import, interrupted staging, concurrent readers and an open-before-rename
+  regression. Final native CI remains required. This does not prepare new
+  placements, change admission limits or implement automatic scaling.
 
 - [x] Runtime/preflight PR #151: installed engine thread-capacity query; no-OpenMP
   single-thread execution; adaptive RAM reserve; acknowledged actionable

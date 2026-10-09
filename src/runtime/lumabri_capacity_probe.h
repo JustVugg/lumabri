@@ -279,4 +279,106 @@ static int api_capacity_select(int access,const char *tracker,char *const *args,
     if (!bad) bad=cap_str(&body,"]}\n") || fputs(body.p,stdout)==EOF;
     free(body.p); free(records); return bad ? 1 : 0;
 }
+/* Explicit owner action, never an automatic consequence of measurement.
+ * Replace future-turn routing for the entire ordered measured model mix.
+ * All selected allocations must already be approved and resident. Existing
+ * turns continue with their original contract; no model is prepared/retired.
+ * The registry publication is atomic even if a revision changed concurrently.
+ * Return an HTTP status so CLI and authenticated service share this operation. */
+static int api_capacity_apply(int access,const char *tracker,char *const *args,unsigned count,Cap *body) {
+    uint32_t first,gap,age;
+    if (count<5 || count>4+LMB_CAPACITY_MODELS || !lmb_api_username(args[0]) ||
+        api_capacity_uint(args[1],1,3600000,&first) || api_capacity_uint(args[2],1,3600000,&gap) ||
+        api_capacity_uint(args[3],1,86400,&age)) return 400;
+    LmbCapacity *record=calloc(1,sizeof *record);
+    LmbModelRoute *routes=calloc(count-4,sizeof *routes);
+    uint32_t expected[LMB_CAPACITY_MODELS]={0}; int status=503,records=-1,dir=-1;
+    if (!record || !routes) goto done;
+    records=lmb_capacity_dir(access,0); dir=lmb_route_dir(access,0);
+    if (records<0 || dir<0 || lmb_capacity_load(records,args[0],record)) goto done;
+    if (record->models!=count-4) { status=400; goto done; }
+    for (uint32_t m=0;m<record->models;m++) {
+        char hex[65]; uint8_t id[32]; size_t n=strlen(args[m+4]);
+        if (n<66 || n>75 || args[m+4][64]!=':') { status=400; goto done; }
+        memcpy(hex,args[m+4],64); hex[64]=0;
+        if (lmb_unhex(id,hex,32) || api_capacity_uint(args[m+4]+65,1,UINT32_MAX-1,&expected[m])) { status=400; goto done; }
+        for (uint32_t j=0;j<m;j++) if (!memcmp(routes[j].id,id,32)) { status=400; goto done; }
+        if (lmb_route_load(dir,id,&routes[m])) goto done;
+        if (routes[m].revision!=expected[m]) { status=409; goto done; }
+        if (memcmp(routes[m].content,record->contents[m],32) || routes[m].numeric_abi!=record->numeric_abi[m] ||
+            strcmp(routes[m].numeric_class,record->numeric_class[m]) || strcmp(routes[m].tracker,tracker)) { status=409; goto done; }
+    }
+    uint8_t current[32]; LmbCapacityCost cost={0};
+    const char *state=api_capacity_snapshot(tracker,record,current,&cost) ? "inventory_or_runtime_unavailable" :
+        lmb_capacity_evaluate(record,current,(uint64_t)time(NULL),age,first/1000.0,gap/1000.0);
+    if (strcmp(state,"observed_workload_passed")) {
+        status=422;
+        if (cap_str(body,"{\"applied\":false,\"state\":") || api_json_text(body,state) || cap_str(body,"}")) status=500;
+        goto done;
+    }
+    for (uint32_t m=0;m<record->models;m++) {
+        char allocation[65]; lmb_hex(allocation,record->allocations[m],32);
+        const char *members[]={allocation};
+        uint32_t context=routes[m].context,max_new=routes[m].max_new;
+        routes[m].revision++; routes[m].policy=LMB_ROUTE_ORDERED;
+        if (api_route_build(tracker,members,1,&routes[m],1)) goto done;
+        /* Do not silently change a public model's context/output limits. */
+        if (context>routes[m].context || max_new>routes[m].max_new) { status=409; goto done; }
+        routes[m].context=context; routes[m].max_new=max_new;
+    }
+    /* Host handshakes may take time: evidence is revalidated immediately
+     * before publication. Normal admission still checks every future turn. */
+    if (api_capacity_snapshot(tracker,record,current,&cost) ||
+        strcmp(lmb_capacity_evaluate(record,current,(uint64_t)time(NULL),age,first/1000.0,gap/1000.0),
+            "observed_workload_passed")) { status=409; goto done; }
+    char fingerprint[65]; lmb_hex(fingerprint,record->fingerprint,32);
+    if (cap_str(body,"{\"schema\":1,\"applied\":true,\"scope\":\"future_turn_routing\","
+        "\"production_capacity_certified\":false,\"weights_loaded\":false,\"weights_released\":false,\"evidence_record\":") ||
+        api_json_text(body,args[0]) || api_addf(body,",\"fingerprint\":\"%s\",\"models\":[",fingerprint)) { status=500; goto done; }
+    for (uint32_t m=0;m<record->models;m++) if (api_route_record(body,&routes[m],m!=0,1)) { status=500; goto done; }
+    if (cap_str(body,"]}")) { status=500; goto done; }
+    int rc=lmb_route_save_many(dir,routes,expected,record->models);
+    status=rc==LMB_ROUTE_CONFLICT || rc==LMB_ROUTE_MISSING ? 409 : rc ? 503 : 200;
+    if (status==200) fprintf(stderr,"[capacity-apply] record=%s models=%u fingerprint=%s routing=atomic weights=unchanged\n",
+        args[0],record->models,fingerprint);
+done:
+    if (status!=200 && status!=422) { free(body->p); memset(body,0,sizeof *body); }
+    if (records>=0) close(records);
+    if (dir>=0) close(dir);
+    free(routes); free(record); return status;
+}
+/* Called only after bearer management authority, origin and framing checks.
+ * No paths, endpoints, model weights or donor consents can enter this schema. */
+static void api_capacity_apply_http(int fd,int access,const char *tracker,const char *body,size_t size) {
+    LmbJsonToken tokens[96]; LmbJson j; int fields[5];
+    const char *const keys[]={"record","ttft_ms","gap_ms","max_age_seconds","models"};
+    char values[4+LMB_CAPACITY_MODELS][80],*args[4+LMB_CAPACITY_MODELS];
+    int bad=size>2048 || lmb_json_parse(&j,body,size,tokens,96) || lmb_json_fields(&j,0,keys,5,fields);
+    if (!bad) for (unsigned i=0;i<5;i++) if (fields[i]<0) bad=1;
+    if (!bad) bad=lmb_api_json_string(&j,(unsigned)fields[0],values[0],33) || !lmb_api_username(values[0]);
+    for (unsigned i=1;!bad && i<4;i++) {
+        uint32_t n; bad=lmb_json_uint(&j,(unsigned)fields[i],&n);
+        if (!bad) snprintf(values[i],sizeof values[i],"%u",n);
+    }
+    unsigned count=0;
+    if (!bad) {
+        const LmbJsonToken *list=&tokens[fields[4]];
+        bad=list->kind!=LMB_JSON_ARRAY || !list->children || list->children>LMB_CAPACITY_MODELS;
+        for (unsigned at=(unsigned)fields[4]+1;!bad && at<list->next;at=tokens[at].next) {
+            const char *const model_keys[]={"id","revision"}; int model[2]; char id[65]; uint8_t identity[32]; uint32_t revision;
+            bad=lmb_json_fields(&j,at,model_keys,2,model) || model[0]<0 || model[1]<0 ||
+                lmb_api_json_string(&j,(unsigned)model[0],id,sizeof id) ||
+                lmb_json_uint(&j,(unsigned)model[1],&revision) || strlen(id)!=64 || lmb_unhex(identity,id,32) ||
+                !revision || revision==UINT32_MAX;
+            if (!bad) snprintf(values[4+count++],sizeof values[0],"%s:%u",id,revision);
+        }
+    }
+    if (bad) { api_error(fd,400,"invalid_capacity_application"); return; }
+    for (unsigned i=0;i<count+4;i++) args[i]=values[i];
+    Cap response={0}; int status=api_capacity_apply(access,tracker,args,count+4,&response);
+    if (response.p) (void)api_response(fd,(unsigned)status,response.p);
+    else api_error(fd,(unsigned)status,status==409 ? "model_revision_or_contract_changed" :
+        status==400 ? "invalid_capacity_application" : "capacity_application_not_confirmed");
+    free(response.p);
+}
 #endif

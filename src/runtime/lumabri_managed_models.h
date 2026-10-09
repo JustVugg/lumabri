@@ -32,14 +32,14 @@ static int api_route_record(Cap *body, const LmbModelRoute *route, int comma, in
 static int api_route_append(Cap *body, int access, const char *tracker, const LmbApiUser *user, int *comma) {
     int dir=lmb_route_dir(access,0);
     if (dir<0) return errno==ENOENT ? 0 : -1;
-    int lock=lmb_api_access_lock(dir); if (lock<0) { close(dir); return -1; }
-    uint8_t ids[LMB_ROUTE_MAX][32]; size_t count; int bad=lmb_route_list(dir,ids,&count);
-    for (size_t i=0; i<count && !bad; i++) {
-        LmbModelRoute route; bad=lmb_route_load(dir,ids[i],&route); if (bad) break;
-        if (strcmp(route.tracker,tracker) || (user && !lmb_api_user_allows(user,route.id))) continue;
-        bad=api_route_record(body,&route,(*comma)++,user==NULL);
+    LmbRouteRegistry *snapshot=calloc(1,sizeof *snapshot);
+    int bad=!snapshot || lmb_route_registry_read(dir,snapshot);
+    for (uint32_t i=0;!bad && i<snapshot->count;i++) {
+        const LmbModelRoute *route=&snapshot->routes[i];
+        if (strcmp(route->tracker,tracker) || (user && !lmb_api_user_allows(user,route->id))) continue;
+        bad=api_route_record(body,route,(*comma)++,user==NULL);
     }
-    close(lock); close(dir); return bad ? -1 : 0;
+    free(snapshot); close(dir); return bad ? -1 : 0;
 }
 static int api_plan_open(const LmbResidentPlan *plan, Engine *engine, uint32_t max_new) {
     if (max_new>plan->max_new) return -1;
@@ -249,7 +249,8 @@ static int api_route_build(const char *tracker, const char *const *allocations, 
         }
         bad=memcmp(route->content,content,32) || strcmp(route->adapter,plan->observation.adapter) ||
             !api_route_engine_matches(route,&engine);
-        engine_stop(&engine); if (bad) break;
+        if (engine_finish(&engine)) bad=1;
+        if (bad) break;
         if (plan->context<route->context) route->context=plan->context;
         if (plan->max_new<route->max_new) route->max_new=plan->max_new;
         route->count++;

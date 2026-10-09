@@ -53,6 +53,23 @@ def main():
             workspace = json.loads(body)
             assert status == 200 and workspace["inventory_ok"] is False and workspace["nodes"] == []
             assert workspace["registry_ok"] and workspace["models"] == [] and workspace["allocations"] == []
+            management_path = "/api/v1/capacity/apply"
+            json_headers = {"Content-Type": "application/json"}
+            assert request(method="POST", path=management_path, body="{}", headers=json_headers)[0] == 403
+            assert cli("manage-grant", "alice").returncode == 0
+            for invalid in ('{}', '{"record":"one","record":"two"}',
+                            '{"record":"../escape","ttft_ms":1,"gap_ms":1,"max_age_seconds":1,"models":[]}',
+                            '{"models":[],"endpoint":"http://example.invalid"}'):
+                assert request(method="POST", path=management_path, body=invalid, headers=json_headers)[0] == 400
+            valid_shape = {"record": "not-present", "ttft_ms": 1, "gap_ms": 1, "max_age_seconds": 1,
+                           "models": [{"id": "01" * 32, "revision": 1}]}
+            for invalid_model in ({"id": "not-an-id", "revision": 1}, {"id": "01" * 32, "revision": 0},
+                                  {"id": "01" * 32, "revision": 4294967295},
+                                  {"id": "01" * 32, "revision": 1, "endpoint": "forbidden"}):
+                invalid = json.dumps({**valid_shape, "models": [invalid_model]})
+                assert request(method="POST", path=management_path, body=invalid, headers=json_headers)[0] == 400
+            assert request(method="POST", path=management_path, body=" " * 2049, headers=json_headers)[0] == 413
+            assert cli("manage-revoke", "alice").returncode == 0
             assert cli("operator-revoke", "alice").returncode == 0
             assert request(path="/api/v1/workspace")[0] == 403
             assert request(headers={"Origin": "http://evil.test"})[0] == 403
