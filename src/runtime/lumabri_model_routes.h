@@ -82,9 +82,9 @@ static inline int lmb_route_decode(const void *bytes, size_t n, LmbModelRoute *r
         c.off!=n || !lmb_route_valid(r)) return -1;
     return 0;
 }
-static inline int lmb_route_load(int dir, const uint8_t id[32], LmbModelRoute *route) {
+static inline int lmb_route_legacy_load(int dir, const uint8_t id[32], LmbModelRoute *route) {
     char hex[65]; lmb_hex(hex,id,32);
-    int fd=openat(dir,hex,O_RDONLY|O_NOFOLLOW|O_CLOEXEC);
+    int fd=openat(dir,hex,O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK);
     if (fd<0) return errno==ENOENT ? LMB_ROUTE_MISSING : LMB_ROUTE_UNSAFE;
     unsigned char bytes[LMB_ROUTE_BYTES]; struct stat st;
     if (lmb_api_private_fd(fd,0) || fstat(fd,&st) || st.st_size<8 || st.st_size>LMB_ROUTE_BYTES) {
@@ -95,7 +95,7 @@ static inline int lmb_route_load(int dir, const uint8_t id[32], LmbModelRoute *r
     int bad=lmb_read_full(fd,bytes,size); close(fd);
     return bad || lmb_route_decode(bytes,size,route) || memcmp(route->id,id,32) ? LMB_ROUTE_UNSAFE : LMB_ROUTE_OK;
 }
-static inline int lmb_route_list(int dir, uint8_t ids[LMB_ROUTE_MAX][32], size_t *count) {
+static inline int lmb_route_legacy_list(int dir, uint8_t ids[LMB_ROUTE_MAX][32], size_t *count) {
     *count=0; int fd=openat(dir,".",O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
     if (fd<0) return LMB_ROUTE_UNSAFE;
     DIR *stream=fdopendir(fd); if (!stream) { close(fd); return LMB_ROUTE_UNSAFE; }
@@ -110,54 +110,5 @@ static inline int lmb_route_list(int dir, uint8_t ids[LMB_ROUTE_MAX][32], size_t
     if (!entry && errno) rc=LMB_ROUTE_UNSAFE;
     closedir(stream); return rc;
 }
-/* Revision zero creates. An update can change the approved replica set and
- * lower/raise limits after validation, but never silently change checkpoint,
- * adapter or numeric semantics behind existing grants and conversation IDs. */
-static inline int lmb_route_save(int dir, const LmbModelRoute *r, uint32_t expected) {
-    if (!lmb_route_valid(r) || expected==UINT32_MAX || r->revision!=expected+1) return LMB_ROUTE_UNSAFE;
-    int lock=lmb_api_access_lock(dir); if (lock<0) return LMB_ROUTE_BUSY;
-    LmbModelRoute old; int rc=lmb_route_load(dir,r->id,&old);
-    if (rc==LMB_ROUTE_OK) {
-        rc=old.revision==expected && !memcmp(old.content,r->content,32) && !strcmp(old.tracker,r->tracker) &&
-            !strcmp(old.adapter,r->adapter) && !strcmp(old.numeric_class,r->numeric_class) &&
-            old.numeric_abi==r->numeric_abi && old.greedy_only==r->greedy_only ?
-            LMB_ROUTE_OK : LMB_ROUTE_CONFLICT;
-    } else if (rc==LMB_ROUTE_MISSING) rc=expected ? LMB_ROUTE_MISSING : LMB_ROUTE_OK;
-    if (rc) goto done;
-    uint8_t ids[LMB_ROUTE_MAX][32]; size_t count;
-    rc=lmb_route_list(dir,ids,&count); if (rc) goto done;
-    if (!expected && count==LMB_ROUTE_MAX) { rc=LMB_ROUTE_QUOTA; goto done; }
-    for (size_t i=0; i<count; i++) {
-        LmbModelRoute other; rc=lmb_route_load(dir,ids[i],&other); if (rc) goto done;
-        if (memcmp(other.id,r->id,32) && !strcmp(other.name,r->name)) { rc=LMB_ROUTE_CONFLICT; goto done; }
-    }
-    struct stat st;
-    if (!fstatat(dir,".transaction",&st,AT_SYMLINK_NOFOLLOW)) {
-        if (!S_ISREG(st.st_mode) || st.st_uid!=geteuid() || (st.st_mode&077) || st.st_nlink!=1 ||
-            unlinkat(dir,".transaction",0)) { rc=LMB_ROUTE_UNSAFE; goto done; }
-    } else if (errno!=ENOENT) { rc=LMB_ROUTE_UNSAFE; goto done; }
-    LmbBuf b={0};
-    if (lmb_route_encode(r,&b)) { free(b.p); rc=LMB_ROUTE_UNSAFE; goto done; }
-    int fd=openat(dir,".transaction",O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600), bad=fd<0;
-    for (size_t at=0; !bad && at<b.len;) {
-        ssize_t n=write(fd,b.p+at,b.len-at);
-        if (n<0 && errno==EINTR) continue;
-        if (n<=0) bad=1; else at+=(size_t)n;
-    }
-    free(b.p);
-    if (fd>=0) { if (!bad && fsync(fd)) bad=1; if (close(fd)) bad=1; }
-    char hex[65]; lmb_hex(hex,r->id,32);
-    if (!bad && renameat(dir,".transaction",dir,hex)) bad=1;
-    if (bad) (void)unlinkat(dir,".transaction",0); else if (fsync(dir)) bad=1;
-    rc=bad ? LMB_ROUTE_UNSAFE : LMB_ROUTE_OK;
-done:
-    close(lock); return rc;
-}
-static inline int lmb_route_remove(int dir, const uint8_t id[32], uint32_t revision) {
-    int lock=lmb_api_access_lock(dir); if (lock<0) return LMB_ROUTE_BUSY;
-    LmbModelRoute route; int rc=lmb_route_load(dir,id,&route);
-    if (!rc && route.revision!=revision) rc=LMB_ROUTE_CONFLICT;
-    if (!rc) { char hex[65]; lmb_hex(hex,id,32); if (unlinkat(dir,hex,0) || fsync(dir)) rc=LMB_ROUTE_UNSAFE; }
-    close(lock); return rc;
-}
+#include "lumabri_route_registry.h"
 #endif

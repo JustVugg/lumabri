@@ -524,6 +524,14 @@ def main():
                 until(lambda: workload_ready(3) and sorted(n["workload"]["reserved_bytes"] for n in observed) ==
                       sorted(s["reserved_total_bytes"] for s in replica_live.values()),
                       "three committed models have not reached the leased inventory", 30)
+                # Free only the test TUI conversation, not its approved
+                # weights, for a real two-model measured-routing application.
+                another.send("/quit\n")
+                until(lambda: another.p.poll() is not None, "second-model TUI did not release capacity for portfolio proof")
+                from capacity_application_test import verify_capacity_application
+                verify_capacity_application(runtime, env("chatter"), tracker, names[4], tmp)
+                another = Terminal("chatter", ["resident-chat", str(second_plan), tracker], program="test_chat_ui")
+                until(lambda: another.has("receives the text"), "second-model TUI did not reconnect after portfolio proof")
                 from managed_routes_test import verify_managed_routes
                 verify_managed_routes(runtime, env("chatter"), tracker, first_plan, third_plan, names[4], tmp)
             # The authenticated release names the first allocation, not the

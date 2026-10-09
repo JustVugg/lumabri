@@ -29,8 +29,9 @@ only while visible and removes old values if a refresh fails.
 Whole-machine prices and power estimates remain operator declarations. Missing
 prices are not zero cost, currencies are not added together, energy is not
 invented from those estimates, and GPU detection is not verified execution.
-The view cannot start, stop, prepare or move models. No cloud resources or
-paid provisioning are introduced.
+Read-only operators cannot change allocations. A separate management grant
+enables the allocation controls documented below; new model preparation and
+donor approval remain separate. No cloud resources or paid provisioning are introduced.
 
 ## Explicit mixed-model capacity observations
 
@@ -85,6 +86,59 @@ record is the static baseline. The JSON result is a recommendation only
 (`applied: false`): it cannot migrate conversations, change allocations or claim
 billed savings. New-placement search, sustained-load capacity certification and
 automatic elasticity are separate work.
+
+### Apply a measured portfolio
+
+After selecting a passing observation, the owner can explicitly apply its
+**whole ordered model mix** to existing managed model IDs:
+
+```sh
+lumabri api capacity-apply alternative 500 100 300 MODEL_A_ID:REVISION MODEL_B_ID:REVISION
+```
+
+The saved record determines the exact, independently approved allocation for
+each model. Arguments supply all managed model IDs and their expected current
+revisions in that same order. The operation rechecks freshness, workload,
+runtime, every numeric/checkpoint contract and real authenticated host before
+publishing. Unknown/expired evidence, rejections, incompatible models or one
+conflicting revision prevent the entire update. A successful response reports
+the evidence fingerprint and the new revisions/allocations for all models.
+
+All future turns on those IDs use the measured allocation (`ordered`, one
+replica per model). Existing model IDs, inference grants, context/output limits
+and private histories are preserved. Existing turns continue on their original
+runtime; there is no KV migration. The operation does **not** prepare, drain or
+release weights, create donor consent or change admission limits. It replaces
+the selected models' previous replica sets; explicitly review the resulting
+availability tradeoff. A short passing burst remains an observation, not a
+production latency guarantee or automatic scaling policy.
+
+Applications use the same operation with a management bearer credential:
+
+```http
+POST /api/v1/capacity/apply
+Content-Type: application/json
+Authorization: Bearer <management token>
+
+{"record":"alternative","ttft_ms":500,"gap_ms":100,"max_age_seconds":300,
+ "models":[{"id":"<model-a-id>","revision":2},{"id":"<model-b-id>","revision":1}]}
+```
+
+The schema is strict and bounded to 2 KiB and eight models. Inference-only and
+read-only operator grants return 403. Malformed input returns 400, a conflicting
+revision/contract 409, and nonpassing evidence 422 with its reason. A 503 or a
+lost connection is **not proof of rollback**: inspect model revisions before
+retrying. Retrying old expected revisions cannot publish a second update.
+No frontend-specific routing logic or client-supplied endpoints are used.
+
+The registry now publishes one bounded, checksummed, owner-only `.registry`
+snapshot for all model routes (at most 32). Atomic rename prevents half-applied
+portfolios, including across a process crash. Existing per-model route files
+are imported on the first successful write and preserved but no longer read
+after publication; an empty registry does not revive removed legacy routes.
+Stop older API binaries before upgrading: old writers do not understand this
+format. Downgrading requires an explicit compatible state export, not deleting
+`.registry`. This migration does not touch checkpoints or conversation files.
 
 Private records live under `~/.lumabri/api-access/capacity`, at most 32 immutable
 names of 16 KiB each. One probe runs per access directory; ordinary inference

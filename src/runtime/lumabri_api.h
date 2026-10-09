@@ -340,6 +340,7 @@ finished:
     if (permit>=0) close(permit);
     g_execution_view=NULL; free(observation); free(selected);
 }
+static void api_capacity_apply_http(int fd,int access,const char *tracker,const char *body,size_t size);
 static void api_connection(int fd, int access_dir, unsigned port, const char *tracker) {
     struct timeval timeout={5,0};
     (void)setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof timeout);
@@ -365,7 +366,8 @@ static void api_connection(int fd, int access_dir, unsigned port, const char *tr
     size_t history_prefix=strlen(history_path);
     int history=!strncmp(request.path,history_path,history_prefix) &&
         (!request.path[history_prefix] || request.path[history_prefix]=='/');
-    int management=!strncmp(request.path,"/api/v1/allocations/",20);
+    int capacity_apply=!strcmp(request.path,"/api/v1/capacity/apply");
+    int management=capacity_apply || !strncmp(request.path,"/api/v1/allocations/",20);
     if (management && !strcmp(request.method,"POST") && !lmb_management_allows(access_dir,&user))
         api_error(fd,403,"management_permission_required");
     else if (!strcmp(request.method,"GET") && !strcmp(request.path,"/api/v1/session") && !request.length) {
@@ -373,7 +375,7 @@ static void api_connection(int fd, int access_dir, unsigned port, const char *tr
             lmb_operator_allows(access_dir,&user) ? "true" : "false",lmb_management_allows(access_dir,&user) ? "true" : "false");
         (void)api_response(fd,200,response);
     }
-    else if (management && !strcmp(request.method,"GET") && !request.length)
+    else if (management && !capacity_apply && !strcmp(request.method,"GET") && !request.length)
         api_management(fd,access_dir,tracker,&user,&request,NULL,0);
     else if (!strcmp(request.method,"GET") && !strcmp(request.path,"/api/v1/workspace") && !request.length) {
         if (lmb_operator_allows(access_dir,&user)) (void)api_workspace(fd,access_dir,tracker);
@@ -382,7 +384,7 @@ static void api_connection(int fd, int access_dir, unsigned port, const char *tr
         api_models(fd,access_dir,tracker,&user);
     else if (history && !strcmp(request.method,"GET") && !request.length)
         api_history(fd,access_dir,&user,&request,NULL,0);
-    else if (management && request.length>512) api_error(fd,413,"management_request_too_large");
+    else if (management && request.length>(capacity_apply ? 2048u : 512u)) api_error(fd,413,"management_request_too_large");
     else if (((!strcmp(request.method,"POST") && (!strcmp(request.path,"/api/v1/chat") || management)) ||
               (history && (!strcmp(request.method,"POST") || !strcmp(request.method,"DELETE")))) &&
              request.has_length && request.length && request.json) {
@@ -398,6 +400,7 @@ static void api_connection(int fd, int access_dir, unsigned port, const char *tr
             }
             body[at]=0;
             if (at!=request.length) api_error(fd,408,"request_body_timeout");
+            else if (capacity_apply) api_capacity_apply_http(fd,access_dir,tracker,body,at);
             else if (management) api_management(fd,access_dir,tracker,&user,&request,body,at);
             else if (history) api_history(fd,access_dir,&user,&request,body,at);
             else api_chat(fd,access_dir,tracker,&user,body,at);
@@ -535,6 +538,12 @@ static int cmd_api(int argc, char **argv) {
     if (!strcmp(argv[0],"capacity-select") && *tracker) {
         int rc=api_capacity_select(dir,tracker,args,count); close(dir); return rc;
     }
+    if (!strcmp(argv[0],"capacity-apply") && *tracker) {
+        Cap body={0}; int status=api_capacity_apply(dir,tracker,args,count,&body); close(dir);
+        if (body.p) puts(body.p);
+        if (status!=200) fprintf(stderr,"Measured portfolio application not confirmed (status %d). Recheck evidence and model revisions; routing changes are all-or-nothing.\n",status);
+        free(body.p); return status==200 ? 0 : 1;
+    }
     if (!strcmp(argv[0],"capacity-remove") && count==1) {
         int records=lmb_capacity_dir(dir,0),guard=records<0 ? -1 : lmb_capacity_lock(records);
         int rc=guard<0 ? -1 : lmb_capacity_remove(records,args[0]);
@@ -608,6 +617,7 @@ usage:
         "lumabri api capacity-measure NAME CLIENTS ROUNDS MAX_TOKENS APPROVED_ALLOCATION... [--tracker HOST:PORT]\n"
         "lumabri api capacity-check NAME TTFT_MS GAP_MS MAX_AGE_SECONDS [--tracker HOST:PORT]\n"
         "lumabri api capacity-select TTFT_MS GAP_MS MAX_AGE_SECONDS BASELINE CANDIDATE... [--tracker HOST:PORT]\n"
+        "lumabri api capacity-apply RECORD TTFT_MS GAP_MS MAX_AGE_SECONDS MODEL_ID:REVISION... [--tracker HOST:PORT]\n"
         "lumabri api capacity-remove NAME    remove only a saved capacity observation\n"
         "lumabri api grant NAME MODEL_OR_ALLOCATION_ID [--tracker HOST:PORT]\n"
         "lumabri api revoke NAME\n"
