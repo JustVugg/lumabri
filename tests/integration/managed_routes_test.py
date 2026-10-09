@@ -35,6 +35,11 @@ def verify_managed_routes(runtime, env, tracker, first_plan, third_plan, first_n
     first = next(m for m in models if m["name"] == first_name)
     third = next(m for m in models if "replica-checkpoint" in m["name"])
     other = next(m for m in models if m["id"] not in (first["id"], third["id"]))
+    # The third real allocation changes contention on the SAME donors. A
+    # successful two-model envelope is now stale even if its own weights and
+    # intervals have not moved. No sleeps or invented timing replacements.
+    previous = json.loads(command("capacity-check", "joint-baseline", "30000", "30000", "300"))
+    assert previous["state"] == "configuration_changed", previous
     command("model-add", "wrong-checkpoint", first["id"], other["id"], ok=False)
     command("model-add", "duplicate", first["id"], first["id"], ok=False)
     assert len(json.loads(command("list"))["models"]) == 3, "failed registration saved a partial route"

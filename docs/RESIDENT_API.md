@@ -32,6 +32,68 @@ invented from those estimates, and GPU detection is not verified execution.
 The view cannot start, stop, prepare or move models. No cloud resources or
 paid provisioning are introduced.
 
+## Explicit mixed-model capacity observations
+
+The local owner can measure already approved resident allocations together.
+This **runs real inference** and competes for compute. It does not prepare a
+model, replay consent, change a route or unload weights. Stop with Ctrl-C;
+only the probe's own conversations are cancelled.
+
+```sh
+lumabri api capacity-measure baseline 2 3 8 ALLOCATION_A ALLOCATION_B
+lumabri api capacity-check baseline 500 100 300
+```
+
+The arguments to `capacity-measure` are a new record name, concurrent clients
+(1–8), rounds (1–16), maximum output tokens (2–512), and 1–8 distinct approved
+allocation IDs. Each burst assigns client `i` to allocation `i % model_count`.
+Every round uses the same public prompt, `Count from one to ten.`, with fresh
+conversation state. The owner invokes the same gateway model admission,
+streaming and cleanup path through local socketpairs; these measurements do
+**not** include browser/network setup, HTTP authentication or per-user quotas.
+Use the HTTP load gate for those boundaries. A round is bounded to five minutes
+plus cleanup. A cancelled or configuration-changing run is not passing evidence.
+
+Records keep outcomes for every request, including BUSY and failures, and
+gateway-observed timing, never prompt text, generated text or credentials.
+Per-model statistics distinguish the TTFT p95 across responses from the p95
+of each response's token-notification-gap p95. Neither is a pooled per-token
+percentile. Missing progress telemetry stays unknown. Timing fields summarize
+responses with valid telemetry; rejection and failure counts remain visible.
+
+`capacity-check NAME TTFT_MS GAP_MS MAX_AGE_SECONDS` rechecks the current runtime
+and compares **this exact observed burst** with the specified latency limits.
+It requires at least three rounds, no failures/rejections, complete timing and
+unchanged checkpoint, numeric contract, builds, machines, assigned intervals,
+threads, context, session limits and co-resident allocation sets. Evidence has
+an explicit age limit (up to one day). A pass is `observed_workload_passed`, not
+a production SLO or an admission guarantee for other prompts or traffic.
+
+The bounded global comparison consumes complete joint observations rather than
+combining independently measured model rates:
+
+```sh
+lumabri api capacity-select 500 100 300 baseline alternative
+```
+
+Candidates must have the same ordered checkpoint/numeric/context/session
+contracts, client mix, rounds, output limit and actual prompt/output lengths.
+Among current passing candidates, select the lowest declared whole-machine
+hourly footprint, counting each shared machine once. Missing prices or mixed
+currencies preserve the operator's ordering; unknown is never free. The first
+record is the static baseline. The JSON result is a recommendation only
+(`applied: false`): it cannot migrate conversations, change allocations or claim
+billed savings. New-placement search, sustained-load capacity certification and
+automatic elasticity are separate work.
+
+Private records live under `~/.lumabri/api-access/capacity`, at most 32 immutable
+names of 16 KiB each. One probe runs per access directory; ordinary inference
+does not take the probe lock. Reruns require a new name so a failed attempt cannot
+silently leave an older success under the same name. Use
+`lumabri api capacity-remove NAME` to remove a saved observation, not its models,
+allocations or conversations. At the record limit the probe refuses before
+starting inference. Measurement and evaluation accept `--tracker HOST:PORT`.
+
 ## Inference gateway
 
 The local gateway exposes **already approved resident allocations**. It does

@@ -71,7 +71,7 @@ below. Historical observations remain here as evidence, not current promises.
   half-close path preserves that cleanup barrier. All eight checks passed on
   final head `1e1a61e` before normal merge `941a2d0`. Automatic scaling policy
   and cloud/server release are separate work.
-- [ ] Shared management: explicit digest-bound management grants, fenced
+- [x] Shared management (#207): explicit digest-bound management grants, fenced
   allocation inspect/drain/resume/retire via HTTP and browser, and the same
   typed retirement coordinator in the resident-library TUI. Ordinary inference
   and read-only operator permissions do not authorize mutation. This does not
@@ -80,8 +80,8 @@ below. Historical observations remain here as evidence, not current promises.
   two-model/four-slot API flow passed. Native CI exposed a stale library-test
   expectation for forced unload. The revised real OLMoE library gate passes
   locally with one, two and eight slots, including inert cancelled confirmation
-  and CLI reconciliation of the TUI's shared journal. Final native CI and
-  review remain required.
+  and CLI reconciliation of the TUI's shared journal. All eight checks passed
+  on final head `6c8df57` before normal merge `c7c468c`.
 - [ ] Requirements-based global placement and measured cost comparison;
   TUI/web/application management through one public service interface;
   recovery, elasticity, provider integration and
@@ -95,6 +95,14 @@ below. Historical observations remain here as evidence, not current promises.
   focused sanitizer tests pass. Native CI, persisted mixed-load envelopes and
   their use in requirement-aware planning remain to be completed; this is not
   a certified production capacity figure.
+- [ ] Persisted joint capacity observations and bounded selection: explicit
+  local-owner C probe uses real gateway admission/cleanup on approved models;
+  records all outcomes, per-model latency tails and exact runtime/workload
+  identity. Local two-model OLMoE gate passes two-client success, eight-client
+  overload and comparison with missing costs; unit and ASan/UBSan/leak gates
+  pass. Recommendations are limited to comparable measured portfolios and do
+  not apply placements or promise SLOs. Final native CI, new-placement search,
+  automatic policy application and sustained workload/cost validation remain.
 
 - [x] Runtime/preflight PR #151: installed engine thread-capacity query; no-OpenMP
   single-thread execution; adaptive RAM reserve; acknowledged actionable
