@@ -1,9 +1,63 @@
 #include "lumabri_metrics.h"
 #include "lumabri_stage_metrics.h"
+#include "src/runtime/lumabri_response_metrics.h"
 #include <assert.h>
 #include <float.h>
 
+static void response_timings(void) {
+    LmbResponseMetrics m={.started=10}; LmbResponseSummary s;
+    const char *stat="STAT 4 4 0 0 2 0 PERF1 4 3 1 0.75 1.75";
+    lmb_response_progress(&m,"PROGRESS req PREFILL 1 2",10.5);
+    lmb_response_progress(&m,"PROGRESS req DECODE 1 4",11);
+    lmb_response_text(&m,11.125,2);
+    lmb_response_progress(&m,"PROGRESS req DECODE 2 4",11.5);
+    lmb_response_progress(&m,"PROGRESS req DECODE 3 4",11.5); /* same read, zero observed gap */
+    lmb_response_progress(&m,"PROGRESS req DECODE 4 4",11.75);
+    lmb_response_text(&m,11.75,1);
+    assert(!lmb_response_summary(&m,stat,1,12,12.5,&s));
+    assert(s.text_known && s.ttft_seconds==1.125 && s.generation_seconds==2 && s.completion_seconds==2.5);
+    assert(s.token_times_known && s.tokens==4 && s.token_first_seconds==1);
+    assert(s.quantiles_known && s.gaps==3 && s.gap_p50_seconds==.25 && s.gap_p95_seconds==.5);
+    assert(!lmb_response_summary(&m,stat,2,12,12.5,&s) && s.text_known && !s.token_times_known && !s.quantiles_known);
+    assert(!lmb_response_summary(&m,"STAT 4 4 0 0",1,12,12.5,&s) && !s.token_times_known);
+    assert(lmb_response_summary(&m,stat,0,12,12.5,&s));
+    assert(lmb_response_summary(&m,stat,1,9,12.5,&s));
+    assert(lmb_response_summary(&m,stat,1,12,11,&s));
+    assert(lmb_response_summary(&m,stat,1,NAN,12,&s));
+    const char *bad[]={"DECODE", "DECODE 0", "DECODE 2", "DECODE 1 0", "DECODE -1", "DECODE 1 4 junk",
+        "DECODE 4294967297", "DECODE 1 1048577", "DECODE 1.0", "DECODE 1 4 4"};
+    for (unsigned i=0;i<sizeof bad/sizeof *bad;i++) {
+        m=(LmbResponseMetrics){.started=10}; char line[100]; snprintf(line,sizeof line,"PROGRESS req %s",bad[i]);
+        lmb_response_progress(&m,line,11); assert(m.invalid);
+        lmb_response_text(&m,11,1);
+        assert(!lmb_response_summary(&m,stat,1,12,12,&s) && s.text_known && !s.token_times_known);
+    }
+    m=(LmbResponseMetrics){.started=10};
+    lmb_response_progress(&m,"PROGRESS req DECODE 1",11);
+    assert(!m.invalid && m.tokens==1); /* legacy optional total */
+    assert(!lmb_response_summary(&m,"STAT 1 PERF1 1 0 1 0 1",1,11,11,&s));
+    assert(s.token_times_known && !s.quantiles_known && !s.text_known);
+    lmb_response_progress(&m,"PROGRESS req DECODE 1",11); assert(m.invalid);
+    m=(LmbResponseMetrics){.started=10};
+    lmb_response_progress(&m,"PROGRESS req DECODE 1",9); assert(m.invalid);
+    m=(LmbResponseMetrics){.started=10};
+    lmb_response_progress(&m,"PROGRESS req DECODE 1",INFINITY); assert(m.invalid);
+    m=(LmbResponseMetrics){.started=0};
+    for (unsigned i=1;i<=LMB_RESPONSE_GAPS+2;i++) {
+        char line[80]; snprintf(line,sizeof line,"PROGRESS req DECODE %u",i);
+        lmb_response_progress(&m,line,i);
+    }
+    char large[120]; snprintf(large,sizeof large,"STAT 1 PERF1 %u %u 1 %u %u",
+        m.tokens,m.tokens-1,m.tokens-1,m.tokens);
+    assert(!m.invalid && m.gap_count==LMB_RESPONSE_GAPS);
+    assert(!lmb_response_summary(&m,large,1,m.tokens,m.tokens,&s) && s.token_times_known && !s.quantiles_known);
+    m=(LmbResponseMetrics){.started=10}; lmb_response_text(&m,11,0);
+    assert(!lmb_response_summary(&m,stat,1,12,12,&s) && !s.text_known && !s.token_times_known);
+}
+
 int main(void) {
+    response_timings();
+    puts("RESPONSE TIMING: PASS (visible text vs token notifications, exact bounded quantiles, missing telemetry, replay exclusion)");
     LmbStageSample samples[LMB_STAGE_PROFILE_MAX] = {{0}};
     uint32_t count = 99;
     const char *profile = "STAT 9 4 0 0 20 0 STAGES1 2 0 12 8 0.8 12 16 8 1.2 PERF1 9 8 15 2 17.2";

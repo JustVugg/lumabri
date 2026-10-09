@@ -87,6 +87,14 @@ below. Historical observations remain here as evidence, not current promises.
   recovery, elasticity, provider integration and
   final declared-platform release gates. Provider credentials and spending
   authority have explicitly been deferred by the operator.
+- [ ] Gateway per-response latency: time to first visible text, generation
+  and cleanup-inclusive completion, and bounded exact token-notification gap
+  p50/p95. Replay/missing telemetry do not fabricate token timing. Local
+  two-model OLMoE reduced-checkpoint flow passes solo baselines and mixed
+  2/4/8-client bursts, preserving each rejection in the artifact. Unit and
+  focused sanitizer tests pass. Native CI, persisted mixed-load envelopes and
+  their use in requirement-aware planning remain to be completed; this is not
+  a certified production capacity figure.
 
 - [x] Runtime/preflight PR #151: installed engine thread-capacity query; no-OpenMP
   single-thread execution; adaptive RAM reserve; acknowledged actionable
