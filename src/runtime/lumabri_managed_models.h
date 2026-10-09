@@ -189,6 +189,17 @@ static int api_segments_control(const char *tracker, char *const *args, unsigned
 }
 /* Host admission is separate from node session/Hybrid admission. Neither
  * operation below nor api_segments_control grants authority to RELEASE. */
+static int api_replica_execute(const char *tracker, const uint8_t allocation[32], uint32_t action,
+    const LmbHostControl *expected, LmbHostControl *result) {
+    LmbResidentPlan *plan=calloc(1,sizeof *plan); if (!plan) return -1;
+    LmbHostControl observed={0};
+    int rc=api_find_plan(tracker,allocation,plan) ? -1 :
+        lmb_host_control_rpc(plan->host,plan->host_key,plan->root,LMB_HOST_CONTROL_QUERY,NULL,&observed);
+    if (!rc && action) rc=lmb_host_control_rpc(plan->host,plan->host_key,plan->root,action,
+        expected ? expected : &observed,result);
+    else *result=observed;
+    free(plan); return rc;
+}
 static int api_replica_control(const char *tracker, char *const *args, unsigned count) {
     uint8_t allocation[32]; uint32_t action=LMB_HOST_CONTROL_QUERY;
     if (!*tracker || count<1 || count>2 || strlen(args[0])!=64 || lmb_unhex(allocation,args[0],32)) return 1;
@@ -197,13 +208,8 @@ static int api_replica_control(const char *tracker, char *const *args, unsigned 
         else if (!strcmp(args[1],"resume")) action=LMB_HOST_CONTROL_RESUME;
         else if (strcmp(args[1],"status")) return 1;
     }
-    LmbResidentPlan *plan=calloc(1,sizeof *plan); if (!plan) return 1;
-    LmbHostControl observed={0},result={0};
-    int bad=api_find_plan(tracker,allocation,plan) ||
-        lmb_host_control_rpc(plan->host,plan->host_key,plan->root,LMB_HOST_CONTROL_QUERY,NULL,&observed);
-    if (!bad && action) bad=lmb_host_control_rpc(plan->host,plan->host_key,plan->root,action,&observed,&result);
-    else result=observed;
-    free(plan);
+    LmbHostControl result={0};
+    int bad=api_replica_execute(tracker,allocation,action,NULL,&result);
     if (bad) {
         fprintf(stderr,"Host control unavailable or changed concurrently. No idle state is assumed and no weights were unloaded.\n");
         return 1;

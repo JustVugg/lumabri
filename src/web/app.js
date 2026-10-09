@@ -6,6 +6,7 @@ let unsaved = false, navigation = 0;
 let partialNode = null;
 let operator = false, workspaceOpen = false, workspacePending = false, workspaceEpoch = 0;
 let workspaceExpires = 0;
+let management = false, managementBusy = false;
 const utf8 = new TextEncoder();
 const say = text => { $("notice").textContent = text; };
 const errors = {
@@ -15,6 +16,9 @@ const errors = {
   host_unavailable_or_busy: "The model's host is busy or unavailable. Try again when capacity is free.",
   replicas_busy: "All approved replicas are serving another API request. Your question is saved; retry when capacity is free.",
   admission_unavailable: "Local request admission could not be checked. No response was started.",
+  management_permission_required: "Your token has no management permission. An operator must grant it explicitly.",
+  allocation_changed_refresh_before_retry: "The allocation changed after it was inspected. Review its current state before retrying.",
+  retirement_started_cannot_resume: "Release has already started and cannot be reversed. Reconcile that release instead.",
   resident_plan_not_found: "This saved model allocation is no longer available. Ask the operator to prepare and grant a new one.",
   conversation_changed_reload_before_editing: "This conversation changed in another window. Reopen it from the sidebar before sending.",
   conversation_limit_32: "Your history has reached 32 conversations. Export and delete one before creating another.",
@@ -56,7 +60,7 @@ function controls() {
   $("new-chat").disabled = !token || busy;
   $("model").disabled = !token || busy || Boolean(current);
   $("refresh").disabled = !token || busy;
-  $("sign-out").disabled = busy;
+  $("sign-out").disabled = busy || managementBusy;
   $("workspace-open").hidden = !operator || !token;
   $("workspace-open").disabled = busy;
   $("prompt").disabled = !canSend;
@@ -125,7 +129,8 @@ function renderMessages() {
 }
 async function refresh() {
   // Sequential calls leave the second per-user permit free for another tab.
-  operator = (await request("/api/v1/session")).operator === true;
+  const permissions = await request("/api/v1/session");
+  operator = permissions.operator === true; management = permissions.management === true;
   if (!operator && workspaceOpen) closeWorkspace();
   models = (await request("/api/v1/models")).models;
   conversations = (await request("/api/v1/conversations")).conversations;
@@ -267,11 +272,11 @@ $("login-form").onsubmit = async event => {
   finally { button.disabled = false; }
 };
 $("sign-out").onclick = () => {
-  if (busy) return;
+  if (busy || managementBusy) return;
   if (unsaved && !confirm("This answer is not saved. Sign out without exporting?")) return;
   navigation++; unsaved = false;
   token = ""; models = []; conversations = []; current = null;
-  operator = false; closeWorkspace(); clearWorkspace();
+  operator = false; management = false; closeWorkspace(); clearWorkspace();
   $("login").hidden = false; $("chat").hidden = true; $("composer-area").hidden = true; $("sign-out").hidden = true;
   $("identity").textContent = "Not connected"; $("app").classList.remove("connected");
   $("prompt").value = ""; renderModels(); renderHistory(); renderMessages(); say("");
@@ -320,7 +325,43 @@ function workspaceCard(parent, title, facts) {
     const term = document.createElement("dt"), detail = document.createElement("dd");
     term.textContent = label; detail.textContent = value; list.append(term, detail);
   }
-  card.append(list); parent.append(card);
+  card.append(list); parent.append(card); return card;
+}
+async function controlAllocation(allocation, action) {
+  if (!management || managementBusy || !workspaceOpen) return;
+  const epoch = workspaceEpoch, credential = token;
+  managementBusy = true; controls();
+  for (const button of $("workspace-allocations").querySelectorAll("button")) button.disabled = true;
+  let submitted = false, message = "";
+  try {
+    const path = `/api/v1/allocations/${allocation.id}/control`;
+    const observed = await request(path);
+    if (epoch !== workspaceEpoch || credential !== token || !workspaceOpen) return;
+    if (action === "status" || observed.state === "released") {
+      message = `${allocation.name}: ${observed.state.replaceAll("_", " ")}.`;
+    } else {
+      const effects = {
+        drain: "Stop admitting new turns. Already admitted work can finish; weights remain in RAM.",
+        resume: "Allow new turns on this already approved allocation. No new model is loaded.",
+        retire: "Stop admitting turns, finish admitted work and release this allocation's RAM on its computers. This cannot be undone; using it again requires preparation and approval. Other models, checkpoint files and chat histories are kept."
+      };
+      if (observed.state === "retirement_pending" && action !== "retire")
+        throw new Error("Release is already in progress. Choose Release RAM to reconcile it.");
+      if (!confirm(`${allocation.name}\n\n${effects[action]}\n\nContinue?`)) return;
+      submitted = true;
+      const result = await request(path, "POST", {action, instance: observed.instance, revision: observed.revision});
+      message = result.state === "retirement_pending" ? "Release is waiting for admitted work. Choose Release RAM again to reconcile; no forced interruption was used." :
+        `${allocation.name}: ${result.state.replaceAll("_", " ")}.`;
+    }
+  } catch (error) {
+    message = submitted ? `${error.message} The operation may have started. Inspect its status before retrying; no automatic retry was sent.` : error.message;
+  } finally {
+    managementBusy = false; controls();
+    if (epoch === workspaceEpoch && credential === token && workspaceOpen) {
+      await refreshWorkspace();
+      if (message) say(message);
+    }
+  }
 }
 function renderWorkspace(data) {
   clearWorkspace();
@@ -360,17 +401,26 @@ function renderWorkspace(data) {
     const observation = allocation.observation;
     const speed = observation.state === "measured" ? `${observation.decode_tok_s.toFixed(2)} tok/s · last ${observation.generated_tokens}-token reply (${observation.prompt_tokens}-token prompt), not capacity` :
       observation.state === "obsolete" ? "Obsolete — configuration changed; observe a new turn" : "Not measured";
-    workspaceCard($("workspace-allocations"), allocation.name, [
+    const card = workspaceCard($("workspace-allocations"), allocation.name, [
       ["Adapter", allocation.adapter || "Unknown"], ["Speed", speed],
       ["Context / session limit", `${allocation.context} tokens / ${allocation.session_limit} configured slots`],
       ["Last preparation", allocation.preparation_seconds === null ? "Not measured" : `${allocation.preparation_seconds.toFixed(2)}s · approval and indexing excluded`],
       ...allocation.ranges.map(range => [range.edge ? "Edge + layers" : "Layers",
         `${range.begin}–${range.end - 1} · ${names.get(range.node) || "Computer not reporting"} · ${gib(range.reserved_bytes)} reserved`])]);
+    if (management && /^[0-9a-f]{64}$/.test(allocation.id)) {
+      const actions = document.createElement("div"); actions.className = "allocation-actions";
+      for (const [action, label] of [["status", "Inspect"], ["drain", "Drain"], ["resume", "Resume"], ["retire", "Release RAM"]]) {
+        const button = document.createElement("button"); button.textContent = label; button.className = "text-button";
+        if (action === "retire") button.classList.add("danger");
+        button.onclick = () => controlAllocation(allocation, action); actions.append(button);
+      }
+      card.append(actions);
+    }
   }
   if (!data.allocations.length) $("workspace-allocations").textContent = "No saved allocations for this household.";
 }
 async function refreshWorkspace() {
-  if (!workspaceOpen || !operator || !token || workspacePending || document.hidden) return;
+  if (!workspaceOpen || !operator || !token || workspacePending || managementBusy || document.hidden) return;
   workspacePending = true; $("workspace-refresh").disabled = true;
   const epoch = workspaceEpoch;
   try {
@@ -393,7 +443,7 @@ $("workspace-open").onclick = () => {
 $("workspace-refresh").onclick = refreshWorkspace;
 setInterval(refreshWorkspace, 10000);
 setInterval(() => {
-  if (workspaceOpen && workspaceExpires && Date.now() >= workspaceExpires) {
+  if (workspaceOpen && !managementBusy && workspaceExpires && Date.now() >= workspaceExpires) {
     clearWorkspace(); $("workspace-status").textContent = "Machine reports expired — refreshing before showing resource values.";
     refreshWorkspace();
   }

@@ -23,6 +23,7 @@ int main(void) {
     assert(!lmb_api_authorize(dir,auth,&user) && lmb_api_user_allows(&user,allocation));
     assert(!lmb_operator_allows(dir,&user));
     assert(!lmb_operator_set(dir,&user,1) && lmb_operator_allows(dir,&user));
+    assert(!lmb_management_allows(dir,&user)); /* visibility is not mutation authority */
     assert(!fchmodat(dir,"alice.operator",0644,0) && !lmb_operator_allows(dir,&user));
     assert(!fchmodat(dir,"alice.operator",0600,0) && lmb_operator_allows(dir,&user));
     LmbApiUser replacement=user; replacement.digest[0]^=1;
@@ -30,6 +31,15 @@ int main(void) {
     assert(!lmb_operator_set(dir,&user,0) && !lmb_operator_allows(dir,&user));
     assert(!symlinkat("alice.user",dir,".operator.pending"));
     assert(lmb_operator_set(dir,&user,1)); assert(!unlinkat(dir,".operator.pending",0));
+    assert(!lmb_management_set(dir,&user,1) && lmb_management_allows(dir,&user) && lmb_operator_allows(dir,&user));
+    assert(!lmb_management_allows(dir,&replacement));
+    assert(!fchmodat(dir,"alice.manager",0644,0) && !lmb_management_allows(dir,&user));
+    assert(!fchmodat(dir,"alice.manager",0600,0) && lmb_management_allows(dir,&user));
+    assert(!lmb_management_set(dir,&user,0) && !lmb_management_allows(dir,&user) && !lmb_operator_allows(dir,&user));
+    assert(!symlinkat("alice.user",dir,".manager.pending"));
+    assert(lmb_management_set(dir,&user,1)); assert(!unlinkat(dir,".manager.pending",0));
+    assert(!linkat(dir,"alice.user",dir,".manager.pending",0));
+    assert(lmb_management_set(dir,&user,1)); assert(!unlinkat(dir,".manager.pending",0));
     char wrong[128]; strcpy(wrong,auth); wrong[strlen(wrong)-1]^=1;
     assert(lmb_api_authorize(dir,wrong,&user));
     assert(lmb_api_authorize(dir,"Bearer alice.short",&user));

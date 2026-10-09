@@ -66,8 +66,10 @@ saved status still requires an authenticated readiness check before use.
 The resident library stores no conversation text, credentials or weights.
 The [resident inference API](RESIDENT_API.md) can grant named local API users
 access to exact approved allocations, without repeating donor approvals or
-loading a new model. It currently binds only to loopback and stores no chat
-history; it is not an OpenAI-compatible or public-network endpoint.
+loading a new model. It currently binds only to loopback. Its bundled web chat
+stores private, per-user history separately from resident plans; management
+permission does not grant access to another user's conversations. It is not
+an OpenAI-compatible or public-network endpoint.
 The background donor keeper can retain up to four independently approved models
 on the same machine, provided their summed reservations fit its sharing budget
 and current memory permits preparation. Pending loads remain reserved before
@@ -161,8 +163,11 @@ cancelling admitted turns; it retains weights and is not donor/server release.
 See [host drain](RESIDENT_API.md#drain-an-approved-host-without-interrupting-admitted-turns).
 Keepers also expose [Segment drain and live session counts](RESIDENT_API.md#inspect-and-drain-the-approved-segment-allocations)
 through a private channel to each owned engine. KV between turns and queued
-Hybrid calls remain counted. This is not yet coordinated retirement or an
-automatic scaling policy; no idle observation alone authorizes releasing RAM.
+Hybrid calls remain counted. Coordinated retirement first seals host and nodes
+and then releases that exact allocation. The resident library, local CLI and
+explicitly authorized browser management use the same durable coordinator;
+read-only operators and inference users cannot release resources. This is not
+an automatic scaling policy; no idle observation alone authorizes releasing RAM.
 
 ### Planned extension: vendor-independent agentic orchestration (not implemented)
 

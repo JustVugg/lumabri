@@ -552,16 +552,40 @@ def main():
         until(lambda: resumed.has("resident models"), "resident library missing")
         resumed.send("r")
         until(lambda: resumed.has("Every donor confirmed"), "library did not authenticate all allocations")
+        # The library uses coordinated retirement now, not forced release.
+        # Merely opening/cancelling the confirmation must neither drain the
+        # host nor create a durable operation or drop any donor reservation.
+        prior_host = api_command("replica", allocation, "status")
+        prior_donors = {name: service(name)["donor"] for name in ("a", "b")}
+        confirmation = "finish admitted chats, then release RAM?"
+        retirement_dir = tmp / "chatter/.lumabri/api-access/retirements"
+        assert not list(retirement_dir.glob("*.retire"))
         resumed.send("x")
-        until(lambda: resumed.has("Active chats will stop"), "unload did not require confirmation")
+        until(lambda: confirmation in current_frame(resumed), "retirement did not require confirmation")
+        resumed.send("\x1b")
+        until(lambda: "resident models" in current_frame(resumed) and confirmation not in current_frame(resumed),
+              "cancelling retirement did not return to the library")
+        unchanged_host = api_command("replica", allocation, "status")
+        for key in ("instance", "revision", "state"):
+            assert unchanged_host[key] == prior_host[key], "cancelled confirmation changed host admission"
+        for name in ("a", "b"):
+            unchanged = service(name)["donor"]
+            for key in ("instance", "segment_pid", "host_pid", "reserved_total_bytes"):
+                assert unchanged[key] == prior_donors[name][key], "cancelled confirmation changed an allocation"
+        assert not list(retirement_dir.glob("*.retire")), "cancelled confirmation created a retirement"
+        resumed.send("x")
+        until(lambda: confirmation in current_frame(resumed), "second retirement confirmation missing")
         resumed.send("\r")
         until(lambda: resumed.has("All donors confirmed release"), "approved allocation release failed")
+        receipt = api_command("retire", allocation)
+        assert receipt["state"] == "released" and receipt["complete"], "CLI did not reconcile the TUI retirement"
+        assert len(list(retirement_dir.glob("*.retire"))) == 1, "TUI retirement did not use the shared journal"
         for name in ("a", "b"):
             state = service(name)["donor"]
             assert state["live"] and not state["segment_pid"] and not state["host_pid"] and state["phase"] == 9, state
         assert len(list((tmp / "chatter/.lumabri/resident-plans").glob("*.plan"))) == 1
         assert not list((tmp / "chatter").rglob("*.safetensors")), "client downloaded a checkpoint"
-        print("HOUSEHOLD SERVICE FLOW: PASS (approval survives reconnect, detached preparation, real model after TUI/manager exit and crash, exact live library, authenticated unload)", flush=True)
+        print("HOUSEHOLD SERVICE FLOW: PASS (approval survives reconnect, detached preparation, real model after TUI/manager exit and crash, exact live library, cancelled confirmation is inert, shared coordinated retirement)", flush=True)
     finally:
         if sys.exc_info()[0] is not None:
             for log in sorted(tmp.glob("*/.lumabri/home/engines.log")):

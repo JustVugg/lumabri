@@ -5,32 +5,40 @@
 #define LMB_OPERATOR_ACCESS_H
 #include "lumabri_api_access.h"
 
-static inline int lmb_operator_allows(int dir, const LmbApiUser *user) {
+/* Capability records are bound to credentials, not reusable usernames.
+ * Management includes cluster visibility but never inference/history grants. */
+static inline int lmb_operator_capability(int dir, const LmbApiUser *user, int manage) {
     if (!user || !lmb_api_username(user->name)) return 0;
-    char file[48]; snprintf(file,sizeof file,"%s.operator",user->name);
-    int fd=openat(dir,file,O_RDONLY|O_NOFOLLOW|O_CLOEXEC);
+    char file[48]; snprintf(file,sizeof file,"%s.%s",user->name,manage ? "manager" : "operator");
+    int fd=openat(dir,file,O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK);
     if (fd<0) return 0;
     unsigned char record[72]; struct stat st;
     int bad=lmb_api_private_fd(fd,0) || fstat(fd,&st) || st.st_size!=sizeof record ||
         lmb_read_full(fd,record,sizeof record);
     close(fd);
-    unsigned mismatch=bad ? 1 : memcmp(record,"LMBOPER1",8)!=0;
+    unsigned mismatch=bad ? 1 : memcmp(record,manage ? "LMBMGR01" : "LMBOPER1",8)!=0;
     if (!bad) for (unsigned i=0;i<64;i++) mismatch|=record[8+i]^user->digest[i];
     lmb_api_wipe(record,sizeof record); return !mismatch;
 }
+static inline int lmb_management_allows(int dir, const LmbApiUser *user) {
+    return lmb_operator_capability(dir,user,1);
+}
+static inline int lmb_operator_allows(int dir, const LmbApiUser *user) {
+    return lmb_operator_capability(dir,user,0) || lmb_management_allows(dir,user);
+}
 /* Caller holds the access database lock. Fixed private transaction file is
  * replaceable after a crash, but never followed if unsafe. */
-static inline int lmb_operator_set(int dir, const LmbApiUser *user, int enabled) {
+static inline int lmb_operator_capability_set(int dir, const LmbApiUser *user, int enabled, int manage) {
     if (!user || !lmb_api_username(user->name)) return -1;
-    char file[48]; snprintf(file,sizeof file,"%s.operator",user->name);
+    char file[48]; snprintf(file,sizeof file,"%s.%s",user->name,manage ? "manager" : "operator");
     if (!enabled) {
         if (unlinkat(dir,file,0) && errno!=ENOENT) return -1;
         return fsync(dir);
     }
-    const char *temporary=".operator.pending";
-    int fd=openat(dir,temporary,O_WRONLY|O_CREAT|O_NOFOLLOW|O_CLOEXEC,0600);
+    const char *temporary=manage ? ".manager.pending" : ".operator.pending";
+    int fd=openat(dir,temporary,O_WRONLY|O_CREAT|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK,0600);
     if (fd<0) return -1;
-    unsigned char record[72]; memcpy(record,"LMBOPER1",8); memcpy(record+8,user->digest,64);
+    unsigned char record[72]; memcpy(record,manage ? "LMBMGR01" : "LMBOPER1",8); memcpy(record+8,user->digest,64);
     int bad=lmb_api_private_fd(fd,0) || ftruncate(fd,0); size_t at=0;
     while (!bad && at<sizeof record) {
         ssize_t n=write(fd,record+at,sizeof record-at);
@@ -43,5 +51,11 @@ static inline int lmb_operator_set(int dir, const LmbApiUser *user, int enabled)
     if (!bad && renameat(dir,temporary,dir,file)) bad=1;
     if (!bad && fsync(dir)) bad=1;
     return bad ? -1 : 0;
+}
+static inline int lmb_operator_set(int dir, const LmbApiUser *user, int enabled) {
+    return lmb_operator_capability_set(dir,user,enabled,0);
+}
+static inline int lmb_management_set(int dir, const LmbApiUser *user, int enabled) {
+    return lmb_operator_capability_set(dir,user,enabled,1);
 }
 #endif

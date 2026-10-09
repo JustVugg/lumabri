@@ -6468,6 +6468,7 @@ static int cmd_doctor(int argc, char **argv) {
 
 /* ---- main --------------------------------------------------------------- */
 #include "src/runtime/lumabri_service_manager.h"
+static int home_managed_retire(const char *tracker, const uint8_t allocation[32]);
 #include "src/ui/lumabri_home_ui.h"
 #include "src/runtime/lumabri_api.h"
 
