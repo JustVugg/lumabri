@@ -100,6 +100,8 @@ static void store_tests(void) {
     assert(!lmb_capacity_load(dir,"first",&b)); assert(!lmb_capacity_remove(dir,"recovered"));
     for (unsigned i=1;i<LMB_CAPACITY_RECORDS;i++) { char name[32]; snprintf(name,sizeof name,"record-%u",i); assert(!lmb_capacity_save(dir,name,&a)); }
     assert(lmb_capacity_save(dir,"too-many",&a));
+    assert(!linkat(dir,"first",dir,".pending",0)); close(lock);
+    lock=lmb_capacity_lock(dir); assert(lock>=0); assert(!lmb_capacity_load(dir,"first",&b));
     for (unsigned i=1;i<LMB_CAPACITY_RECORDS;i++) { char name[32]; snprintf(name,sizeof name,"record-%u",i); assert(!unlinkat(dir,name,0)); }
     assert(!lmb_capacity_remove(dir,"first")); assert(lmb_capacity_remove(dir,"../first"));
     assert(!unlinkat(dir,"probe.lock",0)); close(lock); close(dir);

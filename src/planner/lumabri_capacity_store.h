@@ -89,9 +89,17 @@ static inline int lmb_capacity_load(int dir,const char *name,LmbCapacity *out) {
 }
 /* Hold a dedicated probe lock for the entire run. This prevents concurrent
  * calibrations from contaminating each other but never locks inference. */
+static inline int lmb_capacity_recover(int dir) {
+    struct stat st;
+    if (fstatat(dir,".pending",&st,AT_SYMLINK_NOFOLLOW)) return errno==ENOENT ? 0 : -1;
+    if (!S_ISREG(st.st_mode) || st.st_uid!=geteuid() || (st.st_mode&077) || st.st_nlink<1 || st.st_nlink>2) return -1;
+    /* Only the transaction link is removed, never its published target.
+     * Recover before checking quota so even a full directory is repairable. */
+    return unlinkat(dir,".pending",0) || fsync(dir) ? -1 : 0;
+}
 static inline int lmb_capacity_lock(int dir) {
     int fd=openat(dir,"probe.lock",O_RDWR|O_CREAT|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK,0600);
-    if (fd>=0 && (lmb_api_private_fd(fd,0) || flock(fd,LOCK_EX|LOCK_NB))) { close(fd); return -1; }
+    if (fd>=0 && (lmb_api_private_fd(fd,0) || flock(fd,LOCK_EX|LOCK_NB) || lmb_capacity_recover(dir))) { close(fd); return -1; }
     return fd;
 }
 static inline int lmb_capacity_room(int dir,const char *name) {
@@ -111,14 +119,7 @@ static inline int lmb_capacity_room(int dir,const char *name) {
 static inline int lmb_capacity_save(int dir,const char *name,const LmbCapacity *r) {
     if (lmb_capacity_room(dir,name)) return -1;
     LmbBuf b={0}; if (lmb_capacity_encode(r,&b)) return -1;
-    struct stat st;
-    if (!fstatat(dir,".pending",&st,AT_SYMLINK_NOFOLLOW)) {
-        /* A crash after linkat but before unlink leaves two links. Removing
-         * only the private transaction link repairs publication without ever
-         * truncating the immutable target (or following a symlink). */
-        if (!S_ISREG(st.st_mode) || st.st_uid!=geteuid() || (st.st_mode&077) || st.st_nlink<1 || st.st_nlink>2 ||
-            unlinkat(dir,".pending",0)) { free(b.p); return -1; }
-    } else if (errno!=ENOENT) { free(b.p); return -1; }
+    if (lmb_capacity_recover(dir)) { free(b.p); return -1; }
     int fd=openat(dir,".pending",O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);
     int bad=fd<0;
     if (!bad) bad=lmb_capacity_write(fd,b.p,b.len) || fsync(fd);
