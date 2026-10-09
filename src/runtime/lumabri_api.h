@@ -326,6 +326,12 @@ static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUs
         const char *reason=observed.replay.mismatch || (stream.status==LMB_REPLY_DONE && !lmb_replay_complete(&observed.replay)) ?
             "Recovery did not reproduce the visible prefix; response remains incomplete" :
             observed.error[0] ? observed.error : "Stream interrupted; response is incomplete";
+        /* Terminal errors have the same cleanup boundary as DONE. Releasing
+         * the permit before RESET makes the next ordered request skip this
+         * still-occupied replica, even though the previous stream has ended. */
+        if (engine_finish(&engine)) fprintf(stderr,"[api] error cleanup observation timed out\n");
+        if (permit>=0) close(permit);
+        permit=-1;
         (void)api_engine_error(&fd,reason);
     }
     lmb_replay_free(&observed.replay);

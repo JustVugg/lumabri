@@ -77,6 +77,12 @@ def verify_recovery(env, first, third, route, chat, request, cli, command, port,
             assert ("recovering" in kinds) == (mode != "nonretryable"), data
             if mode == "diverge" or secondary == "short":
                 assert "prefix" in parsed[-1][1]["message"], data
+        if mode == "nonretryable":
+            # This is a single-slot host in the native recovery gate. Do not
+            # wait/retry: the completed HTTP error must already have observed
+            # remote cleanup, including the proxy's delayed RESET_DONE.
+            idle = json.loads(command("replica", first["id"], "status"))
+            assert idle["connections"] == idle["admitted_requests"] == 0, idle
         control.unlink()
 
     # A disconnected browser must not resubmit its text on another replica.
