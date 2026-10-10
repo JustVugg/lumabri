@@ -98,15 +98,18 @@ below. Historical observations remain here as evidence, not current promises.
   before normal merge `34ac5ed`. The first macOS ARM no-OpenMP job correctly
   refused OS-compressed model pages; the repeated native gate passed without
   weakening residency enforcement. This is not a certified production capacity figure.
-- [ ] Persisted joint capacity observations and bounded selection: explicit
+- [x] Persisted joint capacity observations and bounded selection (#209): explicit
   local-owner C probe uses real gateway admission/cleanup on approved models;
   records all outcomes, per-model latency tails and exact runtime/workload
   identity. Local two-model OLMoE gate passes two-client success, eight-client
   overload and comparison with missing costs; unit and ASan/UBSan/leak gates
   pass. Recommendations are limited to comparable measured portfolios and do
-  not apply placements or promise SLOs. Final native CI, new-placement search,
-  automatic policy application and sustained workload/cost validation remain.
-- [ ] Explicit atomic measured-portfolio application: one shared owner/management
+  not apply placements or promise SLOs. All eight native checks passed on
+  `d9815d0` before normal merge `9dc87d3`. The first macOS ARM no-OpenMP attempt
+  refused OS-compressed pages; the repeated gate passed without weakening the
+  guard. New-placement search, automatic policy and sustained cost validation
+  are separate work.
+- [x] Explicit atomic measured-portfolio application (#210): one shared owner/management
   operation for CLI and authenticated HTTP revalidates the whole observed model
   mix and all route revisions before one registry publication. Real OLMoE
   reduced-checkpoint flows pass at one and four slots, switching to an actual
@@ -114,8 +117,20 @@ below. Historical observations remain here as evidence, not current promises.
   allocations. Unauthorized/stale/conflicting requests remain inert. Registry
   unit tests and ASan/UBSan/leak checks cover private bounded snapshots, legacy
   import, interrupted staging, concurrent readers and an open-before-rename
-  regression. Final native CI remains required. This does not prepare new
+  regression. All eight native checks passed on `a3c7078` before normal merge
+  `6d95f99`. This does not prepare new
   placements, change admission limits or implement automatic scaling.
+- [ ] Bounded resident-portfolio controller: opt-in management policy in the
+  permanent API keeper, known-currency cost ceiling, measured joint latency,
+  hysteresis/cooldown and switch-cost horizon. Full route/record hashes and
+  a durable publication intent fence manual edits and reconcile interrupted
+  changes without replay. Local real OLMoE two-model/four-slot flow passes
+  automatic selection after host drain, actual subsequent generation,
+  service restart, manual revision hold, missing evidence and disabling with
+  the route registry unavailable. API regression and focused ASan/UBSan/leak
+  tests pass. Native CI remains required. This only routes among approved
+  resident candidates; it does not prepare/retire capacity or demonstrate
+  billed savings. See [policy scope and commands](PORTFOLIO_POLICY.md).
 
 - [x] Runtime/preflight PR #151: installed engine thread-capacity query; no-OpenMP
   single-thread execution; adaptive RAM reserve; acknowledged actionable

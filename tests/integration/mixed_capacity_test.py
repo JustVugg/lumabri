@@ -145,7 +145,9 @@ def verify_mixed_capacity(runtime, env, tracker, artifacts):
         selected = json.loads(cli("capacity-select", "30000", "30000", "300", "joint-baseline", "joint-repeat"))
         assert selected["selected"] == "joint-baseline", selected
         assert all(c["state"] == "observed_workload_passed" for c in selected["candidates"]), selected
-        assert selected["objective"] == "operator_order_prices_unknown_or_mixed", selected
+        expected_objective = ("declared_machine_footprint_subject_to_observed_latency" if env.get("LUMABRI_COST_PER_HOUR")
+                              else "operator_order_prices_unknown_or_mixed")
+        assert selected["objective"] == expected_objective, selected
         assert "resident allocations and conversations unchanged" in cli("capacity-remove", "joint-repeat")
         assert {a["id"] for a in snapshot()["allocations"]} == {a["id"] for a in report["inventory_before"]["allocations"]}
         report["production_probe"] = {"baseline": measured, "overloaded": overloaded, "selection": selected}

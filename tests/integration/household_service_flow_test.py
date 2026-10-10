@@ -29,6 +29,7 @@ def main():
     parser.add_argument("--api", action="store_true", help="exercise authenticated API users while the second model stays in its TUI")
     parser.add_argument("--replicas", action="store_true", help="also approve a third allocation and test same-checkpoint routing after selective unload")
     parser.add_argument("--recovery", action="store_true", help="verify visible replay using the test-only real-codec fault proxy")
+    parser.add_argument("--portfolio-policy", action="store_true", help="exercise bounded permanent policy with explicit test machine prices")
     parser.add_argument("--joint", choices=("complete", "reject", "cancel"), help="select and prepare two models together from the TUI")
     parser.add_argument("--sessions", type=int, choices=(1, 2, 4, 8), default=1)
     parser.add_argument("--donor-ram-gb", type=float, default=0.5)
@@ -39,6 +40,8 @@ def main():
         parser.error("--api requires --multi-model and --keep-requester")
     if args.replicas and not args.api:
         parser.error("--replicas requires --api")
+    if args.portfolio_policy and not args.replicas:
+        parser.error("--portfolio-policy requires --replicas")
     if args.recovery and (not args.replicas or not (args.runtime_dir / "segment_chat.real").is_file()):
         parser.error("--recovery requires --replicas and a disposable candidate with recovery_codec_proxy.py installed")
     if not 30 <= args.prepare_timeout <= 3600:
@@ -83,6 +86,9 @@ def main():
              # between reports and changed the plan during key navigation.
              "LUMABRI_IO_TIMEOUT_MS": "15000", "COLI_NO_OMP_TUNE": "1", "OMP_NUM_THREADS": "2", "PIN": "off"}
         e.pop("LUMABRI_HOME_FOREGROUND", None)
+        if args.portfolio_policy:
+            e["LUMABRI_COST_PER_HOUR"] = "0.10"
+            e["LUMABRI_COST_CURRENCY"] = "EUR"
         if args.recovery:
             e["LUMABRI_TEST_RECOVERY_CONTROL"] = str(tmp / "recovery-control.json")
         return e
@@ -497,7 +503,8 @@ def main():
                 third_models = tmp / "replica-models"
                 shutil.copytree(configs[0].parent, third_models / "replica-checkpoint")
                 replica = Terminal("chatter", ["models", "--models-dir", str(third_models), "--tracker", tracker,
-                                               "--context", "128", "--max-new", "8", "--sessions", "2"])
+                                               "--context", "128", "--max-new", "8", "--sessions",
+                                               str(args.sessions) if args.portfolio_policy else "2"])
                 until(lambda: "3 computers visible" in current_frame(replica), "replica inventory missing")
                 replica.send("\t")
                 until(lambda: "Nothing is selected automatically" in current_frame(replica), "replica selection missing")
@@ -529,7 +536,7 @@ def main():
                 another.send("/quit\n")
                 until(lambda: another.p.poll() is not None, "second-model TUI did not release capacity for portfolio proof")
                 from capacity_application_test import verify_capacity_application
-                verify_capacity_application(runtime, env("chatter"), tracker, names[4], tmp)
+                verify_capacity_application(runtime, env("chatter"), tracker, names[4], tmp, policy=args.portfolio_policy)
                 another = Terminal("chatter", ["resident-chat", str(second_plan), tracker], program="test_chat_ui")
                 until(lambda: another.has("receives the text"), "second-model TUI did not reconnect after portfolio proof")
                 from managed_routes_test import verify_managed_routes

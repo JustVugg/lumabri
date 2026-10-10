@@ -1,5 +1,9 @@
 # Resident inference API
 
+For the opt-in permanent controller over measured resident portfolios, see
+[bounded portfolio policy](PORTFOLIO_POLICY.md). It uses the same atomic
+application operation below; it does not grant new allocation or cloud authority.
+
 ## Cluster workspace
 
 The bundled browser has an operator-only **Computers & models** view. Explicitly

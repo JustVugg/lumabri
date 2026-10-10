@@ -150,7 +150,9 @@ def verify_managed_routes(runtime, env, tracker, first_plan, third_plan, first_n
         assert policy["revision"] == 4 and policy["policy"] == "declared-cost"
         status, data = chat(route["id"])
         assert status == 200 and b"event: done\n" in data, (status, data)
-        assert "evidence=prices_missing_or_mixed_currency" in policy_log.read_text()
+        expected_price_evidence = ("evidence=declared_machine_footprint" if env.get("LUMABRI_COST_PER_HOUR")
+                                   else "evidence=prices_missing_or_mixed_currency")
+        assert expected_price_evidence in policy_log.read_text()
         assert json.loads(command("model-policy", route["id"], "ordered"))["revision"] == 5
         third_busy = hold(third["id"])
         status, data = chat(route["id"])
@@ -281,7 +283,7 @@ def verify_managed_routes(runtime, env, tracker, first_plan, third_plan, first_n
         assert chat(route["id"])[0] == 404
         assert request("/api/v1/conversations/" + conversation_id)[0] == 200, "route removal lost history"
         assert request("/api/v1/conversations/" + conversation_id, bob)[0] == 404
-        print("MANAGED ROUTES: PASS (real OLMoE replicas, matching observations, explicit preferences, unknown costs, immutable contracts, stable grants, bounded shared admission, selective loss, private history)", flush=True)
+        print("MANAGED ROUTES: PASS (real OLMoE replicas, matching observations, explicit preferences, declared/unknown cost policy, immutable contracts, stable grants, bounded shared admission, selective loss, private history)", flush=True)
     finally:
         for process in held[:]:
             unhold(process)
