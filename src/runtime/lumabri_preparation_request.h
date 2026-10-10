@@ -41,7 +41,7 @@ static inline int lmb_preparation_parse(const char *text,size_t size,LmbPreparat
     for (unsigned i=3;i<8;i++) if (f[i]<0) return -1;
     if (lmb_json_uint(&j,(unsigned)f[5],&r->context) || !r->context || r->context>131072 ||
         lmb_json_uint(&j,(unsigned)f[6],&r->sessions) || !r->sessions || r->sessions>8 ||
-        lmb_json_uint(&j,(unsigned)f[7],&r->max_new) || !r->max_new || r->max_new>16384 || r->max_new>r->context) return -1;
+        lmb_json_uint(&j,(unsigned)f[7],&r->max_new) || !r->max_new || r->max_new>4096 || r->max_new>r->context) return -1;
     const LmbJsonToken *list=&tokens[f[3]];
     if (list->kind!=LMB_JSON_ARRAY || !list->children || list->children>LMB_PREPARATION_MODELS) return -1;
     for (unsigned at=(unsigned)f[3]+1;at<list->next;at=tokens[at].next) {

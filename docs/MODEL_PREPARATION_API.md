@@ -80,7 +80,7 @@ this interface. All inference in this path requires resident weights.
 ## Limits and verification
 
 - At most eight models and 32 explicitly selected computers per request;
-  1–8 sessions; context 1–131072 and output 1–16384 (not above context).
+  1–8 sessions; context 1–131072 and output 1–4096 (not above context).
   These API bounds do not override tighter model or donor memory limits.
 - Newly prepared allocations still require explicit inference grants or managed
   model registration through the existing service. Preparation is not a grant.

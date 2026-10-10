@@ -11,6 +11,10 @@ int main(int argc, char **argv) {
         snprintf(text,sizeof text,"{\"action\":\"preview\",\"models\":[\"olmoe\"],\"nodes\":[\"%s\"],\"context\":128,\"sessions\":2,\"max_new\":8}",id);
         assert(!lmb_preparation_parse(text,strlen(text),&r));
         assert(r.node_count==1 && r.model_count==1 && r.sessions==2);
+        for (uint32_t output=4096;output<=4097;output++) {
+            snprintf(text,sizeof text,"{\"action\":\"preview\",\"models\":[\"olmoe\"],\"nodes\":[\"%s\"],\"context\":8192,\"sessions\":1,\"max_new\":%u}",id,output);
+            assert((lmb_preparation_parse(text,strlen(text),&r)==0)==(output==4096));
+        }
         const char *invalid[]={"{}", "{\"action\":\"start\"}", "{\"action\":\"preview\",\"action\":\"start\"}",
             "{\"action\":\"cancel\",\"operation\":\"../outside\"}", "{\"action\":\"preview\",\"path\":\"/tmp/model\"}"};
         for (unsigned i=0;i<sizeof invalid/sizeof *invalid;i++) assert(lmb_preparation_parse(invalid[i],strlen(invalid[i]),&r));
