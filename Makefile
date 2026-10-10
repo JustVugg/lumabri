@@ -102,7 +102,7 @@ check-warnings:
 		test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 test_exec2 test_accum_order test_hybrid_parallel test_residency_report test_model_family test_planner test_cluster test_memory_budget test_calibration test_metrics \
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
 		test_meminfo test_process_memory test_serve_control test_host_session_pool test_hosted_sessions test_host_drain test_node_control test_compute_broker test_compute_lease test_content_filter \
-		test_scheduler test_run_gate test_inventory test_home test_chat_ui test_weight_cache test_planner_io test_portfolio test_reply_stream test_chat_store test_model_routes test_replica_admission test_replica_rank test_replay_prefix test_capacity \
+		test_scheduler test_run_gate test_inventory test_home test_chat_ui test_weight_cache test_planner_io test_portfolio test_reply_stream test_chat_store test_model_routes test_replica_admission test_replica_rank test_replay_prefix test_capacity test_portfolio_policy \
 		CFLAGS='$(CFLAGS) -Werror'
 
 SECURE_DEPS = lumabri_secure.h lumabri_crypto.h
@@ -146,6 +146,8 @@ build/web_assets.h: build/embed-web src/web/index.html src/web/app.css src/web/a
 lumabri segment_chat test_chat_ui: lumabri_metrics.h
 lumabri test_chat_ui test_host_session_pool test_host_drain test-home-monitor: src/runtime/lumabri_response_metrics.h
 lumabri test_chat_ui test_host_session_pool test_host_drain test-home-monitor: src/runtime/lumabri_capacity_probe.h src/planner/lumabri_capacity.h src/planner/lumabri_capacity_store.h
+PORTFOLIO_POLICY_DEPS = src/planner/lumabri_portfolio_policy.h src/planner/lumabri_portfolio_policy_store.h src/planner/lumabri_portfolio_policy_json.h src/runtime/lumabri_portfolio_controller.h
+lumabri test_chat_ui test_host_session_pool test_host_drain test-home-monitor: $(PORTFOLIO_POLICY_DEPS)
 lumabri test_chat_ui: lumabri_run_gate.c lumabri_run_gate.h src/runtime/lumabri_host_sessions.h
 
 lumabri: $(HOME_NET_DEPS) src/runtime/lumabri_probe_deadline.h lumabri.c src/ui/lumabri_tui.c src/ui/lumabri_tui.h src/ui/lumabri_visual.h src/ui/lumabri_chat_editor.h src/ui/lumabri_execution_view.h lumabri_proto.h lumabri_sign.h \
@@ -568,7 +570,7 @@ test_api_access: tests/c/test_api_access.c src/runtime/lumabri_api_access.h $(SE
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_api_access.c -o $@
 
 .PHONY: test-api test-api-gateway
-test-api: test_api_json test_api_http test_api_access test_chat_store test_model_routes test_replica_admission test_replica_rank test_replay_prefix test_capacity
+test-api: test_api_json test_api_http test_api_access test_chat_store test_model_routes test_replica_admission test_replica_rank test_replay_prefix test_capacity test_portfolio_policy
 	./test_api_json
 	./test_api_http
 	./test_api_access
@@ -578,6 +580,10 @@ test-api: test_api_json test_api_http test_api_access test_chat_store test_model
 	./test_replica_rank
 	./test_replay_prefix
 	./test_capacity
+	./test_portfolio_policy
+
+test_portfolio_policy: tests/c/test_portfolio_policy.c $(PORTFOLIO_POLICY_DEPS) src/runtime/lumabri_model_routes.h src/runtime/lumabri_route_registry.h src/planner/lumabri_capacity.h src/planner/lumabri_capacity_store.h $(SECURE_DEPS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_portfolio_policy.c -o $@ -lm
 
 test_capacity: tests/c/test_capacity.c src/planner/lumabri_capacity.h src/planner/lumabri_capacity_store.h lumabri_calibration_store.h $(SECURE_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_capacity.c -o $@ -lm
@@ -730,6 +736,7 @@ test-sanitize: build/web_assets.h
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_replica_admission.c -o build/sanitize/test_replica_admission
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_replica_rank.c -o build/sanitize/test_replica_rank -lm
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_capacity.c -o build/sanitize/test_capacity -lm
+	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_portfolio_policy.c -o build/sanitize/test_portfolio_policy -lm
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_replay_prefix.c -o build/sanitize/test_replay_prefix
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_hybrid_parallel.c -o build/sanitize/test_hybrid_parallel -lm
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_segment_v2
@@ -757,6 +764,7 @@ test-sanitize: build/web_assets.h
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_replica_admission
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_replica_rank
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/sanitize/test_capacity
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/sanitize/test_portfolio_policy
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_replay_prefix
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_hybrid_parallel
 
@@ -1122,7 +1130,7 @@ clean:
 	      test_verify_failover test_segment_v2 test_segment_discovery test_sampling \
 	      test_swarm_detail test_relay_rate test_machine test_meminfo test_process_memory test_serve_control test_host_session_pool test_hosted_sessions test_host_drain test_node_control \
 	      test_compute_lease test_content_filter test_scheduler test_run_gate \
-	      test_compute_broker test_portfolio test_reply_stream test_api_json test_api_http test_api_access test_chat_store test_model_routes test_replica_admission test_replica_rank test_replay_prefix test_capacity \
+	      test_compute_broker test_portfolio test_reply_stream test_api_json test_api_http test_api_access test_chat_store test_model_routes test_replica_admission test_replica_rank test_replay_prefix test_capacity test_portfolio_policy \
 	      test_segment_v2_tsan tracker_tsan \
 	      segment_node segment_chat test_backend_routes test_segment_close test_tcp_latency segment_node_asan segment_chat_asan \
 	      segment_node_tsan segment_chat_tsan \

@@ -285,7 +285,18 @@ static int api_capacity_select(int access,const char *tracker,char *const *args,
  * turns continue with their original contract; no model is prepared/retired.
  * The registry publication is atomic even if a revision changed concurrently.
  * Return an HTTP status so CLI and authenticated service share this operation. */
-static int api_capacity_apply(int access,const char *tracker,char *const *args,unsigned count,Cap *body) {
+typedef struct {
+    uint8_t record_digest[32];
+    LmbCapacityCost price;
+    int (*before_publish)(void *,const LmbModelRoute *,uint32_t);
+    void *opaque;
+} ApiCapacityGuard;
+static int api_capacity_guard_price(const ApiCapacityGuard *guard,const LmbCapacityCost *cost) {
+    return !guard || (cost->known && guard->price.known &&
+        cost->micro_per_hour==guard->price.micro_per_hour && !memcmp(cost->currency,guard->price.currency,4));
+}
+static int api_capacity_apply_checked(int access,const char *tracker,char *const *args,unsigned count,Cap *body,
+    const ApiCapacityGuard *guard) {
     uint32_t first,gap,age;
     if (count<5 || count>4+LMB_CAPACITY_MODELS || !lmb_api_username(args[0]) ||
         api_capacity_uint(args[1],1,3600000,&first) || api_capacity_uint(args[2],1,3600000,&gap) ||
@@ -296,6 +307,13 @@ static int api_capacity_apply(int access,const char *tracker,char *const *args,u
     if (!record || !routes) goto done;
     records=lmb_capacity_dir(access,0); dir=lmb_route_dir(access,0);
     if (records<0 || dir<0 || lmb_capacity_load(records,args[0],record)) goto done;
+    if (guard) {
+        LmbBuf b={0}; uint8_t hash[32]; LmbSha sha;
+        int bad=lmb_capacity_encode(record,&b);
+        if (!bad) { lmb_sha_init(&sha); lmb_sha_update(&sha,b.p,b.len); lmb_sha_final(&sha,hash); }
+        free(b.p);
+        if (bad || memcmp(hash,guard->record_digest,32)) { status=409; goto done; }
+    }
     if (record->models!=count-4) { status=400; goto done; }
     for (uint32_t m=0;m<record->models;m++) {
         char hex[65]; uint8_t id[32]; size_t n=strlen(args[m+4]);
@@ -316,6 +334,7 @@ static int api_capacity_apply(int access,const char *tracker,char *const *args,u
         if (cap_str(body,"{\"applied\":false,\"state\":") || api_json_text(body,state) || cap_str(body,"}")) status=500;
         goto done;
     }
+    if (!api_capacity_guard_price(guard,&cost)) { status=409; goto done; }
     for (uint32_t m=0;m<record->models;m++) {
         char allocation[65]; lmb_hex(allocation,record->allocations[m],32);
         const char *members[]={allocation};
@@ -328,7 +347,7 @@ static int api_capacity_apply(int access,const char *tracker,char *const *args,u
     }
     /* Host handshakes may take time: evidence is revalidated immediately
      * before publication. Normal admission still checks every future turn. */
-    if (api_capacity_snapshot(tracker,record,current,&cost) ||
+    if (api_capacity_snapshot(tracker,record,current,&cost) || !api_capacity_guard_price(guard,&cost) ||
         strcmp(lmb_capacity_evaluate(record,current,(uint64_t)time(NULL),age,first/1000.0,gap/1000.0),
             "observed_workload_passed")) { status=409; goto done; }
     char fingerprint[65]; lmb_hex(fingerprint,record->fingerprint,32);
@@ -337,6 +356,7 @@ static int api_capacity_apply(int access,const char *tracker,char *const *args,u
         api_json_text(body,args[0]) || api_addf(body,",\"fingerprint\":\"%s\",\"models\":[",fingerprint)) { status=500; goto done; }
     for (uint32_t m=0;m<record->models;m++) if (api_route_record(body,&routes[m],m!=0,1)) { status=500; goto done; }
     if (cap_str(body,"]}")) { status=500; goto done; }
+    if (guard && guard->before_publish && guard->before_publish(guard->opaque,routes,record->models)) goto done;
     int rc=lmb_route_save_many(dir,routes,expected,record->models);
     status=rc==LMB_ROUTE_CONFLICT || rc==LMB_ROUTE_MISSING ? 409 : rc ? 503 : 200;
     if (status==200) fprintf(stderr,"[capacity-apply] record=%s models=%u fingerprint=%s routing=atomic weights=unchanged\n",
@@ -346,6 +366,9 @@ done:
     if (records>=0) close(records);
     if (dir>=0) close(dir);
     free(routes); free(record); return status;
+}
+static int api_capacity_apply(int access,const char *tracker,char *const *args,unsigned count,Cap *body) {
+    return api_capacity_apply_checked(access,tracker,args,count,body,NULL);
 }
 /* Called only after bearer management authority, origin and framing checks.
  * No paths, endpoints, model weights or donor consents can enter this schema. */

@@ -69,7 +69,9 @@ def verify_resident_api(runtime, env, tracker, first_model_name, artifacts, obse
         workspace = json.loads(data)
         assert status == 200 and workspace["inventory_ok"] and workspace["registry_ok"], workspace
         assert len(workspace["allocations"]) == 2 and len(workspace["nodes"]) >= 2
-        assert all(n["machine_cost"] is None and n["energy_joules"] is None for n in workspace["nodes"])
+        expected_cost = ({"state": "declared", "currency": "EUR", "micro_units_per_hour": 100000}
+                         if env.get("LUMABRI_COST_PER_HOUR") == "0.10" else None)
+        assert all(n["machine_cost"] == expected_cost and n["energy_joules"] is None for n in workspace["nodes"])
         assert not any(n["gpu_execution_verified"] for n in workspace["nodes"])
         assert chat(operator, first["id"])[0] == 403, "operator visibility silently granted inference"
         assert json.loads(request("/api/v1/conversations", operator)[1])["conversations"] == []

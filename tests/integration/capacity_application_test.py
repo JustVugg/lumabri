@@ -10,7 +10,7 @@ import subprocess
 import threading
 
 
-def verify_capacity_application(runtime, env, tracker, first_name, artifacts):
+def verify_capacity_application(runtime, env, tracker, first_name, artifacts, policy=False):
     def cli(*args, ok=True):
         result = subprocess.run([str(runtime / "lumabri"), "api", *args, "--tracker", tracker],
                                 env=env, text=True, capture_output=True, timeout=40)
@@ -35,10 +35,10 @@ def verify_capacity_application(runtime, env, tracker, first_name, artifacts):
     with socket.socket() as reservation:
         reservation.bind(("127.0.0.1", 0)); port = reservation.getsockname()[1]
 
-    def request(path, token, body):
+    def request(path, token, body=None):
         connection = http.client.HTTPConnection("127.0.0.1", port, timeout=40)
         try:
-            connection.request("POST", path, json.dumps(body),
+            connection.request("POST" if body is not None else "GET", path, json.dumps(body) if body is not None else None,
                                {"Authorization": "Bearer " + token, "Content-Type": "application/json"})
             response = connection.getresponse()
             return response.status, response.read()
@@ -96,6 +96,10 @@ def verify_capacity_application(runtime, env, tracker, first_name, artifacts):
         cli_applied = json.loads(cli("capacity-apply", "joint-alternate", "30000", "30000", "300",
                                     *(r["id"] + ":2" for r in routes)))
         assert [r["revision"] for r in cli_applied["models"]] == [3, 3]
+        if policy:
+            from portfolio_policy_test import verify_portfolio_policy
+            verify_portfolio_policy(cli, request, port, reader, manager, chatter, cli_applied["models"],
+                                    first, third, other, env, artifacts)
         after = json.loads(cli("workspace"))
         assert {a["id"] for a in before["allocations"]} == {a["id"] for a in after["allocations"]}
         assert {n["id"]: n["workload"]["reserved_bytes"] for n in before["nodes"]} == {
