@@ -233,6 +233,7 @@ jobs:
           )
           for outcome in complete reject cancel; do
             python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint "$outcome" --donor-ram-gb 1 --sessions 2
+            LUMABRI_TEST_BROWSER=1 python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint "$outcome" --api-prepare --donor-ram-gb 1 --sessions 2
           done
           make segment_budget_probe
           python3 tests/integration/planner_tensor_contract_test.py --family olmoe --model build/home-flow-models/olmoe-tiny
@@ -512,6 +513,7 @@ jobs:
             python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester --multi-model --sessions 4 --api --replicas --recovery --portfolio-policy
           )
           python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --donor-ram-gb 1 --sessions 2
+          python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-ram-gb 1 --sessions 2
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --repeat-cached --clear-cached --expect-metrics --expect-calibration
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --kill-donor
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --expect-selected-no-fit

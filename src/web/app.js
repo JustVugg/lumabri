@@ -7,6 +7,8 @@ let partialNode = null;
 let operator = false, workspaceOpen = false, workspacePending = false, workspaceEpoch = 0;
 let workspaceExpires = 0;
 let management = false, managementBusy = false;
+let preparationReview = null, preparationBusy = false, preparationOperation = "";
+let preparationNames = new Map();
 const utf8 = new TextEncoder();
 const say = text => { $("notice").textContent = text; };
 const errors = {
@@ -63,6 +65,7 @@ function controls() {
   $("sign-out").disabled = busy || managementBusy;
   $("workspace-open").hidden = !operator || !token;
   $("workspace-open").disabled = busy;
+  $("preparation").hidden = !management || !token;
   $("prompt").disabled = !canSend;
   $("send").disabled = !canSend;
   $("stop").hidden = !busy;
@@ -277,6 +280,10 @@ $("sign-out").onclick = () => {
   navigation++; unsaved = false;
   token = ""; models = []; conversations = []; current = null;
   operator = false; management = false; closeWorkspace(); clearWorkspace();
+  preparationOperation = ""; preparationInvalidate();
+  $("prepare-form").hidden = true; $("prepare-models").replaceChildren(); $("prepare-nodes").replaceChildren();
+  $("prepare-status").textContent = ""; $("prepare-operation").replaceChildren(new Option("No operation selected", ""));
+  $("prepare-cancel").hidden = true;
   $("login").hidden = false; $("chat").hidden = true; $("composer-area").hidden = true; $("sign-out").hidden = true;
   $("identity").textContent = "Not connected"; $("app").classList.remove("connected");
   $("prompt").value = ""; renderModels(); renderHistory(); renderMessages(); say("");
@@ -439,7 +446,96 @@ $("workspace-open").onclick = () => {
   clearWorkspace(); $("workspace-status").textContent = "Reading the local service…";
   if (window.matchMedia("(max-width: 760px)").matches) sidebar(false);
   refreshWorkspace();
+  if (management) loadPreparations();
 };
+function preparationInvalidate() {
+  preparationReview = null; $("prepare-review").replaceChildren(); $("prepare-start").hidden = true;
+}
+function preparationCheck(parent, value, label, enabled = true) {
+  const row = document.createElement("label"), box = document.createElement("input");
+  row.className = "prepare-choice"; box.type = "checkbox"; box.value = value; box.disabled = !enabled;
+  row.append(box, document.createTextNode(label)); parent.append(row);
+}
+async function preparationTask(fn) {
+  if (!management || preparationBusy || managementBusy || !workspaceOpen) return;
+  preparationBusy = true; managementBusy = true; controls();
+  $("prepare-form").inert = true;
+  for (const id of ["prepare-catalogue", "prepare-preview", "prepare-start", "prepare-cancel", "prepare-operation"]) $(id).disabled = true;
+  const credential = token, epoch = workspaceEpoch;
+  const valid = () => credential === token && epoch === workspaceEpoch && workspaceOpen;
+  try { await fn(valid); } catch (error) { if (valid()) $("prepare-status").textContent = error.message; }
+  finally {
+    preparationBusy = false; managementBusy = false; controls();
+    $("prepare-form").inert = false;
+    for (const id of ["prepare-catalogue", "prepare-preview", "prepare-start", "prepare-cancel", "prepare-operation"]) $(id).disabled = false;
+  }
+}
+async function loadPreparations() {
+  return preparationTask(async valid => {
+    const data = await request("/api/v1/preparation"); if (!valid()) return;
+    const list = data.operations.sort((a, b) => b.updated_at - a.updated_at);
+    $("prepare-operation").replaceChildren(new Option("No operation selected", ""));
+    for (const entry of list) $("prepare-operation").add(new Option(`${entry.recorded_state} · ${entry.operation.slice(0, 12)} · ${entry.detail}`, entry.operation));
+    preparationOperation = list.some(entry => entry.operation === preparationOperation) ? preparationOperation : list[0]?.operation || "";
+    $("prepare-operation").value = preparationOperation;
+  });
+}
+$("prepare-catalogue").onclick = () => preparationTask(async valid => {
+  const catalogue = await request("/api/v1/catalogue"), workspace = await request("/api/v1/workspace");
+  if (!valid()) return;
+  preparationInvalidate(); $("prepare-models").replaceChildren(); $("prepare-nodes").replaceChildren();
+  preparationNames = new Map(workspace.nodes.map(node => [node.id, `${node.name} (${node.id.slice(0, 8)})`]));
+  for (const model of catalogue.models) preparationCheck($("prepare-models"), model.name,
+    `${model.name} · ${model.adapter} · ${gib(model.checkpoint_bytes)}${model.source_ready ? "" : " · source unavailable"}`, model.source_ready);
+  for (const node of workspace.nodes) preparationCheck($("prepare-nodes"), node.id, `${preparationNames.get(node.id)} · ${gib(node.ram_offered_bytes)} offered`);
+  $("prepare-form").hidden = false; $("prepare-status").textContent = "Nothing is selected automatically. Preview does not reserve memory.";
+});
+$("prepare-form").oninput = preparationInvalidate;
+$("prepare-form").onsubmit = event => {
+  event.preventDefault();
+  preparationTask(async valid => {
+    const selected = id => Array.from($(id).querySelectorAll("input:checked"), input => input.value);
+    const intent = {models: selected("prepare-models"), nodes: selected("prepare-nodes"),
+      context: Number($("prepare-context").value), sessions: Number($("prepare-sessions").value), max_new: Number($("prepare-output").value)};
+    if (!intent.models.length || !intent.nodes.length) throw new Error("Choose at least one model and one computer.");
+    preparationInvalidate();
+    const data = await request("/api/v1/preparation", "POST", {action: "preview", ...intent});
+    if (!valid()) return;
+    preparationReview = {intent, review: data.review};
+    for (const model of data.plan.models) workspaceCard($("prepare-review"), model.name, model.slices.map(slice => [
+      `Layers ${slice.begin}–${slice.end - 1}`, `${preparationNames.get(data.plan.nodes[slice.node].id) || data.plan.nodes[slice.node].id.slice(0, 12)} · ${gib(slice.reserved_bytes)} reserved${slice.node === model.edge_node ? " · chat host" : ""}`]));
+    $("prepare-start").hidden = false; $("prepare-status").textContent = "Resident Segment plan. Speed is not calibrated. Review and request approval below.";
+  });
+};
+$("prepare-start").onclick = () => preparationTask(async valid => {
+  if (!preparationReview) return;
+  const reviewed = preparationReview;
+  if (!reviewed.operation) reviewed.operation = Array.from(crypto.getRandomValues(new Uint8Array(32)), byte => byte.toString(16).padStart(2, "0")).join("");
+  preparationOperation = reviewed.operation;
+  $("prepare-status").textContent = `Starting ${preparationOperation}. Closing this page will not cancel preparation.`;
+  const data = await request("/api/v1/preparation", "POST", {action: "start", operation: reviewed.operation, review: reviewed.review, ...reviewed.intent});
+  if (!valid()) return;
+  preparationInvalidate(); $("prepare-status").textContent = data.detail || "Request started. Participating donors must accept it.";
+  $("prepare-operation").add(new Option(`Current · ${preparationOperation.slice(0, 12)}`, preparationOperation));
+  $("prepare-operation").value = preparationOperation;
+});
+$("prepare-operation").onchange = () => { preparationOperation = $("prepare-operation").value; $("prepare-cancel").hidden = true; };
+async function preparationObserve() {
+  if (!preparationOperation || preparationBusy || managementBusy || !workspaceOpen || !management || document.hidden) return;
+  return preparationTask(async valid => {
+    const operation = preparationOperation;
+    const data = await request("/api/v1/preparation", "POST", {action: "status", operation});
+    if (!valid() || operation !== preparationOperation) return;
+    $("prepare-status").textContent = `${data.state.replaceAll("_", " ")} · ${data.detail}`;
+    $("prepare-cancel").hidden = !data.live || data.state !== "running";
+  });
+}
+$("prepare-cancel").onclick = () => preparationTask(async valid => {
+  if (!preparationOperation || !confirm("Cancel incomplete preparation? Models already ready will stay loaded.")) return;
+  const data = await request("/api/v1/preparation", "POST", {action: "cancel", operation: preparationOperation});
+  if (valid()) $("prepare-status").textContent = data.cancel_requested ? "Cancellation requested. Waiting for cleanup." : data.detail;
+});
+setInterval(preparationObserve, 3000);
 $("workspace-refresh").onclick = refreshWorkspace;
 setInterval(refreshWorkspace, 10000);
 setInterval(() => {

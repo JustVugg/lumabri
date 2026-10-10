@@ -5,6 +5,43 @@
 #include <assert.h>
 
 int main(int argc, char **argv) {
+    if (argc==2 && !strcmp(argv[1],"preparation-codec")) {
+        LmbPreparationRequest r; char text[4096],id[65],review[65];
+        memset(id,'a',64); id[64]=0; memset(review,'b',64); review[64]=0;
+        snprintf(text,sizeof text,"{\"action\":\"preview\",\"models\":[\"olmoe\"],\"nodes\":[\"%s\"],\"context\":128,\"sessions\":2,\"max_new\":8}",id);
+        assert(!lmb_preparation_parse(text,strlen(text),&r));
+        assert(r.node_count==1 && r.model_count==1 && r.sessions==2);
+        const char *invalid[]={"{}", "{\"action\":\"start\"}", "{\"action\":\"preview\",\"action\":\"start\"}",
+            "{\"action\":\"cancel\",\"operation\":\"../outside\"}", "{\"action\":\"preview\",\"path\":\"/tmp/model\"}"};
+        for (unsigned i=0;i<sizeof invalid/sizeof *invalid;i++) assert(lmb_preparation_parse(invalid[i],strlen(invalid[i]),&r));
+        const char *badmodels[]={"[]","[\"../model\"]","[\"olmoe\",\"olmoe\"]","[\"\"]","[\"a\\u0000b\"]"};
+        for (unsigned i=0;i<sizeof badmodels/sizeof *badmodels;i++) {
+            snprintf(text,sizeof text,"{\"action\":\"preview\",\"models\":%s,\"nodes\":[\"%s\"],\"context\":128,\"sessions\":2,\"max_new\":8}",badmodels[i],id);
+            assert(lmb_preparation_parse(text,strlen(text),&r));
+        }
+        snprintf(text,sizeof text,"{\"action\":\"start\",\"operation\":\"%s\",\"review\":\"%s\",\"models\":[\"olmoe\"],\"nodes\":[\"%s\"],\"context\":128,\"sessions\":2,\"max_new\":8}",id,review,id);
+        assert(!lmb_preparation_parse(text,strlen(text),&r));
+        uint8_t hash[32],other[32]; preparation_request_hash("tracker-a",&r,hash);
+        preparation_request_hash("tracker-b",&r,other); assert(memcmp(hash,other,32));
+        r.sessions++; preparation_request_hash("tracker-a",&r,other); assert(memcmp(hash,other,32));
+        char tmp[]="/tmp/lmb-prepare-codec-XXXXXX"; assert(mkdtemp(tmp));
+        int access=open(tmp,O_RDONLY|O_DIRECTORY),dir=preparation_dir(access); assert(dir>=0);
+        assert(!preparation_intent(dir,id,hash,1)); assert(preparation_intent(dir,id,hash,1)==1);
+        assert(preparation_intent(dir,id,other,1)==-1);
+        HomeServiceSnapshot s={0},loaded; strcpy(s.role,"prepare"); strcpy(s.tracker,"tracker-a");
+        strcpy(s.detail,"Waiting for approval"); s.state=HOME_SVC_RUNNING; assert(!lmb_unhex(s.instance,id,32));
+        assert(!preparation_save(dir,&s) && !preparation_load(dir,id,&loaded));
+        assert(!strcmp(loaded.detail,s.detail));
+        s.state=HOME_SVC_DONE; strcpy(s.detail,"All selected models ready");
+        assert(!preparation_save(dir,&s) && !preparation_load(dir,id,&loaded)); assert(loaded.state==HOME_SVC_DONE);
+        char file[80]; snprintf(file,sizeof file,"%s.state",id);
+        int corrupt=openat(dir,file,O_WRONLY); assert(corrupt>=0 && write(corrupt,"x",1)==1); close(corrupt);
+        assert(preparation_load(dir,id,&loaded)); assert(!unlinkat(dir,file,0));
+        assert(!symlinkat("/dev/null",dir,file)); assert(preparation_load(dir,id,&loaded)); assert(!unlinkat(dir,file,0));
+        snprintf(file,sizeof file,"%s.intent",id); assert(!unlinkat(dir,file,0));
+        close(dir); assert(!unlinkat(access,"preparations",AT_REMOVEDIR)); close(access); assert(!rmdir(tmp));
+        puts("PREPARATION CODEC: PASS"); return 0;
+    }
     if (argc==4 && !strcmp(argv[1],"resident-hold")) {
         assert(!lmb_secure_init()); LmbResidentPlan plan; Engine engine;
         assert(!home_resident_plan_read(argv[2],argv[3],&plan));

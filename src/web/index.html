@@ -40,6 +40,20 @@
         <p class="workspace-intro">Resource reports and saved allocations. With explicit management permission, inspect, drain, resume or release an approved allocation. Changes require confirmation; new models still require preparation and donor approval.</p>
         <p id="workspace-status" role="status"></p>
         <div id="workspace-summary" class="workspace-summary"></div>
+        <section id="preparation" hidden aria-label="Prepare resident models">
+          <h2>Prepare models</h2>
+          <p class="muted">Choose local checkpoints and authorized computers. Review the placement before sending requests. Every participating donor must approve.</p>
+          <button id="prepare-catalogue" class="text-button">Choose models and computers</button>
+          <form id="prepare-form" hidden>
+            <div class="workspace-grid"><fieldset><legend>Models</legend><div id="prepare-models"></div></fieldset><fieldset><legend>Computers</legend><div id="prepare-nodes"></div></fieldset></div>
+            <div class="prepare-options"><label>Context <input id="prepare-context" type="number" min="1" max="131072" value="512" required></label><label>Sessions <input id="prepare-sessions" type="number" min="1" max="8" value="1" required></label><label>Output limit <input id="prepare-output" type="number" min="1" max="16384" value="128" required></label></div>
+            <button id="prepare-preview" class="text-button" type="submit">Review placement</button>
+          </form>
+          <div id="prepare-review" class="workspace-grid"></div>
+          <button id="prepare-start" class="primary" hidden>Request donor approval</button>
+          <label class="prepare-history" for="prepare-operation">Preparation history</label><select id="prepare-operation"><option value="">No operation selected</option></select>
+          <p id="prepare-status" role="status"></p><button id="prepare-cancel" class="text-button danger" hidden>Cancel preparation</button>
+        </section>
         <h2>Computers</h2><div id="workspace-nodes" class="workspace-grid"></div>
         <h2>Managed models</h2><div id="workspace-models" class="workspace-grid"></div>
         <h2>Saved allocations</h2><p class="muted">An allocation is not a health check. Hosts and approvals are checked again before each request.</p>
