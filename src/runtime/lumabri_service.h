@@ -28,6 +28,15 @@ typedef struct {
     uint8_t allocation_set[32];
 } HomeServiceSnapshot;
 
+/* Optional durable observer for a preparation submitted through another
+ * interface. The keeper inherits only this explicit descriptor, never the
+ * HTTP connection. Observations are not authority to replay an operation. */
+typedef struct {
+    int fd;
+    uint8_t instance[32];
+    int (*save)(int fd, const HomeServiceSnapshot *snapshot);
+} HomePreparationObserver;
+
 typedef struct {
     int lock, listener, reply;
     char directory[1200], socket_path[1200], journal[1200];
@@ -35,6 +44,7 @@ typedef struct {
     uint8_t *last;
     size_t last_size;
     uint32_t batch_completed, batch_total; /* preparation only; detail is journalled */
+    HomePreparationObserver observer;
 } HomeService;
 
 static int home_service_role(const char *role) {
@@ -177,7 +187,10 @@ static int home_service_save(HomeService *s) {
     HomeServiceSnapshot journal = s->snapshot;
     journal.compute_active = journal.compute_queued = 0; journal.compute_grants = 0;
     if (home_service_pack(&b, &journal)) { free(b.p); return -1; }
-    if (b.len == s->last_size && s->last && !memcmp(b.p, s->last, b.len)) { free(b.p); return 0; }
+    if (b.len == s->last_size && s->last && !memcmp(b.p, s->last, b.len)) {
+        free(b.p);
+        return s->observer.save ? s->observer.save(s->observer.fd, &s->snapshot) : 0;
+    }
     char tmp[1240];
     if (checked_printf(tmp, sizeof tmp, "%s.XXXXXX", s->journal)) { free(b.p); return -1; }
     int fd = mkstemp(tmp), rc = -1;
@@ -202,6 +215,7 @@ static int home_service_save(HomeService *s) {
     }
     if (!rc) { free(s->last); s->last = b.p; s->last_size = b.len; }
     else free(b.p);
+    if (!rc && s->observer.save) rc = s->observer.save(s->observer.fd, &s->snapshot);
     return rc;
 }
 

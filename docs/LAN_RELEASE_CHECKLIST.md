@@ -120,7 +120,7 @@ below. Historical observations remain here as evidence, not current promises.
   regression. All eight native checks passed on `a3c7078` before normal merge
   `6d95f99`. This does not prepare new
   placements, change admission limits or implement automatic scaling.
-- [ ] Bounded resident-portfolio controller: opt-in management policy in the
+- [x] Bounded resident-portfolio controller (#211): opt-in management policy in the
   permanent API keeper, known-currency cost ceiling, measured joint latency,
   hysteresis/cooldown and switch-cost horizon. Full route/record hashes and
   a durable publication intent fence manual edits and reconcile interrupted
@@ -128,9 +128,22 @@ below. Historical observations remain here as evidence, not current promises.
   automatic selection after host drain, actual subsequent generation,
   service restart, manual revision hold, missing evidence and disabling with
   the route registry unavailable. API regression and focused ASan/UBSan/leak
-  tests pass. Native CI remains required. This only routes among approved
+  tests pass. All eight native checks passed on `7a43173` before normal merge
+  `01e6e98`. This only routes among approved
   resident candidates; it does not prepare/retire capacity or demonstrate
   billed savings. See [policy scope and commands](PORTFOLIO_POLICY.md).
+
+- [ ] Shared model preparation: management catalogue, exact reviewed plans,
+  explicit selected nodes, per-model donor consent, persistent idempotent
+  operation receipts, status/cancel and web controls. The TUI and API use the
+  same detached preparation keeper; READY models survive a later rejection.
+  Local reduced OLMoE passes completion/rejection/cancellation through HTTP,
+  real browser review/start/cancel, API and manager restart, repeat-submit
+  without duplicate allocations, and real inference from each retained model.
+  The original joint TUI flow and API isolation regression pass; focused
+  ASan/UBSan/leak checks pass. Native CI remains required before release.
+  This does not create cloud resources or grant inference access implicitly.
+  See [preparation API](MODEL_PREPARATION_API.md).
 
 - [x] Runtime/preflight PR #151: installed engine thread-capacity query; no-OpenMP
   single-thread execution; adaptive RAM reserve; acknowledged actionable

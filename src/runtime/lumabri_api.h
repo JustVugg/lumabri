@@ -1,6 +1,6 @@
-/* Authenticated loopback gateway to ALREADY approved resident allocations.
- * One bounded child per HTTP request. No model loading, donor approval,
- * endpoint supplied by clients or shared Engine globals. Private transcripts
+/* Authenticated loopback gateway. Chat uses ALREADY approved allocations;
+ * management can prepare reviewed plans through the existing consent keeper.
+ * One bounded child per HTTP request. No client-supplied endpoints or shared Engine globals. Private transcripts
  * are separate from model authority and engine conversation state.
  * Requires the controller's Engine/template and resident-plan helpers. */
 #ifndef LUMABRI_API_H
@@ -121,6 +121,7 @@ static int api_find_plan(const char *tracker, const uint8_t allocation[32], LmbR
 #include "lumabri_retirement.h"
 #include "lumabri_workspace.h"
 #include "lumabri_management.h"
+#include "lumabri_preparation_api.h"
 /* The local TUI has the process owner's authority, not a borrowed web user's
  * token. It invokes the same durable operation with a short observation
  * deadline; an interrupted observation never falls back to forced release. */
@@ -371,7 +372,8 @@ static void api_connection(int fd, int access_dir, unsigned port, const char *tr
         (!request.path[history_prefix] || request.path[history_prefix]=='/');
     int capacity_apply=!strcmp(request.path,"/api/v1/capacity/apply");
     int policy=!strcmp(request.path,"/api/v1/portfolio-policy");
-    int management=policy || capacity_apply || !strncmp(request.path,"/api/v1/allocations/",20);
+    int preparation=!strcmp(request.path,"/api/v1/preparation");
+    int management=preparation || policy || capacity_apply || !strncmp(request.path,"/api/v1/allocations/",20);
     if (management && !strcmp(request.method,"POST") && !lmb_management_allows(access_dir,&user))
         api_error(fd,403,"management_permission_required");
     else if (!strcmp(request.method,"GET") && !strcmp(request.path,"/api/v1/session") && !request.length) {
@@ -383,7 +385,15 @@ static void api_connection(int fd, int access_dir, unsigned port, const char *tr
         if (lmb_operator_allows(access_dir,&user)) api_policy_http(fd,access_dir,tracker,NULL,0);
         else api_error(fd,403,"operator_permission_required");
     }
-    else if (management && !capacity_apply && !policy && !strcmp(request.method,"GET") && !request.length)
+    else if (!strcmp(request.method,"GET") && !strcmp(request.path,"/api/v1/catalogue") && !request.length) {
+        if (lmb_operator_allows(access_dir,&user)) api_preparation_catalogue(fd,tracker);
+        else api_error(fd,403,"operator_permission_required");
+    }
+    else if (preparation && !strcmp(request.method,"GET") && !request.length) {
+        if (lmb_management_allows(access_dir,&user)) api_preparation_list(fd,access_dir,tracker);
+        else api_error(fd,403,"management_permission_required");
+    }
+    else if (management && !capacity_apply && !policy && !preparation && !strcmp(request.method,"GET") && !request.length)
         api_management(fd,access_dir,tracker,&user,&request,NULL,0);
     else if (!strcmp(request.method,"GET") && !strcmp(request.path,"/api/v1/workspace") && !request.length) {
         if (lmb_operator_allows(access_dir,&user)) (void)api_workspace(fd,access_dir,tracker);
@@ -392,7 +402,7 @@ static void api_connection(int fd, int access_dir, unsigned port, const char *tr
         api_models(fd,access_dir,tracker,&user);
     else if (history && !strcmp(request.method,"GET") && !request.length)
         api_history(fd,access_dir,&user,&request,NULL,0);
-    else if (management && request.length>(policy ? 4096u : capacity_apply ? 2048u : 512u)) api_error(fd,413,"management_request_too_large");
+    else if (management && request.length>(preparation ? 8192u : policy ? 4096u : capacity_apply ? 2048u : 512u)) api_error(fd,413,"management_request_too_large");
     else if (((!strcmp(request.method,"POST") && (!strcmp(request.path,"/api/v1/chat") || management)) ||
               (history && (!strcmp(request.method,"POST") || !strcmp(request.method,"DELETE")))) &&
              request.has_length && request.length && request.json) {
@@ -408,6 +418,7 @@ static void api_connection(int fd, int access_dir, unsigned port, const char *tr
             }
             body[at]=0;
             if (at!=request.length) api_error(fd,408,"request_body_timeout");
+            else if (preparation) api_preparation(fd,access_dir,tracker,body,at);
             else if (policy) api_policy_http(fd,access_dir,tracker,body,at);
             else if (capacity_apply) api_capacity_apply_http(fd,access_dir,tracker,body,at);
             else if (management) api_management(fd,access_dir,tracker,&user,&request,body,at);
@@ -646,7 +657,7 @@ usage:
         "lumabri api user-add NAME\n"
         "lumabri api operator-grant NAME    read-only cluster visibility, no inference grant\n"
         "lumabri api operator-revoke NAME\n"
-        "lumabri api manage-grant NAME      allocation lifecycle control and visibility; no inference/history grant\n"
+        "lumabri api manage-grant NAME      preparation, allocation control and visibility; no inference/history grant\n"
         "lumabri api manage-revoke NAME\n"
         "lumabri api workspace [--tracker HOST:PORT]\n"
         "lumabri api portfolio-policy [CONFIG_JSON_FILE] [--tracker HOST:PORT]\n"
