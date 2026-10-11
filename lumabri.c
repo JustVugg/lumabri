@@ -6471,6 +6471,7 @@ static int cmd_doctor(int argc, char **argv) {
 static int home_managed_retire(const char *tracker, const uint8_t allocation[32]);
 #include "src/ui/lumabri_home_ui.h"
 #include "src/runtime/lumabri_api.h"
+#include "src/runtime/lumabri_donor_policy_cli.h"
 
 int main(int argc, char **argv) {
     (void)setlocale(LC_CTYPE, "");
@@ -6490,6 +6491,8 @@ int main(int argc, char **argv) {
         return cmd_api(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "service"))
         return cmd_service(argc - 2, argv + 2);
+    if (argc >= 2 && !strcmp(argv[1], "donor-policy"))
+        return cmd_donor_policy(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "models"))
         return cmd_models(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "worker"))

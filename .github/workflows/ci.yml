@@ -59,6 +59,7 @@ jobs:
           make test_portfolio CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           ./test_portfolio
           ./test_chat_ui service-codec
+          ./test_chat_ui donor-policy-codec
           ./test_chat_ui host-codec
           ./test_chat_ui resident-plan
           python3 tests/integration/household_service_test.py
@@ -235,6 +236,7 @@ jobs:
             python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint "$outcome" --donor-ram-gb 1 --sessions 2
             LUMABRI_TEST_BROWSER=1 python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint "$outcome" --api-prepare --donor-ram-gb 1 --sessions 2
           done
+          python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-policy --donor-ram-gb 1.5 --sessions 2
           make segment_budget_probe
           python3 tests/integration/planner_tensor_contract_test.py --family olmoe --model build/home-flow-models/olmoe-tiny
           make swarm_probe
@@ -514,6 +516,7 @@ jobs:
           )
           python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --donor-ram-gb 1 --sessions 2
           python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-ram-gb 1 --sessions 2
+          python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-policy --donor-ram-gb 1.5 --sessions 2
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --repeat-cached --clear-cached --expect-metrics --expect-calibration
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --kill-donor
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --expect-selected-no-fit

@@ -11,7 +11,7 @@ from pathlib import Path
 
 class PreparationAPI:
     def __init__(self, runtime, env, tracker, models, sessions):
-        self.runtime, self.env, self.tracker = runtime, env, tracker
+        self.runtime, self.env, self.tracker, self.models = runtime, env, tracker, models
         settings = Path(env["HOME"]) / ".lumabri/home.conf"
         settings.write_text("\n".join(f"models={models}" if line.startswith("models=") else line
                                       for line in settings.read_text().splitlines()) + "\n")
@@ -147,4 +147,69 @@ class PreparationAPI:
         assert status == 200 and len(history["operations"]) == 1, history
         assert history["operations"][0]["operation"] == self.operation
         (Path(self.env["HOME"]).parent / "preparation-api.json").write_text(json.dumps(result, indent=2))
+        self.cli("stop")
+
+    def reload_authorized(self, until):
+        self.cli("start", "--tracker", self.tracker, "--port", str(self.port))
+        status, before = self.http("/api/v1/workspace")
+        assert status == 200, before
+        name = self.start_request["models"][0]
+        original = next(a for a in before["allocations"] if a["name"].endswith("-" + name))
+        nodes = sorted({r["node"] for r in original["ranges"]})
+        before_ids = {a["id"] for a in before["allocations"]}
+        def release():
+            result = json.loads(self.cli("retire", original["id"], "--tracker", self.tracker))
+            return result["state"] == "released"
+        until(release, "original allocation did not retire", 60)
+        def inventory_ready():
+            code, now = self.http("/api/v1/workspace")
+            assert code == 200, now
+            # Saved plans are history, not live reservations. Retirement
+            # retains its plan so lost acknowledgements can be reconciled.
+            expected = {node: sum(a["id"] != original["id"] and any(r["node"] == node for r in a["ranges"])
+                                  for a in before["allocations"]) for node in nodes}
+            reports = {n["id"]: n["workload"] for n in now["nodes"]}
+            return all(reports.get(node) is not None and reports[node]["allocations"] == expected[node] for node in nodes)
+        until(inventory_ready, "retirement not reflected in inventory", 30)
+        intent = {**{k: self.start_request[k] for k in ("context", "sessions", "max_new")}, "models": [name], "nodes": nodes}
+        status, preview = self.http("/api/v1/preparation", {"action": "preview", **intent})
+        if status != 200:
+            args = [str(self.runtime / "lumabri"), "models", "--models-dir", str(self.models), "--tracker", self.tracker,
+                    "--json", "--context", str(intent["context"]), "--sessions", str(intent["sessions"]), "--together", name]
+            for node in nodes:
+                args += ["--node", node]
+            diagnostic = subprocess.run(args, env=self.env, text=True, capture_output=True, timeout=30)
+            raise AssertionError((preview, self.http("/api/v1/workspace"), diagnostic.stdout, diagnostic.stderr))
+        operation = secrets.token_hex(32)
+        status, started = self.http("/api/v1/preparation", {"action": "start", "review": preview["review"], "operation": operation, **intent})
+        assert status == 202, started
+        # No owner command or terminal approval between this start and READY.
+        def ready():
+            code, state = self.http("/api/v1/preparation", {"action": "status", "operation": operation})
+            assert code == 200 and state["state"] != "failed", state
+            return state["state"] == "done"
+        until(ready, "authorized placement did not reload automatically", 120)
+        status, after = self.http("/api/v1/workspace")
+        assert status == 200 and len(after["allocations"]) == len(before["allocations"]) + 1
+        added = [a for a in after["allocations"] if a["id"] not in before_ids]
+        assert len(added) == 1 and added[0]["name"].endswith("-" + name), after
+        self.repeat_intent = intent
+        self.cli("stop")
+        return added[0]["name"]
+
+    def duplicate_offer(self):
+        self.cli("start", "--tracker", self.tracker, "--port", str(self.port))
+        status, preview = self.http("/api/v1/preparation", {"action": "preview", **self.repeat_intent})
+        assert status == 200, preview
+        operation = secrets.token_hex(32)
+        status, state = self.http("/api/v1/preparation", {"action": "start", "review": preview["review"],
+            "operation": operation, **self.repeat_intent})
+        assert status == 202, state
+        return operation
+
+    def cancel_operation(self, operation, until):
+        status, cancelled = self.http("/api/v1/preparation", {"action": "cancel", "operation": operation})
+        assert status == 200 and cancelled["cancel_requested"], cancelled
+        until(lambda: self.http("/api/v1/preparation", {"action": "status", "operation": operation})[1]["state"] == "failed",
+              "over-quota preparation did not cancel", 30)
         self.cli("stop")

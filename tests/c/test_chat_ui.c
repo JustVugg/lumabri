@@ -5,6 +5,73 @@
 #include <assert.h>
 
 int main(int argc, char **argv) {
+    if (argc==2 && !strcmp(argv[1],"donor-content-check")) {
+        assert(!lmb_secure_init());
+        HomeServiceSnapshot s; uint8_t identity[32];
+        assert(!home_service_query("donor",HOME_SVC_STATUS,NULL,&s) && s.has_offer && s.phase==LMB_HOME_PENDING);
+        assert(!home_offer_content(&s.offer,identity) && lmb_home_nonzero(identity,32));
+        assert(memcmp(identity,s.offer.model_root,32));
+        LmbHomeOffer changed=s.offer; changed.model_root[0]^=1;
+        assert(home_offer_content(&changed,identity) && !lmb_home_nonzero(identity,32));
+        changed=s.offer; changed.requester[0]^=1;
+        assert(home_offer_content(&changed,identity) && !lmb_home_nonzero(identity,32));
+        changed=s.offer; changed.model_bytes++;
+        assert(home_offer_content(&changed,identity) && !lmb_home_nonzero(identity,32));
+        puts("DONOR CONTENT: PASS (signed content, routing-root, signer and size fences)"); return 0;
+    }
+    if (argc==2 && !strcmp(argv[1],"donor-policy-codec")) {
+        LmbDonorPolicy p={.revision=1,.enabled=1,.allocations=2,.issued=(uint64_t)time(NULL)};
+        p.expires=p.issued+600; p.donor_instance[0]=1;
+        LmbHomeOffer *o=&p.limit;
+        o->id[0]=1; o->requester[0]=2; o->edge_peer[0]=3; o->model_root[0]=4;
+        strcpy(o->model,"tiny-olmoe"); strcpy(o->model_type,"olmoe"); strcpy(o->tracker,"127.0.0.1:7300");
+        o->begin=0; o->end=2; o->layers=4; o->context=64; o->threads=1; o->max_new=16;
+        o->ram_bytes=256u<<20; o->disk_bytes=128u<<20; o->model_bytes=64u<<20;
+        assert(!lmb_donor_policy_scope(o,p.id) && lmb_donor_policy_valid(&p));
+        LmbHomeOffer next=*o; next.id[0]=99; strcpy(next.model,"new-allocation");
+        assert(lmb_donor_policy_allows(&p,&next,p.donor_instance,p.issued,0,0));
+        assert(!lmb_donor_policy_allows(&p,&next,p.donor_instance,p.issued,2,0));
+        assert(!lmb_donor_policy_allows(&p,&next,p.donor_instance,p.expires,0,0));
+        assert(!lmb_donor_policy_allows(&p,&next,p.donor_instance,p.issued-1,0,0));
+        assert(!lmb_donor_policy_allows(&p,&next,p.donor_instance,p.issued,1,p.limit.ram_bytes*2));
+        uint8_t instance[32]={9}; assert(!lmb_donor_policy_allows(&p,&next,instance,p.issued,0,0));
+        next.requester[0]++; assert(!lmb_donor_policy_allows(&p,&next,p.donor_instance,p.issued,0,0)); next=*o;
+        next.model_root[0]++; assert(!lmb_donor_policy_allows(&p,&next,p.donor_instance,p.issued,0,0)); next=*o;
+        next.edge_peer[0]++; assert(!lmb_donor_policy_allows(&p,&next,p.donor_instance,p.issued,0,0)); next=*o;
+        next.end++; assert(!lmb_donor_policy_allows(&p,&next,p.donor_instance,p.issued,0,0)); next=*o;
+        next.ram_bytes++; assert(!lmb_donor_policy_allows(&p,&next,p.donor_instance,p.issued,0,0)); next=*o;
+        next.context++; assert(!lmb_donor_policy_allows(&p,&next,p.donor_instance,p.issued,0,0)); next=*o;
+        next.threads++; assert(!lmb_donor_policy_allows(&p,&next,p.donor_instance,p.issued,0,0)); next=*o;
+        next.sessions=2; assert(!lmb_donor_policy_allows(&p,&next,p.donor_instance,p.issued,0,0));
+        LmbBuf bytes={0}; LmbDonorPolicy decoded;
+        assert(!lmb_donor_policy_encode(&p,&bytes) && !lmb_donor_policy_decode(bytes.p,bytes.len,&decoded));
+        bytes.p[bytes.len-1]^=1; assert(lmb_donor_policy_decode(bytes.p,bytes.len,&decoded)); free(bytes.p);
+        char tmp[]="/tmp/lmb-donor-policy-XXXXXX",path[1200]; assert(mkdtemp(tmp));
+        char *saved_home=getenv("HOME") ? strdup(getenv("HOME")) : NULL;
+        assert(!setenv("HOME",tmp,1) && !home_service_directory(path,sizeof path));
+        int dir=lmb_donor_policy_dir(path,1); assert(dir>=0);
+        int lock=lmb_donor_policy_lock(dir); assert(lock>=0);
+        assert(!lmb_donor_policy_store(dir,&p,0)); assert(lmb_donor_policy_store(dir,&p,0));
+        HomeDonor donor={0},parked[1]={0}; donor.transaction.offer=*o; donor.transaction.phase=LMB_HOME_PENDING;
+        memcpy(donor.policy_instance,p.donor_instance,32); donor.parked=parked; donor.park_capacity=1;
+        memcpy(donor.policy_content,o->model_root,32); memcpy(parked[0].policy_content,o->model_root,32);
+        assert(home_donor_policy_candidate(&donor,&decoded));
+        parked[0].transaction.offer=*o; parked[0].transaction.reservation_held=1;
+        assert(home_donor_policy_candidate(&donor,&decoded));
+        p.allocations=1; p.revision=2; assert(!lmb_donor_policy_store(dir,&p,1));
+        assert(!home_donor_policy_candidate(&donor,&decoded)); parked[0].transaction.reservation_held=0;
+        memcpy(donor.admission_policy,p.id,32); donor.admission_policy_revision=p.revision;
+        assert(!home_donor_policy_commit(&donor));
+        p.enabled=0; p.revision=3; assert(!lmb_donor_policy_store(dir,&p,2));
+        assert(home_donor_policy_commit(&donor)); assert(!home_donor_policy_candidate(&donor,&decoded));
+        donor.admission_policy_revision=0; assert(!home_donor_policy_commit(&donor));
+        close(lock); char hex[65],name[80]; lmb_hex(hex,p.id,32); snprintf(name,sizeof name,"%s.policy",hex);
+        assert(!unlinkat(dir,name,0)); assert(!unlinkat(dir,"lock",0)); close(dir);
+        char child[1280]; snprintf(child,sizeof child,"%s/donor-policies",path); assert(!rmdir(child));
+        assert(!rmdir(path)); snprintf(path,sizeof path,"%s/.lumabri",tmp); assert(!rmdir(path)); assert(!rmdir(tmp));
+        if (saved_home) { assert(!setenv("HOME",saved_home,1)); free(saved_home); } else assert(!unsetenv("HOME"));
+        puts("DONOR POLICY: PASS"); return 0;
+    }
     if (argc==2 && !strcmp(argv[1],"preparation-codec")) {
         LmbPreparationRequest r; char text[4096],id[65],review[65];
         memset(id,'a',64); id[64]=0; memset(review,'b',64); review[64]=0;
