@@ -82,7 +82,8 @@ static int home_joint_prepare_next(const LmbTuiState *reviewed, LmbTuiState *cur
     return (int)index;
 }
 
-static int home_request_portfolio(const LmbTuiState *reviewed) {
+static int home_prepare_portfolio_begin(const LmbTuiState *reviewed,
+    const HomePreparationObserver *observer, HomeServiceSnapshot *started) {
     home_error[0] = 0;
     if (home_service_foreground() || !home_resident_required())
         return home_fail("Joint preparation requires the resident background service.");
@@ -101,6 +102,10 @@ static int home_request_portfolio(const LmbTuiState *reviewed) {
     if (home_service_open(&job, "prepare")) {
         free(current); return home_fail("Another preparation is running. No second operation was requested.");
     }
+    if (observer) {
+        job.observer = *observer;
+        memcpy(job.snapshot.instance, observer->instance, 32);
+    }
     job.batch_total = reviewed->joint.plan.model_count;
     snprintf(job.snapshot.name, sizeof job.snapshot.name, "Joint resident plan");
     snprintf(job.snapshot.tracker, sizeof job.snapshot.tracker, "%s", reviewed->tracker);
@@ -108,7 +113,7 @@ static int home_request_portfolio(const LmbTuiState *reviewed) {
     if (home_service_save(&job)) {
         home_service_close(&job); free(current); return home_fail("Cannot persist the joint preparation operation.");
     }
-    int detached = home_service_detach(&job, -1);
+    int detached = home_service_detach(&job, observer ? observer->fd : -1);
     if (detached < 0) { home_service_close(&job); free(current); return home_fail("Cannot start joint preparation keeper."); }
     if (!detached) {
         home_background_job = &job;
@@ -136,8 +141,15 @@ static int home_request_portfolio(const LmbTuiState *reviewed) {
         home_service_answer(&job); home_service_close(&job); free(current); _exit(rc != 0);
     }
     free(current);
+    *started = job.snapshot; free(job.last);
+    return 0;
+}
+
+static int home_request_portfolio(const LmbTuiState *reviewed) {
+    HomeServiceSnapshot started;
+    if (home_prepare_portfolio_begin(reviewed, NULL, &started)) return 1;
     HomeServiceSnapshot status;
-    int rc = home_prepare_wait(&job.snapshot, "Prepare selected models together", &status);
+    int rc = home_prepare_wait(&started, "Prepare selected models together", &status);
     return rc < 0 ? 1 : 0;
 }
 #endif

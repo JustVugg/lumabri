@@ -1693,8 +1693,8 @@ static int home_prepare_wait(const HomeServiceSnapshot *expected, const char *la
     return rc;
 }
 
-static int home_request_chat(LmbTuiState *st, int selected) {
-    if (home_service_foreground()) return home_request_chat_direct(st, selected);
+static int home_prepare_begin(LmbTuiState *st, int selected,
+    const HomePreparationObserver *observer, HomeServiceSnapshot *started) {
     if (!home_resident_required()) return home_fail("Background preparation requires resident weights. Disk-cache diagnostics require LUMABRI_HOME_FOREGROUND=1.");
     g_stopping = 0; install_chat_signal_handlers();
     if (selected < 0 || selected >= st->nmodels || home_service_ensure())
@@ -1702,11 +1702,15 @@ static int home_request_chat(LmbTuiState *st, int selected) {
     HomeService job;
     if (home_service_open(&job, "prepare"))
         return home_fail("Another preparation is already running. See the background operation in Resident models; no second allocation was requested.");
+    if (observer) {
+        job.observer = *observer;
+        memcpy(job.snapshot.instance, observer->instance, 32);
+    }
     snprintf(job.snapshot.name, sizeof job.snapshot.name, "%s", st->models[selected].name);
     snprintf(job.snapshot.tracker, sizeof job.snapshot.tracker, "%s", st->tracker);
     snprintf(job.snapshot.detail, sizeof job.snapshot.detail, "Preparing the reviewed plan; donor approval is still required");
     if (home_service_save(&job)) { home_service_close(&job); return home_fail("Cannot persist this operation."); }
-    int detached = home_service_detach(&job, -1);
+    int detached = home_service_detach(&job, observer ? observer->fd : -1);
     if (detached < 0) { home_service_close(&job); return home_fail("Cannot start the preparation keeper."); }
     if (!detached) {
         home_background_job = &job;
@@ -1716,8 +1720,16 @@ static int home_request_chat(LmbTuiState *st, int selected) {
         if (home_service_save(&job)) rc = 1;
         home_service_answer(&job); home_service_close(&job); _exit(rc);
     }
+    *started = job.snapshot; free(job.last);
+    return 0;
+}
+
+static int home_request_chat(LmbTuiState *st, int selected) {
+    if (home_service_foreground()) return home_request_chat_direct(st, selected);
+    HomeServiceSnapshot started;
+    if (home_prepare_begin(st, selected, NULL, &started)) return 1;
     HomeServiceSnapshot status;
-    int rc = home_prepare_wait(&job.snapshot, st->models[selected].name, &status);
+    int rc = home_prepare_wait(&started, st->models[selected].name, &status);
     if (rc) return rc < 0 ? 1 : 0;
     LmbResidentPlan saved;
     if (home_resident_plan_load(st->tracker, &saved) || strcmp(saved.model, status.name))

@@ -4,6 +4,10 @@ For the opt-in permanent controller over measured resident portfolios, see
 [bounded portfolio policy](PORTFOLIO_POLICY.md). It uses the same atomic
 application operation below; it does not grant new allocation or cloud authority.
 
+Management credentials can also [prepare resident models](MODEL_PREPARATION_API.md)
+from the web catalogue or API. This shares the TUI's preparation keeper and
+requires explicit computer selection, a reviewed plan and separate donor approval.
+
 ## Cluster workspace
 
 The bundled browser has an operator-only **Computers & models** view. Explicitly
@@ -457,8 +461,9 @@ rejected. Idle connections are closed during drain; admitted turns finish.
 
 The resident-library TUI retains its local owner authority and uses that same
 typed coordinator and journal, not a second release algorithm. This does not
-yet route every TUI operation through HTTP, add remote model preparation or
-implement an automatic scaling policy. Share-resources service stop remains
+yet route every TUI operation through HTTP. Reviewed model preparation now has
+a shared keeper and management API; automatic capacity creation remains separate.
+Share-resources service stop remains
 an explicit owner operation which can interrupt its allocations.
 
 ### Bounded, visible response recovery
@@ -703,8 +708,9 @@ the user's message alongside the streaming reply, with Stop, New conversation,
 collapsible history, JSON export and confirmed deletion. Model selection is
 fixed within a conversation. The page sends at most 256 generated tokens per
 turn, reduced to the approved model limit. Missing/unloaded allocations are
-reported; the web page cannot authorize preparation or silently substitute a
-different model. Replaying a longer conversation can exhaust the approved
+reported; the chat cannot silently prepare or substitute a different model.
+Explicit management preparation is available separately in Computers & models,
+and does not grant inference permission. Replaying a longer conversation can exhaust the approved
 context, in which case the request fails visibly; history is not trimmed.
 
 History is saved on the gateway's computer, **not end-to-end encrypted from

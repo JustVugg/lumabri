@@ -32,10 +32,13 @@ def main():
     parser.add_argument("--portfolio-policy", action="store_true", help="exercise bounded permanent policy with explicit test machine prices")
     parser.add_argument("--joint", choices=("complete", "reject", "cancel"), help="select and prepare two models together from the TUI")
     parser.add_argument("--sessions", type=int, choices=(1, 2, 4, 8), default=1)
+    parser.add_argument("--api-prepare", action="store_true", help="apply the joint plan through authenticated management API")
     parser.add_argument("--donor-ram-gb", type=float, default=0.5)
     parser.add_argument("--prepare-timeout", type=int, default=180)
     parser.add_argument("--measure-sessions", action="store_true", help="also benchmark the single-slot baseline")
     args = parser.parse_args()
+    if args.api_prepare and not args.joint:
+        parser.error("--api-prepare requires --joint")
     if args.api and not (args.multi_model and args.keep_requester):
         parser.error("--api requires --multi-model and --keep-requester")
     if args.replicas and not args.api:
@@ -152,28 +155,35 @@ def main():
         config = json.loads((combined / "model-b/config.json").read_text())
         config["_lumabri_test_variant"] = "joint-second-checkpoint"
         (combined / "model-b/config.json").write_text(json.dumps(config))
-        chat = Terminal("chatter", ["models", "--models-dir", str(combined), "--tracker", tracker,
+        api_prepare = None
+        if args.api_prepare:
+            from preparation_api_test import PreparationAPI
+            api_prepare = PreparationAPI(runtime, env("chatter"), tracker, combined, args.sessions)
+            chat = None
+        else:
+            chat = Terminal("chatter", ["models", "--models-dir", str(combined), "--tracker", tracker,
                                    "--context", "128", "--max-new", "8", "--sessions", str(args.sessions)])
-        until(lambda: "3 computers visible" in current_frame(chat), "joint inventory missing")
-        chat.send("\t")
-        until(lambda: "Nothing is selected automatically" in current_frame(chat), "joint node view missing")
-        chat.send("\x1b[B\r")
-        until(lambda: "1 selected" in current_frame(chat), "joint first donor selection missing")
-        chat.send("\x1b[B\r")
-        until(lambda: "2 selected" in current_frame(chat), "joint second donor selection missing")
-        chat.send("\t ")
-        until(lambda: "[✓] model-" in current_frame(chat), "first model checkbox missing")
-        chat.send("\x1b[B ")
-        until(lambda: "[✓] model-a" in current_frame(chat) and "[✓] model-b" in current_frame(chat), "second model checkbox missing")
-        chat.send("/" + "\x1b[B" * 5 + "\r")
-        until(lambda: "Enter prepares this joint plan" in current_frame(chat) and
-              "model-a" in current_frame(chat) and "model-b" in current_frame(chat) and
-              "layers" in current_frame(chat), "reviewed joint placement missing")
-        assert all(service(name)["donor"]["model_count"] == 0 for name in ("a", "b")), "review created allocations"
-        chat.send("\r")
+            until(lambda: "3 computers visible" in current_frame(chat), "joint inventory missing")
+            chat.send("\t")
+            until(lambda: "Nothing is selected automatically" in current_frame(chat), "joint node view missing")
+            chat.send("\x1b[B\r")
+            until(lambda: "1 selected" in current_frame(chat), "joint first donor selection missing")
+            chat.send("\x1b[B\r")
+            until(lambda: "2 selected" in current_frame(chat), "joint second donor selection missing")
+            chat.send("\t ")
+            until(lambda: "[✓] model-" in current_frame(chat), "first model checkbox missing")
+            chat.send("\x1b[B ")
+            until(lambda: "[✓] model-a" in current_frame(chat) and "[✓] model-b" in current_frame(chat), "second model checkbox missing")
+            chat.send("/" + "\x1b[B" * 5 + "\r")
+            until(lambda: "Enter prepares this joint plan" in current_frame(chat) and
+                  "model-a" in current_frame(chat) and "model-b" in current_frame(chat) and
+                  "layers" in current_frame(chat), "reviewed joint placement missing")
+            assert all(service(name)["donor"]["model_count"] == 0 for name in ("a", "b")), "review created allocations"
+            chat.send("\r")
         until(lambda: any(service(n)["donor"]["phase"] == 1 for n in ("a", "b")), "joint first offer missing", 120)
         # The keeper owns the batch; the TUI is not its lifecycle owner.
-        chat.p.terminate(); until(lambda: chat.p.poll() is not None, "joint requester did not detach")
+        if chat:
+            chat.p.terminate(); until(lambda: chat.p.poll() is not None, "joint requester did not detach")
         library = tmp / "chatter/.lumabri/resident-plans"
         handled = set(); rejected = False; cancelled = False
         def drive():
@@ -190,9 +200,12 @@ def main():
                 if ready and args.joint == "reject":
                     terminal.send("\r"); rejected = True
                 elif ready and args.joint == "cancel":
-                    result = subprocess.run([str(runtime / "test_chat_ui"), "cancel-prepare"],
-                        env=env("chatter"), text=True, capture_output=True, timeout=20)
-                    assert result.returncode == 0, result.stderr
+                    if api_prepare:
+                        api_prepare.cancel()
+                    else:
+                        result = subprocess.run([str(runtime / "test_chat_ui"), "cancel-prepare"],
+                            env=env("chatter"), text=True, capture_output=True, timeout=20)
+                        assert result.returncode == 0, result.stderr
                     cancelled = True
                 else:
                     terminal.send("\x1b[A\r")
@@ -208,6 +221,8 @@ def main():
         assert args.joint != "cancel" or cancelled
         retained = sum(service(name)["donor"]["model_count"] for name in ("a", "b"))
         assert retained == expected, "incomplete allocation survived or a ready allocation was unloaded"
+        if api_prepare:
+            api_prepare.finish(args.joint == "complete")
         service("chatter", "restart")
         assert not list((tmp / "chatter").rglob("*.cal")), "preparation fabricated a speed"
         # READY is local; leased inventory arrives on the next heartbeat.
