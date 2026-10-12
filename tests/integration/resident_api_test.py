@@ -63,6 +63,7 @@ def verify_resident_api(runtime, env, tracker, first_model_name, artifacts, obse
         assert request("/api/v1/models", "wrong")[0] == 401
         assert request("/api/v1/workspace", "wrong")[0] == 401
         assert request("/api/v1/workspace", alice)[0] == 403
+        assert request("/api/v1/demand", alice)[0] == 403
         assert json.loads(request("/api/v1/session", alice)[1])["operator"] is False
         assert json.loads(request("/api/v1/session", operator)[1])["operator"] is True
         status, data = request("/api/v1/workspace", operator)
@@ -124,6 +125,21 @@ def verify_resident_api(runtime, env, tracker, first_model_name, artifacts, obse
         status, data = chat(alice, first["id"], "overflow " * 200)
         assert status == 200 and b"event: error" in data and b"event: done" not in data
         assert observed_plan.read_bytes() == before_rejected, "rejected generation changed the speed record"
+        deadline = time.monotonic() + 5
+        while True:
+            status, data = request("/api/v1/demand", operator)
+            demand = json.loads(data)
+            measured = next((m for m in demand.get("models", []) if m["id"] == first["id"]), None)
+            if measured and measured["failed"] and not measured["admitted"] and not measured["opening"]:
+                break
+            assert time.monotonic() < deadline, demand
+            time.sleep(.05)
+        assert status == 200 and demand["scope"] == "this_gateway_authorized_chat_only", demand
+        assert demand["telemetry_gaps"] == 0, demand
+        assert measured["completed"] >= 1 and measured["latency"]["completion_samples"] >= 1, measured
+        assert measured["latency"]["ttft_ms"]["p95"] > 0
+        assert measured["latency"]["completion_ms"]["p95"] >= measured["latency"]["ttft_ms"]["p95"]
+        assert "Real OLMoE API response" not in data.decode(), "demand leaked conversation text"
         status, data = request("/api/v1/workspace", operator)
         allocation = next(a for a in json.loads(data)["allocations"] if a["id"] == first["id"])
         assert status == 200 and allocation["observation"]["state"] == "measured", allocation
@@ -131,6 +147,7 @@ def verify_resident_api(runtime, env, tracker, first_model_name, artifacts, obse
         assert allocation["observation"]["prompt_tokens"] > 0 and allocation["observation"]["generated_tokens"] == 8
         cli("operator-revoke", "operator")
         assert request("/api/v1/workspace", operator)[0] == 403
+        assert request("/api/v1/demand", operator)[0] == 403
         assert json.loads(request("/api/v1/session", operator)[1])["operator"] is False
         cli("operator-grant", "operator")
         cli("revoke", "operator")

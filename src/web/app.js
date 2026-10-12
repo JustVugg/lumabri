@@ -384,6 +384,19 @@ function renderWorkspace(data) {
     ["Reporting computers", data.inventory_ok ? String(data.nodes.length) : "Unknown"],
     ["Saved allocations", String(data.allocations.length)],
     ["Managed model names", data.registry_ok ? String(data.models.length) : "Unknown"]]);
+  const demand = data.demand, demandFresh = demand && demand.snapshot_age_ms <= 1000;
+  workspaceCard($("workspace-summary"), "Gateway demand", [
+    ["Scope", "This gateway only · direct TUI chats are not counted"],
+    ["Observation", !demandFresh ? "Unavailable or stale" : demand.window_complete ?
+      "Last 60 seconds" : "Partial window — startup or telemetry gap"],
+    ["Live requests", demandFresh ? `${demand.models.reduce((n, m) => n + m.admitted, 0)} admitted · ${demand.models.reduce((n, m) => n + m.opening, 0)} opening` : "Unknown"]]);
+  const traffic = id => {
+    const m = demandFresh && demand.models.find(model => model.id === id);
+    if (!m) return [["Gateway activity", demandFresh ? "No recent activity observed" : "Unknown"]];
+    return [["Gateway requests", `${m.admitted} admitted · ${m.opening} opening (not a queue)`],
+      ["Window outcomes", `${m.completed} completed · ${m.capacity_rejected} capacity rejected · ${m.failed + m.interrupted} failed/interrupted · ${m.cancelled} cancelled`],
+      ["First text / completion p95", `${m.latency.ttft_ms ? m.latency.ttft_ms.p95.toFixed(0) + " ms" : "Unknown"} / ${m.latency.completion_ms ? m.latency.completion_ms.p95.toFixed(0) + " ms" : "Unknown"} · ${m.latency.completion_samples} successful samples`]];
+  };
   const names = new Map(data.nodes.map(node => [node.id, node.name]));
   for (const node of data.nodes) {
     const workload = node.workload;
@@ -402,7 +415,7 @@ function renderWorkspace(data) {
   for (const model of data.models) workspaceCard($("workspace-models"), model.name, [
     ["Adapter", model.adapter], ["Approved replica references", String(model.replicas)],
     ["Context / output limit", `${model.context} / ${model.max_tokens} tokens`],
-    ["Revision", String(model.revision)], ["Readiness", "Saved route; actual hosts checked on request"]]);
+    ["Revision", String(model.revision)], ["Readiness", "Saved route; actual hosts checked on request"], ...traffic(model.id)]);
   if (!data.models.length) $("workspace-models").textContent = data.registry_ok ? "No managed model names registered yet." : "Registry unavailable.";
   for (const allocation of data.allocations) {
     const observation = allocation.observation;
@@ -412,6 +425,7 @@ function renderWorkspace(data) {
       ["Adapter", allocation.adapter || "Unknown"], ["Speed", speed],
       ["Context / session limit", `${allocation.context} tokens / ${allocation.session_limit} configured slots`],
       ["Last preparation", allocation.preparation_seconds === null ? "Not measured" : `${allocation.preparation_seconds.toFixed(2)}s · approval and indexing excluded`],
+      ...traffic(allocation.id),
       ...allocation.ranges.map(range => [range.edge ? "Edge + layers" : "Layers",
         `${range.begin}–${range.end - 1} · ${names.get(range.node) || "Computer not reporting"} · ${gib(range.reserved_bytes)} reserved`])]);
     if (management && /^[0-9a-f]{64}$/.test(allocation.id)) {

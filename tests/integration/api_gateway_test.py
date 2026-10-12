@@ -47,12 +47,18 @@ def main():
             assert request("invalid")[0] == 401
             status, body = request(); assert status == 200 and json.loads(body) == {"schema": 1, "models": []}
             assert request(path="/api/v1/workspace")[0] == 403
+            assert request(path="/api/v1/demand")[0] == 403
             assert json.loads(request(path="/api/v1/session")[1])["operator"] is False
             assert cli("operator-grant", "alice").returncode == 0
+            status, body = request(path="/api/v1/demand")
+            demand = json.loads(body)
+            assert status == 200 and demand["models"] == [] and not demand["window_complete"]
+            assert demand["scope"] == "this_gateway_authorized_chat_only" and demand["telemetry_gaps"] == 0
             status, body = request(path="/api/v1/workspace")
             workspace = json.loads(body)
             assert status == 200 and workspace["inventory_ok"] is False and workspace["nodes"] == []
             assert workspace["registry_ok"] and workspace["models"] == [] and workspace["allocations"] == []
+            assert workspace["demand"]["instance"] == demand["instance"]
             management_path = "/api/v1/capacity/apply"
             json_headers = {"Content-Type": "application/json"}
             assert request(method="POST", path=management_path, body="{}", headers=json_headers)[0] == 403
@@ -72,6 +78,7 @@ def main():
             assert cli("manage-revoke", "alice").returncode == 0
             assert cli("operator-revoke", "alice").returncode == 0
             assert request(path="/api/v1/workspace")[0] == 403
+            assert request(path="/api/v1/demand")[0] == 403
             assert request(headers={"Origin": "http://evil.test"})[0] == 403
             assert request(headers={"Host": "evil.test"})[0] == 403
             assert request(method="POST", path="/api/v1/chat", body='{}')[0] == 400

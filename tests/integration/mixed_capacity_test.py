@@ -124,6 +124,18 @@ def verify_mixed_capacity(runtime, env, tracker, artifacts):
         report["inventory_after"] = snapshot()
         assert {a["id"] for a in report["inventory_before"]["allocations"]} == {
             a["id"] for a in report["inventory_after"]["allocations"]}, "benchmark changed resident allocations"
+        deadline = time.monotonic() + 5
+        while True:
+            demand = snapshot()["demand"]
+            if demand and all(not m["opening"] and not m["admitted"] for m in demand["models"]):
+                break
+            assert time.monotonic() < deadline, demand
+            time.sleep(.05)
+        assert demand["telemetry_gaps"] == 0 and demand["models"], demand
+        assert all(m["started"] == m["completed"] + m["capacity_rejected"] for m in demand["models"]), demand
+        assert sum(m["capacity_rejected"] for m in demand["models"]) > 0, demand
+        assert all(m["latency"]["completion_samples"] > 0 for m in demand["models"]), demand
+        report["demand_after_bursts"] = demand
         # The production C probe uses the same real gateway admission and
         # timing paths. Its bounded durable observations feed the planner;
         # these are not imported JSON fixtures or claims about full models.

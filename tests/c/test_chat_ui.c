@@ -5,6 +5,91 @@
 #include <assert.h>
 
 int main(int argc, char **argv) {
+    if (argc==2 && !strcmp(argv[1],"demand-codec")) {
+        LmbDemand *s=calloc(1,sizeof *s); assert(s); s->started_ms=1000;
+        LmbDemandWorker a={.model=-1},b={.model=-1};
+        LmbDemandEvent e={.sequence=1,.kind=LMB_DEMAND_START,.model={1}};
+        assert(!lmb_demand_event(s,&a,&e,1000));
+        assert(s->models[a.model].pending==1);
+        assert(!lmb_demand_event(s,&b,&e,1001));
+        assert(s->models[a.model].pending==2);
+        e.sequence=2; e.kind=LMB_DEMAND_ADMIT;
+        assert(!lmb_demand_event(s,&a,&e,1002));
+        assert(s->models[a.model].pending==1 && s->models[a.model].admitted==1);
+        e.kind=LMB_DEMAND_END; e.outcome=LMB_DEMAND_CAPACITY;
+        assert(!lmb_demand_event(s,&b,&e,1003));
+        e.sequence=3; e.outcome=LMB_DEMAND_COMPLETE; e.ttft_us=5000; e.completion_us=12000;
+        assert(!lmb_demand_event(s,&a,&e,1004));
+        LmbDemandSummary sum; int index=a.model;
+        lmb_demand_summary(&s->models[index],1005,&sum);
+        assert(sum.counts[LMB_DEMAND_STARTED]==2 && sum.counts[LMB_DEMAND_ADMITTED]==1);
+        assert(sum.counts[LMB_DEMAND_CAPACITY]==1 && sum.counts[LMB_DEMAND_COMPLETE]==1);
+        assert(sum.ttft_samples==1 && sum.ttft_p95_us==5000 && sum.completion_p50_us==12000);
+        assert(!s->models[index].pending && !s->models[index].admitted);
+        assert(lmb_demand_event(s,&a,&e,1006)); /* duplicate END cannot double-count */
+        lmb_demand_reap(s,&a,0,1007); lmb_demand_reap(s,&b,0,1007);
+        e=(LmbDemandEvent){.sequence=1,.kind=LMB_DEMAND_START,.model={2}};
+        assert(!lmb_demand_event(s,&a,&e,2000)); int other=a.model;
+        e.sequence=3; e.kind=LMB_DEMAND_END;
+        assert(lmb_demand_event(s,&a,&e,2001)); /* lost ADMIT marks evidence incomplete */
+        lmb_demand_reap(s,&a,1,2002);
+        lmb_demand_summary(&s->models[other],2003,&sum);
+        assert(sum.counts[LMB_DEMAND_INTERRUPTED]==1 && !s->models[other].pending);
+        assert(!sum.ttft_samples && !sum.completion_samples);
+        assert(!s->uncertain_workers);
+        lmb_demand_summary(&s->models[index],62000,&sum);
+        assert(!sum.counts[LMB_DEMAND_COMPLETE] && !sum.completion_samples);
+        /* Idle slots can be reused only after their window; an active model
+         * survives arbitrarily long turns and never gets mistaken for idle. */
+        e=(LmbDemandEvent){.sequence=1,.kind=LMB_DEMAND_START,.model={3}};
+        assert(!lmb_demand_event(s,&a,&e,62000));
+        int active=a.model;
+        for (unsigned i=4;i<LMB_DEMAND_MODELS+4;i++) {
+            uint8_t id[32]={(uint8_t)i}; (void)lmb_demand_model(s,id,150000);
+        }
+        assert(s->models[active].pending==1 && s->models[active].id[0]==3);
+        lmb_demand_reap(s,&a,1,150001);
+        /* Recent histories fill the fixed table. Reject a 65th identity
+         * rather than silently dropping a live/recent model's evidence. */
+        memset(s,0,sizeof *s);
+        for (unsigned i=0;i<LMB_DEMAND_MODELS;i++) {
+            e=(LmbDemandEvent){.sequence=1,.kind=LMB_DEMAND_START,.model={(uint8_t)(i+1)}};
+            a=(LmbDemandWorker){.model=-1}; assert(!lmb_demand_event(s,&a,&e,1000));
+            e.sequence=2; e.kind=LMB_DEMAND_END; e.outcome=LMB_DEMAND_CAPACITY;
+            assert(!lmb_demand_event(s,&a,&e,1001)); lmb_demand_reap(s,&a,0,1002);
+        }
+        e=(LmbDemandEvent){.sequence=1,.kind=LMB_DEMAND_START,.model={100}};
+        assert(lmb_demand_event(s,&a,&e,1003) && s->uncertain_workers==1);
+        lmb_demand_reap(s,&a,0,1004); assert(!s->uncertain_workers);
+        assert(!lmb_demand_event(s,&a,&e,64000)); lmb_demand_reap(s,&a,1,64001);
+        /* Exercise the actual datagram transport and JSON with no model
+         * process, then inject a truncated event. */
+        memset(&api_demand,0,sizeof api_demand);
+        api_demand.started_ms=api_demand.captured_ms=lmb_io_monotonic_ms();
+        memset(api_demand.instance,1,32); memset(&api_demand_tx,0,sizeof api_demand_tx);
+        int channel[2]; assert(!socketpair(AF_UNIX,SOCK_DGRAM,0,channel));
+        api_demand_fd=channel[1]; api_demand_tx.model[0]=4;
+        api_demand_send(LMB_DEMAND_START,0,0,0); api_demand_send(LMB_DEMAND_ADMIT,0,0,0);
+        api_demand_send(LMB_DEMAND_END,LMB_DEMAND_COMPLETE,1000,2000);
+        a=(LmbDemandWorker){.model=-1}; api_demand_drain(channel[0],&a);
+        assert(!api_demand_failed && a.ended && !api_demand.loss_count);
+        Cap json={0}; assert(!api_demand_json(&json));
+        assert(strstr(json.p,"\"completed\":1") && strstr(json.p,"\"window_complete\":false"));
+        free(json.p); json=(Cap){0};
+        uint64_t future=api_demand.started_ms+61000;
+        api_demand.captured_ms=future;
+        assert(lmb_demand_window_complete(&api_demand,future));
+        assert(send(channel[1],"broken",6,0)==6); api_demand_drain(channel[0],&a);
+        assert(api_demand.loss_count==1 && api_demand.uncertain_workers==1);
+        future=api_demand.loss_ms+61000; api_demand.captured_ms=future;
+        assert(!lmb_demand_window_complete(&api_demand,future));
+        lmb_demand_reap(&api_demand,&a,0,future);
+        assert(lmb_demand_window_complete(&api_demand,future));
+        api_demand.captured_ms=future-2000;
+        assert(!lmb_demand_window_complete(&api_demand,future));
+        close(channel[0]); close(channel[1]); api_demand_fd=-1; free(s);
+        puts("DEMAND: PASS (bounded windows, live slots, outcomes, latency, loss and transport)"); return 0;
+    }
     if (argc==2 && !strcmp(argv[1],"donor-content-check")) {
         assert(!lmb_secure_init());
         HomeServiceSnapshot s; uint8_t identity[32];

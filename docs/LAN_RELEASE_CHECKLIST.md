@@ -159,6 +159,15 @@ below. Historical observations remain here as evidence, not current promises.
   This is an elasticity prerequisite, not the automatic replica controller.
   See [donor authorization](DONOR_AUTHORIZATION.md).
 
+- [ ] Per-model gateway demand: bounded in-memory windows and per-worker events,
+  operator-only endpoint and web workspace, live admission counts, explicit
+  rejections/interruption and sampled latency tails. Local API/auth/restart,
+  browser and focused sanitizer gates pass. Two real reduced OLMoE models
+  pass four-session coexistence and 2/4/8-client bursts with the observer;
+  no prompt or identity text is stored in the metrics. Native CI remains
+  required. This is traffic evidence, not automatic replica scaling or a
+  production capacity guarantee. See [scope and limits](GATEWAY_DEMAND.md).
+
 - [x] Runtime/preflight PR #151: installed engine thread-capacity query; no-OpenMP
   single-thread execution; adaptive RAM reserve; acknowledged actionable
   failure; pre-index donor reachability; build-option invalidation.
