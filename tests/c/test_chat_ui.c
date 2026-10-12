@@ -87,7 +87,10 @@ int main(int argc, char **argv) {
         assert(lmb_demand_window_complete(&api_demand,future));
         api_demand.captured_ms=future-2000;
         assert(!lmb_demand_window_complete(&api_demand,future));
-        close(channel[0]); close(channel[1]); api_demand_fd=-1; free(s);
+        uint64_t gaps=api_demand.loss_count;
+        close(channel[1]); api_demand_drain(channel[0],&a);
+        assert(api_demand.loss_count==gaps); /* normal peer EOF is not loss */
+        close(channel[0]); api_demand_fd=-1; free(s);
         puts("DEMAND: PASS (bounded windows, live slots, outcomes, latency, loss and transport)"); return 0;
     }
     if (argc==2 && !strcmp(argv[1],"donor-content-check")) {

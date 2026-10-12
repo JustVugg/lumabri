@@ -21,6 +21,10 @@ static void api_demand_drain(int fd,LmbDemandWorker *w) {
         ssize_t n=recv(fd,bytes,sizeof bytes,MSG_DONTWAIT);
         if (n<0 && errno==EINTR) continue;
         if (n<0 && (errno==EAGAIN || errno==EWOULDBLOCK)) break;
+        /* Darwin can report EOF when the connected datagram peer closes;
+         * Linux keeps returning EAGAIN. Neither is a lost event. Reaping
+         * still requires END for every known chat and checks child status. */
+        if (!n) break;
         if (n<0) { lmb_demand_worker_loss(&api_demand,w,lmb_io_monotonic_ms()); break; }
         if (n!=(ssize_t)sizeof(LmbDemandEvent)) { lmb_demand_worker_loss(&api_demand,w,lmb_io_monotonic_ms()); break; }
         LmbDemandEvent e; memcpy(&e,bytes,sizeof e);

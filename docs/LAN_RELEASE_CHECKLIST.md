@@ -148,14 +148,17 @@ below. Historical observations remain here as evidence, not current promises.
   This does not create cloud resources or grant inference access implicitly.
   See [preparation API](MODEL_PREPARATION_API.md).
 
-- [ ] Bounded repeat authorization on the donor: local-owner TUI/CLI consent,
+- [x] Bounded repeat authorization on the donor (#213): local-owner TUI/CLI consent,
   verified content identity independent of allocation names, exact placement,
   expiry, quotas and pre-COMMIT revision checks. Revoke without evicting active
   weights; a new donor keeper requires new consent. The local tiny-OLMoE gate
   passes CLI/TUI grants, verified signatures and content, retirement/reload,
   real generation, over-quota cancellation and revocation without eviction.
-  API isolation regression and focused ASan/UBSan/leak tests pass. Native CI
-  remains required before this item is complete.
+  API isolation regression and focused ASan/UBSan/leak tests pass. Native tests
+  exposed fragmented approval frames and Darwin CRCRLF completion lines;
+  both parsers now have deterministic regressions. All eight checks passed
+  on `4531e4e` before normal merge `a91175a`. The ARM jobs initially refused
+  compressed process pages; unchanged repeats passed with the guard intact.
   This is an elasticity prerequisite, not the automatic replica controller.
   See [donor authorization](DONOR_AUTHORIZATION.md).
 
