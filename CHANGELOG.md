@@ -5,6 +5,9 @@ a tag stay under Unreleased until a new tag is created.
 
 ## Unreleased
 
+- Multi-host benchmark and production gates reject malformed token oracles,
+  boolean or fractional counters, non-finite timing or throughput values, and
+  mismatched model, family or mode across release reports.
 - Segment pressure recovery now drains in-flight sessions through ordinary RAM
   pressure, recovery hysteresis and manual pause; only the critical RAM/swap
   floor aborts a kernel. A failed RUN can reopen the same exact-range executor

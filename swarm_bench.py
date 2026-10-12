@@ -75,26 +75,64 @@ def run_json(host: str, command: list[str], fields: dict[str, Any], timeout: flo
     raise RuntimeError(f"command produced no JSON object: {shlex.join(argv)}")
 
 
+def validate_oracle(oracle: Any) -> list[int]:
+    if not isinstance(oracle, list) or not oracle or any(type(value) is not int for value in oracle):
+        raise ValueError("oracle_token_ids must be a non-empty array of integers")
+    return oracle
+
+
 def validate_sample(sample: dict, oracle: list[int]) -> dict:
+    validate_oracle(oracle)
     ids = sample.get("token_ids")
     count = sample.get("decode_tokens")
     seconds = sample.get("decode_seconds")
-    if not isinstance(ids, list) or any(not isinstance(v, int) for v in ids):
+    if not isinstance(ids, list) or any(type(v) is not int for v in ids):
         raise ValueError("sample has no integer token_ids array")
     if ids != oracle:
         raise ValueError(f"tokens differ from oracle: {ids} != {oracle}")
-    if not isinstance(count, int) or count <= 0 or count != len(ids):
+    if type(count) is not int or count <= 0 or count != len(ids):
         raise ValueError("decode_tokens must equal len(token_ids) and be positive")
-    if not isinstance(seconds, (int, float)) or not math.isfinite(seconds) or seconds <= 0:
+    if type(seconds) not in (int, float):
         raise ValueError("decode_seconds must be finite and positive")
+    try:
+        seconds = float(seconds)
+    except OverflowError as error:
+        raise ValueError("decode_seconds must be finite and positive") from error
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ValueError("decode_seconds must be finite and positive")
+    rate = count / seconds
+    if not math.isfinite(rate):
+        raise ValueError("decode rate must be finite")
     byte_counts = sample.get("bytes", {})
+    if not isinstance(byte_counts, dict):
+        raise ValueError("bytes must be an object")
     for key in ("cas", "expert", "segment"):
         value = byte_counts.get(key, 0)
-        if not isinstance(value, int) or value < 0:
+        if type(value) is not int or value < 0:
             raise ValueError(f"bytes.{key} must be a non-negative integer")
-    return {"tok_s": count / seconds, "seconds": seconds,
+    return {"tok_s": rate, "seconds": seconds,
             "bytes": {key: int(byte_counts.get(key, 0))
                       for key in ("cas", "expert", "segment")}}
+
+
+def validate_peer_counters(obj: dict) -> dict[str, int]:
+    peers = obj.get("peers", [])
+    if not isinstance(peers, list):
+        raise ValueError("probe peers must be an array")
+    calls = {}
+    for peer in peers:
+        if not isinstance(peer, dict) or not isinstance(peer.get("name"), str) or not peer["name"]:
+            raise ValueError("probe peer needs a name")
+        expert = peer.get("expert", {})
+        if not isinstance(expert, dict):
+            raise ValueError("probe expert must be an object")
+        count = expert.get("calls", 0)
+        if type(count) is not int or count < 0:
+            raise ValueError("probe expert.calls must be a non-negative integer")
+        if peer["name"] in calls:
+            raise ValueError("probe peer names must be unique")
+        calls[peer["name"]] = count
+    return calls
 
 
 def peer_counters(spec: dict, timeout: float) -> dict:
@@ -102,8 +140,7 @@ def peer_counters(spec: dict, timeout: float) -> dict:
     if not probe:
         return {}
     obj = run_json(probe.get("host", "local"), probe["command"], {}, timeout)
-    return {peer["name"]: int(peer.get("expert", {}).get("calls", 0))
-            for peer in obj.get("peers", [])}
+    return validate_peer_counters(obj)
 
 
 def one_sample(spec: dict, fields: dict[str, Any], oracle: list[int], timeout: float) -> dict:
@@ -147,9 +184,7 @@ def main() -> int:
     family = spec.get("family")
     if family not in FAMILIES:
         raise SystemExit(f"family must be one of {sorted(FAMILIES)}")
-    oracle = spec.get("oracle_token_ids")
-    if not isinstance(oracle, list) or not oracle:
-        raise SystemExit("spec.oracle_token_ids must be a non-empty array")
+    oracle = validate_oracle(spec.get("oracle_token_ids"))
     clients = [int(v) for v in args.clients.split(",")]
     if any(v <= 0 for v in clients) or args.runs < 1 or args.warmup < 0:
         raise SystemExit("clients/runs/warmup must be positive")

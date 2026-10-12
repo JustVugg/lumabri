@@ -22,6 +22,11 @@ spec shows the contract. Commands run locally when `host` is `local`, and via
 non-interactive SSH otherwise. An optional `chatter.env` object is applied to
 the local process or through `env` after SSH; its values accept the same
 placeholders as the command. Lumabri does not install keys or open hosts.
+The oracle and token IDs must be JSON integers. Invalid counters, non-finite
+timings and rates, and non-finite release metrics fail the gate. The production
+gate also checks that the three reports use the expected modes and the same
+model and family. Peer counts and Expert call counters must be non-negative
+integers, and the reported peer count must match the named counters.
 
 Example:
 
