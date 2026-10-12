@@ -68,6 +68,17 @@ class HouseholdOutputTest(unittest.TestCase):
                      " · hosted stream · no local checkpoint"):
             self.assertFalse(hosted_turn_complete(text))
 
+    def test_darwin_translated_line_endings(self):
+        prefix = "host prefill 0.3s · 8 generated tokens · decode 389.52 tok/s · first text 1.1s · hosted stream · no local checkpoint\x1b[0m"
+        for ending in ("\n", "\r\n", "\r\r\n"):
+            out = TerminalText()
+            out.feed(prefix.encode())
+            for byte in ending.encode()[:-1]:
+                out.feed(bytes([byte]))
+                self.assertFalse(hosted_turn_complete(out.text))
+            out.feed(b"\n")
+            self.assertTrue(hosted_turn_complete(out.text))
+
 
 if __name__ == "__main__":
     unittest.main()
