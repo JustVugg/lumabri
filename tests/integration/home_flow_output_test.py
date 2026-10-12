@@ -1,10 +1,35 @@
 """Deterministic fragmented-output regressions; no processes or models needed."""
 import unittest
 
-from home_flow_test import TerminalText, hosted_turn_complete
+from home_flow_test import TerminalText, hosted_turn_complete, approval_frame_ready
 
 
 class HouseholdOutputTest(unittest.TestCase):
+    def test_approval_waits_for_complete_current_offer(self):
+        frame = ("\x1b[H\x1b[1;1HWaiting for your approval"
+                 "\x1b[11;1HModel: model-b (olmoe)"
+                 "\x1b[24;1HAccept this request\x1b[27;1HDecline"
+                 "\x1b[30;1HAllow repeat loads for 1 hour"
+                 "\x1b[39;1H↑ ↓ choose   Enter confirm\x1b[0m").encode()
+        old_frame = frame.replace(b"model-b", b"model-a")
+        for split in range(len(frame)):
+            with self.subTest(split=split):
+                out = TerminalText()
+                out.feed(old_frame)
+                self.assertFalse(approval_frame_ready(out, "model-b", repeat=True))
+                out.feed(frame[:split])
+                self.assertFalse(approval_frame_ready(out, "model-b", repeat=True))
+                out.feed(frame[split:])
+                self.assertTrue(approval_frame_ready(out, "model-b", repeat=True))
+                self.assertFalse(approval_frame_ready(out, "model-a", repeat=True))
+
+    def test_repeat_permission_must_be_visible(self):
+        out = TerminalText()
+        out.feed(b"\x1b[HWaiting for your approval Model: model-a (olmoe) "
+                 b"Accept this request Decline Enter confirm\x1b[0m")
+        self.assertTrue(approval_frame_ready(out, "model-a"))
+        self.assertFalse(approval_frame_ready(out, "model-a", repeat=True))
+
     def test_metrics_prefix_does_not_finish_turn(self):
         out = TerminalText()
         out.feed(b"\x1b[2m  host prefill 0.1s \xc2\xb7 8 generated tokens")

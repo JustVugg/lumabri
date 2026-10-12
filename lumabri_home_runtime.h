@@ -538,9 +538,9 @@ static int home_donor_launch(HomeDonor *d, int edge) {
 
 static void home_donor_screen(const HomeDonor *d, const char *name, uint64_t ram, int clear, int choice) {
     const LmbHomeTransaction *t = &d->transaction;
-    int repeat=d->persistent && home_resident_required() && !t->offer.hybrid_role && ui_h>=34;
     if (clear) {
         ui_begin("share resources");
+        int repeat=d->persistent && home_resident_required() && !t->offer.hybrid_role && ui_h>=34;
         ui_printf(5, 5, UI_TEXT, "%s · up to %.1f GB RAM · CPU execution", name, ram / 1e9);
         ui_text(7, 5, UI_SAND, d->retained ? "Weights retained in RAM; ready for another chat" : lmb_home_phase_name(t->phase));
         if (d->persistent && d->display_models > 1 && d->display_compute)

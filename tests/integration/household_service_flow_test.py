@@ -17,7 +17,7 @@ import tempfile
 import termios
 import time
 
-from home_flow_test import TerminalText, current_frame, hosted_turn_complete, assert_stage_record
+from home_flow_test import TerminalText, current_frame, approval_frame_ready, hosted_turn_complete, assert_stage_record
 
 
 def main():
@@ -198,7 +198,7 @@ def main():
                 key = (name, state["model"])
                 if state["phase"] != 1 or key in handled:
                     continue
-                if "Waiting for your approval" not in current_frame(terminal):
+                if not approval_frame_ready(terminal, state["model"], repeat=args.donor_policy):
                     continue
                 handled.add(key)
                 if ready and args.joint == "reject":

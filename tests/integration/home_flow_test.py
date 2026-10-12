@@ -49,6 +49,19 @@ def current_frame(terminal):
     return terminal.text.rsplit("\x1b[H", 1)[-1]
 
 
+def approval_frame_ready(terminal, model, repeat=False):
+    # ui_present emits the footer and final SGR reset only after all rows.
+    # A PTY read can stop after the pending heading but before the choices.
+    # Never act on a previous offer, or on a partially drawn new frame.
+    frame = current_frame(terminal)
+    return (frame.endswith("\x1b[0m") and
+            "Waiting for your approval" in frame and
+            f"Model: {model} (" in frame and
+            "Accept this request" in frame and "Decline" in frame and
+            "Enter confirm" in frame and
+            (not repeat or "Allow repeat loads for 1 hour" in frame))
+
+
 def assert_stage_record(path, stages=2, expected_source=2):
     record = path.read_bytes()
     assert record[:8] == b"LMB-CAL5", "workload-bound record was not written"
