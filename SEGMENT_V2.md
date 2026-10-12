@@ -43,6 +43,36 @@ new placements. The tracker reserves a durable generation epoch beside its
 peer-binding database, so a restart cannot make a cached generation current
 again or move either monotonic fencing value backwards.
 
+An optional `GSC1` v1 sideband publishes executor-measured, one-row Segment
+RUN compute time. The node measures only the `coli_segment_run` call and adds
+the sample after a successful table commit; admission, queue wait, transport,
+failed/cancelled runs, cached duplicates and recovery orchestration are
+excluded. Successful replay RUNs contribute their actual compute time.
+The bounded EWMA is tied to the current lease and fencing epoch. The tracker
+accepts updates only on that executor's registered control connection, does
+not alter the placement generation, and stops returning reports after ten
+seconds without a fresh update. `SEG_COMPUTE_GET` is a separate optional
+request: an old tracker returns `ERR`, so discovery keeps the original v1
+route and its conservative ranking. Old nodes and chatters keep using `SGD1`
+unchanged.
+
+The `GSC1` body starts with `u32 magic, u32 version, u32 count`. A GET request
+then lists up to 64 `(lease_id[16], fencing_epoch u64)` keys; a GET reply
+returns only fresh matches as `(lease_id[16], fencing_epoch u64, samples u32,
+ewma_us u64)`. A PUT contains exactly one such value. Decoders reject trailing
+bytes, duplicate keys, zero leases, invalid durations and unmatched replies.
+The zero-count GET is the feature probe; it uses a separate connection so an
+old tracker cannot disturb the signed v1 control heartbeat. GET uses a two-second
+connection and I/O deadline, and discovery skips it while the route is
+incomplete, so optional telemetry cannot hold up route publication.
+
+After eight valid samples, initial selection and recovery add compute EWMA
+times queued plus in-flight work and the current RUN to the existing network
+prediction. Residency remains the first ordering criterion; measured compute
+orders comparable resident routes and comparable fallback routes. A route
+with an open circuit still ranks as degraded. The inference thread only reads
+the immutable snapshot published by discovery.
+
 `LmbSegDiscovery` polls this control plane on a dedicated thread and publishes
 a fixed-size immutable `LmbSegRouteSnapshot`. The inference thread copies that
 snapshot; it never asks the tracker. A session binds the selected generation

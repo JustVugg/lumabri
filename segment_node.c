@@ -91,6 +91,7 @@ typedef struct {
     LmbSegAdvert advert;
     uint8_t pk[32], sk[64];
     LmbSegOwner owner;
+    LmbSegCompute compute;
     LmbRunGate *run_gate;
     int ready;
     volatile sig_atomic_t stop;
@@ -130,6 +131,12 @@ static uint64_t now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+static uint64_t now_us(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts)) return 0;
+    return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
 }
 
 static uint64_t available_memory_bytes(void) {
@@ -346,10 +353,32 @@ static int tracker_registration_reply(TrackerRegistration *r,
         lmb_seg_registration_reply_decode(reply->body, reply->body_len, &owner))
         return -1;
     pthread_mutex_lock(&r->lock);
+    if (!lmb_seg_id_equal(&r->owner.lease_id, &owner.lease_id) ||
+        r->owner.fencing_epoch != owner.fencing_epoch)
+        memset(&r->compute, 0, sizeof r->compute);
     r->owner = owner;
     r->ready = 1;
     pthread_mutex_unlock(&r->lock);
     return 0;
+}
+
+static int tracker_compute_supported(const char *tracker) {
+    return lmb_seg_compute_probe(tracker);
+}
+
+static int tracker_compute_send(int fd, TrackerRegistration *r) {
+    LmbSegCompute value;
+    pthread_mutex_lock(&r->lock);
+    value = r->compute;
+    value.lease_id = r->owner.lease_id;
+    value.fencing_epoch = r->owner.fencing_epoch;
+    pthread_mutex_unlock(&r->lock);
+    if (!value.samples) return 0;
+    uint8_t *body = NULL; uint32_t length = 0;
+    if (lmb_seg_compute_put_encode(&value, &body, &length)) return -1;
+    int rc = lmb_send(fd, LMB_SEG_COMPUTE_PUT, body, length, NULL, 0);
+    free(body);
+    return rc;
 }
 
 static int segment_request_op(uint32_t op) {
@@ -405,6 +434,8 @@ static void *registration_worker(void *opaque) {
             sleep(1);
             continue;
         }
+        int compute_supported = tracker_compute_supported(r->tracker);
+        uint64_t next_compute_probe = now_ms() + 60000u;
         /* Poll provides the short heartbeat cadence; once a frame starts,
          * allow a slow WAN relay enough time to receive the complete bounded
          * activation/snapshot instead of treating a 200 ms partial read as a
@@ -423,6 +454,10 @@ static void *registration_worker(void *opaque) {
                 break;
             }
             if (!ready) {
+                if (!compute_supported && now_ms() >= next_compute_probe) {
+                    compute_supported = tracker_compute_supported(r->tracker);
+                    next_compute_probe = now_ms() + 60000u;
+                }
                 if (now_ms() - last_heartbeat >= 2000u) {
                     if (tracker_register_send(fd, nonce, r)) break;
                     last_heartbeat = now_ms();
@@ -435,8 +470,13 @@ static void *registration_worker(void *opaque) {
                 break;
             }
             int bad = 0;
-            if (message.op == LMB_SEG_REGISTER_R)
+            if (message.op == LMB_SEG_REGISTER_R) {
                 bad = tracker_registration_reply(r, &message);
+                if (!bad && compute_supported)
+                    bad = tracker_compute_send(fd, r);
+            }
+            else if (message.op == LMB_SEG_COMPUTE_PUT_R)
+                bad = message.body_len || message.pay_len;
             else if (message.op == LMB_RSEG_FWD)
                 bad = handle_rseg_fwd(r, fd, &message);
             else if (message.op == LMB_ERR) {
@@ -777,6 +817,7 @@ static int handle_run(Node *node, int fd, const LmbMsg *msg) {
         node->table, &run, msg->pay, msg->pay_len, now_ms());
     LmbSegReply reply = make_reply(&run.session_id, &run.request_id,
                                    &run.owner, status);
+    uint64_t run_compute_us = 0;
     if (status == LMB_SEG_STATUS_DUPLICATE) {
         NodeSession *slot = session_lock_id(node, &run.session_id);
         if (slot && lmb_seg_id_equal(&slot->cached_request, &run.request_id) &&
@@ -839,9 +880,15 @@ static int handle_run(Node *node, int fd, const LmbMsg *msg) {
             uint32_t remaining = lmb_compute_remaining(admission_began, node->run_wait_ms);
             if (admitted == 1 && (!remaining || lmb_compute_acquire(&permit, remaining, run_should_cancel, node)))
                 status = LMB_SEG_STATUS_BUSY;
-            if (admitted == 1 &&
-                status == LMB_SEG_STATUS_OK &&
-                coli_segment_run(session, &request, error, sizeof error)) {
+            int run_failed = 0;
+            if (admitted == 1 && status == LMB_SEG_STATUS_OK) {
+                uint64_t began = now_us();
+                run_failed = coli_segment_run(session, &request, error, sizeof error);
+                uint64_t ended = now_us();
+                if (!run_failed && began && ended > began)
+                    run_compute_us = ended - began;
+            }
+            if (run_failed) {
                 /* Name the slice: an origin runs several of these at once and
                  * an unlabelled line cannot be attributed to a layer range. */
                 fprintf(stderr, "[segment-node %s %u:%u] run failed on %u row%s "
@@ -877,6 +924,15 @@ static int handle_run(Node *node, int fd, const LmbMsg *msg) {
         } else {
             status = lmb_seg_table_run_commit(node->table, &run, now_ms());
             if (status == LMB_SEG_STATUS_OK && slot) {
+                /* Only committed one-row RUNs represent steady decode cost.
+                 * Failed, cancelled, duplicate, prefill and replay requests
+                 * never update the advertised compute estimate. */
+                if (run.rows == 1 && run_compute_us) {
+                    pthread_mutex_lock(&node->registration.lock);
+                    lmb_seg_compute_observe(&node->registration.compute,
+                                            run_compute_us);
+                    pthread_mutex_unlock(&node->registration.lock);
+                }
                 /* Log the first and then power-of-two successful commits.
                  * This distinguishes an idle weight holder from a node that
                  * actually executed this range, without logging user data or

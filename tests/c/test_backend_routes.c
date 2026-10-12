@@ -68,6 +68,46 @@ int main(void) {
     assert(!select_chain(&snapshot, 4, 64, 1, chain, &count));
     assert(count == 1 && !strcmp(chain[0].route.advert.peer_name, "node-1"));
     assert(route_same_range(&snapshot.entries[1], &snapshot.entries[0], 64, 1));
+    /* Equal network predictions no longer hide a faster resident executor.
+     * Until eight committed decode RUNs, the old route order is stable. */
+    segment_backend_mask = LMB_SEG_CAP_CPU;
+    for (unsigned i = 0; i < 2; i++) {
+        snapshot.entries[i].advert.capabilities = LMB_SEG_CAP_CPU;
+        snapshot.entries[i].advert.layer_begin = 0;
+        snapshot.entries[i].advert.layer_end = 4;
+        snapshot.entries[i].advert.queue_depth = 0;
+        snapshot.entries[i].advert.inflight = 0;
+        snapshot.entries[i].advert.flags = 0;
+        snapshot.entries[i].predicted_us = 50000;
+        snapshot.entries[i].compute.samples = 7;
+        snapshot.entries[i].compute.ewma_us = i ? 100000 : 500000;
+    }
+    assert(!select_chain(&snapshot, 4, 64, 1, chain, &count));
+    assert(!strcmp(chain[0].route.advert.peer_name, "node-0"));
+    snapshot.entries[0].compute.samples = 8;
+    snapshot.entries[1].compute.samples = 8;
+    assert(!select_chain(&snapshot, 4, 64, 1, chain, &count));
+    assert(!strcmp(chain[0].route.advert.peer_name, "node-1"));
+    LmbSegRouteEntry gone = snapshot.entries[0];
+    snprintf(gone.advert.peer_name, sizeof gone.advert.peer_name, "gone");
+    assert(recovery_route_better(&snapshot.entries[1], &snapshot.entries[0],
+                                 &gone, 0));
+    snapshot.entries[1].advert.queue_depth = 5;
+    assert(!select_chain(&snapshot, 4, 64, 1, chain, &count));
+    assert(!strcmp(chain[0].route.advert.peer_name, "node-0"));
+    assert(recovery_route_better(&snapshot.entries[0], &snapshot.entries[1],
+                                 &gone, 0));
+    snapshot.entries[1].advert.queue_depth = 0;
+    snapshot.entries[1].predicted_us = UINT64_MAX / 4u;
+    snapshot.entries[0].advert.flags = LMB_SEG_ADVERT_FALLBACK;
+    assert(!select_chain(&snapshot, 4, 64, 1, chain, &count));
+    assert(!strcmp(chain[0].route.advert.peer_name, "node-0"));
+    assert(recovery_route_better(&snapshot.entries[0], &snapshot.entries[1],
+                                 &gone, 0));
+    snapshot.entries[1].predicted_us = 50000;
+    snapshot.entries[1].compute.samples = 0; /* old peer: residency wins */
+    assert(!select_chain(&snapshot, 4, 64, 1, chain, &count));
+    assert(!strcmp(chain[0].route.advert.peer_name, "node-1"));
     puts("BACKEND ROUTES: PASS (CPU approval survives selection, missing coverage and replica checks)");
     return 0;
 }

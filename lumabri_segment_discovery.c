@@ -11,6 +11,7 @@
 #include "lumabri_secure.h"
 
 #include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -231,6 +232,150 @@ static int disc_finish(LmbBuf *b, uint8_t **body, uint32_t *body_len) {
     return 0;
 }
 
+#define LMB_SEG_COMPUTE_MAGIC 0x31435347u /* "GSC1" */
+#define LMB_SEG_COMPUTE_VERSION 1u
+
+int lmb_seg_compute_valid(const LmbSegCompute *c) {
+    return c && !lmb_seg_id_is_zero(&c->lease_id) && c->fencing_epoch &&
+           c->samples && c->ewma_us && c->ewma_us <= LMB_SEG_COMPUTE_MAX_US;
+}
+
+void lmb_seg_compute_observe(LmbSegCompute *c, uint64_t sample_us) {
+    if (!c || !sample_us) return;
+    if (sample_us > LMB_SEG_COMPUTE_MAX_US)
+        sample_us = LMB_SEG_COMPUTE_MAX_US;
+    if (!c->samples) c->ewma_us = sample_us;
+    else c->ewma_us = (c->ewma_us * 7u + sample_us) / 8u;
+    if (c->samples < UINT32_MAX) c->samples++;
+}
+
+static int disc_compute_prefix(LmbBuf *b, uint32_t count) {
+    return lmb_buf_u32(b, LMB_SEG_COMPUTE_MAGIC) ||
+           lmb_buf_u32(b, LMB_SEG_COMPUTE_VERSION) ||
+           lmb_buf_u32(b, count);
+}
+
+static int disc_compute_header(DiscCur *c, uint32_t *count) {
+    uint32_t magic, version;
+    return disc_cur_u32(c, &magic) || disc_cur_u32(c, &version) ||
+           disc_cur_u32(c, count) || magic != LMB_SEG_COMPUTE_MAGIC ||
+           version != LMB_SEG_COMPUTE_VERSION || *count > LMB_SEG_ROUTE_MAX;
+}
+
+static int disc_compute_key_write(LmbBuf *b, const LmbSegCompute *c) {
+    return lmb_buf_bytes(b, c->lease_id.bytes, sizeof c->lease_id.bytes) ||
+           lmb_buf_u64(b, c->fencing_epoch);
+}
+
+static int disc_compute_key_read(DiscCur *cursor, LmbSegCompute *c) {
+    return disc_cur_bytes(cursor, c->lease_id.bytes, sizeof c->lease_id.bytes) ||
+           disc_cur_u64(cursor, &c->fencing_epoch) ||
+           lmb_seg_id_is_zero(&c->lease_id) || !c->fencing_epoch;
+}
+
+static int disc_compute_value_write(LmbBuf *b, const LmbSegCompute *c) {
+    return disc_compute_key_write(b, c) || lmb_buf_u32(b, c->samples) ||
+           lmb_buf_u64(b, c->ewma_us);
+}
+
+static int disc_compute_value_read(DiscCur *cursor, LmbSegCompute *c) {
+    return disc_compute_key_read(cursor, c) ||
+           disc_cur_u32(cursor, &c->samples) ||
+           disc_cur_u64(cursor, &c->ewma_us) || !lmb_seg_compute_valid(c);
+}
+
+int lmb_seg_compute_put_encode(const LmbSegCompute *c,
+                               uint8_t **body, uint32_t *body_len) {
+    if (!lmb_seg_compute_valid(c)) return -1;
+    LmbBuf b = {0};
+    if (disc_compute_prefix(&b, 1u) || disc_compute_value_write(&b, c)) {
+        free(b.p); return -1;
+    }
+    return disc_finish(&b, body, body_len);
+}
+
+int lmb_seg_compute_put_decode(const void *body, size_t body_len,
+                               LmbSegCompute *c) {
+    if ((!body && body_len) || !c) return -1;
+    DiscCur cursor = {body, body_len, 0};
+    uint32_t count = 0;
+    memset(c, 0, sizeof *c);
+    return disc_compute_header(&cursor, &count) || count != 1u ||
+           disc_compute_value_read(&cursor, c) || cursor.off != cursor.len ? -1 : 0;
+}
+
+int lmb_seg_compute_get_encode(const LmbSegRouteSnapshot *snapshot,
+                               uint8_t **body, uint32_t *body_len) {
+    if (!snapshot || snapshot->count > LMB_SEG_ROUTE_MAX) return -1;
+    LmbBuf b = {0};
+    int bad = disc_compute_prefix(&b, snapshot->count);
+    for (uint32_t i = 0; !bad && i < snapshot->count; i++) {
+        LmbSegCompute key = {
+            .lease_id = snapshot->entries[i].owner.lease_id,
+            .fencing_epoch = snapshot->entries[i].owner.fencing_epoch,
+        };
+        bad = lmb_seg_id_is_zero(&key.lease_id) || !key.fencing_epoch ||
+              disc_compute_key_write(&b, &key);
+    }
+    if (bad) { free(b.p); return -1; }
+    return disc_finish(&b, body, body_len);
+}
+
+int lmb_seg_compute_get_request_decode(const void *body, size_t body_len,
+                                       LmbSegCompute *requested, uint32_t *count) {
+    if ((!body && body_len) || !requested || !count) return -1;
+    DiscCur cursor = {body, body_len, 0};
+    if (disc_compute_header(&cursor, count)) return -1;
+    for (uint32_t i = 0; i < *count; i++) {
+        memset(&requested[i], 0, sizeof requested[i]);
+        if (disc_compute_key_read(&cursor, &requested[i])) return -1;
+        for (uint32_t j = 0; j < i; j++)
+            if (lmb_seg_id_equal(&requested[i].lease_id, &requested[j].lease_id) &&
+                requested[i].fencing_epoch == requested[j].fencing_epoch) return -1;
+    }
+    return cursor.off == cursor.len ? 0 : -1;
+}
+
+int lmb_seg_compute_get_reply_encode(const LmbSegCompute *values, uint32_t count,
+                                     uint8_t **body, uint32_t *body_len) {
+    if (count > LMB_SEG_ROUTE_MAX || (count && !values)) return -1;
+    LmbBuf b = {0};
+    int bad = disc_compute_prefix(&b, count);
+    for (uint32_t i = 0; !bad && i < count; i++)
+        bad = !lmb_seg_compute_valid(&values[i]) ||
+              disc_compute_value_write(&b, &values[i]);
+    if (bad) { free(b.p); return -1; }
+    return disc_finish(&b, body, body_len);
+}
+
+int lmb_seg_compute_get_decode(const void *body, size_t body_len,
+                               LmbSegRouteSnapshot *snapshot) {
+    if ((!body && body_len) || !snapshot || snapshot->count > LMB_SEG_ROUTE_MAX)
+        return -1;
+    DiscCur cursor = {body, body_len, 0};
+    uint32_t count = 0;
+    LmbSegCompute parsed[LMB_SEG_ROUTE_MAX];
+    int indices[LMB_SEG_ROUTE_MAX];
+    memset(parsed, 0, sizeof parsed);
+    if (disc_compute_header(&cursor, &count) || count > snapshot->count) return -1;
+    for (uint32_t i = 0; i < count; i++) {
+        if (disc_compute_value_read(&cursor, &parsed[i])) return -1;
+        indices[i] = -1;
+        for (uint32_t j = 0; j < snapshot->count; j++)
+            if (lmb_seg_id_equal(&parsed[i].lease_id,
+                                 &snapshot->entries[j].owner.lease_id) &&
+                parsed[i].fencing_epoch == snapshot->entries[j].owner.fencing_epoch)
+                indices[i] = (int)j;
+        if (indices[i] < 0) return -1;
+        for (uint32_t j = 0; j < i; j++)
+            if (indices[i] == indices[j]) return -1;
+    }
+    if (cursor.off != cursor.len) return -1;
+    for (uint32_t i = 0; i < count; i++)
+        snapshot->entries[indices[i]].compute = parsed[i];
+    return 0;
+}
+
 int lmb_seg_advert_encode(const LmbSegAdvert *a,
                           uint8_t **body, uint32_t *body_len) {
     if (!lmb_seg_advert_valid(a)) return -1;
@@ -378,6 +523,65 @@ int lmb_seg_registration_reply_decode(const void *body, size_t body_len,
            !owner->route_generation ? -1 : 0;
 }
 
+/* An old tracker closes on an unknown op. Remember that result briefly so
+ * a discovery worker does not repeat the probe on every refresh. */
+typedef struct { char tracker[256]; uint64_t retry_at_ms; } DiscComputeLegacy;
+static DiscComputeLegacy disc_compute_legacy[4];
+static pthread_mutex_t disc_compute_legacy_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int disc_compute_should_query(const char *tracker) {
+    int allowed = 1;
+    uint64_t now = disc_now_ms();
+    pthread_mutex_lock(&disc_compute_legacy_lock);
+    for (size_t i = 0; i < 4; i++)
+        if (!strcmp(disc_compute_legacy[i].tracker, tracker) &&
+            now < disc_compute_legacy[i].retry_at_ms) allowed = 0;
+    pthread_mutex_unlock(&disc_compute_legacy_lock);
+    return allowed;
+}
+
+static void disc_compute_mark_legacy(const char *tracker) {
+    uint64_t now = disc_now_ms();
+    pthread_mutex_lock(&disc_compute_legacy_lock);
+    size_t slot = 0;
+    for (size_t i = 0; i < 4; i++)
+        if (!strcmp(disc_compute_legacy[i].tracker, tracker) ||
+            !disc_compute_legacy[i].tracker[0]) { slot = i; break; }
+    snprintf(disc_compute_legacy[slot].tracker,
+             sizeof disc_compute_legacy[slot].tracker, "%s", tracker);
+    disc_compute_legacy[slot].retry_at_ms = now + 60000u;
+    pthread_mutex_unlock(&disc_compute_legacy_lock);
+}
+
+/* The ordinary tracker request inherits a five-minute I/O timeout. This
+ * optional sideband must never hold a placement refresh for that long. */
+static int disc_compute_query(const char *tracker, const void *body,
+                              uint32_t body_len, LmbMsg *reply) {
+    int fd = lmb_connect_ms_io(tracker, 2000, 2000);
+    if (fd < 0) return -1;
+    int rc = lmb_auth(fd);
+    if (!rc) rc = lmb_send(fd, LMB_SEG_COMPUTE_GET, body, body_len, NULL, 0);
+    if (!rc) rc = lmb_recv(fd, reply);
+    lmb_close(fd);
+    return rc;
+}
+
+int lmb_seg_compute_probe(const char *tracker) {
+    if (!tracker || !*tracker) return 0;
+    LmbSegRouteSnapshot empty = {0};
+    uint8_t *body = NULL; uint32_t body_len = 0;
+    if (lmb_seg_compute_get_encode(&empty, &body, &body_len)) return 0;
+    LmbMsg reply = {0};
+    int rc = disc_compute_query(tracker, body, body_len, &reply);
+    free(body);
+    int supported = !rc && reply.op == LMB_SEG_COMPUTE_GET_R &&
+                    !reply.pay_len &&
+                    !lmb_seg_compute_get_decode(reply.body, reply.body_len,
+                                                &empty);
+    lmb_msg_free(&reply);
+    return supported;
+}
+
 int lmb_seg_routes_fetch(const char *tracker, const LmbSegQuery *query,
                          LmbSegRouteSnapshot *snapshot) {
     if (!tracker || !*tracker || !snapshot) return -1;
@@ -397,6 +601,25 @@ int lmb_seg_routes_fetch(const char *tracker, const LmbSegQuery *query,
     lmb_msg_free(&reply);
     if (!rc && snapshot->complete !=
         (uint32_t)lmb_seg_route_complete(snapshot, query)) return -1;
+    if (rc || !snapshot->complete || !snapshot->count ||
+        !disc_compute_should_query(tracker)) return rc;
+    /* Telemetry is optional. A malformed, unsupported or unavailable sideband
+     * must leave the valid v1 placement usable with its conservative ranking. */
+    body = NULL; body_len = 0;
+    if (lmb_seg_compute_get_encode(snapshot, &body, &body_len)) return rc;
+    memset(&reply, 0, sizeof reply);
+    int query_rc = disc_compute_query(tracker, body, body_len, &reply);
+    free(body);
+    if (!query_rc && reply.op == LMB_SEG_COMPUTE_GET_R && !reply.pay_len &&
+        !lmb_seg_compute_get_decode(reply.body, reply.body_len, snapshot)) {
+        uint64_t received = disc_now_ms();
+        for (uint32_t i = 0; i < snapshot->count; i++)
+            snapshot->entries[i].last_compute_ms =
+                snapshot->entries[i].compute.samples ? received : UINT64_MAX;
+    }
+    else if (!query_rc && reply.op == LMB_ERR)
+        disc_compute_mark_legacy(tracker);
+    lmb_msg_free(&reply);
     return rc;
 }
 
@@ -452,6 +675,15 @@ static void disc_enrich_routes(LmbSegDiscovery *d,
         if (old) {
             entry->latency = old->latency;
             entry->last_probe_ms = old->last_probe_ms;
+            if (!entry->compute.samples && !entry->last_compute_ms &&
+                old->last_compute_ms &&
+                now >= old->last_compute_ms &&
+                now - old->last_compute_ms <= 10000u &&
+                lmb_seg_id_equal(&entry->owner.lease_id, &old->owner.lease_id) &&
+                entry->owner.fencing_epoch == old->owner.fencing_epoch) {
+                entry->compute = old->compute;
+                entry->last_compute_ms = old->last_compute_ms;
+            }
         } else {
             lmb_predict_init(&entry->latency,
                 entry->transport & LMB_SEG_TRANSPORT_DIRECT ? 50000u : 120000u);
@@ -571,6 +803,15 @@ int lmb_seg_discovery_refresh_now(LmbSegDiscovery *d,
         if (old) {
             entry->latency = old->latency;
             entry->last_probe_ms = old->last_probe_ms;
+            if (!entry->compute.samples && !entry->last_compute_ms &&
+                old->last_compute_ms &&
+                now >= old->last_compute_ms &&
+                now - old->last_compute_ms <= 10000u &&
+                lmb_seg_id_equal(&entry->owner.lease_id, &old->owner.lease_id) &&
+                entry->owner.fencing_epoch == old->owner.fencing_epoch) {
+                entry->compute = old->compute;
+                entry->last_compute_ms = old->last_compute_ms;
+            }
         } else {
             lmb_predict_init(&entry->latency,
                 entry->transport & LMB_SEG_TRANSPORT_DIRECT ? 50000u : 120000u);
