@@ -133,7 +133,7 @@ below. Historical observations remain here as evidence, not current promises.
   resident candidates; it does not prepare/retire capacity or demonstrate
   billed savings. See [policy scope and commands](PORTFOLIO_POLICY.md).
 
-- [ ] Shared model preparation: management catalogue, exact reviewed plans,
+- [x] Shared model preparation (#212): management catalogue, exact reviewed plans,
   explicit selected nodes, per-model donor consent, persistent idempotent
   operation receipts, status/cancel and web controls. The TUI and API use the
   same detached preparation keeper; READY models survive a later rejection.
@@ -141,9 +141,23 @@ below. Historical observations remain here as evidence, not current promises.
   real browser review/start/cancel, API and manager restart, repeat-submit
   without duplicate allocations, and real inference from each retained model.
   The original joint TUI flow and API isolation regression pass; focused
-  ASan/UBSan/leak checks pass. Native CI remains required before release.
+  ASan/UBSan/leak checks pass. All eight native checks passed on `6545478`
+  before normal merge `449a74a`. The ARM no-OpenMP job initially refused
+  inference after the runner compressed process pages; its unchanged rerun
+  passed, without disabling the residency guard.
   This does not create cloud resources or grant inference access implicitly.
   See [preparation API](MODEL_PREPARATION_API.md).
+
+- [ ] Bounded repeat authorization on the donor: local-owner TUI/CLI consent,
+  verified content identity independent of allocation names, exact placement,
+  expiry, quotas and pre-COMMIT revision checks. Revoke without evicting active
+  weights; a new donor keeper requires new consent. The local tiny-OLMoE gate
+  passes CLI/TUI grants, verified signatures and content, retirement/reload,
+  real generation, over-quota cancellation and revocation without eviction.
+  API isolation regression and focused ASan/UBSan/leak tests pass. Native CI
+  remains required before this item is complete.
+  This is an elasticity prerequisite, not the automatic replica controller.
+  See [donor authorization](DONOR_AUTHORIZATION.md).
 
 - [x] Runtime/preflight PR #151: installed engine thread-capacity query; no-OpenMP
   single-thread execution; adaptive RAM reserve; acknowledged actionable

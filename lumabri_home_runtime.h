@@ -23,6 +23,8 @@ static int home_fail(const char *fmt, ...) {
 }
 #include "src/runtime/lumabri_resident_plan.h"
 #include "src/runtime/lumabri_service.h"
+#include "src/runtime/lumabri_donor_policy_store.h"
+#include "src/runtime/lumabri_content_identity.h"
 #define LMB_COMPUTE_BROKER_SERVER
 #include "src/runtime/lumabri_compute_broker.h"
 static LmbComputeBroker home_compute_broker;
@@ -229,6 +231,10 @@ typedef struct HomeDonor {
     int retained; /* owner's sharing lifetime, independent of any chat */
     int persistent; /* rendering only: the service is not owned by this view */
     uint64_t offer_revision;
+    uint8_t policy_instance[32], admission_policy[32];
+    uint8_t policy_content[32];
+    double policy_checked_at;
+    uint32_t admission_policy_revision;
     int client, lease, weight_lease, segment_port, host_port, segment_ready, host_ready, node_control;
     LmbNodeControl retired_receipt; /* idempotent acknowledgement while this allocation occupies its slot */
     pid_t segment, host;
@@ -243,6 +249,66 @@ typedef struct HomeDonor {
     uint64_t display_reserved;
     uint32_t display_compute, display_active, display_queued;
 } HomeDonor;
+
+static int home_donor_policy_read(const LmbHomeOffer *offer,LmbDonorPolicy *policy) {
+    char path[1200]; uint8_t id[32];
+    if (lmb_donor_policy_scope(offer,id) || home_service_directory(path,sizeof path)) return -1;
+    int dir=lmb_donor_policy_dir(path,0); if (dir<0) return -1;
+    int rc=lmb_donor_policy_load(dir,id,policy); close(dir); return rc;
+}
+static int home_donor_policy_candidate(HomeDonor *d,LmbDonorPolicy *p) {
+    if (d->transaction.phase!=LMB_HOME_PENDING) return 0;
+    if (!lmb_home_nonzero(d->policy_content,32)) {
+        if (d->policy_checked_at && nowd()-d->policy_checked_at<5) return 0;
+        d->policy_checked_at=nowd();
+        if (home_offer_content(&d->transaction.offer,d->policy_content)) return 0;
+    }
+    LmbHomeOffer offer=d->transaction.offer; memcpy(offer.model_root,d->policy_content,32);
+    if (home_donor_policy_read(&offer,p)) return 0;
+    uint32_t used=0; uint64_t ram=0;
+    for (uint32_t i=0;i<=d->park_capacity;i++) {
+        const HomeDonor *other=i ? &d->parked[i-1] : d; uint8_t id[32];
+        LmbHomeOffer held=other->transaction.offer; memcpy(held.model_root,other->policy_content,32);
+        if (other->transaction.reservation_held && !lmb_donor_policy_scope(&held,id) && !memcmp(id,p->id,32)) {
+            used++; ram=lmb_size_add(ram,other->transaction.offer.ram_bytes);
+        }
+    }
+    return lmb_donor_policy_allows(p,&offer,d->policy_instance,(uint64_t)time(NULL),used,ram);
+}
+static int home_donor_policy_commit(const HomeDonor *d) {
+    if (!d->admission_policy_revision) return 0; /* one-off manual consent */
+    LmbDonorPolicy p;
+    LmbHomeOffer offer=d->transaction.offer; memcpy(offer.model_root,d->policy_content,32);
+    return home_donor_policy_read(&offer,&p) || p.revision!=d->admission_policy_revision ||
+        memcmp(p.id,d->admission_policy,32) ||
+        !lmb_donor_policy_allows(&p,&offer,d->policy_instance,(uint64_t)time(NULL),0,0) ? -1 : 0;
+}
+/* The TUI's explicit one-hour option, fenced by the same live keeper IPC as
+ * a one-off acceptance. Saving a policy is not a resource reservation. */
+static int home_donor_policy_change(const HomeDonor *d,int enable) {
+    char path[1200]; uint8_t id[32];
+    LmbHomeOffer offer=d->transaction.offer;
+    if (!lmb_home_nonzero(d->policy_content,32)) return -1;
+    memcpy(offer.model_root,d->policy_content,32);
+    if (!home_resident_required() || (enable && d->transaction.phase!=LMB_HOME_PENDING) ||
+        lmb_donor_policy_scope(&offer,id) || home_service_directory(path,sizeof path)) return -1;
+    int dir=lmb_donor_policy_dir(path,1),lock=dir<0 ? -1 : lmb_donor_policy_lock(dir),rc=-1;
+    LmbDonorPolicy old,p={0};
+    if (lock<0) goto done;
+    int found=lmb_donor_policy_load(dir,id,&old);
+    if (found<0 || (!found && old.revision==UINT32_MAX) || (!enable && found)) goto done;
+    uint32_t prior=found ? 0 : old.revision;
+    if (enable) {
+        memcpy(p.id,id,32); memcpy(p.donor_instance,d->policy_instance,32);
+        p.limit=offer; p.enabled=1; p.allocations=1;
+        p.issued=(uint64_t)time(NULL); p.expires=p.issued+3600;
+    } else { p=old; p.enabled=0; }
+    p.revision=prior+1; rc=lmb_donor_policy_store(dir,&p,prior);
+done:
+    if (lock>=0) close(lock);
+    if (dir>=0) close(dir);
+    return rc;
+}
 
 static uint64_t home_donor_reserved(const HomeDonor *d) {
     uint64_t used = d->transaction.reservation_held ? d->transaction.offer.ram_bytes : 0;
@@ -290,6 +356,8 @@ static int home_weight_lease(const char *base) {
 }
 
 static void home_donor_release(HomeDonor *d, LmbHomePhase why, const char *reason) {
+    d->admission_policy_revision=0; memset(d->admission_policy,0,sizeof d->admission_policy);
+    memset(d->policy_content,0,32); d->policy_checked_at=0;
     d->hybrid_routes_ready = 0; memset(&d->hybrid_routes, 0, sizeof d->hybrid_routes);
     d->retained = 0;
     home_stop_child(&d->host); home_stop_child(&d->segment);
@@ -472,6 +540,7 @@ static void home_donor_screen(const HomeDonor *d, const char *name, uint64_t ram
     const LmbHomeTransaction *t = &d->transaction;
     if (clear) {
         ui_begin("share resources");
+        int repeat=d->persistent && home_resident_required() && !t->offer.hybrid_role && ui_h>=34;
         ui_printf(5, 5, UI_TEXT, "%s · up to %.1f GB RAM · CPU execution", name, ram / 1e9);
         ui_text(7, 5, UI_SAND, d->retained ? "Weights retained in RAM; ready for another chat" : lmb_home_phase_name(t->phase));
         if (d->persistent && d->display_models > 1 && d->display_compute)
@@ -498,17 +567,19 @@ static void home_donor_screen(const HomeDonor *d, const char *name, uint64_t ram
             ui_text(11, 5, UI_TEXT, "Visible to your household. Waiting for a request.");
             ui_printf(14, 5, UI_MUTED, "Runtime supports up to %u thread(s). Nothing loads without approval.", d->thread_capacity);
         }
-        int y = ui_h >= 34 ? 23 : 20;
+        int y = ui_h >= 37 ? 23 : 20;
         if (t->phase == LMB_HOME_PENDING) {
             ui_item(y, choice == 0, "Accept this request", home_resident_required() ?
                 "Keep these weights in RAM until you stop sharing." : "Reserve only the displayed resources for this plan.");
             ui_item(y + 3, choice == 1, "Decline", "No weights or model state will be loaded.");
+            if (repeat) ui_item(y + 6, choice == 2, "Allow repeat loads for 1 hour",
+                "Same requester, checkpoint and layers; one allocation, same limits. Press r to revoke.");
         } else ui_item(y, 0, d->persistent ? "Sharing continues in the background" : "Keep this window open to share", d->retained ?
-            "Weights stay in RAM. Additional models require free capacity and separate approval." : d->persistent ?
+            "Weights stay in RAM. Additional allocations need free capacity and owner approval or a bounded policy." : d->persistent ?
             "Closing this view does not approve new requests or stop sharing." : "Press Esc to stop sharing and release resources.");
         ui_footer(t->reason[0] ? t->reason : d->persistent ? "No allocation starts without your approval." : d->log, d->persistent ?
             t->phase == LMB_HOME_PENDING ? "↑ ↓ choose   Enter confirm   Esc detach   s stop sharing" :
-            "Tab next model   x unload this model   Esc detach   s stop sharing" : t->phase == LMB_HOME_PENDING ?
+            "Tab next model   x unload   r revoke repeat permission   Esc detach   s stop" : t->phase == LMB_HOME_PENDING ?
             "↑ ↓ choose   Enter confirm   Esc stop and return" :
             d->retained ? "x unload model, keep sharing   Esc stop sharing" : "Esc stop sharing and return");
         if (ui_w < 60 || ui_h < 28) {
@@ -660,6 +731,8 @@ static int home_donor_offer(HomeDonor *d, int incoming, const char *tracker,
     if (!rc) rc = lmb_home_offer_begin(&d->transaction, &offer, tracker,
                                        ram, disk, (uint64_t)(nowd() * 1000));
     if (rc) return -1;
+    d->admission_policy_revision=0; memset(d->admission_policy,0,sizeof d->admission_policy);
+    memset(d->policy_content,0,32); d->policy_checked_at=0;
     memset(&d->retired_receipt,0,sizeof d->retired_receipt);
     d->offer_revision++;
     d->client = incoming;
@@ -696,6 +769,10 @@ static int home_donor_message(HomeDonor *d) {
         case LMB_HOME_CANCEL:
             home_donor_release(d, LMB_HOME_CLOSED, "The requester cancelled the plan."); break;
         case LMB_HOME_COMMIT:
+            if (home_donor_policy_commit(d)) {
+                home_donor_release(d,LMB_HOME_FAILED,"Owner authorization expired or was revoked before preparation.");
+                break;
+            }
             rc = (t->offer.hybrid_role == LMB_HYBRID_COORDINATOR && !d->hybrid_routes_ready) ||
                  lmb_home_commit(t, m.body);
             if (!rc && home_donor_launch(d, 0))
@@ -782,9 +859,15 @@ static int home_service_donor_ui(const char *tracker) {
         home_donor_screen(&d, s.name, s.ram, term.active, choice);
         int key = home_key();
         if (key == 'q' || key == 27 || key == 3) break;
-        if (key == 1001 || key == 1002) choice = !choice;
-        if ((key == '\r' || key == '\n') && (!term.active || (ui_w >= 60 && ui_h >= 28))) key = choice ? 'n' : 'y';
+        int choices=term.active && ui_h>=34 && home_resident_required() && !s.offer.hybrid_role ? 3 : 2;
+        if (choice>=choices) choice=1;
+        if (key == 1001) choice=(choice+choices-1)%choices;
+        if (key == 1002) choice=(choice+1)%choices;
+        if ((key == '\r' || key == '\n') && (!term.active || (ui_w >= 60 && ui_h >= 28)))
+            key = choice==2 ? 'a' : choice ? 'n' : 'y';
         uint32_t op = key == '\t' ? HOME_SVC_NEXT_MODEL : key == 's' ? HOME_SVC_STOP : key == 'x' ? HOME_SVC_UNLOAD :
+            key == 'a' && choices==3 && s.phase==LMB_HOME_PENDING ? HOME_SVC_ALLOW_REPEAT :
+            key == 'r' && s.has_offer ? HOME_SVC_REVOKE_REPEAT :
             key == 'y' && s.phase == LMB_HOME_PENDING ? HOME_SVC_ACCEPT :
             key == 'n' && s.phase == LMB_HOME_PENDING ? HOME_SVC_DECLINE : HOME_SVC_STATUS;
         if (op && home_service_query("donor", op, &s, &s)) {
@@ -871,6 +954,8 @@ static int cmd_donor_inner(int argc, char **argv) {
     if (!name) name = profile.hostname;
     if (background) {
         if (home_service_open(&service, "donor")) return home_fail("Sharing is already starting, or the private service directory is unsafe. No duplicate donor was started.");
+        memcpy(d.policy_instance,service.snapshot.instance,32);
+        for (uint32_t i=0;i<d.park_capacity;i++) memcpy(parked[i].policy_instance,service.snapshot.instance,32);
         snprintf(service.snapshot.name, sizeof service.snapshot.name, "%s", name);
         snprintf(service.snapshot.tracker, sizeof service.snapshot.tracker, "%s", tracker);
         service.snapshot.ram = ram; service.snapshot.threads = d.thread_capacity;
@@ -947,6 +1032,14 @@ static int cmd_donor_inner(int argc, char **argv) {
         }
         home_service_donor_snapshot(&service, &d);
         int operation = background ? home_service_poll(&service) : -1;
+        if (operation==HOME_SVC_ALLOW_REPEAT || operation==HOME_SVC_REVOKE_REPEAT) {
+            int grant=operation==HOME_SVC_ALLOW_REPEAT;
+            int changed=home_donor_policy_change(&d,grant);
+            snprintf(d.transaction.reason,sizeof d.transaction.reason,"%s",changed ?
+                "Repeat permission was not changed. Inspect the current offer and retry." : grant ?
+                "One-hour repeat permission saved for this requester, checkpoint and placement." :
+                "Repeat permission revoked. Already loaded weights stay resident.");
+        }
         int key = background ? operation == HOME_SVC_ACCEPT ? 'y' : operation == HOME_SVC_DECLINE ? 'n' :
             operation == HOME_SVC_UNLOAD ? 'x' : operation == HOME_SVC_STOP ? 'q' :
             operation == HOME_SVC_NEXT_MODEL ? '\t' : -1 : home_key();
@@ -965,10 +1058,16 @@ static int cmd_donor_inner(int argc, char **argv) {
             if (d.transaction.phase != LMB_HOME_PENDING) continue;
             key = donor_choice ? 'n' : 'y';
         }
+        int policy_approved=0; LmbDonorPolicy policy;
+        if (background && key<0 && home_resident_required() && home_donor_policy_candidate(&d,&policy)) {
+            key='y'; policy_approved=1;
+            memcpy(d.admission_policy,policy.id,32); d.admission_policy_revision=policy.revision;
+        }
         if (key == 'x') home_donor_disconnect(&d, "Stopped by this computer's owner.");
         if ((key == 'y' || key == 'n') && d.transaction.phase == LMB_HOME_PENDING) {
             if (background) {
-                snprintf(service.snapshot.detail, sizeof service.snapshot.detail, "%s", key == 'y' ?
+                snprintf(service.snapshot.detail, sizeof service.snapshot.detail, "%s", policy_approved ?
+                    "Owner's bounded policy authorized this new allocation; acquiring resources." : key == 'y' ?
                     "Owner approved this immutable allocation; acquiring resources." : "Owner declined this allocation.");
                 if (home_service_save(&service)) { (void)home_fail("Cannot persist the owner's decision; no allocation was approved."); break; }
             }
@@ -1000,6 +1099,11 @@ static int cmd_donor_inner(int argc, char **argv) {
                 lmb_home_decide(&d.transaction, key == 'y', free_ram,
                                 profile.disk_available_bytes, (uint64_t)(nowd() * 1000)))
                 home_donor_release(&d, LMB_HOME_FAILED, "Resources are unavailable or another plan owns this computer or weight cache.");
+            if (policy_approved && d.transaction.phase==LMB_HOME_ACCEPTED) {
+                char id[65]; lmb_hex(id,d.admission_policy,32);
+                snprintf(d.transaction.reason,sizeof d.transaction.reason,"Authorized by owner policy %.12s revision %u; waiting for the complete plan.",id,d.admission_policy_revision);
+                fprintf(stderr,"[donor-policy] accepted grant=%s revision=%u\n",id,d.admission_policy_revision);
+            }
             if (d.client >= 0 && home_status_send(d.client, &d.transaction, 0, 0))
                 home_donor_disconnect(&d, "The requester disconnected.");
         }

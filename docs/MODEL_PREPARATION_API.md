@@ -14,6 +14,11 @@ The owner configures the model folder in the existing household settings.
 Clients select catalogue names; paths, executables, backend overrides, endpoint
 addresses, keys and approvals are not accepted in requests.
 
+A donor owner may explicitly grant [bounded repeat authorization](DONOR_AUTHORIZATION.md)
+from that computer's TUI or local CLI. A matching future offer can then be
+accepted under that policy; management permission on the requester cannot
+create it. One-off approvals still cannot be replayed.
+
 All endpoints use the gateway's existing bearer authentication, loopback binding,
 Origin checks and bounded request limits. Operator visibility alone permits
 catalogue inspection, not preview/start/cancel or operation-history access.

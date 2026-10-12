@@ -40,13 +40,29 @@ class TerminalText:
 def hosted_turn_complete(text):
     # cmd_chat prints timing, transport and final newline in separate calls.
     # A metric prefix is not completion, even on a fast tiny checkpoint.
-    return re.search(r"host prefill [^\r\n]* · [1-9][0-9]* generated tokens[^\r\n]* · hosted stream · no local checkpoint(?:\x1b\[[0-9;]*m)*\r?\n", text) is not None
+    # TUI -> editor termios transitions can leave ONLCR active around an
+    # already CRLF-terminated stats line on Darwin: CR CR LF is still ONE
+    # complete line. A CR without the final LF must remain incomplete.
+    return re.search(r"host prefill [^\r\n]* · [1-9][0-9]* generated tokens[^\r\n]* · hosted stream · no local checkpoint(?:\x1b\[[0-9;]*m)*\r*\n", text) is not None
 
 
 def current_frame(terminal):
     # Historical frames can legitimately say stale while a new selection's
     # refresh is in flight. Assertions about the visible plan use the latest.
     return terminal.text.rsplit("\x1b[H", 1)[-1]
+
+
+def approval_frame_ready(terminal, model, repeat=False):
+    # ui_present emits the footer and final SGR reset only after all rows.
+    # A PTY read can stop after the pending heading but before the choices.
+    # Never act on a previous offer, or on a partially drawn new frame.
+    frame = current_frame(terminal)
+    return (frame.endswith("\x1b[0m") and
+            "Waiting for your approval" in frame and
+            f"Model: {model} (" in frame and
+            "Accept this request" in frame and "Decline" in frame and
+            "Enter confirm" in frame and
+            (not repeat or "Allow repeat loads for 1 hour" in frame))
 
 
 def assert_stage_record(path, stages=2, expected_source=2):

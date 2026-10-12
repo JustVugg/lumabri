@@ -17,7 +17,7 @@ import tempfile
 import termios
 import time
 
-from home_flow_test import TerminalText, current_frame, hosted_turn_complete, assert_stage_record
+from home_flow_test import TerminalText, current_frame, approval_frame_ready, hosted_turn_complete, assert_stage_record
 
 
 def main():
@@ -33,12 +33,15 @@ def main():
     parser.add_argument("--joint", choices=("complete", "reject", "cancel"), help="select and prepare two models together from the TUI")
     parser.add_argument("--sessions", type=int, choices=(1, 2, 4, 8), default=1)
     parser.add_argument("--api-prepare", action="store_true", help="apply the joint plan through authenticated management API")
+    parser.add_argument("--donor-policy", action="store_true", help="authorize bounded repeat placement on the donor, then retire and reload it")
     parser.add_argument("--donor-ram-gb", type=float, default=0.5)
     parser.add_argument("--prepare-timeout", type=int, default=180)
     parser.add_argument("--measure-sessions", action="store_true", help="also benchmark the single-slot baseline")
     args = parser.parse_args()
     if args.api_prepare and not args.joint:
         parser.error("--api-prepare requires --joint")
+    if args.donor_policy and (not args.api_prepare or args.joint != "complete"):
+        parser.error("--donor-policy requires --api-prepare --joint complete")
     if args.api and not (args.multi_model and args.keep_requester):
         parser.error("--api requires --multi-model and --keep-requester")
     if args.replicas and not args.api:
@@ -186,6 +189,7 @@ def main():
             chat.p.terminate(); until(lambda: chat.p.poll() is not None, "joint requester did not detach")
         library = tmp / "chatter/.lumabri/resident-plans"
         handled = set(); rejected = False; cancelled = False
+        authorizations = []
         def drive():
             nonlocal rejected, cancelled
             ready = len(list(library.glob("*.plan"))) if library.exists() else 0
@@ -194,7 +198,7 @@ def main():
                 key = (name, state["model"])
                 if state["phase"] != 1 or key in handled:
                     continue
-                if "Waiting for your approval" not in current_frame(terminal):
+                if not approval_frame_ready(terminal, state["model"], repeat=args.donor_policy):
                     continue
                 handled.add(key)
                 if ready and args.joint == "reject":
@@ -208,7 +212,31 @@ def main():
                         assert result.returncode == 0, result.stderr
                     cancelled = True
                 else:
-                    terminal.send("\x1b[A\r")
+                    if args.donor_policy:
+                        content = subprocess.run([str(runtime / "test_chat_ui"), "donor-content-check"], env=env(name),
+                            text=True, capture_output=True, timeout=20)
+                        assert content.returncode == 0, (content.stdout, content.stderr)
+                        def policy(*arguments, success=True):
+                            p = subprocess.run([str(runtime / "lumabri"), "donor-policy", *arguments],
+                                env=env(name), text=True, capture_output=True, timeout=20)
+                            assert (p.returncode == 0) == success, p.stderr
+                            return json.loads(p.stdout) if success else None
+                        reviewed = policy("inspect")
+                        policy("allow-current", "0" * 64, "600", "1", success=False)
+                        if not authorizations:
+                            grant = policy("allow-current", reviewed["review"], "600", "1")
+                        else:
+                            assert "Allow repeat loads for 1 hour" in current_frame(terminal)
+                            terminal.send("\x1b[B\r")  # default Decline -> explicit repeat permission
+                            until(lambda: any(p["id"] == reviewed["proposed_scope"]["id"] and p["enabled"]
+                                              for p in policy("list")["policies"]), "TUI repeat permission missing")
+                            grant = next(p for p in policy("list")["policies"] if p["id"] == reviewed["proposed_scope"]["id"])
+                            assert grant["expires"] - grant["issued"] == 3600
+                        assert grant["enabled"] and grant["max_allocations"] == 1
+                        assert grant["donor_instance"] == state["instance"]
+                        authorizations.append((name, grant))
+                    else:
+                        terminal.send("\x1b[A\r")
             return service("chatter")["prepare"].get("operation_state") in ("done", "failed")
         until(drive, "joint preparation did not finish", args.prepare_timeout)
         result = service("chatter")["prepare"]
@@ -255,6 +283,42 @@ def main():
             nodes = struct.unpack_from("<I", raw, len(raw) - 36)[0]
             assert assert_stage_record(r, stages=nodes) == 1
         assert not list((tmp / "chatter").rglob("*.safetensors"))
+        if args.donor_policy:
+            assert len(authorizations) == 2
+            assert len({grant["checkpoint_content_id"] for _, grant in authorizations}) == 2
+            api_prepare.reload_authorized(until)
+            new_plans = list(library.glob("*.plan"))
+            assert len(new_plans) == 3 and set(plans) < set(new_plans), "retirement history or new plan missing"
+            replacement, = set(new_plans) - set(plans)
+            conversation = Terminal("chatter", ["resident-chat", str(replacement), tracker], program="test_chat_ui")
+            until(lambda: conversation.has("receives the text"), "policy reloaded host unavailable")
+            conversation.send("hello\n")
+            until(lambda: hosted_turn_complete(conversation.text), "policy reloaded model did not infer", 120)
+            conversation.send("/quit\n")
+            until(lambda: conversation.p.poll() is not None, "policy reloaded chat did not close")
+            assert conversation.p.returncode == 0
+            reserved = {n: service(n)["donor"]["reserved_total_bytes"] for n in ("a", "b")}
+            operation = api_prepare.duplicate_offer()
+            until(lambda: any(service(n)["donor"]["phase"] == 1 for n in ("a", "b")), "over-quota offer missing")
+            # Available RAM alone is insufficient: the owner's one-allocation
+            # authority must leave a duplicate pending, without reserving it.
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                assert any(service(n)["donor"]["phase"] == 1 for n in ("a", "b"))
+                assert all(service(n)["donor"]["reserved_total_bytes"] == reserved[n] for n in ("a", "b"))
+                time.sleep(.1)
+            api_prepare.cancel_operation(operation, until)
+            assert sum(service(n)["donor"]["model_count"] for n in ("a", "b")) == 2
+            for name, grant in authorizations:
+                listed = json.loads(subprocess.run([str(runtime / "lumabri"), "donor-policy", "list"],
+                    env=env(name), text=True, capture_output=True, check=True).stdout)
+                assert any(p["id"] == grant["id"] and p["revision"] == grant["revision"] for p in listed["policies"])
+                revoked = json.loads(subprocess.run([str(runtime / "lumabri"), "donor-policy", "revoke", grant["id"], str(grant["revision"])],
+                    env=env(name), text=True, capture_output=True, check=True).stdout)
+                assert not revoked["enabled"] and revoked["revision"] == grant["revision"] + 1
+            assert all(service(n)["donor"]["reserved_total_bytes"] == reserved[n] for n in ("a", "b")), "revocation evicted active weights"
+            (tmp / "donor-policies.json").write_text(json.dumps(authorizations, indent=2))
+            print("DONOR AUTHORIZATION: PASS (CLI/TUI grants, fresh automatic allocation, real inference, quota, revocation without eviction)", flush=True)
         print(f"JOINT PREPARATION: PASS ({args.joint}, {expected} resident models, detached TUI, real inference)", flush=True)
 
     try:

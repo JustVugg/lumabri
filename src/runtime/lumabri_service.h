@@ -11,7 +11,8 @@
 #define HOME_SVC_RECORD_VERSION 4u
 #define HOME_SVC_MAX 65536u
 enum { HOME_SVC_STATUS = 0, HOME_SVC_STOP, HOME_SVC_ACCEPT, HOME_SVC_DECLINE,
-       HOME_SVC_UNLOAD, HOME_SVC_CANCEL, HOME_SVC_NEXT_MODEL };
+       HOME_SVC_UNLOAD, HOME_SVC_CANCEL, HOME_SVC_NEXT_MODEL,
+       HOME_SVC_ALLOW_REPEAT, HOME_SVC_REVOKE_REPEAT };
 enum { HOME_SVC_RUNNING = 1, HOME_SVC_DONE, HOME_SVC_FAILED, HOME_SVC_STOPPED };
 
 typedef struct {
@@ -317,7 +318,7 @@ static int home_service_poll(HomeService *s) {
     uint8_t r[80];
     if (fcntl(fd, F_SETFD, FD_CLOEXEC) || fcntl(fd, F_SETFL, O_NONBLOCK) || home_service_peer(fd) ||
         home_service_io(fd, r, sizeof r, 0, nowd() + .2) ||
-        lmb_get32(r) != HOME_SVC_VERSION || lmb_get32(r + 4) > HOME_SVC_NEXT_MODEL) { close(fd); return -1; }
+        lmb_get32(r) != HOME_SVC_VERSION || lmb_get32(r + 4) > HOME_SVC_REVOKE_REPEAT) { close(fd); return -1; }
     uint32_t op = lmb_get32(r + 4);
     uint64_t revision = (uint64_t)lmb_get32(r + 72) | ((uint64_t)lmb_get32(r + 76) << 32);
     if (op && (memcmp(r + 8, s->snapshot.instance, 32) || memcmp(r + 40, s->snapshot.offer.id, 32) || revision != s->snapshot.revision)) {
