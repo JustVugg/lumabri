@@ -11,6 +11,21 @@ HERE = Path(__file__).resolve().parent
 
 
 class SwarmSoakTest(unittest.TestCase):
+    def test_rejects_non_integer_oracle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            spec = root / "spec.json"
+            spec.write_text(json.dumps({"model": "tiny", "oracle_token_ids": [True]}),
+                            encoding="utf-8")
+            proc = subprocess.run(
+                [sys.executable, str(HERE / "swarm_soak.py"), "--spec", str(spec),
+                 "--output", str(root / "soak.json"), "--seconds", "1"],
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=10, check=False)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("oracle_token_ids", proc.stderr)
+            self.assertFalse((root / "soak.json").exists())
+
     def test_repeats_exact_oracle_and_writes_result(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

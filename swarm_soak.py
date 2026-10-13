@@ -20,7 +20,10 @@ def main():
     if args.seconds < 1 or args.interval < 0:
         parser.error("seconds must be positive and interval non-negative")
     spec = json.loads(Path(args.spec).read_text(encoding="utf-8"))
-    oracle = [int(value) for value in spec["oracle_token_ids"]]
+    try:
+        oracle = swarm_bench.validate_oracle(spec.get("oracle_token_ids"))
+    except ValueError as error:
+        parser.error(str(error))
     command = spec["chatter"]["command"]
     host = spec["chatter"].get("host", "local")
     environment = spec["chatter"].get("env", {})
