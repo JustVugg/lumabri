@@ -90,7 +90,40 @@ int main(int argc, char **argv) {
         uint64_t gaps=api_demand.loss_count;
         close(channel[1]); api_demand_drain(channel[0],&a);
         assert(api_demand.loss_count==gaps); /* normal peer EOF is not loss */
-        close(channel[0]); api_demand_fd=-1; free(s);
+        close(channel[0]); api_demand_fd=-1;
+        /* Reproduce the actual fork lifecycle: peer exit precedes the first
+         * drain. An ordinary HTTP worker has no events, a completed turn has
+         * three, and a worker lost after START must still be interrupted. */
+        for (unsigned events=0;events<=3;events++) {
+            memset(&api_demand,0,sizeof api_demand);
+            assert(!socketpair(AF_UNIX,SOCK_DGRAM,0,channel));
+            pid_t child=fork(); assert(child>=0);
+            if (!child) {
+                close(channel[0]); api_demand_fd=channel[1]; api_demand_failed=0;
+                memset(&api_demand_tx,0,sizeof api_demand_tx); api_demand_tx.model[0]=5;
+                if (events) api_demand_send(LMB_DEMAND_START,0,0,0);
+                if (events>=2) api_demand_send(LMB_DEMAND_ADMIT,0,0,0);
+                if (events==3) api_demand_send(LMB_DEMAND_END,LMB_DEMAND_COMPLETE,1000,2000);
+                close(channel[1]); _exit(api_demand_failed ? 75 : 0);
+            }
+            close(channel[1]); int child_status=0;
+            assert(waitpid(child,&child_status,0)==child && WIFEXITED(child_status) && !WEXITSTATUS(child_status));
+            a=(LmbDemandWorker){.model=-1}; api_demand_drain(channel[0],&a);
+            assert(!api_demand.loss_count);
+            int model=a.model;
+            lmb_demand_reap(&api_demand,&a,0,lmb_io_monotonic_ms());
+            assert(api_demand.loss_count==(uint64_t)(events==1 || events==2));
+            assert(!api_demand.uncertain_workers);
+            if (events) {
+                assert(model>=0 && !api_demand.models[model].pending && !api_demand.models[model].admitted);
+                lmb_demand_summary(&api_demand.models[model],lmb_io_monotonic_ms(),&sum);
+                assert(sum.counts[LMB_DEMAND_STARTED]==1);
+                assert(sum.counts[LMB_DEMAND_COMPLETE]==(uint64_t)(events==3));
+                assert(sum.counts[LMB_DEMAND_INTERRUPTED]==(uint64_t)(events<3));
+            }
+            close(channel[0]);
+        }
+        free(s);
         puts("DEMAND: PASS (bounded windows, live slots, outcomes, latency, loss and transport)"); return 0;
     }
     if (argc==2 && !strcmp(argv[1],"donor-content-check")) {
