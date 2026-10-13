@@ -21,11 +21,14 @@ static void api_demand_drain(int fd,LmbDemandWorker *w) {
         ssize_t n=recv(fd,bytes,sizeof bytes,MSG_DONTWAIT);
         if (n<0 && errno==EINTR) continue;
         if (n<0 && (errno==EAGAIN || errno==EWOULDBLOCK)) break;
-        /* Darwin can report EOF when the connected datagram peer closes;
-         * Linux keeps returning EAGAIN. Neither is a lost event. Reaping
-         * still requires END for every known chat and checks child status. */
-        if (!n) break;
-        if (n<0) { lmb_demand_worker_loss(&api_demand,w,lmb_io_monotonic_ms()); break; }
+        /* A connected datagram peer can close with EOF or a disconnect
+         * error; Linux normally keeps returning EAGAIN. Reaping, not this
+         * platform-specific indication, verifies END and child exit status. */
+        if (!n || (n<0 && (errno==ECONNRESET || errno==ENOTCONN))) break;
+        if (n<0) {
+            if (!w->uncertain) fprintf(stderr,"[demand] channel read failed: errno=%d\n",errno);
+            lmb_demand_worker_loss(&api_demand,w,lmb_io_monotonic_ms()); break;
+        }
         if (n!=(ssize_t)sizeof(LmbDemandEvent)) { lmb_demand_worker_loss(&api_demand,w,lmb_io_monotonic_ms()); break; }
         LmbDemandEvent e; memcpy(&e,bytes,sizeof e);
         (void)lmb_demand_event(&api_demand,w,&e,lmb_io_monotonic_ms());

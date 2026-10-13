@@ -53,7 +53,7 @@ def main():
             status, body = request(path="/api/v1/demand")
             demand = json.loads(body)
             assert status == 200 and demand["models"] == [] and not demand["window_complete"]
-            assert demand["scope"] == "this_gateway_authorized_chat_only" and demand["telemetry_gaps"] == 0
+            assert demand["scope"] == "this_gateway_authorized_chat_only" and demand["telemetry_gaps"] == 0, demand
             status, body = request(path="/api/v1/workspace")
             workspace = json.loads(body)
             assert status == 200 and workspace["inventory_ok"] is False and workspace["nodes"] == []
