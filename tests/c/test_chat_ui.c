@@ -224,6 +224,27 @@ int main(int argc, char **argv) {
         strcpy(s.detail,"Waiting for approval"); s.state=HOME_SVC_RUNNING; assert(!lmb_unhex(s.instance,id,32));
         assert(!preparation_save(dir,&s) && !preparation_load(dir,id,&loaded));
         assert(!strcmp(loaded.detail,s.detail));
+        assert(!loaded.preparation_results_known && !loaded.preparation_result_count);
+        s.preparation_results_known=1; s.preparation_result_count=2;
+        memset(s.preparation_results[0].allocation,1,32); strcpy(s.preparation_results[0].catalogue_name,"model-a");
+        memset(s.preparation_results[1].allocation,2,32); strcpy(s.preparation_results[1].catalogue_name,"model-b");
+        s.preparation_results[0].ready_observed=1;
+        assert(!preparation_save(dir,&s) && !preparation_load(dir,id,&loaded));
+        assert(loaded.preparation_results_known && loaded.preparation_result_count==2);
+        assert(!memcmp(loaded.preparation_results,s.preparation_results,sizeof s.preparation_results));
+        Cap results={0}; assert(!preparation_results_json(&results,&loaded));
+        assert(strstr(results.p,"ready_observed") && strstr(results.p,"unconfirmed") && strstr(results.p,"model-b"));
+        free(results.p);
+        LmbBuf bad={0};
+        s.preparation_results_known=0; assert(home_service_pack(&bad,&s)); s.preparation_results_known=1;
+        s.preparation_results[1].allocation[0]=1;
+        memcpy(s.preparation_results[1].allocation,s.preparation_results[0].allocation,32);
+        assert(home_service_pack(&bad,&s)); memset(s.preparation_results[1].allocation,2,32);
+        s.preparation_results[1].ready_observed=2; assert(home_service_pack(&bad,&s)); s.preparation_results[1].ready_observed=0;
+        s.preparation_result_count=HOME_PREPARATION_RESULTS+1; assert(home_service_pack(&bad,&s)); s.preparation_result_count=2;
+        assert(!home_service_pack(&bad,&s));
+        for (size_t i=0;i<bad.len;i++) assert(home_service_unpack(bad.p,i,&loaded));
+        free(bad.p);
         s.state=HOME_SVC_DONE; strcpy(s.detail,"All selected models ready");
         assert(!preparation_save(dir,&s) && !preparation_load(dir,id,&loaded)); assert(loaded.state==HOME_SVC_DONE);
         char file[80]; snprintf(file,sizeof file,"%s.state",id);
@@ -417,15 +438,17 @@ int main(int argc, char **argv) {
         assert(!home_service_unpack(b.p, b.len, &output));
         assert(output.compute_active == 1 && output.compute_queued == 3 && output.compute_grants == 1234);
         for (size_t n = 0; n < b.len; n++) assert(home_service_unpack(b.p, n, &output));
+        lmb_put32(b.p, 4);
+        assert(!home_service_unpack(b.p, b.len-8, &output) && !output.preparation_results_known);
         lmb_put32(b.p, 3);
-        assert(!home_service_unpack(b.p, b.len-32, &output) && output.compute_grants == 1234);
+        assert(!home_service_unpack(b.p, b.len-40, &output) && output.compute_grants == 1234);
         lmb_put32(b.p, 2); /* v2 had allocations but no compute observation */
-        assert(!home_service_unpack(b.p, b.len-52, &output));
+        assert(!home_service_unpack(b.p, b.len-60, &output));
         assert(output.model_count == 2 && output.reserved_total == 900 && !output.compute_enabled);
         lmb_put32(b.p, 1);
-        assert(!home_service_unpack(b.p, b.len-64, &output));
+        assert(!home_service_unpack(b.p, b.len-72, &output));
         assert(!output.model_count && !output.compute_enabled);
-        lmb_put32(b.p, 5); assert(home_service_unpack(b.p, b.len, &output));
+        lmb_put32(b.p, 6); assert(home_service_unpack(b.p, b.len, &output));
         free(b.p); b = (LmbBuf){0};
         input.compute_active = 2; assert(home_service_pack(&b, &input));
         input.compute_active = 1; input.compute_queued = 33; assert(home_service_pack(&b, &input));
@@ -443,8 +466,21 @@ int main(int argc, char **argv) {
         service.snapshot.compute_grants++;
         assert(!home_service_save(&service)); assert(!stat(service.journal, &after));
         assert(before.st_ino == after.st_ino); /* no replace/fsync for kernel counters */
+        uint8_t allocation[32]={1};
+        assert(home_service_preparation_assign(&service,"model-a",allocation)); /* donor is not a preparation */
+        memset(&service.snapshot,0,sizeof service.snapshot);
+        strcpy(service.snapshot.role,"prepare"); service.snapshot.state=HOME_SVC_RUNNING;
+        service.snapshot.preparation_results_known=1;
+        assert(!home_service_preparation_assign(&service,"model-a",allocation));
+        assert(!home_service_unpack(service.last,service.last_size,&output));
+        assert(output.preparation_result_count==1 && !output.preparation_results[0].ready_observed);
+        assert(home_service_preparation_assign(&service,"model-a",allocation));
+        assert(service.snapshot.preparation_result_count==1);
+        uint8_t unknown[32]={2}; assert(home_service_preparation_ready(&service,unknown));
+        assert(!home_service_preparation_ready(&service,allocation));
+        assert(!home_service_unpack(service.last,service.last_size,&output) && output.preparation_results[0].ready_observed);
         free(service.last); assert(!unlink(service.journal)); assert(!rmdir(directory));
-        puts("SERVICE CODEC: PASS (v1/v2/v3/v4, strict bounds, counters stay out of durable state)"); return 0;
+        puts("SERVICE CODEC: PASS (v1-v5, strict bounds, historical preparation IDs, counters stay out of durable state)"); return 0;
     }
     if (argc == 2 && !strcmp(argv[1], "model-pool")) {
         HomeDonor parked[3] = {0}, d = {.parked = parked, .park_capacity = 3, .pool_budget = 1000, .offer_revision = 3};

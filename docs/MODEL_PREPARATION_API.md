@@ -42,6 +42,22 @@ catalogue inspection, not preview/start/cancel or operation-history access.
 5. `GET /api/v1/preparation` lists durable receipts for this household. Use
    status to check a recorded running operation against its live keeper.
 
+Status and history include `results_known` and an ordered `allocations` array:
+each entry binds the original catalogue `name` to the exact allocation `id`.
+That ID is persisted before the first donor offer, and its state is initially
+`unconfirmed`. `ready_observed` records that this preparation reached READY
+and saved its resident plan. The array retains successful earlier models when
+a later model is declined or cancelled. Repeating an operation or restarting
+the API does not assign new IDs.
+
+These are historical results, **not live readiness**. Before routing or
+retiring an allocation, revalidate its saved plan and authenticated live owners.
+An interrupted `unconfirmed` entry may have reached a donor: inspect that exact
+ID, never create a replacement merely because acknowledgement was lost. Old
+receipts have `results_known: false`; an empty list then means unknown, not
+that nothing was allocated. This receipt is not permission to reload weights
+or to adopt other allocations with similar names.
+
 Example preview body:
 
 ```json

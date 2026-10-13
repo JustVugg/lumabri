@@ -8,12 +8,23 @@
 #include <sys/file.h>
 
 #define HOME_SVC_VERSION 1u
-#define HOME_SVC_RECORD_VERSION 4u
+#define HOME_SVC_RECORD_VERSION 5u
 #define HOME_SVC_MAX 65536u
+#define HOME_PREPARATION_RESULTS 8u
 enum { HOME_SVC_STATUS = 0, HOME_SVC_STOP, HOME_SVC_ACCEPT, HOME_SVC_DECLINE,
        HOME_SVC_UNLOAD, HOME_SVC_CANCEL, HOME_SVC_NEXT_MODEL,
        HOME_SVC_ALLOW_REPEAT, HOME_SVC_REVOKE_REPEAT };
 enum { HOME_SVC_RUNNING = 1, HOME_SVC_DONE, HOME_SVC_FAILED, HOME_SVC_STOPPED };
+
+/* Historical outcomes, not live readiness or permission to load again. An
+ * allocation ID is durably assigned before the first OFFER. A controller can
+ * reconcile that exact ID after interruption without guessing from names or
+ * adopting someone else's newly visible allocation. */
+typedef struct {
+    uint8_t allocation[32];
+    char catalogue_name[64];
+    uint32_t ready_observed;
+} HomePreparationResult;
 
 typedef struct {
     uint8_t instance[32];
@@ -27,6 +38,8 @@ typedef struct {
     uint32_t compute_enabled, compute_active, compute_queued;
     uint64_t compute_grants;
     uint8_t allocation_set[32];
+    uint32_t preparation_results_known, preparation_result_count;
+    HomePreparationResult preparation_results[HOME_PREPARATION_RESULTS];
 } HomeServiceSnapshot;
 
 /* Optional durable observer for a preparation submitted through another
@@ -133,6 +146,18 @@ static int home_service_pack(LmbBuf *b, const HomeServiceSnapshot *s) {
     if (s->model_count > 4 || s->reserved_total > s->ram) return -1;
     if (s->compute_enabled > 1 || s->compute_active > 1 || s->compute_queued > 32 ||
         (!s->compute_enabled && (s->compute_active || s->compute_queued))) return -1;
+    if (s->preparation_results_known > 1 || s->preparation_result_count > HOME_PREPARATION_RESULTS ||
+        (s->preparation_result_count && !s->preparation_results_known) ||
+        (s->preparation_results_known && strcmp(s->role,"prepare"))) return -1;
+    for (uint32_t i=0;i<s->preparation_result_count;i++) {
+        const HomePreparationResult *r=&s->preparation_results[i]; unsigned nonzero=0;
+        for (unsigned j=0;j<32;j++) nonzero|=r->allocation[j];
+        if (!nonzero || r->ready_observed>1 || !r->catalogue_name[0] ||
+            strnlen(r->catalogue_name,sizeof r->catalogue_name)==sizeof r->catalogue_name ||
+            lmb_inventory_text(r->catalogue_name)) return -1;
+        for (uint32_t j=0;j<i;j++)
+            if (!memcmp(r->allocation,s->preparation_results[j].allocation,32)) return -1;
+    }
     if (lmb_buf_u32(b, HOME_SVC_RECORD_VERSION) || lmb_buf_bytes(b, s->instance, 32) ||
         lmb_buf_u32(b, s->state) || lmb_buf_u32(b, s->phase) ||
         lmb_buf_u32(b, s->retained) || lmb_buf_u32(b, s->threads) ||
@@ -149,6 +174,11 @@ static int home_service_pack(LmbBuf *b, const HomeServiceSnapshot *s) {
     if (!rc) rc = lmb_buf_u32(b, s->compute_enabled) || lmb_buf_u32(b, s->compute_active) ||
         lmb_buf_u32(b, s->compute_queued) || lmb_buf_u64(b, s->compute_grants);
     if (!rc) rc = lmb_buf_bytes(b, s->allocation_set, 32);
+    if (!rc) rc = lmb_buf_u32(b,s->preparation_results_known) || lmb_buf_u32(b,s->preparation_result_count);
+    for (uint32_t i=0;i<s->preparation_result_count && !rc;i++) {
+        const HomePreparationResult *r=&s->preparation_results[i];
+        rc=lmb_buf_bytes(b,r->allocation,32) || lmb_buf_str(b,r->catalogue_name) || lmb_buf_u32(b,r->ready_observed);
+    }
     return rc || b->len > HOME_SVC_MAX ? -1 : 0;
 }
 
@@ -176,6 +206,16 @@ static int home_service_unpack(const uint8_t *bytes, size_t n, HomeServiceSnapsh
     if (v >= 4) {
         if (c.off > c.len || c.len-c.off < 32) return -1;
         memcpy(s->allocation_set, c.p+c.off, 32); c.off += 32;
+    }
+    if (v >= 5) {
+        if (lmb_cur_u32(&c,&s->preparation_results_known) || lmb_cur_u32(&c,&s->preparation_result_count) ||
+            s->preparation_result_count>HOME_PREPARATION_RESULTS) return -1;
+        for (uint32_t i=0;i<s->preparation_result_count;i++) {
+            HomePreparationResult *r=&s->preparation_results[i];
+            if (lmb_cur_bytes(&c,r->allocation,32) ||
+                lmb_inventory_string(&c,r->catalogue_name,sizeof r->catalogue_name) ||
+                lmb_cur_u32(&c,&r->ready_observed)) return -1;
+        }
     }
     if (c.off != c.len) return -1;
     LmbBuf check = {0}; int rc = home_service_pack(&check, s); free(check.p); return rc;
@@ -218,6 +258,37 @@ static int home_service_save(HomeService *s) {
     else free(b.p);
     if (!rc && s->observer.save) rc = s->observer.save(s->observer.fd, &s->snapshot);
     return rc;
+}
+
+static int home_service_preparation_assign(HomeService *s,const char *name,const uint8_t allocation[32]) {
+    if (strcmp(s->snapshot.role,"prepare") || !s->snapshot.preparation_results_known ||
+        s->snapshot.preparation_result_count>=HOME_PREPARATION_RESULTS ||
+        !name || !*name || strlen(name)>=sizeof s->snapshot.preparation_results[0].catalogue_name ||
+        lmb_inventory_text(name)) return -1;
+    unsigned nonzero=0; for (unsigned i=0;i<32;i++) nonzero|=allocation[i];
+    if (!nonzero) return -1;
+    for (uint32_t i=0;i<s->snapshot.preparation_result_count;i++)
+        if (!memcmp(allocation,s->snapshot.preparation_results[i].allocation,32)) return -1;
+    HomePreparationResult *r=&s->snapshot.preparation_results[s->snapshot.preparation_result_count];
+    memset(r,0,sizeof *r); memcpy(r->allocation,allocation,32); strcpy(r->catalogue_name,name);
+    s->snapshot.preparation_result_count++;
+    if (!home_service_save(s)) return 0;
+    /* Some persistence may have succeeded. Keep the ID as unconfirmed in
+     * memory too; a later terminal snapshot must not erase that evidence. */
+    return -1;
+}
+
+static int home_service_preparation_ready(HomeService *s,const uint8_t allocation[32]) {
+    if (strcmp(s->snapshot.role,"prepare") || !s->snapshot.preparation_results_known) return -1;
+    for (uint32_t i=0;i<s->snapshot.preparation_result_count;i++) {
+        HomePreparationResult *r=&s->snapshot.preparation_results[i];
+        if (memcmp(r->allocation,allocation,32)) continue;
+        r->ready_observed=1;
+        int rc=home_service_save(s);
+        if (rc) r->ready_observed=0;
+        return rc;
+    }
+    return -1;
 }
 
 static int home_service_record(const char *role, HomeServiceSnapshot *s) {
