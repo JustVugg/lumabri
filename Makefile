@@ -608,7 +608,7 @@ test_replica_rank: tests/c/test_replica_rank.c src/planner/lumabri_replica_rank.
 
 test: test-api
 
-test-api-gateway: lumabri test_chat_ui
+test-api-gateway: lumabri test_chat_ui test-chat-history
 	./test_chat_ui api-codec
 	./test_chat_ui preparation-codec
 	./test_chat_ui donor-policy-codec
@@ -618,6 +618,12 @@ test-api-gateway: lumabri test_chat_ui
 	python3 tests/integration/chat_history_test.py
 
 test: test-api-gateway
+
+.PHONY: test-chat-history
+test-chat-history: build/web_assets.h
+	mkdir -p build/tests
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_chat_history.c src/ui/lumabri_tui.c lumabri_machine.c lumabri_run_gate.c -o build/tests/chat-history
+	./build/tests/chat-history
 
 test_home: tests/c/test_home.c lumabri_home.h lumabri_inventory.h lumabri_families.h lumabri_proto.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_home.c -o $@
@@ -738,6 +744,7 @@ test-sanitize: build/web_assets.h
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_api_http.c -o build/sanitize/test_api_http
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_api_access.c -o build/sanitize/test_api_access
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_chat_store.c -o build/sanitize/test_chat_store
+	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_chat_history.c src/ui/lumabri_tui.c lumabri_machine.c lumabri_run_gate.c -o build/sanitize/test_chat_history
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_model_routes.c -o build/sanitize/test_model_routes
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_replica_admission.c -o build/sanitize/test_replica_admission
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_replica_rank.c -o build/sanitize/test_replica_rank -lm
@@ -766,6 +773,7 @@ test-sanitize: build/web_assets.h
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_api_http
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_api_access
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_chat_store
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/sanitize/test_chat_history
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_model_routes
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_replica_admission
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_replica_rank

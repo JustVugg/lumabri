@@ -5,6 +5,9 @@ a tag stay under Unreleased until a new tag is created.
 
 ## Unreleased
 
+- Chat-history saves return the document and revision committed by that
+  request, even when another request updates or deletes it before the reply.
+  Concurrent edits retain their revision-conflict protection.
 - Multi-host benchmark and production gates reject malformed token oracles,
   boolean or fractional counters, non-finite timing or throughput values, and
   mismatched model, family or mode across release reports.
