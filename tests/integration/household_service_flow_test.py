@@ -258,16 +258,30 @@ def main():
         # for a turn to begin but change during that turn. The runtime must
         # discard that timing, not label it a stable two-model measurement.
         # Establish the committed workload before testing persistence.
-        committed = sorted((service(name)["donor"]["model_count"],
-                            service(name)["donor"]["reserved_total_bytes"]) for name in ("a", "b"))
-        def joint_inventory_committed():
-            result = subprocess.run([str(runtime / "lumabri"), "models", "--models-dir", str(combined),
-                                     "--tracker", tracker, "--context", "128", "--sessions", str(args.sessions), "--json"],
-                                    env=env("chatter"), text=True, capture_output=True, timeout=30)
-            assert result.returncode == 0, result.stderr
-            reports = [node["workload"] for node in json.loads(result.stdout)["nodes"] if node["workload"] is not None]
-            return sorted((w["allocations"], w["reserved_bytes"]) for w in reports) == committed
-        until(joint_inventory_committed, "joint committed workload did not reach leased inventory", 30)
+        def wait_joint_inventory():
+            committed = {}
+            for name in ("a", "b"):
+                identity = subprocess.run([str(runtime / "lumabri"), "peer-key"], env=env(name),
+                                          text=True, capture_output=True, check=True, timeout=10).stdout.strip()
+                snapshot = subprocess.run([str(runtime / "test_chat_ui"), "donor-workload"], env=env(name),
+                                          text=True, capture_output=True, check=True, timeout=10)
+                committed[identity] = json.loads(snapshot.stdout)
+            observed = {}
+            def joint_inventory_committed():
+                result = subprocess.run([str(runtime / "lumabri"), "models", "--models-dir", str(combined),
+                                         "--tracker", tracker, "--context", "128", "--sessions", str(args.sessions), "--json"],
+                                        env=env("chatter"), text=True, capture_output=True, timeout=30)
+                assert result.returncode == 0, result.stderr
+                observed.clear()
+                observed.update((node["identity"], node["workload"]) for node in json.loads(result.stdout)["nodes"])
+                return all(observed.get(node) is not None and
+                           all(observed[node][key] == value for key, value in facts.items())
+                           for node, facts in committed.items())
+            try:
+                until(joint_inventory_committed, "joint committed workload did not reach leased inventory", 30)
+            except AssertionError as exc:
+                raise AssertionError(f"{exc}: expected={committed}, observed={observed}") from exc
+        wait_joint_inventory()
         for plan in plans:
             conversation = Terminal("chatter", ["resident-chat", str(plan), tracker], program="test_chat_ui")
             until(lambda: conversation.has("receives the text"), "joint resident host unavailable")
@@ -297,9 +311,17 @@ def main():
             conversation.send("/quit\n")
             until(lambda: conversation.p.poll() is not None, "policy reloaded chat did not close")
             assert conversation.p.returncode == 0
+            # Retire/reload changes allocation IDs even if count and RAM
+            # return to their previous values. Wait for that new identity
+            # before reviewing the duplicate; the keeper correctly rejects
+            # a review if a delayed heartbeat changes it before the OFFER.
+            wait_joint_inventory()
             reserved = {n: service(n)["donor"]["reserved_total_bytes"] for n in ("a", "b")}
             operation = api_prepare.duplicate_offer()
-            until(lambda: any(service(n)["donor"]["phase"] == 1 for n in ("a", "b")), "over-quota offer missing")
+            def duplicate_pending():
+                api_prepare.assert_operation_running(operation)
+                return any(service(n)["donor"]["phase"] == 1 for n in ("a", "b"))
+            until(duplicate_pending, "over-quota offer missing")
             # Available RAM alone is insufficient: the owner's one-allocation
             # authority must leave a duplicate pending, without reserving it.
             deadline = time.monotonic() + 3

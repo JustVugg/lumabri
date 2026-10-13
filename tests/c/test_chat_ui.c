@@ -5,6 +5,17 @@
 #include <assert.h>
 
 int main(int argc, char **argv) {
+    if (argc==2 && !strcmp(argv[1],"donor-workload")) {
+        /* The fixture needs the live donor's allocation identity, not only
+         * counts: replacing a model can preserve both count and RAM. */
+        HomeServiceSnapshot donor;
+        assert(!home_service_query("donor",HOME_SVC_STATUS,NULL,&donor));
+        assert(donor.state==HOME_SVC_RUNNING);
+        char set[65]; lmb_hex(set,donor.allocation_set,32);
+        printf("{\"allocations\":%u,\"reserved_bytes\":%llu,\"allocation_set\":\"%s\"}\n",
+            donor.model_count,(unsigned long long)donor.reserved_total,set);
+        return 0;
+    }
     if (argc==2 && !strcmp(argv[1],"demand-codec")) {
         LmbDemand *s=calloc(1,sizeof *s); assert(s); s->started_ms=1000;
         LmbDemandWorker a={.model=-1},b={.model=-1};
