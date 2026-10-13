@@ -26,6 +26,7 @@ def main():
         def states():
             return {s["role"]: s for s in json.loads(run("service", "status", "--json").stdout)["services"]}
         token = run("api", "user-add", "alice").stdout.strip()
+        run("api", "operator-grant", "alice")
         with socket.socket() as reserving:
             reserving.bind(("127.0.0.1", 0)); port = reserving.getsockname()[1]
         start = ("api", "start", "--tracker", "127.0.0.1:1", "--port", str(port))
@@ -34,12 +35,19 @@ def main():
             conn.request("GET", "/api/v1/models", headers={"Authorization": "Bearer " + token})
             reply = conn.getresponse(); body = reply.read(); conn.close()
             assert reply.status == 200 and json.loads(body)["models"] == []
+        def demand():
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.request("GET", "/api/v1/demand", headers={"Authorization": "Bearer " + token})
+            reply = conn.getresponse(); body = reply.read(); conn.close()
+            assert reply.status == 200
+            return json.loads(body)
         pending = None
         try:
             run(*start); initial = states()
             assert initial["api"]["live"] and initial["api"]["phase"] == 2
             assert initial["manager"]["live"]
             models()
+            initial_demand = demand()
             run(*start)
             assert states()["api"]["instance"] == initial["api"]["instance"]
             wrong = (*start[:-1], str(port + 1 if port < 65535 else port - 1))
@@ -51,6 +59,7 @@ def main():
             assert restarted["api"]["instance"] == initial["api"]["instance"]
             assert restarted["api"]["pid"] == initial["api"]["pid"]
             models()
+            assert demand()["instance"] == initial_demand["instance"], "manager restart reset live gateway evidence"
             # An accepted request must not inherit the keeper singleton lock.
             pending = socket.create_connection(("127.0.0.1", port), timeout=5)
             pending.sendall(b"GET "); time.sleep(.2)
@@ -63,6 +72,8 @@ def main():
             assert states()["api"]["state"] == "interrupted"
             run(*start)
             assert states()["api"]["instance"] != live["instance"]
+            restarted_demand = demand()
+            assert restarted_demand["instance"] != initial_demand["instance"] and not restarted_demand["window_complete"]
             pending.close(); pending = None
             models()
             run("api", "stop")

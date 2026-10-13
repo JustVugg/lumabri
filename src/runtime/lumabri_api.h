@@ -58,6 +58,7 @@ static int api_json_text(Cap *c, const char *s) {
     }
     return cap_str(c,"\"");
 }
+#include "lumabri_demand_runtime.h"
 #include "lumabri_chat_history.h"
 
 /* Only these compiled assets are public. No generic file-serving path and no
@@ -232,12 +233,19 @@ static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUs
         api_error(fd,400,"invalid_chat_request"); return;
     }
     if (!lmb_api_user_allows(user,allocation)) { api_error(fd,403,"model_not_authorized"); return; }
+    memcpy(api_demand_tx.model,allocation,32); api_demand_send(LMB_DEMAND_START,0,0,0);
+    unsigned demand_outcome=LMB_DEMAND_FAILED; uint64_t demand_ttft=0;
     LmbResidentPlan *selected=calloc(1,sizeof *selected);
-    if (!selected) { api_error(fd,500,"allocation_failed"); return; }
+    if (!selected) { api_error(fd,500,"allocation_failed"); api_demand_send(LMB_DEMAND_END,LMB_DEMAND_FAILED,0,0); return; }
     Engine engine; const char *error=NULL; int permit=-1;
     LmbModelRoute contract;
     int status=api_model_open(access_dir,tracker,allocation,max_new,&engine,&permit,selected,&error,&contract);
-    if (status) { api_error(fd,(unsigned)status,error); free(selected); return; }
+    if (status) {
+        api_error(fd,(unsigned)status,error); free(selected);
+        api_demand_send(LMB_DEMAND_END,status==429 ? LMB_DEMAND_CAPACITY : status==400 ? LMB_DEMAND_INVALID : LMB_DEMAND_FAILED,0,0);
+        return;
+    }
+    api_demand_send(LMB_DEMAND_ADMIT,0,0,0);
     int seeded=engine.request_seed_supported;
     int recoverable=(seeded || engine.greedy_only) && contract.count>1;
     uint64_t request_seed=0; if (seeded) lmb_random((uint8_t *)&request_seed,sizeof request_seed);
@@ -249,14 +257,14 @@ static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUs
         !catalog_workload_capture_once(tracker,&observation->key,why,sizeof why)) observing=1;
     Cap history={0}; char *prompt=NULL;
     if (api_messages(&j,(unsigned)fields[1],engine.kind,&history,&prompt)) {
-        api_error(fd,400,"unsupported_messages_or_limits"); goto finished;
+        demand_outcome=LMB_DEMAND_INVALID; api_error(fd,400,"unsupported_messages_or_limits"); goto finished;
     }
     if (submit_serve2_seeded(&engine,history.p ? history.p : "",prompt,(int)max_new,seeded ? &request_seed : NULL)) {
         api_error(fd,503,"submit_failed"); goto finished;
     }
     const char *header="HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\n"
         "Connection: close\r\nX-Content-Type-Options: nosniff\r\nX-Accel-Buffering: no\r\n\r\n";
-    if (api_write(fd,header,strlen(header))) goto finished;
+    if (api_write(fd,header,strlen(header))) { demand_outcome=LMB_DEMAND_CANCELLED; goto finished; }
     ApiObservedStream observed={.fd=fd,.replay={.limit=UINT64_C(8)<<20},.timing={.started=started}};
     LmbReplyStream stream; LmbReplySink sink={api_observed_delta,api_observed_progress,api_observed_error,&observed};
     int client_closed=0;
@@ -305,6 +313,7 @@ static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUs
       }
     }
     if (!client_closed && !api_stopping && stream.status==LMB_REPLY_DONE && lmb_replay_complete(&observed.replay)) {
+        demand_outcome=LMB_DEMAND_COMPLETE;
         double generation_end=nowd();
         int observation_saved=0;
         if (attempts==1 && observing && observed.first>started)
@@ -335,10 +344,13 @@ static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUs
         permit=-1;
         (void)api_engine_error(&fd,reason);
     }
+    if (client_closed) demand_outcome=LMB_DEMAND_CANCELLED;
+    if (observed.first>started) demand_ttft=(uint64_t)((observed.first-started)*1000000.0);
     lmb_replay_free(&observed.replay);
 finished:
     free(history.p); free(prompt); engine_stop(&engine);
     if (permit>=0) close(permit);
+    api_demand_send(LMB_DEMAND_END,demand_outcome,demand_ttft,(uint64_t)((nowd()-started)*1000000.0));
     g_execution_view=NULL; free(observation); free(selected);
 }
 static void api_capacity_apply_http(int fd,int access,const char *tracker,const char *body,size_t size);
@@ -387,6 +399,10 @@ static void api_connection(int fd, int access_dir, unsigned port, const char *tr
     }
     else if (!strcmp(request.method,"GET") && !strcmp(request.path,"/api/v1/catalogue") && !request.length) {
         if (lmb_operator_allows(access_dir,&user)) api_preparation_catalogue(fd,tracker);
+        else api_error(fd,403,"operator_permission_required");
+    }
+    else if (!strcmp(request.method,"GET") && !strcmp(request.path,"/api/v1/demand") && !request.length) {
+        if (lmb_operator_allows(access_dir,&user)) api_demand_http(fd);
         else api_error(fd,403,"operator_permission_required");
     }
     else if (preparation && !strcmp(request.method,"GET") && !request.length) {
@@ -440,6 +456,10 @@ static int api_serve(int access_dir, unsigned port, const char *tracker, HomeSer
     }
     signal(SIGTERM,api_stop); signal(SIGINT,api_stop); api_stopping=0;
     pid_t children[LMB_API_CHILDREN]={0},policy_child=0;
+    int telemetry[LMB_API_CHILDREN]; LmbDemandWorker demand_workers[LMB_API_CHILDREN];
+    for (unsigned i=0;i<LMB_API_CHILDREN;i++) { telemetry[i]=-1; demand_workers[i]=(LmbDemandWorker){.model=-1}; }
+    memset(&api_demand,0,sizeof api_demand); api_demand.started_ms=lmb_io_monotonic_ms();
+    lmb_random(api_demand.instance,sizeof api_demand.instance);
     uint64_t next_policy_check=0;
     if (keeper) {
         keeper->snapshot.phase=2; /* API role: 1 starting, 2 listening */
@@ -453,7 +473,17 @@ static int api_serve(int access_dir, unsigned port, const char *tracker, HomeSer
             if (op==HOME_SVC_STOP) break;
             home_service_answer(keeper);
         }
-        for (unsigned i=0; i<LMB_API_CHILDREN; i++) if (children[i] && waitpid(children[i],NULL,WNOHANG)==children[i]) children[i]=0;
+        for (unsigned i=0; i<LMB_API_CHILDREN; i++) if (children[i]) {
+            api_demand_drain(telemetry[i],&demand_workers[i]);
+            int status=0;
+            if (waitpid(children[i],&status,WNOHANG)==children[i]) {
+                /* All final datagrams precede exit; collect them before
+                 * interpreting a missing END as an interrupted request. */
+                api_demand_drain(telemetry[i],&demand_workers[i]);
+                lmb_demand_reap(&api_demand,&demand_workers[i],!WIFEXITED(status) || WEXITSTATUS(status)!=0,lmb_io_monotonic_ms());
+                close(telemetry[i]); telemetry[i]=-1; children[i]=0;
+            }
+        }
         if (policy_child && waitpid(policy_child,NULL,WNOHANG)==policy_child) policy_child=0;
         uint64_t now=lmb_io_monotonic_ms();
         if (!policy_child && now>=next_policy_check) {
@@ -462,6 +492,8 @@ static int api_serve(int access_dir, unsigned port, const char *tracker, HomeSer
                 fflush(NULL); pid_t child=fork();
                 if (!child) {
                     close(listener); signal(SIGTERM,SIG_DFL); signal(SIGINT,SIG_DFL); signal(SIGALRM,SIG_DFL);
+                    for (unsigned i=0;i<LMB_API_CHILDREN;i++) if (telemetry[i]>=0) close(telemetry[i]);
+                    api_demand.captured_ms=lmb_io_monotonic_ms();
                     if (keeper) {
                         if (keeper->listener>=0) close(keeper->listener);
                         if (keeper->lock>=0) close(keeper->lock);
@@ -479,10 +511,18 @@ static int api_serve(int access_dir, unsigned port, const char *tracker, HomeSer
         if (!rc) continue;
         int client=accept(listener,NULL,NULL); if (client<0) continue;
         unsigned slot=0; while (slot<LMB_API_CHILDREN && children[slot]) slot++;
-        if (slot==LMB_API_CHILDREN) { close(client); continue; }
+        if (slot==LMB_API_CHILDREN) { api_demand.refused_connections++; close(client); continue; }
+        int channel[2];
+        if (socketpair(AF_UNIX,SOCK_DGRAM,0,channel)) { lmb_demand_loss(&api_demand,lmb_io_monotonic_ms()); close(client); continue; }
+        if (fcntl(channel[0],F_SETFD,FD_CLOEXEC) || fcntl(channel[1],F_SETFD,FD_CLOEXEC)) {
+            close(channel[0]); close(channel[1]); close(client); lmb_demand_loss(&api_demand,lmb_io_monotonic_ms()); continue;
+        }
+        api_demand.captured_ms=lmb_io_monotonic_ms();
         fflush(NULL); pid_t child=fork();
         if (!child) {
             close(listener); signal(SIGTERM,SIG_DFL); signal(SIGINT,SIG_DFL); signal(SIGALRM,SIG_DFL);
+            close(channel[0]); api_demand_fd=channel[1];
+            for (unsigned i=0;i<LMB_API_CHILDREN;i++) if (telemetry[i]>=0) close(telemetry[i]);
             /* Requests do not own the keeper lock/socket. A gateway crash
              * must not leave its singleton lock held by orphaned requests. */
             if (keeper) {
@@ -491,15 +531,19 @@ static int api_serve(int access_dir, unsigned port, const char *tracker, HomeSer
                 if (keeper->reply>=0) close(keeper->reply);
             }
             alarm(LMB_API_TURN_SECONDS); /* hard lifetime even during a stalled host handshake */
-            api_connection(client,access_dir,port,tracker); shutdown(client,SHUT_RDWR); close(client); fflush(NULL); _exit(0);
+            api_connection(client,access_dir,port,tracker); shutdown(client,SHUT_RDWR); close(client);
+            close(api_demand_fd); fflush(NULL); _exit(api_demand_failed ? 75 : 0);
         }
-        close(client); if (child>0) children[slot]=child;
+        close(client); close(channel[1]);
+        if (child>0) { children[slot]=child; telemetry[slot]=channel[0]; }
+        else { close(channel[0]); lmb_demand_loss(&api_demand,lmb_io_monotonic_ms()); }
     }
     close(listener);
     if (policy_child) (void)kill(policy_child,SIGTERM);
     for (unsigned i=0; i<LMB_API_CHILDREN; i++) if (children[i]) (void)kill(children[i],SIGTERM);
     if (policy_child) while (waitpid(policy_child,NULL,0)<0 && errno==EINTR) { }
     for (unsigned i=0; i<LMB_API_CHILDREN; i++) if (children[i]) while (waitpid(children[i],NULL,0)<0 && errno==EINTR) { }
+    for (unsigned i=0;i<LMB_API_CHILDREN;i++) if (telemetry[i]>=0) close(telemetry[i]);
     return 0;
 }
 static int api_start(int access_dir, unsigned port, const char *tracker) {

@@ -148,16 +148,28 @@ below. Historical observations remain here as evidence, not current promises.
   This does not create cloud resources or grant inference access implicitly.
   See [preparation API](MODEL_PREPARATION_API.md).
 
-- [ ] Bounded repeat authorization on the donor: local-owner TUI/CLI consent,
+- [x] Bounded repeat authorization on the donor (#213): local-owner TUI/CLI consent,
   verified content identity independent of allocation names, exact placement,
   expiry, quotas and pre-COMMIT revision checks. Revoke without evicting active
   weights; a new donor keeper requires new consent. The local tiny-OLMoE gate
   passes CLI/TUI grants, verified signatures and content, retirement/reload,
   real generation, over-quota cancellation and revocation without eviction.
-  API isolation regression and focused ASan/UBSan/leak tests pass. Native CI
-  remains required before this item is complete.
+  API isolation regression and focused ASan/UBSan/leak tests pass. Native tests
+  exposed fragmented approval frames and Darwin CRCRLF completion lines;
+  both parsers now have deterministic regressions. All eight checks passed
+  on `4531e4e` before normal merge `a91175a`. The ARM jobs initially refused
+  compressed process pages; unchanged repeats passed with the guard intact.
   This is an elasticity prerequisite, not the automatic replica controller.
   See [donor authorization](DONOR_AUTHORIZATION.md).
+
+- [ ] Per-model gateway demand: bounded in-memory windows and per-worker events,
+  operator-only endpoint and web workspace, live admission counts, explicit
+  rejections/interruption and sampled latency tails. Local API/auth/restart,
+  browser and focused sanitizer gates pass. Two real reduced OLMoE models
+  pass four-session coexistence and 2/4/8-client bursts with the observer;
+  no prompt or identity text is stored in the metrics. Native CI remains
+  required. This is traffic evidence, not automatic replica scaling or a
+  production capacity guarantee. See [scope and limits](GATEWAY_DEMAND.md).
 
 - [x] Runtime/preflight PR #151: installed engine thread-capacity query; no-OpenMP
   single-thread execution; adaptive RAM reserve; acknowledged actionable

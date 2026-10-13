@@ -165,6 +165,10 @@ async def exercise(port, alice, bob, artifacts, env):
                 return
             await route.fulfill(json={"schema": 1, "captured_at": int(time.time()), "inventory_ok": True,
                 "registry_ok": True, "inventory_ttl_ms": 15000,
+                "demand": {"snapshot_age_ms": 0, "window_complete": False, "models": [{"id": MODEL,
+                    "admitted": 1, "opening": 2, "completed": 3, "capacity_rejected": 4,
+                    "failed": 1, "interrupted": 0, "cancelled": 2, "latency": {"ttft_ms": {"p95": 120},
+                    "completion_ms": {"p95": 900}, "completion_samples": 3}}]},
                 "nodes": [{"id": "node-a", "name": "Studio workstation <script>bad()</script>",
                     "cpu": "Intel Core i7", "os": "Linux", "arch": "x86_64", "age_ms": 1200,
                     "threads": 12, "runtime_threads": 4, "ram_total_bytes": 32 * 2**30,
@@ -184,6 +188,9 @@ async def exercise(port, alice, bob, artifacts, env):
         await expect(page.locator("#workspace")).to_be_visible()
         await expect(page.locator("#workspace-nodes")).to_contain_text("2 queued")
         await expect(page.locator("#workspace-allocations")).to_contain_text("Obsolete")
+        await expect(page.locator("#workspace-summary")).to_contain_text("Partial window")
+        await expect(page.locator("#workspace-allocations")).to_contain_text("4 capacity rejected")
+        await expect(page.locator("#workspace-allocations")).to_contain_text("120 ms / 900 ms")
         assert await page.locator("#workspace script").count() == 0
         assert await page.locator(".allocation-actions button").count() == 0, "read-only operator got mutation controls"
         await page.screenshot(path=str(artifacts / "web-workspace.png"))

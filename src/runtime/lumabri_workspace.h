@@ -110,7 +110,7 @@ static int workspace_json(Cap *body, const LmbWorkspace *s) {
     }
     if (!bad) bad=cap_str(body,"],\"models\":[");
     for (size_t i=0;i<s->route_count && !bad;i++) bad=api_route_record(body,&s->routes[i],i!=0,1);
-    return bad || cap_str(body,"]}\n") ? -1 : 0;
+    return bad || cap_str(body,"],\"demand\":") || api_demand_json(body) || cap_str(body,"}\n") ? -1 : 0;
 }
 static int api_workspace(int fd, int access, const char *tracker) {
     LmbWorkspace *snapshot=calloc(1,sizeof *snapshot); Cap body={0};

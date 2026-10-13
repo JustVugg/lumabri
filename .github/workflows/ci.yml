@@ -85,6 +85,7 @@ jobs:
           python3 tests/integration/api_service_test.py
           python3 tests/integration/chat_history_test.py
           ./test_chat_ui api-codec
+          ./test_chat_ui demand-codec
           ./test_chat_ui reply-errors
           make test_catalogue_advice CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           ./test_catalogue_advice
