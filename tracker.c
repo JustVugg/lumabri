@@ -84,6 +84,8 @@ typedef struct {
     LmbSegOwner segment_owner;
     double segment_ts;
     int segment_live;
+    LmbSegCompute segment_compute;
+    double segment_compute_ts;
 
     /* EXEC relay, multi-inflight: each chatter thread takes one pending
      * slot, appends a fully built forward frame to the outbound queue, and
@@ -1230,6 +1232,10 @@ static Peer *handle_segment_register(int fd, LmbMsg *m, const uint8_t *nonce) {
         int was_live = slot->has_segment && slot->segment_live &&
                        now - slot->segment_ts <= g_stale_s;
         changed = !was_live || !segment_route_shape_equal(&slot->segment, &advert);
+        if (changed || slot->ctrl_fd != fd) {
+            memset(&slot->segment_compute, 0, sizeof slot->segment_compute);
+            slot->segment_compute_ts = 0;
+        }
         if (changed) {
             memcpy(slot->segment_owner.lease_id.bytes, next_lease,
                    sizeof slot->segment_owner.lease_id.bytes);
@@ -1328,6 +1334,60 @@ static int handle_segment_routes(int fd, LmbMsg *m) {
     int rc = lmb_send(fd, LMB_SEG_ROUTES_R, body, body_len, NULL, 0);
     free(body);
     return rc;
+}
+
+static int handle_segment_compute_get(int fd, const LmbMsg *m) {
+    LmbSegCompute requested[LMB_SEG_ROUTE_MAX], values[LMB_SEG_ROUTE_MAX];
+    uint32_t count = 0, found = 0;
+    if (m->pay_len || lmb_seg_compute_get_request_decode(
+            m->body, m->body_len, requested, &count)) {
+        send_err(fd, "bad segment compute query"); return -1;
+    }
+    double now = now_s();
+    pthread_mutex_lock(&g_lk);
+    for (uint32_t i = 0; i < count; i++) {
+        for (int j = 0; j < MAX_PEERS; j++) {
+            Peer *p = &g_peers[j];
+            if (!p->used || !p->has_segment || !p->segment_live ||
+                now - p->segment_ts > g_stale_s ||
+                now - p->segment_compute_ts > 10.0 ||
+                !lmb_seg_compute_valid(&p->segment_compute) ||
+                !lmb_seg_id_equal(&requested[i].lease_id,
+                                  &p->segment_owner.lease_id) ||
+                requested[i].fencing_epoch != p->segment_owner.fencing_epoch)
+                continue;
+            values[found++] = p->segment_compute;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_lk);
+    uint8_t *body = NULL; uint32_t length = 0;
+    if (lmb_seg_compute_get_reply_encode(values, found, &body, &length)) {
+        send_err(fd, "cannot encode segment compute telemetry"); return -1;
+    }
+    int rc = lmb_send(fd, LMB_SEG_COMPUTE_GET_R, body, length, NULL, 0);
+    free(body);
+    return rc;
+}
+
+static int handle_segment_compute_put(int fd, const LmbMsg *m, Peer *ctrl) {
+    LmbSegCompute value;
+    if (m->pay_len || lmb_seg_compute_put_decode(m->body, m->body_len, &value)) {
+        send_err(fd, "bad segment compute telemetry"); return -1;
+    }
+    pthread_mutex_lock(&g_lk);
+    int valid = ctrl && ctrl->used && ctrl->has_segment &&
+                ctrl->segment_live && ctrl->ctrl_fd == fd &&
+                lmb_seg_id_equal(&value.lease_id, &ctrl->segment_owner.lease_id) &&
+                value.fencing_epoch == ctrl->segment_owner.fencing_epoch &&
+                value.samples >= ctrl->segment_compute.samples;
+    if (valid) {
+        ctrl->segment_compute = value;
+        ctrl->segment_compute_ts = now_s();
+    }
+    pthread_mutex_unlock(&g_lk);
+    if (!valid) { send_err(fd, "stale segment compute telemetry"); return -1; }
+    return lmb_send(fd, LMB_SEG_COMPUTE_PUT_R, NULL, 0, NULL, 0);
 }
 
 /* A donor does not choose layer numbers. It asks for the least-replicated
@@ -2934,6 +2994,9 @@ static void *conn_thread(void *arg) {
             break;
         }
         case LMB_SEG_ROUTES: rc = handle_segment_routes(fd, &m); break;
+        case LMB_SEG_COMPUTE_GET: rc = handle_segment_compute_get(fd, &m); break;
+        case LMB_SEG_COMPUTE_PUT:
+            rc = handle_segment_compute_put(fd, &m, ctrl); break;
         case LMB_SEG_ASSIGN: rc = handle_segment_assign(fd, &m); break;
         case LMB_SEG_ASSIGN_RELEASE:
             rc = handle_segment_assign_release(fd, &m); break;

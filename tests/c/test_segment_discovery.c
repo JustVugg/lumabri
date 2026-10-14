@@ -7,9 +7,13 @@
 #include "lumabri_sign.h"
 
 #include <assert.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 typedef struct {
@@ -136,6 +140,66 @@ static void test_codecs(void) {
     assert(lmb_seg_route_complete(&route, &q));
 }
 
+static void test_compute_codec(void) {
+    LmbSegCompute compute = {0}, decoded;
+    memset(compute.lease_id.bytes, 7, sizeof compute.lease_id.bytes);
+    compute.fencing_epoch = 9;
+    for (unsigned i = 0; i < LMB_SEG_COMPUTE_MIN_SAMPLES; i++)
+        lmb_seg_compute_observe(&compute, i ? 200000 : 100000);
+    assert(compute.samples == LMB_SEG_COMPUTE_MIN_SAMPLES);
+    assert(compute.ewma_us >= 100000 && compute.ewma_us <= 200000);
+    uint8_t *body = NULL; uint32_t len = 0;
+    assert(!lmb_seg_compute_put_encode(&compute, &body, &len));
+    assert(!lmb_seg_compute_put_decode(body, len, &decoded));
+    assert(decoded.samples == compute.samples && decoded.ewma_us == compute.ewma_us);
+    assert(lmb_seg_compute_put_decode(body, len - 1, &decoded));
+    free(body);
+
+    LmbSegRouteSnapshot snapshot = { .count = 1 };
+    snapshot.entries[0].owner.lease_id = compute.lease_id;
+    snapshot.entries[0].owner.fencing_epoch = compute.fencing_epoch;
+    assert(!lmb_seg_compute_get_encode(&snapshot, &body, &len));
+    LmbSegCompute requested[LMB_SEG_ROUTE_MAX]; uint32_t count = 0;
+    assert(!lmb_seg_compute_get_request_decode(body, len, requested, &count));
+    assert(count == 1 && lmb_seg_id_equal(&requested[0].lease_id,
+                                         &compute.lease_id));
+    assert(lmb_seg_compute_get_request_decode(body, len - 1, requested, &count));
+    free(body);
+    assert(!lmb_seg_compute_get_reply_encode(&compute, 1, &body, &len));
+    assert(!lmb_seg_compute_get_decode(body, len, &snapshot));
+    assert(snapshot.entries[0].compute.samples == compute.samples);
+    snapshot.entries[0].compute.samples = 0;
+    assert(lmb_seg_compute_get_decode(body, len - 1, &snapshot));
+    assert(!snapshot.entries[0].compute.samples); /* no partial update */
+    snapshot.entries[0].owner.fencing_epoch++;
+    assert(lmb_seg_compute_get_decode(body, len, &snapshot));
+    free(body);
+}
+
+static void test_compute_probe_deadline(void) {
+    /* A listener which accepts TCP but never replies must not stall route
+     * refresh for the normal control-plane I/O timeout (five minutes). */
+    int listener = socket(AF_INET, SOCK_STREAM, 0);
+    assert(listener >= 0);
+    struct sockaddr_in address = {0};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    assert(!bind(listener, (struct sockaddr *)&address, sizeof address));
+    assert(!listen(listener, 1));
+    socklen_t size = sizeof address;
+    assert(!getsockname(listener, (struct sockaddr *)&address, &size));
+    char tracker[64];
+    snprintf(tracker, sizeof tracker, "127.0.0.1:%u", ntohs(address.sin_port));
+    struct timespec began, ended;
+    assert(!clock_gettime(CLOCK_MONOTONIC, &began));
+    assert(!lmb_seg_compute_probe(tracker));
+    assert(!clock_gettime(CLOCK_MONOTONIC, &ended));
+    int64_t elapsed_ms = (int64_t)(ended.tv_sec - began.tv_sec) * 1000 +
+                         (ended.tv_nsec - began.tv_nsec) / 1000000;
+    assert(elapsed_ms < 10000);
+    close(listener);
+}
+
 typedef struct {
     int fd;
     uint8_t pk[32], sk[64];
@@ -219,6 +283,40 @@ static void test_tracker(const char *tracker) {
                                 &registrations[i]));
     }
 
+    /* The optional report travels on the already authenticated Segment
+     * control channel. It cannot change the route's lease or generation. */
+    LmbSegCompute compute = {
+        .lease_id = registrations[0].owner.lease_id,
+        .fencing_epoch = registrations[0].owner.fencing_epoch,
+        .samples = LMB_SEG_COMPUTE_MIN_SAMPLES,
+        .ewma_us = 120000,
+    };
+    LmbSegQuery measured_query = query_for(&adverts[0], 0, 4);
+    LmbSegRouteSnapshot measured;
+    assert(!lmb_seg_routes_fetch(tracker, &measured_query, &measured));
+    uint64_t before_compute_generation = measured.route_generation;
+    uint8_t *compute_body = NULL; uint32_t compute_len = 0;
+    assert(!lmb_seg_compute_put_encode(&compute, &compute_body, &compute_len));
+    assert(!lmb_send(registrations[0].fd, LMB_SEG_COMPUTE_PUT,
+                     compute_body, compute_len, NULL, 0));
+    LmbMsg compute_reply = {0};
+    assert(!lmb_recv(registrations[0].fd, &compute_reply));
+    assert(compute_reply.op == LMB_SEG_COMPUTE_PUT_R);
+    lmb_msg_free(&compute_reply);
+    assert(!lmb_seg_routes_fetch(tracker, &measured_query, &measured));
+    assert(measured.count == 1 && measured.entries[0].compute.samples ==
+           LMB_SEG_COMPUTE_MIN_SAMPLES);
+    assert(measured.entries[0].compute.ewma_us == 120000);
+    assert(measured.route_generation == before_compute_generation);
+    memset(compute.lease_id.bytes, 3, sizeof compute.lease_id.bytes);
+    free(compute_body); compute_body = NULL;
+    assert(!lmb_seg_compute_put_encode(&compute, &compute_body, &compute_len));
+    assert(!lmb_request(tracker, LMB_SEG_COMPUTE_PUT,
+                        compute_body, compute_len, &compute_reply));
+    assert(compute_reply.op == LMB_ERR); /* no registered control identity */
+    lmb_msg_free(&compute_reply);
+    free(compute_body);
+
     /* A Segment-only compute peer is not an Expert peer. This preserves the
      * existing chatter path during rolling upgrades. */
     LmbBuf expert_query = {0}; LmbMsg expert_reply = {0};
@@ -278,6 +376,15 @@ static void test_tracker(const char *tracker) {
     assert(!register_advert(tracker, &replica, 91, &registrations[NF + 1]));
     assert(!lmb_seg_routes_fetch(tracker, &oq, &os));
     assert(os.complete && os.count == 3);
+    int saw_new_owner = 0;
+    for (uint32_t i = 0; i < os.count; i++) {
+        if (lmb_seg_id_equal(&os.entries[i].owner.lease_id,
+                             &registrations[0].owner.lease_id)) {
+            assert(os.entries[i].compute.samples == 0);
+            saw_new_owner = 1;
+        }
+    }
+    assert(saw_new_owner); /* a changed lease cannot inherit old compute */
 
     /* Promises spread concurrent donors across the exact fallback ranges.
      * A capacity rejection releases its promise immediately: the next donor
@@ -330,11 +437,23 @@ static void test_tracker(const char *tracker) {
     assert(have == 1 && os.complete && os.count == 2);
     lmb_seg_discovery_stop(discovery);
 
+    /* A stale lease is rejected even on the legitimate signed control
+     * connection; no telemetry from an earlier owner can be published. */
+    assert(!lmb_seg_compute_put_encode(&compute, &compute_body, &compute_len));
+    assert(!lmb_send(registrations[0].fd, LMB_SEG_COMPUTE_PUT,
+                     compute_body, compute_len, NULL, 0));
+    assert(!lmb_recv(registrations[0].fd, &compute_reply));
+    assert(compute_reply.op == LMB_ERR);
+    lmb_msg_free(&compute_reply);
+    free(compute_body);
+
     for (int i = 0; i < NR; i++) if (registrations[i].fd >= 0) close(registrations[i].fd);
 }
 
 int main(int argc, char **argv) {
     test_codecs();
+    test_compute_codec();
+    test_compute_probe_deadline();
     if (argc == 2) test_tracker(argv[1]);
     else if (argc != 1) {
         fprintf(stderr, "usage: %s [TRACKER]\n", argv[0]);
