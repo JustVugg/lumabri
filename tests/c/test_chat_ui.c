@@ -89,9 +89,16 @@ int main(int argc, char **argv) {
             .route={.count=1,.revision=UINT32_MAX},.resident_bytes={1}};
         memset(p.route.id,0xee,32); memset(p.pending_allocation,0xaa,32);
         memset(p.request.operation,'f',64); strcpy(p.request.models[0],"model-a");
+        p.request.node_count=LMB_PREPARATION_NODES; p.route.count=LMB_ROUTE_REPLICAS;
+        p.request.context=512; p.request.sessions=8; p.request.max_new=128; p.up_rejections=3; p.ttft_ms=1000;
+        for (uint32_t i=0;i<p.request.node_count;i++) snprintf(p.request.nodes[i],65,"%064x",i+1);
+        for (uint32_t i=0;i<p.route.count;i++) { memset(p.route.replicas[i].allocation,(int)i+1,32); p.resident_bytes[i]=1; }
         for (unsigned i=0;i<=LMB_ELASTIC_RETIRING;i++) {
             p.phase=i; Cap body={0}; assert(!api_elastic_record(&body,&p));
-            LmbJson j; LmbJsonToken tokens[128]; assert(!lmb_json_parse(&j,body.p,body.len,tokens,128));
+            LmbJson j; LmbJsonToken tokens[256]; assert(!lmb_json_parse(&j,body.p,body.len,tokens,256));
+            assert(strstr(body.p,"\"context\":512,\"sessions\":8,\"max_new\":128,\"up_rejections\":3,\"ttft_ms\":1000"));
+            assert(strstr(body.p,p.request.nodes[LMB_PREPARATION_NODES-1]));
+            assert(strstr(body.p,"\"adopt_allocations\":[\"0101010101010101010101010101010101010101010101010101010101010101\""));
             free(body.p);
         }
         puts("ELASTIC JSON: PASS (all lifecycle phases, full IDs and bounded counters)"); return 0;

@@ -5,6 +5,11 @@ a tag stay under Unreleased until a new tag is created.
 
 ## Unreleased
 
+- Web workspace controls for authorized-machine replica automation: explicit
+  computers and memory budget, review before applying, exact policy/route
+  revisions, pause/resume/reconciliation, read-only operator visibility and
+  protection from stale replies. The same service owns execution and donor
+  consent; the browser neither places models itself nor creates cloud servers.
 - Opt-in elastic resident replicas on explicitly authorized machines: bounded
   demand-driven preparation, exact operation receipts, live-contract publication,
   withdrawal/drain/release, and on-demand wake with stable model IDs and grants.

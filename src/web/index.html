@@ -56,6 +56,37 @@
         </section>
         <h2>Computers</h2><div id="workspace-nodes" class="workspace-grid"></div>
         <h2>Managed models</h2><div id="workspace-models" class="workspace-grid"></div>
+        <section id="elastic" aria-label="Replica automation">
+          <h2>Replica automation</h2>
+          <p class="muted">Prepare and release replicas on computers you authorize. Donors still approve each allocation or grant a bounded repeat policy. No cloud servers are created.</p>
+          <p id="elastic-status" role="status"></p>
+          <div id="elastic-policies" class="workspace-grid"></div>
+          <form id="elastic-form" hidden>
+            <h3 id="elastic-title">Manage replicas</h3>
+            <p class="muted">This policy takes responsibility for every replica currently registered under this model, including eventual release after inactivity. Other models and private histories are kept.</p>
+            <label>Checkpoint source <select id="elastic-source" required></select></label>
+            <fieldset><legend>Authorized computers</legend><div id="elastic-nodes"></div></fieldset>
+            <div class="prepare-options">
+              <label>Minimum replicas <input id="elastic-min" type="number" min="0" max="8" required></label>
+              <label>Maximum replicas <input id="elastic-max" type="number" min="1" max="8" required></label>
+              <label>Total memory budget (GiB) <input id="elastic-budget" type="text" inputmode="decimal" required></label>
+            </div>
+            <p class="fine-print">Minimum zero allows idle replicas to unload. The first request to a dormant model reports preparation; retry after it is ready. The memory budget includes pending and retiring allocations.</p>
+            <details><summary>Timing, demand and session limits</summary><div class="prepare-options">
+              <label>Cooldown (seconds) <input id="elastic-cooldown" type="number" min="30" max="86400" required></label>
+              <label>Idle grace (seconds) <input id="elastic-idle" type="number" min="60" max="604800" required></label>
+              <label>Capacity rejections to grow <input id="elastic-rejections" type="number" min="1" max="1000000" required></label>
+              <label>First text p95 trigger (ms; 0 = off) <input id="elastic-ttft" type="number" min="0" max="3600000" required></label>
+              <label>Context <input id="elastic-context" type="number" min="1" max="131072" required></label>
+              <label>Sessions per replica <input id="elastic-sessions" type="number" min="1" max="8" required></label>
+              <label>Output limit <input id="elastic-output" type="number" min="1" max="4096" required></label>
+            </div></details>
+            <label class="prepare-choice"><input id="elastic-enabled" type="checkbox"> Enable automatic replica management</label>
+            <div class="allocation-actions"><button type="submit" class="text-button">Review policy</button><button id="elastic-reload" type="button" class="text-button">Reload settings</button><button id="elastic-close" type="button" class="text-button">Cancel editing</button></div>
+          </form>
+          <div id="elastic-review" class="workspace-grid"></div>
+          <button id="elastic-apply" class="primary" hidden>Apply reviewed policy</button>
+        </section>
         <h2>Saved allocations</h2><p class="muted">An allocation is not a health check. Hosts and approvals are checked again before each request.</p>
         <div id="workspace-allocations" class="workspace-grid"></div>
         <p class="fine-print">Queue counts are leased machine observations, not reserved free capacity. Costs are operator declarations, not a bill. Detected GPUs are not treated as working inference backends.</p>

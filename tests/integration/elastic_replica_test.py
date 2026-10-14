@@ -6,11 +6,58 @@ past the pressure probe. No cloud resources, costs or throughput claims.
 import fcntl
 import http.client
 import json
+import os
 import re
 import select
 from pathlib import Path
 import subprocess
+import sys
 import time
+
+
+def configure_from_browser(api, config, artifacts):
+    """Use compiled UI and real API, with no route interception or fake engine."""
+    from playwright.sync_api import sync_playwright, expect
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        try:
+            page = browser.new_page(viewport={"width": 1440, "height": 1000})
+            errors = []; page.on("pageerror", lambda error: errors.append(str(error)))
+            page.goto(f"http://127.0.0.1:{api.port}/")
+            page.locator("#token").fill(api.token)
+            page.locator('#login-form button[type="submit"]').click()
+            page.locator("#workspace-open").click()
+            model = page.locator("#workspace-models article").filter(
+                has=page.get_by_role("heading", name="elastic-olmoe", exact=True))
+            model.get_by_role("button", name="Manage replicas", exact=True).click()
+            expect(page.locator("#elastic-form")).to_be_visible()
+            page.locator("#elastic-source").select_option(config["source_model"])
+            for check in page.locator("#elastic-nodes input").all():
+                check.set_checked(check.input_value() in config["nodes"])
+            page.locator("#elastic-budget").fill("4")
+            for field, key in (("min", "min_replicas"), ("max", "max_replicas"),
+                               ("cooldown", "cooldown_seconds"), ("idle", "idle_seconds"),
+                               ("rejections", "up_rejections"), ("ttft", "ttft_ms"),
+                               ("context", "context"), ("sessions", "sessions"), ("output", "max_new")):
+                # Advanced controls are inside a native details disclosure.
+                page.locator("#elastic-form details").evaluate("node => { node.open = true; }")
+                page.locator("#elastic-" + field).fill(str(config[key]))
+            page.locator("#elastic-enabled").set_checked(config["enabled"])
+            page.get_by_role("button", name="Review policy", exact=True).click()
+            expect(page.locator("#elastic-apply")).to_be_visible()
+            page.screenshot(path=str(artifacts / f'elastic-browser-review-{config["revision"]}.png'), full_page=True)
+            page.once("dialog", lambda dialog: dialog.accept())
+            with page.expect_response(lambda res: res.url.endswith("/api/v1/elastic-policy") and
+                                      res.request.method == "POST") as sent:
+                page.locator("#elastic-apply").click()
+            response = sent.value
+            submitted = response.request.post_data_json
+            assert sorted(submitted.pop("nodes")) == sorted(config["nodes"]), submitted
+            assert submitted == {k: v for k, v in config.items() if k != "nodes"}, submitted
+            assert not errors, errors
+            return response.status, response.json()
+        finally:
+            browser.close()  # The controller must continue independently.
 
 
 def verify_elastic(api, until, service, env, terminal, artifacts):
@@ -18,8 +65,12 @@ def verify_elastic(api, until, service, env, terminal, artifacts):
     path = "/api/v1/elastic-policy"
     status, workspace = api.http("/api/v1/workspace")
     assert status == 200
+    # The real browser preserves catalogue selection order, which need not
+    # be alphabetical. reload_authorized reloads the first submitted source.
+    source, other_source = api.start_request["models"]
     first = next(a for a in reversed(workspace["allocations"]) if a["name"] == api.reloaded_name)
-    other = next(a for a in workspace["allocations"] if a["name"].endswith("-model-b"))
+    other = next(a for a in workspace["allocations"] if a["name"].endswith("-" + other_source))
+    assert other["id"] != first["id"]
     route = json.loads(api.cli("model-add", "elastic-olmoe", first["id"], "--tracker", api.tracker))
     second = json.loads(api.cli("model-add", "elastic-other", other["id"], "--tracker", api.tracker))
     token = api.cli("user-add", "elastic-user")
@@ -28,7 +79,7 @@ def verify_elastic(api, until, service, env, terminal, artifacts):
     config = {"action": "configure", "id": route["id"], "revision": 0, "route_revision": route["revision"],
               "enabled": False, "min_replicas": 1, "max_replicas": 2, "cooldown_seconds": 30,
               "idle_seconds": 60, "up_rejections": 2, "ttft_ms": 0, "max_reserved_bytes": str(4 << 30),
-              "source_model": "model-a", "nodes": api.start_request["nodes"],
+              "source_model": source, "nodes": api.start_request["nodes"],
               "context": 128, "sessions": api.start_request["sessions"], "max_new": 8,
               "adopt_allocations": [first["id"]]}
 
@@ -64,7 +115,7 @@ def verify_elastic(api, until, service, env, terminal, artifacts):
                             assert p.returncode == 0, p.stderr
                             return json.loads(p.stdout)
                         reviewed = owner("inspect")
-                        assert donor["model"].endswith("-model-a"), donor
+                        assert donor["model"].endswith("-" + source), donor
                         # Explicit fixture-owner authorization. The controller
                         # itself cannot grant or expand this repeat permission.
                         granted = owner("allow-current", reviewed["review"], "3600", "2")
@@ -97,16 +148,20 @@ def verify_elastic(api, until, service, env, terminal, artifacts):
         return held
 
     events = {}; held_chat = None; permits = []
+    def configure(body):
+        if os.environ.get("LUMABRI_TEST_BROWSER") == "1":
+            return configure_from_browser(api, body, artifacts)
+        return api.http(path, body)
     try:
         assert api.http(path, config, api.reader)[0] == 403
         assert api.http(path, token=token)[0] == 403
         assert api.http(path, {**config, "revision": 1})[0] == 409
         assert api.http(path, {**config, "all_nodes": True})[0] == 400
-        code, configured = api.http(path, config)
+        code, configured = configure(config)
         assert code == 200 and configured["revision"] == 1 and not configured["enabled"], (code, configured)
         events["configured"] = configured
         infer(route["id"]); infer(second["id"])
-        code, enabled = api.http(path, {**config, "revision": 1, "enabled": True})
+        code, enabled = configure({**config, "revision": 1, "enabled": True})
         assert code == 200 and enabled["revision"] == 2, (code, enabled)
         # Installing the older routing controller second must not create
         # another autonomous writer for the same logical model.
@@ -214,12 +269,21 @@ def verify_elastic(api, until, service, env, terminal, artifacts):
         (artifacts / "elastic-replicas.json").write_text(json.dumps(events, indent=2))
         print("ELASTIC REPLICAS: PASS (real OLMoE pressure -> approved prepare -> publish -> infer, independent model, restart, admitted generation drain, release, scale to zero, demand wake, exact operation reuse, manual-edit fence)", flush=True)
     finally:
+        # A closed PTY or failed status probe during cleanup must not hide
+        # the original inference failure (and its residency diagnostics).
+        failed = sys.exc_info()[0] is not None
+        cleanup_errors = []
+        def cleanup(action):
+            try:
+                action()
+            except Exception as exc:
+                cleanup_errors.append(exc)
+                print(f"Elastic fixture cleanup: {exc}", file=sys.stderr, flush=True)
         for held in permits:
-            held.communicate("release\n", timeout=5)
-        if held_chat:
-            held_chat.send("/quit\n")
-        observed = policy()
-        if observed["enabled"]:
+            cleanup(lambda held=held: held.communicate("release\n", timeout=5))
+        if held_chat and held_chat.p.poll() is None:
+            cleanup(lambda: held_chat.send("/quit\n"))
+        def pause():
             def disable():
                 current = policy()
                 if not current["enabled"]:
@@ -228,4 +292,7 @@ def verify_elastic(api, until, service, env, terminal, artifacts):
                 assert code in (200, 409, 503), (code, reply)
                 return code == 200
             until(disable, "controller did not release its configuration guard", 30)
-        api.cli("stop")
+        cleanup(pause)
+        cleanup(lambda: api.cli("stop"))
+        if cleanup_errors and not failed:
+            raise cleanup_errors[0]

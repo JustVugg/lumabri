@@ -10,7 +10,7 @@ static int api_elastic_record(Cap *body,const LmbElasticPolicy *p) {
     char id[65],allocation[65]; lmb_hex(id,p->route.id,32); lmb_hex(allocation,p->pending_allocation,32);
     static const char *const phases[]={"idle","preparing","publishing_replica","withdrawing_replica","retiring"};
     uint64_t bytes=0; if (lmb_elastic_total(p,&bytes)) return -1;
-    return api_addf(body,"{\"id\":\"%s\",\"revision\":%u,\"enabled\":%s,\"faulted\":%s,"
+    int bad=api_addf(body,"{\"id\":\"%s\",\"revision\":%u,\"enabled\":%s,\"faulted\":%s,"
         "\"phase\":\"%s\",\"replicas\":%u,\"min_replicas\":%u,\"max_replicas\":%u,\"route_revision\":%u,"
         "\"reserved_bytes\":\"%llu\",\"max_reserved_bytes\":\"%llu\",\"cooldown_seconds\":%u,\"idle_seconds\":%u",
         id,p->revision,p->enabled ? "true" : "false",p->faulted ? "true" : "false",phases[p->phase],p->route.count,
@@ -19,8 +19,17 @@ static int api_elastic_record(Cap *body,const LmbElasticPolicy *p) {
         api_addf(body,",\"last_check\":%llu,\"last_change\":%llu,\"pending_operation\":\"%s\",\"pending_allocation\":\"%s\",\"reason\":",
         (unsigned long long)p->last_check,(unsigned long long)p->last_change,
         p->request.operation,lmb_route_nonzero(p->pending_allocation) ? allocation : "") ||
-        api_json_text(body,p->reason) || cap_str(body,",\"source_model\":") || api_json_text(body,p->request.models[0]) ||
-        cap_str(body,",\"scope\":\"authorized_machine_replica_lifecycle\",\"cloud_provisioning\":false}") ? -1 : 0;
+        api_json_text(body,p->reason) || cap_str(body,",\"source_model\":") || api_json_text(body,p->request.models[0]);
+    if (!bad) bad=api_addf(body,",\"context\":%u,\"sessions\":%u,\"max_new\":%u,\"up_rejections\":%u,\"ttft_ms\":%u,\"nodes\":[",
+        p->request.context,p->request.sessions,p->request.max_new,p->up_rejections,p->ttft_ms);
+    for (uint32_t i=0;!bad && i<p->request.node_count;i++)
+        bad=(i && cap_str(body,",")) || api_json_text(body,p->request.nodes[i]);
+    if (!bad) bad=cap_str(body,"],\"adopt_allocations\":[");
+    for (uint32_t i=0;!bad && i<p->route.count;i++) {
+        lmb_hex(allocation,p->route.replicas[i].allocation,32);
+        bad=api_addf(body,"%s\"%s\"",i ? "," : "",allocation);
+    }
+    return bad || cap_str(body,"],\"scope\":\"authorized_machine_replica_lifecycle\",\"cloud_provisioning\":false}") ? -1 : 0;
 }
 static int api_elastic_ids(int root,uint8_t ids[LMB_ROUTE_MAX][32],uint32_t *count) {
     *count=0; int fd=openat(root,".",O_RDONLY|O_DIRECTORY|O_CLOEXEC);

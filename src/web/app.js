@@ -10,6 +10,7 @@ let workspaceExpires = 0;
 let management = false, managementBusy = false;
 let preparationReview = null, preparationBusy = false, preparationOperation = "";
 let preparationNames = new Map();
+let elasticPending = false, elasticEditor = null, elasticReview = null, elasticEpoch = 0;
 const utf8 = new TextEncoder();
 const say = text => { $("notice").textContent = text; };
 const errors = {
@@ -18,6 +19,11 @@ const errors = {
   approved_allocation_unavailable: "A participating computer is unavailable. The model was not replaced or reloaded.",
   host_unavailable_or_busy: "The model's host is busy or unavailable. Try again when capacity is free.",
   replicas_busy: "All approved replicas are serving another API request. Your question is saved; retry when capacity is free.",
+  model_dormant_preparation_required: "This model is not resident. Replica preparation has been requested if its policy permits it. Your question is saved; retry after the operator reports it ready.",
+  elastic_revision_or_ownership_conflict: "The policy, model route or allocation ownership changed. Reload and review the current settings. No automatic retry was sent.",
+  elastic_source_or_budget_unavailable: "The checkpoint, selected computers or memory budget cannot satisfy this policy. Check the source and approved replicas before retrying.",
+  elastic_state_unavailable: "Replica policy state is temporarily unavailable. Inspect it before retrying; a timed-out change may already have been applied.",
+  invalid_elastic_policy: "The replica policy contains unsupported or inconsistent settings. Reload and review its limits.",
   admission_unavailable: "Local request admission could not be checked. No response was started.",
   management_permission_required: "Your token has no management permission. An operator must grant it explicitly.",
   allocation_changed_refresh_before_retry: "The allocation changed after it was inspected. Review its current state before retrying.",
@@ -67,6 +73,13 @@ function controls() {
   $("workspace-open").hidden = !operator || !token;
   $("workspace-open").disabled = busy;
   $("preparation").hidden = !management || !token;
+  $("elastic-form").inert = managementBusy || !management;
+  $("elastic-apply").disabled = managementBusy || !management;
+  for (const button of $("elastic-policies").querySelectorAll("button")) {
+    button.hidden = !management;
+    button.disabled = managementBusy || !management || button.dataset.allowed !== "true";
+  }
+  if (!management && elasticEditor) closeElasticEditor();
   $("prompt").disabled = !canSend;
   $("send").disabled = !canSend;
   $("stop").hidden = !busy;
@@ -333,6 +346,7 @@ window.addEventListener("beforeunload", event => { if (busy || unsaved) { event.
 
 function closeWorkspace() {
   workspaceOpen = false; workspaceEpoch++;
+  closeElasticEditor(); $("elastic-policies").replaceChildren(); $("elastic-status").textContent = "";
   $("workspace").hidden = true;
   $("chat").hidden = !token; $("composer-area").hidden = !token;
 }
@@ -430,10 +444,16 @@ function renderWorkspace(data) {
       ["Report age", `${(node.age_ms / 1000).toFixed(1)}s at capture`]]);
   }
   if (!data.nodes.length) $("workspace-nodes").textContent = "No current machine reports. Sharing and connectivity are managed by the local service.";
-  for (const model of data.models) workspaceCard($("workspace-models"), model.name, [
-    ["Adapter", model.adapter], ["Approved replica references", String(model.replicas)],
-    ["Context / output limit", `${model.context} / ${model.max_tokens} tokens`],
-    ["Revision", String(model.revision)], ["Readiness", "Saved route; actual hosts checked on request"], ...traffic(model.id)]);
+  for (const model of data.models) {
+    const card = workspaceCard($("workspace-models"), model.name, [
+      ["Adapter", model.adapter], ["Approved replica references", String(model.replicas)],
+      ["Context / output limit", `${model.context} / ${model.max_tokens} tokens`],
+      ["Revision", String(model.revision)], ["Readiness", model.state === "dormant" ? "Dormant — preparation needed" : "Saved route; actual hosts checked on request"], ...traffic(model.id)]);
+    if (management) {
+      const button = document.createElement("button"); button.className = "text-button"; button.textContent = "Manage replicas";
+      button.onclick = () => openElasticEditor(model.id); card.append(button);
+    }
+  }
   if (!data.models.length) $("workspace-models").textContent = data.registry_ok ? "No managed model names registered yet." : "Registry unavailable.";
   for (const allocation of data.allocations) {
     const observation = allocation.observation;
@@ -470,6 +490,7 @@ async function refreshWorkspace() {
       clearWorkspace(); $("workspace-status").textContent = `Workspace unavailable: ${error.message}`;
     }
   } finally { workspacePending = false; $("workspace-refresh").disabled = false; }
+  if (epoch === workspaceEpoch && workspaceOpen) await refreshElastic();
 }
 $("workspace-open").onclick = () => {
   if (busy || !operator) return;
@@ -478,7 +499,7 @@ $("workspace-open").onclick = () => {
   clearWorkspace(); $("workspace-status").textContent = "Reading the local service…";
   if (window.matchMedia("(max-width: 760px)").matches) sidebar(false);
   refreshWorkspace();
-  if (management) loadPreparations();
+  if (management) loadPreparations().then(refreshElastic);
 };
 function preparationInvalidate() {
   preparationReview = null; $("prepare-review").replaceChildren(); $("prepare-start").hidden = true;
@@ -568,6 +589,197 @@ $("prepare-cancel").onclick = () => preparationTask(async valid => {
   if (valid()) $("prepare-status").textContent = data.cancel_requested ? "Cancellation requested. Waiting for cleanup." : data.detail;
 });
 setInterval(preparationObserve, 3000);
+
+// The browser edits policy intent only. Placement, approvals, reservations and
+// reconciliation remain in the same service used by the CLI and other clients.
+function invalidateElasticReview() {
+  elasticReview = null; $("elastic-review").replaceChildren(); $("elastic-apply").hidden = true;
+}
+function closeElasticEditor() {
+  elasticEditor = null; invalidateElasticReview(); $("elastic-form").hidden = true;
+  $("elastic-form").reset(); $("elastic-source").replaceChildren(); $("elastic-nodes").replaceChildren();
+  $("elastic-title").textContent = "Manage replicas";
+}
+function elasticGiB(bytes) {
+  // A power-of-two divisor has a finite decimal expansion. Preserve every
+  // byte when editing an existing uint64 budget, without Number rounding.
+  const n = BigInt(bytes), unit = 1073741824n;
+  const fraction = ((n % unit) * 10n ** 30n / unit).toString().padStart(30, "0").replace(/0+$/, "");
+  return String(n / unit) + (fraction ? "." + fraction : "");
+}
+function elasticBytes(text) {
+  if (!/^\d{1,12}(\.\d{1,30})?$/.test(text)) throw new Error("Enter a positive memory budget in GiB, using a decimal point.");
+  const [whole, fraction = ""] = text.split("."), denominator = 10n ** BigInt(fraction.length);
+  const bytes = (BigInt(whole) * denominator + BigInt(fraction || "0")) * 1073741824n / denominator;
+  if (bytes <= 0n || bytes > (1n << 60n)) throw new Error("The memory budget is outside the supported range.");
+  return bytes.toString();
+}
+function renderElastic(data) {
+  $("elastic-policies").replaceChildren();
+  $("elastic-status").textContent = data.policies.length ? "Saved policies, not a host health or throughput guarantee." :
+    "No automatic replica management is configured. Choose Manage replicas on a managed model to review a policy.";
+  for (const policy of data.policies) {
+    const card = workspaceCard($("elastic-policies"), `${policy.source_model} · ${policy.id.slice(0, 12)}`, [
+      ["Policy", policy.faulted ? "Operator review required" : policy.enabled ? "Enabled" : "Paused"],
+      ["Phase", policy.phase.replaceAll("_", " ")],
+      ["Registered replicas / limits", `${policy.replicas} / ${policy.min_replicas}–${policy.max_replicas}`],
+      ["Reserved / maximum memory", `${gib(Number(policy.reserved_bytes))} / ${gib(Number(policy.max_reserved_bytes))}`],
+      ["Reason", policy.reason.replaceAll("_", " ")],
+      ["Pending operation", policy.pending_operation || "None"],
+      ["Pending allocation", policy.pending_allocation || "None"],
+      ["Last controller check", policy.last_check ? new Date(policy.last_check * 1000).toLocaleString() : "Not observed"]]);
+    if (!management) continue;
+    const actions = document.createElement("div"); actions.className = "allocation-actions";
+    const buttons = [["configure", "Edit policy", policy.phase === "idle"],
+      [policy.enabled ? "disable" : "resume", policy.enabled ? "Pause policy" : "Resume policy", policy.enabled || !policy.faulted],
+      ["reconcile", "Reconcile preparation", policy.phase === "preparing"]];
+    for (const [action, label, enabled] of buttons) {
+      const button = document.createElement("button"); button.className = "text-button"; button.textContent = label;
+      button.disabled = !enabled; button.dataset.allowed = String(enabled);
+      button.onclick = () => action === "configure" ? openElasticEditor(policy.id) : controlElastic(policy.id, action);
+      actions.append(button);
+    }
+    card.append(actions);
+  }
+  controls();
+}
+async function refreshElastic() {
+  if (!workspaceOpen || !operator || !token || elasticPending || managementBusy || document.hidden) return;
+  const epoch = workspaceEpoch, generation = elasticEpoch, credential = token;
+  const valid = () => epoch === workspaceEpoch && generation === elasticEpoch &&
+    credential === token && workspaceOpen && operator && !managementBusy;
+  elasticPending = true;
+  try {
+    const data = await request("/api/v1/elastic-policy");
+    if (valid()) renderElastic(data);
+  } catch (error) {
+    if (valid()) {
+      $("elastic-policies").replaceChildren(); $("elastic-status").textContent = `Replica policies unavailable: ${error.message}`;
+    }
+  } finally { elasticPending = false; }
+}
+async function elasticTask(fn) {
+  if (!management || managementBusy || !workspaceOpen) return;
+  // A GET begun before an operator action must not restore stale controls or
+  // overwrite its outcome, even when it completes after the POST response.
+  elasticEpoch++;
+  const epoch = workspaceEpoch, credential = token;
+  const valid = () => epoch === workspaceEpoch && credential === token && workspaceOpen && management;
+  managementBusy = true; controls(); let submitted = false;
+  try {
+    await fn({valid, submit: body => {
+      if (!valid()) throw new Error("Workspace changed; review the policy again.");
+      submitted = true; return request("/api/v1/elastic-policy", "POST", body);
+    }});
+  } catch (error) {
+    if (valid()) $("elastic-status").textContent = error.message + (submitted ?
+      " The operation may already have been applied. Refresh and inspect before retrying; no automatic retry was sent." : "");
+  } finally { managementBusy = false; controls(); }
+}
+async function openElasticEditor(id) {
+  return elasticTask(async ({valid}) => {
+    closeElasticEditor();
+    const workspace = await request("/api/v1/workspace"), policies = await request("/api/v1/elastic-policy");
+    if (!valid()) return;
+    const model = workspace.models.find(item => item.id === id), policy = policies.policies.find(item => item.id === id);
+    if (!workspace.registry_ok || !workspace.inventory_ok || !model) throw new Error("Current model and computer reports are required before configuring replicas.");
+    if (policy && policy.phase !== "idle") throw new Error("An operation still owns pending resources. Inspect or reconcile it before replacing its policy.");
+    if (!Array.isArray(model.allocations)) throw new Error("The service did not provide exact replica identities. Update the complete runtime before editing.");
+    if (policy && (!Array.isArray(policy.nodes) || !Array.isArray(policy.adopt_allocations) ||
+        ![policy.context, policy.sessions, policy.max_new, policy.up_rejections, policy.ttft_ms].every(Number.isSafeInteger)))
+      throw new Error("The service did not provide the complete saved policy. Update the complete runtime before editing.");
+    const catalogue = await request("/api/v1/catalogue"); if (!valid()) return;
+    elasticEditor = {model, policy, nodes: workspace.nodes};
+    $("elastic-title").textContent = `Manage replicas · ${model.name}`;
+    $("elastic-source").add(new Option("Choose a checkpoint source", ""));
+    for (const source of catalogue.models) {
+      const option = new Option(`${source.name}${source.source_ready ? "" : " · unavailable"}`, source.name);
+      option.disabled = !source.source_ready; $("elastic-source").add(option);
+    }
+    if (policy) $("elastic-source").value = policy.source_model;
+    const nodes = new Map(workspace.nodes.map(node => [node.id, node]));
+    for (const id of policy?.nodes || []) if (!nodes.has(id)) nodes.set(id, {id, name: "Computer not reporting", ram_offered_bytes: null});
+    elasticEditor.nodes = Array.from(nodes.values());
+    for (const node of nodes.values()) {
+      preparationCheck($("elastic-nodes"), node.id, `${node.name} · ${node.id.slice(0, 12)} · ${gib(node.ram_offered_bytes)} offered`);
+      $("elastic-nodes").lastElementChild.querySelector("input").checked = Boolean(policy?.nodes.includes(node.id));
+    }
+    const allocations = model.allocations.map(id => workspace.allocations.find(a => a.id === id));
+    const fields = {min: policy?.min_replicas ?? 1, max: policy?.max_replicas ?? Math.max(2, model.replicas),
+      cooldown: policy?.cooldown_seconds ?? 60, idle: policy?.idle_seconds ?? 300,
+      rejections: policy?.up_rejections ?? 3, ttft: policy?.ttft_ms ?? 0,
+      context: policy?.context ?? model.context, sessions: policy?.sessions ?? allocations[0]?.session_limit ?? 1,
+      output: policy?.max_new ?? model.max_tokens};
+    for (const [name, value] of Object.entries(fields)) $("elastic-" + name).value = value;
+    $("elastic-budget").value = policy ? elasticGiB(policy.max_reserved_bytes) : "";
+    $("elastic-enabled").checked = policy?.enabled ?? false;
+    $("elastic-form").hidden = false;
+    $("elastic-status").textContent = "Choose the computers and budget explicitly. Review does not reserve memory or contact donors.";
+    $("elastic-form").scrollIntoView({block: "nearest"});
+  });
+}
+async function controlElastic(id, action) {
+  return elasticTask(async ({valid, submit}) => {
+    const data = await request("/api/v1/elastic-policy"); if (!valid()) return;
+    const policy = data.policies.find(item => item.id === id);
+    if (!policy) throw new Error("This policy no longer exists. Refresh the workspace.");
+    const effects = {
+      disable: "Pause new decisions. Keep pending reservations and prepared models. An already withdrawn replica continues its safe retirement.",
+      resume: "Resume this saved policy and its exact pending operation. This does not clear faults or grant donor permission.",
+      reconcile: "Inspect the exact preparation receipt. Only proven quiescent operations can be reconciled. Unknown allocations remain reserved; this does not force an unload."
+    };
+    if (!confirm(`${policy.source_model}\n\n${effects[action]}\n\nContinue?`)) return;
+    const result = await submit({action, id, revision: policy.revision}); if (!valid()) return;
+    closeElasticEditor();
+    $("elastic-status").textContent = `Policy revision ${result.revision}: ${result.reason.replaceAll("_", " ")}. Refresh to inspect its current phase.`;
+    $("elastic-policies").replaceChildren();
+  });
+}
+$("elastic-form").oninput = invalidateElasticReview;
+$("elastic-form").onsubmit = event => {
+  event.preventDefault();
+  if (!management || managementBusy || !elasticEditor || !workspaceOpen) return;
+  invalidateElasticReview();
+  try {
+    const {model, policy, nodes} = elasticEditor;
+    const selected = Array.from($("elastic-nodes").querySelectorAll("input:checked"), input => input.value);
+    if (!selected.length) throw new Error("Choose at least one authorized computer.");
+    const number = name => {
+      const input = $("elastic-" + name), n = Number(input.value);
+      if (!input.checkValidity() || !Number.isSafeInteger(n)) throw new Error("Review the integer limits in the form.");
+      return n;
+    };
+    const body = {action: "configure", id: model.id, revision: policy?.revision || 0, route_revision: model.revision,
+      enabled: $("elastic-enabled").checked, min_replicas: number("min"), max_replicas: number("max"),
+      cooldown_seconds: number("cooldown"), idle_seconds: number("idle"), up_rejections: number("rejections"), ttft_ms: number("ttft"),
+      max_reserved_bytes: elasticBytes($("elastic-budget").value.trim()), source_model: $("elastic-source").value,
+      nodes: selected, context: number("context"), sessions: number("sessions"), max_new: number("output"),
+      adopt_allocations: [...model.allocations]};
+    if (!body.source_model || body.min_replicas > body.max_replicas || model.replicas > body.max_replicas ||
+        body.context < model.context || body.max_new < model.max_tokens || body.max_new > body.context)
+      throw new Error("Replica counts and context/output limits must preserve the existing model contract.");
+    elasticReview = {body, name: model.name, epoch: workspaceEpoch, credential: token};
+    workspaceCard($("elastic-review"), `Review · ${model.name}`, [
+      ["Policy", body.enabled ? "Enable automatic replica management" : "Save paused; no new automatic decisions"],
+      ["Replica limits", `${body.min_replicas}–${body.max_replicas}${body.min_replicas === 0 ? " · idle unloading allowed" : " · resident minimum"}`],
+      ["Maximum reserved memory", `${elasticGiB(body.max_reserved_bytes)} GiB (${body.max_reserved_bytes} bytes)`],
+      ["Checkpoint", body.source_model], ["Authorized computers", selected.map(id => nodes.find(n => n.id === id)?.name || id).join(", ")],
+      ["Allocations adopted for possible retirement", body.adopt_allocations.join("\n") || "None — model is dormant"],
+      ["Fences", `Policy ${body.revision} · model route ${body.route_revision}`]]);
+    $("elastic-apply").hidden = false;
+  } catch (error) { $("elastic-status").textContent = error.message; }
+};
+$("elastic-apply").onclick = () => elasticTask(async ({valid, submit}) => {
+  const review = elasticReview;
+  if (!review || review.epoch !== workspaceEpoch || review.credential !== token) return;
+  if (!confirm(`${review.name}\n\nApply this reviewed policy? It can prepare replicas and retire the exact adopted allocations within your limits. Donor approval is still required. No cloud servers will be created.`)) return;
+  invalidateElasticReview(); // A lost response must not trigger a blind resubmit.
+  const saved = await submit(review.body); if (!valid()) return;
+  closeElasticEditor(); $("elastic-policies").replaceChildren();
+  $("elastic-status").textContent = `Policy saved at revision ${saved.revision}. ${saved.enabled ? "Automation enabled within the reviewed limits." : "Paused; no new automatic decisions."}`;
+});
+$("elastic-reload").onclick = () => elasticEditor && openElasticEditor(elasticEditor.model.id);
+$("elastic-close").onclick = closeElasticEditor;
 $("workspace-refresh").onclick = refreshWorkspace;
 setInterval(refreshWorkspace, 10000);
 setInterval(() => {
