@@ -211,12 +211,18 @@ async def elastic_workspace(browser, port, token, env, artifacts):
         permission("manage-grant")
         await page.locator("#refresh").click(); await refresh()
         state["pause_load"] = True
+        await page.evaluate("""() => {
+            const open = openElasticEditor;
+            openElasticEditor = id => window.elasticEditTask = open(id);
+        }""")
         await page.locator("#workspace-models article").last.get_by_role("button", name="Manage replicas", exact=True).click()
         await asyncio.wait_for(entered.wait(), 10)
         await page.locator("#expand").click(); await page.locator("#new-chat").click()
         release.set(); state["pause_load"] = False
-        # Wait for the actual task; no sleep or production synchronization hook.
-        await page.wait_for_function("!managementBusy")
+        # Await the actual handler promise. wait_for_function installs an
+        # in-page eval poller rejected by newer Chromium under our CSP.
+        # Do not weaken script-src or bypass CSP just for synchronization.
+        await page.evaluate("window.elasticEditTask")
         await expect(page.locator("#elastic-form")).to_be_hidden()
         await expect(page.locator("#workspace")).to_be_hidden()
         assert not failures, failures
