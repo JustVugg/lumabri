@@ -5,6 +5,16 @@ a tag stay under Unreleased until a new tag is created.
 
 ## Unreleased
 
+- Opt-in elastic resident replicas on explicitly authorized machines: bounded
+  demand-driven preparation, exact operation receipts, live-contract publication,
+  withdrawal/drain/release, and on-demand wake with stable model IDs and grants.
+  Pending resources remain charged through uncertain outcomes; an operator can
+  reconcile quiescent preparations without replaying offers. Native CI includes
+  the real reduced-OLMoE lifecycle. This is not cloud provisioning or certified
+  production capacity. See `docs/ELASTIC_REPLICAS.md`.
+- Preparation status re-reads the exact operation after an unavailable keeper
+  RPC, so a concurrently completed operation is not mistaken for failure.
+  A timeout alone never authorizes another allocation.
 - Multi-host benchmark and production gates reject malformed token oracles,
   boolean or fractional counters, non-finite timing or throughput values, and
   mismatched model, family or mode across release reports.

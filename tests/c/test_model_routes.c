@@ -98,6 +98,12 @@ int main(void) {
     for (size_t n=0; n<data.len; n++) assert(lmb_route_decode(data.p,n,&decoded));
     unsigned char previous=data.p[76]; data.p[76]=0xff; assert(lmb_route_decode(data.p,data.len,&decoded)); data.p[76]=previous;
     free(data.p);
+    LmbModelRoute dormant=route; dormant.count=0;
+    LmbBuf asleep={0}; assert(!lmb_route_encode(&dormant,&asleep) && !memcmp(asleep.p,"LMBROUT3",8));
+    assert(!lmb_route_decode(asleep.p,asleep.len,&decoded) && !decoded.count && !memcmp(decoded.id,route.id,32));
+    asleep.p[7]='2'; assert(lmb_route_decode(asleep.p,asleep.len,&decoded));
+    asleep.p[7]='1'; assert(lmb_route_decode(asleep.p,asleep.len-4,&decoded));
+    free(asleep.p);
     char temporary[]="/tmp/lmb-model-routes-XXXXXX"; assert(mkdtemp(temporary));
     int access=lmb_api_access_dir(temporary,0); assert(access>=0);
     int dir=lmb_route_dir(access,1); assert(dir>=0);

@@ -115,14 +115,24 @@ static int preparation_results_json(Cap *body,const HomeServiceSnapshot *s) {
     }
     return cap_str(body,"],\"result_scope\":\"historical_preparation_not_live_readiness\"");
 }
+/* The keeper may commit its terminal receipt and close the socket between
+ * our file read and RPC. Re-read that exact operation on a failed RPC; a
+ * timeout alone never proves interruption and never authorizes a new OFFER. */
+static int preparation_observe(int dir,const char *id,HomeServiceSnapshot *saved,int *live) {
+    HomeServiceSnapshot current; *live=0;
+    if (preparation_load(dir,id,saved)) return -1;
+    if (saved->state==HOME_SVC_DONE || saved->state==HOME_SVC_FAILED) return 0;
+    if (!home_service_query("prepare",HOME_SVC_STATUS,saved,&current)) {
+        *live=1; *saved=current; return 0;
+    }
+    return preparation_load(dir,id,saved);
+}
 static int preparation_status(int dir,const char *tracker,const char *id,int cancel,Cap *body) {
-    HomeServiceSnapshot saved,current; char intent[80]; uint8_t digest[32]; size_t n=0;
+    HomeServiceSnapshot saved,current; char intent[80]; uint8_t digest[32]; size_t n=0; int live=0;
     snprintf(intent,sizeof intent,"%s.intent",id);
     if (preparation_read(dir,intent,digest,sizeof digest,&n) || n!=32) return 404;
-    if (preparation_load(dir,id,&saved)) return 503;
+    if (preparation_observe(dir,id,&saved,&live)) return 503;
     if (strcmp(saved.tracker,tracker)) return 409;
-    int live=!home_service_query("prepare",HOME_SVC_STATUS,&saved,&current);
-    if (live) saved=current;
     if (cancel && live && saved.state==HOME_SVC_RUNNING) {
         if (home_service_query("prepare",HOME_SVC_CANCEL,&saved,&current)) return 409;
         saved=current;

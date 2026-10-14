@@ -17,8 +17,8 @@ static int api_route_record(Cap *body, const LmbModelRoute *route, int comma, in
     char id[65], content[65]; lmb_hex(id,route->id,32); lmb_hex(content,route->content,32);
     int bad=api_addf(body,"%s{\"id\":\"%s\",\"name\":",comma ? "," : "",id) || api_json_text(body,route->name) ||
         api_addf(body,",\"context\":%u,\"max_tokens\":%u,\"sessions\":null,\"replicas\":%u,"
-            "\"state\":\"saved_route\",\"revision\":%u,\"policy\":\"%s\"",route->context,route->max_new,route->count,
-            route->revision,lmb_route_policy_name(route->policy));
+            "\"state\":\"%s\",\"revision\":%u,\"policy\":\"%s\"",route->context,route->max_new,route->count,
+            route->count ? "saved_route" : "dormant",route->revision,lmb_route_policy_name(route->policy));
     if (operator && !bad) {
         bad=api_addf(body,",\"content_id\":\"%s\",\"adapter\":",content) || api_json_text(body,route->adapter) ||
             cap_str(body,",\"numeric_class\":") || api_json_text(body,route->numeric_class) || cap_str(body,",\"allocations\":[");
@@ -102,6 +102,7 @@ static int api_model_open_ex(int access, const char *tracker, const uint8_t id[3
             }
         }
     } else if (max_new>route.max_new) { status=400; *error="max_tokens_exceeds_plan"; }
+    else if (!route.count) { status=503; *error="model_dormant_preparation_required"; }
     else {
       uint32_t order[LMB_ROUTE_REPLICAS]; api_route_order(tracker,&route,order);
       for (uint32_t attempt=0; attempt<route.count; attempt++) {

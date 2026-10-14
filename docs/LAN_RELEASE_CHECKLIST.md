@@ -173,6 +173,20 @@ below. Historical observations remain here as evidence, not current promises.
   This is traffic evidence, not automatic replica scaling or a
   production capacity guarantee. See [scope and limits](GATEWAY_DEMAND.md).
 
+- [ ] Elastic resident lifecycle (implementation under review): explicit selected
+  machines and allocation ownership, min/max replicas, byte budget, demand
+  windows and cooldown, shared preparation with exact receipts, publication,
+  drain/release and dormant wake. Local real reduced-OLMoE passes growth under
+  rejected demand, inference on the added replica, another independent model,
+  API restart, drain while a real admitted generation waits for a donor CPU
+  permit, release after completion, scale to zero and
+  wake using the same logical ID and operation. Focused tests cover lost-RPC
+  completion, private-state bounds and operator reconciliation without losing
+  uncertain reservations. Warning-as-error, API regression and focused
+  ASan/UBSan/leak tests pass. Native CI and release approval are still pending;
+  no physical LAN performance, cloud provisioning or billed savings are claimed.
+  See [elastic scope and commands](ELASTIC_REPLICAS.md).
+
 - [x] Runtime/preflight PR #151: installed engine thread-capacity query; no-OpenMP
   single-thread execution; adaptive RAM reserve; acknowledged actionable
   failure; pre-index donor reachability; build-option invalidation.

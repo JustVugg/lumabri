@@ -34,6 +34,7 @@ def main():
     parser.add_argument("--sessions", type=int, choices=(1, 2, 4, 8), default=1)
     parser.add_argument("--api-prepare", action="store_true", help="apply the joint plan through authenticated management API")
     parser.add_argument("--donor-policy", action="store_true", help="authorize bounded repeat placement on the donor, then retire and reload it")
+    parser.add_argument("--elastic", action="store_true", help="real gateway pressure, replica preparation, drain, retirement and on-demand wake")
     parser.add_argument("--donor-ram-gb", type=float, default=0.5)
     parser.add_argument("--prepare-timeout", type=int, default=180)
     parser.add_argument("--measure-sessions", action="store_true", help="also benchmark the single-slot baseline")
@@ -42,6 +43,8 @@ def main():
         parser.error("--api-prepare requires --joint")
     if args.donor_policy and (not args.api_prepare or args.joint != "complete"):
         parser.error("--donor-policy requires --api-prepare --joint complete")
+    if args.elastic and not args.donor_policy:
+        parser.error("--elastic requires --donor-policy")
     if args.api and not (args.multi_model and args.keep_requester):
         parser.error("--api requires --multi-model and --keep-requester")
     if args.replicas and not args.api:
@@ -286,7 +289,7 @@ def main():
         if args.donor_policy:
             assert len(authorizations) == 2
             assert len({grant["checkpoint_content_id"] for _, grant in authorizations}) == 2
-            api_prepare.reload_authorized(until)
+            api_prepare.reloaded_name = api_prepare.reload_authorized(until)
             new_plans = list(library.glob("*.plan"))
             assert len(new_plans) == 3 and set(plans) < set(new_plans), "retirement history or new plan missing"
             replacement, = set(new_plans) - set(plans)
@@ -319,6 +322,10 @@ def main():
             assert all(service(n)["donor"]["reserved_total_bytes"] == reserved[n] for n in ("a", "b")), "revocation evicted active weights"
             (tmp / "donor-policies.json").write_text(json.dumps(authorizations, indent=2))
             print("DONOR AUTHORIZATION: PASS (CLI/TUI grants, fresh automatic allocation, real inference, quota, revocation without eviction)", flush=True)
+            if args.elastic:
+                from elastic_replica_test import verify_elastic
+                verify_elastic(api_prepare, until, service, env,
+                    lambda plan: Terminal("chatter", ["resident-chat", str(plan), tracker], program="test_chat_ui"), tmp)
         print(f"JOINT PREPARATION: PASS ({args.joint}, {expected} resident models, detached TUI, real inference)", flush=True)
 
     try:

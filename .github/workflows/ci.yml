@@ -85,6 +85,8 @@ jobs:
           python3 tests/integration/api_service_test.py
           python3 tests/integration/chat_history_test.py
           ./test_chat_ui api-codec
+          ./test_chat_ui preparation-observe
+          ./test_chat_ui elastic-json
           ./test_chat_ui demand-codec
           ./test_chat_ui reply-errors
           make test_catalogue_advice CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
@@ -237,7 +239,7 @@ jobs:
             python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint "$outcome" --donor-ram-gb 1 --sessions 2
             LUMABRI_TEST_BROWSER=1 python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint "$outcome" --api-prepare --donor-ram-gb 1 --sessions 2
           done
-          python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-policy --donor-ram-gb 1.5 --sessions 2
+          python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-policy --donor-ram-gb 1.5 --sessions 2 --elastic
           make segment_budget_probe
           python3 tests/integration/planner_tensor_contract_test.py --family olmoe --model build/home-flow-models/olmoe-tiny
           make swarm_probe
@@ -431,7 +433,9 @@ jobs:
         runner: [macos-15-intel, macos-15]
         openmp: [enabled, disabled]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 35
+    # The real elastic gate includes a complete demand window and idle grace
+    # for both scale-downs; keep those production timers, not fake test time.
+    timeout-minutes: 45
     steps:
       # runner.temp is available to steps, not job-level env expressions.
       # Keep all household logs where the failure artifact collects them.
@@ -517,7 +521,7 @@ jobs:
           )
           python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --donor-ram-gb 1 --sessions 2
           python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-ram-gb 1 --sessions 2
-          python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-policy --donor-ram-gb 1.5 --sessions 2
+          python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-policy --donor-ram-gb 1.5 --sessions 2 --elastic
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --repeat-cached --clear-cached --expect-metrics --expect-calibration
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --kill-donor
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --expect-selected-no-fit
