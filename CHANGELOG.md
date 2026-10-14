@@ -8,6 +8,9 @@ a tag stay under Unreleased until a new tag is created.
 - Chat-history saves return the document and revision committed by that
   request, even when another request updates or deletes it before the reply.
   Concurrent edits retain their revision-conflict protection.
+- Browser chat keeps generation saves bound to their conversation when a
+  history load completes late; deleting a conversation preserves another
+  selected chat or a new draft and blocks sends to the pending deletion.
 - Multi-host benchmark and production gates reject malformed token oracles,
   boolean or fractional counters, non-finite timing or throughput values, and
   mismatched model, family or mode across release reports.

@@ -2,7 +2,8 @@
 // No credentials/transcripts in URLs, browser storage, analytics or third-party scripts.
 const $ = id => document.getElementById(id);
 let token = "", models = [], conversations = [], current = null, busy = false, controller = null;
-let unsaved = false, navigation = 0;
+let unsaved = false, navigation = 0, opening = null;
+const deleting = new Set();
 let partialNode = null;
 let operator = false, workspaceOpen = false, workspacePending = false, workspaceEpoch = 0;
 let workspaceExpires = 0;
@@ -58,7 +59,7 @@ async function request(path, method = "GET", body) {
 }
 function controls() {
   const selected = models.find(model => model.id === $("model").value);
-  const canSend = Boolean(token && selected && !busy);
+  const canSend = Boolean(token && selected && !busy && !deleting.has(current?.id));
   $("new-chat").disabled = !token || busy;
   $("model").disabled = !token || busy || Boolean(current);
   $("refresh").disabled = !token || busy;
@@ -69,7 +70,7 @@ function controls() {
   $("prompt").disabled = !canSend;
   $("send").disabled = !canSend;
   $("stop").hidden = !busy;
-  $("delete").disabled = !current || busy;
+  $("delete").disabled = !current || busy || deleting.has(current.id);
   $("export").disabled = !current || busy;
   const state = current?.conversation.state;
   $("retry").hidden = !current || !["pending", "interrupted"].includes(state);
@@ -143,6 +144,7 @@ async function openConversation(id) {
   if (busy) return;
   if (unsaved && !confirm("This answer is not saved. Leave it without exporting?")) return;
   const ticket = ++navigation;
+  opening = {id, ticket};
   try {
     const loaded = await request(`/api/v1/conversations/${id}`);
     if (ticket !== navigation) return;
@@ -152,19 +154,24 @@ async function openConversation(id) {
     if (["pending", "interrupted"].includes(current.conversation.state))
       say("This response was not saved as complete. Retry sends the last question again; it does not resume a hidden generation.");
     if (window.matchMedia("(max-width: 760px)").matches) sidebar(false);
-  } catch (error) { say(error.message); }
+  } catch (error) { if (ticket === navigation) say(error.message); }
+  finally { if (opening?.ticket === ticket) opening = null; }
 }
 function newConversation() {
   if (busy) return;
   if (unsaved && !confirm("This answer is not saved. Leave it without exporting?")) return;
-  navigation++; unsaved = false;
+  navigation++; opening = null;
+  resetConversation();
+}
+function resetConversation() {
+  unsaved = false;
   closeWorkspace();
   current = null; $("prompt").value = ""; say(""); renderModels(); renderHistory(); renderMessages(); $("prompt").focus();
   if (window.matchMedia("(max-width: 760px)").matches) sidebar(false);
 }
-async function saveConversation(conversation) {
-  const saved = await request(current ? `/api/v1/conversations/${current.id}` : "/api/v1/conversations", "POST",
-    {revision: current?.revision || 0, conversation});
+async function saveConversation(conversation, target) {
+  const saved = await request(target ? `/api/v1/conversations/${target.id}` : "/api/v1/conversations", "POST",
+    {revision: target?.revision || 0, conversation});
   current = saved;
   unsaved = false;
   const summary = {id: saved.id, revision: saved.revision, updated: saved.updated,
@@ -208,7 +215,7 @@ async function consumeStream(response, onText) {
   } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
 }
 async function generate(retry = false) {
-  if (busy || !token) return;
+  if (busy || !token || deleting.has(current?.id)) return;
   const model = models.find(item => item.id === $("model").value);
   if (!model) { say("This resident model is not available. Refresh the model list or ask the operator to prepare it."); return; }
   let conversation;
@@ -226,10 +233,13 @@ async function generate(retry = false) {
     conversation.messages.push({role: "user", content: prompt});
   }
   if (conversation.messages.length > 129) { say("This conversation reached its 65-question limit. Start a new conversation; your history stays available."); return; }
+  // A history GET started before this turn must not replace its destination.
+  navigation++; opening = null;
+  let saved = current;
   busy = true; controller = new AbortController(); controls(); say(""); let started = false, answer = "", complete = false;
   try {
     conversation.state = "pending";
-    await saveConversation(conversation); // Save the question BEFORE sending any text to the model.
+    saved = await saveConversation(conversation, saved); // Save the question BEFORE sending any text to the model.
     started = true; $("prompt").value = ""; $("prompt").style.height = "auto";
     renderMessages(); partialNode = appendMessage("assistant", "");
     const timeout = setTimeout(() => controller?.abort(), 305000);
@@ -251,10 +261,10 @@ async function generate(retry = false) {
     if (started) {
       if (complete || answer) conversation.messages.push({role: "assistant", content: answer});
       conversation.state = complete ? "complete" : "interrupted";
-      try { await saveConversation(conversation); renderMessages(); }
+      try { await saveConversation(conversation, saved); renderMessages(); }
       catch (error) {
         // Keep visible text and an exportable in-memory copy, without pretending it was saved.
-        current.conversation = conversation;
+        current = {...saved, conversation};
         unsaved = true;
         say(`This answer is NOT saved: ${error.message}. Export it before reloading. Another window may have changed this conversation.`);
       }
@@ -277,7 +287,7 @@ $("login-form").onsubmit = async event => {
 $("sign-out").onclick = () => {
   if (busy || managementBusy) return;
   if (unsaved && !confirm("This answer is not saved. Sign out without exporting?")) return;
-  navigation++; unsaved = false;
+  navigation++; opening = null; unsaved = false;
   token = ""; models = []; conversations = []; current = null;
   operator = false; management = false; closeWorkspace(); clearWorkspace();
   preparationOperation = ""; preparationInvalidate();
@@ -299,11 +309,19 @@ $("prompt").oninput = () => { $("prompt").style.height = "auto"; $("prompt").sty
 $("stop").onclick = () => controller?.abort();
 $("retry").onclick = () => generate(true);
 $("delete").onclick = async () => {
-  if (!current || busy || !confirm("Delete this conversation from the local service? This cannot be undone.")) return;
+  if (!current || busy || deleting.has(current.id) || !confirm("Delete this conversation from the local service? This cannot be undone.")) return;
+  const {id, revision} = current, credential = token;
+  deleting.add(id); controls();
   try {
-    await request(`/api/v1/conversations/${current.id}`, "DELETE", {revision: current.revision});
-    conversations = conversations.filter(item => item.id !== current.id); newConversation();
-  } catch (error) { say(error.message); }
+    await request(`/api/v1/conversations/${id}`, "DELETE", {revision});
+    conversations = conversations.filter(item => item.id !== id);
+    // Discard a stale load of the deleted document, but preserve navigation
+    // to another conversation even when its GET has not finished yet.
+    if (opening?.id === id) { navigation++; opening = null; }
+    if (current?.id === id) resetConversation();
+    else renderHistory();
+  } catch (error) { if (credential === token) say(error.message); }
+  finally { deleting.delete(id); controls(); }
 };
 $("export").onclick = () => {
   if (!current) return;

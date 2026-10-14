@@ -207,6 +207,10 @@ class PreparationAPI:
         assert status == 202, state
         return operation
 
+    def assert_operation_running(self, operation):
+        status, state = self.http("/api/v1/preparation", {"action": "status", "operation": operation})
+        assert status == 200 and state["state"] not in ("failed", "done"), state
+
     def cancel_operation(self, operation, until):
         status, cancelled = self.http("/api/v1/preparation", {"action": "cancel", "operation": operation})
         assert status == 200 and cancelled["cancel_requested"], cancelled
