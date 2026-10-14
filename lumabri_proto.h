@@ -321,6 +321,11 @@ enum {
     LMB_HOST_CONTROL = 94, LMB_HOST_CONTROL_R = 95, /* approved requester only; fenced drain/resume */
     LMB_HOME_NODE_CONTROL = 96, LMB_HOME_NODE_CONTROL_R = 97, /* keeper -> owned Segment channel */
     LMB_HOME_RETIRED_RELEASE = 98, LMB_HOME_RETIRED_RELEASE_R = 99, /* irreversible idle-node fence */
+    /* Optional Segment RUN telemetry. GET on a separate connection is safe
+     * against old trackers (ERR); PUT is accepted only from the registered
+     * executor control connection. SGD1 discovery remains byte-for-byte v1. */
+    LMB_SEG_COMPUTE_GET = 100, LMB_SEG_COMPUTE_GET_R = 101,
+    LMB_SEG_COMPUTE_PUT = 102, LMB_SEG_COMPUTE_PUT_R = 103,
 };
 #define LMB_CAP_EXEC2 (1u << 0)
 #define LMB_ENC_F32  0u

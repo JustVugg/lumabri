@@ -12,10 +12,219 @@ import struct
 import subprocess
 import tempfile
 import time
-from playwright.async_api import async_playwright, expect
+from playwright.async_api import Error as PlaywrightError, async_playwright, expect
 
 ROOT = Path(__file__).resolve().parents[2]
 MODEL = "01" * 32
+
+
+async def history_races(page, port, token):
+    """Delay real history replies; assert persisted documents as well as the UI."""
+    base = f"http://127.0.0.1:{port}"
+    headers = {"Authorization": "Bearer " + token}
+    history = base + "/api/v1/conversations"
+
+    class PausedReply:
+        def __init__(self, method, failure=False, engine=False):
+            self.method, self.failure, self.engine = method, failure, engine
+            self.entered, self.release = asyncio.Event(), asyncio.Event()
+            self.cancelled = False
+
+        async def handle(self, route):
+            if route.request.method != self.method:
+                await route.fallback()
+                return
+            response = None if self.failure or self.engine else await route.fetch()
+            self.entered.set()
+            await asyncio.wait_for(self.release.wait(), 30)
+            if self.failure:
+                await route.fulfill(status=503, json={"error": "delayed_history_failure"})
+            elif self.engine:
+                try:
+                    await route.fulfill(content_type="text/event-stream", body=
+                        'event: delta\ndata: {"bytes":"UmFjZSByZXBseQ=="}\n\nevent: done\ndata: {}\n\n')
+                except PlaywrightError:
+                    if not self.cancelled:
+                        raise
+            else:
+                await route.fulfill(response=response)
+
+    async def read(id):
+        response = await page.request.get(history + "/" + id, headers=headers)
+        assert response.status == 200
+        return await response.json()
+
+    async def seed(label):
+        records = []
+        for suffix in ("A", "B"):
+            title = f"{label} {suffix}"
+            conversation = {"model": MODEL, "title": title, "state": "complete",
+                "messages": [{"role": "user", "content": title}, {"role": "assistant", "content": "Original reply"}]}
+            response = await page.request.post(history, headers=headers,
+                                               data={"revision": 0, "conversation": conversation})
+            assert response.status == 200
+            records.append(await response.json())
+        await page.locator("#refresh").click()
+        for record in records:
+            await expect(page.get_by_role("button", name=record["conversation"]["title"], exact=True)).to_be_visible()
+        return records
+
+    async def open_record(record):
+        await page.get_by_role("button", name=record["conversation"]["title"], exact=True).click()
+        await page.evaluate("window.raceHistoryLoad")
+
+    # Observe completion of the actual event handlers, without timing sleeps
+    # or adding synchronization hooks to production code.
+    await page.evaluate("""() => {
+        window.raceOriginalLoad = openConversation;
+        openConversation = id => window.raceHistoryLoad = window.raceOriginalLoad(id);
+        window.raceOriginalDelete = document.getElementById('delete').onclick;
+        document.getElementById('delete').onclick = () =>
+            window.raceHistoryDelete = window.raceOriginalDelete();
+    }""")
+    try:
+        for case in ("existing", "new", "stop-retry", "load-error", "save-conflict"):
+            a, b = await seed("Load " + case)
+            await open_record(a)
+            if case == "new":
+                await page.locator("#new-chat").click()
+            prompt = "Question for " + case
+            await page.locator("#prompt").fill(prompt)
+            load = PausedReply("GET", failure=case == "load-error")
+            engine = PausedReply("POST", engine=True)
+            load_url = history + "/" + b["id"]
+            save_url = history + "/" + a["id"]
+
+            async def reject_completed_save(route):
+                if route.request.method == "POST" and route.request.post_data_json["conversation"]["state"] == "complete":
+                    await route.fulfill(status=409, json={"error": "conversation_changed_reload_before_editing"})
+                else:
+                    await route.fallback()
+
+            await page.route(load_url, load.handle)
+            await page.route("**/api/v1/chat", engine.handle)
+            if case == "save-conflict":
+                await page.route(save_url, reject_completed_save)
+            try:
+                await page.get_by_role("button", name=b["conversation"]["title"], exact=True).click()
+                await asyncio.wait_for(load.entered.wait(), 10)
+                await page.locator("#send").click()
+                await asyncio.wait_for(engine.entered.wait(), 10)
+                load.release.set()
+                await page.evaluate("window.raceHistoryLoad")
+                await expect(page.locator("#notice")).to_have_text("")
+                if case == "stop-retry":
+                    engine.cancelled = True
+                    await page.locator("#stop").click()
+                    await expect(page.locator("#stop")).to_be_hidden()
+                    await expect(page.locator("#retry")).to_be_visible()
+                    assert (await read(a["id"]))["conversation"]["state"] == "interrupted"
+                engine.release.set()
+                if case == "stop-retry":
+                    await page.locator("#retry").click()
+                await expect(page.locator("#stop")).to_be_hidden()
+                await expect(page.locator(".assistant .content").last).to_have_text("Race reply")
+                assert await read(b["id"]) == b, "a delayed history load redirected the generation into B"
+                if case == "save-conflict":
+                    await expect(page.locator("#notice")).to_contain_text("NOT saved")
+                    assert (await read(a["id"]))["conversation"]["state"] == "pending"
+                    async with page.expect_download() as download:
+                        await page.locator("#export").click()
+                    exported = await download.value
+                    saved = json.loads(Path(await exported.path()).read_text())
+                    assert saved["id"] == a["id"] and saved["revision"] == a["revision"] + 1
+                    page.once("dialog", lambda dialog: dialog.accept())
+                    await page.locator("#new-chat").click()
+                elif case == "new":
+                    listing = await (await page.request.get(history, headers=headers)).json()
+                    created = [item for item in listing["conversations"] if item["title"] == prompt]
+                    assert len(created) == 1
+                    saved = await read(created[0]["id"])
+                else:
+                    saved = await read(a["id"])
+                assert saved["conversation"]["state"] == "complete"
+                assert saved["conversation"]["messages"][-2:] == [
+                    {"role": "user", "content": prompt}, {"role": "assistant", "content": "Race reply"}]
+                assert len(saved["conversation"]["messages"]) == (2 if case == "new" else 4)
+            finally:
+                load.release.set(); engine.release.set()
+                await page.unroute(load_url, load.handle)
+                await page.unroute("**/api/v1/chat", engine.handle)
+                if case == "save-conflict":
+                    await page.unroute(save_url, reject_completed_save)
+
+        for case in ("switch", "pending-switch", "pending-self", "new", "logout", "failure"):
+            a, b = await seed("Delete " + case)
+            await open_record(a)
+            deletion = PausedReply("DELETE", failure=case == "failure")
+            delete_url = history + "/" + a["id"]
+            pending_load = None
+            if case in ("pending-switch", "pending-self"):
+                pending_load = PausedReply("GET")
+                pending_record = a if case == "pending-self" else b
+                pending_url = history + "/" + pending_record["id"]
+                await page.route(pending_url, pending_load.handle)
+                if case == "pending-self":
+                    await page.get_by_role("button", name=a["conversation"]["title"], exact=True).click()
+                    await asyncio.wait_for(pending_load.entered.wait(), 10)
+            await page.route(delete_url, deletion.handle)
+            try:
+                page.once("dialog", lambda dialog: dialog.accept())
+                await page.locator("#delete").click()
+                await asyncio.wait_for(deletion.entered.wait(), 10)
+                await expect(page.locator("#send")).to_be_disabled()
+                await expect(page.locator("#delete")).to_be_disabled()
+                if case == "switch":
+                    await open_record(b)
+                    await expect(page.locator("#send")).to_be_enabled()
+                elif case == "pending-switch":
+                    await page.get_by_role("button", name=b["conversation"]["title"], exact=True).click()
+                    await asyncio.wait_for(pending_load.entered.wait(), 10)
+                elif case == "new":
+                    await page.locator("#new-chat").click()
+                    await page.locator("#prompt").fill("Keep this draft")
+                elif case == "logout":
+                    await page.locator("#sign-out").click()
+                deletion.release.set()
+                await page.evaluate("window.raceHistoryDelete")
+                if pending_load:
+                    pending_load.release.set()
+                    await page.evaluate("window.raceHistoryLoad")
+                if case == "failure":
+                    assert await read(a["id"]) == a
+                    await expect(page.locator("#notice")).to_contain_text("delayed history failure")
+                    await expect(page.locator("#send")).to_be_enabled()
+                    await expect(page.locator("#delete")).to_be_enabled()
+                elif case == "logout":
+                    await expect(page.locator("#login")).to_be_visible()
+                    await expect(page.locator("#history button")).to_have_count(0)
+                    await expect(page.locator("#notice")).to_have_text("")
+                    await page.locator("#token").fill(token)
+                    await page.locator("#login-form button").click()
+                    await expect(page.locator("#composer-area")).to_be_visible()
+                else:
+                    assert (await page.request.get(delete_url, headers=headers)).status == 404
+                    await expect(page.get_by_role("button", name=a["conversation"]["title"], exact=True)).to_have_count(0)
+                    await expect(page.get_by_role("button", name=b["conversation"]["title"], exact=True)).to_be_visible()
+                    assert await read(b["id"]) == b
+                    if case in ("switch", "pending-switch"):
+                        await expect(page.locator("#history button.active")).to_have_text(b["conversation"]["title"])
+                        await expect(page.locator(".user .content")).to_have_text(b["conversation"]["title"])
+                    else:
+                        await expect(page.locator("#prompt")).to_have_value("Keep this draft" if case == "new" else "")
+                        await expect(page.locator(".message")).to_have_count(0)
+            finally:
+                deletion.release.set()
+                await page.unroute(delete_url, deletion.handle)
+                if pending_load:
+                    pending_load.release.set()
+                    await page.unroute(pending_url, pending_load.handle)
+    finally:
+        await page.evaluate("""() => {
+            openConversation = window.raceOriginalLoad;
+            document.getElementById('delete').onclick = window.raceOriginalDelete;
+        }""")
+    print("WEB HISTORY RACES: PASS (existing/new turns, stale success/error, stop/retry, unsaved export, delete/navigation/logout/failure)", flush=True)
 
 
 async def exercise(port, alice, bob, artifacts, env):
@@ -149,6 +358,7 @@ async def exercise(port, alice, bob, artifacts, env):
         await expect(page.locator("#stop")).to_be_visible(); await page.locator("#stop").click()
         await expect(page.locator("#retry")).to_be_visible()
         await expect(page.locator("#stop")).to_be_hidden()
+        await history_races(page, port, alice)
         # Browser private-history isolation, not only a server unit test.
         await page.locator("#sign-out").click()
         await page.locator("#token").fill(bob); await page.locator("#login-form button").click()

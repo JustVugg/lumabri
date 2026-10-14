@@ -20,6 +20,15 @@
 #define LMB_SEG_PEER_NAME_MAX         64u
 #define LMB_SEG_ADDR_MAX              64u
 #define LMB_SEG_ROUTE_MAX             64u
+#define LMB_SEG_COMPUTE_MIN_SAMPLES    8u
+#define LMB_SEG_COMPUTE_MAX_US         3600000000ull
+
+typedef struct {
+    LmbSegId lease_id;
+    uint64_t fencing_epoch;
+    uint64_t ewma_us;
+    uint32_t samples;
+} LmbSegCompute;
 
 enum {
     LMB_SEG_ADVERT_DRAINING = 1u << 0,
@@ -91,6 +100,9 @@ typedef struct {
     LmbLatencyPredictor latency;
     uint64_t predicted_us;
     uint64_t last_probe_ms;
+    LmbSegCompute compute;
+    /* UINT64_MAX means a valid GET explicitly returned no current sample. */
+    uint64_t last_compute_ms;
 } LmbSegRouteEntry;
 
 /* Fixed-size by design: copying this value produces an immutable routing
@@ -128,6 +140,44 @@ int lmb_seg_registration_reply_encode(const LmbSegOwner *owner,
                                       uint8_t **body, uint32_t *body_len);
 int lmb_seg_registration_reply_decode(const void *body, size_t body_len,
                                       LmbSegOwner *owner);
+
+/* Optional sideband telemetry: exact lease/epoch matching prevents a recycled
+ * peer name or changed range from inheriting another executor's samples. */
+int lmb_seg_compute_valid(const LmbSegCompute *compute);
+void lmb_seg_compute_observe(LmbSegCompute *compute, uint64_t sample_us);
+int lmb_seg_compute_put_encode(const LmbSegCompute *compute,
+                               uint8_t **body, uint32_t *body_len);
+int lmb_seg_compute_put_decode(const void *body, size_t body_len,
+                               LmbSegCompute *compute);
+int lmb_seg_compute_get_encode(const LmbSegRouteSnapshot *snapshot,
+                               uint8_t **body, uint32_t *body_len);
+int lmb_seg_compute_get_request_decode(const void *body, size_t body_len,
+                                       LmbSegCompute *requested, uint32_t *count);
+int lmb_seg_compute_get_reply_encode(const LmbSegCompute *values, uint32_t count,
+                                     uint8_t **body, uint32_t *body_len);
+int lmb_seg_compute_get_decode(const void *body, size_t body_len,
+                               LmbSegRouteSnapshot *snapshot);
+/* Probe the optional sideband with a short deadline, independently of the
+ * normal control-plane I/O timeout. */
+int lmb_seg_compute_probe(const char *tracker);
+
+static inline int lmb_seg_compute_ready(const LmbSegRouteEntry *entry) {
+    return entry->compute.samples >= LMB_SEG_COMPUTE_MIN_SAMPLES &&
+           entry->compute.ewma_us > 0 &&
+           entry->compute.ewma_us <= LMB_SEG_COMPUTE_MAX_US;
+}
+
+static inline uint64_t lmb_seg_completion_us(const LmbSegRouteEntry *entry) {
+    uint64_t base = entry->predicted_us ? entry->predicted_us :
+        (entry->transport & LMB_SEG_TRANSPORT_DIRECT ? 50000u : 120000u) *
+        ((uint64_t)entry->advert.queue_depth + entry->advert.inflight + 1u);
+    if (base >= UINT64_MAX / 4u || !lmb_seg_compute_ready(entry)) return base;
+    uint64_t work = (uint64_t)entry->advert.queue_depth +
+                    entry->advert.inflight + 1u;
+    uint64_t compute = entry->compute.ewma_us;
+    return work > (UINT64_MAX - base) / compute ? UINT64_MAX :
+           base + work * compute;
+}
 
 /* One synchronous fetch for startup/tests. Production chat uses the worker
  * below so inference never contacts the tracker. */

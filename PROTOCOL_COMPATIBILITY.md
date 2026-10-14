@@ -10,6 +10,7 @@ Changing one payload never permits silently reinterpreting another.
 | signed model identity | `MID1` | refuse to mix checkpoint roots |
 | Segment request/state | `SEG2` / 2 | explicit unsupported/bad-request reply |
 | Segment discovery | `SGD1` / 1 | publish no compatible route |
+| Segment RUN compute (`LMB_SEG_COMPUTE_GET/PUT` 100-103) | optional `GSC1` / 1 sideband | old trackers return `ERR`; old nodes send no report; old chatters continue to use `SGD1` |
 | Segment assignment | `GSA1` / 2 | release/retry assignment, never guess a range |
 | Expert stats capability | `ECAP` / 1, `EST1` / 2 | fall back to legacy registration without stats |
 | swarm execution/detail | `SWX1` / 1, detail 2 | omit unavailable telemetry, not compute identity |

@@ -272,9 +272,9 @@ static int select_chain(const LmbSegRouteSnapshot *snapshot, uint32_t layers,
                     ? entry->advert.layer_end - entry->advert.layer_begin : 0;
             uint64_t own_load = (uint64_t)entry->advert.queue_depth +
                                 entry->advert.inflight;
-            uint64_t own_completion = entry->predicted_us ? entry->predicted_us :
-                (entry->transport & LMB_SEG_TRANSPORT_DIRECT ? 50000u : 120000u) *
-                (own_load + 1u);
+            /* Keep residency authoritative. Among comparable routes, add
+             * measured one-row RUN compute only after enough valid samples. */
+            uint64_t own_completion = lmb_seg_completion_us(entry);
             if (entry->advert.layer_end == layers) {
                 if (!viable[i] || own_fallback < fallback_layers[i] ||
                     (own_fallback == fallback_layers[i] &&
@@ -1145,10 +1145,9 @@ static int recovery_route_better(const LmbSegRouteEntry *candidate,
                             current->advert.peer_name);
     if (candidate_same != best_same)
         return prefer_same ? candidate_same : !candidate_same;
-    /* Fallback rank above latency, same reasoning as select_chain: the
-     * flag describes the COMPUTE (streams from disk), predicted_us only
-     * the network. An unreachable candidate ranks as fallback so a dead
-     * resident replica cannot outrank a live origin. */
+    /* Residency stays ahead of completion cost because a peer without enough
+     * measured RUNs still has only a network prediction. An unreachable
+     * resident ranks as degraded so a live fallback can replace it. */
     int candidate_fallback =
         !!(candidate->advert.flags & LMB_SEG_ADVERT_FALLBACK) ||
         candidate->predicted_us >= UINT64_MAX / 4u;
@@ -1156,8 +1155,10 @@ static int recovery_route_better(const LmbSegRouteEntry *candidate,
         best->predicted_us >= UINT64_MAX / 4u;
     if (candidate_fallback != best_fallback)
         return candidate_fallback < best_fallback;
-    if (candidate->predicted_us != best->predicted_us)
-        return candidate->predicted_us < best->predicted_us;
+    uint64_t candidate_cost = lmb_seg_completion_us(candidate);
+    uint64_t best_cost = lmb_seg_completion_us(best);
+    if (candidate_cost != best_cost)
+        return candidate_cost < best_cost;
     int candidate_direct = !!(candidate->transport & LMB_SEG_TRANSPORT_DIRECT);
     int best_direct = !!(best->transport & LMB_SEG_TRANSPORT_DIRECT);
     return candidate_direct > best_direct;

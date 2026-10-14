@@ -15,9 +15,15 @@ a tag stay under Unreleased until a new tag is created.
 - Preparation status re-reads the exact operation after an unavailable keeper
   RPC, so a concurrently completed operation is not mistaken for failure.
   A timeout alone never authorizes another allocation.
+- Browser chat keeps generation saves bound to their conversation when a
+  history load completes late; deleting a conversation preserves another
+  selected chat or a new draft and blocks sends to the pending deletion.
 - Multi-host benchmark and production gates reject malformed token oracles,
   boolean or fractional counters, non-finite timing or throughput values, and
   mismatched model, family or mode across release reports.
+- Segment routing uses lease-bound, executor-measured RUN compute costs to
+  choose among sampled resident replicas during initial placement and
+  recovery; optional sideband telemetry preserves discovery v1 compatibility.
 - Segment pressure recovery now drains in-flight sessions through ordinary RAM
   pressure, recovery hysteresis and manual pause; only the critical RAM/swap
   floor aborts a kernel. A failed RUN can reopen the same exact-range executor
