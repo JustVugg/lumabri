@@ -10,6 +10,7 @@ import re
 import select
 from pathlib import Path
 import subprocess
+import sys
 import time
 
 
@@ -18,8 +19,12 @@ def verify_elastic(api, until, service, env, terminal, artifacts):
     path = "/api/v1/elastic-policy"
     status, workspace = api.http("/api/v1/workspace")
     assert status == 200
+    # The real browser preserves catalogue selection order, which need not
+    # be alphabetical. reload_authorized reloads the first submitted source.
+    source, other_source = api.start_request["models"]
     first = next(a for a in reversed(workspace["allocations"]) if a["name"] == api.reloaded_name)
-    other = next(a for a in workspace["allocations"] if a["name"].endswith("-model-b"))
+    other = next(a for a in workspace["allocations"] if a["name"].endswith("-" + other_source))
+    assert other["id"] != first["id"]
     route = json.loads(api.cli("model-add", "elastic-olmoe", first["id"], "--tracker", api.tracker))
     second = json.loads(api.cli("model-add", "elastic-other", other["id"], "--tracker", api.tracker))
     token = api.cli("user-add", "elastic-user")
@@ -28,7 +33,7 @@ def verify_elastic(api, until, service, env, terminal, artifacts):
     config = {"action": "configure", "id": route["id"], "revision": 0, "route_revision": route["revision"],
               "enabled": False, "min_replicas": 1, "max_replicas": 2, "cooldown_seconds": 30,
               "idle_seconds": 60, "up_rejections": 2, "ttft_ms": 0, "max_reserved_bytes": str(4 << 30),
-              "source_model": "model-a", "nodes": api.start_request["nodes"],
+              "source_model": source, "nodes": api.start_request["nodes"],
               "context": 128, "sessions": api.start_request["sessions"], "max_new": 8,
               "adopt_allocations": [first["id"]]}
 
@@ -64,7 +69,7 @@ def verify_elastic(api, until, service, env, terminal, artifacts):
                             assert p.returncode == 0, p.stderr
                             return json.loads(p.stdout)
                         reviewed = owner("inspect")
-                        assert donor["model"].endswith("-model-a"), donor
+                        assert donor["model"].endswith("-" + source), donor
                         # Explicit fixture-owner authorization. The controller
                         # itself cannot grant or expand this repeat permission.
                         granted = owner("allow-current", reviewed["review"], "3600", "2")
@@ -214,12 +219,21 @@ def verify_elastic(api, until, service, env, terminal, artifacts):
         (artifacts / "elastic-replicas.json").write_text(json.dumps(events, indent=2))
         print("ELASTIC REPLICAS: PASS (real OLMoE pressure -> approved prepare -> publish -> infer, independent model, restart, admitted generation drain, release, scale to zero, demand wake, exact operation reuse, manual-edit fence)", flush=True)
     finally:
+        # A closed PTY or failed status probe during cleanup must not hide
+        # the original inference failure (and its residency diagnostics).
+        failed = sys.exc_info()[0] is not None
+        cleanup_errors = []
+        def cleanup(action):
+            try:
+                action()
+            except Exception as exc:
+                cleanup_errors.append(exc)
+                print(f"Elastic fixture cleanup: {exc}", file=sys.stderr, flush=True)
         for held in permits:
-            held.communicate("release\n", timeout=5)
-        if held_chat:
-            held_chat.send("/quit\n")
-        observed = policy()
-        if observed["enabled"]:
+            cleanup(lambda held=held: held.communicate("release\n", timeout=5))
+        if held_chat and held_chat.p.poll() is None:
+            cleanup(lambda: held_chat.send("/quit\n"))
+        def pause():
             def disable():
                 current = policy()
                 if not current["enabled"]:
@@ -228,4 +242,7 @@ def verify_elastic(api, until, service, env, terminal, artifacts):
                 assert code in (200, 409, 503), (code, reply)
                 return code == 200
             until(disable, "controller did not release its configuration guard", 30)
-        api.cli("stop")
+        cleanup(pause)
+        cleanup(lambda: api.cli("stop"))
+        if cleanup_errors and not failed:
+            raise cleanup_errors[0]
