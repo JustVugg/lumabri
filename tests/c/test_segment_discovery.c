@@ -427,7 +427,7 @@ static void test_tracker(const char *tracker) {
 
     /* The control worker publishes snapshots asynchronously. The inference
      * side only copies the immutable value and never opens a tracker socket. */
-    LmbSegDiscovery *discovery = lmb_seg_discovery_start(tracker, &oq, 50);
+    LmbSegDiscovery *discovery = lmb_seg_discovery_start(tracker, &oq, 60000);
     assert(discovery);
     int have = 0;
     for (int i = 0; i < 100 && !have; i++) {
@@ -435,6 +435,17 @@ static void test_tracker(const char *tracker) {
         have = lmb_seg_discovery_snapshot(discovery, &os);
     }
     assert(have == 1 && os.complete && os.count == 2);
+    /* RESUME is observed before the long periodic refresh. The nudge is
+     * nonblocking and also remains pending if a fetch is currently active. */
+    upper.flags=0;
+    assert(!register_advert(tracker,&upper,90,&registrations[NF]));
+    assert(!lmb_seg_discovery_request_refresh(discovery));
+    for (int i=0;i<100 && os.count!=3;i++) {
+        usleep(20000);
+        assert(lmb_seg_discovery_snapshot(discovery,&os)==1);
+    }
+    assert(os.complete && os.count==3);
+    assert(lmb_seg_discovery_request_refresh(NULL)==-1);
     lmb_seg_discovery_stop(discovery);
 
     /* A stale lease is rejected even on the legitimate signed control

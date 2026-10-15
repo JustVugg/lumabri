@@ -5,6 +5,11 @@ a tag stay under Unreleased until a new tag is created.
 
 ## Unreleased
 
+- Segment drain/resume promptly republishes admission changes. A hosted turn
+  waits cancellably for complete discovery within its configured deadline,
+  before opening sessions; stale draining snapshots no longer reject it
+  immediately. Residency and admission guards remain authoritative.
+
 - Browser chat keeps generation saves bound to their conversation when a
   history load completes late; deleting a conversation preserves another
   selected chat or a new draft and blocks sends to the pending deletion.

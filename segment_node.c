@@ -93,6 +93,7 @@ typedef struct {
     LmbSegOwner owner;
     LmbSegCompute compute;
     LmbRunGate *run_gate;
+    _Atomic int refresh_requested;
     int ready;
     volatile sig_atomic_t stop;
 } TrackerRegistration;
@@ -180,6 +181,21 @@ static int run_should_cancel(void *opaque) {
            lmb_governor_abort_inflight(&node->governor);
 }
 
+/* Publish changes promptly instead of waiting for the next idle heartbeat.
+ * The registration worker remains the only writer of its network socket. */
+static int publish_admission(Node *node, int accepting) {
+    pthread_mutex_lock(&node->registration.lock);
+    if (atomic_load(&node->manual_draining) ||
+        atomic_load(&lmb_resident_process_guard.fault)) accepting=0;
+    uint32_t before=node->registration.advert.flags;
+    if (accepting) node->registration.advert.flags &= ~LMB_SEG_ADVERT_DRAINING;
+    else node->registration.advert.flags |= LMB_SEG_ADVERT_DRAINING;
+    if (before!=node->registration.advert.flags)
+        atomic_store(&node->registration.refresh_requested,1);
+    pthread_mutex_unlock(&node->registration.lock);
+    return accepting;
+}
+
 static void *governor_worker(void *opaque) {
     Node *node = opaque;
     LmbGovernorState previous = lmb_governor_state(&node->governor);
@@ -192,13 +208,7 @@ static void *governor_worker(void *opaque) {
         int residency_lost = lmb_resident_memory_check();
         int accepting = state == LMB_GOV_ACTIVE && !process_limited && !residency_lost &&
                         !atomic_load(&node->manual_draining);
-        pthread_mutex_lock(&node->registration.lock);
-        if (atomic_load(&node->manual_draining)) accepting=0;
-        if (accepting)
-            node->registration.advert.flags &= ~LMB_SEG_ADVERT_DRAINING;
-        else
-            node->registration.advert.flags |= LMB_SEG_ADVERT_DRAINING;
-        pthread_mutex_unlock(&node->registration.lock);
+        accepting=publish_admission(node,accepting);
         if (first || state != previous || accepting != previous_accepting) {
             uint64_t available = lmb_machine_available_ram();
             uint64_t rss = resident_memory_bytes();
@@ -287,11 +297,9 @@ static void *node_control_worker(void *opaque) {
             LMB_NODE_CONTROL_CONFLICT : 0;
         atomic_store(&node->manual_draining,(int)node->control.draining);
         LmbNodeControl snapshot=node->control;
-        if (snapshot.draining) {
-            pthread_mutex_lock(&node->registration.lock);
-            node->registration.advert.flags |= LMB_SEG_ADVERT_DRAINING;
-            pthread_mutex_unlock(&node->registration.lock);
-        }
+        if (action && !status)
+            (void)publish_admission(node,!snapshot.draining &&
+                lmb_governor_accepting(&node->governor) && !process_budget_exhausted(node));
         pthread_mutex_unlock(&node->sessions_lock);
         lmb_node_control_reply(reply,status,&snapshot);
         if (action) fprintf(stderr,"[segment-control] action=%s revision=%llu conflict=%u sessions=%u experts=%u\n",
@@ -447,6 +455,13 @@ static void *registration_worker(void *opaque) {
             lmb_close(fd); sleep(1); continue;
         }
         while (!r->stop) {
+            /* Relay traffic must not postpone admission updates forever. An
+             * update racing this send leaves the flag set for the next pass. */
+            int refresh=atomic_exchange(&r->refresh_requested,0);
+            if (refresh || now_ms()-last_heartbeat>=2000u) {
+                if (tracker_register_send(fd,nonce,r)) break;
+                last_heartbeat=now_ms();
+            }
             struct pollfd input = { .fd = fd, .events = POLLIN };
             int ready = poll(&input, 1, 200);
             if (ready < 0) {
@@ -457,10 +472,6 @@ static void *registration_worker(void *opaque) {
                 if (!compute_supported && now_ms() >= next_compute_probe) {
                     compute_supported = tracker_compute_supported(r->tracker);
                     next_compute_probe = now_ms() + 60000u;
-                }
-                if (now_ms() - last_heartbeat >= 2000u) {
-                    if (tracker_register_send(fd, nonce, r)) break;
-                    last_heartbeat = now_ms();
                 }
                 continue;
             }

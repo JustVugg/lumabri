@@ -241,6 +241,8 @@ static int parse_ids(const char *text, int32_t **ids, size_t *count) {
 static int select_chain(const LmbSegRouteSnapshot *snapshot, uint32_t layers,
                         uint32_t required_context, uint32_t required_rows,
                         RemoteSegment *chain, size_t *chain_count) {
+    *chain_count=0;
+    if (snapshot->count>LMB_SEG_ROUTE_MAX) return -1;
     uint64_t completion_us[LMB_SEG_ROUTE_MAX] = {0};
     uint64_t fallback_layers[LMB_SEG_ROUTE_MAX] = {0};
     uint64_t load_cost[LMB_SEG_ROUTE_MAX] = {0};
@@ -250,7 +252,8 @@ static int select_chain(const LmbSegRouteSnapshot *snapshot, uint32_t layers,
         int changed = 0;
         for (uint32_t i = 0; i < snapshot->count; i++) {
             const LmbSegRouteEntry *entry = &snapshot->entries[i];
-            if (!lmb_backend_matches(segment_backend_mask, entry->advert.capabilities) ||
+            if ((entry->advert.flags & LMB_SEG_ADVERT_DRAINING) ||
+                !lmb_backend_matches(segment_backend_mask, entry->advert.capabilities) ||
                 !(entry->transport & (LMB_SEG_TRANSPORT_DIRECT |
                                       LMB_SEG_TRANSPORT_RELAY)) ||
                 entry->advert.layer_begin >= entry->advert.layer_end ||
@@ -2012,13 +2015,45 @@ static int serve_generation_event(void *opaque, GenerationEventKind kind,
     return ferror(stdout) ? -1 : 0;
 }
 
+typedef int (*ServeSnapshotFn)(void *, LmbSegRouteSnapshot *, int);
+static int serve_discovery_snapshot(void *opaque, LmbSegRouteSnapshot *snapshot, int refresh) {
+    if (refresh) (void)lmb_seg_discovery_request_refresh(opaque);
+    return lmb_seg_discovery_snapshot(opaque,snapshot);
+}
+
+/* A successful RESUME acknowledgement precedes asynchronous route publication.
+ * Wait only before OPEN/RUN, under the existing discovery deadline. This never
+ * retries model execution, changes a lease or ignores a residency fault. */
+static int serve_select_chain(ServeSnapshotFn observe, void *opaque,
+                              const LmbServeControl *control, uint32_t timeout_ms,
+                              uint32_t layers, uint32_t context, uint32_t rows,
+                              LmbSegRouteSnapshot *snapshot, RemoteSegment *chain,
+                              size_t *chain_count) {
+    *chain_count=0;
+    uint64_t now=lmb_io_monotonic_ms();
+    if (!now || timeout_ms>60000u) return -1;
+    uint64_t deadline=now+timeout_ms, next_refresh=now;
+    int refresh=0;
+    for (;;) {
+        if (atomic_load(&control->cancelled)) return -2;
+        if (observe(opaque,snapshot,refresh)>0 && snapshot->complete &&
+            !select_chain(snapshot,layers,context,rows,chain,chain_count)) return 0;
+        now=lmb_io_monotonic_ms();
+        if (!now || now>=deadline) return -1;
+        refresh=now>=next_refresh;
+        if (refresh) next_refresh=now+250u;
+        uint64_t left=deadline-now;
+        (void)poll(NULL,0,(int)(left<50u ? left : 50u));
+    }
+}
+
 static int segment_serve_loop(ColiEdgeEngine *edge,
                               const ColiEdgeCapabilities *cap,
                               LmbSegDiscovery *discovery,
                               const uint8_t model_root[32],
                               const uint8_t tokenizer_root[32],
                               uint32_t context, uint32_t max_rows,
-                              uint64_t seed, uint32_t slots) {
+                              uint64_t seed, uint32_t slots, uint32_t discovery_timeout_ms) {
     /* Report capabilities before READY, so a pipe reader cannot consume
      * readiness first and lose a later capability line. Direct CLI requests
      * for unavailable stochastic sampling still fail explicitly. */
@@ -2100,7 +2135,6 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
         fflush(stdout);
 
         LmbSegRouteSnapshot snapshot;
-        int have = lmb_seg_discovery_snapshot(discovery, &snapshot);
         RemoteSegment chain[LMB_SEG_ROUTE_MAX];
         size_t chain_count = 0;
         char error[256] = {0};
@@ -2110,9 +2144,9 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
             free(prompt); result_code = 1; break;
         }
         home_edge_control = &control;
-        int bad = have <= 0 || !snapshot.complete ||
-                  select_chain(&snapshot, cap->num_layers, context, max_rows,
-                               chain, &chain_count);
+        int bad=serve_select_chain(serve_discovery_snapshot,discovery,&control,
+                                  discovery_timeout_ms,cap->num_layers,context,max_rows,
+                                  &snapshot,chain,&chain_count);
         if (bad) {
             snprintf(error, sizeof error,
                      "no complete compatible Segment chain");
@@ -2438,7 +2472,7 @@ int main(int argc, char **argv) {
         }
         int result = segment_serve_loop(edge, &cap, discovery,
                                         model_root, tokenizer_root,
-                                        context, max_rows, seed, slots);
+                                        context, max_rows, seed, slots, discovery_timeout_ms);
         lmb_seg_discovery_stop(discovery);
         coli_edge_engine_close(edge);
         free(expected);

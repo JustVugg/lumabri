@@ -416,6 +416,9 @@ def main():
             assert api_command("segments",allocation,"status")["nodes"]==initial_nodes, "household token controlled another requester's segments"
             draining_nodes=api_command("segments",allocation,"drain")["nodes"]
             assert all(n["state"]=="draining" and n["sessions"]==1 for n in draining_nodes), draining_nodes
+            # Make draining visible to discovery before RESUME. There is no
+            # post-resume sleep: the next turn must handle publication lag.
+            time.sleep(2.5)
             # Existing KV is deliberately not idle capacity. Resume before a
             # new user turn: retokenization/route changes may legitimately
             # rebuild that turn with a NEW OPEN, which drain must reject.

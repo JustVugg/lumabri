@@ -50,6 +50,29 @@ TUI. The explicit `LUMABRI_HOME_FOREGROUND=1` diagnostic preserves the earlier
 foreground lifecycle for regression tests, not as the product default.
 See [Household service](HOUSEHOLD_SERVICE.md) for authority, recovery and limits.
 
+### Drain/resume publication
+
+An authenticated Segment `resume` changes the manual admission fence on the
+same engine; it does not reload weights or reset a residency fault. The node
+promptly republishes its current admission state, including governor and
+process-budget restrictions. The tracker and Edge discovery snapshots remain
+asynchronous, so acknowledgement alone is not proof that a fresh route is
+already visible.
+
+Before opening a chain for a new hosted turn, Edge can nudge its discovery
+worker and wait up to `--discovery-timeout-ms` (2500 ms by default in serve
+mode). Cancellation remains active during this wait. A complete compatible
+cached chain incurs no extra refresh or wait. Missing coverage still returns
+an explicit unavailable error at the deadline. This is not a retry of RUN,
+automatic preparation, or permission to use a draining/faulted process.
+
+Local validation uses actual reduced OLMoE inference with two donors, two
+resident checkpoints and two conversation slots. The test leaves nodes drained
+long enough for discovery to observe the transition, then submits immediately
+after resume without a test-side grace period. It also verifies API isolation,
+mixed 2/4/8-client bursts and stopping one model without stopping the other.
+This does not certify full-size throughput or native macOS physical residency.
+
 ## Preparation and inference
 
 The preparation loader transfers authenticated, hash-verified weight blocks
