@@ -704,9 +704,15 @@ def main():
             assert cold_bytes > 0, "cold run did not exercise the byte source"
         owned_groups = set()
         if args.kill_donor:
+            # Always lose the non-Edge worker: random placement used to make
+            # this test kill the host half the time, missing the harder case
+            # where the surviving host must retire an unreachable KV session.
+            edge_on_a = (tmp / "donor-a/.lumabri/home/edge.log").exists()
+            victim, survivor = (b, a) if edge_on_a else (a, b)
+            survivor_name = "donor-a" if edge_on_a else "donor-b"
             rows = subprocess.check_output(["ps", "-axo", "pid=,ppid=,pgid="], text=True)
             processes = [tuple(map(int, row.split())) for row in rows.splitlines()]
-            owned = {a.p.pid}
+            owned = {victim.p.pid}
             while True:
                 descendants = owned | {pid for pid, parent, group in processes if parent in owned}
                 if descendants == owned:
@@ -715,21 +721,30 @@ def main():
             owned_groups = {group for pid, parent, group in processes
                             if pid in owned and group != os.getpgrp() and group == pid}
             assert owned_groups, "test did not find the owned runtime groups"
-            a.p.kill(); a.p.wait(timeout=5)
+            victim.p.kill(); victim.p.wait(timeout=5)
             until(lambda: chat.p.poll() is not None, seconds=45,
                   message="lost donor left hosted chat blocked")
             if resident:
-                until(lambda: b.has("Weights retained in RAM"), message="a failed chat evicted the healthy donor")
+                # DETACH can render retention before the host finishes its
+                # bounded remote CLOSE. Check the settled state, not that
+                # transient frame. No new request or reload is permitted.
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    for terminal in terminals:
+                        terminal.drain()
+                    time.sleep(0.02)
+                survivor.text = ""
+                until(lambda: survivor.has("Weights retained in RAM"), message="a failed chat evicted the healthy donor")
                 for lock in ("compute-donor.lock", "home/weights.lock"):
-                    with open(tmp / "donor-b/.lumabri" / lock, "r") as lease:
+                    with open(tmp / survivor_name / ".lumabri" / lock, "r") as lease:
                         try:
                             fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
                         except BlockingIOError:
                             pass
                         else:
                             raise AssertionError("the healthy donor lost its resident reservation")
-                b.text = ""; b.send("x")
-            until(lambda: b.has("Released"), message="surviving donor was not released after owner Stop")
+                survivor.text = ""; survivor.send("x")
+            until(lambda: survivor.has("Released"), message="surviving donor was not released after owner Stop")
         else:
             if args.crash_requester:
                 chat.p.kill()
@@ -957,7 +972,7 @@ def main():
         for name in ("chatter", "reject"):
             assert not list((tmp / name).rglob("*.safetensors")), "thin client downloaded weights"
             assert not list((tmp / name).rglob("vroot")), "thin client mounted a checkpoint"
-        for donor in ([b] if args.kill_donor else [a, b]):
+        for donor in ([survivor] if args.kill_donor else [a, b]):
             donor.text = ""
             donor.send("\x1b")
             until(lambda: donor.has("your workspace"))

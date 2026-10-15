@@ -1,0 +1,282 @@
+/* Compile WITHOUT the override header. Payloads keep the libc free ABI and
+ * have disjoint page-aligned extents: freeing one cannot unlock another.
+ * This allocator never raises a resource limit or changes machine policy. */
+#define _GNU_SOURCE
+#include "lumabri_engine_memory.h"
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <sys/mman.h>
+
+#if defined(__SANITIZE_ADDRESS__)
+#define LMB_ENGINE_ASAN 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define LMB_ENGINE_ASAN 1
+#endif
+#endif
+
+#define LMB_ENGINE_BUCKETS 1024u
+typedef struct Allocation {
+    void *ptr;
+    size_t requested, extent;
+    int mapping;
+    struct Allocation *next;
+} Allocation;
+static pthread_mutex_t allocation_lock=PTHREAD_MUTEX_INITIALIZER;
+static pthread_once_t configure_once=PTHREAD_ONCE_INIT;
+static Allocation *allocations[LMB_ENGINE_BUCKETS];
+static LmbEngineMemory evidence;
+static size_t page_size;
+static pid_t owner_pid;
+static void before_fork(void) { pthread_mutex_lock(&allocation_lock); }
+static void after_fork(void) { pthread_mutex_unlock(&allocation_lock); }
+static void child_fork(void) {
+    /* POSIX locks are not inherited. Keep the ledger for safe destruction,
+     * but never report the parent's locks as evidence in the child. */
+    if (evidence.enabled) evidence.fault=ESTALE;
+    pthread_mutex_unlock(&allocation_lock);
+}
+
+static void configure(void) {
+    const char *mode=getenv("LUMABRI_RESIDENCY_POLICY");
+    evidence.enabled=mode && !strcmp(mode,"engine-locked");
+    owner_pid=getpid();
+    long page=sysconf(_SC_PAGESIZE);
+    if (page<=0 || ((size_t)page&((size_t)page-1))) evidence.fault=EINVAL;
+    else page_size=(size_t)page;
+    if (evidence.enabled) {
+        int rc=pthread_atfork(before_fork,after_fork,child_fork);
+        if (rc) evidence.fault=rc;
+    }
+#ifdef LMB_ENGINE_ASAN
+    /* Sanitizers can turn mlock into a successful no-op. Never certify that. */
+    if (evidence.enabled) evidence.fault=ENOTSUP;
+#endif
+}
+static int enabled(void) {
+    pthread_once(&configure_once,configure);
+    return evidence.enabled;
+}
+static size_t bucket(const void *ptr) {
+    return ((uintptr_t)ptr>>12)%LMB_ENGINE_BUCKETS;
+}
+static Allocation **lookup(void *ptr) {
+    Allocation **at=&allocations[bucket(ptr)];
+    while (*at && (*at)->ptr!=ptr) at=&(*at)->next;
+    return at;
+}
+/* Only uncommon VM operations need an interval scan. The hot malloc/free
+ * path uses the pointer hash. An interior pointer must not bypass ownership. */
+static Allocation *overlap(const void *ptr, size_t bytes) {
+    uintptr_t begin=(uintptr_t)ptr;
+    if (!bytes) return NULL;
+    uintptr_t end=bytes>UINTPTR_MAX-begin ? UINTPTR_MAX : begin+bytes;
+    for (unsigned i=0;i<LMB_ENGINE_BUCKETS;i++)
+        for (Allocation *p=allocations[i];p;p=p->next) {
+            uintptr_t low=(uintptr_t)p->ptr;
+            if (begin<low+p->extent && end>low) return p;
+        }
+    return NULL;
+}
+static int fault_locked(int error) {
+    if (!evidence.fault) evidence.fault=error ? error : EIO;
+    errno=evidence.fault;
+    return -1;
+}
+static int extent_for(size_t bytes, size_t *extent) {
+    if (!bytes) bytes=1;
+    if (!page_size || bytes>SIZE_MAX-(page_size-1)) { errno=ENOMEM; return -1; }
+    *extent=(bytes+page_size-1)&~(page_size-1);
+    return 0;
+}
+
+void lmb_engine_memory_snapshot(LmbEngineMemory *out) {
+    if (!out) return;
+    (void)enabled();
+    pthread_mutex_lock(&allocation_lock);
+    /* Lock ownership is not inherited across fork. Do not report the parent's
+     * counters as proof in a child. Dedicated model processes normally exec. */
+    if (evidence.enabled && owner_pid!=getpid()) (void)fault_locked(ESTALE);
+    *out=evidence;
+    pthread_mutex_unlock(&allocation_lock);
+}
+
+static void *allocate(size_t bytes, size_t alignment) {
+    size_t extent;
+    if (extent_for(bytes,&extent)) return NULL;
+    if (alignment<page_size) alignment=page_size;
+    pthread_mutex_lock(&allocation_lock);
+    if (evidence.fault || owner_pid!=getpid() ||
+        evidence.requested_bytes>UINT64_MAX-bytes || evidence.locked_bytes>UINT64_MAX-extent) {
+        (void)fault_locked(ENOMEM); pthread_mutex_unlock(&allocation_lock); return NULL;
+    }
+    Allocation *entry=calloc(1,sizeof *entry);
+    void *ptr=NULL;
+    int rc=entry ? posix_memalign(&ptr,alignment,extent) : ENOMEM;
+    if (!rc && mlock(ptr,extent)) rc=errno;
+    if (rc) {
+        free(ptr); free(entry); (void)fault_locked(rc);
+        pthread_mutex_unlock(&allocation_lock); return NULL;
+    }
+    entry->ptr=ptr; entry->extent=extent; entry->requested=bytes;
+    entry->next=allocations[bucket(ptr)]; allocations[bucket(ptr)]=entry;
+    evidence.allocations++; evidence.requested_bytes+=bytes; evidence.locked_bytes+=extent;
+    pthread_mutex_unlock(&allocation_lock);
+    return ptr;
+}
+
+void *lmb_engine_malloc(size_t bytes) {
+    if (!enabled()) return malloc(bytes);
+    return allocate(bytes,page_size);
+}
+void *lmb_engine_calloc(size_t count, size_t bytes) {
+    if (!enabled()) return calloc(count,bytes);
+    if (bytes && count>SIZE_MAX/bytes) { errno=ENOMEM; return NULL; }
+    size_t total=count*bytes;
+    void *ptr=allocate(total,page_size);
+    if (ptr) memset(ptr,0,total);
+    return ptr;
+}
+void lmb_engine_free(void *ptr) {
+    if (!ptr) return;
+    if (!enabled()) { free(ptr); return; }
+    pthread_mutex_lock(&allocation_lock);
+    Allocation **at=lookup(ptr), *entry=*at;
+    if (!entry) { pthread_mutex_unlock(&allocation_lock); free(ptr); return; }
+    if (entry->mapping) { (void)fault_locked(EINVAL); pthread_mutex_unlock(&allocation_lock); return; }
+    *at=entry->next;
+    if (munlock(ptr,entry->extent)) (void)fault_locked(errno);
+    evidence.allocations--; evidence.requested_bytes-=entry->requested; evidence.locked_bytes-=entry->extent;
+    free(ptr); free(entry);
+    pthread_mutex_unlock(&allocation_lock);
+}
+void *lmb_engine_realloc(void *ptr, size_t bytes) {
+    if (!enabled()) return realloc(ptr,bytes);
+    if (!ptr) return lmb_engine_malloc(bytes);
+    if (!bytes) { lmb_engine_free(ptr); return NULL; }
+    pthread_mutex_lock(&allocation_lock);
+    Allocation *entry=*lookup(ptr);
+    if (!entry || entry->mapping) {
+        (void)fault_locked(EINVAL); pthread_mutex_unlock(&allocation_lock); return NULL;
+    }
+    size_t previous=entry->requested;
+    pthread_mutex_unlock(&allocation_lock);
+    /* Realloc's caller owns the pointer exclusively, as with libc. A failed
+     * replacement leaves the old payload and its lock intact. */
+    void *next=allocate(bytes,page_size);
+    if (next) { memcpy(next,ptr,previous<bytes ? previous : bytes); lmb_engine_free(ptr); }
+    return next;
+}
+int lmb_engine_posix_memalign(void **ptr, size_t alignment, size_t bytes) {
+    if (!enabled()) return posix_memalign(ptr,alignment,bytes);
+    if (!alignment || (alignment&(alignment-1)) || alignment%sizeof(void *)) return EINVAL;
+    void *p=allocate(bytes,alignment);
+    if (!p) return errno ? errno : ENOMEM;
+    *ptr=p; return 0;
+}
+void *lmb_engine_aligned_alloc(size_t alignment, size_t bytes) {
+    if (!enabled()) return aligned_alloc(alignment,bytes);
+    if (!alignment || (alignment&(alignment-1)) || bytes%alignment) { errno=EINVAL; return NULL; }
+    return allocate(bytes,alignment);
+}
+char *lmb_engine_strndup(const char *text, size_t max) {
+    size_t size=strnlen(text,max);
+    if (size==SIZE_MAX) { errno=ENOMEM; return NULL; }
+    char *out=lmb_engine_malloc(size+1);
+    if (out) { memcpy(out,text,size); out[size]=0; }
+    return out;
+}
+char *lmb_engine_strdup(const char *text) {
+    return lmb_engine_strndup(text,SIZE_MAX);
+}
+void *lmb_engine_mmap(void *addr, size_t bytes, int prot, int flags, int fd, off_t offset) {
+    if (!enabled()) return mmap(addr,bytes,prot,flags,fd,offset);
+    /* File mappings are not resident tensor ownership. Refuse them instead
+     * of certifying an untracked fallback; callers may use their read path. */
+    if (!bytes || !(flags&MAP_ANONYMOUS) || (flags&MAP_FIXED) || fd!=-1 || offset) {
+        errno=ENOTSUP; return MAP_FAILED;
+    }
+    size_t extent;
+    if (extent_for(bytes,&extent)) return MAP_FAILED;
+    pthread_mutex_lock(&allocation_lock);
+    if (evidence.fault || owner_pid!=getpid() ||
+        evidence.requested_bytes>UINT64_MAX-bytes || evidence.locked_bytes>UINT64_MAX-extent) {
+        (void)fault_locked(ENOMEM); pthread_mutex_unlock(&allocation_lock); return MAP_FAILED;
+    }
+    Allocation *entry=calloc(1,sizeof *entry);
+    void *ptr=entry ? mmap(addr,bytes,prot,flags,fd,offset) : MAP_FAILED;
+    int rc=!entry ? ENOMEM : ptr==MAP_FAILED ? errno : mlock(ptr,extent) ? errno : 0;
+    if (rc) {
+        if (ptr!=MAP_FAILED) (void)munmap(ptr,extent);
+        free(entry); (void)fault_locked(rc); pthread_mutex_unlock(&allocation_lock); return MAP_FAILED;
+    }
+    entry->ptr=ptr; entry->requested=bytes; entry->extent=extent; entry->mapping=1;
+    entry->next=allocations[bucket(ptr)]; allocations[bucket(ptr)]=entry;
+    evidence.allocations++; evidence.requested_bytes+=bytes; evidence.locked_bytes+=extent;
+    pthread_mutex_unlock(&allocation_lock); return ptr;
+}
+int lmb_engine_munmap(void *ptr, size_t bytes) {
+    if (!enabled()) return munmap(ptr,bytes);
+    pthread_mutex_lock(&allocation_lock);
+    Allocation **at=lookup(ptr), *entry=*at;
+    if (!entry) {
+        int owned=overlap(ptr,bytes)!=NULL;
+        pthread_mutex_unlock(&allocation_lock);
+        if (owned) { errno=EINVAL; return -1; }
+        return munmap(ptr,bytes);
+    }
+    if (!entry->mapping || (bytes!=entry->requested && bytes!=entry->extent)) {
+        pthread_mutex_unlock(&allocation_lock); errno=EINVAL; return -1;
+    }
+    if (munmap(ptr,bytes)) { pthread_mutex_unlock(&allocation_lock); return -1; }
+    *at=entry->next;
+    evidence.allocations--; evidence.requested_bytes-=entry->requested; evidence.locked_bytes-=entry->extent;
+    free(entry); pthread_mutex_unlock(&allocation_lock); return 0;
+}
+
+static int owned_range(const void *ptr, size_t bytes) {
+    Allocation *entry=overlap(ptr,bytes);
+    if (!entry) return 0;
+    uintptr_t p=(uintptr_t)ptr, low=(uintptr_t)entry->ptr;
+    return p>=low && p-low<=entry->extent && bytes<=entry->extent-(p-low) ? 1 : -1;
+}
+int lmb_engine_mlock(const void *ptr, size_t bytes) {
+    if (!enabled()) return mlock(ptr,bytes);
+    pthread_mutex_lock(&allocation_lock);
+    int owned=owned_range(ptr,bytes);
+    pthread_mutex_unlock(&allocation_lock);
+    if (owned<0) { errno=EPERM; return -1; }
+    return owned ? 0 : mlock(ptr,bytes);
+}
+int lmb_engine_munlock(const void *ptr, size_t bytes) {
+    if (!enabled()) return munlock(ptr,bytes);
+    pthread_mutex_lock(&allocation_lock);
+    int owned=owned_range(ptr,bytes);
+    pthread_mutex_unlock(&allocation_lock);
+    if (owned<0) { errno=EPERM; return -1; }
+    /* An upstream cache's optional pin is subordinate to resident ownership.
+     * Release the one OS lock only when this allocation is actually freed. */
+    return owned ? 0 : munlock(ptr,bytes);
+}
+int lmb_engine_mlockall(int flags) {
+    if (!enabled()) return mlockall(flags);
+    errno=ENOTSUP; return -1; /* no whole-process locking claim */
+}
+int lmb_engine_munlockall(void) {
+    if (!enabled()) return munlockall();
+    errno=EPERM; return -1;
+}
+int lmb_engine_madvise(void *ptr, size_t bytes, int advice) {
+    if (!enabled()) return madvise(ptr,bytes,advice);
+    pthread_mutex_lock(&allocation_lock);
+    int owned=overlap(ptr,bytes)!=NULL;
+    pthread_mutex_unlock(&allocation_lock);
+    if (owned) {
+        if (advice==MADV_NORMAL || advice==MADV_RANDOM || advice==MADV_SEQUENTIAL || advice==MADV_WILLNEED) return 0;
+        errno=EPERM; return -1;
+    }
+    return madvise(ptr,bytes,advice);
+}

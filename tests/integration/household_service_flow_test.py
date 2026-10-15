@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import pty
 import random
+import re
 import select
 import signal
 import socket
@@ -101,6 +102,24 @@ def main():
         if args.recovery:
             e["LUMABRI_TEST_RECOVERY_CONTROL"] = str(tmp / "recovery-control.json")
         return e
+
+    def assert_locked_evidence(minimum_per_donor, minimum_total):
+        if os.environ.get("LUMABRI_RESIDENCY_POLICY") != "engine-locked":
+            return
+        # Verify effective child behavior, including replicas prepared after
+        # restart/wake. A launch environment alone is not residency evidence.
+        total = 0
+        for name in ("a", "b"):
+            log = (tmp / name / ".lumabri/home/engines.log").read_text()
+            owned = re.findall(r"\[engine-memory\] allocations=(\d+) requested_bytes=(\d+) locked_bytes=(\d+) retained_locked_bytes=(\d+)", log)
+            ready = re.findall(r"event=ready policy=engine-locked fault=0", log)
+            assert len(ready) >= minimum_per_donor and len(owned) == len(ready), log
+            assert all(int(n) > 0 and 0 < int(wanted) <= int(locked)
+                       for n, wanted, locked, retained in owned), log
+            assert "event=ready policy=observe" not in log and "event=lost" not in log, log
+            total += len(ready)
+        assert total >= minimum_total, total
+        print(f"OWNED ENGINE LOCKS: PASS ({total} prepared engines; effective native locks, no fallback)", flush=True)
 
     class Terminal(TerminalText):
         def __init__(self, name, argv=None, program="lumabri"):
@@ -348,6 +367,9 @@ def main():
                 from elastic_replica_test import verify_elastic
                 verify_elastic(api_prepare, until, service, env,
                     lambda plan: Terminal("chatter", ["resident-chat", str(plan), tracker], program="test_chat_ui"), tmp)
+                # Initial models, authorized reload, added replica and cold
+                # wake must all have reached READY with actual owned locks.
+                assert_locked_evidence(1, 5)
         print(f"JOINT PREPARATION: PASS ({args.joint}, {expected} resident models, detached TUI, real inference)", flush=True)
 
     try:
@@ -423,6 +445,9 @@ def main():
             assert api_command("segments",allocation,"status")["nodes"]==initial_nodes, "household token controlled another requester's segments"
             draining_nodes=api_command("segments",allocation,"drain")["nodes"]
             assert all(n["state"]=="draining" and n["sessions"]==1 for n in draining_nodes), draining_nodes
+            # Make draining visible to discovery before RESUME. There is no
+            # post-resume sleep: the next turn must handle publication lag.
+            time.sleep(2.5)
             # Existing KV is deliberately not idle capacity. Resume before a
             # new user turn: retokenization/route changes may legitimately
             # rebuild that turn with a NEW OPEN, which drain must reject.
@@ -678,6 +703,7 @@ def main():
                                      env=env("chatter"), text=True, capture_output=True, timeout=20)
             assert release.returncode == 0, release.stderr
             assert all(not service(name)["donor"]["reserved_total_bytes"] for name in ("a", "b"))
+            assert_locked_evidence(2, 4)
             print("MULTI-MODEL SERVICE: PASS (two checkpoints on SAME donors, separate approval and RAM, manager restart, unload first while second chat lives)", flush=True)
             return
         resumed.send("\x1b[B" * 4 + "\r")

@@ -3456,7 +3456,7 @@ typedef struct {
     uint64_t payload_left;
     int need_terminator, overflow;
     char reset_expected[65];
-    int reset_done;
+    int reset_done, reset_pending;
 } HostOutput;
 
 static int host_output(HostOutput *out, HostInput *in, const char *data,
@@ -3500,6 +3500,10 @@ static int host_output(HostOutput *out, HostInput *in, const char *data,
                    sscanf(out->header, "RESET_DONE %63s %c", id, &extra) == 1 &&
                    !strcmp(id, out->reset_expected)) {
             out->reset_done = 1;
+        } else if (!out->overflow && out->reset_expected[0] &&
+                   sscanf(out->header, "RESET_PENDING %63s %c", id, &extra) == 1 &&
+                   !strcmp(id, out->reset_expected)) {
+            out->reset_pending = 1;
         } else if (((!strncmp(out->header, "DONE ", 5) &&
                      sscanf(out->header, "DONE %63s", id) == 1) ||
                     (!strncmp(out->header, "ERROR ", 6) &&
@@ -3575,7 +3579,9 @@ static int host_bridge(int fd, Engine *e, const HostState *h,
 /* Close the conversation, not its resident weights. Drain an already
  * accepted request before resetting; incomplete client payloads cannot be
  * repaired by injecting a command into their bytes. A fresh unpredictable
- * acknowledgement is recognized only at codec boundaries, never in DATA. */
+ * acknowledgement is recognized only at codec boundaries, never in DATA.
+ * 0 = retired, 1 = known pending remote CLOSE (slot still owns its identities),
+ * -1 = damaged/unresponsive codec. Pending is not a successful reset. */
 static int host_reset_conversation(Engine *e, const HostState *h,
                                    HostInput *in, HostOutput *out) {
     if (!e->segment || !e->reset_supported || in->payload_left ||
@@ -3598,6 +3604,7 @@ static int host_reset_conversation(Engine *e, const HostState *h,
             deadline = nowd() + 30;
         }
         if (out->reset_done) return 0;
+        if (out->reset_pending) return 1;
         if (nowd() >= deadline) return -1;
         struct pollfd p = {e->from, POLLIN, 0};
         int ready = poll(&p, 1, 100);

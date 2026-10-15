@@ -200,6 +200,19 @@ below. Historical observations remain here as evidence, not current promises.
   closed. Native/release approval remains separate; Apple Silicon idle
   compression failures in the underlying lifecycle gate are not waived.
 
+- [x] Conversation-history race fixes (#217, #218) and resumed Segment
+  discovery/remote retirement (#221). #221 passed all eight native checks on
+  `a95bfc4` before normal merge `4a15d61`: resumed routes are refreshed before
+  opening a turn; an unavailable remote CLOSE quarantines only its slot,
+  keeps healthy weights resident and cannot produce a false retirement seal.
+- [ ] Owned CPU allocation locking (#222): native page locks for engine
+  payloads and retained raw tables, with refused lock failures and build-time
+  allocator auditing. Local reduced OLMoE passes two resident models, isolated
+  conversations, API use and selective release. Full native CI remains
+  required. The elastic lifecycle gate explicitly selects this contract and
+  verifies effective locks across preparation, reload and wake; it does not
+  weaken the separately tested observation guard or claim GPU/full-size support.
+
 - [x] Runtime/preflight PR #151: installed engine thread-capacity query; no-OpenMP
   single-thread execution; adaptive RAM reserve; acknowledged actionable
   failure; pre-index donor reachability; build-option invalidation.
