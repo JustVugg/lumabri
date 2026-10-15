@@ -46,6 +46,10 @@ jobs:
           ./test_machine
           make test_process_memory CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           ./test_process_memory
+          make test_engine_memory test_engine_memory_guard CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
+          ./test_engine_memory
+          ./test_engine_memory_guard
+          python3 tests/integration/engine_memory_boundary_test.py
           make test_serve_control CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           ./test_serve_control
           make test_host_session_pool test_host_drain test_node_control CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
@@ -223,6 +227,7 @@ jobs:
           python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models
           python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester
           make test_hosted_sessions
+          LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester --multi-model --sessions 2
           for sessions in 1 2 4 8; do
             python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester --sessions "$sessions" --measure-sessions
           done
@@ -508,6 +513,7 @@ jobs:
           make test_chat_ui
           make test_hosted_sessions
           python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester --sessions 2
+          LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester --multi-model --sessions 2
           python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models
           (
             mv segment_chat segment_chat.real

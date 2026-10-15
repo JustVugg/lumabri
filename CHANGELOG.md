@@ -5,6 +5,11 @@ a tag stay under Unreleased until a new tag is created.
 
 ## Unreleased
 
+- Add opt-in `engine-locked` CPU allocation residency: page-aligned owned
+  buffers and retained raw tables are locked before use, with explicit
+  refusal on lock failure, allocator-boundary auditing and native tests.
+  Default observation and process-wide `locked` policies are unchanged.
+
 - Segment drain/resume promptly republishes admission changes. A hosted turn
   waits cancellably for complete discovery within its configured deadline,
   before opening sessions; stale draining snapshots no longer reject it

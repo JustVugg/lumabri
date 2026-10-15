@@ -144,6 +144,41 @@ GPU device-memory residence is a separate backend contract; these counters
 describe host memory only. See the [Linux proc documentation](https://www.kernel.org/doc/html/latest/filesystems/proc.html)
 and Apple's [TASK_VM_INFO fields](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/mach/task_info.h).
 
+### Opt-in owned-allocation locking
+
+`LUMABRI_RESIDENCY_POLICY=engine-locked` is a separate, opt-in CPU contract.
+The default remains `observe`. Apple exposes `mlockall` in headers but its
+implementation returns `ENOSYS`; `mlock` can instead wire explicit ranges.
+Lumabri compiles its disposable engine copies and Segment runtime with
+namespaced allocation entry points. Each owned heap or anonymous-mapping
+payload has a separate page-aligned extent, locked **before** it is returned
+to the engine. Freeing it unlocks only that extent. Later KV and scratch
+allocations follow the same rule; an OS lock failure latches a fault rather
+than falling back to unlocked memory. Reallocation temporarily needs both
+extents. File mappings and partial removal of owned mappings are refused.
+The upstream Colibri checkout and numerical kernels remain unchanged.
+
+Explicitly retained raw tensor tables in the shim have their own page locks.
+READY requires both contracts and sealed external weight input. The
+`[engine-memory]` record separates requested payload bytes, rounded locked
+bytes and shim-retained locked bytes. The ordinary process governor still
+charges RSS/compression/swap conservatively. Compression of unrelated
+libc, stack or code pages does not invalidate successfully locked owned
+payloads and is **not** reported as zero.
+
+This does not lock every process mapping or claim GPU-driver coverage. Page
+rounding and live replacement buffers increase memory consumption and can
+cause a plan to be refused under its existing process budget or OS memlock
+allowance. No OS limits are increased. The build audits archive imports so a
+new adapter cannot silently import unwrapped native allocation functions;
+that audit is not a substitute for native adapter validation. ASan builds
+refuse this contract because sanitizer locking interceptors can be no-ops.
+
+Local reduced OLMoE validation covers two resident checkpoints on the same
+donors, two isolated conversation slots, restart and selective unload. It
+does not establish full-size locked-memory requirements or native macOS
+release readiness; those gates must pass separately.
+
 ## Evidence
 
 ### October 3, 2026: process residency and independent models
