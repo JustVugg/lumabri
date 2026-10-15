@@ -2088,18 +2088,24 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
                            sscanf(header, "STOP %u %c", &cancelled_id, &reset_extra) == 1)) continue;
         if (sscanf(header, "RESET_SLOT %64s %u %c", reset_id, &reset_slot, &reset_extra) == 2) {
             if (reset_slot >= slots) { result_code = 1; break; }
-            if (conversation_reset(&conversations[reset_slot])) { result_code = 1; break; }
+            if (conversation_reset(&conversations[reset_slot])) {
+                /* Unreachable CLOSE is not a corrupted codec or permission
+                 * to unload healthy weights. Keep the fenced identities;
+                 * this slot cannot be reused until a later reset succeeds. */
+                printf("RESET_PENDING %s\n", reset_id); fflush(stdout);
+                continue;
+            }
             lmb_sampler_init(&samplers[reset_slot], seed);
             printf("RESET_DONE %s\n", reset_id); fflush(stdout);
             continue;
         }
         if (sscanf(header, "RESET %64s %c", reset_id, &reset_extra) == 1) {
+            int pending = 0;
             for (uint32_t i = 0; i < slots; i++) {
-                if (conversation_reset(&conversations[i])) result_code = 1;
+                if (conversation_reset(&conversations[i])) pending = 1;
                 lmb_sampler_init(&samplers[i], seed);
             }
-            if (result_code) break;
-            printf("RESET_DONE %s\n", reset_id);
+            printf("%s %s\n", pending ? "RESET_PENDING" : "RESET_DONE", reset_id);
             fflush(stdout);
             continue;
         }

@@ -9,6 +9,9 @@ a tag stay under Unreleased until a new tag is created.
   waits cancellably for complete discovery within its configured deadline,
   before opening sessions; stale draining snapshots no longer reject it
   immediately. Residency and admission guards remain authoritative.
+- An unreachable Segment CLOSE no longer terminates a healthy resident host.
+  The affected conversation slot remains quarantined until retirement is
+  confirmed; neither slot reuse nor host retirement can invent a clean reset.
 
 - Chat-history saves return the document and revision committed by that
   request, even when another request updates or deletes it before the reply.

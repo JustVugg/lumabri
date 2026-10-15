@@ -73,6 +73,15 @@ after resume without a test-side grace period. It also verifies API isolation,
 mixed 2/4/8-client bursts and stopping one model without stopping the other.
 This does not certify full-size throughput or native macOS physical residency.
 
+When a worker disappears, remote CLOSE can remain unconfirmed. Edge retains
+that session's fenced identity and reports `RESET_PENDING`, not `RESET_DONE`.
+The host keeps healthy resident weights and quarantines the affected codec
+slot. A subsequent client cannot submit to that slot until its reset succeeds;
+other slots remain independent. Failed retirement is never a positive idle
+seal, including a later QUERY. Unreadable codec output still stops the host.
+The loss regression deliberately kills the non-Edge worker and checks the
+surviving host after bounded cleanup, rather than relying on random placement.
+
 ## Preparation and inference
 
 The preparation loader transfers authenticated, hash-verified weight blocks

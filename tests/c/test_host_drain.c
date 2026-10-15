@@ -13,7 +13,8 @@ static void codec(int input, int output, int release, const _Atomic int *reset_f
     while (fgets(line,sizeof line,in)) {
         if (sscanf(line,"RESET_SLOT %64s %u",nonce,&slot)==2 || sscanf(line,"RESET %64s",nonce)==1) {
             if (atomic_load(reset_fault)==2) (void)poll(NULL,0,250);
-            fprintf(out,"RESET_DONE %s\n",atomic_load(reset_fault)==1 ? "wrong-nonce" : nonce);
+            fprintf(out,"%s %s\n",atomic_load(reset_fault)==3 ? "RESET_PENDING" : "RESET_DONE",
+                atomic_load(reset_fault)==1 ? "wrong-nonce" : nonce);
         }
         else if (sscanf(line,"SUBMIT %u %u %zu",&id,&slot,&size)==3) {
             char prompt[32]={0}; assert(size<sizeof prompt && fread(prompt,1,size,in)==size && fgetc(in)=='\n');
@@ -101,6 +102,36 @@ static void run_pool(unsigned slots, int reject_retirement_reset) {
     char wrong[65]; memset(wrong,'b',64); wrong[64]=0;
     assert(lmb_host_control_rpc(address,host_hex,wrong,0,NULL,&observed)<0);
     assert(lmb_host_control_rpc(address,wrong,root,0,NULL,&observed)<0);
+    if (!reject_retirement_reset) {
+        int pending_client=connect_client(address,0);
+        send_prompt(pending_client,70,"hi"); expect_frame(pending_client,"DONE 70 ");
+        atomic_store(reset_fault,3); lmb_close(pending_client);
+        double wait=nowd()+5;
+        do {
+            assert(!lmb_host_control_rpc(address,host_hex,root,0,NULL,&observed));
+            assert(nowd()<wait);
+        } while (observed.connections);
+        pending_client=connect_client(address,0);
+        send_prompt(pending_client,71,"hi");
+        expect_frame(pending_client,"previous Segment session retirement pending");
+        lmb_close(pending_client);
+        wait=nowd()+5;
+        do {
+            assert(!lmb_host_control_rpc(address,host_hex,root,0,NULL,&observed));
+            assert(nowd()<wait);
+        } while (observed.connections);
+        assert(!observed.requests && !kill(host,0));
+        atomic_store(reset_fault,0);
+        pending_client=connect_client(address,0);
+        send_prompt(pending_client,72,"hi"); expect_frame(pending_client,"DONE 72 ");
+        lmb_close(pending_client);
+        wait=nowd()+5;
+        do {
+            assert(!lmb_host_control_rpc(address,host_hex,root,0,NULL,&observed));
+            assert(nowd()<wait);
+        } while (observed.connections);
+        puts("HOST RESET: PASS (pending retirement quarantines only its slot, same engine resumes after CLOSE)");
+    }
     if (slots==1) {
         /* Deterministic reproduction of the CI race: DONE precedes slow
          * RESET. The real encrypted socket pump must wait for remote cleanup
@@ -156,11 +187,19 @@ static void run_pool(unsigned slots, int reject_retirement_reset) {
     assert(!lmb_host_control_rpc(address,host_hex,root,0,NULL,&original));
     assert(!lmb_host_control_rpc(address,host_hex,root,LMB_HOST_CONTROL_DRAIN,&original,&drained));
     uint64_t seal_deadline=lmb_io_monotonic_ms()+5000;
-    if (reject_retirement_reset) atomic_store(reset_fault,1);
+    if (reject_retirement_reset) atomic_store(reset_fault,reject_retirement_reset==1 ? 1 : 3);
     do {
         assert(lmb_io_monotonic_ms()<seal_deadline);
         int rc=lmb_host_control_rpc(address,host_hex,root,LMB_HOST_CONTROL_RETIRE,&drained,&observed);
-        if (reject_retirement_reset && rc<0) {
+        if (reject_retirement_reset==2 && rc<0) {
+            assert(!kill(host,0));
+            assert(lmb_host_control_rpc(address,host_hex,root,0,NULL,&observed)<0);
+            atomic_store(reset_fault,0);
+            reject_retirement_reset=0;
+            puts("HOST RETIREMENT: PASS (pending CLOSE blocks both seal and QUERY receipt without killing weights)");
+            continue;
+        }
+        if (reject_retirement_reset==1 && rc<0) {
             close(release[1]);
             assert(waitpid(host,&status,0)==host && WIFEXITED(status) && WEXITSTATUS(status));
             assert(!munmap(reset_fault,sizeof *reset_fault));
@@ -244,9 +283,9 @@ int main(void) {
     assert(!exhausted.draining && exhausted.revision==UINT64_MAX);
     assert(lmb_host_control_apply(&exhausted,99,instance,UINT64_MAX));
     /* Separate processes avoid inheriting cached encryption identities. */
-    for (unsigned trial=0;trial<3;trial++) {
+    for (unsigned trial=0;trial<4;trial++) {
         pid_t child=fork(); assert(child>=0);
-        if (!child) { run_pool(trial ? 3 : 1,trial==2); fflush(stdout); _exit(0); }
+        if (!child) { run_pool(trial ? 3 : 1,trial>=2 ? (int)trial-1 : 0); fflush(stdout); _exit(0); }
         int status; assert(waitpid(child,&status,0)==child && WIFEXITED(status) && !WEXITSTATUS(status));
     }
     return 0;
