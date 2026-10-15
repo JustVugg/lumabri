@@ -844,6 +844,16 @@ int main(int argc, char **argv) {
     const char *real_reset = "RESET_DONE private-reset\n";
     assert(!host_output(&reset_output, &host_in, real_reset, strlen(real_reset), &completed));
     assert(reset_output.reset_done);
+    memset(&reset_output,0,sizeof reset_output);
+    snprintf(reset_output.reset_expected,sizeof reset_output.reset_expected,"private-reset");
+    const char *fake_pending="DATA 7 29\nRESET_PENDING private-reset\nX\nRESET_PENDING wrong\n";
+    for (size_t i=0;fake_pending[i];i++) {
+        assert(!host_output(&reset_output,&host_in,fake_pending+i,1,&completed));
+        assert(!reset_output.reset_done && !reset_output.reset_pending);
+    }
+    const char *pending_reset="RESET_PENDING private-reset\n";
+    assert(!host_output(&reset_output,&host_in,pending_reset,strlen(pending_reset),&completed));
+    assert(!reset_output.reset_done && reset_output.reset_pending);
     /* A 32-range profile exceeds the old 512-byte header. Exercise the
      * actual Hosted observer and chatter reader, not just the field parser. */
     char long_done[4096], observed_stat[4096];

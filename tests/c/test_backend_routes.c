@@ -5,6 +5,54 @@
 #undef main
 #include <assert.h>
 
+typedef struct {
+    LmbSegRouteSnapshot snapshot;
+    unsigned calls, nudges, ready_after;
+    LmbServeControl *cancel;
+} PendingDiscovery;
+
+static int pending_snapshot(void *opaque, LmbSegRouteSnapshot *out, int refresh) {
+    PendingDiscovery *pending=opaque;
+    pending->calls++; pending->nudges+=(refresh!=0);
+    *out=pending->snapshot;
+    if (pending->calls<pending->ready_after) out->complete=0;
+    if (pending->cancel && pending->calls==2) atomic_store(&pending->cancel->cancelled,1);
+    return 1;
+}
+
+static void test_resume_selection(const LmbSegRouteSnapshot *valid) {
+    PendingDiscovery pending={.snapshot=*valid,.ready_after=3};
+    pending.snapshot.complete=1;
+    LmbServeControl control={0};
+    LmbSegRouteSnapshot snapshot;
+    RemoteSegment chain[LMB_SEG_ROUTE_MAX];
+    size_t count=99;
+    assert(!serve_select_chain(pending_snapshot,&pending,&control,500,4,64,1,&snapshot,chain,&count));
+    assert(count==1 && pending.calls==3 && pending.nudges==1);
+
+    pending.calls=pending.nudges=0; pending.ready_after=1;
+    assert(!serve_select_chain(pending_snapshot,&pending,&control,500,4,64,1,&snapshot,chain,&count));
+    assert(pending.calls==1 && !pending.nudges); /* no extra work on a healthy turn */
+
+    pending.calls=pending.nudges=0; pending.ready_after=UINT_MAX;
+    double before=monotonic_seconds();
+    assert(serve_select_chain(pending_snapshot,&pending,&control,100,4,64,1,&snapshot,chain,&count)==-1);
+    assert(!count && pending.calls>=2 && pending.nudges<=1);
+    assert(monotonic_seconds()-before<1.0); /* bounded even with no coverage */
+
+    pending.calls=pending.nudges=0; pending.cancel=&control;
+    assert(serve_select_chain(pending_snapshot,&pending,&control,5000,4,64,1,&snapshot,chain,&count)==-2);
+    assert(!count && pending.calls==2); /* cancellation does not fetch again */
+    atomic_store(&control.cancelled,0);
+    pending.cancel=NULL; pending.calls=pending.nudges=0;
+    pending.ready_after=1;
+    for (uint32_t i=0;i<pending.snapshot.count;i++) pending.snapshot.entries[i].advert.flags|=LMB_SEG_ADVERT_DRAINING;
+    assert(serve_select_chain(pending_snapshot,&pending,&control,100,4,64,1,&snapshot,chain,&count)==-1);
+    assert(!count); /* a complete snapshot is not permission to use a drained node */
+    snapshot=*valid; snapshot.count=LMB_SEG_ROUTE_MAX+1;
+    assert(select_chain(&snapshot,4,64,1,chain,&count) && !count);
+}
+
 int main(void) {
     size_t stable;
     const char *replacement = "A\xef\xbf\xbd";
@@ -108,6 +156,7 @@ int main(void) {
     snapshot.entries[1].compute.samples = 0; /* old peer: residency wins */
     assert(!select_chain(&snapshot, 4, 64, 1, chain, &count));
     assert(!strcmp(chain[0].route.advert.peer_name, "node-1"));
+    test_resume_selection(&snapshot);
     puts("BACKEND ROUTES: PASS (CPU approval survives selection, missing coverage and replica checks)");
     return 0;
 }

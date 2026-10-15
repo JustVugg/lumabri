@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import pty
 import random
+import re
 import select
 import signal
 import socket
@@ -423,6 +424,9 @@ def main():
             assert api_command("segments",allocation,"status")["nodes"]==initial_nodes, "household token controlled another requester's segments"
             draining_nodes=api_command("segments",allocation,"drain")["nodes"]
             assert all(n["state"]=="draining" and n["sessions"]==1 for n in draining_nodes), draining_nodes
+            # Make draining visible to discovery before RESUME. There is no
+            # post-resume sleep: the next turn must handle publication lag.
+            time.sleep(2.5)
             # Existing KV is deliberately not idle capacity. Resume before a
             # new user turn: retokenization/route changes may legitimately
             # rebuild that turn with a NEW OPEN, which drain must reject.
@@ -678,6 +682,18 @@ def main():
                                      env=env("chatter"), text=True, capture_output=True, timeout=20)
             assert release.returncode == 0, release.stderr
             assert all(not service(name)["donor"]["reserved_total_bytes"] for name in ("a", "b"))
+            if os.environ.get("LUMABRI_RESIDENCY_POLICY") == "engine-locked":
+                # Test the effective engine policy, not merely the parent's
+                # environment. Two prepared allocations on each donor must
+                # report actual ownership and successful native lock guards.
+                for name in ("a", "b"):
+                    log = (tmp / name / ".lumabri/home/engines.log").read_text()
+                    owned = re.findall(r"\[engine-memory\] allocations=(\d+) requested_bytes=(\d+) locked_bytes=(\d+) retained_locked_bytes=(\d+)", log)
+                    assert len(owned) >= 2 and all(int(n) > 0 and 0 < int(wanted) <= int(locked)
+                                                  for n, wanted, locked, retained in owned), log
+                    assert len(re.findall(r"event=ready policy=engine-locked fault=0", log)) >= 2, log
+                    assert "event=ready policy=observe" not in log and "event=lost" not in log, log
+                print("OWNED ENGINE LOCKS: PASS (effective policy, two allocations per donor, no fallback)", flush=True)
             print("MULTI-MODEL SERVICE: PASS (two checkpoints on SAME donors, separate approval and RAM, manager restart, unload first while second chat lives)", flush=True)
             return
         resumed.send("\x1b[B" * 4 + "\r")

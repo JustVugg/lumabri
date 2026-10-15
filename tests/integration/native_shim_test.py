@@ -85,15 +85,17 @@ def main():
                 "LUMABRI_RESIDENT_REQUIRED": "1", "LUMABRI_PREFETCH": "0",
                 "LUMABRI_CACHE": str(tmp / "resident-cache"),
                 "LUMABRI_VROOT": str(tmp / "resident-vroot")}
-            checked = subprocess.run([str(resident_client),
-                str(tmp / "resident-vroot/weights.safetensors"), str(source / "weights.safetensors")],
-                env=resident_env, capture_output=True, text=True, timeout=45)
-            assert checked.returncode == 0, checked.stdout + checked.stderr
-            assert "preparation block cache: 9 fetches," in checked.stderr, checked.stderr
+            for policy in ("observe", "engine-locked"):
+                checked = subprocess.run([str(resident_client),
+                    str(tmp / "resident-vroot/weights.safetensors"), str(source / "weights.safetensors")],
+                    env={**resident_env, "LUMABRI_RESIDENCY_POLICY": policy},
+                    capture_output=True, text=True, timeout=45)
+                assert checked.returncode == 0, checked.stdout + checked.stderr
+                assert "preparation block cache: 9 fetches," in checked.stderr, checked.stderr
+                print(f"{policy}: {checked.stdout.strip()}")
             assert (tmp / "resident-cache/data/weights.safetensors").stat().st_blocks == 0
             assert (tmp / "resident-cache/data/weights.safetensors.other.safetensors").stat().st_blocks == 0
             assert not any(p.is_file() for p in (tmp / "resident-cas").rglob("*"))
-            print(checked.stdout.strip())
             chunk = (source / "weights.bin").read_bytes()[:1024*1024]
             digest = hashlib.sha256(chunk).hexdigest()
             cached_chunk = tmp / "cas" / digest[:2] / digest

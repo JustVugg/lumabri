@@ -88,8 +88,13 @@ static inline int lmb_chat_temporary_clear(int dir) {
     if (!S_ISREG(st.st_mode) || st.st_uid!=geteuid() || (st.st_mode&077) || st.st_nlink!=1) return -1;
     return unlinkat(dir,".transaction",0);
 }
-static inline int lmb_chat_commit(int dir, const char *id, uint32_t expected,
-                                 const void *data, size_t size, int remove) {
+/* Optional snapshot belongs to this transaction, even if another writer
+ * updates or deletes the file as soon as the lock is released. Pass a fresh
+ * output; successful writes transfer ownership to the caller (chat_free).
+ * Errors and deletions leave it empty. Never hold this lock for network I/O. */
+static inline int lmb_chat_commit_snapshot(int dir, const char *id, uint32_t expected,
+                                          const void *data, size_t size, int remove, LmbChat *saved) {
+    if (saved) memset(saved,0,sizeof *saved);
     if (!lmb_chat_id(id) || (!remove && (!data || !size || size>LMB_CHAT_BYTES))) return LMB_CHAT_UNSAFE;
     int lock=lmb_api_access_lock(dir); if (lock<0) return LMB_CHAT_BUSY;
     LmbChat previous; int rc=lmb_chat_load(dir,id,&previous);
@@ -123,7 +128,12 @@ static inline int lmb_chat_commit(int dir, const char *id, uint32_t expected,
     if (bad) (void)unlinkat(dir,".transaction",0);
     else if (fsync(dir)) bad=1;
     rc=bad ? LMB_CHAT_UNSAFE : LMB_CHAT_OK;
+    if (!rc && saved) rc=lmb_chat_load(dir,id,saved);
 done:
     close(lock); return rc;
+}
+static inline int lmb_chat_commit(int dir, const char *id, uint32_t expected,
+                                 const void *data, size_t size, int remove) {
+    return lmb_chat_commit_snapshot(dir,id,expected,data,size,remove,NULL);
 }
 #endif

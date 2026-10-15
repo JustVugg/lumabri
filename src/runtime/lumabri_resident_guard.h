@@ -7,6 +7,10 @@
 #include <stdatomic.h>
 #include <errno.h>
 #include <sys/mman.h>
+#ifdef LMB_ENGINE_MEMORY_OVERRIDE_H
+#include "lumabri_engine_memory.h"
+#include <dlfcn.h>
+#endif
 
 /* AddressSanitizer intercepts locking calls as successful no-ops. A sanitizer
  * binary must not advertise that its pages were pinned by the OS. */
@@ -19,10 +23,11 @@
 #endif
 
 typedef struct {
-    int enabled,locked;
+    int enabled,locked,engine_locked;
+    int (*retained_lock_status)(uint64_t *);
     _Atomic int fault;
 } LmbResidentGuard;
-enum { LMB_RESIDENT_OK=0,LMB_RESIDENT_PAGED=1,LMB_RESIDENT_COMPRESSED=2,LMB_RESIDENT_UNKNOWN=3 };
+enum { LMB_RESIDENT_OK=0,LMB_RESIDENT_PAGED=1,LMB_RESIDENT_COMPRESSED=2,LMB_RESIDENT_UNKNOWN=3,LMB_RESIDENT_LOCK_FAILED=4 };
 
 static inline int lmb_resident_memory_reason(const LmbProcessMemory *m) {
     if(!(m->known&LMB_PM_RSS))return LMB_RESIDENT_UNKNOWN;
@@ -36,17 +41,31 @@ static inline const char *lmb_resident_memory_reason_text(int reason) {
     case LMB_RESIDENT_PAGED:return "process pages moved to swap; resident preparation must be renewed";
     case LMB_RESIDENT_COMPRESSED:return "process pages compressed; physical residency no longer verified";
     case LMB_RESIDENT_UNKNOWN:return "process memory evidence unavailable";
+    case LMB_RESIDENT_LOCK_FAILED:return "engine allocation lock contract failed";
     default:return "resident observation current";
     }
 }
 static inline void lmb_resident_guard_report(LmbResidentGuard *g,const char *event,const LmbProcessMemory *m) {
     flockfile(stderr);
-    fprintf(stderr,"[resident-memory] event=%s policy=%s fault=%d ",event,g->locked?"locked":"observe",atomic_load(&g->fault));
+    fprintf(stderr,"[resident-memory] event=%s policy=%s fault=%d ",event,g->engine_locked?"engine-locked":g->locked?"locked":"observe",atomic_load(&g->fault));
     lmb_process_memory_json(stderr,m);fputc('\n',stderr);funlockfile(stderr);
 }
 static inline int lmb_resident_guard_observe(LmbResidentGuard *g,const LmbProcessMemory *m) {
     if(!g->enabled)return 0;
     int reason=lmb_resident_memory_reason(m);
+    if (g->engine_locked) {
+        reason=LMB_RESIDENT_LOCK_FAILED;
+#ifdef LMB_ENGINE_MEMORY_OVERRIDE_H
+        LmbEngineMemory owned; lmb_engine_memory_snapshot(&owned);
+        uint64_t retained=0;
+        if ((m->known&LMB_PM_RSS) && owned.enabled && !owned.fault &&
+            owned.allocations && owned.locked_bytes>=owned.requested_bytes &&
+            g->retained_lock_status && !g->retained_lock_status(&retained)) reason=0;
+#endif
+        /* Compression of unrelated libc/code/stack pages is not evidence
+         * against successfully locked engine payloads. It remains charged
+         * by the process governor, and is never relabelled as zero. */
+    }
     if(reason) {
         int expected=0;
         if(atomic_compare_exchange_strong(&g->fault,&expected,reason)) {
@@ -65,10 +84,18 @@ static inline int lmb_resident_guard_check(LmbResidentGuard *g) {
 static inline int lmb_resident_guard_begin(LmbResidentGuard *g) {
     const char *mode=getenv("LUMABRI_RESIDENCY_POLICY");
     if(!mode || !*mode)mode="observe";
-    if(strcmp(mode,"observe") && strcmp(mode,"locked")) {
-        fprintf(stderr,"[resident-memory] invalid LUMABRI_RESIDENCY_POLICY; use observe or locked\n");return -1;
+    if(strcmp(mode,"observe") && strcmp(mode,"locked") && strcmp(mode,"engine-locked")) {
+        fprintf(stderr,"[resident-memory] invalid LUMABRI_RESIDENCY_POLICY; use observe, locked or engine-locked\n");return -1;
     }
     g->enabled=1;
+    if (!strcmp(mode,"engine-locked")) {
+#ifdef LMB_ENGINE_MEMORY_OVERRIDE_H
+        g->engine_locked=1;
+        g->retained_lock_status=(int (*)(uint64_t *))dlsym(RTLD_DEFAULT,"lmb_weights_lock_status");
+#else
+        fprintf(stderr,"[resident-memory] engine allocation locking not compiled into this runtime; refusing READY\n");return -1;
+#endif
+    }
     if(!strcmp(mode,"locked")) {
 #ifdef LMB_RESIDENT_ASAN
         fprintf(stderr,"[resident-memory] strict locking unavailable in AddressSanitizer builds; refusing READY\n");return -1;
@@ -78,7 +105,8 @@ static inline int lmb_resident_guard_begin(LmbResidentGuard *g) {
          * The dedicated engine releases locks on exit; no unrelated process
          * or machine-wide paging policy is changed. */
         if(mlockall(MCL_CURRENT|MCL_FUTURE)) {
-            fprintf(stderr,"[resident-memory] cannot lock model process: %s; check the OS memlock allowance, refusing READY\n",strerror(errno));return -1;
+            fprintf(stderr,"[resident-memory] cannot lock model process: %s; %s, refusing READY\n",strerror(errno),
+                errno==ENOSYS || errno==ENOTSUP ? "OS does not implement whole-process locking" : "check the OS memlock allowance");return -1;
         }
         g->locked=1;
 #endif
@@ -89,6 +117,15 @@ static inline int lmb_resident_guard_begin(LmbResidentGuard *g) {
         fprintf(stderr,"[resident-memory] lock call succeeded but the OS reports zero locked bytes; refusing READY\n");return -1;
     }
     if(lmb_resident_guard_observe(g,&m))return -1;
+#ifdef LMB_ENGINE_MEMORY_OVERRIDE_H
+    if (g->engine_locked) {
+        LmbEngineMemory owned; lmb_engine_memory_snapshot(&owned);
+        uint64_t retained=0; (void)g->retained_lock_status(&retained);
+        fprintf(stderr,"[engine-memory] allocations=%llu requested_bytes=%llu locked_bytes=%llu retained_locked_bytes=%llu scope=owned-cpu-allocations\n",
+            (unsigned long long)owned.allocations,(unsigned long long)owned.requested_bytes,
+            (unsigned long long)owned.locked_bytes,(unsigned long long)retained);
+    }
+#endif
     lmb_resident_guard_report(g,"ready",&m);
     return 0;
 }

@@ -7,6 +7,7 @@
 #include <limits.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -57,9 +58,17 @@ int main(int argc, char **argv) {
     int (*seal)(void) = (int (*)(void))dlsym(RTLD_DEFAULT, "lmb_weights_seal");
     int (*retain)(int, uint64_t, uint64_t) =
         (int (*)(int, uint64_t, uint64_t))dlsym(RTLD_DEFAULT, "lmb_weights_retain");
+    int (*lock_status)(uint64_t *)=(int (*)(uint64_t *))dlsym(RTLD_DEFAULT,"lmb_weights_lock_status");
+    uint64_t locked=0;
+    assert(lock_status && lock_status(&locked)); /* not sealed yet */
     assert(retain && !retain(remote, 4000, sizeof got));
     assert(seal && !seal());
     assert(!seal()); /* idempotent cleanup; cached input must not survive seal */
+    const char *policy=getenv("LUMABRI_RESIDENCY_POLICY");
+    if (policy && !strcmp(policy,"engine-locked")) {
+        assert(!lock_status(&locked) && locked>=sizeof got);
+        assert(!(locked%(uint64_t)sysconf(_SC_PAGESIZE)));
+    } else assert(lock_status(&locked)); /* retained != locked */
     assert(pread(source, expected, sizeof expected, 4000) == sizeof expected);
     assert(pread(remote, got, sizeof got, 4000) == sizeof got);
     assert(!memcmp(got, expected, sizeof got));

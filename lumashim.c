@@ -1968,9 +1968,25 @@ typedef struct ResidentRange {
     RFile *file;
     uint64_t offset, length;
     uint8_t *data;
+    size_t locked_bytes;
     struct ResidentRange *next;
 } ResidentRange;
 static ResidentRange *resident_ranges;
+
+/* Separate from the engine's allocations: these explicitly retained native
+ * tables live in the shim. No caller can claim full coverage without both. */
+int lmb_weights_lock_status(uint64_t *bytes) {
+    if (!bytes) return -1;
+    *bytes=0;
+    pthread_mutex_lock(&direct_weight_lock);
+    int bad=!g.ok || !g.direct_weights || !atomic_load(&g.weights_sealed);
+    for (ResidentRange *r=resident_ranges; !bad && r; r=r->next) {
+        if (r->locked_bytes<r->length || *bytes>UINT64_MAX-r->locked_bytes) bad=1;
+        else *bytes+=r->locked_bytes;
+    }
+    pthread_mutex_unlock(&direct_weight_lock);
+    return bad ? -1 : 0;
+}
 
 static int direct_weight_file_p(const RFile *f) {
     size_t n = f ? strlen(f->rel) : 0;
@@ -2087,14 +2103,34 @@ int lmb_weights_retain(int fd, uint64_t offset, uint64_t length) {
         return -1;
     ResidentRange *r = calloc(1, sizeof *r);
     if (!r) return -1;
-    r->data = malloc((size_t)length);
+    const char *policy=getenv("LUMABRI_RESIDENCY_POLICY");
+    if (policy && !strcmp(policy,"engine-locked")) {
+#if defined(__SANITIZE_ADDRESS__)
+        free(r); errno=ENOTSUP; return -1;
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+        free(r); errno=ENOTSUP; return -1;
+#endif
+#endif
+        long page=sysconf(_SC_PAGESIZE);
+        if (page<=0 || ((size_t)page&((size_t)page-1)) || length>SIZE_MAX-((size_t)page-1)) {
+            free(r); return -1;
+        }
+        size_t extent=((size_t)length+(size_t)page-1)&~((size_t)page-1);
+        if (posix_memalign((void **)&r->data,(size_t)page,extent) || mlock(r->data,extent)) {
+            free(r->data); free(r); return -1;
+        }
+        r->locked_bytes=extent;
+    } else r->data = malloc((size_t)length);
     if (!r->data || direct_weight_read(f, r->data, (size_t)length, (off_t)offset) != (ssize_t)length) {
+        if (r->locked_bytes) (void)munlock(r->data,r->locked_bytes);
         free(r->data); free(r); return -1;
     }
     r->file = f; r->offset = offset; r->length = length;
     pthread_mutex_lock(&direct_weight_lock);
     if (atomic_load(&g.weights_sealed)) {
         pthread_mutex_unlock(&direct_weight_lock);
+        if (r->locked_bytes) (void)munlock(r->data,r->locked_bytes);
         free(r->data); free(r); return -1;
     }
     r->next = resident_ranges; resident_ranges = r;
