@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 import time
 from playwright.async_api import Error as PlaywrightError, async_playwright, expect
+from web_elastic_test import elastic_workspace
 
 ROOT = Path(__file__).resolve().parents[2]
 MODEL = "01" * 32
@@ -402,7 +403,7 @@ async def exercise(port, alice, bob, artifacts, env):
         await expect(page.locator("#workspace-allocations")).to_contain_text("4 capacity rejected")
         await expect(page.locator("#workspace-allocations")).to_contain_text("120 ms / 900 ms")
         assert await page.locator("#workspace script").count() == 0
-        assert await page.locator(".allocation-actions button").count() == 0, "read-only operator got mutation controls"
+        assert await page.locator(".allocation-actions button:visible").count() == 0, "read-only operator got mutation controls"
         await page.screenshot(path=str(artifacts / "web-workspace.png"))
         # Real credential-bound management grant; explicit transport fixture
         # below exercises browser confirmation and exact uint64 fences. The
@@ -411,7 +412,7 @@ async def exercise(port, alice, bob, artifacts, env):
                        capture_output=True, text=True, check=True, timeout=10)
         await page.locator("#refresh").click()
         await page.locator("#workspace-refresh").click()
-        await expect(page.locator(".allocation-actions button")).to_have_count(4)
+        await expect(page.locator("#workspace-allocations .allocation-actions button")).to_have_count(4)
         management_requests = []
         control_state = {"schema": 1, "allocation": MODEL, "instance": "02" * 32,
                          "revision": "9007199254740993", "state": "accepting"}
@@ -439,7 +440,7 @@ async def exercise(port, alice, bob, artifacts, env):
         subprocess.run([str(ROOT / "lumabri"), "api", "manage-revoke", "bob"], env=env,
                        capture_output=True, text=True, check=True, timeout=10)
         await page.locator("#refresh").click(); await page.locator("#workspace-refresh").click()
-        await expect(page.locator(".allocation-actions button")).to_have_count(0)
+        await expect(page.locator(".allocation-actions button:visible")).to_have_count(0)
         await page.set_viewport_size({"width": 390, "height": 844})
         await page.locator("#collapse").click()
         assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth")
@@ -457,6 +458,7 @@ async def exercise(port, alice, bob, artifacts, env):
         await page.locator("#collapse").click()
         await page.screenshot(path=str(artifacts / "web-mobile.png"))
         assert not failures, failures
+        await elastic_workspace(browser, port, bob, env, artifacts)
         await browser.close()
 
 

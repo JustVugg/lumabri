@@ -6,12 +6,58 @@ past the pressure probe. No cloud resources, costs or throughput claims.
 import fcntl
 import http.client
 import json
+import os
 import re
 import select
 from pathlib import Path
 import subprocess
 import sys
 import time
+
+
+def configure_from_browser(api, config, artifacts):
+    """Use compiled UI and real API, with no route interception or fake engine."""
+    from playwright.sync_api import sync_playwright, expect
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        try:
+            page = browser.new_page(viewport={"width": 1440, "height": 1000})
+            errors = []; page.on("pageerror", lambda error: errors.append(str(error)))
+            page.goto(f"http://127.0.0.1:{api.port}/")
+            page.locator("#token").fill(api.token)
+            page.locator('#login-form button[type="submit"]').click()
+            page.locator("#workspace-open").click()
+            model = page.locator("#workspace-models article").filter(
+                has=page.get_by_role("heading", name="elastic-olmoe", exact=True))
+            model.get_by_role("button", name="Manage replicas", exact=True).click()
+            expect(page.locator("#elastic-form")).to_be_visible()
+            page.locator("#elastic-source").select_option(config["source_model"])
+            for check in page.locator("#elastic-nodes input").all():
+                check.set_checked(check.input_value() in config["nodes"])
+            page.locator("#elastic-budget").fill("4")
+            for field, key in (("min", "min_replicas"), ("max", "max_replicas"),
+                               ("cooldown", "cooldown_seconds"), ("idle", "idle_seconds"),
+                               ("rejections", "up_rejections"), ("ttft", "ttft_ms"),
+                               ("context", "context"), ("sessions", "sessions"), ("output", "max_new")):
+                # Advanced controls are inside a native details disclosure.
+                page.locator("#elastic-form details").evaluate("node => { node.open = true; }")
+                page.locator("#elastic-" + field).fill(str(config[key]))
+            page.locator("#elastic-enabled").set_checked(config["enabled"])
+            page.get_by_role("button", name="Review policy", exact=True).click()
+            expect(page.locator("#elastic-apply")).to_be_visible()
+            page.screenshot(path=str(artifacts / f'elastic-browser-review-{config["revision"]}.png'), full_page=True)
+            page.once("dialog", lambda dialog: dialog.accept())
+            with page.expect_response(lambda res: res.url.endswith("/api/v1/elastic-policy") and
+                                      res.request.method == "POST") as sent:
+                page.locator("#elastic-apply").click()
+            response = sent.value
+            submitted = response.request.post_data_json
+            assert sorted(submitted.pop("nodes")) == sorted(config["nodes"]), submitted
+            assert submitted == {k: v for k, v in config.items() if k != "nodes"}, submitted
+            assert not errors, errors
+            return response.status, response.json()
+        finally:
+            browser.close()  # The controller must continue independently.
 
 
 def verify_elastic(api, until, service, env, terminal, artifacts):
@@ -102,16 +148,20 @@ def verify_elastic(api, until, service, env, terminal, artifacts):
         return held
 
     events = {}; held_chat = None; permits = []
+    def configure(body):
+        if os.environ.get("LUMABRI_TEST_BROWSER") == "1":
+            return configure_from_browser(api, body, artifacts)
+        return api.http(path, body)
     try:
         assert api.http(path, config, api.reader)[0] == 403
         assert api.http(path, token=token)[0] == 403
         assert api.http(path, {**config, "revision": 1})[0] == 409
         assert api.http(path, {**config, "all_nodes": True})[0] == 400
-        code, configured = api.http(path, config)
+        code, configured = configure(config)
         assert code == 200 and configured["revision"] == 1 and not configured["enabled"], (code, configured)
         events["configured"] = configured
         infer(route["id"]); infer(second["id"])
-        code, enabled = api.http(path, {**config, "revision": 1, "enabled": True})
+        code, enabled = configure({**config, "revision": 1, "enabled": True})
         assert code == 200 and enabled["revision"] == 2, (code, enabled)
         # Installing the older routing controller second must not create
         # another autonomous writer for the same logical model.

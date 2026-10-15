@@ -19,6 +19,39 @@ separate management permission. The local owner can use
 `lumabri api elastic-policy [CONFIG_JSON_FILE] --tracker HOST:PORT`.
 No configuration means no automatic preparation or unloading.
 
+### Web workspace
+
+Sign in with a management-enabled account, open **Computers & models**, and
+choose **Manage replicas** on a registered model. Select a local checkpoint
+source and explicitly check the computers authorized for this policy. Enter
+the total memory budget and replica limits; expand **Timing, demand and
+session limits** when those settings need changing. A new policy starts
+paused, with no computers or budget selected for you.
+
+**Review policy** shows the exact allocations whose lifecycle is being
+adopted, including permission for eventual retirement. It does not contact
+donors or reserve memory. **Apply reviewed policy** requires a final
+confirmation and submits the captured policy and model-route revisions.
+Editing any field invalidates the review. A stale revision or lost response
+requires inspection and another review; the browser never retries a write
+automatically. Existing byte budgets round-trip exactly through the GiB field,
+including values larger than JavaScript's safe integer range.
+
+The **Replica automation** panel shows saved limits, current phase, pending
+operation and allocation, reserved memory and the controller's reason. These
+are policy observations, not a live health or throughput certificate. Operators
+without management permission can read this panel but cannot change it.
+Management users can pause, resume or reconcile a preparation using the same
+revision-fenced API as the CLI. Pausing does not release memory or erase an
+in-progress retirement. Closing the page does not stop the controller.
+
+Late observations cannot overwrite a newer action's outcome. Closing the
+workspace, changing credentials or revoking management permission also
+invalidates an editor that was still loading. The UI does not store tokens,
+policy authority or conversations in browser storage.
+
+### API request
+
 Example (replace the IDs with real IDs from the workspace/model registry):
 
 ```json
@@ -161,7 +194,13 @@ reconciliation and private intent files:
 make test-api
 make test_chat_ui
 ./test_chat_ui elastic-json
+python3 tests/integration/web_chat_test.py
 ```
+
+The browser gate checks real compiled assets, login and permissions, with
+explicit policy transport fixtures for delayed replies, revision conflicts,
+exact budget handling, review/cancel, selected nodes, revocation and narrow
+viewports. It is not an inference test.
 
 The full real-engine fixture additionally tests demand-driven preparation,
 donor approval, publication, inference on the new replica, another independent
@@ -177,6 +216,12 @@ python3 tests/integration/household_service_flow_test.py \
   --joint complete --api-prepare --donor-policy --donor-ram-gb 1.5 \
   --sessions 2 --elastic
 ```
+
+With Playwright Chromium installed, prefix that command with
+`LUMABRI_TEST_BROWSER=1` to prepare the initial models and configure/enable the
+replica policy through the real web UI. This path does not intercept API
+responses: the exact reviewed request reaches the service and the same real
+OLMoE growth/drain/release assertions must pass after the browser closes.
 
 The lifecycle gate explicitly uses owned CPU allocation locking, including
 the reload and cold-wake engines. It checks their effective lock evidence,

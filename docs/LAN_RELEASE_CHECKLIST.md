@@ -187,6 +187,19 @@ below. Historical observations remain here as evidence, not current promises.
   no physical LAN performance, cloud provisioning or billed savings are claimed.
   See [elastic scope and commands](ELASTIC_REPLICAS.md).
 
+- [ ] Web replica controls (implementation under review): explicit source,
+  computer selection, byte-exact memory budget and lifecycle adoption review;
+  revision-fenced apply, pause, resume and reconciliation. Read-only operators
+  can inspect policies without gaining management rights. Browser regressions
+  cover stale polling success/error after a newer action, navigation,
+  revocation, cancelled confirmation and mobile layout. The real OLMoE gate
+  also drives configuration through the browser when `LUMABRI_TEST_BROWSER=1`;
+  the October 15 local reduced-OLMoE run passed approved preparation, growth,
+  inference on the added replica, another independent model, API restart,
+  admitted-generation drain, scale to zero and demand wake after the browser
+  closed. Native/release approval remains separate; Apple Silicon idle
+  compression failures in the underlying lifecycle gate are not waived.
+
 - [x] Conversation-history race fixes (#217, #218) and resumed Segment
   discovery/remote retirement (#221). #221 passed all eight native checks on
   `a95bfc4` before normal merge `4a15d61`: resumed routes are refreshed before
