@@ -170,12 +170,20 @@ donor compute permit, release after that generation completes, a dormant model
 waking with the same ID/grants, and a manual-route-change fence:
 
 ```sh
+LUMABRI_RESIDENCY_POLICY=engine-locked \
 python3 tests/integration/household_service_flow_test.py \
   --models-dir /path/to/tiny-olmoe-models \
   --runtime-dir /path/to/complete-runtime/bin \
   --joint complete --api-prepare --donor-policy --donor-ram-gb 1.5 \
   --sessions 2 --elastic
 ```
+
+The lifecycle gate explicitly uses owned CPU allocation locking, including
+the reload and cold-wake engines. It checks their effective lock evidence,
+not only the parent environment. An unavailable OS locking allowance fails
+preparation; it does not disable the residency guard or fall back to observation.
+The ordinary `observe` policy remains separately tested and unchanged. See
+[resident contracts and limits](RESIDENT_RUNTIME.md).
 
 This is a loopback correctness test using real OLMoE inference, not evidence
 of physical LAN performance, datacenter capacity, billing savings or native
