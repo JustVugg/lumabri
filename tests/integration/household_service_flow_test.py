@@ -716,6 +716,9 @@ def main():
         print("HOUSEHOLD SERVICE FLOW: PASS (approval survives reconnect, detached preparation, real model after TUI/manager exit and crash, exact live library, cancelled confirmation is inert, shared coordinated retirement)", flush=True)
     finally:
         if sys.exc_info()[0] is not None:
+            for t in terminals:
+                t.drain()
+                print(f"Terminal diagnostics: {t.log.name}\n{t.text[-8000:]}", flush=True)
             for log in sorted(tmp.glob("*/.lumabri/home/engines.log")):
                 print(f"Engine diagnostics: {log}\n{log.read_text(errors='replace')[-12000:]}", flush=True)
         for t in terminals:

@@ -117,11 +117,12 @@ static void api_history(int fd, int access_dir, const LmbApiUser *user, const Lm
         const LmbJsonToken *t=&j.tokens[fields[1]]; payload=j.text+t->begin; size=t->end-t->begin;
     }
     if (creating) { uint8_t bytes[16]; lmb_random(bytes,sizeof bytes); lmb_hex(generated,bytes,sizeof bytes); id=generated; }
-    int rc=lmb_chat_commit(dir,id,expected,payload,size,deleting);
+    LmbChat saved;
+    int rc=lmb_chat_commit_snapshot(dir,id,expected,payload,size,deleting,&saved);
     if (rc) api_history_error(fd,rc);
     else if (deleting) (void)api_response(fd,200,"{\"deleted\":true}\n");
-    else { LmbChat chat; rc=api_conversation_read(dir,id,&chat);
-        if (rc) api_history_error(fd,rc); else { api_history_reply(fd,&chat); lmb_chat_free(&chat); } }
+    else api_history_reply(fd,&saved);
+    lmb_chat_free(&saved);
     close(dir);
 }
 #endif
