@@ -50,6 +50,11 @@ test check-warnings: test_host_session_pool test_hosted_sessions test_host_drain
 
 test_node_control: tests/c/test_node_control.c lumabri_proto.h src/runtime/lumabri_node_control.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_node_control.c -o $@
+test_engine_memory: tests/c/test_engine_memory.c src/runtime/lumabri_engine_memory.c src/runtime/lumabri_engine_memory.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_engine_memory.c src/runtime/lumabri_engine_memory.c -o $@
+test_engine_memory_guard: tests/c/test_engine_memory_guard.c src/runtime/lumabri_engine_memory.h src/runtime/lumabri_resident_guard.h src/runtime/lumabri_process_memory.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_engine_memory_guard.c -o $@
+test check-warnings: test_engine_memory test_engine_memory_guard
 test check-warnings: test_compute_broker
 test check-warnings: test_portfolio
 test check-warnings: test_reply_stream
@@ -101,7 +106,7 @@ check-warnings:
 	$(MAKE) -B all test_relay_exec test_swarm_fed test_key_rotation \
 		test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 test_exec2 test_accum_order test_hybrid_parallel test_residency_report test_model_family test_planner test_cluster test_memory_budget test_calibration test_metrics \
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
-		test_meminfo test_process_memory test_serve_control test_host_session_pool test_hosted_sessions test_host_drain test_node_control test_compute_broker test_compute_lease test_content_filter \
+		test_meminfo test_process_memory test_engine_memory test_engine_memory_guard test_serve_control test_host_session_pool test_hosted_sessions test_host_drain test_node_control test_compute_broker test_compute_lease test_content_filter \
 		test_scheduler test_run_gate test_inventory test_home test_chat_ui test_weight_cache test_planner_io test_portfolio test_reply_stream test_chat_store test_model_routes test_replica_admission test_replica_rank test_replay_prefix test_capacity test_portfolio_policy \
 		CFLAGS='$(CFLAGS) -Werror'
 
@@ -728,6 +733,8 @@ test-sanitize: build/web_assets.h
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_run_gate.c lumabri_run_gate.c -o build/sanitize/test_run_gate
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_meminfo.c $(MACHINE_SRC) -o build/sanitize/test_meminfo
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_process_memory.c -o build/sanitize/test_process_memory
+	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_engine_memory.c src/runtime/lumabri_engine_memory.c -o build/sanitize/test_engine_memory
+	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_engine_memory_guard.c -o build/sanitize/test_engine_memory_guard
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_serve_control.c -o build/sanitize/test_serve_control
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_host_drain.c src/ui/lumabri_tui.c $(MACHINE_SRC) lumabri_run_gate.c -o build/sanitize/test_host_drain
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_node_control.c -o build/sanitize/test_node_control
@@ -757,6 +764,8 @@ test-sanitize: build/web_assets.h
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_run_gate
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_meminfo
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_process_memory
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_engine_memory
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_engine_memory_guard
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_serve_control
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/sanitize/test_host_drain
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/sanitize/test_node_control
@@ -798,12 +807,14 @@ production-gate:
 HYBRID_ENGINE_DIR = build/segment-hybrid-colibri
 COLIBRI_SEGMENT_LIB = $(HYBRID_ENGINE_DIR)/build/segment/libcolibri_segment_edge.a
 HYBRID_ROOT = $(abspath .)
-SEGMENT_CFLAGS = $(CFLAGS) -I. -I$(ENGINE) $(OMP_FLAGS)
+ENGINE_MEMORY_FLAGS = -include $(HYBRID_ROOT)/src/runtime/lumabri_engine_memory_override.h
+SEGMENT_CFLAGS = $(CFLAGS) -I. -I$(ENGINE) $(OMP_FLAGS) $(ENGINE_MEMORY_FLAGS)
 SEGMENT_COMMON = segment_colibri.h src/runtime/lumabri_resident.h src/runtime/lumabri_process_memory.h src/runtime/lumabri_resident_guard.h src/runtime/lumabri_backend_policy.h lumabri_segment.c lumabri_segment.h \
 		lumabri_segment_discovery.c lumabri_segment_discovery.h \
 		lumabri_proto.h lumabri_sign.h lumabri_sha.h $(SECURE_DEPS)
 
 HYBRID_PATCH_INPUTS = tools/prepare_resident_adapters.py engine_patches/make_patches.py \
+	src/runtime/lumabri_engine_memory_override.h src/runtime/lumabri_engine_memory.h \
 	lumabri_home_hybrid.h src/runtime/lumabri_hybrid_policy.h src/runtime/lumabri_q8_reference.h \
 	engine_patches/deepseek_v4_p2p.py $(wildcard engine_patches/*-p2p.diff) \
 	lumabri_client.h lumibri_client.h lumi_v4_ext.h lumi_v4_bridge.c \
@@ -816,7 +827,7 @@ segment-options-force:
 # An installed libomp or changed build flags must invalidate both the runtime
 # archive and its bridge, without requiring users to discover make -B.
 build/segment-options: segment-options-force tools/update_build_stamp.py
-	python3 tools/update_build_stamp.py $@ '$(CC)' '$(CPPFLAGS)' '$(CFLAGS)' '$(OMP_FLAGS)' '$(OMP_LIBS)' '$(abspath $(ENGINE))' '$(ENGINE_CPU_FLAGS)'
+	python3 tools/update_build_stamp.py $@ '$(CC)' '$(CPPFLAGS)' '$(CFLAGS)' '$(OMP_FLAGS)' '$(OMP_LIBS)' '$(abspath $(ENGINE))' '$(ENGINE_CPU_FLAGS)' '$(ENGINE_MEMORY_FLAGS)'
 
 # Track every copied adapter/header/build input, including new upstream files,
 # deletions and preserved-mtime edits. This reads sources only, never weights.
@@ -836,21 +847,26 @@ $(HYBRID_ENGINE_DIR)/.prepared: Makefile build/segment-options build/segment-sou
 
 build/segment_hybrid_bridge.o: build/segment-options lumi_v4_bridge.c $(HYBRID_PATCH_INPUTS)
 	mkdir -p build
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(OMP_FLAGS) -pthread -I. -I$(ENGINE) -c lumi_v4_bridge.c -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(OMP_FLAGS) $(ENGINE_MEMORY_FLAGS) -pthread -I. -I$(ENGINE) -c lumi_v4_bridge.c -o $@
+
+build/engine_memory.o: src/runtime/lumabri_engine_memory.c src/runtime/lumabri_engine_memory.h build/segment-options
+	mkdir -p build
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread -c src/runtime/lumabri_engine_memory.c -o $@
 
 build/v41_adapter.o: engine_patches/v41_adapter.c engine_patches/v41_adapter.h engine_patches/v41_boundary.h engine_patches/v41_lifecycle.h src/runtime/lumabri_v41_contract.h lumabri_planner.h $(wildcard planner_adapters/*.h) build/v41_range_core.c build/segment-sources build/segment-options
-	$(CC) $(CPPFLAGS) -O2 $(ENGINE_CPU_FLAGS) $(OMP_FLAGS) -pthread -I. -Ibuild -I$(ENGINE) -c engine_patches/v41_adapter.c -o $@
+	$(CC) $(CPPFLAGS) -O2 $(ENGINE_CPU_FLAGS) $(OMP_FLAGS) $(ENGINE_MEMORY_FLAGS) -pthread -I. -Ibuild -I$(ENGINE) -c engine_patches/v41_adapter.c -o $@
 
-$(COLIBRI_SEGMENT_LIB): $(HYBRID_ENGINE_DIR)/.prepared build/segment_hybrid_bridge.o build/v41_adapter.o
+$(COLIBRI_SEGMENT_LIB): $(HYBRID_ENGINE_DIR)/.prepared build/segment_hybrid_bridge.o build/v41_adapter.o build/engine_memory.o tools/check_engine_memory.py
 	env -u MAKEFLAGS $(MAKE) -C $(HYBRID_ENGINE_DIR) MAKEOVERRIDES= \
 		COLI_V4_SUPPORTED=1 CC='$(CC)' \
-		CFLAGS='-O2 $(ENGINE_CPU_FLAGS) $(CPPFLAGS) $(OMP_FLAGS) -pthread -I$(HYBRID_ROOT) -include $(HYBRID_ROOT)/lumi_v4_ext.h -DLUMABRI_P2P -DLUMIBRI_P2P' \
+		CFLAGS='-O2 $(ENGINE_CPU_FLAGS) $(CPPFLAGS) $(OMP_FLAGS) $(ENGINE_MEMORY_FLAGS) -pthread -I$(HYBRID_ROOT) -include $(HYBRID_ROOT)/lumi_v4_ext.h -DLUMABRI_P2P -DLUMIBRI_P2P' \
 		segment-edge-library
-	$(AR) rcs $@ build/segment_hybrid_bridge.o build/v41_adapter.o
+	$(AR) rcs $@ build/segment_hybrid_bridge.o build/v41_adapter.o build/engine_memory.o
+	python3 tools/check_engine_memory.py $@
 
 # Optional diagnostic; requires explicit, already approved household routes.
 build/bench_home_hybrid: tests/c/bench_home_hybrid.c tests/c/bench_hybrid_numeric.h tests/c/bench_block_verify.h tests/c/bench_causal_spec.h lumabri_client.h lumabri_proto.h $(SECURE_DEPS) $(COLIBRI_SEGMENT_LIB)
-	$(CC) $(CPPFLAGS) -O2 $(ENGINE_CPU_FLAGS) $(OMP_FLAGS) -pthread -I$(HYBRID_ENGINE_DIR) \
+	$(CC) $(CPPFLAGS) -O2 $(ENGINE_CPU_FLAGS) $(OMP_FLAGS) $(ENGINE_MEMORY_FLAGS) -pthread -I$(HYBRID_ENGINE_DIR) \
 		-include lumi_v4_ext.h -DLUMABRI_P2P -DLUMIBRI_P2P -DCOLI_SEGMENT_ADAPTER -DCOLI_EDGE_ADAPTER \
 		tests/c/bench_home_hybrid.c $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
 
@@ -1085,6 +1101,9 @@ test: all test_weight_cache test_key_rotation test_hedge test_local_fallback tes
 	./test_segment_v2
 	./test_meminfo
 	./test_process_memory
+	./test_engine_memory
+	./test_engine_memory_guard
+	python3 tests/integration/engine_memory_boundary_test.py
 	./test_serve_control
 	./test_host_session_pool
 	./test_host_drain
@@ -1142,7 +1161,7 @@ clean:
 	      test_model_family test_planner test_planner_io test_cluster test_memory_budget test_calibration test_catalogue_advice test_metrics test_inventory test_home test_home_expert test_chat_ui test_weight_cache segment_budget_probe \
 	      test_nat_adopt test_rtt_refresh \
 	      test_verify_failover test_segment_v2 test_segment_discovery test_sampling \
-	      test_swarm_detail test_relay_rate test_machine test_meminfo test_process_memory test_serve_control test_host_session_pool test_hosted_sessions test_host_drain test_node_control \
+	      test_swarm_detail test_relay_rate test_machine test_meminfo test_process_memory test_engine_memory test_engine_memory_guard test_serve_control test_host_session_pool test_hosted_sessions test_host_drain test_node_control \
 	      test_compute_lease test_content_filter test_scheduler test_run_gate \
 	      test_compute_broker test_portfolio test_reply_stream test_api_json test_api_http test_api_access test_chat_store test_model_routes test_replica_admission test_replica_rank test_replay_prefix test_capacity test_portfolio_policy \
 	      test_segment_v2_tsan tracker_tsan \
