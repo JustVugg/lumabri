@@ -3,6 +3,7 @@
  * READY models survive rejection/failure of a later model. No approval replay. */
 #ifndef LUMABRI_JOINT_PREPARE_H
 #define LUMABRI_JOINT_PREPARE_H
+_Static_assert(LMB_PORTFOLIO_MODELS<=HOME_PREPARATION_RESULTS,"every prepared model needs an exact operation result");
 
 static int home_joint_validate(const LmbTuiState *reviewed, const LmbTuiState *current,
     uint32_t first, uint32_t mapping[LMB_CLUSTER_MAX_NODES], char *why, size_t cap) {
@@ -107,6 +108,7 @@ static int home_prepare_portfolio_begin(const LmbTuiState *reviewed,
         memcpy(job.snapshot.instance, observer->instance, 32);
     }
     job.batch_total = reviewed->joint.plan.model_count;
+    job.snapshot.preparation_results_known=1;
     snprintf(job.snapshot.name, sizeof job.snapshot.name, "Joint resident plan");
     snprintf(job.snapshot.tracker, sizeof job.snapshot.tracker, "%s", reviewed->tracker);
     home_service_preparation_detail(&job, "Preparing reviewed models; separate donor approvals required");

@@ -5,6 +5,97 @@
 #include <assert.h>
 
 int main(int argc, char **argv) {
+    if (argc==2 && !strcmp(argv[1],"compute-hold")) {
+        /* Test owner obtains the actual donor CPU permit; real model
+         * kernels queue behind it. No engine result/timing is fabricated. */
+        char path[1200]; assert(!home_service_socket_path("donor",path,sizeof path));
+        size_t n=strlen(path); assert(n>=5 && !strcmp(path+n-5,".sock"));
+        memcpy(path+n-5,".cpu",5); assert(!setenv("LUMABRI_COMPUTE_SOCKET",path,1));
+        int permit; assert(!lmb_compute_acquire(&permit,5000,NULL,NULL) && permit>=0);
+        puts("COMPUTE HELD"); fflush(stdout);
+        struct pollfd input={STDIN_FILENO,POLLIN,0};
+        int ready=poll(&input,1,30000); lmb_compute_release(&permit);
+        return ready>0 ? 0 : 1;
+    }
+    if (argc==2 && !strcmp(argv[1],"preparation-observe")) {
+        char tmp[]="/tmp/lmb-prep-observe.XXXXXX"; assert(mkdtemp(tmp));
+        assert(!setenv("HOME",tmp,1));
+        int access=open(tmp,O_RDONLY|O_DIRECTORY),dir=preparation_dir(access); assert(dir>=0);
+        HomeService job; assert(!home_service_open(&job,"prepare"));
+        job.snapshot.preparation_results_known=1;
+        job.observer=(HomePreparationObserver){.fd=dir,.save=preparation_save};
+        assert(!home_service_save(&job));
+        char id[65]; lmb_hex(id,job.snapshot.instance,32);
+        pid_t child=fork(); assert(child>=0);
+        if (!child) {
+            struct pollfd f={job.listener,POLLIN,0}; assert(poll(&f,1,5000)==1);
+            int fd=accept(job.listener,NULL,NULL); assert(fd>=0);
+            uint8_t request[80]; assert(!home_service_io(fd,request,sizeof request,0,nowd()+3));
+            assert(!memcmp(request+8,job.snapshot.instance,32));
+            job.snapshot.state=HOME_SVC_DONE;
+            assert(!preparation_save(dir,&job.snapshot));
+            close(fd); _exit(0); /* terminal receipt, lost RPC reply */
+        }
+        HomeServiceSnapshot observed; int live=-1,waited=0;
+        assert(!preparation_observe(dir,id,&observed,&live));
+        assert(!live && observed.state==HOME_SVC_DONE);
+        assert(waitpid(child,&waited,0)==child && WIFEXITED(waited) && !WEXITSTATUS(waited));
+        home_service_close(&job);
+        job.snapshot.state=HOME_SVC_RUNNING; assert(!preparation_save(dir,&job.snapshot));
+        assert(!preparation_observe(dir,id,&observed,&live));
+        assert(!live && observed.state==HOME_SVC_RUNNING); /* absence is not FAILED */
+        job.snapshot.state=HOME_SVC_FAILED; assert(!preparation_save(dir,&job.snapshot));
+        assert(!preparation_observe(dir,id,&observed,&live) && observed.state==HOME_SVC_FAILED);
+        LmbElasticPolicy p={.phase=LMB_ELASTIC_PREPARING,.faulted=1,.pending_bytes=1234};
+        strcpy(p.request.operation,id); strcpy(p.request.action,"start");
+        uint8_t digest[32]; preparation_request_hash(p.route.tracker,&p.request,digest);
+        assert(!preparation_intent(dir,id,digest,1));
+        /* Quiescence is proven by both submission and keeper locks, never
+         * by a timeout, stale pid, or missing discovery entry. */
+        HomeService busy; assert(!home_service_open(&busy,"prepare"));
+        assert(api_elastic_recover_preparation(access,&p) && p.pending_bytes==1234);
+        home_service_close(&busy);
+        job.snapshot.preparation_result_count=1;
+        memset(job.snapshot.preparation_results[0].allocation,1,32);
+        strcpy(job.snapshot.preparation_results[0].catalogue_name,"model-a");
+        assert(!preparation_save(dir,&job.snapshot));
+        assert(api_elastic_recover_preparation(access,&p) && p.pending_bytes==1234 && p.faulted);
+        job.snapshot.state=HOME_SVC_DONE; job.snapshot.preparation_results[0].ready_observed=1;
+        assert(!preparation_save(dir,&job.snapshot));
+        assert(!api_elastic_recover_preparation(access,&p) && p.pending_bytes==1234 && !p.faulted);
+        assert(p.phase==LMB_ELASTIC_PREPARING && !strcmp(p.request.operation,id));
+        job.snapshot.state=HOME_SVC_FAILED; job.snapshot.preparation_result_count=0;
+        assert(!preparation_save(dir,&job.snapshot));
+        assert(!api_elastic_recover_preparation(access,&p) && !p.phase && !p.pending_bytes);
+        assert(!p.request.operation[0] && !preparation_load(dir,id,&observed) && observed.state==HOME_SVC_FAILED);
+        char file[80]; snprintf(file,sizeof file,"%s.state",id); assert(!unlinkat(dir,file,0));
+        snprintf(file,sizeof file,"%s.intent",id); assert(!unlinkat(dir,file,0));
+        assert(!unlinkat(dir,"access.lock",0));
+        close(dir); assert(!unlinkat(access,"preparations",AT_REMOVEDIR)); close(access);
+        char path[1400]; const char *entries[]={".lumabri/service/prepare.state",".lumabri/service/prepare.lock"};
+        for (unsigned i=0;i<2;i++) { snprintf(path,sizeof path,"%s/%s",tmp,entries[i]); assert(!unlink(path)); }
+        snprintf(path,sizeof path,"%s/retirements",tmp); assert(!rmdir(path));
+        snprintf(path,sizeof path,"%s/.lumabri/resident-plans",tmp); (void)rmdir(path);
+        snprintf(path,sizeof path,"%s/.lumabri/service",tmp); assert(!rmdir(path));
+        snprintf(path,sizeof path,"%s/.lumabri",tmp); assert(!rmdir(path)); assert(!rmdir(tmp));
+        puts("PREPARATION OBSERVE: PASS (terminal RPC race, timeout not failure, locked reconciliation, uncertain allocations retained)"); return 0;
+    }
+    if (argc==2 && !strcmp(argv[1],"elastic-json")) {
+        /* Pending IDs and large counters used to overflow api_addf's
+         * bounded fragment even though the complete JSON buffer had room. */
+        LmbElasticPolicy p={.revision=UINT32_MAX,.enabled=1,.max_replicas=8,.min_replicas=1,
+            .cooldown=86400,.idle_seconds=604800,.max_reserved_bytes=UINT64_C(1)<<60,
+            .last_check=UINT64_MAX,.last_change=UINT64_MAX,.pending_bytes=UINT64_C(1)<<59,
+            .route={.count=1,.revision=UINT32_MAX},.resident_bytes={1}};
+        memset(p.route.id,0xee,32); memset(p.pending_allocation,0xaa,32);
+        memset(p.request.operation,'f',64); strcpy(p.request.models[0],"model-a");
+        for (unsigned i=0;i<=LMB_ELASTIC_RETIRING;i++) {
+            p.phase=i; Cap body={0}; assert(!api_elastic_record(&body,&p));
+            LmbJson j; LmbJsonToken tokens[128]; assert(!lmb_json_parse(&j,body.p,body.len,tokens,128));
+            free(body.p);
+        }
+        puts("ELASTIC JSON: PASS (all lifecycle phases, full IDs and bounded counters)"); return 0;
+    }
     if (argc==2 && !strcmp(argv[1],"donor-workload")) {
         /* The fixture needs the live donor's allocation identity, not only
          * counts: replacing a model can preserve both count and RAM. */
@@ -235,6 +326,27 @@ int main(int argc, char **argv) {
         strcpy(s.detail,"Waiting for approval"); s.state=HOME_SVC_RUNNING; assert(!lmb_unhex(s.instance,id,32));
         assert(!preparation_save(dir,&s) && !preparation_load(dir,id,&loaded));
         assert(!strcmp(loaded.detail,s.detail));
+        assert(!loaded.preparation_results_known && !loaded.preparation_result_count);
+        s.preparation_results_known=1; s.preparation_result_count=2;
+        memset(s.preparation_results[0].allocation,1,32); strcpy(s.preparation_results[0].catalogue_name,"model-a");
+        memset(s.preparation_results[1].allocation,2,32); strcpy(s.preparation_results[1].catalogue_name,"model-b");
+        s.preparation_results[0].ready_observed=1;
+        assert(!preparation_save(dir,&s) && !preparation_load(dir,id,&loaded));
+        assert(loaded.preparation_results_known && loaded.preparation_result_count==2);
+        assert(!memcmp(loaded.preparation_results,s.preparation_results,sizeof s.preparation_results));
+        Cap results={0}; assert(!preparation_results_json(&results,&loaded));
+        assert(strstr(results.p,"ready_observed") && strstr(results.p,"unconfirmed") && strstr(results.p,"model-b"));
+        free(results.p);
+        LmbBuf bad={0};
+        s.preparation_results_known=0; assert(home_service_pack(&bad,&s)); s.preparation_results_known=1;
+        s.preparation_results[1].allocation[0]=1;
+        memcpy(s.preparation_results[1].allocation,s.preparation_results[0].allocation,32);
+        assert(home_service_pack(&bad,&s)); memset(s.preparation_results[1].allocation,2,32);
+        s.preparation_results[1].ready_observed=2; assert(home_service_pack(&bad,&s)); s.preparation_results[1].ready_observed=0;
+        s.preparation_result_count=HOME_PREPARATION_RESULTS+1; assert(home_service_pack(&bad,&s)); s.preparation_result_count=2;
+        assert(!home_service_pack(&bad,&s));
+        for (size_t i=0;i<bad.len;i++) assert(home_service_unpack(bad.p,i,&loaded));
+        free(bad.p);
         s.state=HOME_SVC_DONE; strcpy(s.detail,"All selected models ready");
         assert(!preparation_save(dir,&s) && !preparation_load(dir,id,&loaded)); assert(loaded.state==HOME_SVC_DONE);
         char file[80]; snprintf(file,sizeof file,"%s.state",id);
@@ -428,15 +540,17 @@ int main(int argc, char **argv) {
         assert(!home_service_unpack(b.p, b.len, &output));
         assert(output.compute_active == 1 && output.compute_queued == 3 && output.compute_grants == 1234);
         for (size_t n = 0; n < b.len; n++) assert(home_service_unpack(b.p, n, &output));
+        lmb_put32(b.p, 4);
+        assert(!home_service_unpack(b.p, b.len-8, &output) && !output.preparation_results_known);
         lmb_put32(b.p, 3);
-        assert(!home_service_unpack(b.p, b.len-32, &output) && output.compute_grants == 1234);
+        assert(!home_service_unpack(b.p, b.len-40, &output) && output.compute_grants == 1234);
         lmb_put32(b.p, 2); /* v2 had allocations but no compute observation */
-        assert(!home_service_unpack(b.p, b.len-52, &output));
+        assert(!home_service_unpack(b.p, b.len-60, &output));
         assert(output.model_count == 2 && output.reserved_total == 900 && !output.compute_enabled);
         lmb_put32(b.p, 1);
-        assert(!home_service_unpack(b.p, b.len-64, &output));
+        assert(!home_service_unpack(b.p, b.len-72, &output));
         assert(!output.model_count && !output.compute_enabled);
-        lmb_put32(b.p, 5); assert(home_service_unpack(b.p, b.len, &output));
+        lmb_put32(b.p, 6); assert(home_service_unpack(b.p, b.len, &output));
         free(b.p); b = (LmbBuf){0};
         input.compute_active = 2; assert(home_service_pack(&b, &input));
         input.compute_active = 1; input.compute_queued = 33; assert(home_service_pack(&b, &input));
@@ -454,8 +568,21 @@ int main(int argc, char **argv) {
         service.snapshot.compute_grants++;
         assert(!home_service_save(&service)); assert(!stat(service.journal, &after));
         assert(before.st_ino == after.st_ino); /* no replace/fsync for kernel counters */
+        uint8_t allocation[32]={1};
+        assert(home_service_preparation_assign(&service,"model-a",allocation)); /* donor is not a preparation */
+        memset(&service.snapshot,0,sizeof service.snapshot);
+        strcpy(service.snapshot.role,"prepare"); service.snapshot.state=HOME_SVC_RUNNING;
+        service.snapshot.preparation_results_known=1;
+        assert(!home_service_preparation_assign(&service,"model-a",allocation));
+        assert(!home_service_unpack(service.last,service.last_size,&output));
+        assert(output.preparation_result_count==1 && !output.preparation_results[0].ready_observed);
+        assert(home_service_preparation_assign(&service,"model-a",allocation));
+        assert(service.snapshot.preparation_result_count==1);
+        uint8_t unknown[32]={2}; assert(home_service_preparation_ready(&service,unknown));
+        assert(!home_service_preparation_ready(&service,allocation));
+        assert(!home_service_unpack(service.last,service.last_size,&output) && output.preparation_results[0].ready_observed);
         free(service.last); assert(!unlink(service.journal)); assert(!rmdir(directory));
-        puts("SERVICE CODEC: PASS (v1/v2/v3/v4, strict bounds, counters stay out of durable state)"); return 0;
+        puts("SERVICE CODEC: PASS (v1-v5, strict bounds, historical preparation IDs, counters stay out of durable state)"); return 0;
     }
     if (argc == 2 && !strcmp(argv[1], "model-pool")) {
         HomeDonor parked[3] = {0}, d = {.parked = parked, .park_capacity = 3, .pool_budget = 1000, .offer_revision = 3};

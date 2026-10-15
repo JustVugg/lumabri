@@ -8,6 +8,13 @@ Management credentials can also [prepare resident models](MODEL_PREPARATION_API.
 from the web catalogue or API. This shares the TUI's preparation keeper and
 requires explicit computer selection, a reviewed plan and separate donor approval.
 
+Opt-in [elastic replica policies](ELASTIC_REPLICAS.md) use those same operations
+to prepare capacity on selected authorized computers, then withdraw, drain and
+release idle replicas. `GET /api/v1/elastic-policy` is operator-only; `POST`
+requires management permission. No cloud account or automatic donor approval
+is implied. The dormant model ID stays available; its first request reports
+preparation rather than pretending inference has already started.
+
 ## Cluster workspace
 
 The bundled browser has an operator-only **Computers & models** view. Explicitly

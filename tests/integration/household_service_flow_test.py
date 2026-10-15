@@ -35,6 +35,7 @@ def main():
     parser.add_argument("--sessions", type=int, choices=(1, 2, 4, 8), default=1)
     parser.add_argument("--api-prepare", action="store_true", help="apply the joint plan through authenticated management API")
     parser.add_argument("--donor-policy", action="store_true", help="authorize bounded repeat placement on the donor, then retire and reload it")
+    parser.add_argument("--elastic", action="store_true", help="real gateway pressure, replica preparation, drain, retirement and on-demand wake")
     parser.add_argument("--donor-ram-gb", type=float, default=0.5)
     parser.add_argument("--prepare-timeout", type=int, default=180)
     parser.add_argument("--measure-sessions", action="store_true", help="also benchmark the single-slot baseline")
@@ -43,6 +44,8 @@ def main():
         parser.error("--api-prepare requires --joint")
     if args.donor_policy and (not args.api_prepare or args.joint != "complete"):
         parser.error("--donor-policy requires --api-prepare --joint complete")
+    if args.elastic and not args.donor_policy:
+        parser.error("--elastic requires --donor-policy")
     if args.api and not (args.multi_model and args.keep_requester):
         parser.error("--api requires --multi-model and --keep-requester")
     if args.replicas and not args.api:
@@ -99,6 +102,24 @@ def main():
         if args.recovery:
             e["LUMABRI_TEST_RECOVERY_CONTROL"] = str(tmp / "recovery-control.json")
         return e
+
+    def assert_locked_evidence(minimum_per_donor, minimum_total):
+        if os.environ.get("LUMABRI_RESIDENCY_POLICY") != "engine-locked":
+            return
+        # Verify effective child behavior, including replicas prepared after
+        # restart/wake. A launch environment alone is not residency evidence.
+        total = 0
+        for name in ("a", "b"):
+            log = (tmp / name / ".lumabri/home/engines.log").read_text()
+            owned = re.findall(r"\[engine-memory\] allocations=(\d+) requested_bytes=(\d+) locked_bytes=(\d+) retained_locked_bytes=(\d+)", log)
+            ready = re.findall(r"event=ready policy=engine-locked fault=0", log)
+            assert len(ready) >= minimum_per_donor and len(owned) == len(ready), log
+            assert all(int(n) > 0 and 0 < int(wanted) <= int(locked)
+                       for n, wanted, locked, retained in owned), log
+            assert "event=ready policy=observe" not in log and "event=lost" not in log, log
+            total += len(ready)
+        assert total >= minimum_total, total
+        print(f"OWNED ENGINE LOCKS: PASS ({total} prepared engines; effective native locks, no fallback)", flush=True)
 
     class Terminal(TerminalText):
         def __init__(self, name, argv=None, program="lumabri"):
@@ -301,7 +322,7 @@ def main():
         if args.donor_policy:
             assert len(authorizations) == 2
             assert len({grant["checkpoint_content_id"] for _, grant in authorizations}) == 2
-            api_prepare.reload_authorized(until)
+            api_prepare.reloaded_name = api_prepare.reload_authorized(until)
             new_plans = list(library.glob("*.plan"))
             assert len(new_plans) == 3 and set(plans) < set(new_plans), "retirement history or new plan missing"
             replacement, = set(new_plans) - set(plans)
@@ -342,6 +363,13 @@ def main():
             assert all(service(n)["donor"]["reserved_total_bytes"] == reserved[n] for n in ("a", "b")), "revocation evicted active weights"
             (tmp / "donor-policies.json").write_text(json.dumps(authorizations, indent=2))
             print("DONOR AUTHORIZATION: PASS (CLI/TUI grants, fresh automatic allocation, real inference, quota, revocation without eviction)", flush=True)
+            if args.elastic:
+                from elastic_replica_test import verify_elastic
+                verify_elastic(api_prepare, until, service, env,
+                    lambda plan: Terminal("chatter", ["resident-chat", str(plan), tracker], program="test_chat_ui"), tmp)
+                # Initial models, authorized reload, added replica and cold
+                # wake must all have reached READY with actual owned locks.
+                assert_locked_evidence(1, 5)
         print(f"JOINT PREPARATION: PASS ({args.joint}, {expected} resident models, detached TUI, real inference)", flush=True)
 
     try:
@@ -675,18 +703,7 @@ def main():
                                      env=env("chatter"), text=True, capture_output=True, timeout=20)
             assert release.returncode == 0, release.stderr
             assert all(not service(name)["donor"]["reserved_total_bytes"] for name in ("a", "b"))
-            if os.environ.get("LUMABRI_RESIDENCY_POLICY") == "engine-locked":
-                # Test the effective engine policy, not merely the parent's
-                # environment. Two prepared allocations on each donor must
-                # report actual ownership and successful native lock guards.
-                for name in ("a", "b"):
-                    log = (tmp / name / ".lumabri/home/engines.log").read_text()
-                    owned = re.findall(r"\[engine-memory\] allocations=(\d+) requested_bytes=(\d+) locked_bytes=(\d+) retained_locked_bytes=(\d+)", log)
-                    assert len(owned) >= 2 and all(int(n) > 0 and 0 < int(wanted) <= int(locked)
-                                                  for n, wanted, locked, retained in owned), log
-                    assert len(re.findall(r"event=ready policy=engine-locked fault=0", log)) >= 2, log
-                    assert "event=ready policy=observe" not in log and "event=lost" not in log, log
-                print("OWNED ENGINE LOCKS: PASS (effective policy, two allocations per donor, no fallback)", flush=True)
+            assert_locked_evidence(2, 4)
             print("MULTI-MODEL SERVICE: PASS (two checkpoints on SAME donors, separate approval and RAM, manager restart, unload first while second chat lives)", flush=True)
             return
         resumed.send("\x1b[B" * 4 + "\r")

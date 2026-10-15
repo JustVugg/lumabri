@@ -105,14 +105,34 @@ static void preparation_request_hash(const char *tracker,const LmbPreparationReq
     lmb_put32(numbers+8,r->context); lmb_put32(numbers+12,r->sessions); lmb_put32(numbers+16,r->max_new);
     lmb_sha_update(&sha,numbers,sizeof numbers); lmb_sha_final(&sha,out);
 }
+static int preparation_results_json(Cap *body,const HomeServiceSnapshot *s) {
+    if (api_addf(body,",\"results_known\":%s,\"allocations\":[",s->preparation_results_known ? "true" : "false")) return -1;
+    for (uint32_t i=0;i<s->preparation_result_count;i++) {
+        const HomePreparationResult *r=&s->preparation_results[i]; char id[65]; lmb_hex(id,r->allocation,32);
+        if (api_addf(body,"%s{\"id\":\"%s\",\"name\":",i ? "," : "",id) ||
+            api_json_text(body,r->catalogue_name) || api_addf(body,",\"state\":\"%s\"}",
+                r->ready_observed ? "ready_observed" : "unconfirmed")) return -1;
+    }
+    return cap_str(body,"],\"result_scope\":\"historical_preparation_not_live_readiness\"");
+}
+/* The keeper may commit its terminal receipt and close the socket between
+ * our file read and RPC. Re-read that exact operation on a failed RPC; a
+ * timeout alone never proves interruption and never authorizes a new OFFER. */
+static int preparation_observe(int dir,const char *id,HomeServiceSnapshot *saved,int *live) {
+    HomeServiceSnapshot current; *live=0;
+    if (preparation_load(dir,id,saved)) return -1;
+    if (saved->state==HOME_SVC_DONE || saved->state==HOME_SVC_FAILED) return 0;
+    if (!home_service_query("prepare",HOME_SVC_STATUS,saved,&current)) {
+        *live=1; *saved=current; return 0;
+    }
+    return preparation_load(dir,id,saved);
+}
 static int preparation_status(int dir,const char *tracker,const char *id,int cancel,Cap *body) {
-    HomeServiceSnapshot saved,current; char intent[80]; uint8_t digest[32]; size_t n=0;
+    HomeServiceSnapshot saved,current; char intent[80]; uint8_t digest[32]; size_t n=0; int live=0;
     snprintf(intent,sizeof intent,"%s.intent",id);
     if (preparation_read(dir,intent,digest,sizeof digest,&n) || n!=32) return 404;
-    if (preparation_load(dir,id,&saved)) return 503;
+    if (preparation_observe(dir,id,&saved,&live)) return 503;
     if (strcmp(saved.tracker,tracker)) return 409;
-    int live=!home_service_query("prepare",HOME_SVC_STATUS,&saved,&current);
-    if (live) saved=current;
     if (cancel && live && saved.state==HOME_SVC_RUNNING) {
         if (home_service_query("prepare",HOME_SVC_CANCEL,&saved,&current)) return 409;
         saved=current;
@@ -121,7 +141,8 @@ static int preparation_status(int dir,const char *tracker,const char *id,int can
         live ? "running" : "interrupted_or_starting";
     if (api_addf(body,"{\"schema\":1,\"operation\":\"%s\",\"state\":\"%s\",\"live\":%s,"
         "\"cancel_requested\":%s,\"detail\":",id,state,live ? "true" : "false",cancel && live ? "true" : "false") ||
-        api_json_text(body,saved.detail) || cap_str(body,",\"approval_replayed\":false}")) return 500;
+        api_json_text(body,saved.detail) || preparation_results_json(body,&saved) ||
+        cap_str(body,",\"approval_replayed\":false}")) return 500;
     return 200;
 }
 static void api_preparation_list(int fd,int access,const char *tracker) {
@@ -139,7 +160,7 @@ static void api_preparation_list(int fd,int access,const char *tracker) {
         bad=api_addf(&body,"%s{\"operation\":\"%s\",\"updated_at\":%llu,\"recorded_state\":\"%s\",\"detail\":",
             count>1 ? "," : "",id,(unsigned long long)st.st_mtime,
             s.state==HOME_SVC_DONE ? "done" : s.state==HOME_SVC_FAILED ? "failed" : "requires_live_check") ||
-            api_json_text(&body,s.detail) || cap_str(&body,"}");
+            api_json_text(&body,s.detail) || preparation_results_json(&body,&s) || cap_str(&body,"}");
     }
     if (!bad) bad=cap_str(&body,"]}");
     if (bad) api_error(fd,503,"preparation_history_unavailable"); else (void)api_response(fd,200,body.p);
@@ -147,10 +168,12 @@ static void api_preparation_list(int fd,int access,const char *tracker) {
     if (dir>=0) close(dir);
     free(body.p);
 }
-static void api_preparation(int fd,int access,const char *tracker,const char *text,size_t size) {
-    LmbPreparationRequest r; Cap result={0},plan={0}; LmbTuiState *st=NULL;
+/* The authenticated HTTP handler and service controllers share one typed
+ * operation. The caller supplies a validated request; neither transport is
+ * allowed to bypass the review, intent or keeper admission path. */
+static int preparation_execute(int access,const char *tracker,const LmbPreparationRequest *request,Cap *reply) {
+    LmbPreparationRequest r=*request; Cap result={0},plan={0}; LmbTuiState *st=NULL;
     int status=400,dir=-1,lock=-1; char review[65];
-    if (lmb_preparation_parse(text,size,&r)) goto done;
     int start=!strcmp(r.action,"start"), preview=!strcmp(r.action,"preview");
     if (!preview) {
         dir=preparation_dir(access); if (dir<0) { status=503; goto done; }
@@ -179,6 +202,7 @@ static void api_preparation(int fd,int access,const char *tracker,const char *te
     (void)lmb_unhex(observer.instance,r.operation,32);
     memset(&started,0,sizeof started); memcpy(started.instance,observer.instance,32);
     started.state=HOME_SVC_RUNNING; strcpy(started.role,"prepare");
+    started.preparation_results_known=1;
     snprintf(started.tracker,sizeof started.tracker,"%s",tracker);
     strcpy(started.detail,"Intent saved; keeper startup not yet confirmed. No automatic retry.");
     if (preparation_save(dir,&started)) { status=503; goto done; }
@@ -189,9 +213,15 @@ static void api_preparation(int fd,int access,const char *tracker,const char *te
 done:
     if (lock>=0) close(lock);
     if (dir>=0) close(dir);
+    free(st); free(plan.p); *reply=result;
+    return status;
+}
+static void api_preparation(int fd,int access,const char *tracker,const char *text,size_t size) {
+    LmbPreparationRequest request; Cap result={0};
+    int status=lmb_preparation_parse(text,size,&request) ? 400 : preparation_execute(access,tracker,&request,&result);
     if (status==200 || status==202) (void)api_response(fd,(unsigned)status,result.p);
     else api_error(fd,(unsigned)status,status==400 ? "invalid_preparation_request" : status==404 ? "preparation_not_found" :
         status==409 ? "review_or_operation_changed" : status==422 ? "resident_plan_unavailable" : "preparation_not_confirmed_inspect_before_retry");
-    free(st); free(plan.p); free(result.p);
+    free(result.p);
 }
 #endif

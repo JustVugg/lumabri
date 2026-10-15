@@ -1371,7 +1371,8 @@ static int home_request_chat_direct(LmbTuiState *st, int selected) {
     if (home_background_job) {
         snprintf(home_background_job->snapshot.name, sizeof home_background_job->snapshot.name, "%s", model);
         home_service_preparation_detail(home_background_job, "Indexing and verifying checkpoint identity");
-        if (home_service_save(home_background_job)) return home_fail("Cannot persist preparation identity. No donor was contacted.");
+        if (home_service_preparation_assign(home_background_job,m->name,id))
+            return home_fail("Cannot persist the preparation allocation ID. No offer was sent.");
     }
     char dir[1024], maintainer[1200], ip[INET_ADDRSTRLEN], port[20], addr[64], name[64];
     char logdir[1100], logfile[1200];
@@ -1725,6 +1726,8 @@ done:
     if (atomic_load(&s.failed)) result = -1;
     home_terminal_end(&term);
     home_session_close(&s, prepared && home_resident_required());
+    if (!result && prepared && home_background_job && home_service_preparation_ready(home_background_job,id))
+        result=home_fail("Model reached READY, but its operation result could not be persisted. Inspect the recorded allocation before retrying.");
     if (result) {
         if (!home_error[0]) {
             for (uint32_t i = 0; i < s.count; i++) if (s.reason[i][0]) {
@@ -1810,6 +1813,7 @@ static int home_prepare_begin(LmbTuiState *st, int selected,
         job.observer = *observer;
         memcpy(job.snapshot.instance, observer->instance, 32);
     }
+    job.snapshot.preparation_results_known=1;
     snprintf(job.snapshot.name, sizeof job.snapshot.name, "%s", st->models[selected].name);
     snprintf(job.snapshot.tracker, sizeof job.snapshot.tracker, "%s", st->tracker);
     snprintf(job.snapshot.detail, sizeof job.snapshot.detail, "Preparing the reviewed plan; donor approval is still required");

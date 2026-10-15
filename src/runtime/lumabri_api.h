@@ -357,6 +357,9 @@ static void api_capacity_apply_http(int fd,int access,const char *tracker,const 
 static void api_policy_http(int fd,int access,const char *tracker,const char *body,size_t size);
 static int api_policy_due(int access,const char *tracker);
 static void api_policy_tick(int access,const char *tracker);
+static void api_elastic_http(int fd,int access,const char *tracker,const char *body,size_t size);
+static int api_elastic_due(int access);
+static void api_elastic_tick(int access,const char *tracker);
 static void api_connection(int fd, int access_dir, unsigned port, const char *tracker) {
     struct timeval timeout={5,0};
     (void)setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof timeout);
@@ -384,8 +387,9 @@ static void api_connection(int fd, int access_dir, unsigned port, const char *tr
         (!request.path[history_prefix] || request.path[history_prefix]=='/');
     int capacity_apply=!strcmp(request.path,"/api/v1/capacity/apply");
     int policy=!strcmp(request.path,"/api/v1/portfolio-policy");
+    int elastic=!strcmp(request.path,"/api/v1/elastic-policy");
     int preparation=!strcmp(request.path,"/api/v1/preparation");
-    int management=preparation || policy || capacity_apply || !strncmp(request.path,"/api/v1/allocations/",20);
+    int management=preparation || policy || elastic || capacity_apply || !strncmp(request.path,"/api/v1/allocations/",20);
     if (management && !strcmp(request.method,"POST") && !lmb_management_allows(access_dir,&user))
         api_error(fd,403,"management_permission_required");
     else if (!strcmp(request.method,"GET") && !strcmp(request.path,"/api/v1/session") && !request.length) {
@@ -395,6 +399,10 @@ static void api_connection(int fd, int access_dir, unsigned port, const char *tr
     }
     else if (policy && !strcmp(request.method,"GET") && !request.length) {
         if (lmb_operator_allows(access_dir,&user)) api_policy_http(fd,access_dir,tracker,NULL,0);
+        else api_error(fd,403,"operator_permission_required");
+    }
+    else if (elastic && !strcmp(request.method,"GET") && !request.length) {
+        if (lmb_operator_allows(access_dir,&user)) api_elastic_http(fd,access_dir,tracker,NULL,0);
         else api_error(fd,403,"operator_permission_required");
     }
     else if (!strcmp(request.method,"GET") && !strcmp(request.path,"/api/v1/catalogue") && !request.length) {
@@ -409,7 +417,7 @@ static void api_connection(int fd, int access_dir, unsigned port, const char *tr
         if (lmb_management_allows(access_dir,&user)) api_preparation_list(fd,access_dir,tracker);
         else api_error(fd,403,"management_permission_required");
     }
-    else if (management && !capacity_apply && !policy && !preparation && !strcmp(request.method,"GET") && !request.length)
+    else if (management && !capacity_apply && !policy && !elastic && !preparation && !strcmp(request.method,"GET") && !request.length)
         api_management(fd,access_dir,tracker,&user,&request,NULL,0);
     else if (!strcmp(request.method,"GET") && !strcmp(request.path,"/api/v1/workspace") && !request.length) {
         if (lmb_operator_allows(access_dir,&user)) (void)api_workspace(fd,access_dir,tracker);
@@ -418,7 +426,7 @@ static void api_connection(int fd, int access_dir, unsigned port, const char *tr
         api_models(fd,access_dir,tracker,&user);
     else if (history && !strcmp(request.method,"GET") && !request.length)
         api_history(fd,access_dir,&user,&request,NULL,0);
-    else if (management && request.length>(preparation ? 8192u : policy ? 4096u : capacity_apply ? 2048u : 512u)) api_error(fd,413,"management_request_too_large");
+    else if (management && request.length>(preparation || elastic ? 8192u : policy ? 4096u : capacity_apply ? 2048u : 512u)) api_error(fd,413,"management_request_too_large");
     else if (((!strcmp(request.method,"POST") && (!strcmp(request.path,"/api/v1/chat") || management)) ||
               (history && (!strcmp(request.method,"POST") || !strcmp(request.method,"DELETE")))) &&
              request.has_length && request.length && request.json) {
@@ -436,6 +444,7 @@ static void api_connection(int fd, int access_dir, unsigned port, const char *tr
             if (at!=request.length) api_error(fd,408,"request_body_timeout");
             else if (preparation) api_preparation(fd,access_dir,tracker,body,at);
             else if (policy) api_policy_http(fd,access_dir,tracker,body,at);
+            else if (elastic) api_elastic_http(fd,access_dir,tracker,body,at);
             else if (capacity_apply) api_capacity_apply_http(fd,access_dir,tracker,body,at);
             else if (management) api_management(fd,access_dir,tracker,&user,&request,body,at);
             else if (history) api_history(fd,access_dir,&user,&request,body,at);
@@ -455,12 +464,12 @@ static int api_serve(int access_dir, unsigned port, const char *tracker, HomeSer
         fprintf(stderr,"[api] Cannot listen on 127.0.0.1:%u: %s\n",port,strerror(errno)); close(listener); return 1;
     }
     signal(SIGTERM,api_stop); signal(SIGINT,api_stop); api_stopping=0;
-    pid_t children[LMB_API_CHILDREN]={0},policy_child=0;
+    pid_t children[LMB_API_CHILDREN]={0},policy_child=0,elastic_child=0;
     int telemetry[LMB_API_CHILDREN]; LmbDemandWorker demand_workers[LMB_API_CHILDREN];
     for (unsigned i=0;i<LMB_API_CHILDREN;i++) { telemetry[i]=-1; demand_workers[i]=(LmbDemandWorker){.model=-1}; }
     memset(&api_demand,0,sizeof api_demand); api_demand.started_ms=lmb_io_monotonic_ms();
     lmb_random(api_demand.instance,sizeof api_demand.instance);
-    uint64_t next_policy_check=0;
+    uint64_t next_policy_check=0,next_elastic_check=0;
     if (keeper) {
         keeper->snapshot.phase=2; /* API role: 1 starting, 2 listening */
         snprintf(keeper->snapshot.detail,sizeof keeper->snapshot.detail,"Listening on %s; approved resident models only.",keeper->snapshot.name);
@@ -485,7 +494,27 @@ static int api_serve(int access_dir, unsigned port, const char *tracker, HomeSer
             }
         }
         if (policy_child && waitpid(policy_child,NULL,WNOHANG)==policy_child) policy_child=0;
+        if (elastic_child && waitpid(elastic_child,NULL,WNOHANG)==elastic_child) elastic_child=0;
         uint64_t now=lmb_io_monotonic_ms();
+        if (!elastic_child && now>=next_elastic_check) {
+            next_elastic_check=now+5000;
+            if (api_elastic_due(access_dir)) {
+                fflush(NULL); pid_t child=fork();
+                if (!child) {
+                    close(listener); signal(SIGTERM,SIG_DFL); signal(SIGINT,SIG_DFL); signal(SIGALRM,SIG_DFL);
+                    for (unsigned i=0;i<LMB_API_CHILDREN;i++) if (telemetry[i]>=0) close(telemetry[i]);
+                    api_demand.captured_ms=lmb_io_monotonic_ms();
+                    if (keeper) {
+                        if (keeper->listener>=0) close(keeper->listener);
+                        if (keeper->lock>=0) close(keeper->lock);
+                        if (keeper->reply>=0) close(keeper->reply);
+                    }
+                    alarm(120); lmb_read_deadline_ms=lmb_io_monotonic_ms()+90000;
+                    api_elastic_tick(access_dir,tracker); fflush(NULL); _exit(0);
+                }
+                if (child>0) elastic_child=child;
+            }
+        }
         if (!policy_child && now>=next_policy_check) {
             next_policy_check=now+30000;
             if (api_policy_due(access_dir,tracker)) {
@@ -540,8 +569,10 @@ static int api_serve(int access_dir, unsigned port, const char *tracker, HomeSer
     }
     close(listener);
     if (policy_child) (void)kill(policy_child,SIGTERM);
+    if (elastic_child) (void)kill(elastic_child,SIGTERM);
     for (unsigned i=0; i<LMB_API_CHILDREN; i++) if (children[i]) (void)kill(children[i],SIGTERM);
     if (policy_child) while (waitpid(policy_child,NULL,0)<0 && errno==EINTR) { }
+    if (elastic_child) while (waitpid(elastic_child,NULL,0)<0 && errno==EINTR) { }
     for (unsigned i=0; i<LMB_API_CHILDREN; i++) if (children[i]) while (waitpid(children[i],NULL,0)<0 && errno==EINTR) { }
     for (unsigned i=0;i<LMB_API_CHILDREN;i++) if (telemetry[i]>=0) close(telemetry[i]);
     return 0;
@@ -592,6 +623,7 @@ static int api_start(int access_dir, unsigned port, const char *tracker) {
 }
 #include "lumabri_capacity_probe.h"
 #include "lumabri_portfolio_controller.h"
+#include "lumabri_elastic_controller.h"
 static int cmd_api(int argc, char **argv) {
     if (!argc) goto usage;
     HomeSettings settings; home_settings_load(&settings);
@@ -618,6 +650,9 @@ static int cmd_api(int argc, char **argv) {
     }
     if (!strcmp(argv[0],"portfolio-policy") && *tracker) {
         int rc=api_policy_cli(dir,tracker,args,count); close(dir); return rc;
+    }
+    if (!strcmp(argv[0],"elastic-policy") && *tracker) {
+        int rc=api_elastic_cli(dir,tracker,args,count); close(dir); return rc;
     }
     if (!strcmp(argv[0],"capacity-measure") && *tracker) {
         int rc=api_capacity_measure(dir,tracker,args,count); close(dir); return rc;
@@ -705,6 +740,7 @@ usage:
         "lumabri api manage-revoke NAME\n"
         "lumabri api workspace [--tracker HOST:PORT]\n"
         "lumabri api portfolio-policy [CONFIG_JSON_FILE] [--tracker HOST:PORT]\n"
+        "lumabri api elastic-policy [CONFIG_JSON_FILE] [--tracker HOST:PORT]\n"
         "lumabri api capacity-measure NAME CLIENTS ROUNDS MAX_TOKENS APPROVED_ALLOCATION... [--tracker HOST:PORT]\n"
         "lumabri api capacity-check NAME TTFT_MS GAP_MS MAX_AGE_SECONDS [--tracker HOST:PORT]\n"
         "lumabri api capacity-select TTFT_MS GAP_MS MAX_AGE_SECONDS BASELINE CANDIDATE... [--tracker HOST:PORT]\n"

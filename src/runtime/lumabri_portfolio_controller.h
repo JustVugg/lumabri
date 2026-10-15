@@ -5,6 +5,7 @@
 #define LMB_PORTFOLIO_CONTROLLER_H
 #include "src/planner/lumabri_portfolio_policy_store.h"
 #include "src/planner/lumabri_portfolio_policy_json.h"
+#include "src/planner/lumabri_elastic_store.h"
 
 static int api_policy_registry(int access,LmbRouteRegistry *s) {
     int dir=lmb_route_dir(access,0); if (dir<0) return -1;
@@ -45,8 +46,13 @@ static int api_policy_status(int access,const char *tracker,Cap *body) {
 static int api_policy_configure(int access,const char *tracker,const char *text,size_t n,Cap *body) {
     LmbPortfolioPolicy proposed,old; int configure;
     if (lmb_policy_parse(text,n,&proposed,&configure)) return 400;
-    int dir=lmb_policy_dir(access,1),lock=dir<0 ? -1 : lmb_policy_lock(dir),records=-1,status=503;
+    /* Both controller configuration paths take this guard first. A policy
+     * installed in the opposite order must not create two route writers. */
+    int elastic=lmb_elastic_root(access,1),owner=elastic<0 ? -1 : lmb_api_access_lock(elastic);
+    int dir=-1,lock=-1,records=-1,status=503;
     LmbRouteRegistry *registry=NULL; LmbCapacity *candidates=NULL;
+    if (owner<0) goto done;
+    dir=lmb_policy_dir(access,1); lock=dir<0 ? -1 : lmb_policy_lock(dir);
     if (lock<0) goto done;
     int rc=lmb_policy_load(dir,&old);
     if (rc<0) goto done;
@@ -66,6 +72,13 @@ static int api_policy_configure(int access,const char *tracker,const char *text,
         strcpy(old.reason,"disabled_by_operator");
         if (lmb_policy_save(dir,&old)) goto done;
         status=api_policy_json(&old,body) ? 500 : 200; goto done;
+    }
+    if (proposed.enabled) for (uint32_t i=0;i<proposed.models;i++) {
+        int owned=lmb_elastic_dir(elastic,proposed.model_ids[i],0); LmbElasticPolicy policy;
+        if (owned<0) { if (errno!=ENOENT) goto done; continue; }
+        int loaded=lmb_elastic_load(owned,&policy); close(owned);
+        if (loaded<0) goto done;
+        if (!loaded && (policy.enabled || policy.phase)) { status=409; goto done; }
     }
     registry=calloc(1,sizeof *registry);
     if (!registry || api_policy_registry(access,registry)) goto done;
@@ -101,6 +114,8 @@ done:
     if (records>=0) close(records);
     if (lock>=0) close(lock);
     if (dir>=0) close(dir);
+    if (owner>=0) close(owner);
+    if (elastic>=0) close(elastic);
     free(registry); free(candidates); return status;
 }
 static void api_policy_http(int fd,int access,const char *tracker,const char *body,size_t size) {

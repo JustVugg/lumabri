@@ -162,14 +162,43 @@ below. Historical observations remain here as evidence, not current promises.
   This is an elasticity prerequisite, not the automatic replica controller.
   See [donor authorization](DONOR_AUTHORIZATION.md).
 
-- [ ] Per-model gateway demand: bounded in-memory windows and per-worker events,
+- [x] Per-model gateway demand (#214): bounded in-memory windows and per-worker events,
   operator-only endpoint and web workspace, live admission counts, explicit
   rejections/interruption and sampled latency tails. Local API/auth/restart,
   browser and focused sanitizer gates pass. Two real reduced OLMoE models
   pass four-session coexistence and 2/4/8-client bursts with the observer;
-  no prompt or identity text is stored in the metrics. Native CI remains
-  required. This is traffic evidence, not automatic replica scaling or a
+  no prompt or identity text is stored in the metrics. All eight native checks
+  passed on `46976b2` before normal merge `d63fa8d`. Darwin datagram disconnects
+  have a fork/exit regression; missing terminal events remain interruptions.
+  This is traffic evidence, not automatic replica scaling or a
   production capacity guarantee. See [scope and limits](GATEWAY_DEMAND.md).
+
+- [ ] Elastic resident lifecycle (implementation under review): explicit selected
+  machines and allocation ownership, min/max replicas, byte budget, demand
+  windows and cooldown, shared preparation with exact receipts, publication,
+  drain/release and dormant wake. Local real reduced-OLMoE passes growth under
+  rejected demand, inference on the added replica, another independent model,
+  API restart, drain while a real admitted generation waits for a donor CPU
+  permit, release after completion, scale to zero and
+  wake using the same logical ID and operation. Focused tests cover lost-RPC
+  completion, private-state bounds and operator reconciliation without losing
+  uncertain reservations. Warning-as-error, API regression and focused
+  ASan/UBSan/leak tests pass. Native CI and release approval are still pending;
+  no physical LAN performance, cloud provisioning or billed savings are claimed.
+  See [elastic scope and commands](ELASTIC_REPLICAS.md).
+
+- [x] Conversation-history race fixes (#217, #218) and resumed Segment
+  discovery/remote retirement (#221). #221 passed all eight native checks on
+  `a95bfc4` before normal merge `4a15d61`: resumed routes are refreshed before
+  opening a turn; an unavailable remote CLOSE quarantines only its slot,
+  keeps healthy weights resident and cannot produce a false retirement seal.
+- [ ] Owned CPU allocation locking (#222): native page locks for engine
+  payloads and retained raw tables, with refused lock failures and build-time
+  allocator auditing. Local reduced OLMoE passes two resident models, isolated
+  conversations, API use and selective release. Full native CI remains
+  required. The elastic lifecycle gate explicitly selects this contract and
+  verifies effective locks across preparation, reload and wake; it does not
+  weaken the separately tested observation guard or claim GPU/full-size support.
 
 - [x] Runtime/preflight PR #151: installed engine thread-capacity query; no-OpenMP
   single-thread execution; adaptive RAM reserve; acknowledged actionable

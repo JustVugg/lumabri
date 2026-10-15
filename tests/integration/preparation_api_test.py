@@ -1,4 +1,5 @@
 """Real preparation API gate, driven by the household donor-consent fixture."""
+import hashlib
 import http.client
 import json
 import os
@@ -142,10 +143,19 @@ class PreparationAPI:
     def finish(self, success):
         status, result = self.http("/api/v1/preparation", {"action": "status", "operation": self.operation})
         assert status == 200 and result["state"] == ("done" if success else "failed"), result
-        assert self.http("/api/v1/preparation", self.start_request)[0] == 200
+        assert result["results_known"] and result["result_scope"] == "historical_preparation_not_live_readiness", result
+        assert [a["name"] for a in result["allocations"]] == self.start_request["models"], result
+        ready = [a for a in result["allocations"] if a["state"] == "ready_observed"]
+        assert len(ready) == (2 if success else 1), result
+        status, workspace = self.http("/api/v1/workspace")
+        assert status == 200, workspace
+        assert {a["id"] for a in ready} == {a["id"] for a in workspace["allocations"]}, (result, workspace)
+        repeated_code, repeated = self.http("/api/v1/preparation", self.start_request)
+        assert repeated_code == 200 and repeated["allocations"] == result["allocations"], repeated
         status, history = self.http("/api/v1/preparation")
         assert status == 200 and len(history["operations"]) == 1, history
         assert history["operations"][0]["operation"] == self.operation
+        assert history["operations"][0]["allocations"] == result["allocations"]
         (Path(self.env["HOME"]).parent / "preparation-api.json").write_text(json.dumps(result, indent=2))
         self.cli("stop")
 
@@ -189,10 +199,29 @@ class PreparationAPI:
             assert code == 200 and state["state"] != "failed", state
             return state["state"] == "done"
         until(ready, "authorized placement did not reload automatically", 120)
+        status, receipt = self.http("/api/v1/preparation", {"action": "status", "operation": operation})
+        assert status == 200 and receipt["results_known"] and len(receipt["allocations"]) == 1, receipt
+        assert receipt["allocations"][0]["name"] == name and receipt["allocations"][0]["state"] == "ready_observed", receipt
         status, after = self.http("/api/v1/workspace")
         assert status == 200 and len(after["allocations"]) == len(before["allocations"]) + 1
         added = [a for a in after["allocations"] if a["id"] not in before_ids]
         assert len(added) == 1 and added[0]["name"].endswith("-" + name), after
+        assert added[0]["id"] == receipt["allocations"][0]["id"] and added[0]["id"] != original["id"], receipt
+        # READY is a direct acknowledgement; tracker workload reports have
+        # their own heartbeat. Equal counts do not prove the new allocation
+        # replaced the retired one in the reviewed inventory. Wait for exact
+        # set digests before testing an over-quota OFFER, rather than racing
+        # the production review fence and assuming a 202 means it was sent.
+        expected_sets = {}
+        for node in nodes:
+            ids = sorted(bytes.fromhex(a["id"]) for a in after["allocations"]
+                         if a["id"] != original["id"] and any(r["node"] == node for r in a["ranges"]))
+            expected_sets[node] = hashlib.sha256(b"lumabri-allocation-set-v1\0" + b"".join(ids)).hexdigest()
+        def reloaded_inventory():
+            code, reviewed = self.http("/api/v1/preparation", {"action": "preview", **intent})
+            return code == 200 and all(n["allocation_set"] == expected_sets[n["id"]]
+                                      for n in reviewed["plan"]["nodes"])
+        until(reloaded_inventory, "reloaded allocation set not reflected in inventory", 30)
         self.repeat_intent = intent
         self.cli("stop")
         return added[0]["name"]
