@@ -629,6 +629,7 @@ struct LmbSegDiscovery {
     pthread_cond_t wake;
     int stop;
     int have_snapshot;
+    int refresh_requested; /* protected by lock, including during a fetch */
     uint32_t refresh_ms;
     char tracker[256];
     LmbSegQuery query;
@@ -713,6 +714,11 @@ static void disc_enrich_routes(LmbSegDiscovery *d,
 static void *disc_worker(void *arg) {
     LmbSegDiscovery *d = (LmbSegDiscovery *)arg;
     for (;;) {
+        pthread_mutex_lock(&d->lock);
+        int stopped=d->stop;
+        d->refresh_requested=0;
+        pthread_mutex_unlock(&d->lock);
+        if (stopped) break;
         LmbSegRouteSnapshot next;
         if (!lmb_seg_routes_fetch(d->tracker, &d->query, &next)) {
             LmbSegRouteSnapshot previous;
@@ -741,7 +747,8 @@ static void *disc_worker(void *arg) {
         if (until.tv_nsec >= 1000000000L) {
             until.tv_sec++; until.tv_nsec -= 1000000000L;
         }
-        pthread_cond_timedwait(&d->wake, &d->lock, &until);
+        while (!d->stop && !d->refresh_requested)
+            if (pthread_cond_timedwait(&d->wake,&d->lock,&until)==ETIMEDOUT) break;
         int stop = d->stop;
         pthread_mutex_unlock(&d->lock);
         if (stop) break;
@@ -778,6 +785,18 @@ int lmb_seg_discovery_snapshot(LmbSegDiscovery *d,
     if (have) *snapshot = d->snapshot;
     pthread_mutex_unlock(&d->lock);
     return have;
+}
+
+int lmb_seg_discovery_request_refresh(LmbSegDiscovery *d) {
+    if (!d) return -1;
+    pthread_mutex_lock(&d->lock);
+    int stopped=d->stop;
+    if (!stopped) {
+        d->refresh_requested=1;
+        pthread_cond_signal(&d->wake);
+    }
+    pthread_mutex_unlock(&d->lock);
+    return stopped ? -1 : 0;
 }
 
 int lmb_seg_discovery_refresh_now(LmbSegDiscovery *d,

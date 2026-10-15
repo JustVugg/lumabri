@@ -51,14 +51,18 @@ static void host_session_control(int fd, HostSessionPool *pool, const LmbMsg *re
     pthread_mutex_unlock(&pool->lock);
     /* The acceptor serializes controls. RETIRE seals admission irreversibly
      * only with no workers, so no other writer owns the codec. Acknowledge it
-     * after every retained slot has confirmed RESET/CLOSE. A failed reset
-     * makes the host unavailable, never a positive retirement receipt. */
-    if (!status && action==LMB_HOST_CONTROL_RETIRE) {
+     * after every retained slot has confirmed RESET/CLOSE. A pending reset
+     * blocks a receipt; a damaged codec stops the host. Neither is success. */
+    if (snapshot.draining==LMB_HOST_CONTROL_RETIRED) {
         for (uint32_t i=0;i<h->slots;i++) if (pool->slots[i].reset_needed) {
             HostState reset=*h; reset.routed_slot=i;
             HostInput in={0}; HostOutput out={0};
-            if (host_reset_conversation(h->engine,&reset,&in,&out)) {
-                atomic_store(&pool->failed,1); atomic_store(&pool->stop,1); return;
+            int rc=host_reset_conversation(h->engine,&reset,&in,&out);
+            if (rc) {
+                if (rc<0) { atomic_store(&pool->failed,1); atomic_store(&pool->stop,1); }
+                /* No positive seal, including QUERY/retry, until every
+                 * exact remote session confirms CLOSE. Keep weights alive. */
+                return;
             }
             pool->slots[i].reset_needed=0;
         }
@@ -150,6 +154,12 @@ static void *host_session_worker(void *opaque) {
             HostInput empty = {0}; HostOutput ack = {0};
             broken = host_reset_conversation(h.engine, &h, &empty, &ack);
             if (!broken) slot->reset_needed = 0;
+            else if (broken>0) {
+                host_session_error(slot->fd,input.request_id,
+                    LMB_REPLICA_RETRYABLE "previous Segment session retirement pending");
+                free(pending.p); lmb_run_gate_leave(&pool->turns);
+                break; /* no SUBMIT and no mixing with the previous KV */
+            }
         }
         input.capture = NULL; input.started = nowd();
         double queue_seconds = input.started - queued_at;
@@ -171,11 +181,11 @@ static void *host_session_worker(void *opaque) {
         if (!broken && !g_stopping && !atomic_load(&pool->stop)) {
             char cancel[96];
             n = snprintf(cancel, sizeof cancel, "CANCEL %s\n", input.request_id);
-            if ((h.engine->session_slots && (n <= 0 || (size_t)n >= sizeof cancel ||
-                 host_engine_write(h.engine, cancel, (size_t)n))) ||
-                host_reset_conversation(h.engine, &h, &input, &output)) broken = 1;
+            if (h.engine->session_slots && (n <= 0 || (size_t)n >= sizeof cancel ||
+                 host_engine_write(h.engine, cancel, (size_t)n))) broken = -1;
+            else broken = host_reset_conversation(h.engine, &h, &input, &output);
         }
-        if (broken) { atomic_store(&pool->failed, 1); atomic_store(&pool->stop, 1); }
+        if (broken<0) { atomic_store(&pool->failed, 1); atomic_store(&pool->stop, 1); }
         lmb_run_gate_leave(&pool->turns);
         break;
     }
@@ -186,11 +196,14 @@ static void *host_session_worker(void *opaque) {
      * Multi-slot cleanup still resets under the shared turn gate on reuse. */
     if (h.slots==1 && !g_stopping && !atomic_load(&pool->stop)) {
         HostInput empty={0}; HostOutput ack={0};
-        if (!host_reset_conversation(h.engine,&h,&empty,&ack)) {
+        int reset=host_reset_conversation(h.engine,&h,&empty,&ack);
+        if (!reset) {
             reset_needed=0;
             fprintf(stderr,"[host] conversation reset; resident weights retained\n");
-        } else if (!g_stopping && !atomic_load(&pool->stop)) {
+        } else if (reset<0 && !g_stopping && !atomic_load(&pool->stop)) {
             atomic_store(&pool->failed,1); atomic_store(&pool->stop,1);
+        } else if (reset>0) {
+            fprintf(stderr,"[host] remote session retirement pending; slot quarantined, resident weights retained\n");
         }
     }
     pthread_mutex_lock(&pool->lock);

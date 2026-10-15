@@ -50,6 +50,38 @@ TUI. The explicit `LUMABRI_HOME_FOREGROUND=1` diagnostic preserves the earlier
 foreground lifecycle for regression tests, not as the product default.
 See [Household service](HOUSEHOLD_SERVICE.md) for authority, recovery and limits.
 
+### Drain/resume publication
+
+An authenticated Segment `resume` changes the manual admission fence on the
+same engine; it does not reload weights or reset a residency fault. The node
+promptly republishes its current admission state, including governor and
+process-budget restrictions. The tracker and Edge discovery snapshots remain
+asynchronous, so acknowledgement alone is not proof that a fresh route is
+already visible.
+
+Before opening a chain for a new hosted turn, Edge can nudge its discovery
+worker and wait up to `--discovery-timeout-ms` (2500 ms by default in serve
+mode). Cancellation remains active during this wait. A complete compatible
+cached chain incurs no extra refresh or wait. Missing coverage still returns
+an explicit unavailable error at the deadline. This is not a retry of RUN,
+automatic preparation, or permission to use a draining/faulted process.
+
+Local validation uses actual reduced OLMoE inference with two donors, two
+resident checkpoints and two conversation slots. The test leaves nodes drained
+long enough for discovery to observe the transition, then submits immediately
+after resume without a test-side grace period. It also verifies API isolation,
+mixed 2/4/8-client bursts and stopping one model without stopping the other.
+This does not certify full-size throughput or native macOS physical residency.
+
+When a worker disappears, remote CLOSE can remain unconfirmed. Edge retains
+that session's fenced identity and reports `RESET_PENDING`, not `RESET_DONE`.
+The host keeps healthy resident weights and quarantines the affected codec
+slot. A subsequent client cannot submit to that slot until its reset succeeds;
+other slots remain independent. Failed retirement is never a positive idle
+seal, including a later QUERY. Unreadable codec output still stops the host.
+The loss regression deliberately kills the non-Edge worker and checks the
+surviving host after bounded cleanup, rather than relying on random placement.
+
 ## Preparation and inference
 
 The preparation loader transfers authenticated, hash-verified weight blocks
