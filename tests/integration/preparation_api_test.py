@@ -105,6 +105,11 @@ class PreparationAPI:
     def cli(self, *args):
         p = subprocess.run([str(self.runtime / "lumabri"), "api", *args], env=self.env,
                            text=True, capture_output=True, timeout=30)
+        # A measurement may succeed as an operation but contain a failed
+        # request. Preserve its diagnostics without logging tokens/stdout.
+        if p.stderr:
+            with (Path(self.env["HOME"]).parent / "management-cli.log").open("a") as log:
+                log.write(f"action={args[0]} exit={p.returncode}\n{p.stderr}\n")
         assert p.returncode == 0, (args, p.stderr)
         return p.stdout.strip()
 
