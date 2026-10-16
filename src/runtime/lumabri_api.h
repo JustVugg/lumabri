@@ -35,6 +35,7 @@ static int api_response(int fd, unsigned status, const char *body) {
 }
 static void api_error(int fd, unsigned status, const char *code) {
     /* code is a server-owned constant, never an unescaped engine/client string. */
+    fprintf(stderr,"[api-request] status=%u code=%s\n",status,code);
     char body[192]; snprintf(body,sizeof body,"{\"error\":\"%s\"}\n",code);
     (void)api_response(fd,status,body);
 }

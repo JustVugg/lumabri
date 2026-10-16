@@ -8,33 +8,42 @@
 
 #define LMB_REPLICA_CELLS 32u
 enum { LMB_REPLICA_OK=0, LMB_REPLICA_BUSY=1, LMB_REPLICA_UNSAFE=-1 };
+static inline int lmb_replica_unavailable(const char *stage) {
+    int saved=errno;
+    fprintf(stderr,"[replica-admission] stage=%s errno=%d\n",stage,saved);
+    errno=saved; return LMB_REPLICA_UNSAFE;
+}
 
 static inline int lmb_replica_admit(int access, const uint8_t allocation[32], int *permit) {
     *permit=-1;
-    if (mkdirat(access,"dispatch",0700) && errno!=EEXIST) return LMB_REPLICA_UNSAFE;
+    if (mkdirat(access,"dispatch",0700) && errno!=EEXIST) return lmb_replica_unavailable("directory-create");
     int dir=openat(access,"dispatch",O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
-    if (dir<0) return LMB_REPLICA_UNSAFE;
-    if (lmb_api_private_fd(dir,1)) { close(dir); return LMB_REPLICA_UNSAFE; }
+    if (dir<0) return lmb_replica_unavailable("directory-open");
+    if (lmb_api_private_fd(dir,1)) { int rc=lmb_replica_unavailable("directory-ownership"); close(dir); return rc; }
     int guard=lmb_api_access_lock(dir);
     for (unsigned attempt=0; guard<0 && (errno==EWOULDBLOCK || errno==EAGAIN) && attempt<20; attempt++) {
         (void)poll(NULL,0,5); guard=lmb_api_access_lock(dir);
     }
-    if (guard<0) { int busy=errno==EWOULDBLOCK || errno==EAGAIN; close(dir); return busy ? LMB_REPLICA_BUSY : LMB_REPLICA_UNSAFE; }
+    if (guard<0) {
+        int rc=(errno==EWOULDBLOCK || errno==EAGAIN) ? LMB_REPLICA_BUSY : lmb_replica_unavailable("directory-lock");
+        close(dir); return rc;
+    }
     int candidate=-1, result=LMB_REPLICA_BUSY;
     for (unsigned i=0; i<LMB_REPLICA_CELLS; i++) {
         char name[16]; snprintf(name,sizeof name,"%u.lease",i);
         int fd=openat(dir,name,O_RDWR|O_CREAT|O_NOFOLLOW|O_CLOEXEC,0600);
-        if (fd<0) { result=LMB_REPLICA_UNSAFE; goto done; }
+        if (fd<0) { result=lmb_replica_unavailable("cell-open"); goto done; }
         struct stat st;
-        if (lmb_api_private_fd(fd,0) || fstat(fd,&st)) { close(fd); result=LMB_REPLICA_UNSAFE; goto done; }
+        if (lmb_api_private_fd(fd,0) || fstat(fd,&st)) { result=lmb_replica_unavailable("cell-ownership"); close(fd); goto done; }
         uint8_t saved[32]; int same=0;
         if (st.st_size==32) {
-            if (lmb_read_full(fd,saved,sizeof saved)) { close(fd); result=LMB_REPLICA_UNSAFE; goto done; }
+            if (lmb_read_full(fd,saved,sizeof saved)) { result=lmb_replica_unavailable("cell-read"); close(fd); goto done; }
             same=!memcmp(saved,allocation,32);
         }
         if (flock(fd,LOCK_EX|LOCK_NB)) {
-            int busy=errno==EWOULDBLOCK || errno==EAGAIN; close(fd);
-            if (!busy || st.st_size!=32) { result=LMB_REPLICA_UNSAFE; goto done; }
+            int busy=errno==EWOULDBLOCK || errno==EAGAIN;
+            if (!busy || st.st_size!=32) { result=lmb_replica_unavailable("cell-lock-or-shape"); close(fd); goto done; }
+            close(fd);
             if (same) goto done; /* same allocation through another alias */
             continue;
         }
@@ -48,10 +57,10 @@ static inline int lmb_replica_admit(int access, const uint8_t allocation[32], in
         while (at<32) {
             ssize_t n=pwrite(candidate,allocation+at,32-at,(off_t)at);
             if (n<0 && errno==EINTR) continue;
-            if (n<=0) { result=LMB_REPLICA_UNSAFE; goto done; }
+            if (n<=0) { result=lmb_replica_unavailable("cell-write"); goto done; }
             at+=(size_t)n;
         }
-        if (ftruncate(candidate,32)) { result=LMB_REPLICA_UNSAFE; goto done; }
+        if (ftruncate(candidate,32)) { result=lmb_replica_unavailable("cell-truncate"); goto done; }
         *permit=candidate; candidate=-1; result=LMB_REPLICA_OK;
     }
 done:
