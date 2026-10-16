@@ -7,7 +7,7 @@ alone does not expose other models' activity.
 
 The observer counts authorized, syntactically valid model requests through
 **this gateway**. Direct TUI/Hosted requests, other gateways, unauthenticated
-traffic, local CLI calibration probes and per-user rejections before the request body is read are not
+traffic, explicit CLI/HTTP calibration probes and per-user rejections before the request body is read are not
 attributed to a model. A logical model ID and a direct allocation ID are
 separate targets; their counts must not be added to machine-level active counts
 as if they were independent users.

@@ -8,6 +8,37 @@ import http.client
 import json
 import secrets
 import subprocess
+import socket
+
+
+def open_probe(api, name, allocations, clients=2, rounds=3):
+    connection = http.client.HTTPConnection("127.0.0.1", api.port, timeout=40)
+    connection.request("POST", "/api/v1/capacity/measure", json.dumps({"record": name,
+        "clients": clients, "rounds": rounds, "max_tokens": 8, "allocations": [a["id"] for a in allocations]}),
+        {"Authorization": "Bearer " + api.token, "Content-Type": "application/json"})
+    response = connection.getresponse()
+    assert response.status == 200, (response.status, response.read())
+    assert response.getheader("Content-Type") == "text/event-stream"
+    return connection, response
+
+
+def probe_events(response):
+    event = None
+    while True:
+        line = response.readline()
+        if not line:
+            return
+        if line.startswith(b"event: "):
+            event = line[7:].strip().decode()
+        elif line.startswith(b"data: "):
+            yield event, json.loads(line[6:])
+
+
+def check_probe(api, name):
+    code, checked = api.http("/api/v1/capacity/check", {"record": name,
+        "ttft_ms": 30000, "gap_ms": 30000, "max_age_seconds": 3600})
+    assert code == 200, checked
+    return checked
 
 
 def verify_placement_comparison(api, until, service, env, approve, inventory_ready, artifacts):
@@ -55,16 +86,52 @@ def verify_placement_comparison(api, until, service, env, approve, inventory_rea
         inventory_ready()
     assert service("a")["donor"]["model_count"] == 3 and service("b")["donor"]["model_count"] == 1
     before = {name: service(name)["donor"]["reserved_total_bytes"] for name in ("a", "b")}
+    code, demand_before = api.http("/api/v1/demand")
+    assert code == 200
+    # Cancel only this explicitly requested calibration. The last incomplete
+    # record remains distinguishable; neither approved model is unloaded.
+    connection, response = open_probe(api, "placement-cancelled", managed, rounds=16)
+    try:
+        event, progress = next(probe_events(response))
+        assert event == "progress" and progress["completed_rounds"] == 0
+        code, busy = api.http("/api/v1/capacity/measure", {"record": "placement-competing", "clients": 2,
+            "rounds": 3, "max_tokens": 8, "allocations": [a["id"] for a in managed]})
+        assert code == 409 and busy["error"] == "capacity_probe_not_started", busy
+        # HTTPConnection drops its socket reference for Connection: close;
+        # the response owns it. Shutdown the actual stream, not just its file.
+        response.fp.raw._sock.shutdown(socket.SHUT_RDWR)
+    finally:
+        response.close(); connection.close()
+    cancelled = None
+    def cancellation_saved():
+        nonlocal cancelled
+        code, listed = api.http("/api/v1/capacity")
+        assert code == 200 and listed["scope"] == "historical_not_revalidated", listed
+        cancelled = next((r for r in listed["records"] if r["name"] == "placement-cancelled"), None)
+        return cancelled is not None
+    until(cancellation_saved, "cancelled probe was not cleaned up", 20)
+    assert not cancelled["observation"]["stable"] and cancelled["observation"]["state"] == "incomplete", cancelled
+    code, removed = api.http("/api/v1/capacity/remove", {"record": "placement-cancelled"})
+    assert code == 200 and removed["removed"] and not removed["weights_changed"], removed
+    assert {name: service(name)["donor"]["reserved_total_bytes"] for name in ("a", "b")} == before
 
     def measure(label, allocations, clients=2, require_pass=True):
         # The owner probe uses real gateway admission and per-response timing.
         # All four allocations already coexist before EITHER measurement.
-        record = json.loads(api.cli("capacity-measure", label, str(clients), "3", "8", *(a["id"] for a in allocations)))
+        connection, response = open_probe(api, label, allocations, clients)
+        try:
+            events = list(probe_events(response))
+        finally:
+            response.close(); connection.close()
+        assert [data["completed_rounds"] for event, data in events if event == "progress"] == [0, 1, 2, 3], events
+        results = [data for event, data in events if event == "result"]
+        assert len(results) == 1 and events[-1][0] == "result", events
+        record = results[0]
         assert record["stable"] and record["state"] == "measured", record
         assert all(m["requests"] == clients*3//2 and
                    m["completed"]+m["rejected"]+m["failed"] == m["requests"] and
                    m["timing_samples"] == m["completed"] and not m["failed"] for m in record["models"]), record
-        checked = json.loads(api.cli("capacity-check", label, "30000", "30000", "3600"))
+        checked = check_probe(api, label)
         rejected = any(m["rejected"] for m in record["models"])
         assert checked["state"] == ("requests_rejected_or_failed" if rejected else "observed_workload_passed"), checked
         if require_pass:
@@ -80,9 +147,15 @@ def verify_placement_comparison(api, until, service, env, approve, inventory_rea
     alternative = measure("placement-managed", managed)
     assert baseline["cost"]["micro_per_hour"] == 400000, baseline
     assert alternative["cost"]["micro_per_hour"] == 100000, alternative
-    selected = json.loads(api.cli("capacity-select", "30000", "30000", "3600", "placement-static", "placement-managed"))
+    code, selected = api.http("/api/v1/capacity/select", {"ttft_ms": 30000, "gap_ms": 30000,
+        "max_age_seconds": 3600, "records": ["placement-static", "placement-managed"]})
+    assert code == 200
+    assert selected == json.loads(api.cli("capacity-select", "30000", "30000", "3600", "placement-static", "placement-managed"))
     assert selected["selected"] == "placement-managed" and not selected["applied"], selected
     assert all(c["state"] == "observed_workload_passed" for c in selected["candidates"]), selected
+    code, demand_after = api.http("/api/v1/demand")
+    assert code == 200 and demand_after["models"] == demand_before["models"] == [], demand_after
+    assert demand_after["telemetry_gaps"] == demand_before["telemetry_gaps"] == 0, demand_after
     routes = [json.loads(api.cli("model-add", "comparison-" + name, a["id"], "--tracker", api.tracker))
               for name, a in zip(names, static)]
     config = {"action": "configure", "revision": 0, "enabled": True,
@@ -129,7 +202,7 @@ def verify_placement_comparison(api, until, service, env, approve, inventory_rea
     assert service("a")["donor"]["model_count"] == 2 and service("b")["donor"]["model_count"] == 0
     assert service("a")["donor"]["reserved_total_bytes"] < before["a"]
     assert service("b")["donor"]["reserved_total_bytes"] == 0
-    stale = json.loads(api.cli("capacity-check", "placement-managed", "30000", "30000", "3600"))
+    stale = check_probe(api, "placement-managed")
     assert stale["state"] == "configuration_changed", stale
     after_release = measure("placement-after-retirement", managed)
     report = {"schema": 1, "scope": "loopback_reduced_olmoe_declared_prices_not_billing",

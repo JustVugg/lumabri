@@ -153,7 +153,7 @@ build/web_assets.h: build/embed-web src/web/index.html src/web/app.css src/web/a
 	mv $@.tmp $@
 lumabri segment_chat test_chat_ui: lumabri_metrics.h
 lumabri test_chat_ui test_host_session_pool test_host_drain test-home-monitor: src/runtime/lumabri_response_metrics.h
-lumabri test_chat_ui test_host_session_pool test_host_drain test-home-monitor: src/runtime/lumabri_capacity_probe.h src/planner/lumabri_capacity.h src/planner/lumabri_capacity_store.h
+lumabri test_chat_ui test_host_session_pool test_host_drain test-home-monitor: src/runtime/lumabri_capacity_probe.h src/runtime/lumabri_capacity_http.h src/planner/lumabri_capacity.h src/planner/lumabri_capacity_store.h
 PORTFOLIO_POLICY_DEPS = src/planner/lumabri_portfolio_policy.h src/planner/lumabri_portfolio_policy_store.h src/planner/lumabri_portfolio_policy_json.h src/runtime/lumabri_portfolio_controller.h
 lumabri test_chat_ui test_host_session_pool test_host_drain test-home-monitor: $(PORTFOLIO_POLICY_DEPS)
 ELASTIC_DEPS = src/planner/lumabri_elastic_policy.h src/planner/lumabri_elastic_store.h src/planner/lumabri_elastic_json.h src/runtime/lumabri_elastic_controller.h
