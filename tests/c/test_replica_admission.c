@@ -1,6 +1,27 @@
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
 #include "lumabri_proto.h"
+#include <stdarg.h>
+#include <assert.h>
+/* Exercise a cold-open race: the competing creator
+ * wins before our exclusive create. The next lookup must reuse its inode.
+ * Nonexclusive O_CREAT deliberately cannot hide that race in this test. */
+static int inject_create_race;
+static unsigned combined_lock_opens;
+static int lock_openat(int dir, const char *path, int flags, ...) {
+    mode_t mode=0;
+    if (flags&O_CREAT) { va_list ap; va_start(ap,flags); mode=(mode_t)va_arg(ap,int); va_end(ap); }
+    if (!strcmp(path,"access.lock") && (flags&O_CREAT)) {
+        if (!(flags&O_EXCL)) {
+            combined_lock_opens++;
+            if (inject_create_race) { errno=ENOENT; return -1; }
+        } else if (inject_create_race) {
+            int fd=openat(dir,path,flags,mode); assert(fd>=0); close(fd);
+            inject_create_race=0; errno=EEXIST; return -1;
+        }
+    }
+    return openat(dir,path,flags,mode);
+}
 /* Successful cleanup may change errno (including through the gateway's
  * transport close hook). Make that deterministic on every CI platform. */
 static int cleanup_close(int fd) {
@@ -9,8 +30,8 @@ static int cleanup_close(int fd) {
     return rc;
 }
 #define close(fd) cleanup_close(fd)
+#define openat lock_openat
 #include "src/runtime/lumabri_replica_admission.h"
-#include <assert.h>
 #include <sys/wait.h>
 #include <signal.h>
 
@@ -50,7 +71,9 @@ int main(void) {
     (void)lmb_sign;
     char temporary[]="/tmp/lmb-replica-admission-XXXXXX"; assert(mkdtemp(temporary));
     int access=lmb_api_access_dir(temporary,0); assert(access>=0);
+    inject_create_race=1;
     int guard=lmb_api_access_lock(access); assert(guard>=0);
+    assert(!inject_create_race && !combined_lock_opens);
     errno=0;
     assert(lmb_api_access_lock(access)<0 && (errno==EWOULDBLOCK || errno==EAGAIN));
     close(guard);
@@ -58,6 +81,10 @@ int main(void) {
     errno=EWOULDBLOCK;
     assert(lmb_api_access_lock(access)<0 && errno==EACCES);
     assert(!fchmodat(access,"access.lock",0600,0));
+    assert(!mkdirat(access,"removed",0700));
+    int removed=openat(access,"removed",O_RDONLY|O_DIRECTORY|O_CLOEXEC); assert(removed>=0);
+    assert(!unlinkat(access,"removed",AT_REMOVEDIR));
+    assert(lmb_api_access_lock(removed)<0 && errno==ENOENT); close(removed);
     lmb_read_deadline_ms=lmb_io_monotonic_ms()+30000;
     concurrent_admission(access); /* cold directory, then existing lease hints */
     concurrent_admission(access);
@@ -97,6 +124,7 @@ int main(void) {
     assert(!unlinkat(dir,"access.lock",0)); close(dir);
     assert(!unlinkat(access,"dispatch",AT_REMOVEDIR));
     assert(!unlinkat(access,"access.lock",0)); close(access); assert(!rmdir(temporary));
-    puts("REPLICA ADMISSION: PASS (exact allocation, concurrent cold/warm admission, cleanup errno, unsafe permissions, process death release, bounded cells, torn hint recovery)");
+    assert(!combined_lock_opens);
+    puts("REPLICA ADMISSION: PASS (exact allocation, exclusive-create race, concurrent cold/warm admission, cleanup errno, removed directory, unsafe permissions, process death release, bounded cells, torn hint recovery)");
     return 0;
 }
