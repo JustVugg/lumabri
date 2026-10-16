@@ -25,7 +25,9 @@ async def elastic_workspace(browser, port, token, env, artifacts):
               "idle_seconds": 300, "up_rejections": 3, "ttft_ms": 0, "source_model": "olmoe",
               "context": 512, "sessions": 2, "max_new": 128, "nodes": [NODE],
               "adopt_allocations": [ALLOCATION], "reason": "within_limits", "last_check": int(time.time()),
-              "pending_operation": "", "pending_allocation": ""}
+              "pending_operation": "", "pending_allocation": "",
+              "availability_observations": [{"allocation": ALLOCATION, "state": "unreachable",
+                  "checked_at": int(time.time()) - 180, "consecutive_failures": 3}]}
     state = {"policies": [policy], "offline": False, "conflict": False, "pause_load": False, "paused_error": False}
     entered, release = asyncio.Event(), asyncio.Event()
     workspace = {"schema": 1, "inventory_ok": True, "registry_ok": True, "captured_at": int(time.time()),
@@ -110,6 +112,8 @@ async def elastic_workspace(browser, port, token, env, artifacts):
         await expect(page.locator("#workspace-open")).to_be_visible()
         await page.locator("#workspace-open").click()
         await expect(page.locator("#elastic-policies")).to_contain_text("Registered replicas / limits")
+        await expect(page.locator("#elastic-policies")).to_contain_text("last availability check: unreachable")
+        await expect(page.locator("#elastic-policies")).to_contain_text("3/3 failed checks")
         assert await page.locator("#elastic-policies").get_attribute("inert") is None
         assert await page.locator("#elastic-policies button").count() == 0
         assert await page.get_by_role("button", name="Manage replicas", exact=True).count() == 0

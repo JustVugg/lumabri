@@ -9,6 +9,7 @@ import json
 import os
 import re
 import select
+import signal
 from pathlib import Path
 import subprocess
 import sys
@@ -260,6 +261,82 @@ def verify_elastic(api, until, service, env, terminal, artifacts):
         assert api.http("/api/v1/preparation", {"action": "status", "operation": operation})[1]["state"] == "done"
         infer(route["id"]); infer(second["id"])
         events.update(dormant=dormant, waking=waking, awake=awake)
+        # A saved route is not a healthy resident replica. Kill only this
+        # fixture's explicitly identified Segment child, with another model
+        # still serving. No protocol proxy or forged health report is used.
+        recovery_config = {**cold_config, "revision": awake["revision"],
+                           "route_revision": awake["route_revision"], "min_replicas": 1,
+                           "enabled": False, "adopt_allocations": awake["adopt_allocations"]}
+        code, paused = api.http(path, recovery_config)
+        assert code == 200, (code, paused)
+        code, workspace = api.http("/api/v1/workspace")
+        assert code == 200
+        old_allocation, = paused["adopt_allocations"]
+        victim = next(a for a in workspace["allocations"] if a["id"] == old_allocation)
+        owned = [(n, service(n)["donor"]) for n in ("a", "b")]
+        owned = [(n, s) for n, s in owned if s["model"] == victim["name"] and s["segment_pid"] > 1]
+        assert owned, (victim, owned)
+        name, snapshot = owned[0]
+        child = snapshot["segment_pid"]
+        process = subprocess.run(["ps", "-p", str(child), "-o", "ppid=", "-o", "comm="],
+                                 text=True, capture_output=True, check=True).stdout.strip().split(None, 1)
+        assert int(process[0]) == snapshot["pid"] and "segment_node" in process[1], process
+        before_failure = set(library.glob("*.plan"))
+        old_bytes = int(paused["reserved_bytes"])
+        os.kill(child, signal.SIGKILL)
+        until(lambda: service(name)["donor"]["segment_pid"] != child,
+              "keeper did not observe its terminated Segment child", 20)
+        code, interrupted = chat(route["id"])
+        assert code in (200, 503) and b"event: done\n" not in interrupted, (code, interrupted)
+        infer(second["id"])
+        assert set(library.glob("*.plan")) == before_failure, "paused recovery allocated another model"
+        assert policy()["reserved_bytes"] == paused["reserved_bytes"], "failure was treated as proof of freed memory"
+        code, resumed = api.http(path, {"action": "resume", "id": route["id"], "revision": paused["revision"]})
+        assert code == 200, (code, resumed)
+        failed = await_policy(lambda p: any(h["allocation"] == old_allocation and h["consecutive_failures"] == 3
+                                           for h in p["availability_observations"]),
+                              "terminated Segment child did not trigger bounded health recovery", 90)
+        assert int(failed["reserved_bytes"]) >= old_bytes and old_allocation in failed["adopt_allocations"]
+        restored = await_policy(lambda p: p["phase"] == "idle" and p["replicas"] == 2,
+                                "no replacement was prepared after the real Segment failure", approve=True)
+        assert old_allocation in restored["adopt_allocations"] and int(restored["reserved_bytes"]) > old_bytes
+        assert len(set(library.glob("*.plan")) - before_failure) == 1, "failure created duplicate replacements"
+        infer(route["id"]); infer(second["id"])
+        # Confirm the replacement itself is queried, not inferred healthy
+        # merely from publication. Old ownership remains charged and visible.
+        checked = await_policy(lambda p: any(h["allocation"] != old_allocation and h["state"] == "accepting"
+                                            for h in p["availability_observations"]),
+                               "new replica never received a real availability query", 40)
+        assert checked["replicas"] == 2 and int(checked["reserved_bytes"]) == int(restored["reserved_bytes"])
+        events.update(terminated_segment={"pid": child, "allocation": old_allocation, "node": name},
+                      failed_replica=failed, restored_replica=restored, checked_replica=checked)
+        print("ELASTIC RECOVERY: PASS (real Segment child killed, other model serves, paused policy inert, three failed probes, approved replacement, old reservation retained, exactly one new allocation, restored inference)", flush=True)
+        # The hard replica limit includes unreachable allocations. Losing
+        # the new host too must not buy an unapproved third allocation.
+        new_allocation, = set(restored["adopt_allocations"]) - {old_allocation}
+        code, workspace = api.http("/api/v1/workspace")
+        assert code == 200
+        replacement = next(a for a in workspace["allocations"] if a["id"] == new_allocation)
+        hosts = [(n, service(n)["donor"]) for n in ("a", "b")]
+        hosts = [(n, s) for n, s in hosts if s["model"] == replacement["name"] and s["host_pid"] > 1]
+        assert len(hosts) == 1, hosts
+        host_name, host_snapshot = hosts[0]; host_child = host_snapshot["host_pid"]
+        process = subprocess.run(["ps", "-p", str(host_child), "-o", "ppid=", "-o", "comm="],
+                                 text=True, capture_output=True, check=True).stdout.strip().split(None, 1)
+        assert int(process[0]) == host_snapshot["pid"] and "lumabri" in process[1], process
+        before_host_failure = set(library.glob("*.plan"))
+        os.kill(host_child, signal.SIGKILL)
+        until(lambda: service(host_name)["donor"]["host_pid"] != host_child,
+              "keeper did not observe its terminated host child", 20)
+        limited = await_policy(lambda p: p["reason"] == "unavailable_replica_limit_operator_review_required",
+                               "host failure bypassed the hard replica limit", 90)
+        assert limited["reserved_bytes"] == restored["reserved_bytes"] and limited["replicas"] == 2
+        assert set(library.glob("*.plan")) == before_host_failure
+        code, unavailable = chat(route["id"])
+        assert code == 503 and b"approved_allocation_unavailable" in unavailable, (code, unavailable)
+        infer(second["id"])
+        events["recovery_at_limit"] = limited
+        print("ELASTIC RECOVERY LIMIT: PASS (real host child killed, no spare approved slot, bounded refusal, all reservations retained, independent model still serves)", flush=True)
         # Explicit manual routing always stops the controller's old ownership
         # fence; no following tick may silently undo this operator revision.
         api.cli("model-policy", route["id"], "ordered", "--tracker", api.tracker)
