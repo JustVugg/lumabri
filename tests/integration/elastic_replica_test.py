@@ -14,6 +14,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+from owned_engine_process import owned_engine_pid
 
 
 def configure_from_browser(api, config, artifacts):
@@ -278,12 +279,13 @@ def verify_elastic(api, until, service, env, terminal, artifacts):
         assert owned, (victim, owned)
         name, snapshot = owned[0]
         child = snapshot["segment_pid"]
-        process = subprocess.run(["ps", "-p", str(child), "-o", "ppid=", "-o", "comm="],
-                                 text=True, capture_output=True, check=True).stdout.strip().split(None, 1)
-        assert int(process[0]) == snapshot["pid"] and "segment_node" in process[1], process
+        # On Darwin the keeper tracks home_spawn's supervisor, not the
+        # grandchild that runs Segment. Kill the actual verified engine;
+        # its supervisor must then exit and be observed by the keeper.
+        engine_child = owned_engine_pid(snapshot, "segment_pid", api.runtime, "segment_node")
         before_failure = set(library.glob("*.plan"))
         old_bytes = int(paused["reserved_bytes"])
-        os.kill(child, signal.SIGKILL)
+        os.kill(engine_child, signal.SIGKILL)
         until(lambda: service(name)["donor"]["segment_pid"] != child,
               "keeper did not observe its terminated Segment child", 20)
         code, interrupted = chat(route["id"])
@@ -308,7 +310,8 @@ def verify_elastic(api, until, service, env, terminal, artifacts):
                                             for h in p["availability_observations"]),
                                "new replica never received a real availability query", 40)
         assert checked["replicas"] == 2 and int(checked["reserved_bytes"]) == int(restored["reserved_bytes"])
-        events.update(terminated_segment={"pid": child, "allocation": old_allocation, "node": name},
+        events.update(terminated_segment={"pid": engine_child, "tracked_pid": child,
+                                          "allocation": old_allocation, "node": name},
                       failed_replica=failed, restored_replica=restored, checked_replica=checked)
         print("ELASTIC RECOVERY: PASS (real Segment child killed, other model serves, paused policy inert, three failed probes, approved replacement, old reservation retained, exactly one new allocation, restored inference)", flush=True)
         # The hard replica limit includes unreachable allocations. Losing
@@ -321,11 +324,9 @@ def verify_elastic(api, until, service, env, terminal, artifacts):
         hosts = [(n, s) for n, s in hosts if s["model"] == replacement["name"] and s["host_pid"] > 1]
         assert len(hosts) == 1, hosts
         host_name, host_snapshot = hosts[0]; host_child = host_snapshot["host_pid"]
-        process = subprocess.run(["ps", "-p", str(host_child), "-o", "ppid=", "-o", "comm="],
-                                 text=True, capture_output=True, check=True).stdout.strip().split(None, 1)
-        assert int(process[0]) == host_snapshot["pid"] and "lumabri" in process[1], process
+        host_engine = owned_engine_pid(host_snapshot, "host_pid", api.runtime, "lumabri")
         before_host_failure = set(library.glob("*.plan"))
-        os.kill(host_child, signal.SIGKILL)
+        os.kill(host_engine, signal.SIGKILL)
         until(lambda: service(host_name)["donor"]["host_pid"] != host_child,
               "keeper did not observe its terminated host child", 20)
         limited = await_policy(lambda p: p["reason"] == "unavailable_replica_limit_operator_review_required",
