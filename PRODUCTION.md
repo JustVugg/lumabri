@@ -77,6 +77,43 @@ not a model-quality benchmark. Loopback execution is not a physical-LAN test.
 The workflow contains the additional fault-proxy and browser setup; those
 tools belong in disposable test runtimes, never a shipped package.
 
+### Sustained local workload
+
+The same real-engine fixture can exercise a longer fixed workload rather than
+only a short capacity burst:
+
+```sh
+LUMABRI_RESIDENCY_POLICY=engine-locked \
+python3 tests/integration/household_service_flow_test.py \
+  --models-dir build/home-flow-models --joint complete --api-prepare \
+  --donor-ram-gb 1.5 --sessions 2 --soak-seconds 1800
+```
+
+This is a 30-minute timed phase after preparation and warm-up; total duration
+also includes startup and cleanup. The option accepts 10–3600 seconds. CI runs
+a ten-second smoke, which must not be reported as the longer acceptance run.
+The fixture owns its temporary homes, services and approvals; it does not use
+an existing household, the operator's real donors or a cloud account.
+
+It prepares two independently resident checkpoint identities derived from the
+same tiny OLMoE weights. It repeatedly runs one request per model, eight-client
+overload bursts, client disconnection after visible text and subsequent normal
+requests. A client disconnect is not proof of the exact instant a kernel stops.
+Unexpected errors fail the run; only explicit `replicas_busy` refusals are
+accepted during overload. Every outcome remains in `managed-soak.json` along
+with runtime hashes, elapsed duration, per-model/phase summaries, reservations
+and quiescent process/RSS samples. Percentiles cover completed requests only;
+refusals, client stops and failures have separate counts.
+
+The test requires unchanged resident reservations/processes, no retained gateway
+admissions, effective owned CPU locks, and at most 64 MiB aggregate quiescent
+RSS growth after warm-up. It checks persistent descriptors where the OS allows
+inspection; protected `/proc` entries and unavailable macOS counters stay null.
+These bounds can catch regressions but do not prove absence of every leak, a
+production SLO, full-size memory behavior or physical-LAN performance. Keep the
+report with its exact build and test duration; repeat the deployment acceptance
+below using the actual workload and machines.
+
 ## Deployment acceptance
 
 Before declaring a release supported, run its exact installed package on each

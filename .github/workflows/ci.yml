@@ -685,7 +685,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: placement-comparison-${{ matrix.runner }}-${{ matrix.openmp }}
-          path: ${{ runner.temp }}/lmb-service-flow-*/placement-comparison.json
+          path: |
+            ${{ runner.temp }}/lmb-service-flow-*/placement-comparison.json
+            ${{ runner.temp }}/lmb-service-flow-*/managed-soak.json
           retention-days: 7
       - uses: actions/upload-artifact@v4
         if: failure()
