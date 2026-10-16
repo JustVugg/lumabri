@@ -28,8 +28,12 @@ static inline int lmb_api_username(const char *name) {
 }
 static inline int lmb_api_private_fd(int fd, int directory) {
     struct stat s;
-    return fstat(fd,&s) || s.st_uid!=geteuid() || (s.st_mode&077) ||
-        (directory ? !S_ISDIR(s.st_mode) : !S_ISREG(s.st_mode) || s.st_nlink!=1) ? -1 : 0;
+    if (fstat(fd,&s)) return -1;
+    if (s.st_uid!=geteuid() || (s.st_mode&077) ||
+        (directory ? !S_ISDIR(s.st_mode) : !S_ISREG(s.st_mode) || s.st_nlink!=1)) {
+        errno=EACCES; return -1;
+    }
+    return 0;
 }
 static inline int lmb_api_access_dir(const char *path, int create) {
     if (create && mkdir(path,0700) && errno!=EEXIST) return -1;
@@ -42,7 +46,12 @@ static inline int lmb_api_access_dir(const char *path, int create) {
 static inline int lmb_api_access_lock(int dir) {
     int fd=openat(dir,"access.lock",O_RDWR|O_CREAT|O_NOFOLLOW|O_CLOEXEC,0600);
     if (fd<0) return -1;
-    if (lmb_api_private_fd(fd,0) || flock(fd,LOCK_EX|LOCK_NB)) { close(fd); return -1; }
+    if (lmb_api_private_fd(fd,0) || flock(fd,LOCK_EX|LOCK_NB)) {
+        /* Closing also runs transport cleanup in the gateway. Preserve the
+         * lock error: contention is bounded BUSY, not a storage failure.
+         * Unsafe files must never inherit a stale EWOULDBLOCK either. */
+        int saved=errno; close(fd); errno=saved; return -1;
+    }
     return fd;
 }
 static inline int lmb_api_user_load(int dir, const char *name, LmbApiUser *user) {
