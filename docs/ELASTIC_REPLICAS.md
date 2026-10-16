@@ -163,7 +163,17 @@ replacement is appended only after its real runtime and model contract have
 been checked. Missing contact is not proof that weights were unloaded. If
 headroom or donor permission is unavailable, the controller reports the reason;
 it does not exceed the budget, discard ownership or silently approve an offer.
-The old reservation remains visible for operator reconciliation. Scale-down
+The old reservation remains charged until coordinated retirement confirms every
+participant's release. On upgraded donors, an immutable allocation lifetime
+record and inherited kernel locks can prove that a failed allocation's owned
+processes have all exited. A suspended process, a reaped parent with a surviving
+descendant, a missing record or an unreachable donor cannot supply that proof.
+After three separated failed availability probes, the controller may withdraw
+that exact failed replica. Surviving participants still drain/seal normally;
+the pending charge is removed only after all releases are confirmed. With
+approved headroom it restores availability first; otherwise confirmed release
+can make room without overbooking. Old donor versions remain unknown and retain
+their charges. Scale-down
 does not remove a healthy replacement while counting a failed replica as the
 minimum; unknown or stale health also prevents idle release.
 

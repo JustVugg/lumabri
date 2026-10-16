@@ -27,7 +27,7 @@ typedef struct {
     uint8_t pending_allocation[32], observer[32];
     uint64_t idle_since_ms;
     /* Observations are not ownership receipts. Unreachable allocations
-     * remain in route/resident_bytes and count towards both hard limits. */
+     * count towards both hard limits until retirement confirms release. */
     uint8_t health_observer[32];
     uint32_t health_revision, health_cursor;
     LmbElasticReplicaHealth health[LMB_ROUTE_REPLICAS];
@@ -97,8 +97,10 @@ static inline int lmb_elastic_valid(const LmbElasticPolicy *p) {
             expected.replicas[expected.count++]=p->target.replicas[p->route.count];
             if (memcmp(expected.replicas[expected.count-1].allocation,p->pending_allocation,32)) return 0;
         } else {
-            if (!expected.count || p->pending_bytes!=p->resident_bytes[expected.count-1] ||
-                memcmp(expected.replicas[expected.count-1].allocation,p->pending_allocation,32)) return 0;
+            uint32_t at=0;
+            while (at<expected.count && memcmp(expected.replicas[at].allocation,p->pending_allocation,32)) at++;
+            if (at==expected.count || p->pending_bytes!=p->resident_bytes[at]) return 0;
+            for (uint32_t i=at;i+1<expected.count;i++) expected.replicas[i]=expected.replicas[i+1];
             expected.count--;
         }
         if (!lmb_elastic_route_equal(&expected,&p->target)) return 0;
@@ -121,12 +123,26 @@ static inline int lmb_elastic_reconcile(LmbElasticPolicy *p,const LmbModelRoute 
             p->resident_bytes[p->route.count]=p->pending_bytes;
             p->route=*current; lmb_elastic_idle(p);
         } else {
+            uint32_t at=0;
+            while (at<p->route.count && memcmp(p->route.replicas[at].allocation,p->pending_allocation,32)) at++;
+            if (at==p->route.count) { p->faulted=1; strcpy(p->reason,"retiring_identity_missing"); return -1; }
+            for (uint32_t i=at;i+1<p->route.count;i++) p->resident_bytes[i]=p->resident_bytes[i+1];
             p->resident_bytes[current->count]=0; p->route=*current;
             p->phase=LMB_ELASTIC_RETIRING;
         }
         p->last_change=now; strcpy(p->reason,"publication_reconciled"); return 1;
     }
     p->faulted=1; strcpy(p->reason,"route_changed_operator_review_required"); return -1;
+}
+/* Identity, not array position, owns the pending charge. Removing a failed
+ * early replica must not remove or misaccount a healthy newer one. */
+static inline int lmb_elastic_withdraw(LmbElasticPolicy *p,uint32_t at) {
+    if (!p->enabled || p->faulted || p->phase || at>=p->route.count || p->route.revision==UINT32_MAX) return -1;
+    p->pending_bytes=p->resident_bytes[at]; memcpy(p->pending_allocation,p->route.replicas[at].allocation,32);
+    p->target=p->route; p->target.revision++;
+    for (uint32_t i=at;i+1<p->target.count;i++) p->target.replicas[i]=p->target.replicas[i+1];
+    p->target.count--; p->phase=LMB_ELASTIC_PUBLISH_SHRINK;
+    return lmb_elastic_valid(p) ? 0 : -1;
 }
 /* Positive demand may wake a cold model. Destructive scale-down requires
  * an uninterrupted complete observation window from this gateway instance

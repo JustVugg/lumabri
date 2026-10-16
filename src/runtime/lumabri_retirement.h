@@ -8,29 +8,32 @@ enum { LMB_RET_HOST_DRAIN, LMB_RET_HOST_SEAL, LMB_RET_NODE_DRAIN,
        LMB_RET_NODE_SEAL, LMB_RET_RELEASE, LMB_RET_DONE };
 typedef struct {
     uint8_t plan_hash[64];
-    uint32_t phase, cursor, count, released;
+    uint32_t phase, cursor, count, released, exited, host_exited;
     LmbNodeControl host, nodes[LMB_CLUSTER_MAX_NODES];
 } LmbRetirement;
 static int lmb_retirement_valid(const LmbRetirement *r) {
     if (!r->count || r->count>LMB_CLUSTER_MAX_NODES || r->phase>LMB_RET_DONE || r->cursor>r->count ||
-        ((uint64_t)r->released>>r->count) || (r->phase<LMB_RET_RELEASE && r->released)) return 0;
+        ((uint64_t)r->released>>r->count) || ((uint64_t)r->exited>>r->count) || r->host_exited>1 ||
+        (r->host_exited && !r->exited) || (r->phase<LMB_RET_RELEASE && r->released)) return 0;
     uint8_t nonzero=0; for (unsigned i=0;i<64;i++) nonzero|=r->plan_hash[i];
     if (!nonzero || r->host.sessions>LMB_HOST_MAX_SESSIONS || r->host.experts>r->host.sessions) return 0;
     if (r->phase<=LMB_RET_HOST_SEAL && r->cursor) return 0;
-    if (r->phase==LMB_RET_HOST_SEAL && !r->host.draining) return 0;
+    if (r->phase==LMB_RET_HOST_SEAL && !r->host_exited && !r->host.draining) return 0;
     for (uint32_t i=0;i<=r->count;i++) {
+        if (i ? (r->exited&(UINT32_C(1)<<(i-1))) : r->host_exited) continue;
         const LmbNodeControl *s=i ? &r->nodes[i-1] : &r->host;
         uint8_t bytes[LMB_NODE_CONTROL_REPLY_BYTES]; LmbNodeControl parsed;
         lmb_node_control_reply(bytes,0,s);
         if (lmb_node_control_decode(bytes,sizeof bytes,&parsed)) return 0;
     }
-    if (r->phase>=LMB_RET_NODE_DRAIN && r->host.draining!=LMB_NODE_CONTROL_RETIRED) return 0;
+    if (r->phase>=LMB_RET_NODE_DRAIN && !r->host_exited && r->host.draining!=LMB_NODE_CONTROL_RETIRED) return 0;
     if (r->phase==LMB_RET_NODE_DRAIN) for (uint32_t i=0;i<r->cursor;i++)
-        if (!r->nodes[i].draining) return 0;
+        if (!(r->exited&(UINT32_C(1)<<i)) && !r->nodes[i].draining) return 0;
     if (r->phase==LMB_RET_NODE_SEAL) for (uint32_t i=0;i<r->count;i++)
-        if (!r->nodes[i].draining || (i<r->cursor && r->nodes[i].draining!=LMB_NODE_CONTROL_RETIRED)) return 0;
+        if (!(r->exited&(UINT32_C(1)<<i)) &&
+            (!r->nodes[i].draining || (i<r->cursor && r->nodes[i].draining!=LMB_NODE_CONTROL_RETIRED))) return 0;
     if (r->phase>=LMB_RET_RELEASE) for (uint32_t i=0;i<r->count;i++)
-        if (r->nodes[i].draining!=LMB_NODE_CONTROL_RETIRED) return 0;
+        if (!(r->exited&(UINT32_C(1)<<i)) && r->nodes[i].draining!=LMB_NODE_CONTROL_RETIRED) return 0;
     if (r->phase>=LMB_RET_RELEASE) {
         unsigned completed=0;
         for (uint32_t bits=r->released;bits;bits>>=1) completed+=bits&1u;
@@ -40,23 +43,34 @@ static int lmb_retirement_valid(const LmbRetirement *r) {
 }
 static int lmb_retirement_encode(const LmbRetirement *r, LmbBuf *b) {
     if (!lmb_retirement_valid(r) || lmb_buf_reserve(b,4096)) return -1;
-    int bad=lmb_buf_bytes(b,"LMBRET1\0",8) || lmb_buf_bytes(b,r->plan_hash,64) ||
-        lmb_buf_u32(b,r->phase) || lmb_buf_u32(b,r->cursor) || lmb_buf_u32(b,r->count) || lmb_buf_u32(b,r->released);
+    int bad=lmb_buf_bytes(b,"LMBRET2\0",8) || lmb_buf_bytes(b,r->plan_hash,64) ||
+        lmb_buf_u32(b,r->phase) || lmb_buf_u32(b,r->cursor) || lmb_buf_u32(b,r->count) || lmb_buf_u32(b,r->released) ||
+        lmb_buf_u32(b,r->exited) || lmb_buf_u32(b,r->host_exited);
     for (uint32_t i=0;!bad && i<=r->count;i++) {
-        uint8_t bytes[LMB_NODE_CONTROL_REPLY_BYTES]; lmb_node_control_reply(bytes,0,i ? &r->nodes[i-1] : &r->host);
+        uint8_t bytes[LMB_NODE_CONTROL_REPLY_BYTES]={0};
+        if (!(i ? (r->exited&(UINT32_C(1)<<(i-1))) : r->host_exited))
+            lmb_node_control_reply(bytes,0,i ? &r->nodes[i-1] : &r->host);
         bad=lmb_buf_bytes(b,bytes,sizeof bytes);
     }
     return bad ? -1 : 0;
 }
 static int lmb_retirement_decode(const uint8_t *bytes, size_t size, LmbRetirement *r) {
     memset(r,0,sizeof *r);
-    if (size<88 || memcmp(bytes,"LMBRET1\0",8)) return -1;
+    if (size<88) return -1;
+    int old=!memcmp(bytes,"LMBRET1\0",8);
+    if (!old && memcmp(bytes,"LMBRET2\0",8)) return -1;
     LmbCur c={bytes,size,8};
     if (lmb_cur_bytes(&c,r->plan_hash,64) || lmb_cur_u32(&c,&r->phase) || lmb_cur_u32(&c,&r->cursor) ||
-        lmb_cur_u32(&c,&r->count) || lmb_cur_u32(&c,&r->released) || !r->count || r->count>LMB_CLUSTER_MAX_NODES ||
+        lmb_cur_u32(&c,&r->count) || lmb_cur_u32(&c,&r->released) ||
+        (!old && (lmb_cur_u32(&c,&r->exited) || lmb_cur_u32(&c,&r->host_exited))) ||
+        !r->count || r->count>LMB_CLUSTER_MAX_NODES ||
         c.len-c.off!=(r->count+1)*LMB_NODE_CONTROL_REPLY_BYTES) return -1;
-    for (uint32_t i=0;i<=r->count;i++,c.off+=LMB_NODE_CONTROL_REPLY_BYTES)
-        if (lmb_node_control_decode(c.p+c.off,LMB_NODE_CONTROL_REPLY_BYTES,i ? &r->nodes[i-1] : &r->host)) return -1;
+    for (uint32_t i=0;i<=r->count;i++,c.off+=LMB_NODE_CONTROL_REPLY_BYTES) {
+        if (i ? (r->exited&(UINT32_C(1)<<(i-1))) : r->host_exited) {
+            uint8_t zero[LMB_NODE_CONTROL_REPLY_BYTES]={0};
+            if (memcmp(c.p+c.off,zero,sizeof zero)) return -1;
+        } else if (lmb_node_control_decode(c.p+c.off,LMB_NODE_CONTROL_REPLY_BYTES,i ? &r->nodes[i-1] : &r->host)) return -1;
+    }
     return lmb_retirement_valid(r) ? 0 : -1;
 }
 static int lmb_retirement_dir(int access) {
@@ -117,22 +131,35 @@ static LmbNodeControl lmb_retirement_host_state(const LmbHostControl *h) {
     LmbNodeControl n={.revision=h->revision,.draining=h->draining,.sessions=h->connections,.experts=h->requests};
     memcpy(n.instance,h->instance,32); return n;
 }
+static int lmb_retirement_exited(const LmbResidentPlan *p,LmbRetirement *r,uint32_t i) {
+    if (i>=r->count || home_resident_exit_proof(p,i)) return -1;
+    r->exited|=UINT32_C(1)<<i; memset(&r->nodes[i],0,sizeof r->nodes[i]);
+    if (p->execution.nodes[i].edge) { r->host_exited=1; memset(&r->host,0,sizeof r->host); }
+    return 0;
+}
+static int lmb_retirement_host_exited(const LmbResidentPlan *p,LmbRetirement *r) {
+    for (uint32_t i=0;i<r->count;i++) if (p->execution.nodes[i].edge) return lmb_retirement_exited(p,r,i);
+    return -1;
+}
 /* Returns 1 when admitted work still exists, -1 on unknown/conflict. The
  * caller retains its journal and never rolls accepted mutations back. */
 static int lmb_retirement_host_step(const LmbResidentPlan *p, LmbRetirement *r, uint32_t action) {
+    if (r->host_exited) return 0;
     LmbHostControl expected={.revision=r->host.revision,.draining=r->host.draining}, actual={0};
     memcpy(expected.instance,r->host.instance,32);
     int status=lmb_host_control_rpc(p->host,p->host_key,p->root,action,&expected,&actual);
     if (status==LMB_HOST_CONTROL_CONFLICT && action==LMB_HOST_CONTROL_RETIRE &&
         !memcmp(actual.instance,expected.instance,32) && actual.revision==expected.revision && actual.draining==1 &&
         (actual.connections || actual.requests)) return 1;
-    if (status) return -1;
+    if (status) return lmb_retirement_host_exited(p,r);
     r->host=lmb_retirement_host_state(&actual); return 0;
 }
 static int lmb_retirement_run(int dir, const char *name, const LmbResidentPlan *p, LmbRetirement *r) {
     /* A valid record also has to match the plan's release order. A cursor
      * must never skip a node whose acknowledgement is absent. */
     if (!lmb_retirement_valid(r) || r->count!=p->execution.count) return -1;
+    for (uint32_t i=0;i<r->count;i++) if (p->execution.nodes[i].edge &&
+        r->host_exited!=!!(r->exited&(UINT32_C(1)<<i))) return -1;
     uint32_t order[LMB_CLUSTER_MAX_NODES],at=0,mask=0;
     for (uint32_t i=0;i<r->count;i++) if (!p->execution.nodes[i].edge) order[at++]=i;
     for (uint32_t i=0;i<r->count;i++) if (p->execution.nodes[i].edge) order[at++]=i;
@@ -153,13 +180,15 @@ static int lmb_retirement_run(int dir, const char *name, const LmbResidentPlan *
             else {
                 uint32_t i=r->cursor, action=r->phase==LMB_RET_NODE_DRAIN ? LMB_NODE_CONTROL_DRAIN : LMB_NODE_CONTROL_RETIRE;
                 LmbNodeControl *expected=&r->nodes[i],actual={0};
-                if ((action==LMB_NODE_CONTROL_DRAIN && !expected->draining) ||
-                    (action==LMB_NODE_CONTROL_RETIRE && expected->draining!=LMB_NODE_CONTROL_RETIRED)) {
+                if (!(r->exited&(UINT32_C(1)<<i)) &&
+                    ((action==LMB_NODE_CONTROL_DRAIN && !expected->draining) ||
+                     (action==LMB_NODE_CONTROL_RETIRE && expected->draining!=LMB_NODE_CONTROL_RETIRED))) {
                     status=home_resident_node_control(p,i,action,expected,&actual);
                     if (status==LMB_NODE_CONTROL_CONFLICT && action==LMB_NODE_CONTROL_RETIRE &&
                         !memcmp(actual.instance,expected->instance,32) && actual.revision==expected->revision &&
                         actual.draining==1 && (actual.sessions || actual.experts)) return 1;
-                    if (!status) *expected=actual; else return -1;
+                    if (!status) *expected=actual;
+                    else status=lmb_retirement_exited(p,r,i);
                 }
                 if (!status) r->cursor++;
             }
@@ -169,7 +198,10 @@ static int lmb_retirement_run(int dir, const char *name, const LmbResidentPlan *
             if (r->cursor==r->count) r->phase=LMB_RET_DONE;
             else {
                 uint32_t i=order[r->cursor];
-                status=home_resident_retired_release(p,i,&r->nodes[i]);
+                if (!(r->exited&(UINT32_C(1)<<i))) {
+                    status=home_resident_retired_release(p,i,&r->nodes[i]);
+                    if (status) status=lmb_retirement_exited(p,r,i);
+                }
                 if (!status) { r->released|=UINT32_C(1)<<i; r->cursor++; }
             }
         } else return -1;
@@ -195,16 +227,19 @@ static int api_retirement_execute(int access, const char *tracker, const uint8_t
         if (lmb_retirement_room(dir)) goto done;
         memcpy(r.plan_hash,hash,64); r.count=p->execution.count;
         LmbHostControl host={0};
-        if (lmb_host_control_rpc(p->host,p->host_key,p->root,0,NULL,&host)) goto done;
+        if (lmb_host_control_rpc(p->host,p->host_key,p->root,0,NULL,&host)) {
+            if (expected) { *conflict=1; goto done; }
+            if (lmb_retirement_host_exited(p,&r)) goto done;
+        } else r.host=lmb_retirement_host_state(&host);
         if (expected && (memcmp(host.instance,expected->instance,32) || host.revision!=expected->revision)) {
             *conflict=1; goto done;
         }
-        r.host=lmb_retirement_host_state(&host);
-        for (uint32_t i=0;i<r.count;i++) if (home_resident_node_control(p,i,0,NULL,&r.nodes[i])) goto done;
+        for (uint32_t i=0;i<r.count;i++) if (!(r.exited&(UINT32_C(1)<<i)) &&
+            home_resident_node_control(p,i,0,NULL,&r.nodes[i]) && lmb_retirement_exited(p,&r,i)) goto done;
         if (lmb_retirement_store(dir,name,&r)) goto done;
     }
     if (memcmp(r.plan_hash,hash,64) || r.count!=p->execution.count) goto done;
-    if (expected && (memcmp(r.host.instance,expected->instance,32) || expected->revision>r.host.revision)) {
+    if (expected && !r.host_exited && (memcmp(r.host.instance,expected->instance,32) || expected->revision>r.host.revision)) {
         *conflict=1; goto done;
     }
     status=lmb_retirement_run(dir,name,p,&r);
@@ -219,8 +254,8 @@ static int api_retire(int access, const char *tracker, char *const *args, unsign
     if (count!=1 || !*tracker || strlen(args[0])!=64 || lmb_unhex(id,args[0],32)) return 1;
     lmb_hex(hex,id,32); LmbRetirement r={0}; int conflict=0;
     int status=api_retirement_execute(access,tracker,id,NULL,&r,&conflict);
-    printf("{\"schema\":1,\"allocation\":\"%s\",\"state\":\"%s\",\"phase\":%u,\"released_node_mask\":%u,\"complete\":%s}\n",
-        hex,status<0 ? "unknown_or_conflict" : status ? "waiting_for_admitted_work" : "released",r.phase,r.released,
+    printf("{\"schema\":1,\"allocation\":\"%s\",\"state\":\"%s\",\"phase\":%u,\"released_node_mask\":%u,\"exited_node_mask\":%u,\"complete\":%s}\n",
+        hex,status<0 ? "unknown_or_conflict" : status ? "waiting_for_admitted_work" : "released",r.phase,r.released,r.exited,
         !status && r.phase==LMB_RET_DONE ? "true" : "false");
     if (status) fprintf(stderr,"Retirement is incomplete. Accepted drains/seals remain in effect; rerun this exact operation to reconcile. Unknown peers are never assumed released.\n");
     return status<0 ? 1 : 0;

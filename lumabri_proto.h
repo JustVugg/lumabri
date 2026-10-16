@@ -326,6 +326,7 @@ enum {
      * executor control connection. SGD1 discovery remains byte-for-byte v1. */
     LMB_SEG_COMPUTE_GET = 100, LMB_SEG_COMPUTE_GET_R = 101,
     LMB_SEG_COMPUTE_PUT = 102, LMB_SEG_COMPUTE_PUT_R = 103,
+    LMB_HOME_EXIT_PROOF = 104, LMB_HOME_EXIT_PROOF_R = 105, /* immutable allocation, all descendants exited */
 };
 #define LMB_CAP_EXEC2 (1u << 0)
 #define LMB_ENC_F32  0u

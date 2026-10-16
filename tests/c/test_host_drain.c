@@ -233,6 +233,19 @@ static void retirement_journal_test(void) {
     assert(!lmb_retirement_store(dir,name,&state));
     assert(!lmb_retirement_load(dir,name,&readback) && readback.count==2 && !readback.phase &&
         readback.host.instance[0]==1 && readback.nodes[1].instance[0]==3);
+    LmbBuf wire={0}; assert(!lmb_retirement_encode(&state,&wire));
+    assert(!memcmp(wire.p,"LMBRET2\0",8));
+    for (size_t length=0;length<wire.len;length++) assert(lmb_retirement_decode(wire.p,length,&readback));
+    /* v1 journals retain all old fences; zero exit proofs are inferred. */
+    memmove(wire.p+88,wire.p+96,wire.len-96); wire.len-=8; memcpy(wire.p,"LMBRET1\0",8);
+    assert(!lmb_retirement_decode(wire.p,wire.len,&readback) && !readback.exited && !readback.host_exited);
+    free(wire.p);
+    LmbRetirement gone=state; gone.exited=1; gone.host_exited=1;
+    memset(&gone.host,0,sizeof gone.host); memset(&gone.nodes[0],0,sizeof gone.nodes[0]);
+    assert(!lmb_retirement_store(dir,name,&gone) && !lmb_retirement_load(dir,name,&readback));
+    assert(readback.host_exited && readback.exited==1 && !readback.host.revision && !readback.nodes[0].revision);
+    gone.exited=4; assert(lmb_retirement_store(dir,name,&gone));
+    gone.exited=0; assert(lmb_retirement_store(dir,name,&gone)); /* no host proof without node proof */
     state.cursor=1; assert(lmb_retirement_store(dir,name,&state)); state.cursor=0;
     state.phase=LMB_RET_HOST_SEAL; assert(lmb_retirement_store(dir,name,&state));
     state.phase=LMB_RET_RELEASE; assert(lmb_retirement_store(dir,name,&state)); /* no invented seal */
