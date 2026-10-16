@@ -486,11 +486,42 @@ peer identities/endpoints and live process fences. Progress is persisted before
 the next external action. Repeating a completed operation returns its receipt
 without contacting or stopping engines again. Incomplete retries use the same
 fences: a replacement process is not silently adopted and old approvals are
-never replayed. The keeper retains a lost-release-reply receipt while the closed
-allocation occupies its slot; if it is replaced or its keeper loses that state,
-an unacknowledged release stays unknown instead of being guessed complete.
+never replayed. The donor writes a separate private receipt under
+`~/.lumabri/service/retired-allocations`, bound to the allocation, checkpoint,
+original authenticated requester and exact sealed process instance/revision.
+An intent is saved before shutdown; only a completed receipt written after
+owned-child shutdown and reservation release can acknowledge the operation.
+That acknowledgement survives keeper restart and reuse of its slot for a new
+model. Repeating it cannot stop the new model. A retired allocation ID cannot
+be used to load new work, and a different requester cannot retrieve its proof.
+An interrupted intent, missing/corrupt record, or failed peer remains unknown;
+these records do not prove that an arbitrary failed allocation was released.
+Newly started allocations also hold a shared kernel lifetime lock inherited by
+their owned engines, host and Edge descendants. Before spawning, the keeper
+persists an immutable birth record in `~/.lumabri/service/allocation-lifetimes`,
+binding the allocation, checkpoint, original requester, approved offer digest,
+layer range, Edge role and reserved bytes. A fresh exclusive lock proves that
+every inherited holder exited; reaping a parent alone does not. The original
+requester can query this proof over the authenticated, pinned donor channel.
+No PID from a journal is signalled and the query itself never stops an engine.
+Missing/corrupt records, old runtimes, live/suspended descendants and unreachable
+donors remain unknown. Such evidence cannot release a charge.
+
+Retirement journals use `LMBRET2` to distinguish explicit process-exit proofs
+(`exited_node_mask`) from live idle seals. Version 1 journals remain readable
+without inventing exit proofs. The host proof is tied to the plan's Edge donor;
+other participants must still seal or supply their own proof. All participants
+must confirm before the coordinator declares the allocation released. Do not
+downgrade a live controller to a binary that only reads version 1 journals.
+
 Journals are bounded to 256 operations of at most 4 KiB each plus one transaction
 file; at that limit new operations refuse to start rather than evicting evidence.
+Each donor's separate receipt store is also bounded to 256 entries of 168 bytes
+plus a transaction file and lock. If persistence fails after shutdown, its
+in-memory slot is retained for reconciliation rather than reused silently.
+Lifetime records are bounded to 4096 immutable entries of 188 bytes plus a
+directory lock. They are never automatically evicted or reused; reaching that
+limit refuses a new engine launch rather than deleting release evidence.
 
 This is a controlled release primitive, not automatic elasticity or cloud
 deprovisioning. It does not delete model checkpoints, CAS caches or chat history,

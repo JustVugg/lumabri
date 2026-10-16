@@ -9,6 +9,38 @@ execution, cross-platform numerical compatibility, or concurrent capacity.
 The managed-inference roadmap supersedes the older single-chat LAN checklist
 below. Historical observations remain here as evidence, not current promises.
 
+- [ ] Verified failed-allocation reclamation (local implementation): immutable
+  birth records and inherited kernel lifetime locks distinguish a terminated
+  allocation from an unreachable process. Authenticated proof survives keeper
+  restart and slot reuse without signalling journal PIDs or replaying approval.
+  Retirement v2 separates these proofs from live idle seals; all participants
+  must confirm before accounting releases the exact old charge. Unit tests
+  cover fork/exec descendants, reaped parents, unsafe/missing records, owner
+  authentication, held reservations, v1 migration and arbitrary replica-index
+  withdrawal. The October 17 local reduced-OLMoE gate passed replacement after
+  a real Segment crash, reclamation of the exact old allocation, continued
+  inference on the replacement and an independent model, and refusal to free
+  either of two frozen live hosts or exceed the replica limit. Fourteen
+  prepared engines reported effective native resident locks with no fallback.
+  ASan/UBSan/leak checks pass for lifetime and encrypted proof handling.
+  A second complete local gate also passed same-turn replay after a real
+  visible prefix, with byte-identical oracle output, no duplicated text and
+  the same reclamation/ceiling checks. The test-only codec proxy preserves the
+  lifetime descriptor in its real Edge child, matching production inheritance.
+  Native CI and merge remain pending; this entry is not release certification.
+
+- [ ] Durable donor retirement receipts (local candidate): an exact sealed
+  allocation's release acknowledgement survives slot reuse and keeper restart.
+  A persisted intent alone is not proof; only the original authenticated
+  requester can replay a completed receipt with the same process seal. Retired
+  IDs cannot load new work. The bounded private store refuses unsafe entries,
+  identity replacement, sync failure and automatic evidence eviction. Unit,
+  encrypted control and focused ASan/UBSan/leak checks pass. A local real
+  reduced-OLMoE flow retires one allocation, reloads an approved new one on the
+  donor, then queries the old release directly without disrupting the new
+  inference. Native CI and merge are pending. This does not yet reclaim an
+  arbitrary failed allocation whose owned-process exit was never proven.
+
 - [ ] Same-turn elastic recovery (local candidate): optional bounded API wait
   captures an already enabled policy's scope/revision and keeps the original
   model/numeric contract. The web exposes the wait and Stop; policy/credential

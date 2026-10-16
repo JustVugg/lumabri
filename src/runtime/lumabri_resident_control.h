@@ -3,6 +3,29 @@
 #ifndef LUMABRI_RESIDENT_CONTROL_H
 #define LUMABRI_RESIDENT_CONTROL_H
 #include "lumabri_node_control.h"
+/* Only a pinned donor's authenticated proof for this immutable allocation
+ * may replace live process fences. Old runtimes and unreachable peers return
+ * unknown, never success. This call does not release or interrupt work. */
+static int home_resident_exit_proof(const LmbResidentPlan *p,uint32_t i) {
+    if (!home_resident_plan_valid(p) || i>=p->execution.count) return -1;
+    uint64_t now=lmb_io_monotonic_ms(),prior=lmb_read_deadline_ms;
+    if (!now) return -1;
+    lmb_read_deadline_ms=prior && prior<now+3000 ? prior : now+3000;
+    int fd=lmb_connect_ms_io(p->execution.nodes[i].address,600,1800);
+    if (fd<0) { lmb_read_deadline_ms=prior; return -1; }
+    uint8_t body[64]; memcpy(body,p->allocation,32);
+    LmbMsg msg={0}; LmbAllocationLifetime proof;
+    const LmbExecutionNode *node=&p->execution.nodes[i];
+    int bad=lmb_unhex(body+32,p->root,32) || !lmb_secure_peer_matches(fd,p->peer_keys[i]) || lmb_auth(fd) ||
+        lmb_send(fd,LMB_HOME_EXIT_PROOF,body,sizeof body,NULL,0) ||
+        lmb_recv_bounded(fd,&msg,LMB_LIFETIME_BYTES,1800) || msg.pay_len || msg.op!=LMB_HOME_EXIT_PROOF_R ||
+        lmb_lifetime_decode(msg.body,msg.body_len,&proof) || memcmp(proof.allocation,p->allocation,32) ||
+        memcmp(proof.root,body+32,32) || memcmp(proof.requester,g_sec_pk,32) ||
+        proof.edge!=(uint32_t)node->edge || proof.begin!=node->begin || proof.end!=node->end ||
+        proof.reserved_bytes!=node->reserved_bytes;
+    lmb_msg_free(&msg); lmb_close(fd); lmb_read_deadline_ms=prior;
+    return bad ? -1 : 0;
+}
 static int home_resident_node_control(const LmbResidentPlan *p, uint32_t i, uint32_t action,
                                       const LmbNodeControl *expected, LmbNodeControl *out) {
     if (!home_resident_plan_valid(p) || !lmb_home_nonzero(p->allocation,32) ||

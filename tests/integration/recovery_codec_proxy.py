@@ -51,7 +51,15 @@ def main():
             directory.parent / "lib/lumabri/liblumabri.dylib") if p.is_file()), None)
         assert shim is not None, "candidate weight loader missing"
         child_env["DYLD_INSERT_LIBRARIES"] = str(shim.resolve())
-    child = subprocess.Popen([real, *sys.argv[1:]], env=child_env, stdin=sys.stdin.buffer, stdout=subprocess.PIPE)
+    # Popen closes inherited descriptors by default. The test proxy must
+    # preserve the production lifetime fence in the real Edge process too;
+    # its own exit must not falsely certify that the engine has exited.
+    lifetime = child_env.get("LUMABRI_ALLOCATION_LIFETIME_FD")
+    inherited = (int(lifetime),) if lifetime is not None else ()
+    if inherited:
+        assert inherited[0] >= 3 and os.get_inheritable(inherited[0])
+    child = subprocess.Popen([real, *sys.argv[1:]], env=child_env, stdin=sys.stdin.buffer,
+                             stdout=subprocess.PIPE, pass_fds=inherited)
     seen = set()
     fault = None
     generated = bytearray()
