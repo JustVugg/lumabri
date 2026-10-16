@@ -11,7 +11,8 @@ uses the [shared service operation](MODEL_PREPARATION_API.md), and approved
 capacity can follow the [elastic lifecycle](ELASTIC_REPLICAS.md). These do not
 turn this routing policy into a requirements-aware placement optimizer or
 demonstrate billed savings. A measured static-versus-managed cost comparison
-remains a release requirement.
+remains a release requirement. The reduced-model comparison below verifies the
+connected workflow with declared prices; it is not a datacenter savings study.
 
 ## Prepare comparable evidence
 
@@ -153,3 +154,49 @@ python3 tests/integration/household_service_flow_test.py \
   --models-dir MODELS --keep-requester --multi-model --sessions 4 \
   --api --replicas --portfolio-policy
 ```
+
+### Static versus managed placement gate
+
+This separate test prepares two checkpoint identities with real reduced OLMoE
+inference. The joint planner first places both on donor A. The test then
+explicitly approves a static alternative: one model on B, the other on A.
+Both portfolios coexist before measuring either, so their observations bind
+the same current contention and allocation inventory. Donor prices are fixture
+declarations (A: EUR 0.10/hour, B: EUR 0.30/hour), not provider measurements.
+
+```sh
+LUMABRI_RESIDENCY_POLICY=engine-locked \
+python3 tests/integration/household_service_flow_test.py \
+  --models-dir MODELS --joint complete --api-prepare \
+  --donor-ram-gb 2 --sessions 2 --placement-comparison
+```
+
+The gate records four-client overload outcomes separately from the two-client
+comparison. The gateway currently admits one active turn per allocation;
+two approved engine conversation slots do not mean two simultaneous gateway
+turns. BUSY responses remain in the denominator and cannot become passing
+capacity evidence. The comparison uses three rounds, eight output tokens and
+explicit 30-second fixture TTFT/gap limits, not production SLOs.
+
+It checks lower declared footprint selection, automatic whole-portfolio route
+publication, actual authenticated chat on both models, and unchanged reservations
+after routing. After explicitly disabling this experiment's policy, it retires
+only the obsolete static allocations. B must have zero allocations/reservations;
+both current models must remain on A. Retirement changes the workload identity,
+so old evidence must become obsolete and a new real measurement must pass.
+
+Each run emits `placement-comparison.json` in the printed artifact directory.
+It includes per-model TTFT/token-gap/completion tails, completed/rejected/failed
+counts, declared prices, selection, policy publication and post-retirement
+remeasurement. CI retains this JSON for Linux and native Intel/ARM macOS with
+and without OpenMP, without uploading access tokens or donor keys.
+
+The October 16 local run passed all six requests in each two-client comparison.
+The static portfolio's TTFT p95 was 87/90 ms for its two models; the co-located
+portfolio's was 88/109 ms. Their declared selected-machine footprints were
+EUR 0.40/hour and EUR 0.10/hour respectively. Both four-client probes reported
+six completions and six BUSY responses across three rounds. All eight prepared
+engines proved effective owned CPU allocation locks. This is a workflow result
+on tiny checkpoints and loopback, **not** a performance claim for full-size
+models or physical machines. The unused machine remains running; no invoice
+saving or server shutdown is claimed.
