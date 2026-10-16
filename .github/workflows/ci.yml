@@ -58,6 +58,9 @@ jobs:
           ./test_node_control
           make test_run_gate CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           ./test_run_gate
+          make test_api_access test_replica_admission CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
+          ./test_api_access
+          ./test_replica_admission
           make test_compute_broker CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           ./test_compute_broker
           make test_portfolio CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
