@@ -129,6 +129,12 @@ def main():
             assert request(method="POST", path="/api/v1/chat", body='{}', headers={"Content-Type": "application/json"})[0] == 400
             unauthorized = json.dumps({"model": "01" * 32, "messages": [{"role": "user", "content": "not sent"}], "max_tokens": 1})
             assert request(method="POST", path="/api/v1/chat", body=unauthorized, headers={"Content-Type": "application/json"})[0] == 403
+            for seconds in (-1, 121, True, "10", None):
+                payload = {**json.loads(unauthorized), "recovery_wait_seconds": seconds}
+                assert request(method="POST", path="/api/v1/chat", body=json.dumps(payload), headers=json_headers)[0] == 400
+            for seconds in (0, 1, 120):
+                payload = {**json.loads(unauthorized), "recovery_wait_seconds": seconds}
+                assert request(method="POST", path="/api/v1/chat", body=json.dumps(payload), headers=json_headers)[0] == 403
             for framing in ("Content-Length: 0\r\nContent-Length: 0\r\n", "Transfer-Encoding: chunked\r\n"):
                 with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
                     wire = f"POST /api/v1/chat HTTP/1.1\r\nHost: localhost:{port}\r\n{framing}\r\n"

@@ -124,6 +124,7 @@ static int api_find_plan(const char *tracker, const uint8_t allocation[32], LmbR
 #include "lumabri_workspace.h"
 #include "lumabri_management.h"
 #include "lumabri_preparation_api.h"
+#include "lumabri_recovery_wait.h"
 /* The local TUI has the process owner's authority, not a borrowed web user's
  * token. It invokes the same durable operation with a short observation
  * deadline; an interrupted observation never falls back to forced release. */
@@ -226,11 +227,13 @@ static int api_observed_error(void *opaque, const char *message) {
 }
 static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUser *user, const char *body, size_t length) {
     double started=nowd();
-    LmbJsonToken tokens[1024]; LmbJson j; int fields[3];
-    const char *const keys[]={"model","messages","max_tokens"}; char id[65]; uint8_t allocation[32]; uint32_t max_new;
-    if (lmb_json_parse(&j,body,length,tokens,1024) || lmb_json_fields(&j,0,keys,3,fields) ||
+    LmbJsonToken tokens[1024]; LmbJson j; int fields[4];
+    const char *const keys[]={"model","messages","max_tokens","recovery_wait_seconds"};
+    char id[65]; uint8_t allocation[32]; uint32_t max_new,wait_seconds=0;
+    if (lmb_json_parse(&j,body,length,tokens,1024) || lmb_json_fields(&j,0,keys,4,fields) ||
         fields[0]<0 || fields[1]<0 || fields[2]<0 || lmb_api_json_string(&j,(unsigned)fields[0],id,sizeof id) ||
-        strlen(id)!=64 || lmb_unhex(allocation,id,32) || lmb_json_uint(&j,(unsigned)fields[2],&max_new) || !max_new) {
+        strlen(id)!=64 || lmb_unhex(allocation,id,32) || lmb_json_uint(&j,(unsigned)fields[2],&max_new) || !max_new ||
+        (fields[3]>=0 && (lmb_json_uint(&j,(unsigned)fields[3],&wait_seconds) || wait_seconds>120))) {
         api_error(fd,400,"invalid_chat_request"); return;
     }
     if (!lmb_api_user_allows(user,allocation)) { api_error(fd,403,"model_not_authorized"); return; }
@@ -248,7 +251,9 @@ static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUs
     }
     api_demand_send(LMB_DEMAND_ADMIT,0,0,0);
     int seeded=engine.request_seed_supported;
-    int recoverable=(seeded || engine.greedy_only) && contract.count>1;
+    uint8_t recovery_key[32]; uint64_t recovery_until=0;
+    int wait_authorized=wait_seconds && contract.count && !api_recovery_capture(access_dir,&contract,recovery_key);
+    int recoverable=(seeded || engine.greedy_only) && (contract.count>1 || wait_authorized);
     uint64_t request_seed=0; if (seeded) lmb_random((uint8_t *)&request_seed,sizeof request_seed);
     uint8_t attempted[3][32]; uint32_t attempts=1;
     memcpy(attempted[0],selected->allocation,32);
@@ -290,9 +295,8 @@ static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUs
       }
       if (client_closed || api_stopping || stream.status==LMB_REPLY_DONE || stream.status==LMB_REPLY_ABORTED ||
           !recoverable || attempts>=3 || !(transport_failed || (stream.status==LMB_REPLY_ERROR && observed.retryable))) break;
-      /* Recheck revocation and the current model membership before sending
-       * any text again. A newly added replica is not implicitly adopted by
-       * an in-flight turn; the original immutable contract bounds recovery. */
+      /* Original replicas remain the default. Opt-in waiting can additionally
+       * use an unchanged, already enabled policy's approved replacements. */
       LmbApiUser current;
       if (lmb_api_user_load(access_dir,user->name,&current) || memcmp(current.digest,user->digest,sizeof user->digest) ||
           !lmb_api_user_allows(&current,allocation)) { snprintf(observed.error,sizeof observed.error,"Access revoked during recovery"); break; }
@@ -302,7 +306,15 @@ static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUs
       engine_stop(&engine); if (permit>=0) close(permit); permit=-1;
       status=api_model_open_ex(access_dir,tracker,allocation,max_new,&engine,&permit,selected,&error,
           &contract,&attempted[0][0],attempts,seeded,NULL);
-      if (status) { snprintf(observed.error,sizeof observed.error,"Replica unavailable; no other approved capacity can recover this response"); break; }
+      if (status && wait_authorized) {
+          if (!recovery_until) recovery_until=lmb_io_monotonic_ms()+(uint64_t)wait_seconds*1000;
+          status=api_recovery_wait(fd,access_dir,tracker,user,&contract,recovery_key,recovery_until,max_new,
+              &attempted[0][0],attempts,seeded,&engine,&permit,selected,&client_closed,&error);
+      }
+      if (status) {
+          snprintf(observed.error,sizeof observed.error,"%s",wait_authorized ? error :
+              "Replica unavailable; no other approved capacity can recover this response"); break;
+      }
       client.revents=0;
       if (poll(&client,1,0)!=0) { client_closed=1; break; }
       if (lmb_api_user_load(access_dir,user->name,&current) || memcmp(current.digest,user->digest,sizeof user->digest) ||

@@ -36,6 +36,7 @@ def main():
     parser.add_argument("--api-prepare", action="store_true", help="apply the joint plan through authenticated management API")
     parser.add_argument("--donor-policy", action="store_true", help="authorize bounded repeat placement on the donor, then retire and reload it")
     parser.add_argument("--elastic", action="store_true", help="real gateway pressure, replica preparation, drain, retirement and on-demand wake")
+    parser.add_argument("--elastic-recovery", action="store_true", help="wait within an interrupted turn for replacement capacity; requires a disposable codec proxy")
     parser.add_argument("--placement-comparison", action="store_true", help="compare two real joint placements with declared fixture prices, then apply the measured cost policy")
     parser.add_argument("--donor-ram-gb", type=float, default=0.5)
     parser.add_argument("--prepare-timeout", type=int, default=180)
@@ -47,6 +48,8 @@ def main():
         parser.error("--donor-policy requires --api-prepare --joint complete")
     if args.elastic and not args.donor_policy:
         parser.error("--elastic requires --donor-policy")
+    if args.elastic_recovery and (not args.elastic or not (args.runtime_dir / "segment_chat.real").is_file()):
+        parser.error("--elastic-recovery requires --elastic and a disposable recovery codec proxy")
     if args.placement_comparison and (not args.api_prepare or args.joint != "complete" or
             args.donor_policy or args.sessions != 2 or args.donor_ram_gb < 1.5):
         parser.error("--placement-comparison requires --api-prepare --joint complete --sessions 2 --donor-ram-gb >=1.5, without --donor-policy")
@@ -106,7 +109,7 @@ def main():
         if args.placement_comparison:
             e["LUMABRI_COST_PER_HOUR"] = "0.10" if name == "a" else "0.30"
             e["LUMABRI_COST_CURRENCY"] = "EUR"
-        if args.recovery:
+        if args.recovery or args.elastic_recovery:
             e["LUMABRI_TEST_RECOVERY_CONTROL"] = str(tmp / "recovery-control.json")
         return e
 
