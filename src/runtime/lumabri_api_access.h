@@ -42,15 +42,40 @@ static inline int lmb_api_access_dir(const char *path, int create) {
     if (lmb_api_private_fd(fd,1)) { close(fd); return -1; }
     return fd;
 }
+/* Separate lookup from exclusive creation. Native cold-start admission has
+ * returned ENOENT while acquiring this lock. Keep creation explicit: a concurrent creator is
+ * handled only through EEXIST: reopen the same anchored name, never unlink
+ * or replace a lock inode. A removed directory or unsafe entry still fails. */
+static inline int lmb_api_open_lockfile(int dir, const char *name) {
+    int flags=O_RDWR|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK;
+    for (unsigned attempt=0;attempt<4;attempt++) {
+        int fd=openat(dir,name,flags);
+        if (fd>=0) return fd;
+        if (errno==EINTR) continue;
+        if (errno!=ENOENT) return -1;
+        fd=openat(dir,name,flags|O_CREAT|O_EXCL,0600);
+        if (fd>=0) return fd;
+        if (errno!=EEXIST && errno!=EINTR) return -1;
+    }
+    errno=EAGAIN; return -1;
+}
 /* Keep this lock across each read/modify/atomic-save operation. */
 static inline int lmb_api_access_lock(int dir) {
-    int fd=openat(dir,"access.lock",O_RDWR|O_CREAT|O_NOFOLLOW|O_CLOEXEC,0600);
-    if (fd<0) return -1;
-    if (lmb_api_private_fd(fd,0) || flock(fd,LOCK_EX|LOCK_NB)) {
+    int fd=lmb_api_open_lockfile(dir,"access.lock");
+    if (fd<0) {
+        int saved=errno;
+        if (saved!=EAGAIN && saved!=EWOULDBLOCK) fprintf(stderr,"[api-lock] stage=open errno=%d\n",saved);
+        errno=saved; return -1;
+    }
+    int unsafe=lmb_api_private_fd(fd,0);
+    if (unsafe || flock(fd,LOCK_EX|LOCK_NB)) {
         /* Closing also runs transport cleanup in the gateway. Preserve the
          * lock error: contention is bounded BUSY, not a storage failure.
          * Unsafe files must never inherit a stale EWOULDBLOCK either. */
-        int saved=errno; close(fd); errno=saved; return -1;
+        int saved=errno;
+        if (unsafe || (saved!=EAGAIN && saved!=EWOULDBLOCK))
+            fprintf(stderr,"[api-lock] stage=%s errno=%d\n",unsafe ? "ownership" : "flock",saved);
+        close(fd); errno=saved; return -1;
     }
     return fd;
 }
@@ -152,7 +177,7 @@ static inline int lmb_api_user_permit(int dir, const char *name, unsigned limit)
     if (!lmb_api_username(name) || !limit || limit>8) return -1;
     for (unsigned i=0; i<limit; i++) {
         char path[48]; snprintf(path,sizeof path,"%s.slot-%u",name,i);
-        int fd=openat(dir,path,O_RDWR|O_CREAT|O_NOFOLLOW|O_CLOEXEC,0600);
+        int fd=lmb_api_open_lockfile(dir,path);
         if (fd<0) return -1;
         if (lmb_api_private_fd(fd,0)) { close(fd); return -1; }
         if (!flock(fd,LOCK_EX|LOCK_NB)) return fd;

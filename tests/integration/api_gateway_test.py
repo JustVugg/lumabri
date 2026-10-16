@@ -106,6 +106,31 @@ def main():
                             '{"action":"resume","id":"' + '01' * 32 + '","revision":1,"nodes":[]}'):
                 assert request(method="POST", path="/api/v1/elastic-policy", body=invalid, headers=json_headers)[0] == 400
             assert request(method="POST", path="/api/v1/elastic-policy", body=" " * 8193, headers=json_headers)[0] == 413
+            # Rejection arrives before the body: the request may already be
+            # in flight in another TCP packet. The close must preserve the
+            # HTTP response, not reset it. A second pipelined command is only
+            # discarded; it must never be executed as another request.
+            for _ in range(8):
+                with socket.create_connection(("127.0.0.1", port), timeout=3) as sock:
+                    header = (f"POST /api/v1/elastic-policy HTTP/1.1\r\nHost: localhost:{port}\r\n"
+                              f"Authorization: Bearer {token}\r\nContent-Type: application/json\r\n"
+                              "Content-Length: 8193\r\n\r\n")
+                    sock.sendall(header.encode())
+                    response = http.client.HTTPResponse(sock); response.begin()
+                    assert response.status == 413
+                    sock.sendall(b" " * 8193 + b"GET /api/v1/models HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                    sock.shutdown(socket.SHUT_WR)
+                    assert json.loads(response.read())["error"] == "management_request_too_large"
+                    response.close()
+                    assert sock.recv(1) == b"", "rejection close reset or parsed trailing bytes"
+            # A client that never finishes sending cannot hold cleanup open.
+            with socket.create_connection(("127.0.0.1", port), timeout=3) as sock:
+                sock.sendall(header.encode())
+                started = time.monotonic()
+                response = http.client.HTTPResponse(sock); response.begin()
+                assert response.status == 413
+                response.read(); response.close()
+                assert sock.recv(1) == b"" and time.monotonic() - started < 2
             for invalid in ('{}', '{"record":"one","record":"two"}',
                             '{"record":"../escape","ttft_ms":1,"gap_ms":1,"max_age_seconds":1,"models":[]}',
                             '{"models":[],"endpoint":"http://example.invalid"}'):
@@ -162,7 +187,7 @@ def main():
             server.terminate(); server.wait(timeout=10)
             errors = server.stderr.read().decode(); server.stderr.close()
             assert token not in errors
-    print("API GATEWAY: PASS (loopback, credentials, framing, origin, model grants, bounded users, disconnect and revoke)")
+    print("API GATEWAY: PASS (loopback, credentials, framing, bounded early-rejection close, origin, model grants, bounded users, disconnect and revoke)")
 
 
 if __name__ == "__main__":
