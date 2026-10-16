@@ -271,14 +271,15 @@ below. Historical observations remain here as evidence, not current promises.
   verifies effective locks across preparation, reload and wake; it does not
   weaken the separately tested observation guard or claim GPU/full-size support.
 
-- [ ] Joint placement search extension (under review): alternate node subsets,
+- [x] Joint placement search extension (#223): alternate node subsets,
   known-price ordering and residual-memory range refits, with explicit subset,
   state and refit limits. Deterministic regressions reproduce the old expensive
   single-node choice and false rejection of two models needing different cuts;
   32-node/eight-model bounds, allocation accounting and focused sanitizers pass.
   Local reduced OLMoE passes two-model, two-slot management-API preparation and
   real inference after TUI detach under owned CPU allocation locks. Shared
-  review/revalidation and TUI regression gates pass. Native CI remains required;
+  review/revalidation and TUI regression gates pass. All eight native checks
+  passed on `0196a42` before normal merge `d8e4104`;
   this is not yet requirements-based performance placement or billed savings.
   The first macOS ARM/OpenMP gate refused a compressed idle replica under the
   observation-only policy. Long-lived managed-replica CI now explicitly uses

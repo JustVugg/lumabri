@@ -1,101 +1,129 @@
-# Production release gate
+# Managed inference release checks
 
-The release gate separates correctness from the commercial speed claim. A
-green local CI run says the protocols, security boundaries and six adapter
-hooks still work. Only a distinct-host benchmark can say that more resident
-peers increased tokens per second.
+A green CI run validates a specific commit and test configuration. It does not
+certify every checkpoint, GPU, network or workload. Current evidence and
+remaining work are tracked in the [release ledger](docs/LAN_RELEASE_CHECKLIST.md).
+Do not turn a historical test into a claim about a different installed build.
 
-## Preflight a machine
+The release target is a resident inference service on **owned or authorized
+machines**: approved model allocations, isolated conversations, bounded
+admission, visible recovery and explicit resource limits. Public strangers,
+cloud provisioning and Kubernetes integration are not delivered by the
+household transport or the replica controller.
 
-Build or install Lumabri, then run:
+## Scope of a supported configuration
 
-```sh
-lumabri doctor --tracker 148.251.4.122:7300 --model /srv/models/MODEL --serve-port 7300
-lumabri doctor --json --tracker 148.251.4.122:7300 > doctor.json
-```
+Record the exact Lumabri and Colibri commits, build flags, operating systems,
+CPU/GPU hardware, backend actually used, checkpoint content identity, numeric
+class, layer placement, residency policy, context and conversation limits.
+Keep the initial/final resource inventory and test logs with those records.
 
-`doctor` exits non-zero for a missing required binary/library, unreadable
-model, unwritable state directory, unreachable requested tracker or occupied
-serve topology. Low RAM, swap, disk and optional Segment binaries are warnings:
-chat/Expert/CAS can remain correct while donation is paused or Segment is not
-installed. The JSON schema is versioned and suitable for deployment checks.
+Registration is not execution proof. Every advertised adapter/backend must pass
+its own oracle, memory and lifecycle checks. The pinned upstream adapters and
+Lumabri's resident DeepSeek V4.1 adapter have different contracts; see
+[backends](docs/HOUSEHOLD_BACKENDS.md) and [V4.1](docs/DEEPSEEK_V41.md).
+Household admission currently selects CPU execution. Detecting a GPU does not
+make GPU household inference supported.
 
-## Local release evidence
+Residency includes engine weights, required shared tables, state and scratch,
+not just checkpoint file size. Test the chosen memory policy under pressure.
+Preventing checkpoint reads alone does not prevent OS swap or compression.
+For `engine-locked`, require evidence of effective locks on owned CPU payloads;
+a denied lock is a failed preparation, not permission to silently switch policy.
+See [resident runtime](docs/RESIDENT_RUNTIME.md).
 
-```sh
-./production_gate.sh --engine ../colibri/c --output artifacts/rc-local
-```
+## Local and native CI evidence
 
-This runs exact patch anchors, Werror, the full integration suite,
-ASan/UBSan, and Segment Hybrid when the selected Colibri checkout exposes the
-additive ABI. Every step has a separate log and the final decision is written
-to `production-gate.json`. Colibri is copied only below `build/`; the selected
-checkout is never modified. Fixture generation requires the versioned Python
-packages in `requirements-test.txt`.
-
-ThreadSanitizer is available separately because some container runtimes cannot
-map its shadow memory:
-
-```sh
-make test-thread-sanitize
-```
-
-## Required multi-host release evidence
-
-Prepare the explicit SSH/command spec described in [SWARM_BENCH.md](SWARM_BENCH.md),
-then run:
+Build the complete household runtime, not only its interface:
 
 ```sh
-./production_gate.sh --engine ../colibri/c --output artifacts/rc-multihost \
-  --multi-host run.json --require-multihost
+make household swarm_probe ENGINE=/path/to/colibri/c
+make test ENGINE=/path/to/colibri/c
+make test-sanitize
 ```
 
-The gate records A (single-chat tok/s), B (aggregate tok/s at 1/2/4/8 clients)
-and C (Expert calls per peer), rejects any token-oracle mismatch, requires at
-least three measured peers and requires A to be at least 2x the faster of the
-local-Colibri and single-Lumabri baselines. It does not configure SSH, install
-keys, start somebody else's computer or infer that a connected-but-idle donor
-helped.
+Use the pinned Colibri revision in the README and installed test dependencies
+from `requirements-test.txt`. The build prepares its engine sources below
+`build/`; it must not edit the supplied Colibri checkout.
 
-For a long stability run, add seconds explicitly (259200 is 72 hours):
+The versioned CI workflow adds real reduced-checkpoint inference and verifies:
+
+- TUI request, all-party approval, preparation, READY and streamed output;
+- manager restart and TUI detach without replayed approvals or duplicate loads;
+- distinct resident models, isolated users and selective retirement;
+- 1/2/4/8 conversation slots, bounded overload, cancellation and cleanup;
+- whole-workload capacity measurements and invalidation after configuration changes;
+- actual web measurement, comparison, separate routing confirmation and chat;
+- replica growth, drain, release, dormant wake and interrupted-response replay;
+- loss of an explicitly owned engine, including Darwin's supervisor hierarchy;
+- native Intel/Apple Silicon builds with and without OpenMP, plus installed layouts.
+
+For example, with a compatible tiny OLMoE fixture already in
+`build/home-flow-models/olmoe-tiny`:
 
 ```sh
-./production_gate.sh --engine ../colibri/c --output artifacts/rc-soak \
-  --multi-host run.json --require-multihost --soak-seconds 259200
+LUMABRI_RESIDENCY_POLICY=engine-locked \
+python3 tests/integration/household_service_flow_test.py \
+  --models-dir build/home-flow-models --joint complete --api-prepare \
+  --donor-ram-gb 2 --sessions 2 --placement-comparison
 ```
 
-The soak repeats the exact oracle request, writes its result atomically and
-keeps every failure with the elapsed timestamp. A process crash, malformed
-JSON, token divergence or zero successful runs fails the release.
+This starts isolated local homes and real engines. Its declared machine prices
+are test inputs, not bills or demonstrated savings. Tiny synthetic output is
+not a model-quality benchmark. Loopback execution is not a physical-LAN test.
+The workflow contains the additional fault-proxy and browser setup; those
+tools belong in disposable test runtimes, never a shipped package.
 
-## Release checklist
+## Deployment acceptance
 
-1. Every stacked PR is reviewed and merged in order; no branch is skipped.
-2. `lumabri doctor --json` is green on origin, chatter and each donor.
-3. The local production gate artifact is attached to the release.
-4. The multi-host decision is green; report the measured speedup, never a
-   projected one.
-5. Run fault injection: dead Expert, dead Segment, relay-only donor, pressure
-   pause/recovery and occupied startup ports.
-6. Verify direct firewall ports and then verify relay-only operation with those
-   ports closed.
-7. Run the chosen soak period and retain its JSON.
-8. Confirm model licences allow redistribution before public CAS seeding.
-9. Publish the exact Lumabri commit, Colibri commit, compiler, ISA and numeric
-   profile used by the evidence.
+Before declaring a release supported, run its exact installed package on each
+advertised platform and deployment topology. At minimum:
 
-Rolling upgrades must follow [PROTOCOL_COMPATIBILITY.md](PROTOCOL_COMPATIBILITY.md);
-in particular, drain/migrate Segment sessions instead of changing a fenced
-placement underneath an active conversation.
+1. Verify package contents and hashes; test a clean install, update and rollback.
+   A matching manifest is not a release signature. macOS ad-hoc signing is not
+   notarization; WSL is not native Windows. See [native candidates](docs/NATIVE_CANDIDATES.md).
+2. Pair the actual machines, authenticate endpoints and verify direct data-path
+   connectivity. Keep firewalls enabled. Neither an outbound report nor LAN
+   discovery proves the donor is reachable for inference.
+3. Run a trained checkpoint through the approved resident path. Compare local
+   and distributed output under a documented compatible numerical contract.
+   Record participation and memory use; a connected donor is not proof it ran layers.
+4. Exercise two real models together, private conversations, overload, Stop and
+   selective unload. Report each session's first-text and inter-token timings,
+   completion and rejection counts, not just aggregate tok/s.
+5. Interrupt worker, host and coordinator separately. Verify recovery where an
+   authorized alternative exists, and an explicit incomplete conversation where
+   it does not. No duplicate text, automatic consent or inferred memory release.
+6. Test replica policies through a burst, cooldown and idle period. Confirm
+   existing work drains before release and that min/max and byte budgets hold.
+   Unreachable ownership stays charged until authoritatively reconciled.
+7. Run the documented sustained workload and retain every failure. Report its
+   duration and limits; a short probe is not sustained-capacity certification.
+8. Check costs against actual billing before claiming server savings. A lower
+   declared placement price or a routing change alone does not stop a server,
+   release storage or prove a cheaper bill. Provisioning requires a separately
+   authorized provider, credentials and spending cap.
 
-## Honest limits
+`lumabri doctor --json` supplies basic diagnostics, not this acceptance result:
+it still treats Segment binaries as optional for legacy installations. A
+managed-inference release requires both Segment services and their execution
+tests. The web/API remains loopback-only; exposing it to another network needs
+a separately designed and tested deployment boundary.
 
-- The executor sees activations; transport encryption is not confidential
-  computing.
-- Current Colibri Segment engines serialize one opaque engine instance. The
-  range pipeline and replicas provide safe multi-chat parallelism; unrelated
-  sessions are not fused and labelled continuous batching.
-- A READY peer can be ignored when its predicted completion is worse than the
-  fallback. More connected peers is not itself proof of more speed.
-- Public operation still needs an abuse policy, operator monitoring and model
-  licence review even when all technical gates pass.
+All required checks must pass on the final PR head before normal merge. Retain
+native job results and the final package manifest with release evidence.
+Rolling changes must follow [protocol compatibility](PROTOCOL_COMPATIBILITY.md);
+do not replace a fenced placement underneath an active conversation.
+
+## Legacy Expert performance tools
+
+`production_gate.sh` and `production_check.py` remain developer regression and
+Expert speed-claim tools. Their names do **not** mean the managed release above
+has passed. With no multi-host specification, the script explicitly skips that
+evidence. Its optional multi-host check still requires three measured peers
+and a 2x single-chat speedup over its baselines. This is the legacy experiment's
+acceptance condition, not a promise or release requirement that adding any
+computer must double a resident Segment chat's speed.
+
+Existing experiments may use [SWARM_BENCH.md](SWARM_BENCH.md). They do not replace
+managed multi-model, privacy, residency, fault, package or cost validation.
