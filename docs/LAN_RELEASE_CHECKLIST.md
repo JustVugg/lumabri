@@ -226,6 +226,17 @@ below. Historical observations remain here as evidence, not current promises.
   review/revalidation and TUI regression gates pass. Native CI remains required;
   this is not yet requirements-based performance placement or billed savings.
 
+- [ ] Connected static/managed comparison (under review): two real reduced
+  OLMoE checkpoints, two explicitly approved placements, observed joint timing,
+  declared-price selection and automatic portfolio publication. The October 16
+  local gate passes actual chat after selection, unchanged RAM on rerouting,
+  selective retirement, a completely freed donor and invalidation/renewal of
+  co-resident workload evidence. Four-client BUSY outcomes remain in the report;
+  six of six requests pass on the admitted two-client workload in each plan.
+  Eight engines prove effective owned CPU locks. Native CI remains required.
+  Prices are test declarations; no paid machine is stopped or billed saving
+  claimed. See [comparison gate](PORTFOLIO_POLICY.md#static-versus-managed-placement-gate).
+
 - [x] Runtime/preflight PR #151: installed engine thread-capacity query; no-OpenMP
   single-thread execution; adaptive RAM reserve; acknowledged actionable
   failure; pre-index donor reachability; build-option invalidation.

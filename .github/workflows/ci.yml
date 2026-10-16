@@ -246,6 +246,7 @@ jobs:
             LUMABRI_TEST_BROWSER=1 python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint "$outcome" --api-prepare --donor-ram-gb 1 --sessions 2
           done
           LUMABRI_TEST_BROWSER=1 LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-policy --donor-ram-gb 1.5 --sessions 2 --elastic
+          LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-ram-gb 2 --sessions 2 --placement-comparison
           make segment_budget_probe
           python3 tests/integration/planner_tensor_contract_test.py --family olmoe --model build/home-flow-models/olmoe-tiny
           make swarm_probe
@@ -425,6 +426,13 @@ jobs:
           name: household-candidate-linux
           path: lumabri/build/lumabri-linux-candidate.tar.gz
           retention-days: 7
+      - name: Keep the declared-cost comparison report (no credentials)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: placement-comparison-linux
+          path: /tmp/lmb-service-flow-*/placement-comparison.json
+          retention-days: 7
   macos-household:
     # Real native CPU engines + signed CAS + approvals + streaming. Loopback
     # coverage does not replace the macOS 12.6 / physical household LAN test.
@@ -440,8 +448,9 @@ jobs:
         openmp: [enabled, disabled]
     runs-on: ${{ matrix.runner }}
     # The real elastic gate includes a complete demand window and idle grace
-    # for both scale-downs; keep those production timers, not fake test time.
-    timeout-minutes: 45
+    # for both scale-downs, plus the two-portfolio comparison. Keep production
+    # timers and inference rather than replacing them with fake test time.
+    timeout-minutes: 50
     steps:
       # runner.temp is available to steps, not job-level env expressions.
       # Keep all household logs where the failure artifact collects them.
@@ -529,6 +538,7 @@ jobs:
           python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --donor-ram-gb 1 --sessions 2
           python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-ram-gb 1 --sessions 2
           LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-policy --donor-ram-gb 1.5 --sessions 2 --elastic
+          LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-ram-gb 2 --sessions 2 --placement-comparison
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --repeat-cached --clear-cached --expect-metrics --expect-calibration
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --kill-donor
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --expect-selected-no-fit
@@ -644,6 +654,13 @@ jobs:
         with:
           name: household-candidate-${{ matrix.runner }}-${{ matrix.openmp }}
           path: lumabri/build/lumabri-macos-candidate.tar.gz
+          retention-days: 7
+      - name: Keep the declared-cost comparison report (no credentials)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: placement-comparison-${{ matrix.runner }}-${{ matrix.openmp }}
+          path: ${{ runner.temp }}/lmb-service-flow-*/placement-comparison.json
           retention-days: 7
       - uses: actions/upload-artifact@v4
         if: failure()
