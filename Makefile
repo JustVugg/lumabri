@@ -628,6 +628,7 @@ test-api-gateway: lumabri test_chat_ui test-chat-history
 	./test_chat_ui demand-codec
 	python3 tests/integration/api_gateway_test.py
 	python3 tests/integration/api_service_test.py
+	python3 tests/integration/owned_engine_process_test.py
 	python3 tests/integration/chat_history_test.py
 
 test: test-api-gateway
