@@ -774,6 +774,38 @@ certify a large-model LAN, datacenter workload or remote browser deployment.
 
 ## Browser chat and private history
 
+### Measure and compare from the workspace
+
+In **Computers & models → Measure & compare**, an operator can inspect saved
+historical measurements. Management permission is required to run or check
+measurements, compare plans, remove observations or change model routing.
+Refreshing the list does not turn historical evidence into a current result.
+
+Choose one already approved allocation per model, in the same order for each
+plan being compared. Set concurrent clients, rounds and output tokens, then
+confirm **Run measurement**. This is real inference and competes with other
+work; it never downloads, prepares or unloads weights. Stop or navigating away
+cancels only this probe. Cleanup may take time; refresh records afterwards to
+inspect a possibly incomplete observation. There is no automatic retry.
+
+Check first-text and token-gap limits and maximum evidence age, or compare a
+baseline with up to seven other records. Only a passing live check exposes
+routing review. Select the corresponding managed models in measured order,
+then confirm the change. Exact model revisions and checkpoint contracts are
+checked again server-side; all model routes change together or none do.
+Current turns continue and weights stay resident. This does not retire old
+allocations, stop servers or establish billed savings.
+
+Every observation now includes `observation_id`, the SHA-256 of its canonical
+stored evidence (distinct from the runtime configuration `fingerprint`). The
+browser echoes it in `POST /api/v1/capacity/apply`; a different observation
+recreated under the same record name is rejected before routing changes.
+The field is optional for existing API clients that deliberately apply the
+current named observation, but must be supplied by review/confirmation UIs.
+Policy-driven application retains its existing evidence and price fences.
+
+### Chat and history
+
 After `api start`, open the printed loopback URL and enter the token from
 `user-add`. No separate web server, JavaScript build chain, external font or
 CDN is involved: HTML, CSS, JavaScript and the repository logo are compiled

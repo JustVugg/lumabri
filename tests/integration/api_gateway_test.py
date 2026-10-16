@@ -73,6 +73,11 @@ def main():
             for path in capacity_paths:
                 assert request(method="POST", path=path, body="{}", headers=json_headers)[0] == 403
             assert cli("manage-grant", "alice").returncode == 0
+            application = {"record": "sample", "ttft_ms": 1000, "gap_ms": 200, "max_age_seconds": 300,
+                           "models": [{"id": "01" * 32, "revision": 1}]}
+            for digest in ("", "a" * 63, "z" * 64, True):
+                assert request(method="POST", path=management_path, body=json.dumps({**application, "observation_id": digest}),
+                               headers=json_headers)[0] == 400
             valid_capacity = {"record": "sample", "clients": 1, "rounds": 3, "max_tokens": 8, "allocations": ["01" * 32]}
             invalid_capacity = ["{}", '{"record":"one","record":"two"}',
                 json.dumps({**valid_capacity, "endpoint": "http://example.invalid"}),

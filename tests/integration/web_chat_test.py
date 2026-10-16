@@ -14,6 +14,7 @@ import tempfile
 import time
 from playwright.async_api import Error as PlaywrightError, async_playwright, expect
 from web_elastic_test import elastic_workspace
+from web_capacity_test import capacity_workspace
 
 ROOT = Path(__file__).resolve().parents[2]
 MODEL = "01" * 32
@@ -459,6 +460,24 @@ async def exercise(port, alice, bob, artifacts, env):
         await page.screenshot(path=str(artifacts / "web-mobile.png"))
         assert not failures, failures
         await elastic_workspace(browser, port, bob, env, artifacts)
+        await capacity_workspace(browser, port, bob, env, artifacts)
+        # Documentation image: real compiled UI with explicitly labelled
+        # example conversation, not a claim about model output quality.
+        preview = await browser.new_page(viewport={"width": 1365, "height": 900})
+        await preview.route("**/api/v1/models", lambda route: route.fulfill(json={"models": [
+            {"id": MODEL, "name": "OLMoE · interface example", "adapter": "olmoe", "max_tokens": 256}]}))
+        response = await preview.request.post(f"http://127.0.0.1:{port}/api/v1/conversations",
+            headers={"Authorization": "Bearer " + bob}, data={"revision": 0, "conversation": {
+                "model": MODEL, "title": "A place for your ideas", "state": "complete", "messages": [
+                    {"role": "user", "content": "Help me plan a quiet weekend in the garden."},
+                    {"role": "assistant", "content": "Keep it simple: one useful task, something to enjoy, and time to rest.\n\nStart with an hour of planting or tidying while it is cool. Make lunch outside, then leave the afternoon free for a book or a walk.\n\nWhat would you most like to grow?"}]}})
+        assert response.ok, await response.text()
+        await preview.goto(f"http://127.0.0.1:{port}/")
+        await preview.locator("#token").fill(bob); await preview.locator("#login-form button").click()
+        await preview.get_by_role("button", name="A place for your ideas", exact=True).click()
+        await expect(preview.locator("#messages .assistant .content")).to_contain_text("Keep it simple")
+        await preview.screenshot(path=str(artifacts / "web-chat-preview.png"))
+        await preview.close()
         await browser.close()
 
 

@@ -7,6 +7,7 @@
   <title>Lumabri — Your conversations</title>
   <link rel="icon" href="/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/app.css">
+  <script src="/capacity.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -86,6 +87,36 @@
           </form>
           <div id="elastic-review" class="workspace-grid"></div>
           <button id="elastic-apply" class="primary" hidden>Apply reviewed policy</button>
+        </section>
+        <section id="capacity" aria-label="Measure model capacity">
+          <h2>Measure &amp; compare</h2>
+          <p class="muted">Run a short, explicit workload on already approved models. Measurements include rejected requests; they are observations, not a speed guarantee. This does not load or release weights.</p>
+          <button id="capacity-refresh" class="text-button">Refresh measurements</button>
+          <p id="capacity-status" role="status"></p>
+          <details id="capacity-measure-details" hidden><summary>New measurement</summary>
+            <form id="capacity-form">
+              <label>Record name <input id="capacity-name" maxlength="32" pattern="[a-z0-9_-]{1,32}" autocomplete="off" required placeholder="evening-baseline"></label>
+              <fieldset><legend>Ordered model allocations</legend><p class="muted">Choose one allocation per model in the same order for every plan you compare. Clients take turns across this list.</p><div id="capacity-slots"></div><button id="capacity-add" type="button" class="text-button">Add model</button></fieldset>
+              <div class="prepare-options"><label>Concurrent clients <input id="capacity-clients" type="number" min="1" max="8" value="1" required></label><label>Rounds <input id="capacity-rounds" type="number" min="1" max="16" value="3" required></label><label>Output tokens per request <input id="capacity-tokens" type="number" min="2" max="512" value="8" required></label></div>
+              <button type="submit" class="primary">Run measurement</button>
+            </form>
+          </details>
+          <button id="capacity-stop" class="text-button danger" hidden>Stop measurement</button>
+          <progress id="capacity-progress" max="1" value="0" hidden aria-label="Completed measurement rounds"></progress>
+          <div id="capacity-records" class="workspace-grid"></div>
+          <form id="capacity-compare" hidden>
+            <h3>Check against your limits</h3>
+            <div class="prepare-options"><label>First text p95 (ms) <input id="capacity-ttft" type="number" min="1" max="3600000" value="1000" required></label><label>Token gap p95 (ms) <input id="capacity-gap" type="number" min="1" max="3600000" value="200" required></label><label>Maximum evidence age (seconds) <input id="capacity-age" type="number" min="1" max="86400" value="300" required></label></div>
+            <label>Baseline <select id="capacity-baseline" required><option value="">Choose a record</option></select></label>
+            <fieldset><legend>Other measured plans</legend><div id="capacity-candidates"></div></fieldset>
+            <button type="submit" class="text-button">Compare measured plans</button>
+          </form>
+          <div id="capacity-result" class="workspace-grid" aria-live="polite"></div>
+          <form id="capacity-apply-form" hidden>
+            <h3>Apply to future conversations</h3><p class="muted">Match each measured allocation to its managed model. This replaces those models' replica routes atomically; active turns continue. No RAM is released and no server is shut down.</p>
+            <div id="capacity-route-models"></div><button type="submit" class="text-button">Review and apply routing</button>
+          </form>
+          <p class="fine-print">Historical records are not revalidated by refreshing this list. Checking and applying revalidate the exact configuration. Prices describe the selected whole machines, not a bill or realized savings.</p>
         </section>
         <h2>Saved allocations</h2><p class="muted">An allocation is not a health check. Hosts and approvals are checked again before each request.</p>
         <div id="workspace-allocations" class="workspace-grid"></div>

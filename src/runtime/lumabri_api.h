@@ -69,6 +69,7 @@ static int api_web(int fd, const LmbApiHttp *request) {
     if (!strcmp(request->path,"/")) { data=lmb_web_html; size=sizeof lmb_web_html-1; type="text/html; charset=utf-8"; }
     else if (!strcmp(request->path,"/app.css")) { data=lmb_web_css; size=sizeof lmb_web_css-1; type="text/css; charset=utf-8"; }
     else if (!strcmp(request->path,"/app.js")) { data=lmb_web_js; size=sizeof lmb_web_js-1; type="text/javascript; charset=utf-8"; }
+    else if (!strcmp(request->path,"/capacity.js")) { data=lmb_web_capacity_js; size=sizeof lmb_web_capacity_js-1; type="text/javascript; charset=utf-8"; }
     else if (!strcmp(request->path,"/logo.svg")) { data=lmb_web_logo; size=sizeof lmb_web_logo-1; type="image/svg+xml"; }
     if (!data) return 0;
     char header[1024];

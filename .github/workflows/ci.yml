@@ -249,7 +249,7 @@ jobs:
             LUMABRI_TEST_BROWSER=1 python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint "$outcome" --api-prepare --donor-ram-gb 1 --sessions 2
           done
           LUMABRI_TEST_BROWSER=1 LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-policy --donor-ram-gb 1.5 --sessions 2 --elastic
-          LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-ram-gb 2 --sessions 2 --placement-comparison
+          LUMABRI_TEST_BROWSER=1 LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-ram-gb 2 --sessions 2 --placement-comparison
           make segment_budget_probe
           python3 tests/integration/planner_tensor_contract_test.py --family olmoe --model build/home-flow-models/olmoe-tiny
           make swarm_probe
@@ -434,7 +434,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: placement-comparison-linux
-          path: /tmp/lmb-service-flow-*/placement-comparison.json
+          path: |
+            /tmp/lmb-service-flow-*/placement-comparison.json
+            /tmp/lmb-service-flow-*/browser-capacity-real-olmoe.*
           retention-days: 7
   macos-household:
     # Real native CPU engines + signed CAS + approvals + streaming. Loopback
