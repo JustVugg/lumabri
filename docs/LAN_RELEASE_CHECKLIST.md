@@ -9,6 +9,19 @@ execution, cross-platform numerical compatibility, or concurrent capacity.
 The managed-inference roadmap supersedes the older single-chat LAN checklist
 below. Historical observations remain here as evidence, not current promises.
 
+- [ ] Shared capacity management API (under review): authenticated historical
+  listing, explicit inference measurement with progress/cancellation, live
+  checking, whole-portfolio comparison and observation removal. The CLI and
+  HTTP consume the same C operations; no command execution or stdout parsing.
+  The October 16 local reduced-OLMoE placement gate passes streamed results,
+  concurrent-probe refusal, disconnect cleanup, unchanged resident budgets,
+  CLI/HTTP selection agreement and separation from production-demand counters.
+  Strict API authorization/schema tests and all API unit tests pass. The
+  four-slot managed-replica/recovery/portfolio gate also passes with nine
+  prepared engines under effective owned-payload locks. Native CI and the
+  browser measurement controls are still required; this is not release or
+  production-capacity certification.
+
 - [x] Persistent manager and allocation keepers (#183): TUI detach and manager
   restart do not replay approvals or reload live resident allocations.
 - [x] Colibri 1.12.1 integration (#184), resource/link/preparation observations
