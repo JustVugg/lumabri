@@ -532,6 +532,7 @@ jobs:
       - name: Request, accept, fetch weights and chat on native macOS
         working-directory: lumabri
         run: |
+          python3 tests/integration/owned_engine_process_test.py
           ./test_backend_routes
           make test_segment_close ENGINE=../colibri/c
           ./test_segment_close

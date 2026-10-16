@@ -108,7 +108,11 @@ Up to four model allocations can coexist on one donor within its total budget;
 each plan explicitly reserves 1–8 isolated conversation slots. Compute uses
 bounded queues, not a promise that every slot runs at the single-user speed.
 Exhausted capacity returns `BUSY` rather than replacing a running model.
-Automatic household recovery after losing a donor is not implemented yet.
+An ordinary household plan does not automatically replace a lost donor.
+For managed API models, opt-in [replica policies](docs/ELASTIC_REPLICAS.md)
+can restore capacity within approved limits after repeated availability
+failures. Preparation still requires donor permission and spare capacity;
+this does not promise an uninterrupted response.
 
 The donor queries its installed Segment runtime before sharing. A runtime
 built without OpenMP uses one execution thread; CPU core count is not a

@@ -41,6 +41,9 @@ The **Replica automation** panel shows saved limits, current phase, pending
 operation and allocation, reserved memory and the controller's reason. These
 are policy observations, not a live health or throughput certificate. Operators
 without management permission can read this panel but cannot change it.
+Per-allocation availability observations include their timestamp and consecutive
+failed checks. An old observation is not current health; unknown and draining
+are distinct from unreachable. No failed check removes a memory reservation.
 Management users can pause, resume or reconcile a preparation using the same
 revision-fenced API as the CLI. Pausing does not release memory or erase an
 in-progress retirement. Closing the page does not stop the controller.
@@ -132,6 +135,39 @@ repeated unloading immediately after activity.
 There is no hidden unbounded cold-start queue or completed reply promised to
 the initial request.
 
+### Restoring unavailable replicas
+
+The controller queries one replica per policy per tick through its authenticated
+host and Segment control channels, with a two-second shared read deadline
+and the existing bounded connection timeouts.
+It does not open an inference slot, so a busy but accepting model remains
+available. Three failed checks, at least five seconds apart, are required
+before an unreachable replica stops satisfying the resident minimum. A successful
+check, observation gap longer than two minutes, changed route, or restarted
+gateway resets that failure evidence. Deliberate draining is not a crash.
+
+If the remaining potentially available replicas cannot satisfy `min_replicas`,
+the controller prepares a replacement after the normal cooldown. For an
+on-demand model, recent authorized demand can request one available replica.
+The existing selected-node, source identity, memory admission and donor approval
+rules apply. No policy means no automatic replacement.
+
+**Keep recovery headroom in both limits.** The old allocation still counts
+towards `max_replicas` and `max_reserved_bytes`, even when unreachable. A
+replacement is appended only after its real runtime and model contract have
+been checked. Missing contact is not proof that weights were unloaded. If
+headroom or donor permission is unavailable, the controller reports the reason;
+it does not exceed the budget, discard ownership or silently approve an offer.
+The old reservation remains visible for operator reconciliation. Scale-down
+does not remove a healthy replacement while counting a failed replica as the
+minimum; unknown or stale health also prevents idle release.
+
+This restores capacity for **subsequent requests**. An interrupted response is
+still reported as interrupted, with its conversation preserved; it is not
+silently replayed on a newly added machine. In-flight replay remains limited to
+replicas authorized when that turn started. Recovery onto a newly prepared
+replica during the same turn is a separate, unfinished step.
+
 ## Crash and concurrency behavior
 
 Each model has a private, checksummed, atomically replaced lifecycle record.
@@ -147,6 +183,11 @@ An uncertain preparation is not restarted with another operation ID.
 Pending allocations and uncertain retirements remain charged against the
 policy budget. Machine-wide admission also accounts for other models and
 preserves the system reserve.
+
+Policy records use format `LMBELA02`. Existing `LMBELA01` records are read with
+unknown availability and retain their complete ownership/operation state.
+Older binaries refuse the newer record instead of silently losing recovery
+observations; do not downgrade a live controller's state file in place.
 
 Scale-down first withdraws the exact replica from the model's route, then
 drains and seals the authenticated host and Segment nodes, and only then
@@ -206,7 +247,10 @@ The full real-engine fixture additionally tests demand-driven preparation,
 donor approval, publication, inference on the new replica, another independent
 model, API restart, drain with an admitted TUI generation waiting for the real
 donor compute permit, release after that generation completes, a dormant model
-waking with the same ID/grants, and a manual-route-change fence:
+waking with the same ID/grants, a real Segment child termination followed by
+approved replacement without discarding the failed allocation's reservation,
+host termination at the hard replica ceiling with controlled refusal and no
+third allocation, and a manual-route-change fence:
 
 ```sh
 LUMABRI_RESIDENCY_POLICY=engine-locked \
