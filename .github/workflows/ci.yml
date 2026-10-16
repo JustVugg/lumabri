@@ -238,8 +238,11 @@ jobs:
             trap 'mv -f segment_chat.real segment_chat' EXIT
             python3 tests/integration/recovery_proxy_install_test.py
             python3 tests/integration/recovery_codec_proxy.py --install segment_chat
-            python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester --multi-model --sessions 1 --api --replicas --recovery
-            LUMABRI_TEST_BROWSER=1 python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester --multi-model --sessions 4 --api --replicas --recovery --portfolio-policy
+            # Long-lived idle replicas need the owned-payload lock contract,
+            # not a hope that the shared runner never compresses a process.
+            # The flow asserts effective locks on every prepared engine.
+            LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester --multi-model --sessions 1 --api --replicas --recovery
+            LUMABRI_TEST_BROWSER=1 LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester --multi-model --sessions 4 --api --replicas --recovery --portfolio-policy
           )
           for outcome in complete reject cancel; do
             python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint "$outcome" --donor-ram-gb 1 --sessions 2
@@ -533,7 +536,9 @@ jobs:
             trap 'mv -f segment_chat.real segment_chat' EXIT
             python3 tests/integration/recovery_proxy_install_test.py
             python3 tests/integration/recovery_codec_proxy.py --install segment_chat
-            python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester --multi-model --sessions 4 --api --replicas --recovery --portfolio-policy
+            # Exercise persistent replicas with actual payload locks. The
+            # observation-only compression guard remains independently tested.
+            LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester --multi-model --sessions 4 --api --replicas --recovery --portfolio-policy
           )
           python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --donor-ram-gb 1 --sessions 2
           python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-ram-gb 1 --sessions 2
