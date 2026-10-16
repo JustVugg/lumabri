@@ -212,6 +212,75 @@ static void test_retired_acknowledgements(void) {
     puts("HOME RETIRED ACK: PASS (uncommitted intent refused, durable release, slot reuse, restart, original owner and seal, old allocation cannot reload)");
 }
 
+static void test_allocation_exit_proof(void) {
+    uint8_t seed[32]={0x35},other_seed[32]={0x36},other_pk[32],other_sk[64];
+    lmb_sign_keypair(g_sec_pk,g_sec_sk,seed); lmb_sign_keypair(other_pk,other_sk,other_seed);
+    lmb_enc_wrap=lmb_sec_wrap_hook; lmb_enc_send=lmb_sec_send_hook;
+    lmb_enc_recv=lmb_sec_recv_hook; lmb_enc_forget=lmb_sec_forget_hook;
+    setenv("LUMABRI_TOKEN","monitor-test-only",1);
+    HomeDonor d={.client=-1,.lease=-1,.weight_lease=-1,.node_control=-1,.segment_ready=-1,.host_ready=-1};
+    d.transaction.offer=(LmbHomeOffer){.id={71},.model_root={72},.edge_peer={73},.layers=4,.end=2,
+        .context=64,.threads=1,.max_new=8,.ram_bytes=1u<<28,.disk_bytes=1u<<20,.model_bytes=1u<<26,
+        .tracker="127.0.0.1:1",.model="test-lifetime",.model_type="olmoe"};
+    memcpy(d.transaction.offer.requester,g_sec_pk,32);
+    d.transaction.phase=LMB_HOME_SEGMENT_READY; d.transaction.reservation_held=1;
+    assert(!home_lifetime_begin(&d));
+    int held=dup(d.lifetime_fd_plus_one-1); assert(held>=0);
+    home_donor_release(&d,LMB_HOME_FAILED,"test engine stopped");
+    assert(d.release_pending && d.transaction.reservation_held && d.lifetime_started);
+    LmbHomeOffer old=d.transaction.offer;
+    for (unsigned mode=0;mode<8;mode++) {
+        if (mode==1) {
+            close(held); home_donor_release(&d,LMB_HOME_CLOSED,"should preserve the first cause");
+            assert(!d.release_pending && !d.transaction.reservation_held && !d.lifetime_started &&
+                d.transaction.phase==LMB_HOME_FAILED && !strcmp(d.transaction.reason,"test engine stopped"));
+        }
+        int pair[2]; assert(!socketpair(AF_UNIX,SOCK_STREAM,0,pair));
+        IdleOffer o={.fd=pair[1],.donor={.client=-1,.lease=-1,.weight_lease=-1,
+            .node_control=-1,.segment_ready=-1,.host_ready=-1}};
+        if (mode==0) o.donor=d;
+        if (mode==2) {
+            o.donor.transaction.offer=old; o.donor.transaction.offer.id[0]=74;
+            o.donor.transaction.reservation_held=1; o.donor.retained=1;
+            o.donor.transaction.phase=LMB_HOME_SEGMENT_READY;
+        }
+        pthread_t server; assert(!pthread_create(&server,NULL,complete_offer_server,&o));
+        LmbSecure client;
+        assert(!lmb_secure_handshake(pair[0],1,mode==4 ? other_sk : g_sec_sk,mode==4 ? other_pk : g_sec_pk,&client));
+        lmb_set_io_timeout(pair[0],3000);
+        LmbBuf auth={0}; assert(!lmb_buf_str(&auth,"monitor-test-only"));
+        assert(!lmb_secure_send(&client,pair[0],LMB_AUTH,auth.p,auth.len,NULL,0)); free(auth.p);
+        LmbMsg reply={0}; assert(!lmb_secure_recv(&client,pair[0],&reply) && reply.op==LMB_OK); lmb_msg_free(&reply);
+        if (mode==7) {
+            LmbBuf offer={0}; assert(!lmb_home_offer_pack(&offer,&old));
+            assert(!lmb_secure_send(&client,pair[0],LMB_HOME_OFFER,offer.p,offer.len,NULL,0)); free(offer.p);
+        } else {
+            uint8_t body[64]; memcpy(body,old.id,32); memcpy(body+32,old.model_root,32);
+            if (mode==5) body[32]^=1;
+            if (mode==6) body[0]^=1;
+            assert(!lmb_secure_send(&client,pair[0],LMB_HOME_EXIT_PROOF,body,sizeof body,NULL,0));
+        }
+        int rc=lmb_secure_recv(&client,pair[0],&reply);
+        if (mode>=1 && mode<=3) {
+            LmbAllocationLifetime proof;
+            assert(!rc && reply.op==LMB_HOME_EXIT_PROOF_R && !reply.pay_len &&
+                !lmb_lifetime_decode(reply.body,reply.body_len,&proof) &&
+                !memcmp(proof.allocation,old.id,32) && !memcmp(proof.requester,g_sec_pk,32));
+        } else if (mode==7) assert(!rc && reply.op==LMB_HOME_STATUS && reply.body_len>=40 &&
+            lmb_get32(reply.body+36)==LMB_HOME_REJECTED);
+        else assert(rc);
+        lmb_msg_free(&reply); pthread_join(server,NULL); lmb_close(pair[0]); lmb_close(pair[1]);
+        if (mode==0) assert(o.donor.release_pending && o.donor.transaction.reservation_held);
+        if (mode==2) assert(o.donor.retained && o.donor.transaction.reservation_held && o.donor.transaction.offer.id[0]==74);
+    }
+    char service[1200],name[80]; assert(!home_service_directory(service,sizeof service));
+    int dir=lmb_lifetime_dir(service,0); assert(dir>=0); lmb_lifetime_name(old.id,name);
+    assert(!unlinkat(dir,name,0) && !unlinkat(dir,"lock",0)); close(dir);
+    int base=open(service,O_RDONLY|O_DIRECTORY); assert(base>=0);
+    assert(!unlinkat(base,"allocation-lifetimes",AT_REMOVEDIR)); close(base);
+    puts("HOME EXIT PROOF: PASS (held descendants retain budget, authenticated final proof, slot reuse/restart, old ID refused, unrelated allocation unchanged)");
+}
+
 static void *monitor_donor(void *arg) {
     MonitorDonor *d = arg;
     while (!atomic_load(&d->stop)) {
@@ -258,6 +327,9 @@ int main(int argc, char **argv) {
     assert(mkdtemp(temporary) && !setenv("HOME",temporary,1));
     if (argc==2 && !strcmp(argv[1],"retired-receipts")) {
         signal(SIGPIPE,SIG_IGN); test_retired_acknowledgements(); goto cleanup;
+    }
+    if (argc==2 && !strcmp(argv[1],"allocation-lifetime")) {
+        signal(SIGPIPE,SIG_IGN); test_allocation_exit_proof(); goto cleanup;
     }
     assert(argc==1);
     test_connection_reasons();
@@ -310,6 +382,7 @@ int main(int argc, char **argv) {
     test_authenticated_idle_offer();
     test_complete_offers();
     test_retired_acknowledgements();
+    test_allocation_exit_proof();
 cleanup:
     snprintf(path,sizeof path,"%s/.lumabri/service",temporary); assert(!rmdir(path));
     snprintf(path,sizeof path,"%s/.lumabri",temporary); assert(!rmdir(path));

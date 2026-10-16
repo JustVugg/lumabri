@@ -388,7 +388,10 @@ int main(int argc, char **argv) {
         close(dir); close(access);
         /* Bypass the coordinator's completed local journal deliberately:
          * every old keeper must answer the authenticated release replay. */
-        for (uint32_t i=0;i<r.count;i++) assert(!home_resident_retired_release(&plan,i,&r.nodes[i]));
+        for (uint32_t i=0;i<r.count;i++) {
+            assert(!home_resident_retired_release(&plan,i,&r.nodes[i]));
+            assert(!home_resident_exit_proof(&plan,i));
+        }
         puts("RETIRED PEER PROOF: PASS (old release acknowledged after a new real allocation reused the donor)"); return 0;
     }
     if (argc == 4 && !strcmp(argv[1], "api-hold-allocation")) {

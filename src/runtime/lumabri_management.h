@@ -45,10 +45,10 @@ static int api_management_record(Cap *body, const char *allocation, const LmbHos
 static int api_management_retirement_record(Cap *body, const char *allocation, const LmbRetirement *r, int status) {
     char instance[65]; lmb_hex(instance,r->host.instance,32);
     return api_addf(body,"{\"schema\":1,\"allocation\":\"%s\",\"instance\":\"%s\",\"revision\":\"%llu\","
-        "\"state\":\"%s\",\"phase\":%u,\"released_node_mask\":%u,\"complete\":%s}",
+        "\"state\":\"%s\",\"phase\":%u,\"released_node_mask\":%u,\"exited_node_mask\":%u,\"complete\":%s}",
         allocation,instance,(unsigned long long)r->host.revision,
         status<0 ? "unknown_or_conflict" : r->phase==LMB_RET_DONE ? "released" : "retirement_pending",
-        r->phase,r->released,r->phase==LMB_RET_DONE && status>=0 ? "true" : "false");
+        r->phase,r->released,r->exited,r->phase==LMB_RET_DONE && status>=0 ? "true" : "false");
 }
 /* GET of a pending/completed retirement is a journal observation, not a
  * mutation or an assumption that unreachable nodes freed memory. It permits
