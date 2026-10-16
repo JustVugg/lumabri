@@ -144,6 +144,10 @@ static pid_t home_spawn_guarded(char *const argv[], char *const envv[], const ch
         /* The supervisor and the actual service both retain this shared
          * description. Edge children inherit it at their subsequent exec. */
         if (lifetime>=0 && fcntl(lifetime,F_SETFD,0)) _exit(125);
+        if (lifetime>=0) {
+            char descriptor[32]; snprintf(descriptor,sizeof descriptor,"%d",lifetime);
+            if (setenv("LUMABRI_ALLOCATION_LIFETIME_FD",descriptor,1)) _exit(125);
+        } else unsetenv("LUMABRI_ALLOCATION_LIFETIME_FD");
         int nullfd = open("/dev/null", O_RDONLY);
         int logfd = open(log, O_WRONLY | O_CREAT | O_APPEND, 0600);
         if (nullfd < 0 || logfd < 0) _exit(125);

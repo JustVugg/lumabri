@@ -23,6 +23,10 @@ below. Historical observations remain here as evidence, not current promises.
   either of two frozen live hosts or exceed the replica limit. Fourteen
   prepared engines reported effective native resident locks with no fallback.
   ASan/UBSan/leak checks pass for lifetime and encrypted proof handling.
+  A second complete local gate also passed same-turn replay after a real
+  visible prefix, with byte-identical oracle output, no duplicated text and
+  the same reclamation/ceiling checks. The test-only codec proxy preserves the
+  lifetime descriptor in its real Edge child, matching production inheritance.
   Native CI and merge remain pending; this entry is not release certification.
 
 - [ ] Durable donor retirement receipts (local candidate): an exact sealed
