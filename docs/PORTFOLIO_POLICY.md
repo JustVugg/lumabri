@@ -5,9 +5,13 @@ already approved resident allocations. It is off until the administrator
 explicitly configures it. It does not prepare or release weights, replay donor
 approvals, buy servers or change a running conversation's route.
 
-This is one component of the global planner, not its completion. New-placement
-search, automatic preparation/retirement, workload-driven elasticity and a
-measured static-versus-managed cost comparison remain separate work.
+This is one component of the global planner, not its completion. New placements
+use the separate [joint resident search](HOUSEHOLD_PLACEMENT.md), preparation
+uses the [shared service operation](MODEL_PREPARATION_API.md), and approved
+capacity can follow the [elastic lifecycle](ELASTIC_REPLICAS.md). These do not
+turn this routing policy into a requirements-aware placement optimizer or
+demonstrate billed savings. A measured static-versus-managed cost comparison
+remains a release requirement.
 
 ## Prepare comparable evidence
 

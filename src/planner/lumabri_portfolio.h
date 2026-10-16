@@ -9,8 +9,9 @@
 #include "lumabri_workload_facts.h"
 
 #define LMB_PORTFOLIO_MODELS 8u
-#define LMB_PORTFOLIO_CHOICES 64u
+#define LMB_PORTFOLIO_CHOICES 128u
 #define LMB_PORTFOLIO_SEARCH 20000u
+#define LMB_PORTFOLIO_REFITS 256u
 
 typedef struct {
     const LmbModelShape *shape;
@@ -44,15 +45,18 @@ typedef struct {
 
 typedef struct {
     LmbClusterPlan plan;
-    uint32_t mask;
+    uint32_t mask, requested_mask;
     uint64_t memory[LMB_CLUSTER_MAX_NODES];
 } LmbPortfolioChoice;
 
 typedef struct {
     LmbPortfolioChoice choices[LMB_PORTFOLIO_MODELS][LMB_PORTFOLIO_CHOICES];
-    uint32_t count[LMB_PORTFOLIO_MODELS], selected[LMB_PORTFOLIO_MODELS];
+    uint32_t count[LMB_PORTFOLIO_MODELS], attempts[LMB_PORTFOLIO_MODELS];
+    uint32_t tried[LMB_PORTFOLIO_MODELS][LMB_PORTFOLIO_CHOICES];
+    LmbPortfolioChoice selected[LMB_PORTFOLIO_MODELS];
     const LmbPortfolioNode *nodes;
-    uint32_t nnodes, nmodels, visited, bounded, cost_objective, found;
+    const LmbPortfolioModel *models;
+    uint32_t nnodes, nmodels, visited, bounded, limited, refits, cost_objective, found;
     uint64_t best_cost, best_memory;
     uint32_t best_nodes;
     LmbPortfolioPlan *result;
@@ -64,27 +68,60 @@ static inline uint32_t lmb_portfolio_popcount(uint32_t bits) {
     return count;
 }
 
-static inline void lmb_portfolio_candidate(LmbPortfolioSearch *s, uint32_t model,
-    const LmbPortfolioModel *m, uint32_t mask) {
-    if (!mask || s->count[model] >= LMB_PORTFOLIO_CHOICES) return;
-    for (uint32_t i = 0; i < s->count[model]; i++) if (s->choices[model][i].mask == mask) return;
+/* Refit against the remaining offer, not the machine's total/free RAM. The
+ * source planner may omit an unnecessary node: charge only actual slices. */
+static inline int lmb_portfolio_fit(const LmbPortfolioSearch *s,
+    const LmbPortfolioModel *m, uint32_t mask, const uint64_t *used,
+    const uint32_t *added, LmbPortfolioChoice *choice) {
     LmbClusterNode subset[LMB_CLUSTER_MAX_NODES]; uint32_t map[LMB_CLUSTER_MAX_NODES], n = 0;
     for (uint32_t i = 0; i < s->nnodes; i++) if (mask & (UINT32_C(1) << i)) {
-        map[n] = i; subset[n++] = s->nodes[i].node;
+        if (added && s->nodes[i].workload.allocations + added[i] >= 4) continue;
+        uint64_t prior = used ? used[i] : 0;
+        if (prior >= s->nodes[i].node.ram_budget_bytes) continue;
+        map[n] = i; subset[n] = s->nodes[i].node;
+        subset[n++].ram_budget_bytes -= prior;
     }
-    if (n > m->shape->layers) return;
+    if (!n || n > m->shape->layers) return -1;
+    /* Cheap necessary condition before the range DP. Segment/Edge weights and
+     * state are additive (fixed segment costs repeat when split), so the full
+     * model here is a lower bound, never an admission decision. */
+    LmbRangeCost layers = lmb_estimate_segment(m->shape, 0, m->shape->layers, m->context, m->sessions);
+    LmbRangeCost edge = lmb_estimate_edge(m->shape, m->context, m->sessions);
+    uint64_t minimum = lmb_size_add(lmb_size_add(layers.resident_bytes, layers.state_bytes),
+        lmb_size_add(edge.resident_bytes, edge.state_bytes));
+    uint64_t available = 0;
+    for (uint32_t i = 0; i < n; i++) available = lmb_size_add(available, subset[i].ram_budget_bytes);
+    if (!layers.ok || !edge.ok || minimum == UINT64_MAX || minimum > available) return -1;
     LmbClusterPlan seed, planned;
     if (lmb_plan_cluster_source(m->shape, subset, n, m->context, m->sessions,
         LMB_GOAL_ONE_SESSION, 1, &seed) || lmb_home_plan_selected(m->shape,
-        m->checkpoint_bytes, subset, n, m->context, &seed, NULL, &planned)) return;
-    LmbPortfolioChoice *choice = &s->choices[model][s->count[model]];
-    choice->plan = planned; choice->plan.edge_node = map[planned.edge_node]; choice->mask = mask;
+        m->checkpoint_bytes, subset, n, m->context, &seed, NULL, &planned)) {
+        /* A large remaining offer need not be the viable Edge owner. Try the
+         * shared source planner's alternative owners/orders as well. */
+        if (lmb_home_plan_source(m->shape, m->checkpoint_bytes, subset, n,
+            m->context, m->sessions, LMB_GOAL_ONE_SESSION, 1, &planned)) return -1;
+    }
+    if (lmb_home_plan_budgets(m->shape, m->checkpoint_bytes, subset, n,
+        m->context, &planned) || planned.state != LMB_PLAN_RESIDENT) return -1;
+    memset(choice, 0, sizeof *choice);
+    choice->plan = planned; choice->plan.edge_node = map[planned.edge_node]; choice->requested_mask = mask;
     for (uint32_t i = 0; i < planned.nslices; i++) {
         uint32_t node = map[planned.slices[i].node];
         choice->plan.slices[i].node = node;
+        choice->mask |= UINT32_C(1) << node;
         choice->memory[node] = lmb_size_add(choice->memory[node], planned.slices[i].bytes_resident);
-        if (choice->memory[node] == UINT64_MAX) { memset(choice, 0, sizeof *choice); return; }
+        if (choice->memory[node] == UINT64_MAX) return -1;
     }
+    return 0;
+}
+
+static inline void lmb_portfolio_candidate(LmbPortfolioSearch *s, uint32_t model,
+    const LmbPortfolioModel *m, uint32_t mask) {
+    if (!mask || lmb_portfolio_popcount(mask) > m->shape->layers) return;
+    for (uint32_t i = 0; i < s->attempts[model]; i++) if (s->tried[model][i] == mask) return;
+    if (s->attempts[model] == LMB_PORTFOLIO_CHOICES) { s->limited = 1; return; }
+    s->tried[model][s->attempts[model]++] = mask;
+    if (lmb_portfolio_fit(s, m, mask, NULL, NULL, &s->choices[model][s->count[model]])) return;
     s->count[model]++;
 }
 
@@ -108,7 +145,7 @@ static inline void lmb_portfolio_search(LmbPortfolioSearch *s, uint32_t depth,
         LmbPortfolioPlan *out = s->result;
         out->node_mask = mask; out->machine_cost_micro_per_hour = s->cost_objective ? cost : 0;
         memcpy(out->reserved, used, sizeof out->reserved); memcpy(out->added, added, sizeof out->added);
-        for (uint32_t i = 0; i < s->nmodels; i++) out->plans[i] = s->choices[i][s->selected[i]].plan;
+        for (uint32_t i = 0; i < s->nmodels; i++) out->plans[i] = s->selected[i].plan;
         return;
     }
     for (uint32_t c = 0; c < s->count[depth] && !s->bounded; c++) {
@@ -119,11 +156,18 @@ static inline void lmb_portfolio_search(LmbPortfolioSearch *s, uint32_t depth,
                 used[i] > s->nodes[i].node.ram_budget_bytes ||
                 choice->memory[i] > s->nodes[i].node.ram_budget_bytes-used[i]) { fits = 0; break; }
         }
-        if (!fits) continue;
+        LmbPortfolioChoice refitted;
+        if (!fits) {
+            if (s->refits >= LMB_PORTFOLIO_REFITS) { s->limited = 1; continue; }
+            s->refits++;
+            if (lmb_portfolio_fit(s, &s->models[depth], choice->requested_mask,
+                used, added, &refitted)) continue;
+            choice = &refitted;
+        }
         for (uint32_t i = 0; i < s->nnodes; i++) if (choice->mask & (UINT32_C(1) << i)) {
             used[i] += choice->memory[i]; added[i]++;
         }
-        s->selected[depth] = c;
+        s->selected[depth] = *choice;
         lmb_portfolio_search(s, depth+1, mask | choice->mask, used, added);
         for (uint32_t i = 0; i < s->nnodes; i++) if (choice->mask & (UINT32_C(1) << i)) {
             used[i] -= choice->memory[i]; added[i]--;
@@ -131,7 +175,10 @@ static inline void lmb_portfolio_search(LmbPortfolioSearch *s, uint32_t depth,
     }
 }
 
-/* Candidate family: every eligible single node plus descending-RAM prefixes.
+/* Candidate family: all subsets up to seven eligible nodes; bounded singles,
+ * RAM/cost prefixes and pairs above that. Refits repartition later models on
+ * the residual offer. Neither fixed-order cuts nor this bounded search prove
+ * optimality/infeasibility. Candidate/refit limits do not abort static search.
  * Cross-model search then checks SUMMED memory and allocation limits. Missing
  * or mixed-currency prices disable the cost objective globally; no unknown
  * node is treated as free. The caller must revalidate and obtain approvals. */
@@ -143,7 +190,8 @@ static inline int lmb_portfolio_plan(const LmbPortfolioNode *nodes, uint32_t nno
         !nmodels || nmodels > LMB_PORTFOLIO_MODELS) return -1;
     LmbPortfolioSearch *s = calloc(1, sizeof *s);
     if (!s) return -1;
-    s->nodes = nodes; s->nnodes = nnodes; s->nmodels = nmodels; s->result = out; s->cost_objective = 1;
+    s->nodes = nodes; s->models = models; s->nnodes = nnodes; s->nmodels = nmodels;
+    s->result = out; s->cost_objective = 1;
     uint32_t order[LMB_CLUSTER_MAX_NODES], eligible = 0;
     for (uint32_t i = 0; i < nnodes; i++) {
         const LmbPortfolioNode *n = &nodes[i];
@@ -160,20 +208,59 @@ static inline int lmb_portfolio_plan(const LmbPortfolioNode *nodes, uint32_t nno
         order[at] = i;
     }
     if (!s->cost_objective) memset(out->currency, 0, sizeof out->currency);
+    uint32_t cheap[LMB_CLUSTER_MAX_NODES];
+    memcpy(cheap, order, eligible * sizeof *cheap);
+    if (s->cost_objective) for (uint32_t i = 1; i < eligible; i++) {
+        uint32_t nd = cheap[i], j = i;
+        while (j && nodes[cheap[j-1]].facts.price_micro_per_hour > nodes[nd].facts.price_micro_per_hour) {
+            cheap[j] = cheap[j-1]; j--;
+        }
+        cheap[j] = nd;
+    }
     for (uint32_t m = 0; m < nmodels; m++) {
         if (!models[m].shape || !models[m].checkpoint_bytes || !models[m].context ||
+            !models[m].shape->layers || models[m].shape->layers > LMB_PLAN_LAYER_MAX ||
             !models[m].sessions || models[m].sessions > LMB_HOST_MAX_SESSIONS) { free(s); return -1; }
         for (uint32_t i = 0; i < eligible; i++) lmb_portfolio_candidate(s, m, &models[m], UINT32_C(1) << order[i]);
-        uint32_t mask = 0;
+        uint32_t mask = 0, cost_mask = 0;
         for (uint32_t i = 0; i < eligible; i++) {
             mask |= UINT32_C(1) << order[i];
+            cost_mask |= UINT32_C(1) << cheap[i];
+            if (i) lmb_portfolio_candidate(s, m, &models[m], cost_mask);
             if (i) lmb_portfolio_candidate(s, m, &models[m], mask);
         }
-        if (!s->count[m]) { free(s); return 1; }
+        if (eligible <= 7) {
+            for (uint32_t bits = 1; bits < (UINT32_C(1) << eligible); bits++) {
+                mask = 0;
+                for (uint32_t i = 0; i < eligible; i++) if (bits & (UINT32_C(1) << i))
+                    mask |= UINT32_C(1) << order[i];
+                lmb_portfolio_candidate(s, m, &models[m], mask);
+            }
+        } else {
+            s->limited = 1;
+            for (uint32_t i = 0; i < eligible; i++) for (uint32_t j = i+1; j < eligible; j++)
+                lmb_portfolio_candidate(s, m, &models[m], (UINT32_C(1) << cheap[i]) | (UINT32_C(1) << cheap[j]));
+        }
+        /* Explore low-cost/few-machine candidates first before the DFS cap.
+         * Stable ties keep repeated previews deterministic. */
+        for (uint32_t i = 1; i < s->count[m]; i++) {
+            LmbPortfolioChoice choice = s->choices[m][i]; uint32_t j = i;
+            uint64_t score = 0;
+            for (uint32_t n = 0; n < nnodes; n++) if (choice.mask & (UINT32_C(1) << n))
+                score += s->cost_objective ? nodes[n].facts.price_micro_per_hour : 1;
+            while (j) {
+                uint64_t prior = 0;
+                for (uint32_t n = 0; n < nnodes; n++) if (s->choices[m][j-1].mask & (UINT32_C(1) << n))
+                    prior += s->cost_objective ? nodes[n].facts.price_micro_per_hour : 1;
+                if (prior <= score) break;
+                s->choices[m][j] = s->choices[m][j-1]; j--;
+            }
+            s->choices[m][j] = choice;
+        }
     }
     uint64_t used[LMB_CLUSTER_MAX_NODES] = {0}; uint32_t added[LMB_CLUSTER_MAX_NODES] = {0};
     lmb_portfolio_search(s, 0, 0, used, added);
-    out->model_count = s->found ? nmodels : 0; out->examined = s->visited; out->bounded = s->bounded;
+    out->model_count = s->found ? nmodels : 0; out->examined = s->visited; out->bounded = s->bounded || s->limited;
     out->cost_objective = s->cost_objective;
     int rc = s->found ? 0 : 1; free(s); return rc;
 }
