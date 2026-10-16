@@ -10,8 +10,9 @@ Python, pip and the Colibri source checkout are not needed to run the folder.
 
 1. On one computer, use `/create`. On the others, use `/join`, check the
    displayed identity and enter that household's key.
-2. On helpers, open **Share resources** and keep it open. They do not allocate
-   model memory until their owner accepts a particular request.
+2. On helpers, open **Share resources** to review requests. They do not allocate
+   model memory until their owner accepts a particular request or grants an
+   explicit bounded repeat policy. Esc detaches the view; it does not stop sharing.
 3. On the chatting computer, set the source model folder in `/settings`,
    open **Your computers** and select the helpers you want to use.
 4. Choose a supported, fitting model and request its plan. Accept on each
@@ -47,10 +48,17 @@ The latest measured speed is historical, not a guarantee for the next turn.
 - Neither a GPU detector nor a manifest entry proves accelerated execution.
   These candidates use the verified CPU path. Each participating machine
   must permit the household's fixed LAN ports in its own firewall.
-- One household chat plan per participating computer and cache directory.
-  Disjoint donor groups can serve independent chats concurrently; this is
-  not multi-session inference on a shared donor. Losing a participating donor stops the
-  current chat and releases resources; automatic household replay is pending.
+- The background donor can retain up to four independently approved resident
+  CPU Segment allocations, each reserving 1–8 isolated conversation slots.
+  Their total memory must fit the sharing budget; a slot is not a single-user
+  speed guarantee. Compute admission is bounded across models. Stopping one
+  allocation must not unload the others.
+- Ordinary household chat does not automatically replace a lost donor.
+  Managed API models can use explicitly configured replica policies and bounded
+  visible replay. Recovery still needs an authorized compatible replacement,
+  sufficient capacity and unchanged permissions. No transparent KV migration
+  or uninterrupted-answer guarantee is made; see [replica policies](ELASTIC_REPLICAS.md).
+  Failure does not justify assuming a disconnected donor's RAM was released.
 
 ## Building and testing a candidate
 
