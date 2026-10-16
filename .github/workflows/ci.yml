@@ -8,6 +8,12 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  # A stacked PR may receive both a base update and a head update. Test the
+  # latest revision once, instead of running duplicate native matrices.
+  group: lumabri-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   windows-network-helper:
     # Validate the permission helper without changing runner firewall rules.
@@ -121,7 +127,9 @@ jobs:
           python3 tests/integration/preload_path_test.py
   linux:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # Real multi-model/recovery and installed-layout gates take 40–45 minutes
+    # on current runners. Keep every gate and allow bounded scheduling margin.
+    timeout-minutes: 60
     steps:
       - name: Checkout Lumabri
         uses: actions/checkout@v4
