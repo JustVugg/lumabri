@@ -56,6 +56,9 @@ The versioned CI workflow adds real reduced-checkpoint inference and verifies:
 - actual web measurement, comparison, separate routing confirmation and chat;
 - replica growth, drain, release, dormant wake and interrupted-response replay;
 - loss of an explicitly owned engine, including Darwin's supervisor hierarchy;
+- durable release receipts across donor slot reuse, and exact failed-allocation
+  reclamation only after all inherited lifetime holders have exited;
+- refusal to free suspended/live allocations or infer exit from a missing heartbeat;
 - native Intel/Apple Silicon builds with and without OpenMP, plus installed layouts.
 
 For example, with a compatible tiny OLMoE fixture already in
@@ -97,6 +100,8 @@ advertised platform and deployment topology. At minimum:
 6. Test replica policies through a burst, cooldown and idle period. Confirm
    existing work drains before release and that min/max and byte budgets hold.
    Unreachable ownership stays charged until authoritatively reconciled.
+   Retain retirement/lifetime evidence through restart; never delete journals
+   to work around a full metadata store or reuse an allocation identity.
 7. Run the documented sustained workload and retain every failure. Report its
    duration and limits; a short probe is not sustained-capacity certification.
 8. Check costs against actual billing before claiming server savings. A lower

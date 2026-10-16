@@ -17,6 +17,7 @@ Changing one payload never permits silently reinterpreting another.
 | executor residency (`LMB_ERES` 70/71) | additive op | older node answers `ERR`; chatter treats residency as unknown, no penalty |
 | machine inventory (`LMB_MACHINE_REPORT/LIST/LIST_R` 77/78/79) | body version 2, including signed donor control address | incompatible versions refuse; viewer clears remote inventory and invalidates proposed plans |
 | household consent (`LMB_HOME_*` 80–85) | body version 1 | authenticated offer, immutable allocation, explicit donor approval and commit; no negotiation or execution fallback |
+| household allocation-exit proof (`LMB_HOME_EXIT_PROOF/R` 104/105) | immutable `LMBLIF1` record | missing operation, missing record or unreachable peer means unknown, never released memory |
 | hosted greeting | optional codec field `2` after limits | new hosts explicitly declare SUBMIT/DATA/DONE independently of model family; unsupported codecs fail closed |
 | encoded expert call (`LMB_EXEC2` 72/73, caps word in `ERES_R`) | additive op | a chatter sends `EXEC2` only to a node whose `ERES_R` carries `LMB_CAP_EXEC2`; the tunnel keeps `EXEC`; bf16 only for values that are exactly bf16 |
 
@@ -42,6 +43,22 @@ The C structs may grow additively through `struct_size`; wire structs do not.
 Runtime-only scheduler fields in route snapshots are intentionally excluded
 from the discovery encoding, so a v1 tracker and newer chatter still agree on
 the same signed placement fields.
+
+Allocation-exit proof is an additive, read-only query to the authenticated
+donor keeper, not a tracker operation or a shutdown request. Only the original
+requester may query an exact allocation/checkpoint pair. A birth record must
+have been persisted before the allocation started, with a lifetime descriptor
+inherited by its owned processes. Updating the keeper cannot retrofit that
+evidence onto an already running legacy allocation. Old peers and invalid
+responses therefore retain the reservation; normal live drain/retirement
+remains separate. See [release proof](docs/RESIDENT_API.md#coordinated-retirement-of-an-exact-approved-allocation).
+
+The local retirement journal now writes `LMBRET2`, distinguishing a verified
+process exit from an idle live-process seal. It reads `LMBRET1` without adding
+exit evidence. A binary supporting only v1 cannot reconcile a v2 journal;
+do not downgrade a live controller in place or remove its records to bypass
+that check. Finish or explicitly account for outstanding operations using a
+compatible controller before a rollback. No version change replays approval.
 
 Machine inventory uses a separate bounded table (32 identities). Report bodies
 contain version, peer public key, hostname/OS/architecture/CPU/ISA strings,
