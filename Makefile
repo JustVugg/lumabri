@@ -639,6 +639,7 @@ test-api-gateway: lumabri test_chat_ui test-chat-history
 	python3 tests/integration/api_gateway_test.py
 	python3 tests/integration/api_service_test.py
 	python3 tests/integration/owned_engine_process_test.py
+	python3 tests/integration/managed_soak_summary_test.py
 	python3 tests/integration/chat_history_test.py
 
 test: test-api-gateway

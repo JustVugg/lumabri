@@ -263,6 +263,7 @@ jobs:
             LUMABRI_TEST_BROWSER=1 python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint "$outcome" --api-prepare --donor-ram-gb 1 --sessions 2
           done
           LUMABRI_TEST_BROWSER=1 LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-ram-gb 2 --sessions 2 --placement-comparison
+          LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-ram-gb 1.5 --sessions 2 --soak-seconds 10
           make segment_budget_probe
           python3 tests/integration/planner_tensor_contract_test.py --family olmoe --model build/home-flow-models/olmoe-tiny
           make swarm_probe
@@ -449,6 +450,7 @@ jobs:
           name: placement-comparison-linux
           path: |
             /tmp/lmb-service-flow-*/placement-comparison.json
+            /tmp/lmb-service-flow-*/managed-soak.json
             /tmp/lmb-service-flow-*/browser-capacity-real-olmoe.*
           retention-days: 7
   macos-household:
@@ -535,6 +537,7 @@ jobs:
         working-directory: lumabri
         run: |
           python3 tests/integration/owned_engine_process_test.py
+          python3 tests/integration/managed_soak_summary_test.py
           ./test_backend_routes
           make test_segment_close ENGINE=../colibri/c
           ./test_segment_close
@@ -560,6 +563,7 @@ jobs:
           python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-ram-gb 1 --sessions 2
           LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-policy --donor-ram-gb 1.5 --sessions 2 --elastic
           LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-ram-gb 2 --sessions 2 --placement-comparison
+          LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-ram-gb 1.5 --sessions 2 --soak-seconds 10
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --repeat-cached --clear-cached --expect-metrics --expect-calibration
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --kill-donor
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --expect-selected-no-fit
