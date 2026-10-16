@@ -376,6 +376,21 @@ int main(int argc, char **argv) {
         int rc=home_managed_retire(argv[3],plan.allocation);
         printf("%d\n",rc); return rc<0 ? 1 : 0;
     }
+    if (argc==4 && !strcmp(argv[1],"resident-retired-proof")) {
+        assert(!lmb_secure_init()); LmbResidentPlan plan; LmbRetirement r; uint8_t allocation[32];
+        assert(strlen(argv[2])==64 && !lmb_unhex(allocation,argv[2],32) && !api_find_plan(argv[3],allocation,&plan));
+        char path[1200],id[65],name[80]; uint8_t digest[64];
+        assert(!checked_printf(path,sizeof path,"%s/.lumabri/api-access",getenv("HOME")));
+        int access=lmb_api_access_dir(path,0),dir=access<0 ? -1 : lmb_retirement_dir(access); assert(dir>=0);
+        lmb_hex(id,plan.allocation,32); snprintf(name,sizeof name,"%s.retire",id);
+        assert(!lmb_retirement_load(dir,name,&r) && r.phase==LMB_RET_DONE &&
+            r.count==plan.execution.count && !lmb_retirement_plan_hash(&plan,digest) && !memcmp(r.plan_hash,digest,64));
+        close(dir); close(access);
+        /* Bypass the coordinator's completed local journal deliberately:
+         * every old keeper must answer the authenticated release replay. */
+        for (uint32_t i=0;i<r.count;i++) assert(!home_resident_retired_release(&plan,i,&r.nodes[i]));
+        puts("RETIRED PEER PROOF: PASS (old release acknowledged after a new real allocation reused the donor)"); return 0;
+    }
     if (argc == 4 && !strcmp(argv[1], "api-hold-allocation")) {
         int access=lmb_api_access_dir(argv[2],0), permit=-1; uint8_t id[32];
         assert(access>=0 && strlen(argv[3])==64 && !lmb_unhex(id,argv[3],32));

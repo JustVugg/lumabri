@@ -104,6 +104,7 @@ static int home_control_io_ms(int fallback) {
 }
 
 #include "src/runtime/lumabri_node_control.h"
+#include "src/runtime/lumabri_retired_receipts.h"
 /* Consumes listener and private control child end, including on failure;
  * unrelated inherited descriptors remain CLOEXEC. */
 static pid_t home_spawn(char *const argv[], char *const envv[], const char *log, int *ready_fd, int listener, int control) {
@@ -236,7 +237,7 @@ typedef struct HomeDonor {
     double policy_checked_at;
     uint32_t admission_policy_revision;
     int client, lease, weight_lease, segment_port, host_port, segment_ready, host_ready, node_control;
-    LmbNodeControl retired_receipt; /* idempotent acknowledgement while this allocation occupies its slot */
+    LmbNodeControl retired_receipt; /* unpersisted terminal proof pins this keeper slot until reconciled */
     pid_t segment, host;
     char bin_dir[1024], cache_base[1024], disk[512], ip[INET_ADDRSTRLEN];
     char log[1200];
@@ -342,6 +343,7 @@ static void home_donor_swap(HomeDonor *d, uint32_t index) {
 static int home_donor_available_slot(const HomeDonor *d) {
     for (uint32_t i = 0; i < d->park_capacity; i++)
         if (!d->parked[i].transaction.reservation_held && d->parked[i].client < 0 &&
+            !d->parked[i].retired_receipt.revision &&
             d->parked[i].transaction.phase != LMB_HOME_PENDING) return (int)i;
     return -1;
 }
@@ -380,6 +382,40 @@ static void home_donor_disconnect(HomeDonor *d, const char *reason) {
     }
 }
 
+static int home_retired_lookup(const uint8_t id[32], LmbRetiredReceipt *r) {
+    char path[1200];
+    if (home_service_directory(path,sizeof path)) return -1;
+    int dir=lmb_retired_dir(path,0);
+    if (dir<0) return errno==ENOENT ? 1 : -1;
+    int rc=lmb_retired_load(dir,id,r); close(dir); return rc;
+}
+static LmbRetiredReceipt home_retired_record(const HomeDonor *d, const LmbNodeControl *state, uint32_t phase) {
+    LmbRetiredReceipt r={.phase=phase,.seal=*state};
+    memcpy(r.allocation,d->transaction.offer.id,32);
+    memcpy(r.root,d->transaction.offer.model_root,32);
+    memcpy(r.requester,d->transaction.offer.requester,32); return r;
+}
+/* Only completed records can acknowledge a previous release. Reading one
+ * neither touches a newer slot nor assumes a currently unreachable child
+ * has exited. Transport authentication still binds the original requester. */
+static int home_retired_reply(int incoming, const uint8_t *body) {
+    LmbRetiredReceipt r; char path[1200];
+    const uint8_t *request=body+64;
+    if (lmb_get32(request)!=LMB_NODE_CONTROL_VERSION || lmb_get32(request+4)!=LMB_NODE_CONTROL_QUERY ||
+        home_service_directory(path,sizeof path)) return 0;
+    int dir=lmb_retired_dir(path,0),lock=dir<0 ? -1 : lmb_retired_lock(dir),found=0;
+    if (lock<0 || lmb_retired_load(dir,body,&r) || r.phase!=LMB_RECEIPT_DONE || memcmp(body+32,r.root,32) ||
+        !lmb_secure_peer_matches(incoming,r.requester) || memcmp(request+8,r.seal.instance,32) ||
+        lmb_node_control_u64(request+40)!=r.seal.revision || lmb_retired_sync(dir,body)) goto done;
+    uint8_t reply[64+LMB_NODE_CONTROL_REPLY_BYTES];
+    memcpy(reply,body,64); lmb_node_control_reply(reply+64,0,&r.seal);
+    (void)lmb_send(incoming,LMB_HOME_RETIRED_RELEASE_R,reply,sizeof reply,NULL,0); found=1;
+done:
+    if (lock>=0) close(lock);
+    if (dir>=0) close(dir);
+    return found;
+}
+
 /* Called only after exact allocation/root/original-requester authentication.
  * The node's seal cannot be resumed, so no new OPEN or expert admission can
  * race the idle observation and owned-child shutdown. Never use HOME_RELEASE
@@ -400,12 +436,26 @@ static void home_donor_retired_release(HomeDonor *d, int incoming, const uint8_t
     }
     if (!state.revision || state.draining!=LMB_NODE_CONTROL_RETIRED || state.sessions || state.experts ||
         memcmp(state.instance,request+8,32) || state.revision!=lmb_node_control_u64(request+40)) return;
+    /* Reserve a durable intent before stopping a child. A full or unsafe
+     * journal leaves the sealed allocation owned, not falsely released. */
+    char path[1200];
+    if (home_service_directory(path,sizeof path)) return;
+    int dir=lmb_retired_dir(path,1),lock=dir<0 ? -1 : lmb_retired_lock(dir);
+    LmbRetiredReceipt receipt=home_retired_record(d,&state,LMB_RECEIPT_PREPARED),old;
+    int found=lock<0 ? -1 : lmb_retired_load(dir,receipt.allocation,&old);
+    if (found<0 || (!found && old.phase==LMB_RECEIPT_DONE) || lmb_retired_store(dir,&receipt)) goto done;
     d->retired_receipt=state;
     if (d->transaction.phase!=LMB_HOME_CLOSED)
         home_donor_disconnect(d,"Retired by the original requester after fenced idle admission.");
-    if (d->segment || d->host || d->transaction.reservation_held) return;
+    if (d->segment || d->host || d->transaction.reservation_held) goto done;
+    receipt.phase=LMB_RECEIPT_DONE;
+    if (lmb_retired_store(dir,&receipt)) goto done;
+    memset(&d->retired_receipt,0,sizeof d->retired_receipt);
     memcpy(reply,body,64); lmb_node_control_reply(reply+64,0,&state);
     (void)lmb_send(incoming,LMB_HOME_RETIRED_RELEASE_R,reply,sizeof reply,NULL,0);
+done:
+    if (lock>=0) close(lock);
+    if (dir>=0) close(dir);
 }
 
 static int home_donor_can_retain(const HomeDonor *d) {
@@ -648,6 +698,12 @@ static int home_donor_offer(HomeDonor *d, int incoming, const char *tracker,
                 !memcmp(m.body, target->transaction.offer.id, 32) &&
                 !memcmp(m.body + 32, target->transaction.offer.model_root, 32) &&
                 lmb_secure_peer_matches(incoming, target->transaction.offer.requester);
+            if (m.op==LMB_HOME_RETIRED_RELEASE && m.body_len==expected_bytes && !m.pay_len &&
+                (!permitted || (!target->segment && !target->host && !target->transaction.reservation_held)) &&
+                home_retired_reply(incoming,m.body)) {
+                if (permitted) memset(&target->retired_receipt,0,sizeof target->retired_receipt);
+                lmb_msg_free(&m); return -1;
+            }
             if (permitted) {
                 if (m.op==LMB_HOME_RETIRED_RELEASE) home_donor_retired_release(target,incoming,m.body);
                 else if (m.op==LMB_HOME_NODE_CONTROL) {
@@ -679,6 +735,19 @@ static int home_donor_offer(HomeDonor *d, int incoming, const char *tracker,
              !lmb_secure_peer_matches(incoming, offer.requester);
     }
     lmb_msg_free(&m);
+    if (!rc) {
+        /* Allocation IDs are immutable, including after restart. Reusing an
+         * acknowledged ID would make its old receipt refer to live new work. */
+        LmbRetiredReceipt prior;
+        int retired=home_retired_lookup(offer.id,&prior);
+        if (retired!=1 || d->retired_receipt.revision) {
+            LmbHomeTransaction rejected={.offer=offer,.phase=LMB_HOME_REJECTED};
+            snprintf(rejected.reason,sizeof rejected.reason,"%s",retired==0 ?
+                "This allocation was already retired or has a pending retirement. Request a new plan." :
+                "Retirement evidence is unavailable or pending. No new allocation was admitted.");
+            (void)home_status_send(incoming,&rejected,0,0); return -1;
+        }
+    }
     if (!rc) {
         for (uint32_t i = 0; i <= d->park_capacity; i++) {
             const HomeDonor *other = i ? &d->parked[i-1] : d;

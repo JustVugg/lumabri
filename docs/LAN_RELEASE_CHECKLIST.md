@@ -9,6 +9,18 @@ execution, cross-platform numerical compatibility, or concurrent capacity.
 The managed-inference roadmap supersedes the older single-chat LAN checklist
 below. Historical observations remain here as evidence, not current promises.
 
+- [ ] Durable donor retirement receipts (local candidate): an exact sealed
+  allocation's release acknowledgement survives slot reuse and keeper restart.
+  A persisted intent alone is not proof; only the original authenticated
+  requester can replay a completed receipt with the same process seal. Retired
+  IDs cannot load new work. The bounded private store refuses unsafe entries,
+  identity replacement, sync failure and automatic evidence eviction. Unit,
+  encrypted control and focused ASan/UBSan/leak checks pass. A local real
+  reduced-OLMoE flow retires one allocation, reloads an approved new one on the
+  donor, then queries the old release directly without disrupting the new
+  inference. Native CI and merge are pending. This does not yet reclaim an
+  arbitrary failed allocation whose owned-process exit was never proven.
+
 - [ ] Same-turn elastic recovery (local candidate): optional bounded API wait
   captures an already enabled policy's scope/revision and keeps the original
   model/numeric contract. The web exposes the wait and Stop; policy/credential

@@ -100,6 +100,11 @@ lifecycle operation per policy. The common preparation keeper additionally
 serializes preparations. Preparation and retirement receipts remain bounded
 at 256 entries each; reaching a receipt limit holds new work for operator
 inspection rather than forgetting an idempotency key.
+Donors also retain up to 256 exact sealed-release receipts. They can confirm
+an old completed release after a new allocation reuses the slot, without
+unloading that new allocation. An interrupted release intent is not a receipt
+of completion, and failed/unreachable allocations remain charged until their
+release is authoritatively confirmed.
 
 ## Demand and readiness
 

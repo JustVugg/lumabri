@@ -212,6 +212,10 @@ class PreparationAPI:
         added = [a for a in after["allocations"] if a["id"] not in before_ids]
         assert len(added) == 1 and added[0]["name"].endswith("-" + name), after
         assert added[0]["id"] == receipt["allocations"][0]["id"] and added[0]["id"] != original["id"], receipt
+        proof = subprocess.run([str(self.runtime / "test_chat_ui"), "resident-retired-proof", original["id"], self.tracker],
+                               env=self.env, text=True, capture_output=True, timeout=30)
+        assert proof.returncode == 0, (proof.stdout, proof.stderr)
+        print(proof.stdout.strip(), flush=True)
         # READY is a direct acknowledgement; tracker workload reports have
         # their own heartbeat. Equal counts do not prove the new allocation
         # replaced the retired one in the reviewed inventory. Wait for exact
