@@ -17,7 +17,9 @@ below. Historical observations remain here as evidence, not current promises.
   prepared a new approved replica and completed the same HTTP turn with
   byte-identical oracle output and no duplicate text. Failed ownership remains
   charged; this is not automatic reclamation or KV migration. API/browser,
-  policy unit and ASan/UBSan/leak checks pass. Native CI and merge are pending.
+  policy unit and ASan/UBSan/leak checks pass. The final local flow also passes
+  on `99490c9`, after the shared admission/HTTP fixes, with twelve effectively
+  locked engines. Native CI and merge of that final head are pending.
 
 - [ ] Unavailable replica replenishment (local candidate): bounded authenticated
   host/Segment probes distinguish accepting, draining, unreachable and unknown.
@@ -294,7 +296,12 @@ below. Historical observations remain here as evidence, not current promises.
   selective retirement, a completely freed donor and invalidation/renewal of
   co-resident workload evidence. Four-client BUSY outcomes remain in the report;
   six of six requests pass on the admitted two-client workload in each plan.
-  Eight engines prove effective owned CPU locks. Native CI remains required.
+  Eight engines prove effective owned CPU locks, including the repeated local
+  gate on `2a59e9d`. Native Intel initially exposed an unexpected 503 during a
+  cold concurrent lock acquisition. The new exclusive-create regression and
+  native Intel/ARM workspace gates pass; the complete final native flow is
+  still pending. HTTP early rejections also have a bounded half-close regression
+  so unread request bytes do not erase the error response with a TCP reset.
   Prices are test declarations; no paid machine is stopped or billed saving
   claimed. See [comparison gate](PORTFOLIO_POLICY.md#static-versus-managed-placement-gate).
 
