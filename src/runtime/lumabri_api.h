@@ -362,7 +362,7 @@ static void api_policy_tick(int access,const char *tracker);
 static void api_elastic_http(int fd,int access,const char *tracker,const char *body,size_t size);
 static int api_elastic_due(int access);
 static void api_elastic_tick(int access,const char *tracker);
-static void api_connection(int fd, int access_dir, unsigned port, const char *tracker) {
+static void api_connection_dispatch(int fd, int access_dir, unsigned port, const char *tracker) {
     struct timeval timeout={5,0};
     (void)setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof timeout);
     (void)setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&timeout,sizeof timeout);
@@ -463,6 +463,31 @@ static void api_connection(int fd, int access_dir, unsigned port, const char *tr
         }
     } else api_error(fd,400,"unsupported_endpoint_or_framing");
     close(permit);
+}
+/* An early HTTP rejection may leave an already-sent request body unread.
+ * Closing both directions then can send TCP RST and erase the response at
+ * the client. Finish our response first; discard, never parse, a bounded
+ * remainder until the peer closes. Neither a slow writer nor an unlimited
+ * body may extend this absolute cleanup budget. No keep-alive/pipelining. */
+static void api_connection(int fd, int access_dir, unsigned port, const char *tracker) {
+    api_connection_dispatch(fd,access_dir,port,tracker);
+    if (shutdown(fd,SHUT_WR)) return;
+    uint64_t started=lmb_io_monotonic_ms();
+    if (!started) return;
+    size_t discarded=0;
+    while (discarded<LMB_API_BODY_MAX) {
+        uint64_t now=lmb_io_monotonic_ms();
+        if (!now || now<started || now-started>=100) break;
+        struct pollfd ready={fd,POLLIN,0};
+        int rc=poll(&ready,1,(int)(100-(now-started)));
+        if (rc<0 && errno==EINTR) continue;
+        if (rc<=0 || (ready.revents&POLLNVAL)) break;
+        char bytes[4096]; size_t room=LMB_API_BODY_MAX-discarded;
+        ssize_t n=recv(fd,bytes,room<sizeof bytes ? room : sizeof bytes,MSG_DONTWAIT);
+        if (n<0 && (errno==EINTR || errno==EAGAIN || errno==EWOULDBLOCK)) continue;
+        if (n<=0) break;
+        discarded+=(size_t)n;
+    }
 }
 static int api_serve(int access_dir, unsigned port, const char *tracker, HomeService *keeper) {
     int listener=socket(AF_INET,SOCK_STREAM,0); if (listener<0) return 1;
