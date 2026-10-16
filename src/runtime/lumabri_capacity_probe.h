@@ -179,6 +179,9 @@ static int api_capacity_round(int access,const char *tracker,LmbCapacity *r,uint
                 close(pair[i][0]); pair[i][0]=-1; remaining--;
                 LmbCapacitySample *s=&r->samples[round*r->clients+i]; s->completion=nowd()-began;
                 api_capacity_parse(&wires[i],s);
+                if (s->status!=429 && (!s->complete || !s->timing_known))
+                    fprintf(stderr,"[capacity-probe] round=%u client=%u model=%u status=%u complete=%u timing=%u wire_bytes=%zu\n",
+                        round+1,i+1,s->model,s->status,s->complete,s->timing_known,wires[i].len);
             }
         }
     }
