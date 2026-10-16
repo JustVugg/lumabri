@@ -40,7 +40,7 @@ static int catalog_portfolio_build(const LmbTuiState *st, const char *const *nam
     int rc = lmb_portfolio_plan(nodes, nnodes, models, count, &out->plan);
     if (rc < 0) JOINT_FAIL("Invalid joint planning inputs.");
     out->ready = !rc;
-    snprintf(out->reason, sizeof out->reason, "%s", rc ? "No joint resident candidate fits the known donor budgets." :
+    snprintf(out->reason, sizeof out->reason, "%s", rc ? "No joint resident plan found within the search limits. This does not prove the models cannot fit." :
         "Resident candidate. Each model requires donor approval; performance is not yet calibrated.");
 #undef JOINT_FAIL
     return rc;

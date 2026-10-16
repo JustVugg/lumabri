@@ -90,19 +90,30 @@ lumabri models --tracker HOST:PORT --models-dir CHECKPOINTS --json \
 No computer is selected implicitly. Only managed donors with known local FIFO
 admission are candidates. Unlike the single-model all-selected flow above,
 these explicit identities define an authorized candidate pool; the preview
-reports which machines each model would actually use. Up to eight models share a search over single-node
-placements and descending-RAM prefixes. It independently validates every range,
+reports which machines each model would actually use. Up to eight models share
+a bounded search over node subsets. With up to seven eligible machines it
+tries all subsets; larger pools try single nodes, price/RAM prefixes and pairs,
+with at most 128 distinct subset attempts per model. It independently validates every range,
 then sums resident process budgets across models and checks the four-allocation
 limit including existing allocations. Offered RAM is already net of existing
-reservations: they are not subtracted twice. This path is CPU Segment only;
+reservations: they are not subtracted twice. When a later model's initial split
+does not fit the remaining offer, the planner tries new contiguous ranges and
+alternative Edge owners against that remaining memory. Only the actual slices
+are charged, including when a proposed node proves unnecessary. The final
+output preserves the requested model order for preparation.
+This path is CPU Segment only;
 inventoried VRAM never becomes usable capacity without an adapter contract.
 
 Where all eligible node prices are known and use one currency, candidate plans
 minimize declared whole-machine hourly cost, counted once per used machine.
 Otherwise the objective is resident feasibility with fewer machines, not a
-fabricated zero-cost ranking. Search is limited to 20,000 states and reports
-when that bound is reached. `no_candidate` means no plan in this candidate
-family was found, not a proof that every possible placement is impossible.
+fabricated zero-cost ranking. It explores low-cost candidates first, with stable
+ties. Search is limited to 20,000 states and 256 residual refits. `search_bounded`
+is true when a subset/refit/state limit applies, including the restricted family
+above seven eligible machines. Reaching the refit limit does not discard feasible
+static candidates. Even with all subsets examined, the range/Edge search and
+model ordering are heuristics: neither an optimum nor impossibility is proved.
+`no_candidate` means no plan was found in this bounded search.
 
 This is **preview only**: no allocation, eviction, migration, approval or server
 purchase occurs. Plans expose inventory/runtime/allocation-set identities for

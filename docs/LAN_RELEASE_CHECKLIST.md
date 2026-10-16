@@ -173,7 +173,7 @@ below. Historical observations remain here as evidence, not current promises.
   This is traffic evidence, not automatic replica scaling or a
   production capacity guarantee. See [scope and limits](GATEWAY_DEMAND.md).
 
-- [ ] Elastic resident lifecycle (implementation under review): explicit selected
+- [x] Elastic resident lifecycle (#219): explicit selected
   machines and allocation ownership, min/max replicas, byte budget, demand
   windows and cooldown, shared preparation with exact receipts, publication,
   drain/release and dormant wake. Local real reduced-OLMoE passes growth under
@@ -183,11 +183,13 @@ below. Historical observations remain here as evidence, not current promises.
   wake using the same logical ID and operation. Focused tests cover lost-RPC
   completion, private-state bounds and operator reconciliation without losing
   uncertain reservations. Warning-as-error, API regression and focused
-  ASan/UBSan/leak tests pass. Native CI and release approval are still pending;
+  ASan/UBSan/leak tests pass. All eight native checks passed on `83bdbee` before
+  normal merge `51f9119`. The updated local real-OLMoE flow also verified ten
+  prepared engines under the owned-allocation lock contract, including wake;
   no physical LAN performance, cloud provisioning or billed savings are claimed.
   See [elastic scope and commands](ELASTIC_REPLICAS.md).
 
-- [ ] Web replica controls (implementation under review): explicit source,
+- [x] Web replica controls (#220): explicit source,
   computer selection, byte-exact memory budget and lifecycle adoption review;
   revision-fenced apply, pause, resume and reconciliation. Read-only operators
   can inspect policies without gaining management rights. Browser regressions
@@ -197,21 +199,37 @@ below. Historical observations remain here as evidence, not current promises.
   the October 15 local reduced-OLMoE run passed approved preparation, growth,
   inference on the added replica, another independent model, API restart,
   admitted-generation drain, scale to zero and demand wake after the browser
-  closed. Native/release approval remains separate; Apple Silicon idle
-  compression failures in the underlying lifecycle gate are not waived.
+  closed, with effective owned-allocation locks verified across all ten engine
+  preparations. All eight native checks passed on `0ce84f6` before normal merge
+  `640cc16`. This is implementation evidence, not full release certification.
 
 - [x] Conversation-history race fixes (#217, #218) and resumed Segment
   discovery/remote retirement (#221). #221 passed all eight native checks on
   `a95bfc4` before normal merge `4a15d61`: resumed routes are refreshed before
   opening a turn; an unavailable remote CLOSE quarantines only its slot,
   keeps healthy weights resident and cannot produce a false retirement seal.
-- [ ] Owned CPU allocation locking (#222): native page locks for engine
+- [x] Owned CPU allocation locking (#222): native page locks for engine
   payloads and retained raw tables, with refused lock failures and build-time
   allocator auditing. Local reduced OLMoE passes two resident models, isolated
-  conversations, API use and selective release. Full native CI remains
-  required. The elastic lifecycle gate explicitly selects this contract and
+  conversations, API use and selective release. All eight native checks passed
+  on `a1e6ebb` before normal merge `237c3e7`. The elastic lifecycle gate explicitly selects this contract and
   verifies effective locks across preparation, reload and wake; it does not
   weaken the separately tested observation guard or claim GPU/full-size support.
+
+- [ ] Joint placement search extension (under review): alternate node subsets,
+  known-price ordering and residual-memory range refits, with explicit subset,
+  state and refit limits. Deterministic regressions reproduce the old expensive
+  single-node choice and false rejection of two models needing different cuts;
+  32-node/eight-model bounds, allocation accounting and focused sanitizers pass.
+  Local reduced OLMoE passes two-model, two-slot management-API preparation and
+  real inference after TUI detach under owned CPU allocation locks. Shared
+  review/revalidation and TUI regression gates pass. Native CI remains required;
+  this is not yet requirements-based performance placement or billed savings.
+  The first macOS ARM/OpenMP gate refused a compressed idle replica under the
+  observation-only policy. Long-lived managed-replica CI now explicitly uses
+  the owned CPU allocation lock contract and verifies every prepared engine's
+  effective locks, as the elastic gate already does. Compression-refusal tests
+  remain in place; no residency protection or numerical assertion is disabled.
 
 - [x] Runtime/preflight PR #151: installed engine thread-capacity query; no-OpenMP
   single-thread execution; adaptive RAM reserve; acknowledged actionable
