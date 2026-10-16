@@ -225,6 +225,11 @@ below. Historical observations remain here as evidence, not current promises.
   real inference after TUI detach under owned CPU allocation locks. Shared
   review/revalidation and TUI regression gates pass. Native CI remains required;
   this is not yet requirements-based performance placement or billed savings.
+  The first macOS ARM/OpenMP gate refused a compressed idle replica under the
+  observation-only policy. Long-lived managed-replica CI now explicitly uses
+  the owned CPU allocation lock contract and verifies every prepared engine's
+  effective locks, as the elastic gate already does. Compression-refusal tests
+  remain in place; no residency protection or numerical assertion is disabled.
 
 - [ ] Connected static/managed comparison (under review): two real reduced
   OLMoE checkpoints, two explicitly approved placements, observed joint timing,
