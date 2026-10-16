@@ -132,6 +132,86 @@ static void test_complete_offers(void) {
     puts("HOME AUTH/OFFER: PASS (saved credentials, single AUTH, wrong/missing/duplicate AUTH, tracker rejection)");
 }
 
+static void test_retired_acknowledgements(void) {
+    uint8_t seed[32]={0x35},other_seed[32]={0x36},other_pk[32],other_sk[64];
+    lmb_sign_keypair(g_sec_pk,g_sec_sk,seed); lmb_sign_keypair(other_pk,other_sk,other_seed);
+    lmb_enc_wrap=lmb_sec_wrap_hook; lmb_enc_send=lmb_sec_send_hook;
+    lmb_enc_recv=lmb_sec_recv_hook; lmb_enc_forget=lmb_sec_forget_hook;
+    setenv("LUMABRI_TOKEN","monitor-test-only",1);
+    LmbHomeOffer old={.id={1},.model_root={2},.edge_peer={3},.layers=4,.end=2,.context=64,
+        .threads=1,.max_new=16,.ram_bytes=256u<<20,.disk_bytes=128u<<20,.model_bytes=64u<<20};
+    memcpy(old.requester,g_sec_pk,32); strcpy(old.model,"tiny-olmoe");
+    strcpy(old.model_type,"olmoe"); strcpy(old.tracker,"127.0.0.1:1");
+    LmbNodeControl seal={.instance={8},.revision=3,.draining=LMB_NODE_CONTROL_RETIRED};
+    char service[1200]; assert(!home_service_directory(service,sizeof service));
+    int dir=lmb_retired_dir(service,1); assert(dir>=0);
+    LmbRetiredReceipt receipt={.phase=LMB_RECEIPT_PREPARED,.seal=seal};
+    memcpy(receipt.allocation,old.id,32); memcpy(receipt.root,old.model_root,32); memcpy(receipt.requester,old.requester,32);
+    int lock=lmb_retired_lock(dir); assert(lock>=0 && !lmb_retired_store(dir,&receipt)); close(lock);
+    /* 0: a crash intent alone is not release; 1: reconcile an owned closed
+     * slot; 2: replay after slot reuse; 3: replay after keeper restart;
+     * 4..8: wrong owner/root/id/fence/action; 9: old ID cannot be admitted. */
+    for (unsigned mode=0;mode<10;mode++) {
+        int pair[2]; assert(!socketpair(AF_UNIX,SOCK_STREAM,0,pair));
+        pid_t held=0;
+        IdleOffer o={.fd=pair[1],.donor={.client=-1,.lease=-1,.weight_lease=-1,
+            .node_control=-1,.segment_ready=-1,.host_ready=-1}};
+        if (mode==1) {
+            o.donor.transaction.offer=old; o.donor.transaction.phase=LMB_HOME_CLOSED;
+            o.donor.retired_receipt=seal;
+        } else if (mode==2) {
+            held=fork(); assert(held>=0);
+            if (!held) { for (;;) pause(); }
+            o.donor.transaction.offer=old; o.donor.transaction.offer.id[0]=9;
+            o.donor.transaction.phase=LMB_HOME_SEGMENT_READY; o.donor.transaction.reservation_held=1;
+            o.donor.segment=held; o.donor.retained=1;
+        }
+        pthread_t server; assert(!pthread_create(&server,NULL,complete_offer_server,&o));
+        LmbSecure client;
+        assert(!lmb_secure_handshake(pair[0],1,mode==4 ? other_sk : g_sec_sk,mode==4 ? other_pk : g_sec_pk,&client));
+        lmb_set_io_timeout(pair[0],3000);
+        LmbBuf auth={0}; assert(!lmb_buf_str(&auth,"monitor-test-only"));
+        assert(!lmb_secure_send(&client,pair[0],LMB_AUTH,auth.p,auth.len,NULL,0)); free(auth.p);
+        LmbMsg reply={0}; assert(!lmb_secure_recv(&client,pair[0],&reply) && reply.op==LMB_OK); lmb_msg_free(&reply);
+        if (mode==9) {
+            LmbBuf b={0}; assert(!lmb_home_offer_pack(&b,&old));
+            assert(!lmb_secure_send(&client,pair[0],LMB_HOME_OFFER,b.p,b.len,NULL,0)); free(b.p);
+        } else {
+            uint8_t body[64+LMB_NODE_CONTROL_REQUEST_BYTES];
+            memcpy(body,old.id,32); memcpy(body+32,old.model_root,32);
+            lmb_node_control_request(body+64,mode==8 ? LMB_NODE_CONTROL_RESUME : LMB_NODE_CONTROL_QUERY,&seal);
+            if (mode==5) body[32]^=1;
+            if (mode==6) body[0]^=1;
+            if (mode==7) body[64+8]^=1;
+            assert(!lmb_secure_send(&client,pair[0],LMB_HOME_RETIRED_RELEASE,body,sizeof body,NULL,0));
+        }
+        int rc=lmb_secure_recv(&client,pair[0],&reply);
+        if (mode>=1 && mode<=3) {
+            LmbNodeControl actual;
+            assert(!rc && reply.op==LMB_HOME_RETIRED_RELEASE_R && !reply.pay_len &&
+                reply.body_len==64+LMB_NODE_CONTROL_REPLY_BYTES && !memcmp(reply.body,old.id,32) &&
+                !lmb_node_control_decode(reply.body+64,LMB_NODE_CONTROL_REPLY_BYTES,&actual));
+            assert(actual.revision==seal.revision && !memcmp(actual.instance,seal.instance,32));
+        } else if (mode==9) {
+            assert(!rc && reply.op==LMB_HOME_STATUS && reply.body_len>=40);
+            assert(lmb_get32(reply.body+36)==LMB_HOME_REJECTED);
+        } else assert(rc); /* no false successful ACK, including an uncommitted intent */
+        lmb_msg_free(&reply); pthread_join(server,NULL);
+        if (mode==1) assert(!o.donor.retired_receipt.revision);
+        if (mode==2) {
+            assert(o.donor.segment==held && o.donor.transaction.reservation_held &&
+                o.donor.transaction.offer.id[0]==9 && o.donor.retained && waitpid(held,NULL,WNOHANG)==0);
+            assert(!kill(held,SIGTERM) && waitpid(held,NULL,0)==held);
+        }
+        lmb_close(pair[0]); lmb_close(pair[1]);
+    }
+    char name[80]; lmb_retired_name(old.id,name); assert(!unlinkat(dir,name,0));
+    assert(!unlinkat(dir,"lock",0)); close(dir);
+    int base=open(service,O_RDONLY|O_DIRECTORY); assert(base>=0);
+    assert(!unlinkat(base,"retired-allocations",AT_REMOVEDIR)); close(base);
+    puts("HOME RETIRED ACK: PASS (uncommitted intent refused, durable release, slot reuse, restart, original owner and seal, old allocation cannot reload)");
+}
+
 static void *monitor_donor(void *arg) {
     MonitorDonor *d = arg;
     while (!atomic_load(&d->stop)) {
@@ -173,7 +253,13 @@ static void test_connection_reasons(void) {
     pthread_mutex_destroy(&s.status_lock); pthread_mutex_destroy(&s.send_lock);
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    char temporary[]="/tmp/lmb-home-monitor-XXXXXX",path[1200];
+    assert(mkdtemp(temporary) && !setenv("HOME",temporary,1));
+    if (argc==2 && !strcmp(argv[1],"retired-receipts")) {
+        signal(SIGPIPE,SIG_IGN); test_retired_acknowledgements(); goto cleanup;
+    }
+    assert(argc==1);
     test_connection_reasons();
     signal(SIGPIPE, SIG_IGN);
     HomeSession s = HOME_SESSION_INIT;
@@ -223,5 +309,10 @@ int main(void) {
     puts("HOME MONITOR: PASS (two leases survive a paused UI; terminal reasons preserved)");
     test_authenticated_idle_offer();
     test_complete_offers();
+    test_retired_acknowledgements();
+cleanup:
+    snprintf(path,sizeof path,"%s/.lumabri/service",temporary); assert(!rmdir(path));
+    snprintf(path,sizeof path,"%s/.lumabri",temporary); assert(!rmdir(path));
+    assert(!rmdir(temporary));
     return 0;
 }
