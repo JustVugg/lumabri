@@ -149,7 +149,7 @@ def verify_elastic(api, until, service, env, terminal, artifacts):
                 time.sleep(.01)
         return held
 
-    events = {}; held_chat = None; permits = []
+    events = {}; held_chat = None; permits = []; recovery_turn = None
     def configure(body):
         if os.environ.get("LUMABRI_TEST_BROWSER") == "1":
             return configure_from_browser(api, body, artifacts)
@@ -265,9 +265,10 @@ def verify_elastic(api, until, service, env, terminal, artifacts):
         # A saved route is not a healthy resident replica. Kill only this
         # fixture's explicitly identified Segment child, with another model
         # still serving. No protocol proxy or forged health report is used.
+        response_recovery = "LUMABRI_TEST_RECOVERY_CONTROL" in api.env
         recovery_config = {**cold_config, "revision": awake["revision"],
                            "route_revision": awake["route_revision"], "min_replicas": 1,
-                           "enabled": False, "adopt_allocations": awake["adopt_allocations"]}
+                           "enabled": response_recovery, "adopt_allocations": awake["adopt_allocations"]}
         code, paused = api.http(path, recovery_config)
         assert code == 200, (code, paused)
         code, workspace = api.http("/api/v1/workspace")
@@ -285,16 +286,25 @@ def verify_elastic(api, until, service, env, terminal, artifacts):
         engine_child = owned_engine_pid(snapshot, "segment_pid", api.runtime, "segment_node")
         before_failure = set(library.glob("*.plan"))
         old_bytes = int(paused["reserved_bytes"])
+        if response_recovery:
+            from elastic_response_test import WaitingTurn, verify_wait_boundaries
+            verify_wait_boundaries(api, token, route["id"], victim["name"], policy)
+            recovery_turn = WaitingTurn(api, token, route["id"], victim["name"], hold=True)
+            recovery_turn.ready(waiting=False)
         os.kill(engine_child, signal.SIGKILL)
         until(lambda: service(name)["donor"]["segment_pid"] != child,
               "keeper did not observe its terminated Segment child", 20)
-        code, interrupted = chat(route["id"])
-        assert code in (200, 503) and b"event: done\n" not in interrupted, (code, interrupted)
+        if recovery_turn:
+            recovery_turn.release(); recovery_turn.ready()
+        else:
+            code, interrupted = chat(route["id"])
+            assert code in (200, 503) and b"event: done\n" not in interrupted, (code, interrupted)
         infer(second["id"])
         assert set(library.glob("*.plan")) == before_failure, "paused recovery allocated another model"
         assert policy()["reserved_bytes"] == paused["reserved_bytes"], "failure was treated as proof of freed memory"
-        code, resumed = api.http(path, {"action": "resume", "id": route["id"], "revision": paused["revision"]})
-        assert code == 200, (code, resumed)
+        if not response_recovery:
+            code, resumed = api.http(path, {"action": "resume", "id": route["id"], "revision": paused["revision"]})
+            assert code == 200, (code, resumed)
         failed = await_policy(lambda p: any(h["allocation"] == old_allocation and h["consecutive_failures"] == 3
                                            for h in p["availability_observations"]),
                               "terminated Segment child did not trigger bounded health recovery", 90)
@@ -303,6 +313,10 @@ def verify_elastic(api, until, service, env, terminal, artifacts):
                                 "no replacement was prepared after the real Segment failure", approve=True)
         assert old_allocation in restored["adopt_allocations"] and int(restored["reserved_bytes"]) > old_bytes
         assert len(set(library.glob("*.plan")) - before_failure) == 1, "failure created duplicate replacements"
+        if recovery_turn:
+            events["recovered_turn"] = recovery_turn.finish(success=True)
+            recovery_turn.close(); recovery_turn = None
+            print("ELASTIC RESPONSE RECOVERY: PASS (real Segment killed after visible output, new approved replica, identical oracle, no duplicated text)", flush=True)
         infer(route["id"]); infer(second["id"])
         # Confirm the replacement itself is queried, not inferred healthy
         # merely from publication. Old ownership remains charged and visible.
@@ -313,7 +327,9 @@ def verify_elastic(api, until, service, env, terminal, artifacts):
         events.update(terminated_segment={"pid": engine_child, "tracked_pid": child,
                                           "allocation": old_allocation, "node": name},
                       failed_replica=failed, restored_replica=restored, checked_replica=checked)
-        print("ELASTIC RECOVERY: PASS (real Segment child killed, other model serves, paused policy inert, three failed probes, approved replacement, old reservation retained, exactly one new allocation, restored inference)", flush=True)
+        print("ELASTIC RECOVERY: PASS (real Segment child killed, other model serves, " +
+              ("same-turn replay, " if response_recovery else "paused policy inert, ") +
+              "three failed probes, approved replacement, old reservation retained, exactly one new allocation, restored inference)", flush=True)
         # The hard replica limit includes unreachable allocations. Losing
         # the new host too must not buy an unapproved third allocation.
         new_allocation, = set(restored["adopt_allocations"]) - {old_allocation}
@@ -359,6 +375,8 @@ def verify_elastic(api, until, service, env, terminal, artifacts):
                 print(f"Elastic fixture cleanup: {exc}", file=sys.stderr, flush=True)
         for held in permits:
             cleanup(lambda held=held: held.communicate("release\n", timeout=5))
+        if recovery_turn:
+            cleanup(recovery_turn.close)
         if held_chat and held_chat.p.poll() is None:
             cleanup(lambda: held_chat.send("/quit\n"))
         def pause():

@@ -219,7 +219,9 @@ async function consumeStream(response, onText) {
           if (bytes > 65536) throw new Error("Response exceeded the conversation limit; the partial answer is preserved.");
           onText(text.decode(decoded, {stream: true}));
         } else if (kind === "recovering") {
-          say("A replica stopped. Recovering on another approved computer; checking the text already shown…");
+          say(value.phase === "waiting" ?
+            "A replica stopped. Waiting for approved replacement capacity (up to 2 minutes). Stop cancels this response." :
+            "A replica stopped. Recovering on another approved computer; checking the text already shown…");
         } else if (kind === "done") {
           onText(text.decode()); done = true;
           if (value.recovery_attempts) say("Recovered on another approved replica. The text already shown was verified and was not repeated.");
@@ -265,7 +267,8 @@ async function generate(retry = false) {
     try {
       const response = await fetch("/api/v1/chat", {method: "POST", signal: controller.signal,
         headers: {Authorization: `Bearer ${token}`, "Content-Type": "application/json"},
-        body: JSON.stringify({model: model.id, messages: conversation.messages, max_tokens: Math.min(256, model.max_tokens)})});
+        body: JSON.stringify({model: model.id, messages: conversation.messages, max_tokens: Math.min(256, model.max_tokens),
+          recovery_wait_seconds: $("recovery-wait").checked ? 120 : 0})});
       if (!response.ok) { const problem = await response.json(); throw new Error(explain(problem.error || `Generation failed (${response.status})`)); }
       await consumeStream(response, delta => {
         const nearEnd = $("chat").scrollHeight - $("chat").scrollTop - $("chat").clientHeight < 100;

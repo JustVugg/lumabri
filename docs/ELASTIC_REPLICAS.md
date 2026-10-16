@@ -162,11 +162,13 @@ The old reservation remains visible for operator reconciliation. Scale-down
 does not remove a healthy replacement while counting a failed replica as the
 minimum; unknown or stale health also prevents idle release.
 
-This restores capacity for **subsequent requests**. An interrupted response is
-still reported as interrupted, with its conversation preserved; it is not
-silently replayed on a newly added machine. In-flight replay remains limited to
-replicas authorized when that turn started. Recovery onto a newly prepared
-replica during the same turn is a separate, unfinished step.
+This restores capacity for subsequent requests. An in-flight API turn can also
+opt into `recovery_wait_seconds` (at most 120) to wait for a new replica from its
+already enabled, unchanged policy. The interruption and wait are visible, Stop
+remains available, and replay verifies every byte already delivered before
+publishing a continuation. Changed policy/model/permissions or an expired wait
+leave the conversation incomplete. Without opt-in, recovery remains restricted
+to the original replica set. See [response recovery](RESIDENT_API.md#bounded-visible-response-recovery).
 
 ## Crash and concurrency behavior
 

@@ -563,12 +563,31 @@ The temporary prefix is bounded to 8 MiB and is not telemetry or calibration.
 
 Every retry revalidates donor approval, signed root, content identity, numeric
 ABI/class, host identity and the current API credential/grant. The replica must
-belong to both the original request's set and the current operator-approved set.
-Newly added replicas are not adopted mid-response. Removed/revoked members,
+belong to both the original request's set and the current operator-approved set
+by default. Removed/revoked members,
 busy allocations and previously attempted allocations are excluded. A browser
 disconnect, cancellation, malformed stream or ordinary engine error does not
 trigger another attempt. Exhausted capacity preserves the visible partial
-answer and reports an error; it does not prepare new resources.
+answer and reports an error; the request itself never prepares new resources.
+
+Optional `recovery_wait_seconds` (integer 0–120, default 0) lets an interrupted
+managed-model turn wait for replacements prepared by an **already enabled
+elastic policy**. This also works when only one replica existed at admission.
+The policy's revision, selected computers, source identity and limits are
+captured when the turn starts. A policy edit, pause, fault, unrelated route
+change or credential/grant revocation ends the wait. Newly published capacity
+must belong to that policy, retain the original model/numeric contract and use
+only its authorized computers. Donor approval is still required.
+
+Waiting releases the failed host's permit and emits `recovering` events with
+`phase: "waiting"`. Disconnect/Stop cancels only this turn; it does not cancel
+the independent operator policy or unload its replicas. The wait budget is
+shared across recovery attempts and bounded by the existing request deadline;
+remote cleanup can add its existing bounded acknowledgement time. Replay still
+verifies the visible prefix byte for byte. No capacity within the deadline
+means an explicit incomplete response, not a successful empty reply. Initial
+cold/unavailable admission remains an HTTP error: this option is not a hidden
+cold-start queue. The browser exposes a checkbox for the two-minute wait.
 
 An older runtime without the seed capability can participate in automatic
 recovery only for an explicitly greedy model. Raw allocation requests have no
