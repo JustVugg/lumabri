@@ -102,6 +102,77 @@ record is the static baseline. The JSON result is a recommendation only
 billed savings. New-placement search, sustained-load capacity certification and
 automatic elasticity are separate work.
 
+### Measure and inspect through the service
+
+The same operations are available to applications without a shell or parsing
+CLI output. `GET /api/v1/capacity` requires operator or management permission.
+It lists at most 32 immutable records, explicitly labelled
+`historical_not_revalidated`; this read does **not** contact hosts, certify
+freshness or invent a current machine price. Check a record before using it.
+
+All the following POSTs require an explicit **management** grant, JSON content
+type, a same-origin request and a body of at most 2 KiB. Unknown or duplicate
+fields, paths, endpoints, prompts and imported observations are rejected.
+
+```http
+POST /api/v1/capacity/measure
+Content-Type: application/json
+Authorization: Bearer <management token>
+
+{"record":"baseline","clients":2,"rounds":3,"max_tokens":8,
+ "allocations":["<approved-allocation-a>","<approved-allocation-b>"]}
+```
+
+The bounds, round-robin model order and real inference path are the same as
+the CLI. This is a calibration burst, not an end-to-end HTTP load test: the
+individual probe conversations still use the gateway's local socketpairs.
+After validating the live allocations, the response is `text/event-stream`:
+`progress` reports `completed_rounds` (initially zero) and `rounds`, followed
+by one `result` with the same observation JSON as the CLI. Progress indicates
+finished rounds, not an estimated completion time. No generated text is sent.
+
+Closing/aborting that HTTP connection cancels its probe conversations and
+releases their permits after reset. Closing the page does not unload models.
+The server also bounds the HTTP probe to four minutes plus bounded cleanup;
+initial runtime checks have network deadlines. An interrupted run is saved
+as `incomplete`, never substituted for a successful observation. If validation
+fails before the stream begins, no measurement is saved. A busy probe, reused
+name, full record store or unavailable approved runtime returns 409
+`capacity_probe_not_started`; inspect the saved records and model availability
+before retrying. Do not automatically resubmit a measurement after a lost
+connection: inspect its immutable name first.
+
+```http
+POST /api/v1/capacity/check
+Content-Type: application/json
+Authorization: Bearer <management token>
+
+{"record":"baseline","ttft_ms":500,"gap_ms":100,"max_age_seconds":300}
+```
+
+`check` returns current eligibility (including stale or unavailable evidence),
+not a second inference run. `select` rechecks two to eight records together:
+
+```json
+{"ttft_ms":500,"gap_ms":100,"max_age_seconds":300,
+ "records":["baseline","alternative"]}
+```
+
+Send that body to `POST /api/v1/capacity/select`; the first name is the baseline.
+The selection is read-only (`applied: false`). Application and the permanent
+portfolio policy remain separate operations with revision checks.
+
+`POST /api/v1/capacity/remove` accepts only `{"record":"baseline"}` and removes
+that observation, not allocations, models or histories. It refuses while a
+probe holds the store lock. Removing evidence referenced by a policy prevents
+future decisions from using it; it does not manufacture replacement evidence.
+
+Synthetic calibration turns are excluded from gateway production-demand
+counters, whether started through CLI or HTTP. They do contend for compute;
+run a calibration during a controlled interval. The connected reduced-OLMoE
+placement test covers streaming, concurrent-probe refusal, disconnect cleanup,
+CLI/HTTP comparison agreement, unchanged reservations and telemetry isolation.
+
 ### Apply a measured portfolio
 
 After selecting a passing observation, the owner can explicitly apply its

@@ -7,6 +7,27 @@
 #include "src/planner/lumabri_capacity_store.h"
 #define LMB_CAPACITY_WIRE (1024u*1024u)
 
+typedef struct { int fd,started; } ApiCapacityObserver;
+static int api_capacity_progress(ApiCapacityObserver *observer,uint32_t round,uint32_t rounds) {
+    if (!observer || observer->fd<0) return 0;
+    if (!observer->started) {
+        const char *header="HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+            "Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n";
+        observer->started=1;
+        if (api_write(observer->fd,header,strlen(header))) return -1;
+    }
+    char progress[160];
+    snprintf(progress,sizeof progress,"{\"completed_rounds\":%u,\"rounds\":%u,\"weights_changed\":false}",round,rounds);
+    return api_event(observer->fd,"progress",progress);
+}
+static int api_capacity_disconnected(int fd) {
+    if (fd<0) return 0;
+    struct pollfd p={fd,POLLIN,0}; int rc=poll(&p,1,0);
+    /* This is one complete POST, never an HTTP pipeline. EOF, extra input or
+     * a socket error all terminate its probe without touching other chats. */
+    return (rc<0 && errno!=EINTR) || (rc>0 && p.revents);
+}
+
 static int api_capacity_snapshot(const char *tracker,LmbCapacity *r,uint8_t digest[32],LmbCapacityCost *cost) {
     LmbMachineReport reports[LMB_INVENTORY_MAX]; uint32_t n=0;
     LmbResidentPlan *plan=calloc(1,sizeof *plan); LmbCalibration *seed=calloc(1,sizeof *seed);
@@ -106,7 +127,7 @@ static void api_capacity_parse(Cap *wire,LmbCapacitySample *s) {
     s->timing_known=1; s->ttft=first; s->completion=completion; s->gap_p95=gap;
     s->prompt_tokens=prompt; s->generated_tokens=notifications;
 }
-static int api_capacity_round(int access,const char *tracker,LmbCapacity *r,uint32_t round,int guard) {
+static int api_capacity_round(int access,const char *tracker,LmbCapacity *r,uint32_t round,int guard,int client) {
     int pair[LMB_CAPACITY_CLIENTS][2],gate[2]={-1,-1}; pid_t children[LMB_CAPACITY_CLIENTS]={0};
     Cap wires[LMB_CAPACITY_CLIENTS]={0}; int bad=0; uint32_t started=0;
     for (uint32_t i=0;i<LMB_CAPACITY_CLIENTS;i++) pair[i][0]=pair[i][1]=-1;
@@ -116,6 +137,12 @@ static int api_capacity_round(int access,const char *tracker,LmbCapacity *r,uint
         pid_t pid=fork(); if (pid<0) { bad=1; break; }
         if (!pid) {
             close(guard); close(gate[1]);
+            if (client>=0) close(client);
+            /* Calibration is synthetic load, not production demand. Forked
+             * probes must not multiplex BEGIN/END onto one gateway worker's
+             * telemetry channel or trigger elastic growth themselves. */
+            if (api_demand_fd>=0) close(api_demand_fd);
+            api_demand_fd=-1;
             for (uint32_t k=0;k<r->clients;k++) { close(pair[k][0]); if (k!=i) close(pair[k][1]); }
             signal(SIGINT,api_stop); signal(SIGTERM,api_stop); signal(SIGALRM,api_stop); alarm(LMB_API_TURN_SECONDS);
             char ready; if (read(gate[0],&ready,1)!=1) _exit(1); close(gate[0]);
@@ -136,6 +163,7 @@ static int api_capacity_round(int access,const char *tracker,LmbCapacity *r,uint
     close(gate[1]);
     double began=nowd(),deadline=began+LMB_API_TURN_SECONDS+35; uint32_t remaining=started;
     while (!bad && remaining && !api_stopping && nowd()<deadline) {
+        if (api_capacity_disconnected(client)) { bad=1; break; }
         struct pollfd pollers[LMB_CAPACITY_CLIENTS];
         for (uint32_t i=0;i<started;i++) pollers[i]=(struct pollfd){pair[i][0],POLLIN,0};
         int rc=poll(pollers,started,200);
@@ -172,7 +200,7 @@ static int api_capacity_round(int access,const char *tracker,LmbCapacity *r,uint
     }
     return bad ? -1 : 0;
 }
-static int api_capacity_json(const LmbCapacity *r,const char *state,const LmbCapacityCost *cost) {
+static int api_capacity_json(Cap *out,const LmbCapacity *r,const char *state,const LmbCapacityCost *cost) {
     Cap body={0}; char hash[65]; lmb_hex(hash,r->fingerprint,32);
     int bad=api_addf(&body,"{\"schema\":1,\"scope\":\"local_owner_gateway_bursts\",\"production_capacity_certified\":false,"
         "\"fingerprint\":\"%s\",\"state\":",hash) || api_json_text(&body,state) ||
@@ -188,8 +216,7 @@ static int api_capacity_json(const LmbCapacity *r,const char *state,const LmbCap
         if (!bad) bad=s.measured ? api_addf(&body,"%.9f,\"gap_p95_of_response_p95_seconds\":%.9f,\"completion_p95_seconds\":%.9f}",
             s.ttft_p95,s.gap_p95_of_response_p95,s.completion_p95) : cap_str(&body,"null,\"gap_p95_of_response_p95_seconds\":null,\"completion_p95_seconds\":null}");
     }
-    if (!bad) bad=cap_str(&body,"]}\n");
-    if (!bad) bad=fputs(body.p,stdout)==EOF;
+    if (!bad) bad=cap_str(&body,"]}") || cap_add(out,body.p,body.len);
     free(body.p); return bad ? 1 : 0;
 }
 static int api_capacity_uint(const char *s,uint32_t low,uint32_t high,uint32_t *out) {
@@ -197,7 +224,8 @@ static int api_capacity_uint(const char *s,uint32_t low,uint32_t high,uint32_t *
     if (lmb_response_uint(&p,&n) || *p || n<low || n>high) return -1;
     *out=n; return 0;
 }
-static int api_capacity_measure(int access,const char *tracker,char *const *args,unsigned count) {
+static int api_capacity_measure_result(int access,const char *tracker,char *const *args,unsigned count,
+    Cap *body,ApiCapacityObserver *observer) {
     LmbCapacity r={0}; LmbCapacityCost cost={0};
     if (count<5 || count>4+LMB_CAPACITY_MODELS || !lmb_api_username(args[0]) ||
         api_capacity_uint(args[1],1,LMB_CAPACITY_CLIENTS,&r.clients) ||
@@ -213,25 +241,33 @@ static int api_capacity_measure(int access,const char *tracker,char *const *args
     int bad=lmb_capacity_room(dir,args[0]);
     r.measured_at=(uint64_t)time(NULL); r.stable=1; r.count=r.clients*r.rounds;
     for (uint32_t i=0;i<r.count;i++) { r.samples[i].model=(i%r.clients)%r.models; r.samples[i].round=i/r.clients; }
+    struct sigaction stop={0},old_int,old_term,old_alarm; stop.sa_handler=api_stop; sigemptyset(&stop.sa_mask);
+    sigaction(SIGINT,&stop,&old_int); sigaction(SIGTERM,&stop,&old_term); sigaction(SIGALRM,&stop,&old_alarm);
     if (!bad) bad=api_capacity_snapshot(tracker,&r,r.fingerprint,&cost);
-    if (bad) { fprintf(stderr,"Capacity probe needs a new record name and live approved allocations with current inventory\n"); close(guard); close(dir); return 1; }
-    struct sigaction stop={0},old_int,old_term; stop.sa_handler=api_stop; sigemptyset(&stop.sa_mask);
-    sigaction(SIGINT,&stop,&old_int); sigaction(SIGTERM,&stop,&old_term); api_stopping=0;
+    if (bad || api_stopping) {
+        fprintf(stderr,"Capacity probe needs a new record name and live approved allocations with current inventory\n");
+        sigaction(SIGINT,&old_int,NULL); sigaction(SIGTERM,&old_term,NULL); sigaction(SIGALRM,&old_alarm,NULL);
+        close(guard); close(dir); return 1;
+    }
     fprintf(stderr,"[capacity] real inference: %u clients, %u rounds, at most %u output tokens/request; no models will be loaded or released\n",
         r.clients,r.rounds,r.max_new);
+    bad=api_capacity_progress(observer,0,r.rounds);
     for (uint32_t round=0;!bad && round<r.rounds;round++) {
-        bad=api_capacity_round(access,tracker,&r,round,guard);
+        int client=observer ? observer->fd : -1;
+        bad=api_stopping || api_capacity_disconnected(client) || api_capacity_round(access,tracker,&r,round,guard,client);
         uint8_t current[32]; LmbCapacityCost latest={0};
         if (!bad && (api_capacity_snapshot(tracker,&r,current,&latest) || memcmp(current,r.fingerprint,32))) bad=1;
         fprintf(stderr,"[capacity] round %u/%u %s\n",round+1,r.rounds,bad ? "interrupted or changed" : "recorded");
+        if (!bad) bad=api_capacity_progress(observer,round+1,r.rounds);
     }
-    sigaction(SIGINT,&old_int,NULL); sigaction(SIGTERM,&old_term,NULL);
+    if (api_stopping) bad=1;
     if (bad) r.stable=0;
     int saved=lmb_capacity_save(dir,args[0],&r); close(guard); close(dir);
-    int printed=api_capacity_json(&r,saved ? "record_not_saved" : bad ? "incomplete" : "measured",&cost);
+    sigaction(SIGINT,&old_int,NULL); sigaction(SIGTERM,&old_term,NULL); sigaction(SIGALRM,&old_alarm,NULL);
+    int printed=api_capacity_json(body,&r,saved ? "record_not_saved" : bad ? "incomplete" : "measured",&cost);
     return bad || saved || printed ? 1 : 0;
 }
-static int api_capacity_check(int access,const char *tracker,char *const *args,unsigned count) {
+static int api_capacity_check_result(int access,const char *tracker,char *const *args,unsigned count,Cap *body) {
     uint32_t first,gap,age;
     if (count!=4 || !lmb_api_username(args[0]) || api_capacity_uint(args[1],1,3600000,&first) ||
         api_capacity_uint(args[2],1,3600000,&gap) || api_capacity_uint(args[3],1,86400,&age)) return 2;
@@ -240,13 +276,13 @@ static int api_capacity_check(int access,const char *tracker,char *const *args,u
     uint8_t current[32]; LmbCapacityCost cost={0};
     const char *state=api_capacity_snapshot(tracker,&r,current,&cost) ? "inventory_or_runtime_unavailable" :
         lmb_capacity_evaluate(&r,current,(uint64_t)time(NULL),age,first/1000.0,gap/1000.0);
-    return api_capacity_json(&r,state,&cost);
+    return api_capacity_json(body,&r,state,&cost);
 }
 /* Read-only bounded global choice among whole, actually measured portfolios.
  * The first candidate is the operator's static baseline. No profile from one
  * mix is composed with another: shared CPU/network interference is retained.
  * This does not prepare new placements, change routing or release capacity. */
-static int api_capacity_select(int access,const char *tracker,char *const *args,unsigned count) {
+static int api_capacity_select_result(int access,const char *tracker,char *const *args,unsigned count,Cap *out) {
     uint32_t first,gap,age;
     if (count<5 || count>3+LMB_CAPACITY_MODELS || api_capacity_uint(args[0],1,3600000,&first) ||
         api_capacity_uint(args[1],1,3600000,&gap) || api_capacity_uint(args[2],1,86400,&age)) return 2;
@@ -279,8 +315,17 @@ static int api_capacity_select(int access,const char *tracker,char *const *args,
             costs[i].currency,(unsigned long long)costs[i].micro_per_hour) : cap_str(&body,"null");
         if (!bad) bad=cap_str(&body,"}");
     }
-    if (!bad) bad=cap_str(&body,"]}\n") || fputs(body.p,stdout)==EOF;
+    if (!bad) bad=cap_str(&body,"]}") || cap_add(out,body.p,body.len);
     free(body.p); free(records); return bad ? 1 : 0;
+}
+/* CLI and HTTP consume the same result; no subprocess or stdout parsing. */
+static int api_capacity_cli(int access,const char *tracker,char *const *args,unsigned count,int action) {
+    Cap body={0};
+    int rc=action==0 ? api_capacity_measure_result(access,tracker,args,count,&body,NULL) :
+        action==1 ? api_capacity_check_result(access,tracker,args,count,&body) :
+        api_capacity_select_result(access,tracker,args,count,&body);
+    if (body.p && (fputs(body.p,stdout)==EOF || fputc('\n',stdout)==EOF)) rc=1;
+    free(body.p); return rc;
 }
 /* Explicit owner action, never an automatic consequence of measurement.
  * Replace future-turn routing for the entire ordered measured model mix.
