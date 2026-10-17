@@ -18,9 +18,24 @@ below. Historical observations remain here as evidence, not current promises.
   CLI/HTTP selection agreement and separation from production-demand counters.
   Strict API authorization/schema tests and all API unit tests pass. The
   four-slot managed-replica/recovery/portfolio gate also passes with nine
-  prepared engines under effective owned-payload locks. Native CI and the
-  browser measurement controls are still required; this is not release or
+  prepared engines under effective owned-payload locks. Native CI is still
+  required; this is not release or
   production-capacity certification.
+
+- [ ] Browser capacity controls (under review): explicit ordered allocations,
+  workload limits and confirmation; streamed progress and cancellation;
+  historical listings, live checks and joint-plan comparison; separate atomic
+  model-route application. The browser binds application to exact observation
+  content as well as model revisions, so a removed/recreated record name cannot
+  silently substitute another plan. Read-only operator, permission revocation,
+  malformed stream, stale polling, navigation and mobile regression tests pass.
+  The October 16 connected browser gate ran real two-model reduced-OLMoE
+  measurement, comparison, route application and private chat through both
+  models, with eight effective owned-payload locks. An incorrect observation
+  identity was refused without changing either route. The complete placement
+  gate then passed policy-driven selection, explicit retirement and evidence
+  invalidation. These are loopback results, not datacenter throughput or bills.
+  Linux CI now runs that browser path; native CI and merge remain pending.
 
 - [x] Persistent manager and allocation keepers (#183): TUI detach and manager
   restart do not replay approvals or reload live resident allocations.

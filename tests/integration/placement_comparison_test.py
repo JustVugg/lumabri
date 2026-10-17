@@ -6,6 +6,7 @@ and post-retirement invalidation; never call routing alone a realized saving.
 """
 import http.client
 import json
+import os
 import secrets
 import subprocess
 import socket
@@ -156,6 +157,9 @@ def verify_placement_comparison(api, until, service, env, approve, inventory_rea
     code, demand_after = api.http("/api/v1/demand")
     assert code == 200 and demand_after["models"] == demand_before["models"] == [], demand_after
     assert demand_after["telemetry_gaps"] == demand_before["telemetry_gaps"] == 0, demand_after
+    if os.environ.get("LUMABRI_TEST_BROWSER") == "1":
+        from capacity_browser_flow import verify_browser_capacity
+        verify_browser_capacity(api, managed, static, artifacts)
     routes = [json.loads(api.cli("model-add", "comparison-" + name, a["id"], "--tracker", api.tracker))
               for name, a in zip(names, static)]
     config = {"action": "configure", "revision": 0, "enabled": True,

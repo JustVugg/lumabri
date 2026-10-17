@@ -201,9 +201,12 @@ static int api_capacity_round(int access,const char *tracker,LmbCapacity *r,uint
     return bad ? -1 : 0;
 }
 static int api_capacity_json(Cap *out,const LmbCapacity *r,const char *state,const LmbCapacityCost *cost) {
-    Cap body={0}; char hash[65]; lmb_hex(hash,r->fingerprint,32);
+    Cap body={0}; char hash[65],observation[65]; LmbBuf encoded={0}; LmbSha sha; uint8_t digest[32];
+    if (lmb_capacity_encode(r,&encoded)) { free(encoded.p); return 1; }
+    lmb_sha_init(&sha); lmb_sha_update(&sha,encoded.p,encoded.len); lmb_sha_final(&sha,digest); free(encoded.p);
+    lmb_hex(observation,digest,32); lmb_hex(hash,r->fingerprint,32);
     int bad=api_addf(&body,"{\"schema\":1,\"scope\":\"local_owner_gateway_bursts\",\"production_capacity_certified\":false,"
-        "\"fingerprint\":\"%s\",\"state\":",hash) || api_json_text(&body,state) ||
+        "\"observation_id\":\"%s\",\"fingerprint\":\"%s\",\"state\":",observation,hash) || api_json_text(&body,state) ||
         api_addf(&body,",\"clients\":%u,\"rounds\":%u,\"max_tokens\":%u,\"measured_at\":%llu,\"stable\":%s,\"cost\":",
             r->clients,r->rounds,r->max_new,(unsigned long long)r->measured_at,r->stable ? "true" : "false");
     if (!bad) bad=cost->known ? api_addf(&body,"{\"scope\":\"declared_whole_machine_footprint_not_bill\","
@@ -336,11 +339,12 @@ static int api_capacity_cli(int access,const char *tracker,char *const *args,uns
 typedef struct {
     uint8_t record_digest[32];
     LmbCapacityCost price;
+    int require_price;
     int (*before_publish)(void *,const LmbModelRoute *,uint32_t);
     void *opaque;
 } ApiCapacityGuard;
 static int api_capacity_guard_price(const ApiCapacityGuard *guard,const LmbCapacityCost *cost) {
-    return !guard || (cost->known && guard->price.known &&
+    return !guard || !guard->require_price || (cost->known && guard->price.known &&
         cost->micro_per_hour==guard->price.micro_per_hour && !memcmp(cost->currency,guard->price.currency,4));
 }
 static int api_capacity_apply_checked(int access,const char *tracker,char *const *args,unsigned count,Cap *body,
@@ -421,12 +425,17 @@ static int api_capacity_apply(int access,const char *tracker,char *const *args,u
 /* Called only after bearer management authority, origin and framing checks.
  * No paths, endpoints, model weights or donor consents can enter this schema. */
 static void api_capacity_apply_http(int fd,int access,const char *tracker,const char *body,size_t size) {
-    LmbJsonToken tokens[96]; LmbJson j; int fields[5];
-    const char *const keys[]={"record","ttft_ms","gap_ms","max_age_seconds","models"};
+    LmbJsonToken tokens[96]; LmbJson j; int fields[6]; ApiCapacityGuard guard={0};
+    const char *const keys[]={"record","ttft_ms","gap_ms","max_age_seconds","models","observation_id"};
     char values[4+LMB_CAPACITY_MODELS][80],*args[4+LMB_CAPACITY_MODELS];
-    int bad=size>2048 || lmb_json_parse(&j,body,size,tokens,96) || lmb_json_fields(&j,0,keys,5,fields);
+    int bad=size>2048 || lmb_json_parse(&j,body,size,tokens,96) || lmb_json_fields(&j,0,keys,6,fields);
     if (!bad) for (unsigned i=0;i<5;i++) if (fields[i]<0) bad=1;
     if (!bad) bad=lmb_api_json_string(&j,(unsigned)fields[0],values[0],33) || !lmb_api_username(values[0]);
+    if (!bad && fields[5]>=0) {
+        char expected[65];
+        bad=lmb_api_json_string(&j,(unsigned)fields[5],expected,sizeof expected) || strlen(expected)!=64 ||
+            lmb_unhex(guard.record_digest,expected,32);
+    }
     for (unsigned i=1;!bad && i<4;i++) {
         uint32_t n; bad=lmb_json_uint(&j,(unsigned)fields[i],&n);
         if (!bad) snprintf(values[i],sizeof values[i],"%u",n);
@@ -446,7 +455,7 @@ static void api_capacity_apply_http(int fd,int access,const char *tracker,const 
     }
     if (bad) { api_error(fd,400,"invalid_capacity_application"); return; }
     for (unsigned i=0;i<count+4;i++) args[i]=values[i];
-    Cap response={0}; int status=api_capacity_apply(access,tracker,args,count+4,&response);
+    Cap response={0}; int status=api_capacity_apply_checked(access,tracker,args,count+4,&response,fields[5]>=0 ? &guard : NULL);
     if (response.p) (void)api_response(fd,(unsigned)status,response.p);
     else api_error(fd,(unsigned)status,status==409 ? "model_revision_or_contract_changed" :
         status==400 ? "invalid_capacity_application" : "capacity_application_not_confirmed");
