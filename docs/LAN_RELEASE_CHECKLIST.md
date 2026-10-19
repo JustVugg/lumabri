@@ -19,7 +19,7 @@ entries below record the exact evidence; an open PR is not an integrated release
 | 2 — Inventory and measurements | Runtime/backend checks; memory, workload, link, preparation and model observations; declared machine costs | Missing facts stay unknown. Pinned distributed adapters expose CPU execution, not an enabled household GPU path. |
 | 3 — Several resident models | Independent reservations, private state, selective unload and effective owned CPU locks | Final-package memory-pressure and sustained workload checks on the deployment machines. |
 | 4 — Controlled concurrency | Bounded compute/session admission, isolated users, cancellation, timing and 1/2/4/8-slot gates | Per-deployment latency/capacity envelope; configured slots are not a single-user speed guarantee. |
-| 5 — Joint placement and cost | Bounded joint memory/cost search, measured portfolio selection/application and static-versus-managed comparison (#224) | Capacity API/web changes #225–226 are under review. New placements still require preparation and measurement; declared cost is not billed savings. |
+| 5 — Joint placement and cost | Bounded joint memory/cost search, measured portfolio selection/application, static-versus-managed comparison (#224) and shared capacity API (#225) | Browser capacity controls #226 are under review. New placements still require preparation and measurement; declared cost is not billed savings. |
 | 6 — Shared service and interfaces | Permanent keepers, common preparation/retirement operations, TUI, authenticated API, web chat and private history | The HTTP service is loopback-only; remote/datacenter ingress is not certified. |
 | 7 — Recovery | Approved-replica replay; unavailable-capacity replacement, same-turn wait and durable exit/release proofs implemented in #227–230 | Final-head native CI and ordered merges for those PRs; final-package fault tests. No instantaneous KV migration. |
 | 8 — Authorized elasticity | Opt-in replica growth, drain, retirement, scale-to-zero/wake, budgets and cooldown | Sustained burst/idle validation on actual machines; failed ownership remains charged without proof. |
@@ -107,7 +107,7 @@ is complete. See [deployment acceptance](../PRODUCTION.md#deployment-acceptance)
   pending. Same-turn opt-in replay and authoritative failed-allocation
   reclamation are the separate candidates above, not claims of this PR alone.
 
-- [ ] Shared capacity management API (#225, under review): authenticated historical
+- [x] Shared capacity management API (#225): authenticated historical
   listing, explicit inference measurement with progress/cancellation, live
   checking, whole-portfolio comparison and observation removal. The CLI and
   HTTP consume the same C operations; no command execution or stdout parsing.
@@ -116,8 +116,8 @@ is complete. See [deployment acceptance](../PRODUCTION.md#deployment-acceptance)
   CLI/HTTP selection agreement and separation from production-demand counters.
   Strict API authorization/schema tests and all API unit tests pass. The
   four-slot managed-replica/recovery/portfolio gate also passes with nine
-  prepared engines under effective owned-payload locks. Native CI is still
-  required; this is not release or
+  prepared engines under effective owned-payload locks. All eight checks passed
+  on `194e608` before normal merge `2a58669`. This is not whole-release or
   production-capacity certification.
 
 - [ ] Browser capacity controls (#226, under review): explicit ordered allocations,
