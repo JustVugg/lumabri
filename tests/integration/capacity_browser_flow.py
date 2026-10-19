@@ -3,8 +3,57 @@ No request interception, artificial timing, or fabricated inference results.
 The surrounding fixture owns, approves and cleans up every allocation.
 """
 import json
+from urllib.parse import urlsplit
 
 from playwright.sync_api import sync_playwright, expect
+
+
+def verify_saved_reply(page, api, route):
+    """Check the displayed engine reply and durable history, not just a label.
+
+    The reduced model can emit NUL. Archival history preserves it, while the
+    C-string inference interface deliberately refuses to replay that turn.
+    This is a completed answer, not an interrupted or unsaved conversation.
+    """
+    def complete_save(response):
+        request = response.request
+        if request.method != "POST" or not urlsplit(response.url).path.startswith("/api/v1/conversations/"):
+            return False
+        return request.post_data_json.get("conversation", {}).get("state") == "complete"
+
+    with page.expect_response(complete_save, timeout=30000) as saved_response:
+        with page.expect_response(lambda response: urlsplit(response.url).path == "/api/v1/chat"
+                                  and response.request.method == "POST", timeout=30000) as chat_response:
+            page.locator("#send").click()
+    response = saved_response.value
+    assert response.status == 200, "Completed reply was not saved"
+    saved = response.json()
+    streamed = chat_response.value
+    assert streamed.status == 200
+    assert streamed.headers["content-type"].startswith("text/event-stream")
+    conversation = saved["conversation"]
+    assert conversation["model"] == route["id"] and conversation["state"] == "complete"
+    messages = conversation["messages"]
+    assert len(messages) == 2 and messages[0] == {"role": "user", "content": "Hello"}
+    assert messages[1]["role"] == "assistant" and messages[1]["content"]
+    answer = messages[1]["content"]
+    code, durable = api.http("/api/v1/conversations/" + saved["id"])
+    assert code == 200 and durable == saved, "Saved history did not round-trip"
+    assert api.http("/api/v1/conversations/" + saved["id"], token=api.reader)[0] == 404
+    has_nul = "\0" in answer
+    status = ("Saved · reply contains a NUL byte; start a new chat to continue" if has_nul
+              else "Saved privately on this computer")
+    expect(page.locator("#save-status")).to_have_text(status)
+    expect(page.locator("#stop")).to_be_hidden()
+    expect(page.locator("#retry")).to_be_hidden()
+    assert page.locator("#messages .assistant .content").text_content() == answer
+    for control in ("#prompt", "#send"):
+        if has_nul:
+            expect(page.locator(control)).to_be_disabled()
+        else:
+            expect(page.locator(control)).to_be_enabled()
+    return {"model": route["id"], "state": "complete", "bytes": len(answer.encode("utf-8")),
+            "contains_nul": has_nul, "history_round_trip": True, "private_history": True}
 
 
 def verify_browser_capacity(api, managed, static, artifacts):
@@ -65,13 +114,12 @@ def verify_browser_capacity(api, managed, static, artifacts):
             assert all(saved[r["id"]]["revision"] == r["revision"] + 1 and
                        saved[r["id"]]["allocations"] == [a["id"]] for r, a in zip(routes, managed)), saved
             # Both model routes actually answer through the same web chat.
+            chats = []
             for route in routes:
                 page.locator("#new-chat").click()
                 page.locator("#model").select_option(route["id"])
                 page.locator("#prompt").fill("Hello")
-                page.locator("#send").click()
-                expect(page.locator("#save-status")).to_have_text("Saved privately on this computer", timeout=30000)
-                expect(page.locator("#messages .assistant .content")).not_to_be_empty()
+                chats.append(verify_saved_reply(page, api, route))
             assert not failures, failures
             code, record = api.http("/api/v1/capacity/check", {"record": "browser-measured", "ttft_ms": 30000,
                 "gap_ms": 30000, "max_age_seconds": 3600})
@@ -79,7 +127,7 @@ def verify_browser_capacity(api, managed, static, artifacts):
             assert all(m["completed"] == 3 and not m["rejected"] and not m["failed"] for m in record["models"]), record
             (artifacts / "browser-capacity-real-olmoe.json").write_text(json.dumps(
                 {"scope": "loopback_reduced_olmoe_browser", "record": record,
-                 "routes": [saved[r["id"]] for r in routes]}, indent=2))
+                 "routes": [saved[r["id"]] for r in routes], "chats": chats}, indent=2))
         finally:
             browser.close()
             for route in routes:

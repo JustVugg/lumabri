@@ -1490,6 +1490,17 @@ static int generation_stream_prefix(ColiEdgeEngine *edge,
     return 0;
 }
 
+/* A request without a conversation cannot recover, but the failing peer's
+ * own status (quota, busy, stale owner...) is still the actionable reason;
+ * it was already formatted into operation_error, so do not discard it. */
+static void peer_failure_reason(const RemoteSegment *chain, size_t index,
+                                char *error, size_t error_size) {
+    snprintf(error, error_size, "%.240s",
+             chain[index].operation_error[0]
+                 ? chain[index].operation_error
+                 : "Segment peer failed and recovery was unavailable");
+}
+
 static int segment_generate(ColiEdgeEngine *edge,
                             const ColiEdgeCapabilities *cap,
                             RemoteSegment *chain, size_t chain_count,
@@ -1679,8 +1690,8 @@ static int segment_generate(ColiEdgeEngine *edge,
                                  prompt_tokens, offset, NULL, 0,
                                  buffer_a, buffer_b, error, error_size))) {
             if (!error[0])
-                snprintf(error, error_size,
-                         "Segment peer failed and recovery was unavailable");
+                peer_failure_reason(active_chain, (size_t)(-failed - 1),
+                                    error, error_size);
             result->replica_unavailable=1;
             goto cleanup;
         }
@@ -1771,8 +1782,8 @@ static int segment_generate(ColiEdgeEngine *edge,
                                  generated, generated_count - 1,
                                  buffer_a, buffer_b, error, error_size))) {
             if (!error[0])
-                snprintf(error, error_size,
-                         "Segment peer failed and recovery was unavailable");
+                peer_failure_reason(active_chain, (size_t)(-failed - 1),
+                                    error, error_size);
             result->replica_unavailable=1;
             goto cleanup;
         }
