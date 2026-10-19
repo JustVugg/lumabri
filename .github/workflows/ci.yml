@@ -538,6 +538,7 @@ jobs:
         run: |
           python3 tests/integration/owned_engine_process_test.py
           python3 tests/integration/managed_soak_summary_test.py
+          python3 tests/integration/installed_gateway_contract_test.py
           ./test_backend_routes
           make test_segment_close ENGINE=../colibri/c
           ./test_segment_close

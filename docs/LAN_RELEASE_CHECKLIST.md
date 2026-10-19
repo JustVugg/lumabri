@@ -46,6 +46,18 @@ is complete. See [deployment acceptance](../PRODUCTION.md#deployment-acceptance)
   These are Linux loopback observations, not full-size model capacity, physical
   topology, a no-leak proof or a production SLO.
 
+- [ ] Installed gateway lifecycle (release candidate, not yet merged): the Linux
+  loopback gate passed previous → candidate → previous using actual packaged
+  gateway binaries from clean revisions `2a59e9d` and `f46f9c9`, both using
+  Colibri `ce370e87`. Each stage served both reduced OLMoE model identities,
+  preserved private history and grants, refused stale writes and left donor
+  instances, engine processes and reserved bytes unchanged. Four engines kept
+  effective owned-payload locks, and package hashes were unchanged afterward.
+  `installed-gateway-update.json` retains the package/manifest identities and
+  each stage, without credentials or conversation text. This proves only a
+  quiescent gateway switch on Linux, not fleet or journal migration, macOS
+  rollback or zero-downtime upgrades.
+
 - [ ] Verified failed-allocation reclamation (#230, under review): immutable
   birth records and inherited kernel lifetime locks distinguish a terminated
   allocation from an unreachable process. Authenticated proof survives keeper
