@@ -120,7 +120,8 @@ def main():
         # restart/wake. A launch environment alone is not residency evidence.
         total = 0
         for name in ("a", "b"):
-            log = (tmp / name / ".lumabri/home/engines.log").read_text()
+            path = tmp / name / ".lumabri/home/engines.log"
+            log = "" if minimum_per_donor == 0 and not path.exists() else path.read_text()
             owned = re.findall(r"\[engine-memory\] allocations=(\d+) requested_bytes=(\d+) locked_bytes=(\d+) retained_locked_bytes=(\d+)", log)
             ready = re.findall(r"event=ready policy=engine-locked fault=0", log)
             assert len(ready) >= minimum_per_donor and len(owned) == len(ready), log
@@ -329,6 +330,10 @@ def main():
             nodes = struct.unpack_from("<I", raw, len(raw) - 36)[0]
             assert assert_stage_record(r, stages=nodes) == 1
         assert not list((tmp / "chatter").rglob("*.safetensors"))
+        if args.joint == "complete":
+            # The planner may co-locate both models on one selected donor.
+            # Each prepared model still requires locked Segment and Edge payloads.
+            assert_locked_evidence(0, 4)
         if args.placement_comparison:
             from placement_comparison_test import verify_placement_comparison
             verify_placement_comparison(api_prepare, until, service, env, drive, wait_joint_inventory, tmp)

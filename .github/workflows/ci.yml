@@ -556,8 +556,11 @@ jobs:
             # observation-only compression guard remains independently tested.
             LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester --multi-model --sessions 4 --api --replicas --recovery --portfolio-policy
           )
-          python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --donor-ram-gb 1 --sessions 2
-          python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-ram-gb 1 --sessions 2
+          # Idle resident models need owned-payload locks, not a hope that
+          # macOS never compresses an observation-only process on this runner.
+          # The joint flow verifies effective locks; no residency guard is disabled.
+          LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --donor-ram-gb 1 --sessions 2
+          LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-ram-gb 1 --sessions 2
           LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-policy --donor-ram-gb 1.5 --sessions 2 --elastic
           LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-ram-gb 2 --sessions 2 --placement-comparison
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --repeat-cached --clear-cached --expect-metrics --expect-calibration
