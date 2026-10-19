@@ -4,9 +4,11 @@
 #include <assert.h>
 #include <sys/wait.h>
 
-static void wait_success(pid_t pid) {
+static void wait_success(pid_t pid,const char *phase) {
     int status=0;
     while (waitpid(pid,&status,0)<0) assert(errno==EINTR);
+    if (!WIFEXITED(status) || WEXITSTATUS(status))
+        fprintf(stderr,"allocation lifetime child failed: phase=%s status=%d\n",phase,status);
     assert(WIFEXITED(status) && !WEXITSTATUS(status));
 }
 static void erase_record(int dir,const uint8_t id[32]) {
@@ -14,6 +16,11 @@ static void erase_record(int dir,const uint8_t id[32]) {
 }
 int main(int argc,char **argv) {
     (void)lmb_sign; (void)lmb_retired_dir; (void)lmb_retired_store; (void)lmb_retired_sync;
+    if (argc==3 && !strcmp(argv[1],"cloexec")) {
+        errno=0;
+        assert(fcntl(atoi(argv[2]),F_GETFD)<0 && errno==EBADF);
+        _exit(0);
+    }
     if (argc==5 && !strcmp(argv[1],"descendant")) {
         int lifetime=atoi(argv[2]),gate=atoi(argv[3]),ready=atoi(argv[4]);
         assert(fcntl(lifetime,F_GETFD)==0);
@@ -51,9 +58,10 @@ int main(int argc,char **argv) {
         char fd[24],input[24],output[24];
         snprintf(fd,sizeof fd,"%d",held); snprintf(input,sizeof input,"%d",gate[0]);
         snprintf(output,sizeof output,"%d",ready[1]);
-        execl(argv[0],argv[0],"descendant",fd,input,output,(char *)NULL); _exit(127);
+        execl(argv[0],argv[0],"descendant",fd,input,output,(char *)NULL);
+        perror("exec lifetime descendant"); _exit(127);
     }
-    close(gate[0]); close(ready[1]); close(held); wait_success(child);
+    close(gate[0]); close(ready[1]); close(held); wait_success(child,"forked parent");
     struct pollfd check={ready[0],POLLIN,0}; assert(poll(&check,1,3000)>0);
     char byte=0; assert(read(ready[0],&byte,1)==1 && byte=='R'); close(ready[0]);
     assert(lmb_lifetime_prove(dir,r.allocation,&proof)==1); /* orphan survived exec */
@@ -86,8 +94,14 @@ int main(int argc,char **argv) {
     /* An unrelated CLOEXEC descriptor cannot retain another model at exec. */
     r.allocation[0]=2; held=lmb_lifetime_create(dir,&r); assert(held>=3);
     child=fork(); assert(child>=0);
-    if (!child) { execl("/bin/true","true",(char *)NULL); _exit(127); }
-    close(held); wait_success(child); assert(!lmb_lifetime_prove(dir,r.allocation,&proof));
+    if (!child) {
+        /* macOS does not put true in /bin. Re-exec our fixture instead,
+         * verifying closure directly rather than assuming a helper path. */
+        char fd[24]; snprintf(fd,sizeof fd,"%d",held);
+        execl(argv[0],argv[0],"cloexec",fd,(char *)NULL);
+        perror("exec lifetime CLOEXEC check"); _exit(127);
+    }
+    close(held); wait_success(child,"CLOEXEC"); assert(!lmb_lifetime_prove(dir,r.allocation,&proof));
     erase_record(dir,r.allocation); r.allocation[0]=1; erase_record(dir,r.allocation);
     assert(!unlinkat(dir,"lock",0)); close(dir);
     int base=open(path,O_RDONLY|O_DIRECTORY); assert(base>=0);
