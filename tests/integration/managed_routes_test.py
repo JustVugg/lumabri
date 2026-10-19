@@ -271,8 +271,12 @@ def verify_managed_routes(runtime, env, tracker, first_plan, third_plan, first_n
         # rewind only the local release-progress fields, not donor state.
         journal=Path(env["HOME"])/".lumabri/api-access/retirements"/(third["id"]+".retire")
         checkpoint=bytearray(journal.read_bytes())
-        assert checkpoint[:8]==b"LMBRET1\0" and struct.unpack_from("<I",checkpoint,80)[0]==2
+        assert checkpoint[:8]==b"LMBRET2\0" and struct.unpack_from("<I",checkpoint,80)[0]==2
+        # This flow sealed live processes; it must not fabricate exit proof.
+        assert struct.unpack_from("<II",checkpoint,88)==(0,0)
+        immutable=checkpoint[:72]+checkpoint[88:]
         struct.pack_into("<IIII",checkpoint,72,4,0,2,0)  # RELEASE, no saved acknowledgements
+        assert checkpoint[:72]+checkpoint[88:]==immutable
         journal.write_bytes(checkpoint)
         reconciled=json.loads(command("retire",third["id"]))
         assert reconciled==cli_retired, ("lost acknowledgements were not reconciled",reconciled)

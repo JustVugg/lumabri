@@ -342,6 +342,10 @@ def main():
             nodes = struct.unpack_from("<I", raw, len(raw) - 36)[0]
             assert assert_stage_record(r, stages=nodes) == 1
         assert not list((tmp / "chatter").rglob("*.safetensors"))
+        if args.joint == "complete":
+            # The planner may co-locate both models on one selected donor.
+            # Each prepared model still requires locked Segment and Edge payloads.
+            assert_locked_evidence(0, 4)
         if args.soak_seconds:
             from managed_soak_test import verify_managed_soak
             verify_managed_soak(api_prepare, until, service, tmp, args.soak_seconds)
