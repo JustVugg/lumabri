@@ -36,6 +36,11 @@ const errors = {
   history_storage_unavailable: "Private history storage is unavailable. No new question was sent unless generation had already started."
 };
 const explain = code => errors[code] || String(code).replaceAll("_", " ");
+const capacityPanel = window.createCapacityPanel({
+  session: () => ({token, operator, management, open: workspaceOpen, epoch: workspaceEpoch, busy: managementBusy}),
+  request, card: workspaceCard, choice: preparationCheck, explain,
+  lock: value => { managementBusy = value; controls(); }
+});
 function boundedTitle(text) {
   let title = Array.from(text.trim().replace(/\s+/gu, " ")).slice(0, 80).join("") || "New conversation";
   while (utf8.encode(title).length > 128) title = Array.from(title).slice(0, -1).join("");
@@ -59,7 +64,7 @@ async function request(path, method = "GET", body) {
     const response = await fetch(path, options);
     const answer = await response.json();
     if (credential !== token) throw new Error("Connection changed; this result was discarded");
-    if (!response.ok) throw new Error(explain(answer.error || `Request failed (${response.status})`));
+    if (!response.ok) throw new Error(explain(answer.error || answer.state || `Request failed (${response.status})`));
     return answer;
   } finally { clearTimeout(timer); }
 }
@@ -80,6 +85,7 @@ function controls() {
     button.disabled = managementBusy || !management || button.dataset.allowed !== "true";
   }
   if (!management && elasticEditor) closeElasticEditor();
+  capacityPanel.controls();
   $("prompt").disabled = !canSend;
   $("send").disabled = !canSend;
   $("stop").hidden = !busy;
@@ -342,10 +348,11 @@ $("export").onclick = () => {
   const url = URL.createObjectURL(blob), link = document.createElement("a");
   link.href = url; link.download = `lumabri-chat-${current.id}.json`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
 };
-window.addEventListener("beforeunload", event => { if (busy || unsaved) { event.preventDefault(); event.returnValue = ""; } });
+window.addEventListener("beforeunload", event => { if (busy || unsaved || capacityPanel.active()) { event.preventDefault(); event.returnValue = ""; } });
 
 function closeWorkspace() {
   workspaceOpen = false; workspaceEpoch++;
+  capacityPanel.close();
   closeElasticEditor(); $("elastic-policies").replaceChildren(); $("elastic-status").textContent = "";
   $("workspace").hidden = true;
   $("chat").hidden = !token; $("composer-area").hidden = !token;
@@ -477,6 +484,7 @@ function renderWorkspace(data) {
     }
   }
   if (!data.allocations.length) $("workspace-allocations").textContent = "No saved allocations for this household.";
+  capacityPanel.syncWorkspace(data);
 }
 async function refreshWorkspace() {
   if (!workspaceOpen || !operator || !token || workspacePending || managementBusy || document.hidden) return;
@@ -491,6 +499,7 @@ async function refreshWorkspace() {
     }
   } finally { workspacePending = false; $("workspace-refresh").disabled = false; }
   if (epoch === workspaceEpoch && workspaceOpen) await refreshElastic();
+  if (epoch === workspaceEpoch && workspaceOpen) await capacityPanel.refresh();
 }
 $("workspace-open").onclick = () => {
   if (busy || !operator) return;

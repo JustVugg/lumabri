@@ -182,7 +182,7 @@ static void api_policy_tick(int access,const char *tracker) {
     }
     for (uint32_t i=0;i<4+p.models;i++) args[i]=values[i];
     ApiPolicyIntent intent={dir,(uint32_t)next,&p};
-    ApiCapacityGuard guard={.price=prices[next],.before_publish=api_policy_intent,.opaque=&intent};
+    ApiCapacityGuard guard={.price=prices[next],.require_price=1,.before_publish=api_policy_intent,.opaque=&intent};
     memcpy(guard.record_digest,p.records[next],32);
     Cap reply={0}; int status=api_capacity_apply_checked(access,tracker,args,p.models+4,&reply,&guard); free(reply.p);
     /* The intent may have published even when confirmation/fsync failed. Do

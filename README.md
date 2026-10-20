@@ -2,10 +2,26 @@
 
 # Your computers. Your models.
 
-Lumabri connects your computers into a private household cluster using
-[Colibri](https://github.com/JustVugg/colibri). Choose a model, select the
-computers that may help, and ask their owners to approve the allocation.
-The interface and runtime are written in C.
+Lumabri runs a private inference service across your computers, powered by
+[Colibri](https://github.com/JustVugg/colibri). Choose models, select the
+computers that may help, and approve how their memory is used. Chat from the
+terminal or the bundled web page. The controller, terminal interface and
+inference integration are written in C; the browser uses bundled HTML/CSS/JS.
+
+**A worker does not need its own complete copy of the model.** In the resident
+Segment path, it loads the weights for its assigned layers, plus any shared
+state required by the adapter. Conversation state stays with the nodes that
+execute those layers. A complete source checkpoint may still live on the
+requesting computer; distributing its weights does not duplicate it in every
+worker's RAM.
+
+- Run supported models that do not fit on one computer by sharing the work.
+- Keep several approved models resident within explicit memory budgets.
+- See computers, allocations and measured workloads in one local workspace.
+
+More computers can add usable memory and capacity. They do not guarantee more
+tokens per second for each chat. Lumabri measures performance rather than
+promising that every additional device makes inference faster.
 
 ![The household workspace](docs/images/workspace.png)
 
@@ -131,13 +147,35 @@ conversation and exit.
 
 ### Browser chat
 
+![Lumabri's bundled browser chat, showing an example conversation](docs/images/web-chat.png)
+
 Prepared resident models are also available through the authenticated local
 API and its bundled chat page. An operator creates a user token, grants it
-specific allocations and runs `lumabri api start`; open the printed local URL.
+specific models or allocations and runs `lumabri api start`; open the printed local URL.
 The page provides model selection, streaming, Stop, collapsible private
 history and export. No separate web server or browser-side AI engine is needed.
 See [setup, limits and privacy](docs/RESIDENT_API.md). This endpoint is
 loopback-only: do not expose it directly to the internet.
+
+**Computers & models** shows resource reports, resident allocation references,
+model routes and gateway activity. Explicit management permission adds model
+preparation, donor approval requests, replica policies, draining and release.
+Read-only operators cannot change allocations.
+
+**Measure & compare** runs a bounded workload on models already approved and
+loaded. Choose allocations, client count and rounds; then check first-text and
+token-gap limits. A changed configuration makes old evidence unusable. Applying
+a measured plan requires a separate confirmation and replaces future-turn
+routing atomically. It does not unload weights or shut down computers.
+
+![Measured two-model plans and explicit routing review in the web workspace](docs/images/web-capacity.png)
+
+These are screenshots of the compiled web interface. The chat text is an
+illustrative example, not a model-quality benchmark. The comparison comes from
+a real reduced-OLMoE loopback integration run; its machine prices are test
+inputs, not cloud bills, demonstrated savings or production capacity figures.
+Browser history is private between API users, but the service operator and
+inference computers are trusted: this is not end-to-end encryption from them.
 
 Household chat also shows the approved layer allocation. **/plan** displays
 each compute donor, its layer range, reserved RAM and the Edge/chat host.
@@ -153,8 +191,12 @@ a READY-time snapshot, not a live utilization or speed measurement.
   generation using a tiny synthetic OLMoE checkpoint on loopback.
 - Arrow/Enter navigation, all-party approval, rejection, slash completion,
   terminal restoration and resource release.
-- The images above are frames from that integration test, not performance
+- Terminal images are frames from that integration test, not performance
   claims for a large model or a multi-computer LAN.
+- The browser capacity path has been exercised with two real reduced OLMoE
+  models: measure, compare, confirm routing, then chat through both models.
+  Cancellation, authorization, stale measurements and changed model revisions
+  have separate regression checks.
 
 Native macOS Intel and Apple Silicon CI covers the real Tiny household flow.
 A user-operated Windows/WSL-to-macOS 12.6 Intel trial also completed two Tiny

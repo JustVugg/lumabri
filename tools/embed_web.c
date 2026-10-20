@@ -3,10 +3,11 @@
 #include <stdio.h>
 
 int main(int argc, char **argv) {
-    const char *names[]={"lmb_web_html","lmb_web_css","lmb_web_js","lmb_web_logo"};
-    if (argc!=5) return 1;
+    const char *names[]={"lmb_web_html","lmb_web_css","lmb_web_js","lmb_web_logo","lmb_web_capacity_js"};
+    const unsigned assets=sizeof names/sizeof names[0];
+    if (argc!=(int)assets+1) return 1;
     puts("/* Generated from src/web and logo.svg; do not edit. */");
-    for (unsigned i=0; i<4; i++) {
+    for (unsigned i=0; i<assets; i++) {
         FILE *file=fopen(argv[i+1],"rb"); if (!file) { perror(argv[i+1]); return 1; }
         printf("static const unsigned char %s[]={\n",names[i]);
         unsigned count=0; int byte;
