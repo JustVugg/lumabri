@@ -31,6 +31,33 @@ nor tiny-checkpoint CI claims that arbitrary models are downloaded automatically
 that every added machine increases single-chat speed, or that the full roadmap
 is complete. See [deployment acceptance](../PRODUCTION.md#deployment-acceptance).
 
+- [ ] Sustained managed workload (release candidate, not yet merged): on October
+  17, the complete local gate passed a 1,800.57-second timed workload after
+  preparation and warm-up. Two independently resident identities derived from
+  the same reduced OLMoE weights served 9,908 complete requests, explicitly
+  refused 4,248 overload requests and handled 1,416 client disconnects after
+  visible text; there were no unexpected failed turns. All 15,572 outcomes
+  remain in the report. Sixty-one quiescent resource samples showed unchanged
+  allocation reservations and process identities; aggregate RSS moved from
+  88,522,752 to 90,681,344 bytes, with a maximum of 91,009,024 bytes. Four engines
+  reported effective owned-payload locks. Runtime source was `f46f9c9`, with
+  actual binary hashes retained in `managed-soak.json`; the workload script was
+  `7e957f5`. CI runs only a ten-second smoke, not this 30-minute acceptance run.
+  These are Linux loopback observations, not full-size model capacity, physical
+  topology, a no-leak proof or a production SLO.
+
+- [ ] Installed gateway lifecycle (release candidate, not yet merged): the Linux
+  loopback gate passed previous → candidate → previous using actual packaged
+  gateway binaries from clean revisions `2a59e9d` and `f46f9c9`, both using
+  Colibri `ce370e87`. Each stage served both reduced OLMoE model identities,
+  preserved private history and grants, refused stale writes and left donor
+  instances, engine processes and reserved bytes unchanged. Four engines kept
+  effective owned-payload locks, and package hashes were unchanged afterward.
+  `installed-gateway-update.json` retains the package/manifest identities and
+  each stage, without credentials or conversation text. This proves only a
+  quiescent gateway switch on Linux, not fleet or journal migration, macOS
+  rollback or zero-downtime upgrades.
+
 - [ ] Verified failed-allocation reclamation (#230, under review): immutable
   birth records and inherited kernel lifetime locks distinguish a terminated
   allocation from an unreachable process. Authenticated proof survives keeper

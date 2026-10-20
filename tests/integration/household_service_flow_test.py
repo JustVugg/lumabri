@@ -38,6 +38,9 @@ def main():
     parser.add_argument("--elastic", action="store_true", help="real gateway pressure, replica preparation, drain, retirement and on-demand wake")
     parser.add_argument("--elastic-recovery", action="store_true", help="wait within an interrupted turn for replacement capacity; requires a disposable codec proxy")
     parser.add_argument("--placement-comparison", action="store_true", help="compare two real joint placements with declared fixture prices, then apply the measured cost policy")
+    parser.add_argument("--soak-seconds", type=int, default=0, help="repeat approved real two-model work, overload and client stops for 10–3600 seconds")
+    parser.add_argument("--gateway-packages", nargs=2, type=Path, metavar=("PREVIOUS", "CANDIDATE"),
+                        help="test installed gateway upgrade/rollback using two distinct native packages; engines remain running")
     parser.add_argument("--donor-ram-gb", type=float, default=0.5)
     parser.add_argument("--prepare-timeout", type=int, default=180)
     parser.add_argument("--measure-sessions", action="store_true", help="also benchmark the single-slot baseline")
@@ -53,6 +56,15 @@ def main():
     if args.placement_comparison and (not args.api_prepare or args.joint != "complete" or
             args.donor_policy or args.sessions != 2 or args.donor_ram_gb < 1.5):
         parser.error("--placement-comparison requires --api-prepare --joint complete --sessions 2 --donor-ram-gb >=1.5, without --donor-policy")
+    if args.soak_seconds and (not 10 <= args.soak_seconds <= 3600 or not args.api_prepare or
+            args.joint != "complete" or args.donor_policy or args.placement_comparison):
+        parser.error("--soak-seconds requires 10–3600, --api-prepare --joint complete, without --donor-policy or --placement-comparison")
+    if args.gateway_packages:
+        if (not args.api_prepare or args.joint != "complete" or args.donor_policy or
+                args.placement_comparison or args.soak_seconds):
+            parser.error("--gateway-packages requires --api-prepare --joint complete without other lifecycle extensions")
+        from installed_gateway_update_test import candidate_pair
+        candidate_pair(args.gateway_packages)
     if args.api and not (args.multi_model and args.keep_requester):
         parser.error("--api requires --multi-model and --keep-requester")
     if args.replicas and not args.api:
@@ -333,6 +345,15 @@ def main():
         if args.joint == "complete":
             # The planner may co-locate both models on one selected donor.
             # Each prepared model still requires locked Segment and Edge payloads.
+            assert_locked_evidence(0, 4)
+        if args.soak_seconds:
+            from managed_soak_test import verify_managed_soak
+            verify_managed_soak(api_prepare, until, service, tmp, args.soak_seconds)
+            # Joint placement may co-locate both models on one selected donor.
+            assert_locked_evidence(0, 4)
+        if args.gateway_packages:
+            from installed_gateway_update_test import verify_installed_gateway_update
+            verify_installed_gateway_update(api_prepare, until, service, tmp, args.gateway_packages)
             assert_locked_evidence(0, 4)
         if args.placement_comparison:
             from placement_comparison_test import verify_placement_comparison

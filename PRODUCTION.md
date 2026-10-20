@@ -77,6 +77,77 @@ not a model-quality benchmark. Loopback execution is not a physical-LAN test.
 The workflow contains the additional fault-proxy and browser setup; those
 tools belong in disposable test runtimes, never a shipped package.
 
+### Sustained local workload
+
+The same real-engine fixture can exercise a longer fixed workload rather than
+only a short capacity burst:
+
+```sh
+LUMABRI_RESIDENCY_POLICY=engine-locked \
+python3 tests/integration/household_service_flow_test.py \
+  --models-dir build/home-flow-models --joint complete --api-prepare \
+  --donor-ram-gb 1.5 --sessions 2 --soak-seconds 1800
+```
+
+This is a 30-minute timed phase after preparation and warm-up; total duration
+also includes startup and cleanup. The option accepts 10–3600 seconds. CI runs
+a ten-second smoke, which must not be reported as the longer acceptance run.
+The fixture owns its temporary homes, services and approvals; it does not use
+an existing household, the operator's real donors or a cloud account.
+
+It prepares two independently resident checkpoint identities derived from the
+same tiny OLMoE weights. It repeatedly runs one request per model, eight-client
+overload bursts, client disconnection after visible text and subsequent normal
+requests. A client disconnect is not proof of the exact instant a kernel stops.
+Unexpected errors fail the run; only explicit `replicas_busy` refusals are
+accepted during overload. Every outcome remains in `managed-soak.json` along
+with runtime hashes, elapsed duration, per-model/phase summaries, reservations
+and quiescent process/RSS samples. Percentiles cover completed requests only;
+refusals, client stops and failures have separate counts.
+
+The test requires unchanged resident reservations/processes, no retained gateway
+admissions, effective owned CPU locks, and at most 64 MiB aggregate quiescent
+RSS growth after warm-up. It checks persistent descriptors where the OS allows
+inspection; protected `/proc` entries and unavailable macOS counters stay null.
+These bounds can catch regressions but do not prove absence of every leak, a
+production SLO, full-size memory behavior or physical-LAN performance. Keep the
+report with its exact build and test duration; repeat the deployment acceptance
+below using the actual workload and machines.
+
+### Installed gateway update and rollback
+
+Build and retain two distinct native packages in separate directories using
+`tools/package_household.py`. Never overlay files from one candidate onto the
+other. From a complete current runtime with the tiny fixture, run:
+
+```sh
+LUMABRI_RESIDENCY_POLICY=engine-locked \
+python3 tests/integration/household_service_flow_test.py \
+  --runtime-dir /path/to/current/runtime \
+  --models-dir build/home-flow-models --joint complete --api-prepare \
+  --donor-ram-gb 1.5 --sessions 2 \
+  --gateway-packages '/path/to/previous package' '/path/to/candidate package'
+```
+
+The gate verifies both manifests before execution and requires distinct source
+revisions and gateway binary hashes, native architecture and the same Colibri
+revision. It prepares two approved tiny model identities in isolated homes,
+then uses the installed launchers for previous → candidate → previous gateway
+versions. Each stage generates through both real engines, retains private
+history and credential permissions, refuses stale history revisions and checks
+unchanged donor instances, processes and memory reservations. The gateways
+switch only after their fixture requests finish; this is not zero downtime.
+Package contents must still match their manifests afterward. Evidence goes to
+`installed-gateway-update.json`, without credentials or conversation text.
+
+This tests a **gateway-only** update and rollback with unchanged resident
+workers. It is not an automatic updater, fleet restart or controller-state
+migration. The fixture refuses retirement/elastic/portfolio journals; do not
+delete real journals to make a downgrade possible. Keep the protocol's
+[rolling-change restrictions](PROTOCOL_COMPATIBILITY.md#rolling-upgrade) and
+test each deployed version pair. Native platform and physical-topology
+acceptance below are still required.
+
 ## Deployment acceptance
 
 Before declaring a release supported, run its exact installed package on each
