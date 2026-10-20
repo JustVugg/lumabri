@@ -73,6 +73,19 @@ they are not retroactively described as different binaries.
   workload outcome. Native CI/review of this new gate is pending. This is not
   fleet update, full-size capacity or physical deployment certification.
 
+- [ ] Whole-household package update (local candidate): the October 20 Linux
+  run passed `01e3f86` → `42d0ec3` → `01e3f86`, using complete clean packages
+  and the same four isolated homes. Each stage prepared two co-resident
+  reduced-OLMoE identities with fresh donor approvals, generated through stable
+  managed IDs, preserved private history and grants, refused cross-user access
+  and stale writes, then retired every allocation and stopped all services.
+  Completed preparation/retirement/lifetime records and peer/configuration
+  data survived both switches; no snapshot was restored and no journal
+  deleted. All twelve prepared engines reported effective payload locks.
+  `installed-fleet-update.json` retains package hashes and all three stages.
+  Native CI/review of this new gate is pending. It covers a quiescent pair,
+  not live rolling updates or migration of active autonomous policies.
+
 - [x] Sustained managed workload (#237): on October
   17, the complete local gate passed a 1,800.57-second timed workload after
   preparation and warm-up. Two independently resident identities derived from

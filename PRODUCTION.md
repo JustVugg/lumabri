@@ -175,6 +175,23 @@ delete real journals to make a downgrade possible. Keep the protocol's
 test each deployed version pair. Native platform and physical-topology
 acceptance below are still required.
 
+### Whole-household installed update and rollback
+
+The [installed update procedure](docs/INSTALLED_UPDATES.md) and
+`tests/integration/installed_fleet_update_test.py` cover a separate operation:
+retire all approved test allocations, stop **every** local service, then run
+previous → candidate → previous packages on the same four isolated homes.
+Both switches preserve configuration, identity, grants, stable managed model
+IDs, private history and completed preparation/retirement/lifetime evidence.
+Each stage requires fresh donor approval and real inference through two
+co-resident model identities. Service and inherited allocation locks must be
+released before changing versions; package contents must remain unchanged.
+
+This has planned downtime and reloads weights. The gate never restores a
+state snapshot, deletes journals or replays approval, and does not include
+active autonomous policies or unfinished operations. It proves the exact
+tested version pair, not arbitrary downgrade compatibility.
+
 ## Deployment acceptance
 
 Before declaring a release supported, run its exact installed package on each

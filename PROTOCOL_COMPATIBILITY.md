@@ -39,6 +39,12 @@ two numeric classes equivalent.
    explicit when backward decoding is impossible.
 6. Run the mixed-version fixture before removing a legacy decoder.
 
+These are compatibility rules, not a claim that arbitrary installed releases
+can roll live. The currently tested whole-household operation is a planned,
+quiescent [package update and rollback](docs/INSTALLED_UPDATES.md), with
+completed retirement, all services stopped and new approvals after restart.
+The current version pair must read every retained local state format too.
+
 The C structs may grow additively through `struct_size`; wire structs do not.
 Runtime-only scheduler fields in route snapshots are intentionally excluded
 from the discovery encoding, so a v1 tracker and newer chatter still agree on
