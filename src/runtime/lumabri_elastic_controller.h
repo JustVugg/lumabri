@@ -29,6 +29,14 @@ static int api_elastic_record(Cap *body,const LmbElasticPolicy *p) {
         lmb_hex(allocation,p->route.replicas[i].allocation,32);
         bad=api_addf(body,"%s\"%s\"",i ? "," : "",allocation);
     }
+    if (!bad) bad=cap_str(body,"],\"availability_observations\":[");
+    static const char *const states[]={"unknown","accepting","draining","unreachable"};
+    for (uint32_t i=0;!bad && i<p->route.count;i++) {
+        LmbElasticReplicaHealth h=p->health_revision==p->route.revision ? p->health[i] : (LmbElasticReplicaHealth){0};
+        lmb_hex(allocation,p->route.replicas[i].allocation,32);
+        bad=api_addf(body,"%s{\"allocation\":\"%s\",\"state\":\"%s\",\"checked_at\":%llu,\"consecutive_failures\":%u}",
+            i ? "," : "",allocation,states[h.state],(unsigned long long)h.at_wall,h.failures);
+    }
     return bad || cap_str(body,"],\"scope\":\"authorized_machine_replica_lifecycle\",\"cloud_provisioning\":false}") ? -1 : 0;
 }
 static int api_elastic_ids(int root,uint8_t ids[LMB_ROUTE_MAX][32],uint32_t *count) {
@@ -323,6 +331,38 @@ static int api_elastic_begin_grow(int dir,LmbElasticPolicy *p) {
 done:
     free(st); free(review.p); return bad;
 }
+/* Availability is queried on the authenticated control channels, not by
+ * consuming a conversation slot. Busy but accepting engines remain healthy;
+ * an operator drain is not classified as a crash. At most one replica per
+ * policy per tick, with a shared two-second read deadline across all its
+ * nodes. Connect attempts also retain their existing finite timeouts. */
+static unsigned api_elastic_probe(const LmbElasticPolicy *p,unsigned index) {
+    unsigned state=LMB_ELASTIC_UNKNOWN;
+    LmbResidentPlan *plan=calloc(1,sizeof *plan);
+    uint64_t now=lmb_io_monotonic_ms(),prior=lmb_read_deadline_ms;
+    if (!plan || !now || index>=p->route.count ||
+        api_find_plan(p->route.tracker,p->route.replicas[index].allocation,plan) ||
+        !api_route_plan_matches(&p->route,index,plan)) goto done;
+    /* An exhausted outer controller deadline is not a failed peer probe. */
+    if (prior && (prior<=now || prior-now<2000)) goto done;
+    lmb_read_deadline_ms=now+2000;
+    LmbHostControl host;
+    if (lmb_host_control_rpc(plan->host,plan->host_key,plan->root,LMB_HOST_CONTROL_QUERY,NULL,&host)) {
+        state=LMB_ELASTIC_UNREACHABLE; goto done;
+    }
+    if (host.draining) { state=LMB_ELASTIC_DRAINING; goto done; }
+    for (uint32_t i=0;i<plan->execution.count;i++) {
+        if (lmb_io_monotonic_ms()>=lmb_read_deadline_ms) goto done;
+        LmbNodeControl node;
+        if (home_resident_node_control(plan,i,LMB_NODE_CONTROL_QUERY,NULL,&node)) {
+            state=LMB_ELASTIC_UNREACHABLE; goto done;
+        }
+        if (node.draining) { state=LMB_ELASTIC_DRAINING; goto done; }
+    }
+    state=LMB_ELASTIC_READY;
+done:
+    lmb_read_deadline_ms=prior; free(plan); return state;
+}
 static void api_elastic_tick_one(int access,int dir,LmbElasticPolicy *p) {
     uint64_t wall=(uint64_t)time(NULL),mono=lmb_io_monotonic_ms(); LmbModelRoute current;
     const char *reason; int choice=lmb_elastic_choose(p,&api_demand,mono,wall,&reason);
@@ -353,6 +393,12 @@ static void api_elastic_tick_one(int access,int dir,LmbElasticPolicy *p) {
         if (routes>=0) close(routes);
         goto save;
     }
+    int probe=lmb_elastic_health_next(p,&api_demand,mono);
+    if (probe>=0) {
+        unsigned state=api_elastic_probe(p,(unsigned)probe);
+        lmb_elastic_health_observe(p,(unsigned)probe,state,lmb_io_monotonic_ms(),(uint64_t)time(NULL));
+    }
+    choice=lmb_elastic_health_choice(p,&api_demand,lmb_io_monotonic_ms(),wall,choice,&reason);
     snprintf(p->reason,sizeof p->reason,"%s",reason);
     if (choice==LMB_ELASTIC_GROW && p->route.revision<UINT32_MAX) {
         if (!api_elastic_begin_grow(dir,p)) api_elastic_prepare(access,dir,p);

@@ -637,6 +637,13 @@ function renderElastic(data) {
       ["Pending operation", policy.pending_operation || "None"],
       ["Pending allocation", policy.pending_allocation || "None"],
       ["Last controller check", policy.last_check ? new Date(policy.last_check * 1000).toLocaleString() : "Not observed"]]);
+    for (const observation of policy.availability_observations || []) {
+      const line = document.createElement("p"); line.className = "muted";
+      line.textContent = `${observation.allocation.slice(0, 12)} · last availability check: ${observation.state}` +
+        (observation.checked_at ? ` · ${new Date(observation.checked_at * 1000).toLocaleString()}` : " · not observed") +
+        (observation.consecutive_failures ? ` · ${observation.consecutive_failures}/3 failed checks` : "");
+      card.append(line);
+    }
     if (!management) continue;
     const actions = document.createElement("div"); actions.className = "allocation-actions";
     const buttons = [["configure", "Edit policy", policy.phase === "idle"],

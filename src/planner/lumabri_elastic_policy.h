@@ -9,6 +9,11 @@
 enum { LMB_ELASTIC_IDLE, LMB_ELASTIC_PREPARING, LMB_ELASTIC_PUBLISH_GROW,
        LMB_ELASTIC_PUBLISH_SHRINK, LMB_ELASTIC_RETIRING };
 enum { LMB_ELASTIC_HOLD, LMB_ELASTIC_GROW, LMB_ELASTIC_SHRINK };
+enum { LMB_ELASTIC_UNKNOWN, LMB_ELASTIC_READY, LMB_ELASTIC_DRAINING, LMB_ELASTIC_UNREACHABLE };
+typedef struct {
+    uint64_t at_ms, at_wall;
+    uint32_t state, failures;
+} LmbElasticReplicaHealth;
 typedef struct {
     uint32_t revision, enabled, faulted, min_replicas, max_replicas;
     uint32_t cooldown, idle_seconds, up_rejections, ttft_ms, phase;
@@ -21,6 +26,11 @@ typedef struct {
     char source_stamp[65], reason[97];
     uint8_t pending_allocation[32], observer[32];
     uint64_t idle_since_ms;
+    /* Observations are not ownership receipts. Unreachable allocations
+     * remain in route/resident_bytes and count towards both hard limits. */
+    uint8_t health_observer[32];
+    uint32_t health_revision, health_cursor;
+    LmbElasticReplicaHealth health[LMB_ROUTE_REPLICAS];
 } LmbElasticPolicy;
 
 static inline int lmb_elastic_settings_valid(const LmbElasticPolicy *p) {
@@ -63,6 +73,13 @@ static inline int lmb_elastic_valid(const LmbElasticPolicy *p) {
         !memchr(p->source_stamp,0,sizeof p->source_stamp) || !lmb_preparation_hex(p->source_stamp) ||
         !memchr(p->reason,0,sizeof p->reason) || lmb_elastic_total(p,&bytes) ||
         p->request.context<p->route.context || p->request.max_new<p->route.max_new) return 0;
+    if (p->health_cursor>=LMB_ROUTE_REPLICAS) return 0;
+    for (unsigned i=0;i<LMB_ROUTE_REPLICAS;i++) {
+        const LmbElasticReplicaHealth *h=&p->health[i];
+        if (h->state>LMB_ELASTIC_UNREACHABLE || h->failures>3 ||
+            (h->state!=LMB_ELASTIC_UNREACHABLE && h->failures) ||
+            (h->state && (!h->at_ms || !h->at_wall))) return 0;
+    }
     if (p->phase==LMB_ELASTIC_IDLE) return !p->pending_bytes && !lmb_route_nonzero(p->pending_allocation) &&
         !p->request.operation[0] && !p->request.review[0];
     if (!p->pending_bytes) return 0;
@@ -159,5 +176,68 @@ static inline int lmb_elastic_choose(LmbElasticPolicy *p,const LmbDemand *d,uint
     }
     *reason=!fresh || !lmb_demand_window_complete(d,now_ms) ? "observation_window_incomplete" : "within_limits";
     return LMB_ELASTIC_HOLD;
+}
+/* Probe one replica per tick, without opening an inference session. Three
+ * separated failures are required; a restart, route change, long gap or
+ * successful probe resets this evidence rather than inheriting an outage. */
+static inline int lmb_elastic_health_next(LmbElasticPolicy *p,const LmbDemand *d,uint64_t now) {
+    if (!p->enabled || p->faulted || p->phase || !p->route.count || !now) return -1;
+    if (p->health_revision!=p->route.revision || memcmp(p->health_observer,d->instance,32)) {
+        memset(p->health,0,sizeof p->health); p->health_cursor=0;
+        p->health_revision=p->route.revision; memcpy(p->health_observer,d->instance,32);
+    }
+    unsigned index=p->health_cursor%p->route.count;
+    const LmbElasticReplicaHealth *h=&p->health[index];
+    if (h->at_ms && now>=h->at_ms && now-h->at_ms<5000) return -1;
+    p->health_cursor=(index+1)%p->route.count;
+    return (int)index;
+}
+static inline void lmb_elastic_health_observe(LmbElasticPolicy *p,unsigned index,unsigned state,
+                                             uint64_t now,uint64_t wall) {
+    if (index>=p->route.count || state>LMB_ELASTIC_UNREACHABLE || !now || !wall) return;
+    LmbElasticReplicaHealth *h=&p->health[index]; unsigned failures=0;
+    if (state==LMB_ELASTIC_UNREACHABLE) {
+        failures=1;
+        if (h->state==state && now>=h->at_ms && now-h->at_ms>=5000 && now-h->at_ms<=120000)
+            failures=h->failures<3 ? h->failures+1 : 3;
+    }
+    *h=(LmbElasticReplicaHealth){now,wall,state,failures};
+}
+static inline int lmb_elastic_health_choice(LmbElasticPolicy *p,const LmbDemand *d,uint64_t now,uint64_t wall,
+                                           int choice,const char **reason) {
+    if (!p->enabled || p->faulted || p->phase || wall<p->last_check || wall<p->last_change) return choice;
+    unsigned failed=0,ready=0;
+    int same=p->health_revision==p->route.revision && !memcmp(p->health_observer,d->instance,32);
+    for (uint32_t i=0;i<p->route.count;i++) {
+        const LmbElasticReplicaHealth *h=&p->health[i];
+        if (!same || !h->at_ms || now<h->at_ms || now-h->at_ms>120000) continue;
+        ready+=h->state==LMB_ELASTIC_READY;
+        failed+=h->state==LMB_ELASTIC_UNREACHABLE && h->failures==3;
+    }
+    /* In particular, never remove the newly healthy last replica while
+     * counting an unreachable old replica as the resident minimum. */
+    if (ready<p->route.count) {
+        p->idle_since_ms=0;
+        if (choice==LMB_ELASTIC_SHRINK) { choice=LMB_ELASTIC_HOLD; *reason="replica_health_not_ready_for_release"; }
+    }
+    unsigned wanted=p->min_replicas;
+    /* Positive recent demand may restore an on-demand model too. Unlike
+     * destructive idle evidence this remains useful across a bounded probe. */
+    if (!wanted && d->captured_ms && now>=d->captured_ms && now-d->captured_ms<=30000) {
+        for (unsigned i=0;i<LMB_DEMAND_MODELS;i++) if (!memcmp(d->models[i].id,p->route.id,32)) {
+            LmbDemandSummary s; lmb_demand_summary(&d->models[i],now,&s);
+            wanted=d->models[i].pending || d->models[i].admitted || s.counts[LMB_DEMAND_STARTED] ? 1 : 0;
+            break;
+        }
+    }
+    /* Deliberate drain and unobserved replicas are not confirmed failures.
+     * Neither a failed probe nor a completed replacement frees old RAM. */
+    if (!failed || p->route.count-failed>=wanted) return choice;
+    *reason="unavailable_replica_recovery_cooldown";
+    if (p->last_change && wall-p->last_change<p->cooldown) return LMB_ELASTIC_HOLD;
+    *reason="unavailable_replica_limit_operator_review_required";
+    if (p->route.count>=p->max_replicas) return LMB_ELASTIC_HOLD;
+    *reason="restore_available_replica_minimum";
+    return LMB_ELASTIC_GROW;
 }
 #endif

@@ -9,6 +9,24 @@ execution, cross-platform numerical compatibility, or concurrent capacity.
 The managed-inference roadmap supersedes the older single-chat LAN checklist
 below. Historical observations remain here as evidence, not current promises.
 
+- [ ] Unavailable replica replenishment (local candidate): bounded authenticated
+  host/Segment probes distinguish accepting, draining, unreachable and unknown.
+  Three separated failures can restore an opt-in policy's available minimum;
+  failed allocations remain charged to both replica and memory limits. Unknown
+  or stale health prevents retiring the healthy replacement. Policy state
+  migrates from v1 without losing reservations and resets failure evidence on
+  route/observer changes. Unit, API/browser regression and focused ASan/UBSan
+  with leak detection pass. The first local real reduced-OLMoE gate killed an
+  owned Segment process, prepared one authorized replacement and resumed
+  inference while the second model remained usable, with twelve effectively
+  locked engines across the complete lifecycle. The expanded final gate passed
+  through the actual web interface as well, then killed the replacement host:
+  the hard replica ceiling refused a third allocation, retained every budget
+  charge and kept the independent model serving. Native CI and merge remain
+  pending. Newly prepared capacity is for subsequent requests: same-turn
+  replay onto a new allocation and authoritative failed-allocation reclamation
+  remain separate recovery work.
+
 - [ ] Shared capacity management API (under review): authenticated historical
   listing, explicit inference measurement with progress/cancellation, live
   checking, whole-portfolio comparison and observation removal. The CLI and

@@ -11,7 +11,7 @@ static inline void lmb_elastic_digest(const void *data,size_t n,uint8_t out[32])
 static inline int lmb_elastic_encode(const LmbElasticPolicy *p,LmbBuf *b) {
     if (b->len || !lmb_elastic_valid(p)) return -1;
 #define EP(call) do { if (call) return -1; } while (0)
-    EP(lmb_buf_bytes(b,"LMBELA01",8));
+    EP(lmb_buf_bytes(b,"LMBELA02",8));
     const uint32_t values[]={p->revision,p->enabled,p->faulted,p->min_replicas,p->max_replicas,p->cooldown,
         p->idle_seconds,p->up_rejections,p->ttft_ms,p->phase,p->request.context,p->request.sessions,
         p->request.max_new,p->request.node_count};
@@ -30,13 +30,21 @@ static inline int lmb_elastic_encode(const LmbElasticPolicy *p,LmbBuf *b) {
         if (!bad) bad=lmb_buf_u32(b,(uint32_t)r.len) || (r.len && lmb_buf_bytes(b,r.p,r.len));
         free(r.p); if (bad) return -1;
     }
+    EP(lmb_buf_bytes(b,p->health_observer,32));
+    EP(lmb_buf_u32(b,p->health_revision)); EP(lmb_buf_u32(b,p->health_cursor));
+    for (unsigned i=0;i<LMB_ROUTE_REPLICAS;i++) {
+        EP(lmb_buf_u64(b,p->health[i].at_ms)); EP(lmb_buf_u64(b,p->health[i].at_wall));
+        EP(lmb_buf_u32(b,p->health[i].state)); EP(lmb_buf_u32(b,p->health[i].failures));
+    }
     uint8_t hash[32]; lmb_elastic_digest(b->p,b->len,hash); EP(lmb_buf_bytes(b,hash,32));
     return b->len>LMB_ELASTIC_BYTES ? -1 : 0;
 #undef EP
 }
 static inline int lmb_elastic_decode(const void *bytes,size_t n,LmbElasticPolicy *out) {
     memset(out,0,sizeof *out);
-    if (!bytes || n<320 || n>LMB_ELASTIC_BYTES || memcmp(bytes,"LMBELA01",8)) return -1;
+    if (!bytes || n<320 || n>LMB_ELASTIC_BYTES ||
+        (memcmp(bytes,"LMBELA01",8) && memcmp(bytes,"LMBELA02",8))) return -1;
+    int v2=!memcmp(bytes,"LMBELA02",8);
     uint8_t hash[32]; lmb_elastic_digest(bytes,n-32,hash);
     if (memcmp(hash,(const uint8_t *)bytes+n-32,32)) return -1;
     LmbElasticPolicy p={0}; LmbCur c={bytes,n-32,8};
@@ -61,6 +69,14 @@ static inline int lmb_elastic_decode(const void *bytes,size_t n,LmbElasticPolicy
         if ((!!size!=!!used) || size>c.len-c.off ||
             (used && lmb_route_decode((const uint8_t *)bytes+c.off,size,i ? &p.target : &p.route))) return -1;
         c.off+=size;
+    }
+    if (v2) {
+        EG(lmb_cur_bytes(&c,p.health_observer,32));
+        EG(lmb_cur_u32(&c,&p.health_revision)); EG(lmb_cur_u32(&c,&p.health_cursor));
+        for (unsigned i=0;i<LMB_ROUTE_REPLICAS;i++) {
+            EG(lmb_cur_u64(&c,&p.health[i].at_ms)); EG(lmb_cur_u64(&c,&p.health[i].at_wall));
+            EG(lmb_cur_u32(&c,&p.health[i].state)); EG(lmb_cur_u32(&c,&p.health[i].failures));
+        }
     }
     if (c.off!=c.len || !lmb_elastic_valid(&p)) return -1;
     *out=p; return 0;
