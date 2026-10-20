@@ -6303,10 +6303,11 @@ static void doctor_add(DoctorCheck *checks, size_t *count, const char *name,
 }
 
 static int cmd_doctor(int argc, char **argv) {
-    int json = 0, serve_port = 0;
+    int json = 0, serve_port = 0, household = 0;
     const char *tracker = NULL, *model = NULL;
     for (int i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "--json")) json = 1;
+        else if (!strcmp(argv[i], "--household")) household = 1;
         else if (!strcmp(argv[i], "--tracker") && i + 1 < argc)
             tracker = argv[++i];
         else if (!strcmp(argv[i], "--model") && i + 1 < argc)
@@ -6317,7 +6318,7 @@ static int cmd_doctor(int argc, char **argv) {
                 return 2;
             }
         } else {
-            fprintf(stderr, "usage: lumabri doctor [--json] [--tracker HOST:PORT] "
+            fprintf(stderr, "usage: lumabri doctor [--household] [--json] [--tracker HOST:PORT] "
                             "[--model DIR] [--serve-port N]\n");
             return 2;
         }
@@ -6381,10 +6382,26 @@ static int cmd_doctor(int argc, char **argv) {
     for (size_t i = 0; i < sizeof segment_bins / sizeof segment_bins[0]; i++) {
         char path[1200], name[64];
         snprintf(path, sizeof path, "%s/%s", directory, segment_bins[i]);
-        snprintf(name, sizeof name, "optional-%s", segment_bins[i]);
-        doctor_add(checks, &count, name, access(path, X_OK) == 0, 0,
-                   access(path, X_OK) == 0 ? "Segment runtime available" :
-                   "classic Expert/CAS remains available; build against Colibri dev for Segment");
+        if (household) {
+            unsigned capacity = 0;
+            int started = !access(path, X_OK) &&
+                          !lmb_runtime_thread_capacity(path, &capacity);
+            char detail[192];
+            snprintf(name, sizeof name, "runtime-%s", segment_bins[i]);
+            if (started)
+                snprintf(detail, sizeof detail,
+                         "startup probe passed; thread capacity %u; no model tested", capacity);
+            else
+                snprintf(detail, sizeof detail,
+                         "missing, blocked or incompatible runtime; bounded startup probe failed; "
+                         "reinstall the complete household package and check loader errors");
+            doctor_add(checks, &count, name, started, 1, detail);
+        } else {
+            snprintf(name, sizeof name, "optional-%s", segment_bins[i]);
+            doctor_add(checks, &count, name, access(path, X_OK) == 0, 0,
+                       access(path, X_OK) == 0 ? "Segment executable found (not started)" :
+                       "classic Expert/CAS remains available; build against Colibri for Segment");
+        }
     }
 
     if (model) {
@@ -6399,36 +6416,43 @@ static int cmd_doctor(int argc, char **argv) {
                    profile.tracker_rtt_ms >= 0.0, 1,
                    machine_ok && profile.tracker_rtt_ms >= 0.0 ?
                    "tracker TCP endpoint is reachable" : "tracker is unreachable");
-        /* Which side of the NAT am I on? Bind an ephemeral port, ask the
-         * tracker to dial it back. Purely informational: a relay-only donor
-         * is a full member of the swarm, it just rides the tunnel. */
-        static char nat_note[160];
-        snprintf(nat_note, sizeof nat_note,
-                 "tracker too old for the reach probe — assume relay");
-        int lfd = lmb_listen(0);
-        if (lfd >= 0) {
-            struct sockaddr_in me; socklen_t ml = sizeof me;
-            if (getsockname(lfd, (struct sockaddr *)&me, &ml) == 0) {
-                LmbBuf b = {0};
-                lmb_buf_u32(&b, (uint32_t)ntohs(me.sin_port));
-                LmbMsg reply = {0};
-                if (!lmb_request(tracker, LMB_REACH, b.p, (uint32_t)b.len,
-                                 &reply) && reply.op == LMB_REACH_R) {
-                    LmbCur c = { reply.body, reply.body_len, 0 };
-                    uint32_t direct = 0; char observed[96] = "";
-                    if (!lmb_cur_u32(&c, &direct) &&
-                        !lmb_cur_str(&c, observed, sizeof observed))
-                        snprintf(nat_note, sizeof nat_note, direct ?
-                                 "directly dialable at %s" :
-                                 "behind NAT/firewall (%s): the tracker "
-                                 "relay will carry this peer", observed);
+        /* The legacy public relay is not a household data-path fallback.
+         * Neither a tracker TCP connect nor a reverse callback proves the
+         * approved Segment endpoints can communicate with each other. */
+        if (household) {
+            doctor_add(checks, &count, "household-data-path", 0, 0,
+                       "not tested; verify direct connectivity between approved peers; "
+                       "household inference does not fall back to the public relay");
+        } else {
+            /* Legacy public-network diagnostic only. */
+            char nat_note[160];
+            snprintf(nat_note, sizeof nat_note,
+                     "tracker too old for the reach probe — assume relay");
+            int lfd = lmb_listen(0);
+            if (lfd >= 0) {
+                struct sockaddr_in me; socklen_t ml = sizeof me;
+                if (getsockname(lfd, (struct sockaddr *)&me, &ml) == 0) {
+                    LmbBuf b = {0};
+                    lmb_buf_u32(&b, (uint32_t)ntohs(me.sin_port));
+                    LmbMsg reply = {0};
+                    if (!lmb_request(tracker, LMB_REACH, b.p, (uint32_t)b.len,
+                                     &reply) && reply.op == LMB_REACH_R) {
+                        LmbCur c = { reply.body, reply.body_len, 0 };
+                        uint32_t direct = 0; char observed[96] = "";
+                        if (!lmb_cur_u32(&c, &direct) &&
+                            !lmb_cur_str(&c, observed, sizeof observed))
+                            snprintf(nat_note, sizeof nat_note, direct ?
+                                     "directly dialable at %s" :
+                                     "behind NAT/firewall (%s): the tracker "
+                                     "relay will carry this peer", observed);
+                    }
+                    lmb_msg_free(&reply);
+                    free(b.p);
                 }
-                lmb_msg_free(&reply);
-                free(b.p);
+                close(lfd);
             }
-            close(lfd);
+            doctor_add(checks, &count, "nat-reachability", 1, 0, nat_note);
         }
-        doctor_add(checks, &count, "nat-reachability", 1, 0, nat_note);
     }
     if (serve_port) {
         int topology_ok = 1, failed_port = 0;
@@ -6451,7 +6475,8 @@ static int cmd_doctor(int argc, char **argv) {
         if (!checks[i].ok && !checks[i].required) warnings++;
     }
     if (json) {
-        printf("{\"schema\":1,\"ok\":%s,\"warnings\":%d,\"checks\":[",
+        printf("{\"schema\":1,\"scope\":\"%s\",\"ok\":%s,\"warnings\":%d,\"checks\":[",
+               household ? "household-runtime" : "legacy-installation",
                ok ? "true" : "false", warnings);
         for (size_t i = 0; i < count; i++) {
             if (i) fputc(',', stdout);
@@ -6463,12 +6488,16 @@ static int cmd_doctor(int argc, char **argv) {
         }
         fputs("]}\n", stdout);
     } else {
-        printf("Lumabri doctor: %s (%d warning%s)\n", ok ? "READY" : "NOT READY",
+        printf("Lumabri doctor%s: %s (%d warning%s)\n",
+               household ? " (household runtime)" : "", ok ? "READY" : "NOT READY",
                warnings, warnings == 1 ? "" : "s");
         for (size_t i = 0; i < count; i++)
             printf("  %s %-24s %s\n", checks[i].ok ? "ok" :
                    (checks[i].required ? "FAIL" : "warn"), checks[i].name,
                    checks[i].detail);
+        if (household)
+            puts("Runtime startup only; model execution, resident memory and peer connectivity "
+                 "require separate checks.");
     }
     return ok ? 0 : 1;
 }
@@ -6533,7 +6562,7 @@ int main(int argc, char **argv) {
         "  lumabri worker --join HOST:PORT [--ram-gb N]              publish LAN inventory\n"
         "  lumabri models --tracker HOST:PORT                       cluster planning preview\n"
         "  lumabri status | limits | pause | resume                    resource governor\n"
-        "  lumabri doctor [--json] [--tracker H:P] [--model DIR]      deployment preflight\n"
+        "  lumabri doctor [--household] [--json] [--tracker H:P]     runtime diagnostics\n"
         "  lumabri peer-key                                           print this machine's endpoint identity\n"
         "  lumabri serve --model DIR [--port 7300] [--join TRACKER]   share a model\n"
         "  lumabri chat  [--tracker HOST:7300] [--model NAME]         chat with it\n"

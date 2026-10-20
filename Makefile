@@ -749,6 +749,10 @@ test-machine-governor: lumabri tracker swarm_probe expert_node segment_node fixt
 test-doctor: all
 	bash ./tests/integration/doctor_test.sh
 
+.PHONY: test-household-doctor
+test-household-doctor: household swarm_probe
+	python3 tests/integration/household_doctor_test.py
+
 SANITIZE_FLAGS = -O1 -g -Wall -Wextra -fno-omit-frame-pointer -fsanitize=address,undefined
 test-sanitize: build/web_assets.h
 	mkdir -p build/sanitize
@@ -839,7 +843,7 @@ COLIBRI_SEGMENT_LIB = $(HYBRID_ENGINE_DIR)/build/segment/libcolibri_segment_edge
 HYBRID_ROOT = $(abspath .)
 ENGINE_MEMORY_FLAGS = -include $(HYBRID_ROOT)/src/runtime/lumabri_engine_memory_override.h
 SEGMENT_CFLAGS = $(CFLAGS) -I. -I$(ENGINE) $(OMP_FLAGS) $(ENGINE_MEMORY_FLAGS)
-SEGMENT_COMMON = segment_colibri.h src/runtime/lumabri_resident.h src/runtime/lumabri_process_memory.h src/runtime/lumabri_resident_guard.h src/runtime/lumabri_backend_policy.h lumabri_segment.c lumabri_segment.h \
+SEGMENT_COMMON = segment_colibri.h src/runtime/lumabri_thread_capacity.h src/runtime/lumabri_resident.h src/runtime/lumabri_process_memory.h src/runtime/lumabri_resident_guard.h src/runtime/lumabri_backend_policy.h lumabri_segment.c lumabri_segment.h \
 		lumabri_segment_discovery.c lumabri_segment_discovery.h \
 		lumabri_proto.h lumabri_sign.h lumabri_sha.h $(SECURE_DEPS)
 
