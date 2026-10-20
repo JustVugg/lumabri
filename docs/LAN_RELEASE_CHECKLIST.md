@@ -9,7 +9,7 @@ execution, cross-platform numerical compatibility, or concurrent capacity.
 The managed-inference roadmap supersedes the older single-chat LAN checklist
 below. Historical observations remain here as evidence, not current promises.
 
-### Roadmap status, October 17, 2026
+### Roadmap status, October 20, 2026
 
 This table separates implementation from release acceptance. The detailed PR
 entries below record the exact evidence; an open PR is not an integrated release.
@@ -19,9 +19,9 @@ entries below record the exact evidence; an open PR is not an integrated release
 | 2 — Inventory and measurements | Runtime/backend checks; memory, workload, link, preparation and model observations; declared machine costs | Missing facts stay unknown. Pinned distributed adapters expose CPU execution, not an enabled household GPU path. |
 | 3 — Several resident models | Independent reservations, private state, selective unload and effective owned CPU locks | Final-package memory-pressure and sustained workload checks on the deployment machines. |
 | 4 — Controlled concurrency | Bounded compute/session admission, isolated users, cancellation, timing and 1/2/4/8-slot gates | Per-deployment latency/capacity envelope; configured slots are not a single-user speed guarantee. |
-| 5 — Joint placement and cost | Bounded joint memory/cost search, measured portfolio selection/application, static-versus-managed comparison (#224) and shared capacity API (#225) | Browser capacity controls #226 are under review. New placements still require preparation and measurement; declared cost is not billed savings. |
-| 6 — Shared service and interfaces | Permanent keepers, common preparation/retirement operations, TUI, authenticated API, web chat and private history | The HTTP service is loopback-only; remote/datacenter ingress is not certified. |
-| 7 — Recovery | Approved-replica replay; unavailable-capacity replacement, same-turn wait and durable exit/release proofs implemented in #227–230 | Final-head native CI and ordered merges for those PRs; final-package fault tests. No instantaneous KV migration. |
+| 5 — Joint placement and cost | Bounded joint memory/cost search, measured portfolio selection/application, static-versus-managed comparison (#224), shared capacity API (#225) and browser controls (#226) | New placements still require preparation and measurement; declared cost is not billed savings. |
+| 6 — Shared service and interfaces | Permanent keepers, common preparation/retirement operations, TUI, authenticated API, web chat and private history; explicit private HTTPS upstream candidate | Verified local TLS/OLMoE gate, not installed remote/datacenter certification. |
+| 7 — Recovery | Approved-replica replay; unavailable-capacity replacement, same-turn wait and durable exit/release proofs merged in #227–230 after all eight checks passed | Final-package fault tests on deployment machines. No instantaneous KV migration. |
 | 8 — Authorized elasticity | Opt-in replica growth, drain, retirement, scale-to-zero/wake, budgets and cooldown | Sustained burst/idle validation on actual machines; failed ownership remains charged without proof. |
 | 9 — Provider and actual savings | No paid resources created | Explicitly deferred provider choice, account access and spending authority; implementation and billing comparison remain. |
 | 10 — Release | Native CI, allowlisted package assembly and hash verification | Final installed-package LAN/datacenter, sustained-load, update and rollback evidence. Native Windows inference and notarized macOS distribution are not delivered. |
@@ -31,7 +31,34 @@ nor tiny-checkpoint CI claims that arbitrary models are downloaded automatically
 that every added machine increases single-chat speed, or that the full roadmap
 is complete. See [deployment acceptance](../PRODUCTION.md#deployment-acceptance).
 
-- [ ] Sustained managed workload (release candidate, not yet merged): on October
+The following PRs passed all eight final-head CI checks before normal merge on
+October 20 (no squash). Historical local-run revisions below remain unchanged;
+they are not retroactively described as different binaries.
+
+| PR | Tested head | Merge commit |
+| --- | --- | --- |
+| #226 | `c8be574` | `c514cac` |
+| #227 | `3701537` | `28d4d4d` |
+| #228 | `b8a7c91` | `5977aca` |
+| #229 | `7f0fa99` | `36b3852` |
+| #230 | `dbb6f80` | `1602551` |
+| #231 | `90e376c` | `744c669` |
+| #237 | `3e006cf` | `01e3f86` |
+
+- [ ] Explicit HTTPS ingress (local candidate): the private same-user Unix
+  upstream passes authentication, exact Host/Origin, history isolation, keeper
+  restart/crash and unsafe-socket replacement tests. The supplied NGINX recipe
+  passes a real certificate-verified loopback test, rejecting untrusted TLS,
+  cleartext access, spoofed origins and oversized bodies. The October 20
+  connected gate prepares two real reduced-OLMoE allocations under four
+  effective owned-payload locks, serves four complete HTTPS turns across two
+  separately granted users, handles a client stop and restarts the gateway
+  without changing allocations, reservations or private histories.
+  `https-resident.json` retains the actual gateway hash and NGINX version;
+  this candidate still needs native CI/review. Deployment DNS, certificates,
+  firewall and topology checks remain separate. See [HTTPS](HTTPS_INGRESS.md).
+
+- [x] Sustained managed workload (#237): on October
   17, the complete local gate passed a 1,800.57-second timed workload after
   preparation and warm-up. Two independently resident identities derived from
   the same reduced OLMoE weights served 9,908 complete requests, explicitly
@@ -46,7 +73,7 @@ is complete. See [deployment acceptance](../PRODUCTION.md#deployment-acceptance)
   These are Linux loopback observations, not full-size model capacity, physical
   topology, a no-leak proof or a production SLO.
 
-- [ ] Installed gateway lifecycle (release candidate, not yet merged): the Linux
+- [x] Installed gateway lifecycle (#237): the Linux
   loopback gate passed previous → candidate → previous using actual packaged
   gateway binaries from clean revisions `2a59e9d` and `f46f9c9`, both using
   Colibri `ce370e87`. Each stage served both reduced OLMoE model identities,
@@ -58,7 +85,7 @@ is complete. See [deployment acceptance](../PRODUCTION.md#deployment-acceptance)
   quiescent gateway switch on Linux, not fleet or journal migration, macOS
   rollback or zero-downtime upgrades.
 
-- [ ] Verified failed-allocation reclamation (#230, under review): immutable
+- [x] Verified failed-allocation reclamation (#230): immutable
   birth records and inherited kernel lifetime locks distinguish a terminated
   allocation from an unreachable process. Authenticated proof survives keeper
   restart and slot reuse without signalling journal PIDs or replaying approval.
@@ -76,9 +103,10 @@ is complete. See [deployment acceptance](../PRODUCTION.md#deployment-acceptance)
   visible prefix, with byte-identical oracle output, no duplicated text and
   the same reclamation/ceiling checks. The test-only codec proxy preserves the
   lifetime descriptor in its real Edge child, matching production inheritance.
-  Native CI and merge remain pending; this entry is not release certification.
+  Final-head native CI and normal merge passed as recorded above; this entry
+  is not whole-release certification.
 
-- [ ] Durable donor retirement receipts (#229, under review): an exact sealed
+- [x] Durable donor retirement receipts (#229): an exact sealed
   allocation's release acknowledgement survives slot reuse and keeper restart.
   A persisted intent alone is not proof; only the original authenticated
   requester can replay a completed receipt with the same process seal. Retired
@@ -87,10 +115,10 @@ is complete. See [deployment acceptance](../PRODUCTION.md#deployment-acceptance)
   encrypted control and focused ASan/UBSan/leak checks pass. A local real
   reduced-OLMoE flow retires one allocation, reloads an approved new one on the
   donor, then queries the old release directly without disrupting the new
-  inference. Native CI and merge are pending. This does not yet reclaim an
+  inference. Native CI and normal merge passed. This PR alone does not reclaim an
   arbitrary failed allocation whose owned-process exit was never proven.
 
-- [ ] Same-turn elastic recovery (#228, under review): optional bounded API wait
+- [x] Same-turn elastic recovery (#228): optional bounded API wait
   captures an already enabled policy's scope/revision and keeps the original
   model/numeric contract. The web exposes the wait and Stop; policy/credential
   revocation, deadline and disconnect prevent subsequent disclosure. Local
@@ -100,9 +128,9 @@ is complete. See [deployment acceptance](../PRODUCTION.md#deployment-acceptance)
   charged; this is not automatic reclamation or KV migration. API/browser,
   policy unit and ASan/UBSan/leak checks pass. The final local flow also passes
   on `99490c9`, after the shared admission/HTTP fixes, with twelve effectively
-  locked engines. Native CI and merge of that final head are pending.
+  locked engines. Native CI and normal merge of the final head passed.
 
-- [ ] Unavailable replica replenishment (#227, under review): bounded authenticated
+- [x] Unavailable replica replenishment (#227): bounded authenticated
   host/Segment probes distinguish accepting, draining, unreachable and unknown.
   Three separated failures can restore an opt-in policy's available minimum;
   failed allocations remain charged to both replica and memory limits. Unknown
@@ -115,9 +143,9 @@ is complete. See [deployment acceptance](../PRODUCTION.md#deployment-acceptance)
   locked engines across the complete lifecycle. The expanded final gate passed
   through the actual web interface as well, then killed the replacement host:
   the hard replica ceiling refused a third allocation, retained every budget
-  charge and kept the independent model serving. Native CI and merge remain
-  pending. Same-turn opt-in replay and authoritative failed-allocation
-  reclamation are the separate candidates above, not claims of this PR alone.
+  charge and kept the independent model serving. Native CI and normal merge
+  passed. Same-turn opt-in replay and authoritative failed-allocation
+  reclamation are the separate PRs above, not claims of this PR alone.
 
 - [x] Shared capacity management API (#225): authenticated historical
   listing, explicit inference measurement with progress/cancellation, live
@@ -132,7 +160,7 @@ is complete. See [deployment acceptance](../PRODUCTION.md#deployment-acceptance)
   on `194e608` before normal merge `2a58669`. This is not whole-release or
   production-capacity certification.
 
-- [ ] Browser capacity controls (#226, under review): explicit ordered allocations,
+- [x] Browser capacity controls (#226): explicit ordered allocations,
   workload limits and confirmation; streamed progress and cancellation;
   historical listings, live checks and joint-plan comparison; separate atomic
   model-route application. The browser binds application to exact observation
@@ -145,7 +173,10 @@ is complete. See [deployment acceptance](../PRODUCTION.md#deployment-acceptance)
   identity was refused without changing either route. The complete placement
   gate then passed policy-driven selection, explicit retirement and evidence
   invalidation. These are loopback results, not datacenter throughput or bills.
-  Linux CI now runs that browser path; native CI and merge remain pending.
+  The October 19 rerun also verified archival output containing NUL bytes:
+  history preserves the real response and replay is explicitly disabled,
+  rather than silently changing model output. Linux CI runs that browser
+  path; all eight final-head checks passed before the normal merge above.
 
 - [x] Persistent manager and allocation keepers (#183): TUI detach and manager
   restart do not replay approvals or reload live resident allocations.

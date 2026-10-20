@@ -1,4 +1,5 @@
-/* Authenticated loopback gateway. Chat uses ALREADY approved allocations;
+/* Authenticated gateway: loopback TCP or private same-user TLS-proxy upstream.
+ * Chat uses ALREADY approved allocations;
  * management can prepare reviewed plans through the existing consent keeper.
  * One bounded child per HTTP request. No client-supplied endpoints or shared Engine globals. Private transcripts
  * are separate from model authority and engine conversation state.
@@ -8,6 +9,7 @@
 #include "lumabri_api_http.h"
 #include "lumabri_api_json.h"
 #include "lumabri_api_access.h"
+#include "lumabri_api_proxy.h"
 #include "lumabri_resident_control.h"
 #include "build/web_assets.h"
 
@@ -375,7 +377,7 @@ static void api_policy_tick(int access,const char *tracker);
 static void api_elastic_http(int fd,int access,const char *tracker,const char *body,size_t size);
 static int api_elastic_due(int access);
 static void api_elastic_tick(int access,const char *tracker);
-static void api_connection_dispatch(int fd, int access_dir, unsigned port, const char *tracker) {
+static void api_connection_dispatch(int fd, int access_dir, unsigned port, const char *tracker, const char *https_origin) {
     struct timeval timeout={5,0};
     (void)setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof timeout);
     (void)setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&timeout,sizeof timeout);
@@ -389,7 +391,9 @@ static void api_connection_dispatch(int fd, int access_dir, unsigned port, const
     }
     LmbApiHttp request;
     if (!complete || lmb_api_http_parse(&request,header,length)) { api_error(fd,400,"invalid_http_request"); return; }
-    if (lmb_api_http_origin(&request,port)) { api_error(fd,403,"origin_or_host_rejected"); return; }
+    if (https_origin ? lmb_api_http_https_origin(&request,https_origin) : lmb_api_http_origin(&request,port)) {
+        api_error(fd,403,"origin_or_host_rejected"); return;
+    }
     if (api_web(fd,&request)) return;
     LmbApiUser user;
     if (lmb_api_authorize(access_dir,request.authorization,&user)) { api_error(fd,401,"authentication_required"); return; }
@@ -482,8 +486,8 @@ static void api_connection_dispatch(int fd, int access_dir, unsigned port, const
  * the client. Finish our response first; discard, never parse, a bounded
  * remainder until the peer closes. Neither a slow writer nor an unlimited
  * body may extend this absolute cleanup budget. No keep-alive/pipelining. */
-static void api_connection(int fd, int access_dir, unsigned port, const char *tracker) {
-    api_connection_dispatch(fd,access_dir,port,tracker);
+static void api_connection(int fd, int access_dir, unsigned port, const char *tracker, const char *https_origin) {
+    api_connection_dispatch(fd,access_dir,port,tracker,https_origin);
     if (shutdown(fd,SHUT_WR)) return;
     uint64_t started=lmb_io_monotonic_ms();
     if (!started) return;
@@ -502,14 +506,23 @@ static void api_connection(int fd, int access_dir, unsigned port, const char *tr
         discarded+=(size_t)n;
     }
 }
-static int api_serve(int access_dir, unsigned port, const char *tracker, HomeService *keeper) {
-    int listener=socket(AF_INET,SOCK_STREAM,0); if (listener<0) return 1;
-    struct sockaddr_in address={0}; address.sin_family=AF_INET;
-    address.sin_addr.s_addr=htonl(INADDR_LOOPBACK); address.sin_port=htons((uint16_t)port);
-    int one=1; (void)setsockopt(listener,SOL_SOCKET,SO_REUSEADDR,&one,sizeof one);
-    if (fcntl(listener,F_SETFD,FD_CLOEXEC) ||
-        bind(listener,(struct sockaddr *)&address,sizeof address) || listen(listener,16)) {
-        fprintf(stderr,"[api] Cannot listen on 127.0.0.1:%u: %s\n",port,strerror(errno)); close(listener); return 1;
+static int api_serve(int access_dir, unsigned port, const char *tracker, HomeService *keeper,
+                     const char *https_origin, const char *access_path) {
+    LmbApiProxy proxy={.fd=-1,.lock=-1}; int listener;
+    if (https_origin) {
+        if (lmb_api_proxy_listen(&proxy,access_dir,access_path)) {
+            fprintf(stderr,"[api] Cannot create private TLS-proxy socket: %s\n",strerror(errno)); return 1;
+        }
+        listener=proxy.fd;
+    } else {
+        listener=socket(AF_INET,SOCK_STREAM,0); if (listener<0) return 1;
+        struct sockaddr_in address={0}; address.sin_family=AF_INET;
+        address.sin_addr.s_addr=htonl(INADDR_LOOPBACK); address.sin_port=htons((uint16_t)port);
+        int one=1; (void)setsockopt(listener,SOL_SOCKET,SO_REUSEADDR,&one,sizeof one);
+        if (fcntl(listener,F_SETFD,FD_CLOEXEC) ||
+            bind(listener,(struct sockaddr *)&address,sizeof address) || listen(listener,16)) {
+            fprintf(stderr,"[api] Cannot listen on 127.0.0.1:%u: %s\n",port,strerror(errno)); close(listener); return 1;
+        }
     }
     signal(SIGTERM,api_stop); signal(SIGINT,api_stop); api_stopping=0;
     pid_t children[LMB_API_CHILDREN]={0},policy_child=0,elastic_child=0;
@@ -520,10 +533,17 @@ static int api_serve(int access_dir, unsigned port, const char *tracker, HomeSer
     uint64_t next_policy_check=0,next_elastic_check=0;
     if (keeper) {
         keeper->snapshot.phase=2; /* API role: 1 starting, 2 listening */
-        snprintf(keeper->snapshot.detail,sizeof keeper->snapshot.detail,"Listening on %s; approved resident models only.",keeper->snapshot.name);
-        if (home_service_save(keeper)) { close(listener); return 1; }
+        if (https_origin) snprintf(keeper->snapshot.detail,sizeof keeper->snapshot.detail,
+            "Private upstream %s for TLS proxy %s; same-user proxy and bearer credentials required.",proxy.path,https_origin);
+        else snprintf(keeper->snapshot.detail,sizeof keeper->snapshot.detail,"Listening on %s; approved resident models only.",keeper->snapshot.name);
+        if (home_service_save(keeper)) {
+            if (https_origin) lmb_api_proxy_close(&proxy); else close(listener);
+            return 1;
+        }
     }
-    printf("[api] http://127.0.0.1:%u · bearer authentication · approved resident models only\n",port); fflush(stdout);
+    if (https_origin) printf("[api] %s via private upstream %s · configure a same-user TLS proxy · bearer authentication\n",https_origin,proxy.path);
+    else printf("[api] http://127.0.0.1:%u · bearer authentication · approved resident models only\n",port);
+    fflush(stdout);
     while (!api_stopping) {
         if (keeper) {
             int op=home_service_poll(keeper);
@@ -550,6 +570,7 @@ static int api_serve(int access_dir, unsigned port, const char *tracker, HomeSer
                 fflush(NULL); pid_t child=fork();
                 if (!child) {
                     close(listener); signal(SIGTERM,SIG_DFL); signal(SIGINT,SIG_DFL); signal(SIGALRM,SIG_DFL);
+                    if (proxy.lock>=0) close(proxy.lock);
                     for (unsigned i=0;i<LMB_API_CHILDREN;i++) if (telemetry[i]>=0) close(telemetry[i]);
                     api_demand.captured_ms=lmb_io_monotonic_ms();
                     if (keeper) {
@@ -569,6 +590,7 @@ static int api_serve(int access_dir, unsigned port, const char *tracker, HomeSer
                 fflush(NULL); pid_t child=fork();
                 if (!child) {
                     close(listener); signal(SIGTERM,SIG_DFL); signal(SIGINT,SIG_DFL); signal(SIGALRM,SIG_DFL);
+                    if (proxy.lock>=0) close(proxy.lock);
                     for (unsigned i=0;i<LMB_API_CHILDREN;i++) if (telemetry[i]>=0) close(telemetry[i]);
                     api_demand.captured_ms=lmb_io_monotonic_ms();
                     if (keeper) {
@@ -587,6 +609,7 @@ static int api_serve(int access_dir, unsigned port, const char *tracker, HomeSer
         if (rc<0) break;
         if (!rc) continue;
         int client=accept(listener,NULL,NULL); if (client<0) continue;
+        if (https_origin && home_service_peer(client)) { close(client); continue; }
         unsigned slot=0; while (slot<LMB_API_CHILDREN && children[slot]) slot++;
         if (slot==LMB_API_CHILDREN) { api_demand.refused_connections++; close(client); continue; }
         int channel[2];
@@ -598,6 +621,7 @@ static int api_serve(int access_dir, unsigned port, const char *tracker, HomeSer
         fflush(NULL); pid_t child=fork();
         if (!child) {
             close(listener); signal(SIGTERM,SIG_DFL); signal(SIGINT,SIG_DFL); signal(SIGALRM,SIG_DFL);
+            if (proxy.lock>=0) close(proxy.lock);
             close(channel[0]); api_demand_fd=channel[1];
             for (unsigned i=0;i<LMB_API_CHILDREN;i++) if (telemetry[i]>=0) close(telemetry[i]);
             /* Requests do not own the keeper lock/socket. A gateway crash
@@ -608,14 +632,14 @@ static int api_serve(int access_dir, unsigned port, const char *tracker, HomeSer
                 if (keeper->reply>=0) close(keeper->reply);
             }
             alarm(LMB_API_TURN_SECONDS); /* hard lifetime even during a stalled host handshake */
-            api_connection(client,access_dir,port,tracker); shutdown(client,SHUT_RDWR); close(client);
+            api_connection(client,access_dir,port,tracker,https_origin); shutdown(client,SHUT_RDWR); close(client);
             close(api_demand_fd); fflush(NULL); _exit(api_demand_failed ? 75 : 0);
         }
         close(client); close(channel[1]);
         if (child>0) { children[slot]=child; telemetry[slot]=channel[0]; }
         else { close(channel[0]); lmb_demand_loss(&api_demand,lmb_io_monotonic_ms()); }
     }
-    close(listener);
+    if (https_origin) lmb_api_proxy_close(&proxy); else close(listener);
     if (policy_child) (void)kill(policy_child,SIGTERM);
     if (elastic_child) (void)kill(elastic_child,SIGTERM);
     for (unsigned i=0; i<LMB_API_CHILDREN; i++) if (children[i]) (void)kill(children[i],SIGTERM);
@@ -625,16 +649,20 @@ static int api_serve(int access_dir, unsigned port, const char *tracker, HomeSer
     for (unsigned i=0;i<LMB_API_CHILDREN;i++) if (telemetry[i]>=0) close(telemetry[i]);
     return 0;
 }
-static int api_start(int access_dir, unsigned port, const char *tracker) {
+static int api_start(int access_dir, unsigned port, const char *tracker, const char *https_origin, const char *access_path) {
     if (strlen(tracker)>=sizeof ((HomeServiceSnapshot *)0)->tracker) return 1;
     if (home_service_foreground() || home_service_ensure()) {
         fprintf(stderr,"Cannot start the API keeper; use api serve for foreground operation\n"); return 1;
     }
     char endpoint[64]; snprintf(endpoint,sizeof endpoint,"http://127.0.0.1:%u",port);
+    if (https_origin) {
+        uint8_t hash[64]; char hex[57]; lmb_sha512(https_origin,strlen(https_origin),hash); lmb_hex(hex,hash,28);
+        snprintf(endpoint,sizeof endpoint,"https-%s",hex);
+    }
     HomeServiceSnapshot observed;
     if (!home_service_query("api",HOME_SVC_STATUS,NULL,&observed)) {
         if (strcmp(observed.tracker,tracker) || strcmp(observed.name,endpoint)) {
-            fprintf(stderr,"Another API configuration is active; stop it explicitly before changing the household or port\n"); return 1;
+            fprintf(stderr,"Another API configuration is active; stop it explicitly before changing the household, port or HTTPS origin\n"); return 1;
         }
         return observed.phase==2 ? 0 : 1;
     }
@@ -650,7 +678,7 @@ static int api_start(int access_dir, unsigned port, const char *tracker) {
     }
     snprintf(keeper.snapshot.name,sizeof keeper.snapshot.name,"%s",endpoint);
     snprintf(keeper.snapshot.tracker,sizeof keeper.snapshot.tracker,"%s",tracker);
-    snprintf(keeper.snapshot.detail,sizeof keeper.snapshot.detail,"Starting authenticated loopback API");
+    snprintf(keeper.snapshot.detail,sizeof keeper.snapshot.detail,"Starting authenticated %s API",https_origin ? "private TLS-proxy" : "loopback");
     keeper.snapshot.phase=1;
     if (home_service_save(&keeper)) { home_service_close(&keeper); return 1; }
     int detached=home_service_detach(&keeper,access_dir);
@@ -658,12 +686,15 @@ static int api_start(int access_dir, unsigned port, const char *tracker) {
     if (detached) {
         for (unsigned i=0; i<60; i++) {
             if (!home_service_query("api",HOME_SVC_STATUS,NULL,&observed) && observed.phase==2 &&
-                !strcmp(observed.tracker,tracker) && !strcmp(observed.name,endpoint)) { puts(endpoint); return 0; }
+                !strcmp(observed.tracker,tracker) && !strcmp(observed.name,endpoint)) {
+                if (https_origin) fprintf(stderr,"[api] Private upstream ready; configure and verify your same-user TLS proxy separately.\n");
+                puts(https_origin ? https_origin : endpoint); return 0;
+            }
             (void)poll(NULL,0,50);
         }
         fprintf(stderr,"API did not become ready; inspect lumabri service status and api.log\n"); return 1;
     }
-    int rc=api_serve(access_dir,port,tracker,&keeper);
+    int rc=api_serve(access_dir,port,tracker,&keeper,https_origin,access_path);
     keeper.snapshot.state=rc ? HOME_SVC_FAILED : HOME_SVC_STOPPED; keeper.snapshot.phase=0;
     snprintf(keeper.snapshot.detail,sizeof keeper.snapshot.detail,"API %s; resident models were not unloaded.",rc ? "failed" : "stopped");
     (void)home_service_save(&keeper); home_service_answer(&keeper); home_service_close(&keeper);
@@ -676,16 +707,21 @@ static int api_start(int access_dir, unsigned port, const char *tracker) {
 static int cmd_api(int argc, char **argv) {
     if (!argc) goto usage;
     HomeSettings settings; home_settings_load(&settings);
-    const char *tracker=settings.tracker; unsigned port=47380;
+    const char *tracker=settings.tracker, *https_origin=NULL; unsigned port=47380; int port_set=0;
     char *args[LMB_CAPACITY_MODELS+4]={0}; unsigned count=0;
     for (int i=1; i<argc; i++) {
         if (!strcmp(argv[i],"--tracker") && i+1<argc) tracker=argv[++i];
         else if (!strcmp(argv[i],"--port") && i+1<argc) {
             char *end; unsigned long value=strtoul(argv[++i],&end,10);
             if (!*argv[i] || *end || !value || value>65535) goto usage;
-            port=(unsigned)value;
+            port=(unsigned)value; port_set=1;
+        } else if (!strcmp(argv[i],"--https-origin") && i+1<argc) {
+            if (https_origin) goto usage;
+            https_origin=argv[++i];
         } else if (count<sizeof args/sizeof *args) args[count++]=argv[i]; else goto usage;
     }
+    if (https_origin && (port_set || (strcmp(argv[0],"serve") && strcmp(argv[0],"start")) ||
+                         !lmb_api_https_origin_valid(https_origin))) goto usage;
     if (!strcmp(tracker,settings.tracker) && home_settings_activate(&settings)) return 1;
     if (!strcmp(argv[0],"stop") && !count) return home_service_stop_role("api") ? 1 : 0;
     char path[1200];
@@ -743,7 +779,7 @@ static int cmd_api(int argc, char **argv) {
         int rc=api_retire(dir,tracker,args,count); close(dir); return rc;
     }
     if ((!strcmp(argv[0],"serve") || !strcmp(argv[0],"start")) && !count && *tracker) {
-        int rc=!strcmp(argv[0],"start") ? api_start(dir,port,tracker) : api_serve(dir,port,tracker,NULL);
+        int rc=!strcmp(argv[0],"start") ? api_start(dir,port,tracker,https_origin,path) : api_serve(dir,port,tracker,NULL,https_origin,path);
         close(dir); return rc;
     }
     int lock=lmb_api_access_lock(dir),rc=1;
@@ -798,8 +834,9 @@ usage:
         "lumabri api grant NAME MODEL_OR_ALLOCATION_ID [--tracker HOST:PORT]\n"
         "lumabri api revoke NAME\n"
         "lumabri api start [--tracker HOST:PORT] [--port 47380]\n"
+        "lumabri api start --https-origin https://HOST[:PORT] [--tracker HOST:PORT]   private Unix upstream; configure TLS proxy separately\n"
         "lumabri api stop\n"
-        "lumabri api serve [--tracker HOST:PORT] [--port 47380]   foreground diagnostics\n");
+        "lumabri api serve [--tracker HOST:PORT] [--port 47380 | --https-origin https://HOST[:PORT]]   foreground diagnostics\n");
     return 2;
 }
 #endif
