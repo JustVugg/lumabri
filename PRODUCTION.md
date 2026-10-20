@@ -116,6 +116,33 @@ below using the actual workload and machines.
 
 ### Installed gateway update and rollback
 
+Before testing updates, exercise the complete managed service from a **single
+verified installed package**, not a source-tree runtime with test helpers:
+
+```sh
+LUMABRI_RESIDENCY_POLICY=engine-locked \
+python3 tests/integration/household_service_flow_test.py \
+  --installed-package '/path/to/native candidate' \
+  --models-dir build/home-flow-models --joint complete --api-prepare \
+  --donor-ram-gb 1.5 --sessions 2
+```
+
+This gate verifies the native manifest and clean source provenance before
+starting anything. Only the package's production binaries are executed; test
+drivers stay outside it. It prepares two distinct reduced-OLMoE identities on
+the **same donor**, detaches their TUIs, restarts the managers and runs the
+ten-second mixed-model/overload/client-stop workload above. It then checks real
+streamed replies, private history across API restart and selective retirement:
+the surviving model keeps its engine PIDs and reserved memory, continues
+inference, and is released only by the separate final operation. Four engines
+must report effective payload locks. Package contents are verified again.
+
+`installed-managed.json` identifies the package and outcome; `managed-soak.json`
+contains every workload result and resource sample. Linux and all four native
+macOS household variants run this gate on their newly assembled archives before
+upload. This is installed clean-start/lifecycle evidence, not a physical LAN,
+full-size capacity test, fleet upgrade or controller-journal migration.
+
 Build and retain two distinct native packages in separate directories using
 `tools/package_household.py`. Never overlay files from one candidate onto the
 other. From a complete current runtime with the tiny fixture, run:

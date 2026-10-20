@@ -25,6 +25,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--models-dir", required=True, type=Path)
     parser.add_argument("--runtime-dir", type=Path, default=Path(__file__).resolve().parents[2])
+    parser.add_argument("--installed-package", type=Path,
+                        help="verify the clean native package, then use only its production binaries for the managed lifecycle")
     parser.add_argument("--keep-requester", action="store_true", help="also verify the normal post-preparation chat and saved calibration")
     parser.add_argument("--multi-model", action="store_true", help="two distinct checkpoints coexist on the same donors; unload only one")
     parser.add_argument("--api", action="store_true", help="exercise authenticated API users while the second model stays in its TUI")
@@ -46,6 +48,19 @@ def main():
     parser.add_argument("--prepare-timeout", type=int, default=180)
     parser.add_argument("--measure-sessions", action="store_true", help="also benchmark the single-slot baseline")
     args = parser.parse_args()
+    installed_manifest = None
+    if args.installed_package:
+        if (not args.api_prepare or args.joint != "complete" or args.donor_ram_gb < 1.5 or args.sessions != 2 or
+                args.runtime_dir != Path(__file__).resolve().parents[2] or args.donor_policy or args.elastic or
+                args.elastic_recovery or args.placement_comparison or args.soak_seconds or args.gateway_packages or
+                args.https_nginx or args.multi_model or args.keep_requester or args.api or args.replicas or
+                args.recovery or args.portfolio_policy or args.measure_sessions):
+            parser.error("--installed-package requires --joint complete --api-prepare --donor-ram-gb >=1.5 --sessions 2, without other lifecycle/runtime overrides")
+        if os.environ.get("LUMABRI_RESIDENCY_POLICY") != "engine-locked":
+            parser.error("installed acceptance requires LUMABRI_RESIDENCY_POLICY=engine-locked")
+        from installed_managed_test import checked_package
+        args.installed_package, installed_manifest = checked_package(args.installed_package)
+        args.runtime_dir = args.installed_package / "bin"
     if args.api_prepare and not args.joint:
         parser.error("--api-prepare requires --joint")
     if args.donor_policy and (not args.api_prepare or args.joint != "complete"):
@@ -124,7 +139,7 @@ def main():
         if args.portfolio_policy:
             e["LUMABRI_COST_PER_HOUR"] = "0.10"
             e["LUMABRI_COST_CURRENCY"] = "EUR"
-        if args.placement_comparison:
+        if args.placement_comparison or args.installed_package:
             e["LUMABRI_COST_PER_HOUR"] = "0.10" if name == "a" else "0.30"
             e["LUMABRI_COST_CURRENCY"] = "EUR"
         if args.recovery or args.elastic_recovery:
@@ -153,6 +168,7 @@ def main():
     class Terminal(TerminalText):
         def __init__(self, name, argv=None, program="lumabri"):
             super().__init__()
+            assert not args.installed_package or program == "lumabri", "installed test must not use development helpers"
             self.master, slave = pty.openpty()
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 140, 0, 0))
             self.log = open(tmp / f"{name}-{len(terminals)}.terminal.log", "wb")
@@ -302,6 +318,15 @@ def main():
         assert retained == expected, "incomplete allocation survived or a ready allocation was unloaded"
         if api_prepare:
             api_prepare.finish(args.joint == "complete")
+        if args.installed_package:
+            def detach():
+                for terminal in (a, b):
+                    terminal.p.terminate()
+                    until(lambda: terminal.p.poll() is not None, "installed donor TUI did not detach")
+            from installed_managed_test import verify_installed_managed
+            verify_installed_managed(api_prepare, until, service, tmp, args.installed_package, installed_manifest, detach)
+            assert_locked_evidence(0, 4)
+            return
         service("chatter", "restart")
         assert not list((tmp / "chatter").rglob("*.cal")), "preparation fabricated a speed"
         # READY is local; leased inventory arrives on the next heartbeat.
