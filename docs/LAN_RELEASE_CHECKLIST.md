@@ -9,7 +9,29 @@ execution, cross-platform numerical compatibility, or concurrent capacity.
 The managed-inference roadmap supersedes the older single-chat LAN checklist
 below. Historical observations remain here as evidence, not current promises.
 
-- [ ] Verified failed-allocation reclamation (local implementation): immutable
+### Roadmap status, October 17, 2026
+
+This table separates implementation from release acceptance. The detailed PR
+entries below record the exact evidence; an open PR is not an integrated release.
+
+| Step | Delivered or implemented | Remaining acceptance boundary |
+| --- | --- | --- |
+| 2 — Inventory and measurements | Runtime/backend checks; memory, workload, link, preparation and model observations; declared machine costs | Missing facts stay unknown. Pinned distributed adapters expose CPU execution, not an enabled household GPU path. |
+| 3 — Several resident models | Independent reservations, private state, selective unload and effective owned CPU locks | Final-package memory-pressure and sustained workload checks on the deployment machines. |
+| 4 — Controlled concurrency | Bounded compute/session admission, isolated users, cancellation, timing and 1/2/4/8-slot gates | Per-deployment latency/capacity envelope; configured slots are not a single-user speed guarantee. |
+| 5 — Joint placement and cost | Bounded joint memory/cost search, measured portfolio selection/application, static-versus-managed comparison (#224) and shared capacity API (#225) | Browser capacity controls #226 are under review. New placements still require preparation and measurement; declared cost is not billed savings. |
+| 6 — Shared service and interfaces | Permanent keepers, common preparation/retirement operations, TUI, authenticated API, web chat and private history | The HTTP service is loopback-only; remote/datacenter ingress is not certified. |
+| 7 — Recovery | Approved-replica replay; unavailable-capacity replacement, same-turn wait and durable exit/release proofs implemented in #227–230 | Final-head native CI and ordered merges for those PRs; final-package fault tests. No instantaneous KV migration. |
+| 8 — Authorized elasticity | Opt-in replica growth, drain, retirement, scale-to-zero/wake, budgets and cooldown | Sustained burst/idle validation on actual machines; failed ownership remains charged without proof. |
+| 9 — Provider and actual savings | No paid resources created | Explicitly deferred provider choice, account access and spending authority; implementation and billing comparison remain. |
+| 10 — Release | Native CI, allowlisted package assembly and hash verification | Final installed-package LAN/datacenter, sustained-load, update and rollback evidence. Native Windows inference and notarized macOS distribution are not delivered. |
+
+The model source stays local to the requesting installation. Neither this table
+nor tiny-checkpoint CI claims that arbitrary models are downloaded automatically,
+that every added machine increases single-chat speed, or that the full roadmap
+is complete. See [deployment acceptance](../PRODUCTION.md#deployment-acceptance).
+
+- [ ] Verified failed-allocation reclamation (#230, under review): immutable
   birth records and inherited kernel lifetime locks distinguish a terminated
   allocation from an unreachable process. Authenticated proof survives keeper
   restart and slot reuse without signalling journal PIDs or replaying approval.
@@ -29,7 +51,7 @@ below. Historical observations remain here as evidence, not current promises.
   lifetime descriptor in its real Edge child, matching production inheritance.
   Native CI and merge remain pending; this entry is not release certification.
 
-- [ ] Durable donor retirement receipts (local candidate): an exact sealed
+- [ ] Durable donor retirement receipts (#229, under review): an exact sealed
   allocation's release acknowledgement survives slot reuse and keeper restart.
   A persisted intent alone is not proof; only the original authenticated
   requester can replay a completed receipt with the same process seal. Retired
@@ -41,7 +63,7 @@ below. Historical observations remain here as evidence, not current promises.
   inference. Native CI and merge are pending. This does not yet reclaim an
   arbitrary failed allocation whose owned-process exit was never proven.
 
-- [ ] Same-turn elastic recovery (local candidate): optional bounded API wait
+- [ ] Same-turn elastic recovery (#228, under review): optional bounded API wait
   captures an already enabled policy's scope/revision and keeps the original
   model/numeric contract. The web exposes the wait and Stop; policy/credential
   revocation, deadline and disconnect prevent subsequent disclosure. Local
@@ -49,9 +71,11 @@ below. Historical observations remain here as evidence, not current promises.
   prepared a new approved replica and completed the same HTTP turn with
   byte-identical oracle output and no duplicate text. Failed ownership remains
   charged; this is not automatic reclamation or KV migration. API/browser,
-  policy unit and ASan/UBSan/leak checks pass. Native CI and merge are pending.
+  policy unit and ASan/UBSan/leak checks pass. The final local flow also passes
+  on `99490c9`, after the shared admission/HTTP fixes, with twelve effectively
+  locked engines. Native CI and merge of that final head are pending.
 
-- [ ] Unavailable replica replenishment (local candidate): bounded authenticated
+- [ ] Unavailable replica replenishment (#227, under review): bounded authenticated
   host/Segment probes distinguish accepting, draining, unreachable and unknown.
   Three separated failures can restore an opt-in policy's available minimum;
   failed allocations remain charged to both replica and memory limits. Unknown
@@ -65,10 +89,10 @@ below. Historical observations remain here as evidence, not current promises.
   through the actual web interface as well, then killed the replacement host:
   the hard replica ceiling refused a third allocation, retained every budget
   charge and kept the independent model serving. Native CI and merge remain
-  pending. Same-turn opt-in replay is the separate candidate above;
-  authoritative failed-allocation reclamation remains unfinished.
+  pending. Same-turn opt-in replay and authoritative failed-allocation
+  reclamation are the separate candidates above, not claims of this PR alone.
 
-- [ ] Shared capacity management API (under review): authenticated historical
+- [x] Shared capacity management API (#225): authenticated historical
   listing, explicit inference measurement with progress/cancellation, live
   checking, whole-portfolio comparison and observation removal. The CLI and
   HTTP consume the same C operations; no command execution or stdout parsing.
@@ -77,11 +101,11 @@ below. Historical observations remain here as evidence, not current promises.
   CLI/HTTP selection agreement and separation from production-demand counters.
   Strict API authorization/schema tests and all API unit tests pass. The
   four-slot managed-replica/recovery/portfolio gate also passes with nine
-  prepared engines under effective owned-payload locks. Native CI is still
-  required; this is not release or
+  prepared engines under effective owned-payload locks. All eight checks passed
+  on `194e608` before normal merge `2a58669`. This is not whole-release or
   production-capacity certification.
 
-- [ ] Browser capacity controls (under review): explicit ordered allocations,
+- [ ] Browser capacity controls (#226, under review): explicit ordered allocations,
   workload limits and confirmation; streamed progress and cancellation;
   historical listings, live checks and joint-plan comparison; separate atomic
   model-route application. The browser binds application to exact observation
@@ -169,11 +193,10 @@ below. Historical observations remain here as evidence, not current promises.
   locally with one, two and eight slots, including inert cancelled confirmation
   and CLI reconciliation of the TUI's shared journal. All eight checks passed
   on final head `6c8df57` before normal merge `c7c468c`.
-- [ ] Requirements-based global placement and measured cost comparison;
-  TUI/web/application management through one public service interface;
-  recovery, elasticity, provider integration and
-  final declared-platform release gates. Provider credentials and spending
-  authority have explicitly been deferred by the operator.
+- [ ] Complete managed-release acceptance, distinct from the merged component
+  gates below: deployment-specific capacity, sustained workload, physical
+  topology, installed-package lifecycle and actual cost evidence. Provider
+  credentials and spending authority remain explicitly deferred by the operator.
 - [x] Gateway per-response latency (#208): time to first visible text, generation
   and cleanup-inclusive completion, and bounded exact token-notification gap
   p50/p95. Replay/missing telemetry do not fabricate token timing. Local
@@ -303,14 +326,15 @@ below. Historical observations remain here as evidence, not current promises.
   verifies effective locks across preparation, reload and wake; it does not
   weaken the separately tested observation guard or claim GPU/full-size support.
 
-- [ ] Joint placement search extension (under review): alternate node subsets,
+- [x] Joint placement search extension (#223): alternate node subsets,
   known-price ordering and residual-memory range refits, with explicit subset,
   state and refit limits. Deterministic regressions reproduce the old expensive
   single-node choice and false rejection of two models needing different cuts;
   32-node/eight-model bounds, allocation accounting and focused sanitizers pass.
   Local reduced OLMoE passes two-model, two-slot management-API preparation and
   real inference after TUI detach under owned CPU allocation locks. Shared
-  review/revalidation and TUI regression gates pass. Native CI remains required;
+  review/revalidation and TUI regression gates pass. All eight native checks
+  passed on `0196a42` before normal merge `d8e4104`;
   this is not yet requirements-based performance placement or billed savings.
   The first macOS ARM/OpenMP gate refused a compressed idle replica under the
   observation-only policy. Long-lived managed-replica CI now explicitly uses
@@ -318,14 +342,19 @@ below. Historical observations remain here as evidence, not current promises.
   effective locks, as the elastic gate already does. Compression-refusal tests
   remain in place; no residency protection or numerical assertion is disabled.
 
-- [ ] Connected static/managed comparison (under review): two real reduced
+- [x] Connected static/managed comparison (#224): two real reduced
   OLMoE checkpoints, two explicitly approved placements, observed joint timing,
   declared-price selection and automatic portfolio publication. The October 16
   local gate passes actual chat after selection, unchanged RAM on rerouting,
   selective retirement, a completely freed donor and invalidation/renewal of
   co-resident workload evidence. Four-client BUSY outcomes remain in the report;
   six of six requests pass on the admitted two-client workload in each plan.
-  Eight engines prove effective owned CPU locks. Native CI remains required.
+  Eight engines prove effective owned CPU locks, including the repeated local
+  gate on `2a59e9d`. Native Intel initially exposed an unexpected 503 during a
+  cold concurrent lock acquisition. The new exclusive-create regression and
+  native Intel/ARM workspace gates pass. All eight final-head checks passed on
+  `2a59e9d` before normal merge `51ba958`. HTTP early rejections have a bounded half-close regression
+  so unread request bytes do not erase the error response with a TCP reset.
   Prices are test declarations; no paid machine is stopped or billed saving
   claimed. See [comparison gate](PORTFOLIO_POLICY.md#static-versus-managed-placement-gate).
 
