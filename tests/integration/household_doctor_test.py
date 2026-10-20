@@ -25,7 +25,10 @@ class HouseholdDoctor(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.home = self.root / "home"
         self.home.mkdir()
-        self.env = dict(os.environ, HOME=str(self.home), OMP_NUM_THREADS="1")
+        self.env = dict(os.environ, HOME=str(self.home), OMP_NUM_THREADS="1",
+                        LUMABRI_PEER_KEY=str(self.root / "peer.key"),
+                        LUMABRI_KNOWN_HOSTS=str(self.root / "known.hosts"),
+                        LUMABRI_NO_DISK_PROBE="1")
         self.env.pop("OMP_THREAD_LIMIT", None)
 
     def check(self, runtime, household=True, env=None):
