@@ -46,6 +46,7 @@ they are not retroactively described as different binaries.
 | #237 | `3e006cf` | `01e3f86` |
 | #238 | `42d0ec3` | `36fd706` |
 | #239 | `f0856d8` | `6b4a229` |
+| #240 | `41463a5` | `575ea7b` |
 
 - [x] Explicit HTTPS ingress (#238): the private same-user Unix
   upstream passes authentication, exact Host/Origin, history isolation, keeper
@@ -75,7 +76,7 @@ they are not retroactively described as different binaries.
   including the installed gate on all four native macOS variants. This is not
   fleet update, full-size capacity or physical deployment certification.
 
-- [ ] Whole-household package update (local candidate): the October 20 Linux
+- [x] Whole-household package update (#240): the October 20 Linux
   run passed `01e3f86` → `42d0ec3` → `01e3f86`, using complete clean packages
   and the same four isolated homes. Each stage prepared two co-resident
   reduced-OLMoE identities with fresh donor approvals, generated through stable
@@ -85,8 +86,29 @@ they are not retroactively described as different binaries.
   data survived both switches; no snapshot was restored and no journal
   deleted. All twelve prepared engines reported effective payload locks.
   `installed-fleet-update.json` retains package hashes and all three stages.
-  Native CI/review of this new gate is pending. It covers a quiescent pair,
+  All eight final-head checks passed before normal merge, including the
+  installed update/rollback gate on all four native macOS variants.
+  It covers a quiescent pair,
   not live rolling updates or migration of active autonomous policies.
+
+- [ ] Reported release corrections (#233–235, candidate): the workspace now
+  persists a validated context in `/settings` and forwards it through both
+  catalogue entry points. Missing/invalid legacy context defaults to 512,
+  matching the API catalogue; existing allocations are not resized.
+  Segment caps an explicit process limit at current available RAM minus the
+  system reserve and refuses unavailable/exhausted headroom before adapter
+  open. This preflight is not an atomic machine-wide reservation: the runtime
+  governor and owned-payload residency checks remain enabled.
+  `make fixture PYTHON=/path/to/python` selects the fixture interpreter;
+  missing prerequisites in the budget/multi-session gates exit 77, not 0.
+  Local October 20 checks passed: strict-warning household build, settings
+  roundtrip/bounds, both actual PTY catalogue paths, physical preflight refusal
+  with the real node and its supervisor pipe, memory-budget sanitizers, the
+  resident-range budget gate and the concurrent-session token oracle.
+  A connected reduced-OLMoE test prepared two resident model identities under
+  four effective engine locks and completed 108 workload outcomes in 10.9
+  seconds with no unexpected failed turns. Final-head native CI is still
+  required; this is not a new full-size or physical-LAN result.
 
 - [x] Sustained managed workload (#237): on October
   17, the complete local gate passed a 1,800.57-second timed workload after

@@ -1592,8 +1592,22 @@ int main(int argc, char **argv) {
                                "LUMABRI_RAM_RESERVE_MB";
     uint64_t reserve = (uint64_t)lmb_env_int(
         reserve_name, (int)lmb_machine_default_reserve_mb(lmb_machine_total_ram()), 256, 262144) << 20;
-    if (!process_limit && available != UINT64_MAX && available > reserve)
-        process_limit = available - reserve;
+    uint64_t requested_limit = process_limit;
+    if (lmb_process_budget(requested_limit, available, reserve, &process_limit)) {
+        fprintf(stderr, "[segment-node] no verified available RAM above the "
+                "%.1f GB system reserve; refusing before loading weights\n",
+                (double)reserve / 1e9);
+        if (auto_range)
+            (void)auto_range_release(tracker, model, name, engine_id,
+                                     resolved_model_root);
+        preflight_signal(&preflight_fd, 'F');
+        return 3;
+    }
+    if (requested_limit && process_limit < requested_limit)
+        fprintf(stderr, "[segment-node] requested %.1f GB process budget capped "
+                "to %.1f GB (available RAM %.1f GB minus system reserve %.1f GB)\n",
+                (double)requested_limit / 1e9, (double)process_limit / 1e9,
+                (double)available / 1e9, (double)reserve / 1e9);
     /* The runtime preflight must be conservative. The generic catalogue
      * arithmetic is not an adapter contract and cannot authorize a smaller
      * allocation; in particular setting a "disk" environment flag did not

@@ -5988,7 +5988,7 @@ static void catalog_json(const LmbTuiState *st) {
 
 static int cmd_models(int argc, char **argv) {
     const char *root = NULL, *disk = ".", *keys = NULL, *tracker = NULL;
-    uint32_t context = 4096, sessions = 1, max_new = 256;
+    uint32_t context = LMB_HOME_DEFAULT_CONTEXT, sessions = 1, max_new = 256;
     const char *together[LMB_PORTFOLIO_MODELS], *node_ids[LMB_CLUSTER_MAX_NODES];
     uint32_t ntogether = 0, nids = 0;
     /* The screen is the default and the listing is the fallback, not the
@@ -6007,8 +6007,12 @@ static int cmd_models(int argc, char **argv) {
             node_ids[nids++] = id;
         }
         else if (!strcmp(argv[i], "--disk") && i + 1 < argc) disk = argv[++i];
-        else if (!strcmp(argv[i], "--context") && i + 1 < argc)
-            context = (uint32_t)atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--context") && i + 1 < argc) {
+            if (lmb_context_limit_parse(argv[++i], &context)) {
+                fprintf(stderr, "Context must be a whole number from 1 to %u.\n", LMB_HOME_MAX_CONTEXT);
+                return 2;
+            }
+        }
         else if (!strcmp(argv[i], "--sessions") && i + 1 < argc) {
             if (lmb_session_limit_parse(argv[++i], LMB_HOST_MAX_SESSIONS, &sessions)) return 2;
         }

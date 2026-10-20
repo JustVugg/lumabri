@@ -45,7 +45,9 @@ and **Esc** to go back. Use a terminal at least 60 columns by 28 rows.
 3. Open **/settings** to set the maximum RAM you offer. Choose
    **Share resources** on each computer that may participate.
 4. On the requesting computer, set **/settings** to the folder containing
-   your existing Colibri model directories.
+   your existing Colibri model directories. Set the **context tokens** for
+   new plans there too (default 512): longer conversations need more memory.
+   This setting does not resize models that are already running.
 5. Open **Your computers**. Press Enter to select donors; none is selected
    automatically. Tab switches to **Models**.
 6. Choose a model and review its plan. Enter requests approval from the

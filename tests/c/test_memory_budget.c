@@ -244,6 +244,26 @@ static void feasible_plans(void) {
 }
 
 int main(void) {
+    uint64_t cap = 99;
+    assert(!lmb_process_budget(8700, 8900, 2000, &cap) && cap == 6900);
+    assert(!lmb_process_budget(0, 8900, 2000, &cap) && cap == 6900);
+    assert(!lmb_process_budget(4000, 8900, 2000, &cap) && cap == 4000);
+    assert(!lmb_process_budget(UINT64_MAX, 8900, 2000, &cap) && cap == 6900);
+    assert(lmb_process_budget(8700, 2000, 2000, &cap) && !cap);
+    assert(lmb_process_budget(0, 1999, 2000, &cap) && !cap);
+    assert(lmb_process_budget(8700, 0, 2000, &cap) && !cap);
+    assert(lmb_process_budget(8700, UINT64_MAX, 2000, &cap) && !cap);
+    assert(lmb_process_budget(8700, 8900, UINT64_MAX, &cap) && !cap);
+    assert(lmb_process_budget(0, 8900, 2000, NULL));
+    assert(!lmb_process_budget(0, 2001, 2000, &cap) && cap == 1);
+    for (uint64_t available = 0; available < 50; available++)
+        for (uint64_t reserve = 0; reserve < 50; reserve++)
+            for (uint64_t requested = 0; requested < 50; requested++) {
+                int bad = lmb_process_budget(requested, available, reserve, &cap);
+                assert(bad == (available <= reserve ? -1 : 0));
+                if (!bad) assert(cap && cap <= available - reserve && (!requested || cap <= requested));
+                else assert(!cap);
+            }
     timed_plans();
     combined_capacity();
     feasible_plans();

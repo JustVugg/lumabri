@@ -23,8 +23,8 @@ cleanup() { kill "${PIDS[@]}" 2>/dev/null || true
             wait "${PIDS[@]}" 2>/dev/null || true; rm -rf "$TMP"; }
 trap cleanup EXIT
 
-[[ -x ./segment_node && -x ./segment_chat && -x ./tracker && -f tiny_olmoe/config.json ]] ||
-    { echo "MULTI-SESSION TEST: SKIP (needs the Segment binaries and tiny_olmoe)"; exit 0; }
+[[ -x ./segment_node && -x ./segment_chat && -x ./tracker && -f tiny_olmoe/config.json && -f tiny_olmoe/ref.json ]] ||
+    { echo "MULTI-SESSION TEST: SKIP (needs the Segment binaries and tiny_olmoe; exit 77 is not PASS)"; exit 77; }
 
 wait_port() { for _ in $(seq 1 300); do
     (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && { exec 3<&-; exec 3>&-; return 0; }

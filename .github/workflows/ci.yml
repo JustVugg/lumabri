@@ -74,6 +74,8 @@ jobs:
           make test_portfolio CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           ./test_portfolio
           ./test_chat_ui service-codec
+          ./test_chat_ui home-settings
+          python3 tests/integration/test_prerequisites_test.py
           ./test_chat_ui donor-policy-codec
           ./test_chat_ui host-codec
           ./test_chat_ui resident-plan
@@ -284,6 +286,7 @@ jobs:
           LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-ram-gb 1.5 --sessions 2 --soak-seconds 10
           LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-ram-gb 1.5 --sessions 2 --https-nginx "$LUMABRI_TEST_NGINX"
           make segment_budget_probe
+          python3 tests/integration/segment_physical_budget_test.py
           python3 tests/integration/planner_tensor_contract_test.py --family olmoe --model build/home-flow-models/olmoe-tiny
           make swarm_probe
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --repeat-cached --clear-cached --expect-metrics --expect-calibration
@@ -581,6 +584,7 @@ jobs:
           python3 tests/integration/backend_policy_test.py
           test "$(OMP_NUM_THREADS=1 ./segment_node --thread-capacity)" = 1
           test "$(OMP_NUM_THREADS=4 OMP_THREAD_LIMIT=1 ./segment_node --thread-capacity)" = 1
+          python3 tests/integration/segment_physical_budget_test.py
           make swarm_probe
           python3 tests/integration/household_doctor_test.py
           make test_chat_ui

@@ -1,5 +1,6 @@
 CC      ?= cc
 HOSTCC  ?= cc
+PYTHON  ?= python3
 CFLAGS  ?= -O2 -Wall -Wextra
 ENGINE  ?= ../colibri/c
 # Shared headers remain in the repository root during the staged layout cleanup.
@@ -462,7 +463,7 @@ endif
 chatters: $(ENGINE_CHATTERS)
 
 tiny_olmoe/config.json: make_tiny_olmoe.py
-	python3 make_tiny_olmoe.py tiny_olmoe
+	$(PYTHON) make_tiny_olmoe.py tiny_olmoe
 
 fixture: tiny_olmoe/config.json
 
@@ -683,6 +684,7 @@ test-home-network: tests/c/test_home_network.c $(HOME_NET_DEPS) src/ui/lumabri_v
 .PHONY: test-home-network
 
 test-chat-ui: lumabri test_chat_ui test-ready-pipe
+	./test_chat_ui home-settings
 	./test_chat_ui resident-plan
 	python3 tests/integration/chat_ui_test.py
 	python3 tests/ui_text_test.py
@@ -1053,6 +1055,7 @@ test-segment-split: tracker segment_node segment_chat
 	bash ./tests/integration/segment_split_test.sh
 
 test-segment-budget: tracker segment_node segment_budget_probe
+	$(PYTHON) tests/integration/segment_physical_budget_test.py
 	bash ./tests/integration/segment_budget_test.sh
 
 test-multi-session: tracker segment_node segment_chat
@@ -1072,6 +1075,8 @@ test: all test_weight_cache test_key_rotation test_hedge test_local_fallback tes
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
 		test_meminfo test_compute_lease test_content_filter \
 		test_scheduler test_run_gate test_tcp_latency test_planner_io
+	./test_chat_ui home-settings
+	$(PYTHON) tests/integration/test_prerequisites_test.py
 	bash ./tests/integration/selftest.sh
 	bash ./tests/integration/donate_test.sh
 	bash ./tests/integration/signed_donor_test.sh
