@@ -1,0 +1,65 @@
+# Replace every @PLACEHOLDER@ before use. Run nginx as the SAME unprivileged
+# account as Lumabri, never with sudo or a different worker user. Keep this
+# runtime directory and certificate private. See docs/HTTPS_INGRESS.md.
+# The integration gate renders and exercises this exact template on loopback.
+daemon off;
+worker_processes 1;
+pid "@RUNTIME@/nginx.pid";
+error_log "@RUNTIME@/nginx-error.log" warn;
+events { worker_connections 256; }
+http {
+    access_log off;
+    server_tokens off;
+    client_body_temp_path "@RUNTIME@/client-body";
+    proxy_temp_path "@RUNTIME@/proxy-temp";
+    fastcgi_temp_path "@RUNTIME@/fastcgi-temp";
+    uwsgi_temp_path "@RUNTIME@/uwsgi-temp";
+    scgi_temp_path "@RUNTIME@/scgi-temp";
+    client_max_body_size 1m;
+    client_body_buffer_size 1m;
+    client_header_timeout 10s;
+    client_body_timeout 10s;
+    send_timeout 30s;
+    keepalive_timeout 15s;
+    limit_conn_zone $binary_remote_addr zone=per_address:1m;
+    limit_req_zone $binary_remote_addr zone=request_rate:1m rate=10r/s;
+
+    upstream lumabri_private { server "unix:@UPSTREAM@"; }
+    server {
+        listen @LISTEN@ ssl;
+        server_name @SERVER_NAME@;
+        ssl_certificate "@CERTIFICATE@";
+        ssl_certificate_key "@KEY@";
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_session_tickets off;
+        # Preserve the original Host. A default server must not translate
+        # arbitrary hostnames into the one authorized application origin.
+        if ($http_host != "@AUTHORITY@") { return 403; }
+        limit_conn per_address 16;
+        limit_conn_status 429;
+        limit_req zone=request_rate burst=20 nodelay;
+        limit_req_status 429;
+
+        location / {
+            proxy_pass http://lumabri_private;
+            proxy_http_version 1.1;
+            proxy_set_header Host $http_host;
+            proxy_set_header Connection close;
+            # Authorization and Origin pass through unchanged. Never inject
+            # a shared credential or replace Origin with an authorized value.
+            proxy_set_header Forwarded "";
+            proxy_set_header X-Forwarded-Host "";
+            proxy_set_header X-Forwarded-Proto "";
+            proxy_set_header X-Forwarded-For "";
+            proxy_request_buffering on;
+            proxy_buffering off;
+            proxy_cache off;
+            proxy_max_temp_file_size 0;
+            proxy_next_upstream off;
+            proxy_ignore_client_abort off;
+            proxy_connect_timeout 3s;
+            proxy_send_timeout 10s;
+            proxy_read_timeout 310s;
+        }
+    }
+}

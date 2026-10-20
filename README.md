@@ -161,8 +161,9 @@ API and its bundled chat page. An operator creates a user token, grants it
 specific models or allocations and runs `lumabri api start`; open the printed local URL.
 The page provides model selection, streaming, Stop, collapsible private
 history and export. No separate web server or browser-side AI engine is needed.
-See [setup, limits and privacy](docs/RESIDENT_API.md). This endpoint is
-loopback-only: do not expose it directly to the internet.
+See [setup, limits and privacy](docs/RESIDENT_API.md). The default endpoint is
+loopback-only: do not expose plain HTTP directly. For other authorized
+computers, use the explicit [HTTPS reverse-proxy setup](docs/HTTPS_INGRESS.md).
 
 **Computers & models** shows resource reports, resident allocation references,
 model routes and gateway activity. Explicit management permission adds model

@@ -183,8 +183,10 @@ advertised platform and deployment topology. At minimum:
 `lumabri doctor --json` supplies basic diagnostics, not this acceptance result:
 it still treats Segment binaries as optional for legacy installations. A
 managed-inference release requires both Segment services and their execution
-tests. The web/API remains loopback-only; exposing it to another network needs
-a separately designed and tested deployment boundary.
+tests. The default web/API remains loopback-only. Remote access requires the
+explicit [private upstream and HTTPS proxy](docs/HTTPS_INGRESS.md), including
+certificate, permission, streaming/cancellation and network checks on the
+actual deployment. A local TLS gate is not that deployment's acceptance.
 
 All required checks must pass on the final PR head before normal merge. Retain
 native job results and the final package manifest with release evidence.

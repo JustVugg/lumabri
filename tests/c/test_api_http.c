@@ -26,6 +26,28 @@ int main(void) {
     for (size_t i=0; i<sizeof bad/sizeof *bad; i++) assert(lmb_api_http_parse(&r,bad[i],strlen(bad[i])));
     memset(wire,'x',sizeof wire); assert(lmb_api_http_parse(&r,wire,sizeof wire));
     memcpy(wire,request,strlen(request)); wire[10]=0; assert(lmb_api_http_parse(&r,wire,strlen(request)));
-    puts("API HTTP: PASS (framing, bounds, duplicate headers, same-origin/Host policy)");
+    const char *origins[]={"https://chat.example.test", "https://localhost:8443", "https://127.0.0.1:65535",
+        "https://[::1]", "https://[2001:db8::1]:8443", "https://xn--bcher-kva.example"};
+    for (size_t i=0; i<sizeof origins/sizeof *origins; i++) assert(lmb_api_https_origin_valid(origins[i]));
+    const char *invalid_origins[]={"", "http://chat.test", "HTTPS://chat.test", "https://", "https://Chat.test",
+        "https://chat.test/", "https://chat.test/path", "https://chat.test?q=x", "https://chat.test#x",
+        "https://user@chat.test", "https://*.test", "https://chat_test", "https://chat..test", "https://chat.test.",
+        "https://-chat.test", "https://chat-.test", "https://chat.test:", "https://chat.test:0",
+        "https://chat.test:443", "https://chat.test:0443", "https://chat.test:65536", "https://chat.test:99999999999",
+        "https://chat.test:+80", "https://chat.test:80x", "https://chat.test:80:90", "https://[::1",
+        "https://[]", "https://[gg::1]", "https://[FE80::1]", "https://[fe80::1%en0]", "https://[::1]extra",
+        "https://::1", "https://chat.test\r\nHost: evil", "https://chat%2etest"};
+    assert(!lmb_api_https_origin_valid(NULL));
+    for (size_t i=0; i<sizeof invalid_origins/sizeof *invalid_origins; i++) assert(!lmb_api_https_origin_valid(invalid_origins[i]));
+    const char *proxied="GET /api/v1/models HTTP/1.1\r\nHost: chat.example.test\r\nOrigin: https://chat.example.test\r\n"
+        "X-Forwarded-Host: evil.test\r\nX-Forwarded-Proto: http\r\n\r\n";
+    assert(!lmb_api_http_parse(&r,proxied,strlen(proxied)));
+    assert(!lmb_api_http_https_origin(&r,"https://chat.example.test"));
+    assert(lmb_api_http_origin(&r,47380));
+    strcpy(r.origin,"http://chat.example.test"); assert(lmb_api_http_https_origin(&r,"https://chat.example.test"));
+    r.has_origin=0; assert(!lmb_api_http_https_origin(&r,"https://chat.example.test"));
+    strcpy(r.host,"chat.example.test:443"); assert(lmb_api_http_https_origin(&r,"https://chat.example.test"));
+    strcpy(r.host,"evil.test"); assert(lmb_api_http_https_origin(&r,"https://chat.example.test"));
+    puts("API HTTP: PASS (framing, bounds, duplicate headers, explicit loopback/HTTPS origin policy)");
     return 0;
 }

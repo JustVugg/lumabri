@@ -132,7 +132,7 @@ lumabri test_chat_ui: src/runtime/lumabri_service.h src/runtime/lumabri_service_
 lumabri test_chat_ui: src/runtime/lumabri_joint_prepare.h
 lumabri test_chat_ui: src/ui/lumabri_resident_ui.h
 lumabri test_chat_ui: src/runtime/lumabri_resident_control.h
-lumabri test_chat_ui: src/runtime/lumabri_api.h src/runtime/lumabri_api_http.h src/runtime/lumabri_api_json.h src/runtime/lumabri_api_access.h
+lumabri test_chat_ui: src/runtime/lumabri_api.h src/runtime/lumabri_api_http.h src/runtime/lumabri_api_json.h src/runtime/lumabri_api_access.h src/runtime/lumabri_api_proxy.h
 lumabri test_chat_ui test_host_session_pool test-home-monitor test_elastic_policy: src/runtime/lumabri_recovery_wait.h src/runtime/lumabri_recovery_policy.h
 lumabri test_chat_ui test_host_session_pool test-home-monitor test_api_access: src/runtime/lumabri_operator_access.h src/runtime/lumabri_workspace.h
 lumabri test_chat_ui test_host_session_pool test-home-monitor: src/runtime/lumabri_management.h
@@ -638,6 +638,7 @@ test-api-gateway: lumabri test_chat_ui test-chat-history
 	./test_chat_ui demand-codec
 	python3 tests/integration/api_gateway_test.py
 	python3 tests/integration/api_service_test.py
+	python3 tests/integration/api_proxy_test.py
 	python3 tests/integration/owned_engine_process_test.py
 	python3 tests/integration/managed_soak_summary_test.py
 	python3 tests/integration/installed_gateway_contract_test.py

@@ -41,6 +41,7 @@ def main():
     parser.add_argument("--soak-seconds", type=int, default=0, help="repeat approved real two-model work, overload and client stops for 10–3600 seconds")
     parser.add_argument("--gateway-packages", nargs=2, type=Path, metavar=("PREVIOUS", "CANDIDATE"),
                         help="test installed gateway upgrade/rollback using two distinct native packages; engines remain running")
+    parser.add_argument("--https-nginx", type=Path, help="test two resident models through an existing NGINX binary with verified local TLS")
     parser.add_argument("--donor-ram-gb", type=float, default=0.5)
     parser.add_argument("--prepare-timeout", type=int, default=180)
     parser.add_argument("--measure-sessions", action="store_true", help="also benchmark the single-slot baseline")
@@ -65,6 +66,11 @@ def main():
             parser.error("--gateway-packages requires --api-prepare --joint complete without other lifecycle extensions")
         from installed_gateway_update_test import candidate_pair
         candidate_pair(args.gateway_packages)
+    if args.https_nginx:
+        if (not args.api_prepare or args.joint != "complete" or args.donor_policy or
+                args.placement_comparison or args.soak_seconds or args.gateway_packages):
+            parser.error("--https-nginx requires --api-prepare --joint complete without other lifecycle extensions")
+        args.https_nginx = args.https_nginx.resolve(strict=True)
     if args.api and not (args.multi_model and args.keep_requester):
         parser.error("--api requires --multi-model and --keep-requester")
     if args.replicas and not args.api:
@@ -354,6 +360,10 @@ def main():
         if args.gateway_packages:
             from installed_gateway_update_test import verify_installed_gateway_update
             verify_installed_gateway_update(api_prepare, until, service, tmp, args.gateway_packages)
+            assert_locked_evidence(0, 4)
+        if args.https_nginx:
+            from https_resident_test import verify_https_resident
+            verify_https_resident(api_prepare, until, service, tmp, args.https_nginx)
             assert_locked_evidence(0, 4)
         if args.placement_comparison:
             from placement_comparison_test import verify_placement_comparison

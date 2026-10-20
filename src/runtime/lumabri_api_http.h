@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
+#include <arpa/inet.h>
 
 #define LMB_API_HEADER_MAX 8192u
 #define LMB_API_BODY_MAX (1u << 20)
@@ -103,5 +104,49 @@ static inline int lmb_api_http_origin(const LmbApiHttp *r, unsigned port) {
     if (strcmp(r->host,numeric) && strcmp(r->host,local)) return -1;
     snprintf(origin,sizeof origin,"http://%s",r->host);
     return r->has_origin && strcmp(r->origin,origin) ? -1 : 0;
+}
+/* One explicit canonical HTTPS origin, not a CORS allowlist or a trusted
+ * Forwarded header. DNS names are lowercase; omit the default :443 port.
+ * No paths, credentials, wildcards, zones, encoded names or opaque origins. */
+static inline int lmb_api_https_origin_valid(const char *origin) {
+    if (!origin || strncmp(origin,"https://",8) || strlen(origin)>=160) return 0;
+    const char *host=origin+8, *port=NULL, *end=host+strlen(host);
+    if (!*host || (size_t)(end-host)>=128) return 0;
+    if (*host=='[') {
+        const char *close=strchr(host,']'); char ip[INET6_ADDRSTRLEN]; struct in6_addr address;
+        if (!close || close==host+1 || (size_t)(close-host-1)>=sizeof ip) return 0;
+        memcpy(ip,host+1,(size_t)(close-host-1)); ip[close-host-1]=0;
+        for (const char *p=ip; *p; p++)
+            if (!((*p>='0' && *p<='9') || (*p>='a' && *p<='f') || *p==':' || *p=='.')) return 0;
+        if (inet_pton(AF_INET6,ip,&address)!=1) return 0;
+        if (close[1]) { if (close[1]!=':') return 0; port=close+2; }
+    } else {
+        const char *colon=strchr(host,':'); if (colon) { end=colon; port=colon+1; }
+        unsigned label=0; char previous=0;
+        for (const char *p=host; p<end; p++) {
+            unsigned c=(unsigned char)*p;
+            if (c=='.') { if (!label || previous=='-') return 0; label=0; }
+            else {
+                if (!((c>='a' && c<='z') || (c>='0' && c<='9') || (c=='-' && label))) return 0;
+                if (++label>63) return 0;
+            }
+            previous=(char)c;
+        }
+        if (!label || previous=='-') return 0;
+    }
+    if (port) {
+        if (!*port || *port=='0') return 0;
+        unsigned value=0;
+        for (const char *p=port; *p; p++) {
+            if (*p<'0' || *p>'9' || value>(65535u-(unsigned)(*p-'0'))/10u) return 0;
+            value=value*10u+(unsigned)(*p-'0');
+        }
+        if (value==443) return 0;
+    }
+    return 1;
+}
+static inline int lmb_api_http_https_origin(const LmbApiHttp *r, const char *origin) {
+    return !lmb_api_https_origin_valid(origin) || strcmp(r->host,origin+8) ||
+           (r->has_origin && strcmp(r->origin,origin)) ? -1 : 0;
 }
 #endif

@@ -241,9 +241,11 @@ not download a model, approve a donor, change placement or evict weights.
 The TUI and gateway use the same authenticated allocation checks, hosted
 connection, chat templates and incremental reply decoder.
 
-This first endpoint is loopback-only (`127.0.0.1`). It is **not an OpenAI API**
-and must not be exposed through a public port forward. Remote TLS deployment
-is separate work. The bundled browser chat opens at `http://127.0.0.1:47380/`.
+The default endpoint is loopback-only (`127.0.0.1`). It is **not an OpenAI API**
+and must not be exposed through a public plain-HTTP port forward. Explicit
+[HTTPS mode](HTTPS_INGRESS.md) uses a private Unix upstream and a separately
+configured same-user TLS proxy. The default bundled browser chat opens at
+`http://127.0.0.1:47380/`.
 Stopping this gateway
 cancels its requests, but does not unload models
 or stop conversations belonging to other clients.
@@ -263,11 +265,13 @@ The same OS account that prepared them can then run:
 The configured household is reused. `list`, `grant`, `start` and `serve` accept
 `--tracker HOST:PORT`; with a different explicit tracker, provide its household
 credential using the existing `LUMABRI_TOKEN` mechanism. `start --port N`
-changes the default port 47380, not the loopback binding.
+changes the default port 47380, not the loopback binding. Alternatively,
+`start --https-origin https://HOST[:PORT]` selects private Unix upstream mode;
+it cannot be combined with `--port` and does not itself configure TLS.
 
 `start` detaches an authenticated same-user keeper. Closing the terminal/TUI or
 running `lumabri service restart` does not stop it or duplicate it. Repeating
-`start` with the same household and port reuses the keeper; a different
+`start` with the same household and port/origin reuses the keeper; a different
 configuration is rejected until explicitly stopped. `lumabri service status
 --json` lists the `api` role (phase 1: starting, phase 2: listening).
 
@@ -798,7 +802,8 @@ Before streaming, errors use JSON `{"error":"CODE"}` and HTTP status:
 - One request per HTTP connection. No chunked request bodies, pipelining,
   half-closed request connections, ambiguous duplicate framing headers,
   upgrades or `Expect: 100-continue`.
-- Browser requests must use the same loopback Origin and Host. No permissive
+- Browser requests must use the same loopback Origin and Host, or the exact
+  explicitly configured HTTPS origin in private-proxy mode. No permissive
   CORS, bearer tokens in query strings, or cookie-based implicit authority.
 - User grants authorize inference only. They do not expose the operator's
   household key, donor control API, checkpoint paths or other users' histories.
