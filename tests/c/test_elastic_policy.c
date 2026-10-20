@@ -99,6 +99,20 @@ static void recovery(void) {
     assert(lmb_elastic_valid(&p)); assert(!lmb_elastic_total(&p,&bytes) && bytes==1000);
     lmb_elastic_idle(&p); assert(lmb_elastic_valid(&p));
     assert(!lmb_elastic_total(&p,&bytes) && !bytes);
+    /* Reclaim the OLD failed replica, not the most recently added healthy
+     * one. Its distinct byte charge survives publication/restart until DONE. */
+    p=fixture(); p.route.count=2; p.resident_bytes[1]=1500;
+    p.route.replicas[1]=(LmbModelReplica){{6},{7},{8}};
+    assert(!lmb_elastic_withdraw(&p,0) && lmb_elastic_valid(&p));
+    assert(p.pending_allocation[0]==3 && p.pending_bytes==1000 && p.target.count==1 &&
+        p.target.replicas[0].allocation[0]==6);
+    encoded=(LmbBuf){0}; assert(!lmb_elastic_encode(&p,&encoded));
+    assert(!lmb_elastic_decode(encoded.p,encoded.len,&decoded)); free(encoded.p);
+    changed=decoded.target; assert(lmb_elastic_reconcile(&decoded,&changed,2001)==1);
+    assert(decoded.phase==LMB_ELASTIC_RETIRING && decoded.resident_bytes[0]==1500 && !decoded.resident_bytes[1]);
+    assert(!lmb_elastic_total(&decoded,&bytes) && bytes==2500);
+    lmb_elastic_idle(&decoded); assert(lmb_elastic_valid(&decoded));
+    assert(!lmb_elastic_total(&decoded,&bytes) && bytes==1500);
 }
 static void availability(void) {
     LmbElasticPolicy p=fixture(); p.min_replicas=1;

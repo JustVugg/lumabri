@@ -363,6 +363,27 @@ static unsigned api_elastic_probe(const LmbElasticPolicy *p,unsigned index) {
 done:
     lmb_read_deadline_ms=prior; free(plan); return state;
 }
+/* Failure evidence permits a read-only proof query, never forced eviction.
+ * One exited participant proves this immutable plan can no longer serve.
+ * Other nodes are still drained/sealed through normal retirement and their
+ * charges remain until every participant acknowledges release. */
+static int api_elastic_failed_candidate(const LmbElasticPolicy *p,uint64_t now,uint64_t wall) {
+    if (!p->enabled || p->faulted || p->phase || wall<p->last_change || wall<p->last_check ||
+        (p->last_change && wall-p->last_change<p->cooldown) ||
+        p->health_revision!=p->route.revision || memcmp(p->health_observer,api_demand.instance,32)) return -1;
+    for (uint32_t i=0;i<p->route.count;i++) {
+        const LmbElasticReplicaHealth *h=&p->health[i];
+        if (h->state!=LMB_ELASTIC_UNREACHABLE || h->failures!=3 || !h->at_ms || now<h->at_ms || now-h->at_ms>120000) continue;
+        LmbResidentPlan *plan=calloc(1,sizeof *plan); int found=-1;
+        if (plan && !api_find_plan(p->route.tracker,p->route.replicas[i].allocation,plan) &&
+            api_route_plan_matches(&p->route,i,plan)) {
+            for (uint32_t node=0;node<plan->execution.count;node++)
+                if (!home_resident_exit_proof(plan,node)) { found=(int)i; break; }
+        }
+        free(plan); return found; /* one bounded candidate per tick */
+    }
+    return -1;
+}
 static void api_elastic_tick_one(int access,int dir,LmbElasticPolicy *p) {
     uint64_t wall=(uint64_t)time(NULL),mono=lmb_io_monotonic_ms(); LmbModelRoute current;
     const char *reason; int choice=lmb_elastic_choose(p,&api_demand,mono,wall,&reason);
@@ -400,13 +421,17 @@ static void api_elastic_tick_one(int access,int dir,LmbElasticPolicy *p) {
     }
     choice=lmb_elastic_health_choice(p,&api_demand,lmb_io_monotonic_ms(),wall,choice,&reason);
     snprintf(p->reason,sizeof p->reason,"%s",reason);
-    if (choice==LMB_ELASTIC_GROW && p->route.revision<UINT32_MAX) {
-        if (!api_elastic_begin_grow(dir,p)) api_elastic_prepare(access,dir,p);
+    /* Prefer restoring availability first when approved headroom permits it.
+     * At the hard limit, or with no room to grow, confirmed exit can reclaim
+     * the old charge before a new preparation. Neither path overbooks. */
+    if (choice==LMB_ELASTIC_GROW && p->route.revision<UINT32_MAX && !api_elastic_begin_grow(dir,p)) {
+        api_elastic_prepare(access,dir,p); return;
+    }
+    int failed=api_elastic_failed_candidate(p,lmb_io_monotonic_ms(),wall);
+    if (failed>=0 && !lmb_elastic_withdraw(p,(uint32_t)failed)) {
+        strcpy(p->reason,"failed_replica_exit_confirmed_withdrawal_intent");
     } else if (choice==LMB_ELASTIC_SHRINK && p->route.revision<UINT32_MAX) {
-        uint32_t last=p->route.count-1; p->pending_bytes=p->resident_bytes[last];
-        memcpy(p->pending_allocation,p->route.replicas[last].allocation,32);
-        p->target=p->route; p->target.revision++; p->target.count--;
-        p->phase=LMB_ELASTIC_PUBLISH_SHRINK; strcpy(p->reason,"idle_replica_withdrawal_intent");
+        if (!lmb_elastic_withdraw(p,p->route.count-1)) strcpy(p->reason,"idle_replica_withdrawal_intent");
     }
 save:
     if (wall>=p->last_check) p->last_check=wall;

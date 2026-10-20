@@ -105,9 +105,10 @@ static int home_control_io_ms(int fallback) {
 
 #include "src/runtime/lumabri_node_control.h"
 #include "src/runtime/lumabri_retired_receipts.h"
+#include "src/runtime/lumabri_allocation_lifetime.h"
 /* Consumes listener and private control child end, including on failure;
  * unrelated inherited descriptors remain CLOEXEC. */
-static pid_t home_spawn(char *const argv[], char *const envv[], const char *log, int *ready_fd, int listener, int control) {
+static pid_t home_spawn_guarded(char *const argv[], char *const envv[], const char *log, int *ready_fd, int listener, int control, int lifetime) {
     int ready[2] = {-1, -1};
     if (ready_fd && pipe(ready)) {
         if (listener >= 0) close(listener);
@@ -127,7 +128,7 @@ static pid_t home_spawn(char *const argv[], char *const envv[], const char *log,
         if (service < 0) _exit(125);
         if (service > 0) {
             int limit = getdtablesize();
-            for (int fd = 3; fd < limit; fd++) close(fd);
+            for (int fd = 3; fd < limit; fd++) if (fd!=lifetime) close(fd);
             for (;;) {
                 int status;
                 pid_t result = waitpid(service, &status, WNOHANG);
@@ -140,6 +141,13 @@ static pid_t home_spawn(char *const argv[], char *const envv[], const char *log,
             }
         }
 #endif
+        /* The supervisor and the actual service both retain this shared
+         * description. Edge children inherit it at their subsequent exec. */
+        if (lifetime>=0 && fcntl(lifetime,F_SETFD,0)) _exit(125);
+        if (lifetime>=0) {
+            char descriptor[32]; snprintf(descriptor,sizeof descriptor,"%d",lifetime);
+            if (setenv("LUMABRI_ALLOCATION_LIFETIME_FD",descriptor,1)) _exit(125);
+        } else unsetenv("LUMABRI_ALLOCATION_LIFETIME_FD");
         int nullfd = open("/dev/null", O_RDONLY);
         int logfd = open(log, O_WRONLY | O_CREAT | O_APPEND, 0600);
         if (nullfd < 0 || logfd < 0) _exit(125);
@@ -183,6 +191,10 @@ static pid_t home_spawn(char *const argv[], char *const envv[], const char *log,
     }
     if (pid > 0) (void)setpgid(pid, pid);
     return pid;
+}
+
+static pid_t home_spawn(char *const argv[], char *const envv[], const char *log, int *ready_fd, int listener, int control) {
+    return home_spawn_guarded(argv,envv,log,ready_fd,listener,control,-1);
 }
 
 static void home_stop_child(pid_t *pid) {
@@ -238,6 +250,9 @@ typedef struct HomeDonor {
     uint32_t admission_policy_revision;
     int client, lease, weight_lease, segment_port, host_port, segment_ready, host_ready, node_control;
     LmbNodeControl retired_receipt; /* unpersisted terminal proof pins this keeper slot until reconciled */
+    int lifetime_fd_plus_one, lifetime_started, release_pending;
+    LmbHomePhase release_phase;
+    char release_reason[160];
     pid_t segment, host;
     char bin_dir[1024], cache_base[1024], disk[512], ip[INET_ADDRSTRLEN];
     char log[1200];
@@ -358,6 +373,10 @@ static int home_weight_lease(const char *base) {
 }
 
 static void home_donor_release(HomeDonor *d, LmbHomePhase why, const char *reason) {
+    if (!d->release_pending) {
+        d->release_phase=why;
+        snprintf(d->release_reason,sizeof d->release_reason,"%s",reason);
+    }
     d->admission_policy_revision=0; memset(d->admission_policy,0,sizeof d->admission_policy);
     memset(d->policy_content,0,32); d->policy_checked_at=0;
     d->hybrid_routes_ready = 0; memset(&d->hybrid_routes, 0, sizeof d->hybrid_routes);
@@ -366,10 +385,66 @@ static void home_donor_release(HomeDonor *d, LmbHomePhase why, const char *reaso
     if (d->node_control >= 0) { (close)(d->node_control); d->node_control=-1; }
     if (d->segment_ready >= 0) { close(d->segment_ready); d->segment_ready = -1; }
     if (d->host_ready >= 0) { close(d->host_ready); d->host_ready = -1; }
+    d->host_port = d->segment_port = 0;
+    if (d->lifetime_fd_plus_one) {
+        close(d->lifetime_fd_plus_one-1); d->lifetime_fd_plus_one=0;
+    }
+    if (d->lifetime_started) {
+        char path[1200]; LmbAllocationLifetime proof;
+        int dir=home_service_directory(path,sizeof path) ? -1 : lmb_lifetime_dir(path,0);
+        int rc=dir<0 ? -1 : lmb_lifetime_prove(dir,d->transaction.offer.id,&proof);
+        if (dir>=0) close(dir);
+        if (rc) {
+            d->release_pending=1;
+            d->transaction.phase=LMB_HOME_FAILED;
+            snprintf(d->transaction.reason,sizeof d->transaction.reason,
+                "Waiting for proof that all owned processes exited. Memory remains reserved.");
+            return;
+        }
+        d->lifetime_started=0;
+    }
+    d->release_pending=0;
     if (d->lease >= 0) { close(d->lease); d->lease = -1; }
     if (d->weight_lease >= 0) { close(d->weight_lease); d->weight_lease = -1; }
-    d->host_port = d->segment_port = 0;
-    lmb_home_released(&d->transaction, why, reason);
+    lmb_home_released(&d->transaction, d->release_phase, d->release_reason);
+}
+
+static int home_lifetime_unused(const uint8_t id[32]) {
+    char path[1200];
+    if (home_service_directory(path,sizeof path)) return -1;
+    int dir=lmb_lifetime_dir(path,0);
+    if (dir<0) return errno==ENOENT ? 1 : -1;
+    int rc=lmb_lifetime_unused(dir,id); close(dir); return rc;
+}
+static int home_lifetime_begin(HomeDonor *d) {
+    if (d->release_pending) return -1;
+    if (d->lifetime_started) return d->lifetime_fd_plus_one ? 0 : -1;
+    const LmbHomeOffer *o=&d->transaction.offer;
+    LmbAllocationLifetime r={.reserved_bytes=o->ram_bytes,.edge=o->runs_edge,.begin=o->begin,.end=o->end};
+    memcpy(r.allocation,o->id,32); memcpy(r.root,o->model_root,32); memcpy(r.requester,o->requester,32);
+    LmbBuf b={0}; int bad=lmb_home_offer_pack(&b,o);
+    if (!bad) lmb_sha512(b.p,b.len,r.offer_hash);
+    free(b.p);
+    char path[1200];
+    if (bad || home_service_directory(path,sizeof path)) return -1;
+    int dir=lmb_lifetime_dir(path,1),fd=dir<0 ? -1 : lmb_lifetime_create(dir,&r);
+    if (dir>=0) close(dir);
+    if (fd<0) return -1;
+    d->lifetime_started=1; d->lifetime_fd_plus_one=fd+1; return 0;
+}
+
+/* Read-only, original-owner query. A failed heartbeat is never an exit
+ * certificate. In particular, no STOP is sent to satisfy this request. */
+static void home_lifetime_reply(int incoming,const uint8_t body[64]) {
+    char path[1200]; LmbAllocationLifetime proof;
+    if (home_service_directory(path,sizeof path)) return;
+    int dir=lmb_lifetime_dir(path,0);
+    if (dir<0) return;
+    int rc=lmb_lifetime_prove(dir,body,&proof); close(dir);
+    uint8_t bytes[LMB_LIFETIME_BYTES];
+    if (rc || memcmp(body+32,proof.root,32) || !lmb_secure_peer_matches(incoming,proof.requester) ||
+        lmb_lifetime_encode(&proof,bytes)) return;
+    (void)lmb_send(incoming,LMB_HOME_EXIT_PROOF_R,bytes,sizeof bytes,NULL,0);
 }
 
 static void home_donor_disconnect(HomeDonor *d, const char *reason) {
@@ -484,6 +559,7 @@ static void home_donor_lost_requester(HomeDonor *d, const char *reason) {
  * Session/KV state never goes into these weight caches. The shim still checks
  * current signed inventory, accepted root and each block hash on reuse. */
 static int home_donor_launch(HomeDonor *d, int edge) {
+    if (home_lifetime_begin(d)) return -1;
     char current_runtime[65];
     if (lmb_runtime_identity(d->bin_dir, d->runtime_epoch, &d->runtime_cache, current_runtime) ||
         strcmp(current_runtime, d->runtime_id)) {
@@ -571,7 +647,7 @@ static int home_donor_launch(HomeDonor *d, int edge) {
         /* The host itself must not be preloaded; model_boot passes the mirror
          * to its Edge child, while its own networking remains ordinary C. */
         envv[0] = LMB_PRELOAD_ENV "=";
-        d->host = home_spawn(host_argv, envv, d->log, &d->host_ready, listener, -1);
+        d->host = home_spawn_guarded(host_argv, envv, d->log, &d->host_ready, listener, -1, d->lifetime_fd_plus_one-1);
         d->host_port = chosen_port;
         return d->host > 0 ? 0 : -1;
     }
@@ -580,7 +656,7 @@ static int home_donor_launch(HomeDonor *d, int edge) {
     if (fcntl(control[0],F_SETFD,FD_CLOEXEC) || fcntl(control[1],F_SETFD,FD_CLOEXEC)) {
         (close)(control[0]); (close)(control[1]); close(listener); return -1;
     }
-    d->segment = home_spawn(segment_argv, envv, d->log, &d->segment_ready, listener, control[1]);
+    d->segment = home_spawn_guarded(segment_argv, envv, d->log, &d->segment_ready, listener, control[1], d->lifetime_fd_plus_one-1);
     if (d->segment>0) d->node_control=control[0]; else (close)(control[0]);
     d->segment_port = chosen_port;
     return d->segment > 0 ? 0 : -1;
@@ -685,6 +761,21 @@ static int home_donor_offer(HomeDonor *d, int incoming, const char *tracker,
         if (!rc) rc = lmb_send(incoming, LMB_OK, NULL, 0, NULL, 0) || lmb_recv(incoming, &m);
     }
     if (!rc) {
+        if (m.op==LMB_HOME_EXIT_PROOF) {
+            int held=0;
+            if (m.body_len==64 && !m.pay_len) {
+                for (uint32_t i=0;i<=d->park_capacity;i++) {
+                    HomeDonor *node=i ? &d->parked[i-1] : d;
+                    if (memcmp(m.body,node->transaction.offer.id,32)) continue;
+                    if (node->release_pending && !memcmp(m.body+32,node->transaction.offer.model_root,32) &&
+                        lmb_secure_peer_matches(incoming,node->transaction.offer.requester))
+                        home_donor_release(node,node->release_phase,node->release_reason);
+                    held|=node->transaction.reservation_held;
+                }
+                if (!held) home_lifetime_reply(incoming,m.body);
+            }
+            lmb_msg_free(&m); return -1;
+        }
         if (m.op == LMB_HOME_QUERY || m.op == LMB_HOME_RELEASE || m.op == LMB_HOME_NODE_CONTROL || m.op==LMB_HOME_RETIRED_RELEASE) {
             HomeDonor *target = d;
             uint32_t expected_bytes=(m.op==LMB_HOME_NODE_CONTROL || m.op==LMB_HOME_RETIRED_RELEASE) ? 64+LMB_NODE_CONTROL_REQUEST_BYTES : 64;
@@ -740,11 +831,11 @@ static int home_donor_offer(HomeDonor *d, int incoming, const char *tracker,
          * acknowledged ID would make its old receipt refer to live new work. */
         LmbRetiredReceipt prior;
         int retired=home_retired_lookup(offer.id,&prior);
-        if (retired!=1 || d->retired_receipt.revision) {
+        if (retired!=1 || d->retired_receipt.revision || home_lifetime_unused(offer.id)!=1 || d->release_pending) {
             LmbHomeTransaction rejected={.offer=offer,.phase=LMB_HOME_REJECTED};
             snprintf(rejected.reason,sizeof rejected.reason,"%s",retired==0 ?
                 "This allocation was already retired or has a pending retirement. Request a new plan." :
-                "Retirement evidence is unavailable or pending. No new allocation was admitted.");
+                "Allocation identity was already used, or release evidence is pending. Request a new plan after release.");
             (void)home_status_send(incoming,&rejected,0,0); return -1;
         }
     }
@@ -1096,6 +1187,10 @@ static int cmd_donor_inner(int argc, char **argv) {
         }
         for (uint32_t i = 0; i <= d.park_capacity; i++) {
             HomeDonor *m = models[i];
+            if (m->release_pending) {
+                home_donor_release(m,m->release_phase,m->release_reason);
+                continue;
+            }
             if (m->client >= 0 && ready[i+1].fd == m->client && ready[i+1].revents && home_donor_message(m))
                 home_donor_lost_requester(m, "The requester disconnected or sent an invalid command.");
         }

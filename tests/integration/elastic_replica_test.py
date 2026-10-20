@@ -149,7 +149,7 @@ def verify_elastic(api, until, service, env, terminal, artifacts):
                 time.sleep(.01)
         return held
 
-    events = {}; held_chat = None; permits = []; recovery_turn = None
+    events = {}; held_chat = None; permits = []; recovery_turn = None; suspended = []
     def configure(body):
         if os.environ.get("LUMABRI_TEST_BROWSER") == "1":
             return configure_from_browser(api, body, artifacts)
@@ -330,8 +330,21 @@ def verify_elastic(api, until, service, env, terminal, artifacts):
         print("ELASTIC RECOVERY: PASS (real Segment child killed, other model serves, " +
               ("same-turn replay, " if response_recovery else "paused policy inert, ") +
               "three failed probes, approved replacement, old reservation retained, exactly one new allocation, restored inference)", flush=True)
-        # The hard replica limit includes unreachable allocations. Losing
-        # the new host too must not buy an unapproved third allocation.
+        # The old failed allocation can now be reclaimed from authenticated
+        # lifetime proof, without mistaking a missing heartbeat for release.
+        # Every surviving participant still goes through fenced retirement.
+        reclaimed = await_policy(lambda p: p["phase"] == "idle" and p["replicas"] == 1 and
+                                  old_allocation not in p["adopt_allocations"],
+                                  "failed allocation was not reclaimed after authoritative exit proof", 120)
+        assert int(reclaimed["reserved_bytes"]) < int(restored["reserved_bytes"])
+        released = json.loads(api.cli("retire", old_allocation, "--tracker", api.tracker))
+        assert released["complete"] and released["exited_node_mask"], released
+        infer(route["id"]); infer(second["id"])
+        events.update(reclaimed_replica=reclaimed, failed_retirement=released)
+        print("ELASTIC RECLAMATION: PASS (failed allocation exit proved, survivors drained, exact old charge released, healthy replacement and independent model preserved)", flush=True)
+        # A frozen process is genuinely unavailable but has NOT exited.
+        # Its weights and reservation must remain charged. Fill the second
+        # approved slot, freeze that host too, then prove the limit holds.
         new_allocation, = set(restored["adopt_allocations"]) - {old_allocation}
         code, workspace = api.http("/api/v1/workspace")
         assert code == 200
@@ -341,19 +354,28 @@ def verify_elastic(api, until, service, env, terminal, artifacts):
         assert len(hosts) == 1, hosts
         host_name, host_snapshot = hosts[0]; host_child = host_snapshot["host_pid"]
         host_engine = owned_engine_pid(host_snapshot, "host_pid", api.runtime, "lumabri")
+        os.kill(host_engine, signal.SIGSTOP); suspended.append(host_engine)
+        unresolved = await_policy(lambda p: p["phase"] == "idle" and p["replicas"] == 2,
+                                  "unavailable live host did not consume approved replacement headroom", approve=True)
+        assert new_allocation in unresolved["adopt_allocations"]
+        fresh, = set(unresolved["adopt_allocations"]) - {new_allocation}
+        code, workspace = api.http("/api/v1/workspace"); assert code == 200
+        another = next(a for a in workspace["allocations"] if a["id"] == fresh)
+        holders = [service(n)["donor"] for n in ("a", "b")]
+        holders = [s for s in holders if s["model"] == another["name"] and s["host_pid"] > 1]
+        assert len(holders) == 1, holders
+        frozen = owned_engine_pid(holders[0], "host_pid", api.runtime, "lumabri")
+        os.kill(frozen, signal.SIGSTOP); suspended.append(frozen)
         before_host_failure = set(library.glob("*.plan"))
-        os.kill(host_engine, signal.SIGKILL)
-        until(lambda: service(host_name)["donor"]["host_pid"] != host_child,
-              "keeper did not observe its terminated host child", 20)
         limited = await_policy(lambda p: p["reason"] == "unavailable_replica_limit_operator_review_required",
                                "host failure bypassed the hard replica limit", 90)
-        assert limited["reserved_bytes"] == restored["reserved_bytes"] and limited["replicas"] == 2
+        assert limited["reserved_bytes"] == unresolved["reserved_bytes"] and limited["replicas"] == 2
         assert set(library.glob("*.plan")) == before_host_failure
         code, unavailable = chat(route["id"])
         assert code == 503 and b"approved_allocation_unavailable" in unavailable, (code, unavailable)
         infer(second["id"])
         events["recovery_at_limit"] = limited
-        print("ELASTIC RECOVERY LIMIT: PASS (real host child killed, no spare approved slot, bounded refusal, all reservations retained, independent model still serves)", flush=True)
+        print("ELASTIC RECOVERY LIMIT: PASS (two live hosts frozen, no false exit proof, no spare approved slot, bounded refusal, reservations retained, independent model still serves)", flush=True)
         # Explicit manual routing always stops the controller's old ownership
         # fence; no following tick may silently undo this operator revision.
         api.cli("model-policy", route["id"], "ordered", "--tracker", api.tracker)
@@ -373,6 +395,8 @@ def verify_elastic(api, until, service, env, terminal, artifacts):
             except Exception as exc:
                 cleanup_errors.append(exc)
                 print(f"Elastic fixture cleanup: {exc}", file=sys.stderr, flush=True)
+        for pid in suspended:
+            cleanup(lambda pid=pid: os.kill(pid, signal.SIGCONT))
         for held in permits:
             cleanup(lambda held=held: held.communicate("release\n", timeout=5))
         if recovery_turn:
