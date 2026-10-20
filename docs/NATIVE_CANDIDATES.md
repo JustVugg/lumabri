@@ -89,6 +89,24 @@ The post-test hash check rejects missing, changed or extra files and symlinks.
 It checks consistency with the manifest, not the trustworthiness of a download
 or a cryptographic release signature.
 
+For the managed multi-model service, also run the installed-package gate:
+
+```sh
+LUMABRI_RESIDENCY_POLICY=engine-locked \
+python3 tests/integration/household_service_flow_test.py \
+  --installed-package /tmp/lumabri-candidate --models-dir /path/to/tiny-model-parent \
+  --joint complete --api-prepare --donor-ram-gb 1.5 --sessions 2
+```
+
+It uses only shipped production binaries, never a copied `test_chat_ui` or a
+replacement engine. It verifies two models on one donor, real mixed requests,
+bounded overload, client Stop, detached TUIs, manager/API restart, private
+history and selective release without replacing the other model's engines.
+The test requires the package's native OS/architecture and clean build source
+metadata, and rechecks its contents afterward. See
+[the release gate](https://github.com/JustVugg/lumabri/blob/main/PRODUCTION.md#installed-gateway-update-and-rollback) for
+report scope and the separate update/rollback checks.
+
 `make install-household PREFIX=/your/prefix` is the strict install target:
 all required services must build, not just the TUI. The older general install
 target remains available for existing Expert/public-network deployments.

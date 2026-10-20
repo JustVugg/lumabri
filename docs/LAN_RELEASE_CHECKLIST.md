@@ -20,7 +20,7 @@ entries below record the exact evidence; an open PR is not an integrated release
 | 3 — Several resident models | Independent reservations, private state, selective unload and effective owned CPU locks | Final-package memory-pressure and sustained workload checks on the deployment machines. |
 | 4 — Controlled concurrency | Bounded compute/session admission, isolated users, cancellation, timing and 1/2/4/8-slot gates | Per-deployment latency/capacity envelope; configured slots are not a single-user speed guarantee. |
 | 5 — Joint placement and cost | Bounded joint memory/cost search, measured portfolio selection/application, static-versus-managed comparison (#224), shared capacity API (#225) and browser controls (#226) | New placements still require preparation and measurement; declared cost is not billed savings. |
-| 6 — Shared service and interfaces | Permanent keepers, common preparation/retirement operations, TUI, authenticated API, web chat and private history; explicit private HTTPS upstream candidate | Verified local TLS/OLMoE gate, not installed remote/datacenter certification. |
+| 6 — Shared service and interfaces | Permanent keepers, common preparation/retirement operations, TUI, authenticated API, web chat and private history; explicit private HTTPS upstream (#238) | Verified local TLS/OLMoE gate, not installed remote/datacenter certification. |
 | 7 — Recovery | Approved-replica replay; unavailable-capacity replacement, same-turn wait and durable exit/release proofs merged in #227–230 after all eight checks passed | Final-package fault tests on deployment machines. No instantaneous KV migration. |
 | 8 — Authorized elasticity | Opt-in replica growth, drain, retirement, scale-to-zero/wake, budgets and cooldown | Sustained burst/idle validation on actual machines; failed ownership remains charged without proof. |
 | 9 — Provider and actual savings | No paid resources created | Explicitly deferred provider choice, account access and spending authority; implementation and billing comparison remain. |
@@ -44,8 +44,9 @@ they are not retroactively described as different binaries.
 | #230 | `dbb6f80` | `1602551` |
 | #231 | `90e376c` | `744c669` |
 | #237 | `3e006cf` | `01e3f86` |
+| #238 | `42d0ec3` | `36fd706` |
 
-- [ ] Explicit HTTPS ingress (local candidate): the private same-user Unix
+- [x] Explicit HTTPS ingress (#238): the private same-user Unix
   upstream passes authentication, exact Host/Origin, history isolation, keeper
   restart/crash and unsafe-socket replacement tests. The supplied NGINX recipe
   passes a real certificate-verified loopback test, rejecting untrusted TLS,
@@ -55,8 +56,22 @@ they are not retroactively described as different binaries.
   separately granted users, handles a client stop and restarts the gateway
   without changing allocations, reservations or private histories.
   `https-resident.json` retains the actual gateway hash and NGINX version;
-  this candidate still needs native CI/review. Deployment DNS, certificates,
+  all eight final-head CI checks passed before normal merge. Deployment DNS, certificates,
   firewall and topology checks remain separate. See [HTTPS](HTTPS_INGRESS.md).
+
+- [ ] Installed managed service (local candidate): on October 20, the complete
+  native Linux package from clean commit `42d0ec3` passed two co-resident
+  reduced-OLMoE identities using only shipped production binaries. Closing
+  both donor TUIs and restarting all managers preserved allocations. The
+  10.9-second workload smoke recorded 108 outcomes with no unexpected failed
+  turns, including bounded overload and client stops. Private history survived
+  API restart; retiring one allocation reduced its reservation without changing
+  the other model's engine PIDs or interrupting its subsequent inference.
+  Separate final retirement released all charges; the package remained
+  byte-identical to its manifest and all four prepared engines reported
+  effective payload locks. Reports retain package/runtime hashes and every
+  workload outcome. Native CI/review of this new gate is pending. This is not
+  fleet update, full-size capacity or physical deployment certification.
 
 - [x] Sustained managed workload (#237): on October
   17, the complete local gate passed a 1,800.57-second timed workload after
