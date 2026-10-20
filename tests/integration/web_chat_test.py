@@ -278,10 +278,13 @@ async def exercise(port, alice, bob, artifacts, env):
         await expect(page.locator(".assistant .content")).to_have_text("Hello € <script>alert(1)</script>")
         assert await page.locator(".assistant script").count() == 0
         assert len(requests) == 1 and requests[0]["messages"] == [{"role": "user", "content": "First private question"}]
+        assert requests[0]["recovery_wait_seconds"] == 120
+        await page.locator("#recovery-wait").uncheck()
         await page.locator("#prompt").fill("Second question")
         await page.locator("#prompt").press("Enter")
         await expect(page.locator("#stop")).to_be_hidden()
         assert len(requests) == 2 and len(requests[-1]["messages"]) == 3
+        assert requests[-1]["recovery_wait_seconds"] == 0
         await expect(page.locator(".message.user")).to_have_count(2)
         async with page.expect_download() as download:
             await page.locator("#export").click()

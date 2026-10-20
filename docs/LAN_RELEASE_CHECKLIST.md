@@ -9,6 +9,16 @@ execution, cross-platform numerical compatibility, or concurrent capacity.
 The managed-inference roadmap supersedes the older single-chat LAN checklist
 below. Historical observations remain here as evidence, not current promises.
 
+- [ ] Same-turn elastic recovery (local candidate): optional bounded API wait
+  captures an already enabled policy's scope/revision and keeps the original
+  model/numeric contract. The web exposes the wait and Stop; policy/credential
+  revocation, deadline and disconnect prevent subsequent disclosure. Local
+  reduced-OLMoE tests killed an owned Segment after a real visible prefix,
+  prepared a new approved replica and completed the same HTTP turn with
+  byte-identical oracle output and no duplicate text. Failed ownership remains
+  charged; this is not automatic reclamation or KV migration. API/browser,
+  policy unit and ASan/UBSan/leak checks pass. Native CI and merge are pending.
+
 - [ ] Unavailable replica replenishment (local candidate): bounded authenticated
   host/Segment probes distinguish accepting, draining, unreachable and unknown.
   Three separated failures can restore an opt-in policy's available minimum;
@@ -23,9 +33,8 @@ below. Historical observations remain here as evidence, not current promises.
   through the actual web interface as well, then killed the replacement host:
   the hard replica ceiling refused a third allocation, retained every budget
   charge and kept the independent model serving. Native CI and merge remain
-  pending. Newly prepared capacity is for subsequent requests: same-turn
-  replay onto a new allocation and authoritative failed-allocation reclamation
-  remain separate recovery work.
+  pending. Same-turn opt-in replay is the separate candidate above;
+  authoritative failed-allocation reclamation remains unfinished.
 
 - [ ] Shared capacity management API (under review): authenticated historical
   listing, explicit inference measurement with progress/cancellation, live

@@ -113,6 +113,9 @@ For managed API models, opt-in [replica policies](docs/ELASTIC_REPLICAS.md)
 can restore capacity within approved limits after repeated availability
 failures. Preparation still requires donor permission and spare capacity;
 this does not promise an uninterrupted response.
+The web chat can wait up to two minutes for an approved replacement and replay
+an interrupted response, checking the text already shown before continuing.
+Stop cancels the wait; insufficient capacity preserves an incomplete answer.
 
 The donor queries its installed Segment runtime before sharing. A runtime
 built without OpenMP uses one execution thread; CPU core count is not a

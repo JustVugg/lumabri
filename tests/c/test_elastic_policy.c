@@ -2,6 +2,7 @@
 #define _DEFAULT_SOURCE
 #include "src/planner/lumabri_elastic_store.h"
 #include "src/planner/lumabri_elastic_json.h"
+#include "src/runtime/lumabri_recovery_policy.h"
 #include <assert.h>
 #include <sys/wait.h>
 
@@ -220,8 +221,31 @@ static void json(void) {
     p=fixture(); p.max_reserved_bytes=999; assert(!lmb_elastic_valid(&p));
     p=fixture(); p.request.node_count=2; strcpy(p.request.nodes[1],p.request.nodes[0]); assert(!lmb_elastic_valid(&p));
 }
+static void turn_recovery(void) {
+    LmbElasticPolicy p=fixture(); LmbModelRoute original=p.route,current=p.route;
+    uint8_t key[32]; assert(!lmb_recovery_policy_key(&p,key));
+    assert(lmb_recovery_policy_route(&p,key,&original,&current)==1);
+    current.revision++; current.replicas[current.count++]=(LmbModelReplica){{6},{7},{8}};
+    assert(!lmb_recovery_policy_route(&p,key,&original,&current)); /* arbitrary route addition */
+    p.phase=LMB_ELASTIC_PUBLISH_GROW; p.pending_bytes=1000; p.pending_allocation[0]=6;
+    memset(p.request.operation,'c',64); memset(p.request.review,'d',64); p.target=current;
+    assert(lmb_elastic_valid(&p));
+    assert(lmb_recovery_policy_route(&p,key,&original,&current)==2); /* journal gap */
+    assert(lmb_elastic_reconcile(&p,&current,1000)==1);
+    assert(lmb_recovery_policy_route(&p,key,&original,&current)==1);
+    p.last_check++; p.health[0]=(LmbElasticReplicaHealth){100,100,LMB_ELASTIC_READY,0};
+    assert(lmb_recovery_policy_route(&p,key,&original,&current)==1); /* observation isn't policy */
+    LmbElasticPolicy good=p;
+#define DENY(change) do { p=good; change; assert(!lmb_recovery_policy_route(&p,key,&original,&p.route)); } while (0)
+    DENY(p.enabled=0); DENY(p.faulted=1); DENY(p.revision++);
+    DENY(p.source_stamp[0]='e'); DENY(p.request.nodes[0][0]='e');
+    DENY(p.max_reserved_bytes++); DENY(p.cooldown++); DENY(p.request.sessions++);
+    DENY(p.route.content[0]++); DENY(p.route.numeric_abi++); DENY(p.route.context++);
+    DENY(p.route.max_new++); DENY(p.route.policy++); DENY(p.route.id[0]++);
+#undef DENY
+}
 int main(void) {
-    (void)lmb_sign; decision(); recovery(); availability(); codec_store(); json();
+    (void)lmb_sign; decision(); recovery(); availability(); codec_store(); json(); turn_recovery();
     puts("ELASTIC POLICY: PASS (demand, cooldown, fresh idle evidence, scale to zero, exact publication recovery, bounded health replenishment, budgets, v1/v2 migration, private intent store, strict configuration)");
     return 0;
 }
