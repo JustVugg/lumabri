@@ -107,6 +107,12 @@ metadata, and rechecks its contents afterward. See
 [the release gate](https://github.com/JustVugg/lumabri/blob/main/PRODUCTION.md#installed-gateway-update-and-rollback) for
 report scope and the separate update/rollback checks.
 
+Updating the whole household requires a different check from changing only
+its API. Follow the
+[installed update procedure](https://github.com/JustVugg/lumabri/blob/main/docs/INSTALLED_UPDATES.md):
+retire allocations, stop all services, switch complete packages and obtain
+fresh approvals. `service restart` alone leaves old keepers and engines alive.
+
 `make install-household PREFIX=/your/prefix` is the strict install target:
 all required services must build, not just the TUI. The older general install
 target remains available for existing Expert/public-network deployments.

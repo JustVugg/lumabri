@@ -45,6 +45,7 @@ they are not retroactively described as different binaries.
 | #231 | `90e376c` | `744c669` |
 | #237 | `3e006cf` | `01e3f86` |
 | #238 | `42d0ec3` | `36fd706` |
+| #239 | `f0856d8` | `6b4a229` |
 
 - [x] Explicit HTTPS ingress (#238): the private same-user Unix
   upstream passes authentication, exact Host/Origin, history isolation, keeper
@@ -59,7 +60,7 @@ they are not retroactively described as different binaries.
   all eight final-head CI checks passed before normal merge. Deployment DNS, certificates,
   firewall and topology checks remain separate. See [HTTPS](HTTPS_INGRESS.md).
 
-- [ ] Installed managed service (local candidate): on October 20, the complete
+- [x] Installed managed service (#239): on October 20, the complete
   native Linux package from clean commit `42d0ec3` passed two co-resident
   reduced-OLMoE identities using only shipped production binaries. Closing
   both donor TUIs and restarting all managers preserved allocations. The
@@ -70,8 +71,22 @@ they are not retroactively described as different binaries.
   Separate final retirement released all charges; the package remained
   byte-identical to its manifest and all four prepared engines reported
   effective payload locks. Reports retain package/runtime hashes and every
-  workload outcome. Native CI/review of this new gate is pending. This is not
+  workload outcome. All eight final-head checks passed before normal merge,
+  including the installed gate on all four native macOS variants. This is not
   fleet update, full-size capacity or physical deployment certification.
+
+- [ ] Whole-household package update (local candidate): the October 20 Linux
+  run passed `01e3f86` → `42d0ec3` → `01e3f86`, using complete clean packages
+  and the same four isolated homes. Each stage prepared two co-resident
+  reduced-OLMoE identities with fresh donor approvals, generated through stable
+  managed IDs, preserved private history and grants, refused cross-user access
+  and stale writes, then retired every allocation and stopped all services.
+  Completed preparation/retirement/lifetime records and peer/configuration
+  data survived both switches; no snapshot was restored and no journal
+  deleted. All twelve prepared engines reported effective payload locks.
+  `installed-fleet-update.json` retains package hashes and all three stages.
+  Native CI/review of this new gate is pending. It covers a quiescent pair,
+  not live rolling updates or migration of active autonomous policies.
 
 - [x] Sustained managed workload (#237): on October
   17, the complete local gate passed a 1,800.57-second timed workload after

@@ -130,8 +130,9 @@ jobs:
   linux:
     runs-on: ubuntu-24.04
     # Real multi-model/recovery and installed-layout gates take 40–45 minutes
-    # on current runners. Keep every gate and allow bounded scheduling margin.
-    timeout-minutes: 60
+    # on current runners. Also build a clean baseline package for the full
+    # previous -> candidate -> previous service gate; retain bounded margin.
+    timeout-minutes: 75
     steps:
       - name: Checkout Lumabri
         uses: actions/checkout@v4
@@ -143,6 +144,12 @@ jobs:
           repository: JustVugg/colibri
           ref: ce370e87d7b623d7759b52ec2007d75fc5b0e87e
           path: colibri
+      - name: Checkout the explicit whole-service update baseline
+        uses: actions/checkout@v4
+        with:
+          repository: JustVugg/lumabri
+          ref: 01e3f86840f27260ea0e1229586116d8d99a26c3
+          path: previous-lumabri
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -448,6 +455,9 @@ jobs:
           python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --kill-donor
           python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --expect-disjoint-plans --context 256
           python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --expect-quick-calibration
+          make -C ../previous-lumabri household swarm_probe ENGINE="$GITHUB_WORKSPACE/colibri/c" -j2
+          python3 ../previous-lumabri/tools/package_household.py --colibri-root ../colibri --output 'build/previous candidate'
+          python3 tests/integration/installed_fleet_update_test.py --previous-package 'build/previous candidate' --candidate-package 'build/native candidate' --models-dir build/home-flow-models
           python3 tools/package_household.py --verify 'build/native candidate'
           tar -czf build/lumabri-linux-candidate.tar.gz -C 'build/native candidate' .
       - uses: actions/upload-artifact@v4
@@ -463,6 +473,8 @@ jobs:
           path: |
             /tmp/lmb-service-flow-*/placement-comparison.json
             /tmp/lmb-service-flow-*/managed-soak.json
+            /tmp/lmb-service-flow-*/installed-managed.json
+            /tmp/lmb-installed-fleet-*/installed-fleet-update.json
             /tmp/lmb-service-flow-*/browser-capacity-real-olmoe.*
           retention-days: 7
   macos-household:
@@ -482,7 +494,9 @@ jobs:
     # The real elastic gate includes a complete demand window and idle grace
     # for both scale-downs, plus the two-portfolio comparison. Keep production
     # timers and inference rather than replacing them with fake test time.
-    timeout-minutes: 50
+    # Include the independently built older native package and all-service
+    # update/rollback, not only the short same-package acceptance run.
+    timeout-minutes: 65
     steps:
       # runner.temp is available to steps, not job-level env expressions.
       # Keep all household logs where the failure artifact collects them.
@@ -497,6 +511,12 @@ jobs:
           repository: JustVugg/colibri
           ref: ce370e87d7b623d7759b52ec2007d75fc5b0e87e
           path: colibri
+      - name: Checkout the explicit whole-service update baseline
+        uses: actions/checkout@v4
+        with:
+          repository: JustVugg/lumabri
+          ref: 01e3f86840f27260ea0e1229586116d8d99a26c3
+          path: previous-lumabri
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -552,6 +572,7 @@ jobs:
           python3 tests/integration/managed_soak_summary_test.py
           python3 tests/integration/installed_gateway_contract_test.py
           python3 tests/integration/installed_managed_contract_test.py
+          python3 tests/integration/installed_fleet_contract_test.py
           ./test_backend_routes
           make test_segment_close ENGINE=../colibri/c
           ./test_segment_close
@@ -691,6 +712,14 @@ jobs:
           python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --kill-donor
           python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --expect-disjoint-plans --context 256
           python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --expect-quick-calibration
+          if [ "$OPENMP_MODE" = enabled ]; then
+            make -C ../previous-lumabri household swarm_probe ENGINE="$GITHUB_WORKSPACE/colibri/c" CC=clang -j2
+            python3 ../previous-lumabri/tools/package_household.py --colibri-root ../colibri --openmp-prefix "$OMP_PREFIX" --output 'build/previous candidate'
+          else
+            make -C ../previous-lumabri household swarm_probe ENGINE="$GITHUB_WORKSPACE/colibri/c" CC=clang OMP_FLAGS= OMP_LIBS= -j2
+            python3 ../previous-lumabri/tools/package_household.py --colibri-root ../colibri --output 'build/previous candidate'
+          fi
+          python3 tests/integration/installed_fleet_update_test.py --previous-package 'build/previous candidate' --candidate-package 'build/native candidate' --models-dir build/home-flow-models
           python3 tools/package_household.py --verify 'build/native candidate'
           tar -czf build/lumabri-macos-candidate.tar.gz -C 'build/native candidate' .
       - uses: actions/upload-artifact@v4
@@ -706,6 +735,8 @@ jobs:
           path: |
             ${{ runner.temp }}/lmb-service-flow-*/placement-comparison.json
             ${{ runner.temp }}/lmb-service-flow-*/managed-soak.json
+            ${{ runner.temp }}/lmb-service-flow-*/installed-managed.json
+            ${{ runner.temp }}/lmb-installed-fleet-*/installed-fleet-update.json
           retention-days: 7
       - uses: actions/upload-artifact@v4
         if: failure()
@@ -714,5 +745,6 @@ jobs:
           path: |
             ${{ runner.temp }}/lumabri-home-flow-*/**/*.log
             ${{ runner.temp }}/lmb-service-flow-*/**/*.log
+            ${{ runner.temp }}/lmb-installed-fleet-*/**/*.log
           include-hidden-files: true
           retention-days: 3
