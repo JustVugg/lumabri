@@ -15,9 +15,9 @@ class SoakReportTest(unittest.TestCase):
         api.http.side_effect = [state("a", 1, 0), state("b"),
                                 state("a"), state("b", 1, 1),
                                 state("a"), state("b")]
-        self.assertFalse(hosts_quiescent(api, ("a", "b")))
-        self.assertFalse(hosts_quiescent(api, ("a", "b")))
-        self.assertTrue(hosts_quiescent(api, ("a", "b")))
+        self.assertFalse(hosts_quiescent(api.http, ("a", "b")))
+        self.assertFalse(hosts_quiescent(api.http, ("a", "b")))
+        self.assertTrue(hosts_quiescent(api.http, ("a", "b")))
         self.assertEqual([call.args for call in api.http.call_args_list],
                          [(f"/api/v1/allocations/{name}/control",) for name in ("a", "b") * 3])
 
@@ -33,7 +33,7 @@ class SoakReportTest(unittest.TestCase):
                 api = Mock()
                 api.http.return_value = code, state
                 with self.assertRaises((AssertionError, KeyError)):
-                    hosts_quiescent(api, ("a",))
+                    hosts_quiescent(api.http, ("a",))
 
     def test_rejections_and_stops_are_not_success_percentiles(self):
         rows = [{"phase": "burst", "model": "a", "outcome": "completed",
