@@ -138,6 +138,13 @@ they are not retroactively described as different binaries.
   two-model lifecycle pass locally (104 outcomes, four effective locks).
   A separate Intel artifact-service timeout was infrastructure failure, not
   an inference result. Neither failure is counted as a green check.
+  The following Linux run exposed another test startup race: a listening
+  maintainer had not yet registered the checkpoint when the planner's shim
+  reader started. The native shim gate now waits for the exact source/model
+  and file count in the authenticated tracker snapshot, with a deadline.
+  Missing, failed or unrelated publications are not readiness. The real
+  byte/CAS/resident/header-only assertions remain unchanged and pass locally;
+  deterministic readiness tests cover delayed publication and failure.
   Final-head native CI is still required; this is not a new full-size or
   physical-LAN result.
 

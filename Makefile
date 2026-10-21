@@ -1124,6 +1124,7 @@ test: all test_weight_cache test_key_rotation test_hedge test_local_fallback tes
 	bash ./tests/integration/tui_test.sh
 	./test_planner
 	./test_planner_io
+	python3 tests/integration/native_shim_readiness_test.py
 	python3 tests/integration/native_shim_test.py
 	./test_cluster
 	./test_memory_budget
