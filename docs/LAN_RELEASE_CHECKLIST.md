@@ -121,6 +121,23 @@ they are not retroactively described as different binaries.
   now handles empty cleanup safely and preserves the original settings file
   when resuming an unchanged household. The full-fleet retained-data hash
   assertion remains unchanged; diagnostics identify only the relative path.
+  The clean `85bb08b` Linux package passed the complete installed fleet
+  `01e3f86` → `85bb08b` → `01e3f86` test with twelve effective locks and
+  retained settings, identities, history and journals. The same runtime
+  binaries then passed a 1,800.81-second checkout-harness workload: 10,100
+  complete requests, 4,332 explicit overload refusals and 1,444 client stops,
+  with no unexpected failed turns. Sixty-one quiescent samples recorded
+  aggregate RSS from 90,726,400 to 92,913,664 bytes (maximum 93,241,344).
+  This is reduced-OLMoE Linux loopback evidence, not an installed 30-minute
+  run or deployment capacity certification.
+  The next native CI exposed a workload-harness cancellation race on ARM:
+  gateway demand returning to zero did not acknowledge remote slot cleanup.
+  The workload now also waits for authenticated idle host observations after
+  a client stop, with a bounded deadline; it never retries or discards a chat
+  result. Unknown host evidence fails. Five unit tests and the installed
+  two-model lifecycle pass locally (104 outcomes, four effective locks).
+  A separate Intel artifact-service timeout was infrastructure failure, not
+  an inference result. Neither failure is counted as a green check.
   Final-head native CI is still required; this is not a new full-size or
   physical-LAN result.
 

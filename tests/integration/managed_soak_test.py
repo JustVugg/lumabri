@@ -65,13 +65,27 @@ def process_sample(roots):
     return {"processes": result, "rss_bytes": sum(row["rss_bytes"] for row in result.values())}
 
 
+def hosts_quiescent(api, allocations):
+    """Observe exact hosts; gateway END is not a remote cancellation ACK."""
+    idle = True
+    for allocation in allocations:
+        code, state = api.http(f"/api/v1/allocations/{allocation}/control")
+        assert code == 200, "host cleanup evidence unavailable"
+        assert state["allocation"] == allocation and state["state"] == "accepting"
+        counts = (state["connections"], state["admitted_requests"])
+        assert all(type(n) is int and n >= 0 for n in counts)
+        assert counts[1] <= counts[0]
+        idle = idle and not any(counts)
+    return idle
+
+
 def verify_managed_soak(api, until, service, artifacts, seconds, max_growth_mib=64):
     assert 10 <= seconds <= 3600 and max_growth_mib > 0
     report = {"schema": 1, "scope": "reduced_olmoe_two_identity_loopback_soak",
         "production_capacity_certified": False, "run_complete": False,
         "requested_seconds": seconds, "max_quiescent_rss_growth_bytes": max_growth_mib << 20,
         "checkpoint_note": "Two independently resident identities derived from the same tiny weights; not a model-quality comparison.",
-        "requests": [], "resources": []}
+        "requests": [], "resources": [], "cancellation_cleanup": []}
     started = None
 
     def save():
@@ -82,6 +96,7 @@ def verify_managed_soak(api, until, service, artifacts, seconds, max_growth_mib=
         record = {"phase": phase, "cycle": turn, "client": index,
                   "model": model_ids[index % 2], "outcome": "failed"}
         connection = http.client.HTTPConnection("127.0.0.1", api.port, timeout=20)
+        response = None
         begin = time.monotonic()
         try:
             connection.connect(); barrier.wait(timeout=10)
@@ -136,6 +151,8 @@ def verify_managed_soak(api, until, service, artifacts, seconds, max_growth_mib=
             record["outcome"] = "failed"
             record["error"] = type(error).__name__  # no tokens/text/exception payload
         finally:
+            if response is not None:
+                response.close()
             connection.close()
             record["elapsed_seconds"] = time.monotonic() - begin
         return record
@@ -156,6 +173,16 @@ def verify_managed_soak(api, until, service, artifacts, seconds, max_growth_mib=
             wanted = "client_disconnected" if phase == "disconnect" else "completed"
             assert all(r["outcome"] == wanted for r in rows), rows
         until(quiescent, "requests remained admitted after close", 15)
+        if phase == "disconnect":
+            # Cancellation is asynchronous: END releases gateway admission,
+            # while the host can still be draining/resetting the codec slot.
+            # Wait for authenticated host observations, not a fixed delay or
+            # retries of the next chat. Unknown/stuck hosts still fail.
+            began = time.monotonic()
+            until(lambda: hosts_quiescent(api, model_ids),
+                  "cancelled host conversations did not close", 15)
+            report["cancellation_cleanup"].append({"cycle": turn,
+                "elapsed_seconds": time.monotonic() - began, "hosts_idle": True})
 
     def reservation_sample():
         result = {}
