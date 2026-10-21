@@ -160,9 +160,18 @@ def main():
                 owner.send(b"\x1b"); owner.expect("small")
                 owner.send(b"\x1b"); owner.expect("What would you like to do?")
 
+            # Simulate an older configuration plus an unknown future field.
+            # A no-op attach/restart must not migrate it, lose fields or persist
+            # new default values merely because this binary knows about them.
+            settings_path = owner.home / ".lumabri/home.conf"
+            legacy = "".join(line for line in settings_path.read_text().splitlines(keepends=True)
+                             if not line.startswith("context=")) + "future_setting=kept\n"
+            settings_path.write_text(legacy)
+            saved = owner.settings()
             second = start("owner")
             second.expect("Household ready")
             assert second.settings() == saved
+            assert settings_path.read_bytes() == legacy.encode()
             second.quit()  # An attached second window must not kill the first tracker.
 
             wrong = start("wrong")
@@ -193,6 +202,7 @@ def main():
             resumed = start("owner")
             resumed.expect("Household ready")
             assert resumed.settings() == saved
+            assert settings_path.read_bytes() == legacy.encode()
             resumed.quit()
             subprocess.run([str(ROOT / "lumabri"), "service", "stop"], env=resumed.env,
                            check=True, capture_output=True, timeout=25)

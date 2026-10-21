@@ -23,8 +23,13 @@ PIDS=()
 failed() { echo "SEGMENT BUDGET TEST: FAIL" >&2
            for l in "$TMP"/*.log; do [[ -f $l ]] || continue
                echo "--- $(basename "$l")" >&2; tail -30 "$l" >&2; done; }
-cleanup() { kill "${PIDS[@]}" 2>/dev/null || true
-            wait "${PIDS[@]}" 2>/dev/null || true; rm -rf "$TMP"; }
+cleanup() {
+    local pid
+    # Bash 3.2 (macOS) treats an empty array as unset under nounset.
+    for pid in ${PIDS[@]+"${PIDS[@]}"}; do kill "$pid" 2>/dev/null || true; done
+    for pid in ${PIDS[@]+"${PIDS[@]}"}; do wait "$pid" 2>/dev/null || true; done
+    rm -rf "$TMP"
+}
 trap failed ERR
 trap cleanup EXIT
 

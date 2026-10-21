@@ -9,7 +9,7 @@ execution, cross-platform numerical compatibility, or concurrent capacity.
 The managed-inference roadmap supersedes the older single-chat LAN checklist
 below. Historical observations remain here as evidence, not current promises.
 
-### Roadmap status, October 20, 2026
+### Roadmap status, October 21, 2026
 
 This table separates implementation from release acceptance. The detailed PR
 entries below record the exact evidence; an open PR is not an integrated release.
@@ -32,7 +32,7 @@ that every added machine increases single-chat speed, or that the full roadmap
 is complete. See [deployment acceptance](../PRODUCTION.md#deployment-acceptance).
 
 The following PRs passed all eight final-head CI checks before normal merge on
-October 20 (no squash). Historical local-run revisions below remain unchanged;
+October 20–21 (no squash). Historical local-run revisions below remain unchanged;
 they are not retroactively described as different binaries.
 
 | PR | Tested head | Merge commit |
@@ -47,6 +47,7 @@ they are not retroactively described as different binaries.
 | #238 | `42d0ec3` | `36fd706` |
 | #239 | `f0856d8` | `6b4a229` |
 | #240 | `41463a5` | `575ea7b` |
+| #241 | `f7207b4` | `6beeabf` |
 
 - [x] Explicit HTTPS ingress (#238): the private same-user Unix
   upstream passes authentication, exact Host/Origin, history isolation, keeper
@@ -91,7 +92,14 @@ they are not retroactively described as different binaries.
   It covers a quiescent pair,
   not live rolling updates or migration of active autonomous policies.
 
-- [ ] Reported release corrections (#233–235, candidate): the workspace now
+- [x] Installed runtime startup diagnostics (#241): the strict household
+  doctor executes bounded startup probes of both Segment binaries instead of
+  counting executable files as working runtimes. Missing, blocked, invalid or
+  hung helpers fail; legacy optional diagnostics remain available. All eight
+  final-head checks passed before normal merge on October 21. This check does
+  not load a model or establish data-path, memory-lock or inference readiness.
+
+- [ ] Reported release corrections (#242, fixes #233–235, candidate): the workspace now
   persists a validated context in `/settings` and forwards it through both
   catalogue entry points. Missing/invalid legacy context defaults to 512,
   matching the API catalogue; existing allocations are not resized.
@@ -107,8 +115,14 @@ they are not retroactively described as different binaries.
   resident-range budget gate and the concurrent-session token oracle.
   A connected reduced-OLMoE test prepared two resident model identities under
   four effective engine locks and completed 108 workload outcomes in 10.9
-  seconds with no unexpected failed turns. Final-head native CI is still
-  required; this is not a new full-size or physical-LAN result.
+  seconds with no unexpected failed turns. Initial CI found two regressions:
+  Bash 3.2's empty-array cleanup masked skip status, and reopening the owner
+  TUI rewrote legacy settings with the new default context. The candidate
+  now handles empty cleanup safely and preserves the original settings file
+  when resuming an unchanged household. The full-fleet retained-data hash
+  assertion remains unchanged; diagnostics identify only the relative path.
+  Final-head native CI is still required; this is not a new full-size or
+  physical-LAN result.
 
 - [x] Sustained managed workload (#237): on October
   17, the complete local gate passed a 1,800.57-second timed workload after

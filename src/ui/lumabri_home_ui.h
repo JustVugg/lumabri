@@ -151,6 +151,11 @@ static int home_tracker_resume(HomeSettings *s, pid_t *child, char *notice, size
     }
     next.owner = 1;
     snprintf(next.tracker, sizeof next.tracker, "%s:%d", ip, chosen);
+    /* Reopening an existing household is not a settings migration. Keep its
+     * file byte-for-byte intact, including absent defaults and future fields,
+     * unless this operation actually changes its endpoint or credentials. */
+    int settings_changed = next.owner != s->owner ||
+        strcmp(next.tracker, s->tracker) || strcmp(next.token, s->token);
     snprintf(port, sizeof port, "%d", chosen);
     setenv("LUMABRI_TOKEN", next.token, 1);
     int probe = lmb_listen(chosen);
@@ -182,7 +187,7 @@ static int home_tracker_resume(HomeSettings *s, pid_t *child, char *notice, size
             }
             snprintf(keeper.snapshot.name, sizeof keeper.snapshot.name, "Household tracker");
             snprintf(keeper.snapshot.tracker, sizeof keeper.snapshot.tracker, "%s", next.tracker);
-            if (home_settings_save(&next) || home_service_save(&keeper)) {
+            if ((settings_changed && home_settings_save(&next)) || home_service_save(&keeper)) {
                 close(probe); home_service_close(&keeper);
                 snprintf(notice, cap, "Cannot persist household service configuration."); return -1;
             }
@@ -213,12 +218,15 @@ static int home_tracker_resume(HomeSettings *s, pid_t *child, char *notice, size
             (void)poll(NULL, 0, 100);
         }
         if (!ready) {
-            if (!home_service_foreground()) { (void)home_service_stop_role("tracker"); (void)home_settings_save(s); }
+            if (!home_service_foreground()) {
+                (void)home_service_stop_role("tracker");
+                if (settings_changed) (void)home_settings_save(s);
+            }
             home_stop_child(child); setenv("LUMABRI_TOKEN", s->token, 1);
             snprintf(notice, cap, "Household tracker did not become ready. Check home-tracker.log."); return -1;
         }
     }
-    if (home_settings_save(&next)) {
+    if (settings_changed && home_settings_save(&next)) {
         home_stop_child(child); setenv("LUMABRI_TOKEN", s->token, 1);
         snprintf(notice, cap, "Could not save the household. No new settings were applied."); return -1;
     }
