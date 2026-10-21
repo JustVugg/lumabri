@@ -252,6 +252,7 @@ jobs:
           make test_segment_close ENGINE=../colibri/c
           ./test_segment_close
           python3 tests/integration/backend_policy_test.py
+          python3 tests/integration/household_doctor_test.py
           test "$(OMP_NUM_THREADS=1 ./segment_node --thread-capacity)" = 1
           test "$(OMP_NUM_THREADS=4 OMP_THREAD_LIMIT=1 ./segment_node --thread-capacity)" = 1
           mkdir -p build/home-flow-models
@@ -447,6 +448,7 @@ jobs:
         run: |
           python3 tests/integration/package_household_test.py
           python3 tools/package_household.py --colibri-root ../colibri --output 'build/native candidate'
+          python3 tests/integration/household_doctor_test.py --runtime-dir 'build/native candidate/bin'
           LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --installed-package 'build/native candidate' --models-dir build/home-flow-models --joint complete --api-prepare --donor-ram-gb 1.5 --sessions 2
           python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --resident-default --expect-metrics --stall-preparation-ui
           python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --resident-default --expect-hybrid --expect-metrics
@@ -580,6 +582,7 @@ jobs:
           test "$(OMP_NUM_THREADS=1 ./segment_node --thread-capacity)" = 1
           test "$(OMP_NUM_THREADS=4 OMP_THREAD_LIMIT=1 ./segment_node --thread-capacity)" = 1
           make swarm_probe
+          python3 tests/integration/household_doctor_test.py
           make test_chat_ui
           make test_hosted_sessions
           python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester --sessions 2
@@ -704,6 +707,7 @@ jobs:
             python3 tools/package_household.py --colibri-root ../colibri --output 'build/native candidate'
             test "$('build/native candidate/bin/segment_node' --thread-capacity)" = 1
           fi
+          python3 tests/integration/household_doctor_test.py --runtime-dir 'build/native candidate/bin'
           python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --resident-default --expect-metrics
           LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --installed-package 'build/native candidate' --models-dir build/home-flow-models --joint complete --api-prepare --donor-ram-gb 1.5 --sessions 2
           python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --resident-default --expect-hybrid --expect-metrics

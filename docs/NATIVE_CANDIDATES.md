@@ -8,6 +8,15 @@ Keep the whole folder together. On macOS, open `Lumabri.command`; on Linux,
 run `./start-lumabri` from a terminal. The launcher opens the normal TUI.
 Python, pip and the Colibri source checkout are not needed to run the folder.
 
+If startup or sharing fails, run `./Lumabri.command doctor --household` on
+macOS, or `./start-lumabri doctor --household` on Linux. This tests that both
+installed Segment executables can actually start, including their linked
+library loading; it does not load model weights or start background services.
+Keep any loader error printed before the report. Reinstall a complete package
+if a runtime is missing or incompatible; do not mix individual binaries from
+different downloads. `--json` provides the same results for diagnostics.
+Passing this check does not prove model compatibility or connectivity to peers.
+
 1. On one computer, use `/create`. On the others, use `/join`, check the
    displayed identity and enter that household's key.
 2. On helpers, open **Share resources** to review requests. They do not allocate

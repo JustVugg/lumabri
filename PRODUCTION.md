@@ -224,10 +224,14 @@ advertised platform and deployment topology. At minimum:
    release storage or prove a cheaper bill. Provisioning requires a separately
    authorized provider, credentials and spending cap.
 
-`lumabri doctor --json` supplies basic diagnostics, not this acceptance result:
-it still treats Segment binaries as optional for legacy installations. A
-managed-inference release requires both Segment services and their execution
-tests. The default web/API remains loopback-only. Remote access requires the
+`lumabri doctor --household --json` checks the complete household layout and
+executes bounded startup probes of both installed Segment binaries. Missing,
+blocked, incompatible or hung executables fail this check instead of being
+reported as optional. Loader errors remain on stderr; JSON identifies each
+failed runtime. No model is loaded, allocation approved or service started.
+This is **not** model execution, memory-lock, network or release acceptance.
+Without `--household`, doctor retains the legacy optional-Segment behaviour.
+The default web/API remains loopback-only. Remote access requires the
 explicit [private upstream and HTTPS proxy](docs/HTTPS_INGRESS.md), including
 certificate, permission, streaming/cancellation and network checks on the
 actual deployment. A local TLS gate is not that deployment's acceptance.

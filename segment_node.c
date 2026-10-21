@@ -15,6 +15,7 @@
 #include "lumabri_home_net.h"
 #include "src/runtime/lumabri_compute_broker.h"
 #include "src/runtime/lumabri_node_control.h"
+#include "src/runtime/lumabri_thread_capacity.h"
 
 #include <pthread.h>
 #include <dirent.h>
@@ -1398,21 +1399,7 @@ static void preflight_signal(int *fd, char status) {
 
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--thread-capacity")) {
-#ifdef _OPENMP
-        int capacity = omp_get_num_procs();
-        /* A donor inherits the operator's OpenMP limits. Reporting hardware
-         * cores alone would overwrite OMP_NUM_THREADS=2 with --threads=12
-         * when the household launches the real engine. */
-        int configured = omp_get_max_threads();
-        int limit = omp_get_thread_limit();
-        if (configured > 0 && configured < capacity) capacity = configured;
-        if (limit > 0 && limit < capacity) capacity = limit;
-        if (capacity < 1) capacity = 1;
-        if (capacity > 256) capacity = 256;
-        printf("%d\n", capacity);
-#else
-        puts("1");
-#endif
+        printf("%u\n", lmb_engine_thread_capacity());
         return 0;
     }
     uint64_t backend_mask = 0;

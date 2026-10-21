@@ -12,6 +12,7 @@
 #include "src/runtime/lumabri_v41_contract.h"
 #include "src/runtime/lumabri_serve_control.h"
 #include "src/runtime/lumabri_compute_broker.h"
+#include "src/runtime/lumabri_thread_capacity.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -2270,6 +2271,10 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
 }
 
 int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "--thread-capacity")) {
+        printf("%u\n", lmb_engine_thread_capacity());
+        return 0;
+    }
     if (lmb_backend_request(getenv("LUMABRI_ENGINE_BACKEND"), &segment_backend_mask)) {
         fprintf(stderr, "unsupported execution backend policy; use cpu or auto\n");
         return 2;
