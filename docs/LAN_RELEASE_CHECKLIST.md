@@ -48,6 +48,7 @@ they are not retroactively described as different binaries.
 | #239 | `f0856d8` | `6b4a229` |
 | #240 | `41463a5` | `575ea7b` |
 | #241 | `f7207b4` | `6beeabf` |
+| #242 | `0a61491` | `1a968ed` |
 
 - [x] Explicit HTTPS ingress (#238): the private same-user Unix
   upstream passes authentication, exact Host/Origin, history isolation, keeper
@@ -99,7 +100,7 @@ they are not retroactively described as different binaries.
   final-head checks passed before normal merge on October 21. This check does
   not load a model or establish data-path, memory-lock or inference readiness.
 
-- [ ] Reported release corrections (#242, fixes #233–235, candidate): the workspace now
+- [x] Reported release corrections (#242, fixes #233–235): the workspace now
   persists a validated context in `/settings` and forwards it through both
   catalogue entry points. Missing/invalid legacy context defaults to 512,
   matching the API catalogue; existing allocations are not resized.
@@ -145,8 +146,34 @@ they are not retroactively described as different binaries.
   Missing, failed or unrelated publications are not readiness. The real
   byte/CAS/resident/header-only assertions remain unchanged and pass locally;
   deterministic readiness tests cover delayed publication and failure.
-  Final-head native CI is still required; this is not a new full-size or
-  physical-LAN result.
+  All eight final-head checks passed in run `39594393387` before normal merge
+  on October 21. The tested head, CI merge `4126231` and actual merge `1a968ed`
+  have the same source tree. Both downloaded Linux and Intel/OpenMP archives
+  passed manifest verification. The exact Linux archive also passed the
+  installed lifecycle on the user's PC (104 workload outcomes, four effective
+  payload locks). Native CI passed installed lifecycle and whole-fleet
+  update/rollback on all four macOS variants. The Intel/OpenMP package has
+  **not** been tested on the user's macOS 12.6 machine; that physical test is
+  explicitly deferred. These results are not full-size or physical-LAN proof.
+
+- Installed sustained-workload gate: the test driver now accepts
+  `--installed-package ... --soak-seconds 1800`, retaining the same package
+  hashes, TUI/manager/API lifecycle, isolated history and selective release
+  checks. Its default is still the ten-second CI smoke. Reports distinguish
+  requested duration, observed duration, package identity and driver hashes.
+  The initial explicit eleven-second run passed (122 outcomes, four effective
+  payload locks) against the downloaded #242 Linux package. Sustained acceptance
+  requires a completed report from the longer installed run; the older
+  checkout-based run above is not a substitute. Separately, post-merge main
+  CI run `39612543891` failed when its
+  HTTPS test started a new chat after gateway admission ended but before the
+  cancelled remote slot was reset. The candidate test now observes the exact
+  host's authenticated idle state via HTTPS with a deadline; chat failures
+  are never retried or discarded. Two complete local TLS reruns passed with
+  real reduced OLMoE, four turns, one client stop, preserved private history,
+  unchanged allocations and four effective payload locks each. The shared
+  observation's unit tests reject unknown, unauthorized or inconsistent host
+  state. These are local regression results, not remote ingress certification.
 
 - [x] Sustained managed workload (#237): on October
   17, the complete local gate passed a 1,800.57-second timed workload after

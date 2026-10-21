@@ -65,11 +65,11 @@ def process_sample(roots):
     return {"processes": result, "rss_bytes": sum(row["rss_bytes"] for row in result.values())}
 
 
-def hosts_quiescent(api, allocations):
+def hosts_quiescent(request, allocations):
     """Observe exact hosts; gateway END is not a remote cancellation ACK."""
     idle = True
     for allocation in allocations:
-        code, state = api.http(f"/api/v1/allocations/{allocation}/control")
+        code, state = request(f"/api/v1/allocations/{allocation}/control")
         assert code == 200, "host cleanup evidence unavailable"
         assert state["allocation"] == allocation and state["state"] == "accepting"
         counts = (state["connections"], state["admitted_requests"])
@@ -179,7 +179,7 @@ def verify_managed_soak(api, until, service, artifacts, seconds, max_growth_mib=
             # Wait for authenticated host observations, not a fixed delay or
             # retries of the next chat. Unknown/stuck hosts still fail.
             began = time.monotonic()
-            until(lambda: hosts_quiescent(api, model_ids),
+            until(lambda: hosts_quiescent(api.http, model_ids),
                   "cancelled host conversations did not close", 15)
             report["cancellation_cleanup"].append({"cycle": turn,
                 "elapsed_seconds": time.monotonic() - began, "hosts_idle": True})

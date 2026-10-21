@@ -143,6 +143,16 @@ macOS household variants run this gate on their newly assembled archives before
 upload. This is installed clean-start/lifecycle evidence, not a physical LAN,
 full-size capacity test, fleet upgrade or controller-journal migration.
 
+For sustained acceptance of that **same installed package**, add
+`--soak-seconds 1800` to the installed command above. The default remains a
+ten-second CI smoke; a nonzero duration must be 10–3600 seconds. The longer
+run keeps all lifecycle checks, including TUI detach, manager and API restarts,
+private history and selective retirement. It does not substitute development
+engines or modify the archive. The installed report records the requested
+duration and test-driver hashes alongside the package manifest; the workload
+report records actual elapsed time and every outcome. A failed or interrupted
+run is not sustained acceptance, even if earlier requests succeeded.
+
 Build and retain two distinct native packages in separate directories using
 `tools/package_household.py`. Never overlay files from one candidate onto the
 other. From a complete current runtime with the tiny fixture, run:
