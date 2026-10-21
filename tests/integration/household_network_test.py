@@ -4,6 +4,7 @@ Only temporary identities/settings are used. No firewall changes are made.
 This is loopback/local-interface coverage, not a physical-LAN certification.
 """
 import fcntl
+import json
 import os
 from pathlib import Path
 import pty
@@ -123,8 +124,11 @@ def main():
             owner.send(b"0.5\n")
             owner.expect("Conversation slots per new model")
             owner.send(b"2\n")
+            owner.expect("Context tokens per new plan")
+            owner.send(b"256\n")
             owner.expect("Settings saved.")
             assert owner.settings()["sessions"] == "2"
+            assert owner.settings()["context"] == "256"
             assert owner.settings()["models"] == model_folder
             assert owner.settings()["ram"] == "0.5"
             owner.action(0)
@@ -135,9 +139,39 @@ def main():
             assert saved["token"] and not saved["tracker"].startswith("10.255.255.254:")
             owner.send(b"\n"); owner.expect("What would you like to do?")
 
+            # Metadata-only catalogue fixture, not an inference test. Both
+            # entry points must forward the saved context into the real TUI.
+            small = Path(model_folder) / "small"
+            small.mkdir()
+            (small / "config.json").write_text(json.dumps({
+                "model_type": "olmoe", "num_hidden_layers": 4, "hidden_size": 64,
+                "intermediate_size": 128, "num_experts": 8, "num_experts_per_tok": 2,
+                "num_attention_heads": 4, "num_key_value_heads": 4, "vocab_size": 256,
+            }))
+            subprocess.run(["python3", str(ROOT / "tests/integration/prepare_olmoe_headers.py"),
+                            str(small)], check=True, capture_output=True, timeout=15)
+            for computers in (False, True):
+                owner.send((b"\x1b[B\x1b[B" if computers else b"") + b"\r")
+                owner.expect("Models")
+                if computers:
+                    owner.send(b"\t")
+                owner.expect("small")
+                owner.send(b"\r"); owner.expect("256 context")
+                owner.send(b"\x1b"); owner.expect("small")
+                owner.send(b"\x1b"); owner.expect("What would you like to do?")
+
+            # Simulate an older configuration plus an unknown future field.
+            # A no-op attach/restart must not migrate it, lose fields or persist
+            # new default values merely because this binary knows about them.
+            settings_path = owner.home / ".lumabri/home.conf"
+            legacy = "".join(line for line in settings_path.read_text().splitlines(keepends=True)
+                             if not line.startswith("context=")) + "future_setting=kept\n"
+            settings_path.write_text(legacy)
+            saved = owner.settings()
             second = start("owner")
             second.expect("Household ready")
             assert second.settings() == saved
+            assert settings_path.read_bytes() == legacy.encode()
             second.quit()  # An attached second window must not kill the first tracker.
 
             wrong = start("wrong")
@@ -168,6 +202,7 @@ def main():
             resumed = start("owner")
             resumed.expect("Household ready")
             assert resumed.settings() == saved
+            assert settings_path.read_bytes() == legacy.encode()
             resumed.quit()
             subprocess.run([str(ROOT / "lumabri"), "service", "stop"], env=resumed.env,
                            check=True, capture_output=True, timeout=25)

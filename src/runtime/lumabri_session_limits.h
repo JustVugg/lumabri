@@ -4,6 +4,8 @@
 #include <errno.h>
 #include <stdlib.h>
 #define LMB_HOST_MAX_SESSIONS 8u
+#define LMB_HOME_DEFAULT_CONTEXT 512u
+#define LMB_HOME_MAX_CONTEXT 1048576u
 /* Buffered request, protocol metadata and host worker stack allowance. */
 #define LMB_HOST_SESSION_BYTES (UINT64_C(12) << 20)
 
@@ -14,5 +16,9 @@ static inline int lmb_session_limit_parse(const char *text, uint32_t maximum, ui
     unsigned long n = strtoul(text, &end, 10);
     if (errno || *end || !n || n > maximum) return -1;
     *value = (uint32_t)n; return 0;
+}
+
+static inline int lmb_context_limit_parse(const char *text, uint32_t *value) {
+    return lmb_session_limit_parse(text, LMB_HOME_MAX_CONTEXT, value);
 }
 #endif

@@ -5,6 +5,51 @@
 #include <assert.h>
 
 int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "home-settings")) {
+        char tmp[] = "/tmp/lmb-home-settings.XXXXXX"; assert(mkdtemp(tmp));
+        assert(!setenv("HOME", tmp, 1));
+        HomeSettings s, saved;
+        home_settings_load(&s);
+        assert(!strcmp(s.context, "512") && !strcmp(s.sessions, "1"));
+        strcpy(s.context, "256"); assert(!home_settings_save(&s));
+        home_settings_load(&saved); assert(!memcmp(&s, &saved, sizeof s));
+        char path[1200]; assert(!home_settings_path(path, sizeof path));
+        struct stat st; assert(!stat(path, &st) && (st.st_mode & 0777) == 0600);
+        const char *invalid[] = {"", "0", "-1", "+1", " 256", "256x", "256.0",
+            "1048577", "4294967552", "18446744073709551616"};
+        for (size_t i = 0; i < sizeof invalid / sizeof *invalid; i++) {
+            uint32_t n = 99;
+            assert(lmb_context_limit_parse(invalid[i], &n) && n == 99);
+            char *args[] = {"--context", (char *)invalid[i]};
+            assert(cmd_models(2, args) == 2); /* Refuse before any inventory/network work. */
+            if (strlen(invalid[i]) < sizeof s.context) {
+                strcpy(s.context, invalid[i]);
+                assert(home_settings_save(&s));
+                home_settings_load(&s); assert(!strcmp(s.context, "256"));
+            }
+        }
+        uint32_t n = 0;
+        assert(!lmb_context_limit_parse("1", &n) && n == 1);
+        assert(!lmb_context_limit_parse("1048576", &n) && n == 1048576);
+        assert(lmb_context_limit_parse(NULL, &n) && lmb_context_limit_parse("512", NULL));
+        for (size_t i = 0; i < sizeof invalid / sizeof *invalid; i++) {
+            FILE *f = fopen(path, "w"); assert(f);
+            assert(fprintf(f, "sessions=2\ncontext=%s\n", invalid[i]) > 0);
+            assert(!fclose(f));
+            home_settings_load(&s);
+            assert(!strcmp(s.context, "512") && !strcmp(s.sessions, "2"));
+        }
+        FILE *f = fopen(path, "w"); assert(f);
+        assert(fputs("sessions=2\n", f) >= 0 && !fclose(f)); /* Older configuration. */
+        home_settings_load(&s); assert(!strcmp(s.context, "512"));
+        strcpy(s.context, "000256"); assert(!home_settings_save(&s));
+        home_settings_load(&s); assert(!strcmp(s.context, "256"));
+        assert(!unlink(path));
+        snprintf(path, sizeof path, "%s/.lumabri", tmp);
+        assert(!rmdir(path) && !rmdir(tmp));
+        puts("HOME SETTINGS: PASS (context default, strict bounds, persistence, legacy config)");
+        return 0;
+    }
     if (argc==2 && !strcmp(argv[1],"compute-hold")) {
         /* Test owner obtains the actual donor CPU permit; real model
          * kernels queue behind it. No engine result/timing is fabricated. */

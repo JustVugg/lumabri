@@ -49,6 +49,20 @@ static LMB_UNUSED uint64_t lmb_budget_mib(uint64_t bytes) {
     return rounded == UINT64_MAX ? UINT64_MAX : rounded & ~mask;
 }
 
+/* An explicit process ceiling is not permission to consume the system
+ * reserve. Unknown/exhausted physical RAM must never become a zero
+ * (unlimited) runtime budget. The runtime governor still handles subsequent
+ * changes in availability; this preflight is not an atomic reservation. */
+static LMB_UNUSED int lmb_process_budget(uint64_t requested, uint64_t available,
+                                        uint64_t reserve, uint64_t *out) {
+    if (!out) return -1;
+    *out = 0;
+    if (!available || available == UINT64_MAX || available <= reserve) return -1;
+    uint64_t usable = available - reserve;
+    *out = requested && requested < usable ? requested : usable;
+    return 0;
+}
+
 /* ceil-by-MiB is deliberately left to the caller. The proportional share
  * keeps its remainder; bytes/layers*count alone silently drops it. */
 static LMB_UNUSED uint64_t lmb_checkpoint_floor(uint64_t bytes,

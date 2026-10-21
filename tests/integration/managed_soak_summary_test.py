@@ -1,12 +1,40 @@
 """Report semantics and process ownership, not simulated inference evidence."""
 import subprocess
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from managed_soak_test import process_sample, summaries
+from managed_soak_test import hosts_quiescent, process_sample, summaries
 
 
 class SoakReportTest(unittest.TestCase):
+    def test_remote_cleanup_is_not_gateway_quiescence(self):
+        def state(allocation, connections=0, requests=0):
+            return 200, {"allocation": allocation, "state": "accepting",
+                         "connections": connections, "admitted_requests": requests}
+        api = Mock()
+        api.http.side_effect = [state("a", 1, 0), state("b"),
+                                state("a"), state("b", 1, 1),
+                                state("a"), state("b")]
+        self.assertFalse(hosts_quiescent(api, ("a", "b")))
+        self.assertFalse(hosts_quiescent(api, ("a", "b")))
+        self.assertTrue(hosts_quiescent(api, ("a", "b")))
+        self.assertEqual([call.args for call in api.http.call_args_list],
+                         [(f"/api/v1/allocations/{name}/control",) for name in ("a", "b") * 3])
+
+    def test_unknown_or_inconsistent_host_is_not_idle(self):
+        valid = {"allocation": "a", "state": "accepting", "connections": 0, "admitted_requests": 0}
+        for code, state in ((503, {}), (401, {}), (200, {}),
+                            (200, {**valid, "allocation": "b"}),
+                            (200, {**valid, "state": "drained"}),
+                            (200, {**valid, "connections": -1}),
+                            (200, {**valid, "connections": False}),
+                            (200, {**valid, "admitted_requests": 1})):
+            with self.subTest(code=code, state=state):
+                api = Mock()
+                api.http.return_value = code, state
+                with self.assertRaises((AssertionError, KeyError)):
+                    hosts_quiescent(api, ("a",))
+
     def test_rejections_and_stops_are_not_success_percentiles(self):
         rows = [{"phase": "burst", "model": "a", "outcome": "completed",
                  "ttft_seconds": .1, "elapsed_seconds": .2,

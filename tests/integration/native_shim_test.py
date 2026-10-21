@@ -17,6 +17,25 @@ import time
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def wait_registered(child, tracker, model, name, files, env, timeout=15):
+    """A listening origin is not yet a discoverable checkpoint source."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        assert child.poll() is None, "origin exited before tracker registration"
+        probe = subprocess.run([str(ROOT / "swarm_probe"), "--tracker", tracker,
+                                "--model", model], cwd=ROOT, env=env,
+                               capture_output=True, text=True,
+                               timeout=max(.05, min(3, deadline - time.monotonic())))
+        assert probe.returncode == 0, probe.stderr
+        snapshot = json.loads(probe.stdout)
+        assert snapshot["schema"] == 1
+        if any(peer["name"] == name and peer["model"] == model and
+               peer["storage"]["files"] == files for peer in snapshot["peers"]):
+            return
+        time.sleep(.05)
+    raise AssertionError("origin did not register its checkpoint before the deadline")
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="lumabri-native-shim-") as directory:
         tmp = Path(directory).resolve()  # F_GETPATH uses /private/var on Darwin
@@ -67,6 +86,8 @@ def main():
             origin = launch("origin", ["./maintainer", "--root", str(source), "--port", str(origin_port),
                 "--tracker", f"127.0.0.1:{port}", "--name", "native-origin", "--model-name", "native-cas"])
             ready(origin, origin_port)
+            registration_env = {**environment("registration-observer"), "LUMABRI_IO_TIMEOUT_MS": "1000"}
+            wait_registered(origin, f"127.0.0.1:{port}", "native-cas", "native-origin", 4, registration_env)
             loader, library = (("DYLD_INSERT_LIBRARIES", "liblumabri.dylib") if sys.platform == "darwin"
                                else ("LD_PRELOAD", "liblumabri.so"))
             observer = tmp / ("trace-sync.dylib" if sys.platform == "darwin" else "trace-sync.so")
@@ -167,6 +188,7 @@ def main():
                 "--port", str(header_port), "--tracker", f"127.0.0.1:{port}",
                 "--name", "header-origin", "--model-name", "header-only"])
             ready(header_origin, header_port)
+            wait_registered(header_origin, f"127.0.0.1:{port}", "header-only", "header-origin", 1, registration_env)
             env = {**environment("header-client"), loader: str(ROOT / library),
                    "LUMABRI_MODEL": "header-only", "LUMABRI_TRACKER": f"127.0.0.1:{port}",
                    "LUMABRI_CAS": str(tmp / "header-cas"), "LUMABRI_BLOCK_MIB": "1",

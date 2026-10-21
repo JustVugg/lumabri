@@ -5,7 +5,7 @@
 #include "lumabri_home_discovery.h"
 #include "src/ui/lumabri_resident_ui.h"
 typedef struct {
-    char tracker[256], token[LMB_TOKEN_MAX + 1], models[512], ram[32], sessions[12];
+    char tracker[256], token[LMB_TOKEN_MAX + 1], models[512], ram[32], sessions[12], context[12];
     int owner;
 } HomeSettings;
 
@@ -22,6 +22,7 @@ static void home_settings_load(HomeSettings *s) {
     snprintf(s->models, sizeof s->models, "%s/.lumabri/models", getenv("HOME") ? getenv("HOME") : ".");
     snprintf(s->ram, sizeof s->ram, "4");
     snprintf(s->sessions, sizeof s->sessions, "1");
+    snprintf(s->context, sizeof s->context, "%u", LMB_HOME_DEFAULT_CONTEXT);
     char path[1200], line[1500];
     if (home_settings_path(path, sizeof path)) return;
     FILE *f = fopen(path, "r");
@@ -37,6 +38,11 @@ static void home_settings_load(HomeSettings *s) {
         else if (!strcmp(line, "owner")) s->owner = !strcmp(eq, "1");
         else if (!strcmp(line, "sessions") && strlen(eq) == 1 && eq[0] >= '1' && eq[0] <= '8')
             snprintf(s->sessions, sizeof s->sessions, "%s", eq);
+        else if (!strcmp(line, "context")) {
+            uint32_t context;
+            if (!lmb_context_limit_parse(eq, &context))
+                snprintf(s->context, sizeof s->context, "%u", context);
+        }
     }
     fclose(f);
 }
@@ -48,6 +54,8 @@ static int home_settings_activate(const HomeSettings *s) {
 }
 
 static int home_settings_save(const HomeSettings *s) {
+    uint32_t context;
+    if (lmb_context_limit_parse(s->context, &context)) { errno = EINVAL; return -1; }
     char path[1200], temporary[1232];
     if (home_settings_path(path, sizeof path) ||
         checked_printf(temporary, sizeof temporary, "%s.XXXXXX", path)) return -1;
@@ -55,8 +63,9 @@ static int home_settings_save(const HomeSettings *s) {
     if (fd < 0) return -1;
     FILE *f = fdopen(fd, "w");
     if (!f) { close(fd); unlink(temporary); return -1; }
-    int bad = fprintf(f, "tracker=%s\ntoken=%s\nmodels=%s\nram=%s\nowner=%d\nsessions=%s\n",
-                      s->tracker, s->token, s->models, s->ram, s->owner, s->sessions[0] ? s->sessions : "1") < 0;
+    int bad = fprintf(f, "tracker=%s\ntoken=%s\nmodels=%s\nram=%s\nowner=%d\nsessions=%s\ncontext=%u\n",
+                      s->tracker, s->token, s->models, s->ram, s->owner,
+                      s->sessions[0] ? s->sessions : "1", context) < 0;
     if (fflush(f) || fsync(fd)) bad = 1;
     if (fclose(f)) bad = 1;
     if (!bad && !rename(temporary, path)) return 0;
@@ -142,6 +151,11 @@ static int home_tracker_resume(HomeSettings *s, pid_t *child, char *notice, size
     }
     next.owner = 1;
     snprintf(next.tracker, sizeof next.tracker, "%s:%d", ip, chosen);
+    /* Reopening an existing household is not a settings migration. Keep its
+     * file byte-for-byte intact, including absent defaults and future fields,
+     * unless this operation actually changes its endpoint or credentials. */
+    int settings_changed = next.owner != s->owner ||
+        strcmp(next.tracker, s->tracker) || strcmp(next.token, s->token);
     snprintf(port, sizeof port, "%d", chosen);
     setenv("LUMABRI_TOKEN", next.token, 1);
     int probe = lmb_listen(chosen);
@@ -173,7 +187,7 @@ static int home_tracker_resume(HomeSettings *s, pid_t *child, char *notice, size
             }
             snprintf(keeper.snapshot.name, sizeof keeper.snapshot.name, "Household tracker");
             snprintf(keeper.snapshot.tracker, sizeof keeper.snapshot.tracker, "%s", next.tracker);
-            if (home_settings_save(&next) || home_service_save(&keeper)) {
+            if ((settings_changed && home_settings_save(&next)) || home_service_save(&keeper)) {
                 close(probe); home_service_close(&keeper);
                 snprintf(notice, cap, "Cannot persist household service configuration."); return -1;
             }
@@ -204,12 +218,15 @@ static int home_tracker_resume(HomeSettings *s, pid_t *child, char *notice, size
             (void)poll(NULL, 0, 100);
         }
         if (!ready) {
-            if (!home_service_foreground()) { (void)home_service_stop_role("tracker"); (void)home_settings_save(s); }
+            if (!home_service_foreground()) {
+                (void)home_service_stop_role("tracker");
+                if (settings_changed) (void)home_settings_save(s);
+            }
             home_stop_child(child); setenv("LUMABRI_TOKEN", s->token, 1);
             snprintf(notice, cap, "Household tracker did not become ready. Check home-tracker.log."); return -1;
         }
     }
-    if (home_settings_save(&next)) {
+    if (settings_changed && home_settings_save(&next)) {
         home_stop_child(child); setenv("LUMABRI_TOKEN", s->token, 1);
         snprintf(notice, cap, "Could not save the household. No new settings were applied."); return -1;
     }
@@ -539,10 +556,17 @@ static int cmd_home(void) {
             if (home_field("Folder containing your model directories", next.models, sizeof next.models, 0) ||
                 home_field("Maximum RAM to offer, in GB", next.ram, sizeof next.ram, 0) ||
                 home_field("Conversation slots per new model (1–8; one turn runs at a time, bounded FIFO queue)",
-                           next.sessions, sizeof next.sessions, 0)) continue;
+                           next.sessions, sizeof next.sessions, 0) ||
+                home_field("Context tokens per new plan (1–1048576; higher values reserve more memory)",
+                           next.context, sizeof next.context, 0)) continue;
             if (strlen(next.sessions) != 1 || next.sessions[0] < '1' || next.sessions[0] > '8') {
                 snprintf(notice, sizeof notice, "Choose 1–8 conversation slots. Additional slots reserve separate conversation memory."); continue;
             }
+            uint32_t context;
+            if (lmb_context_limit_parse(next.context, &context)) {
+                snprintf(notice, sizeof notice, "Context must be a whole number from 1 to 1048576. Each model also has its own limit."); continue;
+            }
+            snprintf(next.context, sizeof next.context, "%u", context);
             char *end; double ram = strtod(next.ram, &end);
             if (*end || !isfinite(ram) || ram <= 0 || ram > 1048576) {
                 snprintf(notice, sizeof notice, "RAM limit must be a positive number of GB."); continue;
@@ -550,7 +574,7 @@ static int cmd_home(void) {
             if (home_settings_save(&next)) home_error_dialog("Could not save settings", "Check that your home directory is writable, then retry.");
             else {
                 s = next;
-                snprintf(notice, sizeof notice, "Settings saved. RAM %.20s GB applies on the next sharing start; active allocations are unchanged.", s.ram);
+                snprintf(notice, sizeof notice, "Settings saved. Context %u for new plans; RAM %.20s GB on next sharing start. Active allocations unchanged.", context, s.ram);
             }
         } else if (key == 'n') {
             if (tracker_child <= 0 && home_tracker_resume(&s, &tracker_child, notice, sizeof notice)) continue;
@@ -571,8 +595,9 @@ static int cmd_home(void) {
                 char *args[] = {"--join", s.tracker, "--ram-gb", s.ram};
                 rc = cmd_donor(4, args);
             } else {
-                char *args[] = {"--tracker", s.tracker, "--models-dir", s.models, "--sessions", s.sessions, "--computers"};
-                rc = cmd_models(key == 'p' ? 7 : 6, args);
+                char *args[] = {"--tracker", s.tracker, "--models-dir", s.models,
+                    "--sessions", s.sessions, "--context", s.context, "--computers"};
+                rc = cmd_models(key == 'p' ? 9 : 8, args);
             }
             if (g_stopping) break;
             install_chat_signal_handlers();

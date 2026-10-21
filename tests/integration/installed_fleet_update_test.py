@@ -262,7 +262,8 @@ class Fleet:
             assert state["live"] and state["model_count"] == state["reserved_total_bytes"] == 0
         assert not self.service("chatter")["prepare"]["live"]
         for path, digest in self.expected_files.items():
-            assert path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == digest, "upgrade altered retained durable data"
+            assert path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == digest, (
+                "upgrade altered retained durable data", str(path.relative_to(self.root)))
         for node in self.nodes:
             current = {role: state["instance"] for role, state in self.service(node).items() if state["live"]}
             for role, instance in current.items():

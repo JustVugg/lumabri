@@ -23,13 +23,18 @@ PIDS=()
 failed() { echo "SEGMENT BUDGET TEST: FAIL" >&2
            for l in "$TMP"/*.log; do [[ -f $l ]] || continue
                echo "--- $(basename "$l")" >&2; tail -30 "$l" >&2; done; }
-cleanup() { kill "${PIDS[@]}" 2>/dev/null || true
-            wait "${PIDS[@]}" 2>/dev/null || true; rm -rf "$TMP"; }
+cleanup() {
+    local pid
+    # Bash 3.2 (macOS) treats an empty array as unset under nounset.
+    for pid in ${PIDS[@]+"${PIDS[@]}"}; do kill "$pid" 2>/dev/null || true; done
+    for pid in ${PIDS[@]+"${PIDS[@]}"}; do wait "$pid" 2>/dev/null || true; done
+    rm -rf "$TMP"
+}
 trap failed ERR
 trap cleanup EXIT
 
-[[ -x ./segment_node && -x ./tracker && -f tiny_olmoe/config.json ]] ||
-    { echo "SEGMENT BUDGET TEST: SKIP (needs segment_node, tracker, tiny_olmoe)"; exit 0; }
+[[ -x ./segment_node && -x ./tracker && -x ./segment_budget_probe && -f tiny_olmoe/config.json ]] ||
+    { echo "SEGMENT BUDGET TEST: SKIP (needs segment_node, tracker, segment_budget_probe, tiny_olmoe; exit 77 is not PASS)"; exit 77; }
 
 wait_port() { for _ in $(seq 1 200); do
         (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && { exec 3<&-; exec 3>&-; return 0; }

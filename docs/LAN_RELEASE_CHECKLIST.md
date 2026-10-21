@@ -9,7 +9,7 @@ execution, cross-platform numerical compatibility, or concurrent capacity.
 The managed-inference roadmap supersedes the older single-chat LAN checklist
 below. Historical observations remain here as evidence, not current promises.
 
-### Roadmap status, October 20, 2026
+### Roadmap status, October 21, 2026
 
 This table separates implementation from release acceptance. The detailed PR
 entries below record the exact evidence; an open PR is not an integrated release.
@@ -32,7 +32,7 @@ that every added machine increases single-chat speed, or that the full roadmap
 is complete. See [deployment acceptance](../PRODUCTION.md#deployment-acceptance).
 
 The following PRs passed all eight final-head CI checks before normal merge on
-October 20 (no squash). Historical local-run revisions below remain unchanged;
+October 20–21 (no squash). Historical local-run revisions below remain unchanged;
 they are not retroactively described as different binaries.
 
 | PR | Tested head | Merge commit |
@@ -46,6 +46,8 @@ they are not retroactively described as different binaries.
 | #237 | `3e006cf` | `01e3f86` |
 | #238 | `42d0ec3` | `36fd706` |
 | #239 | `f0856d8` | `6b4a229` |
+| #240 | `41463a5` | `575ea7b` |
+| #241 | `f7207b4` | `6beeabf` |
 
 - [x] Explicit HTTPS ingress (#238): the private same-user Unix
   upstream passes authentication, exact Host/Origin, history isolation, keeper
@@ -75,7 +77,7 @@ they are not retroactively described as different binaries.
   including the installed gate on all four native macOS variants. This is not
   fleet update, full-size capacity or physical deployment certification.
 
-- [ ] Whole-household package update (local candidate): the October 20 Linux
+- [x] Whole-household package update (#240): the October 20 Linux
   run passed `01e3f86` → `42d0ec3` → `01e3f86`, using complete clean packages
   and the same four isolated homes. Each stage prepared two co-resident
   reduced-OLMoE identities with fresh donor approvals, generated through stable
@@ -85,8 +87,66 @@ they are not retroactively described as different binaries.
   data survived both switches; no snapshot was restored and no journal
   deleted. All twelve prepared engines reported effective payload locks.
   `installed-fleet-update.json` retains package hashes and all three stages.
-  Native CI/review of this new gate is pending. It covers a quiescent pair,
+  All eight final-head checks passed before normal merge, including the
+  installed update/rollback gate on all four native macOS variants.
+  It covers a quiescent pair,
   not live rolling updates or migration of active autonomous policies.
+
+- [x] Installed runtime startup diagnostics (#241): the strict household
+  doctor executes bounded startup probes of both Segment binaries instead of
+  counting executable files as working runtimes. Missing, blocked, invalid or
+  hung helpers fail; legacy optional diagnostics remain available. All eight
+  final-head checks passed before normal merge on October 21. This check does
+  not load a model or establish data-path, memory-lock or inference readiness.
+
+- [ ] Reported release corrections (#242, fixes #233–235, candidate): the workspace now
+  persists a validated context in `/settings` and forwards it through both
+  catalogue entry points. Missing/invalid legacy context defaults to 512,
+  matching the API catalogue; existing allocations are not resized.
+  Segment caps an explicit process limit at current available RAM minus the
+  system reserve and refuses unavailable/exhausted headroom before adapter
+  open. This preflight is not an atomic machine-wide reservation: the runtime
+  governor and owned-payload residency checks remain enabled.
+  `make fixture PYTHON=/path/to/python` selects the fixture interpreter;
+  missing prerequisites in the budget/multi-session gates exit 77, not 0.
+  Local October 20 checks passed: strict-warning household build, settings
+  roundtrip/bounds, both actual PTY catalogue paths, physical preflight refusal
+  with the real node and its supervisor pipe, memory-budget sanitizers, the
+  resident-range budget gate and the concurrent-session token oracle.
+  A connected reduced-OLMoE test prepared two resident model identities under
+  four effective engine locks and completed 108 workload outcomes in 10.9
+  seconds with no unexpected failed turns. Initial CI found two regressions:
+  Bash 3.2's empty-array cleanup masked skip status, and reopening the owner
+  TUI rewrote legacy settings with the new default context. The candidate
+  now handles empty cleanup safely and preserves the original settings file
+  when resuming an unchanged household. The full-fleet retained-data hash
+  assertion remains unchanged; diagnostics identify only the relative path.
+  The clean `85bb08b` Linux package passed the complete installed fleet
+  `01e3f86` → `85bb08b` → `01e3f86` test with twelve effective locks and
+  retained settings, identities, history and journals. The same runtime
+  binaries then passed a 1,800.81-second checkout-harness workload: 10,100
+  complete requests, 4,332 explicit overload refusals and 1,444 client stops,
+  with no unexpected failed turns. Sixty-one quiescent samples recorded
+  aggregate RSS from 90,726,400 to 92,913,664 bytes (maximum 93,241,344).
+  This is reduced-OLMoE Linux loopback evidence, not an installed 30-minute
+  run or deployment capacity certification.
+  The next native CI exposed a workload-harness cancellation race on ARM:
+  gateway demand returning to zero did not acknowledge remote slot cleanup.
+  The workload now also waits for authenticated idle host observations after
+  a client stop, with a bounded deadline; it never retries or discards a chat
+  result. Unknown host evidence fails. Five unit tests and the installed
+  two-model lifecycle pass locally (104 outcomes, four effective locks).
+  A separate Intel artifact-service timeout was infrastructure failure, not
+  an inference result. Neither failure is counted as a green check.
+  The following Linux run exposed another test startup race: a listening
+  maintainer had not yet registered the checkpoint when the planner's shim
+  reader started. The native shim gate now waits for the exact source/model
+  and file count in the authenticated tracker snapshot, with a deadline.
+  Missing, failed or unrelated publications are not readiness. The real
+  byte/CAS/resident/header-only assertions remain unchanged and pass locally;
+  deterministic readiness tests cover delayed publication and failure.
+  Final-head native CI is still required; this is not a new full-size or
+  physical-LAN result.
 
 - [x] Sustained managed workload (#237): on October
   17, the complete local gate passed a 1,800.57-second timed workload after

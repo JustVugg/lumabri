@@ -8,7 +8,7 @@
 static LmbTuiState *preparation_catalogue(const char *tracker,const LmbPreparationRequest *r) {
     HomeSettings settings; home_settings_load(&settings);
     LmbTuiState *st=calloc(1,sizeof *st); if (!st) return NULL;
-    st->context=r ? r->context : 512; st->sessions=r ? r->sessions : 1; st->max_new=r ? r->max_new : 128;
+    st->context=r ? r->context : LMB_HOME_DEFAULT_CONTEXT; st->sessions=r ? r->sessions : 1; st->max_new=r ? r->max_new : 128;
     if (checked_printf(st->root,sizeof st->root,"%s",settings.models) ||
         checked_printf(st->tracker,sizeof st->tracker,"%s",tracker)) { free(st); return NULL; }
     if (r) for (uint32_t i=0;i<r->node_count;i++) strcpy(st->selected_nodes[i],r->nodes[i]);
