@@ -1442,6 +1442,7 @@ int main(int argc, char **argv) {
         usage(argv[0]); return 2;
     }
     uint32_t context = 4096, max_rows = 256, max_sessions = 16, threads = 0;
+    int max_rows_given = arg_value(argc, argv, "--max-rows") != NULL;
     uint32_t run_queue = 32, run_wait_ms = 30000;
     uint32_t memory_limit_mb = 0, model_layers = 0, preflight_fd_u32 = 0;
     uint64_t model_bytes = 0;
@@ -1746,6 +1747,12 @@ int main(int argc, char **argv) {
                     "%.1f MB per session\n",
             (double)process_limit / 1e9,
             (double)node.session_memory_limit_bytes / 1e6);
+    /* The 256 default is an upper bound, not a request: engines such as OLMoE
+     * cap a batch at 128 rows, and a node started without --max-rows must
+     * not refuse to serve them. An explicit --max-rows is still checked. */
+    if (!max_rows_given && node.cap.max_batch_rows &&
+        max_rows > node.cap.max_batch_rows)
+        max_rows = node.cap.max_batch_rows;
     if (end > node.cap.num_layers || context > node.cap.max_context_tokens ||
         max_rows > node.cap.max_batch_rows) {
         fprintf(stderr, "requested range/context/rows exceed model capabilities\n");
