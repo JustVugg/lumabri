@@ -1091,6 +1091,7 @@ test: all test_weight_cache test_key_rotation test_hedge test_local_fallback tes
 		test_scheduler test_run_gate test_tcp_latency test_planner_io
 	./test_chat_ui home-settings
 	$(PYTHON) tests/integration/test_prerequisites_test.py
+	./test_tracker_history
 	bash ./tests/integration/selftest.sh
 	bash ./tests/integration/donate_test.sh
 	bash ./tests/integration/signed_donor_test.sh
@@ -1157,7 +1158,6 @@ test: all test_weight_cache test_key_rotation test_hedge test_local_fallback tes
 	./test_process_memory
 	./test_engine_memory
 	./test_engine_memory_guard
-	./test_tracker_history
 	python3 tests/integration/engine_memory_boundary_test.py
 	./test_serve_control
 	./test_host_session_pool
