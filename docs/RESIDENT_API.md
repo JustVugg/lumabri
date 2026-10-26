@@ -518,14 +518,41 @@ other participants must still seal or supply their own proof. All participants
 must confirm before the coordinator declares the allocation released. Do not
 downgrade a live controller to a binary that only reads version 1 journals.
 
-Journals are bounded to 256 operations of at most 4 KiB each plus one transaction
-file; at that limit new operations refuse to start rather than evicting evidence.
-Each donor's separate receipt store is also bounded to 256 entries of 168 bytes
-plus a transaction file and lock. If persistence fails after shutdown, its
-in-memory slot is retained for reconciliation rather than reused silently.
-Lifetime records are bounded to 4096 immutable entries of 188 bytes plus a
-directory lock. They are never automatically evicted or reused; reaching that
-limit refuses a new engine launch rather than deleting release evidence.
+The legacy flat namespaces hold the first 256 retirement journals/receipts and
+4096 allocation-lifetime records. These are **indexing thresholds, not lifetime
+operation limits**. Subsequent exact IDs use private
+`history-v1/XX/YY/<allocation>.<suffix>` paths. Records remain bounded individually
+(retirement journal at most 4 KiB, donor receipt 168 bytes, lifetime 188 bytes),
+but total history grows with operations and requires disk capacity. No receipt,
+unfinished intent or lifetime inode is evicted or relocated. In particular,
+inherited process-lifetime locks retain the original inode. Readers accept
+both layouts, and a repeated old operation retains its original fences.
+The tracker additionally stores exact accepted checkpoint roots and per-file
+integrity proofs in `<peer-bindings>.history`. Cache eviction or restart cannot
+reopen a model name with a different root or silently accept changed file
+hashes. Signing-key rank is recomputed against the current configured trust
+set when a record is loaded; a newer valid signature can upgrade the same
+root/hashes. Queries with missing or corrupt evidence fail closed.
+
+Peer ownership remains in the append-only legacy bindings file, with an exact
+private index to check entries beyond the RAM cache. The indexed metadata is
+identity/integrity evidence, not model weights or conversation state. Back up
+the tracker state together; do not delete historical records to free slots or
+reuse a model name for a changed checkpoint. Such a checkpoint needs a new name.
+These guarantees apply to records accepted by the upgraded tracker. An older
+tracker binary does not provide the same history enforcement and is not a
+supported downgrade target once this metadata is in use.
+
+If durable writing fails, the mutation remains unconfirmed; a donor's in-memory
+reservation is retained for reconciliation, not silently reused.
+
+This storage layout requires index-aware binaries on each upgraded participant.
+Do not downgrade a used indexed store to a flat-only binary or delete history to
+make it start. The installed rollback gate proves only its tested version pair;
+an earlier successful flat-only test does not certify rollback after indexed
+records have been created. Back up owner state and retain all evidence across
+upgrades. Exact allocation management searches the complete saved plan library,
+not its bounded UI page.
 
 This is a controlled release primitive, not automatic elasticity or cloud
 deprovisioning. It does not delete model checkpoints, CAS caches or chat history,

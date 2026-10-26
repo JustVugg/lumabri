@@ -218,6 +218,31 @@ static size_t home_resident_library_list(const char *tracker, LmbResidentPlan *p
     closedir(d); return n;
 }
 
+/* Management resolves an exact allocation, not a truncated UI page. Keep
+ * bounded memory even with years of retained plans; duplicate identities are
+ * ambiguous and must not authorize a retirement of either record. */
+static int home_resident_library_find(const char *tracker,const uint8_t allocation[32],LmbResidentPlan *out) {
+    char dir[1200];
+    if (home_resident_library_directory(dir,sizeof dir)) return -1;
+    DIR *d=opendir(dir); if (!d) return -1;
+    LmbResidentPlan *candidate=calloc(1,sizeof *candidate);
+    int found=0,bad=!candidate; struct dirent *entry;
+    while (!bad) {
+        errno=0; entry=readdir(d);
+        if (!entry) { bad=errno!=0; break; }
+        if (strlen(entry->d_name)!=69 || strcmp(entry->d_name+64,".plan")) continue;
+        char hex[65],path[1400]; uint8_t hash[32];
+        memcpy(hex,entry->d_name,64); hex[64]=0;
+        if (lmb_unhex(hash,hex,32) || checked_printf(path,sizeof path,"%s/%s",dir,entry->d_name)) continue;
+        if (home_resident_plan_read(path,tracker,candidate)) continue;
+        if (memcmp(candidate->allocation,allocation,32)) continue;
+        if (found++) { bad=1; break; }
+        *out=*candidate;
+    }
+    free(candidate); closedir(d);
+    return !bad && found==1 ? 0 : -1;
+}
+
 static int home_resident_observation_key(const LmbResidentPlan *p, LmbCalKey *key) {
     memset(key, 0, sizeof *key);
     if (!home_resident_plan_valid(p) || !p->observation.build_id[0]) return -1;

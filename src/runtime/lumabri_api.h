@@ -114,13 +114,7 @@ static int api_engine_error(void *opaque, const char *message) {
     free(payload.p); return bad ? -1 : 0;
 }
 static int api_find_plan(const char *tracker, const uint8_t allocation[32], LmbResidentPlan *out) {
-    LmbResidentPlan *plans=calloc(64,sizeof *plans); if (!plans) return -1;
-    size_t n=home_resident_library_list(tracker,plans,64); int found=0;
-    for (size_t i=0; i<n; i++) if (!memcmp(plans[i].allocation,allocation,32)) {
-        if (found++) { free(plans); return -1; }
-        *out=plans[i];
-    }
-    free(plans); return found==1 ? 0 : -1;
+    return home_resident_library_find(tracker,allocation,out);
 }
 #include "lumabri_managed_models.h"
 #include "lumabri_retirement.h"
@@ -411,6 +405,8 @@ static void api_connection_dispatch(int fd, int access_dir, unsigned port, const
     int policy=!strcmp(request.path,"/api/v1/portfolio-policy");
     int elastic=!strcmp(request.path,"/api/v1/elastic-policy");
     int preparation=!strcmp(request.path,"/api/v1/preparation");
+    const char *preparation_after="/api/v1/preparation/after/";
+    int preparation_page=!strncmp(request.path,preparation_after,strlen(preparation_after));
     int management=preparation || policy || elastic || capacity || capacity_apply || !strncmp(request.path,"/api/v1/allocations/",20);
     if (management && !strcmp(request.method,"POST") && !lmb_management_allows(access_dir,&user))
         api_error(fd,403,"management_permission_required");
@@ -439,8 +435,9 @@ static void api_connection_dispatch(int fd, int access_dir, unsigned port, const
         if (lmb_operator_allows(access_dir,&user)) api_demand_http(fd);
         else api_error(fd,403,"operator_permission_required");
     }
-    else if (preparation && !strcmp(request.method,"GET") && !request.length) {
-        if (lmb_management_allows(access_dir,&user)) api_preparation_list(fd,access_dir,tracker);
+    else if ((preparation || preparation_page) && !strcmp(request.method,"GET") && !request.length) {
+        if (lmb_management_allows(access_dir,&user)) api_preparation_list(fd,access_dir,tracker,
+            preparation_page ? request.path+strlen(preparation_after) : "");
         else api_error(fd,403,"management_permission_required");
     }
     else if (management && !capacity && !capacity_apply && !policy && !elastic && !preparation && !strcmp(request.method,"GET") && !request.length)

@@ -145,26 +145,39 @@ static int preparation_status(int dir,const char *tracker,const char *id,int can
         cap_str(body,",\"approval_replayed\":false}")) return 500;
     return 200;
 }
-static void api_preparation_list(int fd,int access,const char *tracker) {
-    int dir=preparation_dir(access),scan=dir<0 ? -1 : openat(dir,".",O_RDONLY|O_DIRECTORY|O_CLOEXEC);
-    DIR *d=scan<0 ? NULL : fdopendir(scan); Cap body={0}; unsigned count=0;
-    int bad=!d || cap_str(&body,"{\"schema\":1,\"operations\":[");
-    struct dirent *e;
-    while (!bad && (e=readdir(d))) {
-        if (strlen(e->d_name)!=70 || strcmp(e->d_name+64,".state")) continue;
-        char id[65]; memcpy(id,e->d_name,64); id[64]=0;
+static int preparation_list(int dir,const char *tracker,const char *after,Cap *body) {
+    if (after[0] && !lmb_preparation_hex(after)) return 400;
+    unsigned count=0;
+    LmbJournalPage page={0};
+    int bad=dir<0 || lmb_journal_page(dir,".state",after,&page) || cap_str(body,"{\"schema\":1,\"operations\":[");
+    unsigned shown=page.count>LMB_JOURNAL_PAGE ? LMB_JOURNAL_PAGE : page.count;
+    for (unsigned i=0;!bad && i<shown;i++) {
+        char id[65]; memcpy(id,page.names[i],64); id[64]=0;
         HomeServiceSnapshot s; struct stat st;
         if (!lmb_preparation_hex(id) || preparation_load(dir,id,&s)) { bad=1; break; }
         if (strcmp(s.tracker,tracker)) continue;
-        if (fstatat(dir,e->d_name,&st,AT_SYMLINK_NOFOLLOW) || ++count>256) { bad=1; break; }
-        bad=api_addf(&body,"%s{\"operation\":\"%s\",\"updated_at\":%llu,\"recorded_state\":\"%s\",\"detail\":",
+        int record=lmb_journal_open(dir,page.names[i],O_RDONLY);
+        if (record<0) { bad=1; break; }
+        bad=fstat(record,&st); close(record); if (bad) break;
+        count++;
+        bad=api_addf(body,"%s{\"operation\":\"%s\",\"updated_at\":%llu,\"recorded_state\":\"%s\",\"detail\":",
             count>1 ? "," : "",id,(unsigned long long)st.st_mtime,
             s.state==HOME_SVC_DONE ? "done" : s.state==HOME_SVC_FAILED ? "failed" : "requires_live_check") ||
-            api_json_text(&body,s.detail) || preparation_results_json(&body,&s) || cap_str(&body,"}");
+            api_json_text(body,s.detail) || preparation_results_json(body,&s) || cap_str(body,"}");
     }
-    if (!bad) bad=cap_str(&body,"]}");
-    if (bad) api_error(fd,503,"preparation_history_unavailable"); else (void)api_response(fd,200,body.p);
-    if (d) closedir(d); else if (scan>=0) close(scan);
+    /* Advance over scanned keys even when they belong to another tracker.
+     * An empty page can therefore still have a next cursor. */
+    char next[65]={0};
+    if (page.count>LMB_JOURNAL_PAGE) memcpy(next,page.names[LMB_JOURNAL_PAGE-1],64);
+    if (!bad) bad=api_addf(body,"],\"next_cursor\":\"%s\",\"order\":\"operation_id\","
+        "\"page_limit\":%u,\"history_policy\":\"exact_records_retained_disk_space_required\"}",next,LMB_JOURNAL_PAGE);
+    return bad ? 503 : 200;
+}
+static void api_preparation_list(int fd,int access,const char *tracker,const char *after) {
+    int dir=preparation_dir(access); Cap body={0};
+    int status=preparation_list(dir,tracker,after,&body);
+    if (status!=200) api_error(fd,(unsigned)status,status==400 ? "invalid_history_cursor" : "preparation_history_unavailable");
+    else (void)api_response(fd,200,body.p);
     if (dir>=0) close(dir);
     free(body.p);
 }

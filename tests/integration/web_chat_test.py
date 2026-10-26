@@ -441,6 +441,37 @@ async def exercise(port, alice, bob, artifacts, env):
             assert management_requests[-1]["action"] == action
         assert management_requests[0]["revision"] == "9007199254740993", "browser rounded the fence"
         await page.screenshot(path=str(artifacts / "web-management.png"))
+        # Explicit history transport fixture: bounded pages must not drop the
+        # selected in-flight operation when it is outside the current page.
+        history_first, history_second = "11" * 32, "22" * 32
+        history_requests = []
+        async def preparation_page_fixture(route):
+            if route.request.method == "POST":
+                request = route.request.post_data_json
+                assert request["action"] == "status", request
+                await route.fulfill(json={"state": "done", "live": False, "detail": "Historical preparation",
+                    "allocations": [], "results_known": True})
+                return
+            later = "/after/" in route.request.url
+            history_requests.append(route.request.url)
+            await route.fulfill(json={"operations": [{"operation": history_second if later else history_first,
+                "updated_at": 1, "recorded_state": "done", "detail": "History page fixture"}],
+                "next_cursor": "" if later else history_first, "page_limit": 256, "order": "operation_id"})
+        await page.route("**/api/v1/preparation**", preparation_page_fixture)
+        await page.locator("#prepare-history-first").click()
+        await expect(page.locator("#prepare-operation")).to_have_value(history_first)
+        await expect(page.locator("#prepare-history-next")).to_be_visible()
+        await page.locator("#prepare-history-next").click()
+        await expect(page.locator("#prepare-history-page")).to_contain_text("End of history")
+        await expect(page.locator("#prepare-operation")).to_have_value(history_first)
+        await expect(page.locator("#prepare-operation")).to_contain_text("outside this page")
+        assert history_requests[-1].endswith("/after/" + history_first)
+        await expect(page.locator("#prepare-history-next")).to_be_hidden()
+        await page.locator("#prepare-operation").select_option(history_second)
+        await page.locator("#prepare-history-first").click()
+        await expect(page.locator("#prepare-operation")).to_have_value(history_second)
+        await expect(page.locator("#prepare-history-next")).to_be_visible()
+        await page.unroute("**/api/v1/preparation**", preparation_page_fixture)
         subprocess.run([str(ROOT / "lumabri"), "api", "manage-revoke", "bob"], env=env,
                        capture_output=True, text=True, check=True, timeout=10)
         await page.locator("#refresh").click(); await page.locator("#workspace-refresh").click()

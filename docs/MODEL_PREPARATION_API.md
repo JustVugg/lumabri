@@ -39,8 +39,15 @@ catalogue inspection, not preview/start/cancel or operation-history access.
    "cancel"` requests cleanup of incomplete preparation. Already READY models
    in a joint batch remain loaded. A cancellation acknowledgement is not proof
    that cleanup has already completed; continue observing.
-5. `GET /api/v1/preparation` lists durable receipts for this household. Use
-   status to check a recorded running operation against its live keeper.
+5. `GET /api/v1/preparation` lists a page of durable receipts for this household.
+   When `next_cursor` is nonempty, request
+   `GET /api/v1/preparation/after/<next_cursor>` for the next page. Each page
+   covers at most 256 operation IDs, in ascending ID order, not chronological order;
+   filtering by household can leave an empty page with a next cursor. Refresh
+   from the first page to see concurrent new keys before the cursor. Use status
+   to check a recorded running operation against its live keeper. The web view
+   exposes refresh/next-page controls and keeps the selected operation when
+   paging, even if that operation is outside the displayed page.
 
 Status and history include `results_known` and an ordered `allocations` array:
 each entry binds the original catalogue `name` to the exact allocation `id`.
@@ -85,8 +92,13 @@ its ID with identical parameters only observes it, even after completion,
 failure or API restart. Reusing the ID for different parameters returns 409.
 No receipt replays donor approval or creates a replacement allocation.
 
-Receipts are owner-private, bounded to 256 intents, and progress snapshots are
-checksummed and atomically replaced. They do not persist raw C pointers or use
+Receipts are owner-private. The first 256 intents keep their legacy flat paths;
+new IDs after that threshold use `history-v1/XX/YY/<operation>.intent`, where
+XX/YY are the first four hexadecimal ID characters. Snapshots follow their
+intent directory. Existing records are not relocated, deleted or reused.
+Exact-ID status/retry works across both layouts. History requires disk space;
+storage failures still stop new mutations rather than discard evidence.
+Progress snapshots are checksummed and atomically replaced. They do not persist raw C pointers or use
 PIDs as authority. Damaged receipts fail closed. `interrupted_or_starting` means
 that the last running snapshot cannot currently be confirmed through its exact
 keeper incarnation; it is not permission for an automatic retry. Inspect

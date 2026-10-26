@@ -268,9 +268,24 @@ static void retirement_journal_test(void) {
     assert(lmb_retirement_store(dir,name,&state)<0);
     assert(!unlinkat(dir,"pending",0));
     assert(!lmb_retirement_load(dir,name,&readback) && readback.phase==LMB_RET_DONE);
-    assert(!unlinkat(dir,name,0)); assert(!unlinkat(dir,"access.lock",0));
+    assert(!unlinkat(dir,name,0));
+    for (unsigned i=0;i<257;i++) {
+        snprintf(name,sizeof name,"%064x.retire",i);
+        assert(!lmb_retirement_store(dir,name,&state));
+    }
+    for (unsigned i=0;i<257;i++) {
+        snprintf(name,sizeof name,"%064x.retire",i);
+        assert(!lmb_retirement_load(dir,name,&readback) && readback.phase==LMB_RET_DONE && readback.released==3);
+        int at=lmb_journal_location(dir,name); assert(at>=0 && !unlinkat(at,name,0)); close(at);
+    }
+    int history=lmb_journal_child(dir,LMB_JOURNAL_HISTORY,0); assert(history>=0);
+    int first=lmb_journal_child(history,"00",0); assert(first>=0);
+    assert(!unlinkat(first,"00",AT_REMOVEDIR)); close(first);
+    assert(!unlinkat(history,"00",AT_REMOVEDIR)); close(history);
+    assert(!unlinkat(dir,LMB_JOURNAL_HISTORY,AT_REMOVEDIR));
+    assert(!unlinkat(dir,"access.lock",0));
     close(lock); close(dir); assert(!unlinkat(access,"retirements",AT_REMOVEDIR)); close(access); assert(!rmdir(path));
-    puts("RETIREMENT JOURNAL: PASS (atomic progress, exact fences, partial release retained, unsafe files refused)");
+    puts("RETIREMENT JOURNAL: PASS (257 exact records, atomic progress, exact fences, partial release retained, unsafe files refused)");
 }
 int main(void) {
     signal(SIGPIPE,SIG_IGN);

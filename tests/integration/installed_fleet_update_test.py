@@ -377,7 +377,7 @@ class Fleet:
                 for lock in (self.root / node / ".lumabri/service").glob("*.lock"):
                     with lock.open("rb") as guard:
                         fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                for lock in (self.root / node / ".lumabri/service/allocation-lifetimes").glob("*.lifetime"):
+                for lock in (self.root / node / ".lumabri/service/allocation-lifetimes").rglob("*.lifetime"):
                     assert lock.stat().st_size == 188 and lock.read_bytes().startswith(b"LMBLIF1\0")
                     with lock.open("rb") as guard:
                         fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)

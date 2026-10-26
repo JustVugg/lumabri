@@ -72,14 +72,26 @@ int main(void) {
         r.allocation[1]=(uint8_t)i; r.phase=LMB_RECEIPT_PREPARED;
         assert(!lmb_retired_store(dir,&r));
     }
-    r.allocation[2]=1; assert(lmb_retired_store(dir,&r)); /* bounded, no silent eviction */
+    r.allocation[2]=1; assert(!lmb_retired_store(dir,&r)); /* indexed, no evidence evicted */
+    assert(!lmb_retired_load(dir,r.allocation,&readback) && readback.phase==LMB_RECEIPT_PREPARED);
+    r.phase=LMB_RECEIPT_DONE; assert(!lmb_retired_store(dir,&r));
+    assert(!lmb_retired_load(dir,r.allocation,&readback) && readback.phase==LMB_RECEIPT_DONE);
+    assert(!lmb_retired_sync(dir,r.allocation));
+    lmb_retired_name(r.allocation,name);
+    int history=lmb_journal_location(dir,name); assert(history>=0);
+    assert(!unlinkat(history,name,0)); close(history);
     r.allocation[2]=0; r.phase=LMB_RECEIPT_DONE; assert(!lmb_retired_store(dir,&r));
     for (unsigned i=0;i<LMB_RETIRED_RECEIPTS_MAX;i++) {
         r.allocation[1]=(uint8_t)i; lmb_retired_name(r.allocation,name); assert(!unlinkat(dir,name,0));
     }
+    history=lmb_journal_child(dir,LMB_JOURNAL_HISTORY,0); assert(history>=0);
+    int first=lmb_journal_child(history,"01",0); assert(first>=0);
+    assert(!unlinkat(first,"ff",AT_REMOVEDIR)); close(first);
+    assert(!unlinkat(history,"01",AT_REMOVEDIR)); close(history);
+    assert(!unlinkat(dir,LMB_JOURNAL_HISTORY,AT_REMOVEDIR));
     assert(!unlinkat(dir,"lock",0)); close(lock); close(dir);
     int base=open(path,O_RDONLY|O_DIRECTORY); assert(base>=0);
     assert(!unlinkat(base,"retired-allocations",AT_REMOVEDIR)); close(base); assert(!rmdir(path));
-    puts("RETIRED RECEIPTS: PASS (intent is not release, immutable identity, sync failure, restart, bounded store, unsafe entries rejected)");
+    puts("RETIRED RECEIPTS: PASS (intent is not release, immutable identity, sync failure, restart, indexed history, unsafe entries rejected)");
     return 0;
 }

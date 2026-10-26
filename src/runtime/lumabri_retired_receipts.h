@@ -3,12 +3,13 @@
  * the owning keeper has stopped its children and returned its reservation.
  * Neither a missing receipt nor an unreachable process is evidence of exit.
  * Callers hold the directory lock for every store. Records are never evicted
- * or reused automatically; exhaustion refuses a new retirement safely. */
+ * or reused. History is indexed after the legacy flat namespace fills. */
 #ifndef LMB_RETIRED_RECEIPTS_H
 #define LMB_RETIRED_RECEIPTS_H
 #include "lumabri_proto.h"
 #include "lumabri_sign.h"
 #include "lumabri_node_control.h"
+#include "lumabri_journal_index.h"
 #include <dirent.h>
 #include <sys/file.h>
 #include <sys/stat.h>
@@ -79,7 +80,7 @@ static void lmb_retired_name(const uint8_t id[32], char name[80]) {
 /* 1 = no record, 0 = decoded record (possibly only PREPARED), -1 = unsafe. */
 static int lmb_retired_load(int dir, const uint8_t id[32], LmbRetiredReceipt *out) {
     char name[80]; lmb_retired_name(id,name);
-    int fd=openat(dir,name,O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK);
+    int fd=lmb_journal_open(dir,name,O_RDONLY);
     if (fd<0) return errno==ENOENT ? 1 : -1;
     struct stat s; uint8_t bytes[LMB_RETIRED_RECEIPT_BYTES];
     int bad=lmb_retired_private(fd,0) || fstat(fd,&s) || s.st_size!=(off_t)sizeof bytes ||
@@ -87,24 +88,16 @@ static int lmb_retired_load(int dir, const uint8_t id[32], LmbRetiredReceipt *ou
         memcmp(out->allocation,id,32);
     close(fd); return bad ? -1 : 0;
 }
-static int lmb_retired_room(int dir) {
-    int copy=openat(dir,".",O_RDONLY|O_DIRECTORY|O_CLOEXEC); if (copy<0) return -1;
-    DIR *scan=fdopendir(copy); if (!scan) { close(copy); return -1; }
-    unsigned count=0; int bad=0; struct dirent *entry;
-    for (;;) {
-        errno=0; entry=readdir(scan); if (!entry) { bad=errno!=0; break; }
-        if (strlen(entry->d_name)==72 && !strcmp(entry->d_name+64,".release")) count++;
-    }
-    closedir(scan); return bad || count>=LMB_RETIRED_RECEIPTS_MAX ? -1 : 0;
-}
 /* A previous writer may have completed rename but lost the directory fsync.
  * Re-establish persistence before replaying an acknowledgement. */
 static int lmb_retired_sync(int dir, const uint8_t id[32]) {
     char name[80]; lmb_retired_name(id,name);
-    int fd=openat(dir,name,O_RDWR|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK);
-    if (fd<0) return -1;
-    int bad=lmb_retired_private(fd,0) || fsync(fd) || fsync(dir);
-    close(fd); return bad ? -1 : 0;
+    int at=lmb_journal_location(dir,name);
+    if (at<0) return -1;
+    int fd=openat(at,name,O_RDWR|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK);
+    int bad=fd<0 || lmb_retired_private(fd,0) || fsync(fd) || fsync(at);
+    if (fd>=0) close(fd);
+    close(at); return bad ? -1 : 0;
 }
 static int lmb_retired_store(int dir, const LmbRetiredReceipt *r) {
     uint8_t bytes[LMB_RETIRED_RECEIPT_BYTES],prior[LMB_RETIRED_RECEIPT_BYTES]; LmbRetiredReceipt old;
@@ -115,7 +108,11 @@ static int lmb_retired_store(int dir, const LmbRetiredReceipt *r) {
         if (old.phase>r->phase) return -1; /* DONE cannot become an intent. */
         old.phase=r->phase;
         if (lmb_retired_encode(&old,prior) || memcmp(bytes,prior,sizeof bytes)) return -1;
-    } else if (r->phase!=LMB_RECEIPT_PREPARED || lmb_retired_room(dir)) return -1;
+    } else if (r->phase!=LMB_RECEIPT_PREPARED) return -1;
+    char name[80]; lmb_retired_name(r->allocation,name);
+    int target=lmb_journal_select(dir,name,".release",LMB_RETIRED_RECEIPTS_MAX);
+    if (target<0) return -1;
+    dir=target;
     struct stat st; int bad=0;
     if (!fstatat(dir,"pending",&st,AT_SYMLINK_NOFOLLOW)) {
         bad=!S_ISREG(st.st_mode) || st.st_uid!=geteuid() || (st.st_mode&077) || st.st_nlink!=1 || unlinkat(dir,"pending",0);
@@ -130,9 +127,9 @@ static int lmb_retired_store(int dir, const LmbRetiredReceipt *r) {
     }
     if (!bad && fsync(fd)) bad=1;
     if (fd>=0 && close(fd)) bad=1;
-    char name[80]; lmb_retired_name(r->allocation,name);
     if (!bad && renameat(dir,"pending",dir,name)) bad=1;
     if (!bad && fsync(dir)) bad=1;
+    close(target);
     return bad ? -1 : 0;
 }
 #endif
