@@ -7,6 +7,7 @@
 #include "lumabri_machine.h"
 #include "lumabri_run_gate.h"
 #include "lumabri_planner.h"
+#include "src/runtime/lumabri_memlock.h"
 #include "lumabri_memory_budget.h"
 #include "lumabri_sign.h"
 #include "lumabri_secure.h"
@@ -1472,6 +1473,10 @@ int main(int argc, char **argv) {
     }
     if (arg_value(argc, argv, "--preflight-fd"))
         preflight_fd = (int)preflight_fd_u32;
+    if (backend_mask==LMB_SEG_CAP_CPU && lmb_memlock_startup()) {
+        preflight_signal(&preflight_fd,'F');
+        return LMB_MEMLOCK_EXIT;
+    }
 #ifdef _OPENMP
     if (threads) omp_set_num_threads((int)threads);
 #else
@@ -1631,6 +1636,22 @@ int main(int argc, char **argv) {
                                          resolved_model_root);
             preflight_signal(&preflight_fd, 'F');
             return 3;
+        }
+    }
+    /* Count only declared tensor payloads, not the reservation's preparation
+     * headroom or metadata estimates. Those are not a minimum lock size.
+     * Automatic/GPU policies require their own host-memory contract. */
+    if (shaped && shape.sizing_verified && shape.memory_contract==1 &&
+        lmb_resident_required() && backend_mask==LMB_SEG_CAP_CPU &&
+        begin<end && end<=shape.layers) {
+        uint64_t weights=0;
+        for (uint32_t i=begin;i<end;i++)
+            weights=lmb_size_add(weights,shape.memory[i].resident_bytes);
+        if (lmb_memlock_preflight(weights,"Segment CPU weight payload")) {
+            if (auto_range)
+                (void)auto_range_release(tracker,model,name,engine_id,resolved_model_root);
+            preflight_signal(&preflight_fd,'F');
+            return LMB_MEMLOCK_EXIT;
         }
     }
     preflight_signal(&preflight_fd, 'P');

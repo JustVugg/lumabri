@@ -5,6 +5,7 @@
 #include "lumabri_home_net.h"
 #include "lumabri_runtime_probe.h"
 #include "src/runtime/lumabri_prepare_progress.h"
+#include "src/runtime/lumabri_memlock.h"
 
 static char home_error[512];
 static int home_resident_required(void) {
@@ -1275,8 +1276,12 @@ static int cmd_donor_inner(int argc, char **argv) {
             HomeDonor *m = models[i];
             if (!m->retained && lmb_home_expired(&m->transaction, (uint64_t)(nowd() * 1000)))
                 home_donor_lost_requester(m, "Request lease expired before preparation completed.");
-            if (m->segment > 0 && waitpid(m->segment, NULL, WNOHANG) == m->segment)
-                home_donor_release(m, LMB_HOME_FAILED, "Segment stopped. See the engine log.");
+            int segment_status=0;
+            if (m->segment > 0 && waitpid(m->segment, &segment_status, WNOHANG) == m->segment)
+                home_donor_release(m, LMB_HOME_FAILED,
+                    WIFEXITED(segment_status) && WEXITSTATUS(segment_status)==LMB_MEMLOCK_EXIT ?
+                    "OS locked-memory limit is too low. Ask this computer's owner to configure the Lumabri service's memlock allowance; see the engine log for required bytes." :
+                    "Segment stopped. See the engine log.");
             if (m->host > 0 && waitpid(m->host, NULL, WNOHANG) == m->host)
                 home_donor_release(m, LMB_HOME_FAILED, "Chat host stopped. See the engine log.");
             if (m->transaction.phase == LMB_HOME_LOADING && home_child_ready(&m->segment_ready))

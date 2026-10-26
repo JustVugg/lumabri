@@ -3,6 +3,7 @@
  * This allocator never raises a resource limit or changes machine policy. */
 #define _GNU_SOURCE
 #include "lumabri_engine_memory.h"
+#include "lumabri_memlock.h"
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
@@ -116,7 +117,10 @@ static void *allocate(size_t bytes, size_t alignment) {
     Allocation *entry=calloc(1,sizeof *entry);
     void *ptr=NULL;
     int rc=entry ? posix_memalign(&ptr,alignment,extent) : ENOMEM;
-    if (!rc && mlock(ptr,extent)) rc=errno;
+    if (!rc && mlock(ptr,extent)) {
+        rc=errno;
+        lmb_memlock_failure(extent,evidence.locked_bytes,rc);
+    }
     if (rc) {
         free(ptr); free(entry); (void)fault_locked(rc);
         pthread_mutex_unlock(&allocation_lock); return NULL;
@@ -208,7 +212,11 @@ void *lmb_engine_mmap(void *addr, size_t bytes, int prot, int flags, int fd, off
     }
     Allocation *entry=calloc(1,sizeof *entry);
     void *ptr=entry ? mmap(addr,bytes,prot,flags,fd,offset) : MAP_FAILED;
-    int rc=!entry ? ENOMEM : ptr==MAP_FAILED ? errno : mlock(ptr,extent) ? errno : 0;
+    int rc=!entry ? ENOMEM : ptr==MAP_FAILED ? errno : 0;
+    if (!rc && mlock(ptr,extent)) {
+        rc=errno;
+        lmb_memlock_failure(extent,evidence.locked_bytes,rc);
+    }
     if (rc) {
         if (ptr!=MAP_FAILED) (void)munmap(ptr,extent);
         free(entry); (void)fault_locked(rc); pthread_mutex_unlock(&allocation_lock); return MAP_FAILED;
