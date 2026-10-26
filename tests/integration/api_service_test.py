@@ -15,7 +15,9 @@ ROOT = Path(__file__).resolve().parents[2]
 def main():
     with tempfile.TemporaryDirectory(prefix="lmb-api-service-") as temporary:
         env = {**os.environ, "HOME": temporary, "LUMABRI_PEER_KEY": temporary + "/peer.key",
-               "LUMABRI_KNOWN_HOSTS": temporary + "/known", "LUMABRI_ENCRYPT": "1"}
+               "LUMABRI_KNOWN_HOSTS": temporary + "/known"}
+        env.pop("LUMABRI_ENCRYPT", None)
+        env.pop("LUMABRI_TOKEN", None)
         env.pop("LUMABRI_HOME_FOREGROUND", None)
         def run(*args, good=True):
             result = subprocess.run([str(ROOT / "lumabri"), *args], env=env, text=True,
@@ -29,7 +31,19 @@ def main():
         run("api", "operator-grant", "alice")
         with socket.socket() as reserving:
             reserving.bind(("127.0.0.1", 0)); port = reserving.getsockname()[1]
-        start = ("api", "start", "--tracker", "127.0.0.1:1", "--port", str(port))
+        with socket.socket() as reserving:
+            reserving.bind(("127.0.0.1", 0)); tracker_port = reserving.getsockname()[1]
+        tracker_address = f"127.0.0.1:{tracker_port}"
+        # The tracker is encrypted and requires the key saved by the TUI. API
+        # commands below run from a fresh terminal without either env override.
+        household = Path(temporary) / ".lumabri" / "home.conf"
+        household.write_text(f"tracker={tracker_address}\ntoken=api-service-test-key\n")
+        household.chmod(0o600)
+        tracker = subprocess.Popen([str(ROOT / "tracker"), "--port", str(tracker_port),
+                                    "--token", "api-service-test-key"],
+                                   env={**env, "LUMABRI_ENCRYPT": "1"},
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        start = ("api", "start", "--port", str(port))
         def models():
             conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
             conn.request("GET", "/api/v1/models", headers={"Authorization": "Bearer " + token})
@@ -41,12 +55,33 @@ def main():
             reply = conn.getresponse(); body = reply.read(); conn.close()
             assert reply.status == 200
             return json.loads(body)
+        def workspace():
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.request("GET", "/api/v1/workspace", headers={"Authorization": "Bearer " + token})
+            reply = conn.getresponse(); body = reply.read(); conn.close()
+            assert reply.status == 200 and json.loads(body)["inventory_ok"], body
         pending = None
         try:
+            deadline = time.monotonic() + 5
+            while True:
+                try:
+                    with socket.create_connection(("127.0.0.1", tracker_port), timeout=.2):
+                        break
+                except OSError:
+                    assert tracker.poll() is None and time.monotonic() < deadline
+                    time.sleep(.05)
+            assert json.loads(run("api", "workspace").stdout)["inventory_ok"], \
+                "fresh-terminal CLI did not authenticate to the encrypted household"
+            for mode in ("start", "serve"):
+                rejected = subprocess.run([str(ROOT / "lumabri"), "api", mode, "--port", str(port)],
+                    env={**env, "LUMABRI_ENCRYPT": "0"}, text=True, capture_output=True, timeout=10)
+                assert rejected.returncode != 0 and "require authenticated encryption" in rejected.stderr
+                assert not states()["api"]["live"]
             run(*start); initial = states()
             assert initial["api"]["live"] and initial["api"]["phase"] == 2
             assert initial["manager"]["live"]
             models()
+            workspace()
             initial_demand = demand()
             run(*start)
             assert states()["api"]["instance"] == initial["api"]["instance"]
@@ -59,6 +94,7 @@ def main():
             assert restarted["api"]["instance"] == initial["api"]["instance"]
             assert restarted["api"]["pid"] == initial["api"]["pid"]
             models()
+            workspace()
             assert demand()["instance"] == initial_demand["instance"], "manager restart reset live gateway evidence"
             # An accepted request must not inherit the keeper singleton lock.
             pending = socket.create_connection(("127.0.0.1", port), timeout=5)
@@ -90,7 +126,12 @@ def main():
             if pending:
                 pending.close()
             run("service", "stop", good=False)
-    print("API SERVICE: PASS (independent lifetime, idempotent start, manager restart, crashed parent, occupied port and isolated stop)")
+            tracker.terminate()
+            try:
+                tracker.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                tracker.kill(); tracker.wait(timeout=5)
+    print("API SERVICE: PASS (saved household key, default encrypted peer transport, plaintext rejection, independent lifetime, idempotent start, manager restart, crashed parent, occupied port and isolated stop)")
 
 
 if __name__ == "__main__":
