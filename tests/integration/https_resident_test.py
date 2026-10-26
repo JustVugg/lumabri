@@ -5,8 +5,10 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import time
 
 from https_proxy_fixture import TLSProxy
+from managed_soak_test import hosts_quiescent
 
 
 def verify_https_resident(api, until, service, artifacts, nginx):
@@ -98,6 +100,14 @@ def verify_https_resident(api, until, service, artifacts, nginx):
         assert turn(ids[0], tokens[0], stop=True) is None
         report["client_stops"] = 1
         until(idle, "TLS client stop did not release admission", 15)
+        # Gateway admission is released before the remote host finishes
+        # resetting a cancelled slot. Observe that exact host via authenticated
+        # HTTPS control before the next turn. Do not retry a rejected chat or
+        # pretend that a gateway END is a remote cancellation acknowledgement.
+        began = time.monotonic()
+        until(lambda: hosts_quiescent(request, (ids[0],)),
+              "TLS cancelled host conversation did not close", 15)
+        report["cancellation_cleanup"] = {"elapsed_seconds": time.monotonic() - began, "hosts_idle": True}
         assert turn(ids[0], tokens[0])
         report["completed_turns"] += 1
         until(idle, "post-stop TLS turn did not drain", 15)

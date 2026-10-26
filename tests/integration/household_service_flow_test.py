@@ -21,7 +21,7 @@ import time
 from home_flow_test import TerminalText, current_frame, approval_frame_ready, hosted_turn_complete, assert_stage_record
 
 
-def main():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--models-dir", required=True, type=Path)
     parser.add_argument("--runtime-dir", type=Path, default=Path(__file__).resolve().parents[2])
@@ -48,7 +48,10 @@ def main():
     parser.add_argument("--donor-ram-gb", type=float, default=0.5)
     parser.add_argument("--prepare-timeout", type=int, default=180)
     parser.add_argument("--measure-sessions", action="store_true", help="also benchmark the single-slot baseline")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.soak_seconds and (not 10 <= args.soak_seconds <= 3600 or not args.api_prepare or
+            args.joint != "complete" or args.donor_policy or args.placement_comparison):
+        parser.error("--soak-seconds requires 10–3600, --api-prepare --joint complete, without --donor-policy or --placement-comparison")
     installed_manifest = None
     if args.lifecycle_cycles and (not 2 <= args.lifecycle_cycles <= 300 or not args.api_prepare or
             args.joint != "complete" or args.installed_package or args.donor_policy or args.soak_seconds or
@@ -57,7 +60,7 @@ def main():
     if args.installed_package:
         if (not args.api_prepare or args.joint != "complete" or args.donor_ram_gb < 1.5 or args.sessions != 2 or
                 args.runtime_dir != Path(__file__).resolve().parents[2] or args.donor_policy or args.elastic or
-                args.elastic_recovery or args.placement_comparison or args.soak_seconds or args.gateway_packages or
+                args.elastic_recovery or args.placement_comparison or args.gateway_packages or
                 args.https_nginx or args.multi_model or args.keep_requester or args.api or args.replicas or
                 args.recovery or args.portfolio_policy or args.measure_sessions):
             parser.error("--installed-package requires --joint complete --api-prepare --donor-ram-gb >=1.5 --sessions 2, without other lifecycle/runtime overrides")
@@ -77,9 +80,6 @@ def main():
     if args.placement_comparison and (not args.api_prepare or args.joint != "complete" or
             args.donor_policy or args.sessions != 2 or args.donor_ram_gb < 1.5):
         parser.error("--placement-comparison requires --api-prepare --joint complete --sessions 2 --donor-ram-gb >=1.5, without --donor-policy")
-    if args.soak_seconds and (not 10 <= args.soak_seconds <= 3600 or not args.api_prepare or
-            args.joint != "complete" or args.donor_policy or args.placement_comparison):
-        parser.error("--soak-seconds requires 10–3600, --api-prepare --joint complete, without --donor-policy or --placement-comparison")
     if args.gateway_packages:
         if (not args.api_prepare or args.joint != "complete" or args.donor_policy or
                 args.placement_comparison or args.soak_seconds):
@@ -101,6 +101,11 @@ def main():
         parser.error("--recovery requires --replicas and a disposable candidate with recovery_codec_proxy.py installed")
     if not 30 <= args.prepare_timeout <= 3600:
         parser.error("--prepare-timeout must be between 30 and 3600 seconds")
+    return args, installed_manifest
+
+
+def main():
+    args, installed_manifest = parse_args()
     runtime = args.runtime_dir.resolve()
     tmp = Path(tempfile.mkdtemp(prefix="lmb-service-flow-"))
     print(f"Artifacts: {tmp}", flush=True)
@@ -334,7 +339,8 @@ def main():
                     terminal.p.terminate()
                     until(lambda: terminal.p.poll() is not None, "installed donor TUI did not detach")
             from installed_managed_test import verify_installed_managed
-            verify_installed_managed(api_prepare, until, service, tmp, args.installed_package, installed_manifest, detach)
+            verify_installed_managed(api_prepare, until, service, tmp, args.installed_package,
+                                     installed_manifest, detach, soak_seconds=args.soak_seconds or 10)
             assert_locked_evidence(0, 4)
             return
         service("chatter", "restart")

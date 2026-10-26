@@ -34,13 +34,18 @@ def checked_package(directory):
     return directory, manifest
 
 
-def verify_installed_managed(api, until, service, artifacts, directory, manifest, detach):
+def verify_installed_managed(api, until, service, artifacts, directory, manifest, detach, soak_seconds=10):
+    if type(soak_seconds) is not int or not 10 <= soak_seconds <= 3600:
+        raise ValueError("installed workload duration must be 10–3600 seconds")
     assert api.runtime.resolve() == directory / "bin"
     report = {"schema": 1, "scope": "installed_managed_service_reduced_olmoe_loopback",
         "run_complete": False, "full_fleet_update_tested": False,
         "package_commit": manifest["lumabri"]["commit"],
         "colibri_commit": manifest["colibri_checkout"]["commit"],
         "manifest_sha256": hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest(),
+        "workload_seconds_requested": soak_seconds,
+        "harness_sha256": {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+                           for name in ("household_service_flow_test.py", "installed_managed_test.py", "managed_soak_test.py")},
         "runtime_sha256": {name: manifest["files"]["bin/" + name]["sha256"]
                            for name in native_package.BINARIES}}
 
@@ -110,8 +115,9 @@ def verify_installed_managed(api, until, service, artifacts, directory, manifest
         report["detach_and_manager_restart"] = True
 
         # Reuse the real measured workload, not simulated completions. This
-        # smoke includes distinct users, bounded overload and client stops.
-        verify_managed_soak(api, until, service, artifacts, 10)
+        # default smoke and opt-in sustained run both include distinct users,
+        # bounded overload and client stops, followed by the same lifecycle.
+        verify_managed_soak(api, until, service, artifacts, soak_seconds)
         assert residents() == original
         report["workload_report"] = "managed-soak.json"
         api.cli("start", "--tracker", api.tracker, "--port", str(api.port))

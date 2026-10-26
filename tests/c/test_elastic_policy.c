@@ -179,6 +179,33 @@ static void availability(void) {
     lmb_elastic_health_observe(&p,0,LMB_ELASTIC_READY,16000,115);
     assert(lmb_elastic_health_choice(&p,&d,16000,115,LMB_ELASTIC_SHRINK,&why)==LMB_ELASTIC_SHRINK);
 }
+static void failed_rotation(void) {
+    LmbElasticPolicy p=fixture(); uint8_t observer[32]={1};
+    p.min_replicas=1; p.max_replicas=3; p.max_reserved_bytes=3000; p.route.count=3;
+    p.resident_bytes[1]=p.resident_bytes[2]=1000;
+    p.route.replicas[1]=(LmbModelReplica){{6},{7},{8}}; p.route.replicas[2]=(LmbModelReplica){{9},{10},{11}};
+    p.health_revision=p.route.revision; memcpy(p.health_observer,observer,32);
+    p.health[0]=(LmbElasticReplicaHealth){11000,110,LMB_ELASTIC_UNREACHABLE,3};
+    p.health[1]=(LmbElasticReplicaHealth){11000,110,LMB_ELASTIC_READY,0};
+    p.health[2]=(LmbElasticReplicaHealth){11000,110,LMB_ELASTIC_UNREACHABLE,3};
+    assert(lmb_elastic_valid(&p));
+    /* Replica 0 may never prove exit (host powered off). As the probe cursor
+     * advances, replica 2 must still be offered, not replica 0 every tick. */
+    p.health_cursor=0; assert(lmb_elastic_failed_next(&p,observer,11000,110)==0);
+    p.health_cursor=1; assert(lmb_elastic_failed_next(&p,observer,11000,110)==2);
+    p.health_cursor=2; assert(lmb_elastic_failed_next(&p,observer,11000,110)==2);
+    p.health[2].failures=2; assert(lmb_elastic_failed_next(&p,observer,11000,110)==0);
+    p.health[2].failures=3;
+    assert(lmb_elastic_failed_next(&p,observer,131001,110)==-1); /* stale outage */
+    assert(lmb_elastic_failed_next(&p,observer,10999,110)==-1);
+    observer[0]++; assert(lmb_elastic_failed_next(&p,observer,11000,110)==-1); observer[0]--;
+    p.route.revision++; assert(lmb_elastic_failed_next(&p,observer,11000,110)==-1); p.route.revision--;
+    p.last_change=100; assert(lmb_elastic_failed_next(&p,observer,11000,110)==-1); p.last_change=0;
+    p.enabled=0; assert(lmb_elastic_failed_next(&p,observer,11000,110)==-1); p.enabled=1;
+    p.health[0].failures=p.health[2].failures=0;
+    p.health[0].state=p.health[2].state=LMB_ELASTIC_READY;
+    assert(lmb_elastic_failed_next(&p,observer,11000,110)==-1);
+}
 static void codec_store(void) {
     LmbElasticPolicy p=fixture(),decoded; LmbBuf b={0};
     assert(!lmb_elastic_encode(&p,&b)); assert(!lmb_elastic_decode(b.p,b.len,&decoded));
@@ -259,7 +286,7 @@ static void turn_recovery(void) {
 #undef DENY
 }
 int main(void) {
-    (void)lmb_sign; decision(); recovery(); availability(); codec_store(); json(); turn_recovery();
-    puts("ELASTIC POLICY: PASS (demand, cooldown, fresh idle evidence, scale to zero, exact publication recovery, bounded health replenishment, budgets, v1/v2 migration, private intent store, strict configuration)");
+    (void)lmb_sign; decision(); recovery(); availability(); failed_rotation(); codec_store(); json(); turn_recovery();
+    puts("ELASTIC POLICY: PASS (demand, cooldown, fresh idle evidence, scale to zero, exact publication recovery, bounded health replenishment, failed-replica rotation, budgets, v1/v2 migration, private intent store, strict configuration)");
     return 0;
 }
