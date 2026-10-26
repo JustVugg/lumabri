@@ -53,6 +53,15 @@ static inline void lmb_response_progress(LmbResponseMetrics *m, const char *line
     else if (m->gap_count<LMB_RESPONSE_GAPS) m->gaps[m->gap_count++]=now-m->last_token;
     m->last_token=now; m->tokens=count;
 }
+/* Live mean decode rate at the gateway. Include pauses since the last token,
+ * exclude the first token (prefill), and withhold a rate for coalesced bursts
+ * shorter than 100 ms. Text frame counts never enter this calculation. */
+static inline double lmb_response_live_rate(const LmbResponseMetrics *m, uint32_t attempts, double now) {
+    if (!m || attempts!=1 || m->invalid || m->tokens<2 || !isfinite(now) ||
+        now<m->started || now<m->last_token || now-m->first_token<.1) return 0;
+    double rate=(m->tokens-1)/(now-m->first_token);
+    return isfinite(rate) && rate>0 ? rate : 0;
+}
 static inline int lmb_response_double_order(const void *a, const void *b) {
     double x=*(const double *)a,y=*(const double *)b; return (x>y)-(x<y);
 }

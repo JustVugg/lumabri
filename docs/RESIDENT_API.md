@@ -762,6 +762,35 @@ reply or a response exceeding the gap buffer has null gap quantiles; replay
 withholds all token-notification statistics because hidden prefix work is not
 new user-visible output. Transport batching can produce zero observed gaps.
 
+Clients can opt into live response measurements with the optional boolean
+`"stream_metrics": true` in the chat request. It adds `event: metrics` messages
+and a `metrics` object in `done`. Omitted or `false` preserves the original
+delta/recovering/done/error event contract and adds no terminal metrics object.
+The browser opts in automatically. Example during generation:
+
+```text
+event: metrics
+data: {"phase":"decode","scope":"gateway_observed","generated_tokens":8,"decode_tok_s":6.5,"elapsed_seconds":3.8,"ttft_seconds":2.6}
+```
+
+`phase` is preparing, queued, prefill, decode or recovering. The live rate is
+`(consecutive DECODE notifications - 1) / (now - first notification)`: a running
+decode average, including stalls, excluding prompt preparation and the first
+token. DATA frames and byte counts never stand in for tokens. Updates are
+limited to about four per second, with phase transitions sent immediately and
+polling updates about once per second while waiting. Fewer than two tokens,
+an observation shorter than 100 ms, missing/malformed notifications or replay
+produce a null rate, never an estimated number. Transport buffering can affect
+the live measurement; it is not a benchmark or capacity guarantee.
+
+On successful completion, `done.metrics` reports `scope: "engine_reported"`,
+`generated_tokens`, `prefill_seconds`, `decode_seconds` and `decode_tok_s` from
+validated PERF1 statistics. Its rate excludes the first token and may differ
+from the gateway's live average. Missing/malformed PERF1 or replay makes this
+object null. Cancellation and errors have no final rate. The browser clears
+stale speed on recovery, Stop, failure, conversation navigation and sign-out.
+Response metrics are not persisted in conversation history.
+
 The real-engine service gate records solo and mixed two-model bursts at 2, 4
 and 8 clients in `mixed-capacity.json`, including client latency and rejected
 requests. Percentiles are explicitly success-only. This reduced-checkpoint

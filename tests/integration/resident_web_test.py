@@ -20,6 +20,8 @@ def verify_resident_browser(port, alice, bob, model, artifacts):
             answer = page.locator(".assistant .content").text_content()
             assert answer, page.locator("#notice").inner_text()
             assert page.locator("#notice").inner_text() == ""
+            expect(page.locator("#generation-metrics")).to_be_visible()
+            expect(page.locator("#generation-detail")).to_contain_text("Average decode")
             page.screenshot(path=str(artifacts / "real-olmoe-web.png"))
             headers = {"Authorization": "Bearer " + alice}
             listing = page.request.get(f"http://127.0.0.1:{port}/api/v1/conversations", headers=headers).json()
@@ -32,6 +34,7 @@ def verify_resident_browser(port, alice, bob, model, artifacts):
             page.locator("#history button", has_text="hi").click()
             expect(page.locator(".assistant .content")).to_have_count(1)
             assert page.locator(".assistant .content").text_content() == answer
+            expect(page.locator("#generation-metrics")).to_be_hidden()
             page.locator("#sign-out").click()
             page.locator("#token").fill(bob); page.locator("#login-form button").click()
             expect(page.locator("#composer-area")).to_be_visible()

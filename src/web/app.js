@@ -5,6 +5,7 @@ let token = "", models = [], conversations = [], current = null, busy = false, c
 let unsaved = false, navigation = 0, opening = null;
 const deleting = new Set();
 let partialNode = null;
+let generationMetrics = null;
 let operator = false, workspaceOpen = false, workspacePending = false, workspaceEpoch = 0;
 let workspaceExpires = 0;
 let management = false, managementBusy = false;
@@ -13,6 +14,28 @@ let preparationNames = new Map();
 let elasticPending = false, elasticEditor = null, elasticReview = null, elasticEpoch = 0;
 const utf8 = new TextEncoder();
 const say = text => { $("notice").textContent = text; };
+function showGenerationMetrics(value = null, final = false) {
+  generationMetrics = value;
+  $("generation-metrics").hidden = !value;
+  if (!value) { $("generation-speed").textContent = ""; $("generation-detail").textContent = ""; return; }
+  const finite = number => typeof number === "number" && Number.isFinite(number) && number >= 0;
+  const rate = finite(value.decode_tok_s) && value.decode_tok_s > 0 ? value.decode_tok_s : null;
+  const labels = {preparing: "Starting…", queued: "Waiting for a turn…", prefill: "Preparing prompt…",
+    decode: "Measuring speed…", recovering: "Recovering…", recovered: "Recovered",
+    stopped: "Stopped", interrupted: "Interrupted", complete: "Complete"};
+  $("generation-speed").textContent = rate === null ? labels[value.phase] || "Speed unavailable" : `${rate.toFixed(2)} tok/s`;
+  const detail = [];
+  if (value.phase === "decode" || value.phase === "complete")
+    detail.push(final ? "Average decode" : "Live decode average");
+  if (Number.isInteger(value.generated_tokens) && value.generated_tokens > 0) detail.push(`${value.generated_tokens} tokens`);
+  if (finite(value.ttft_seconds)) detail.push(`First text ${value.ttft_seconds.toFixed(1)}s`);
+  if (finite(value.elapsed_seconds)) detail.push(`${value.elapsed_seconds.toFixed(1)}s elapsed`);
+  if ((final || ["stopped", "interrupted"].includes(value.phase)) && rate === null) detail.push("Speed unavailable");
+  $("generation-detail").textContent = detail.join(" · ");
+  $("generation-metrics").title = final ?
+    "Completed response: engine-reported decode rate, excluding prompt preparation and the first token. Timing is for this turn, not a capacity guarantee." :
+    "Live average from token notifications at the gateway. Includes pauses since the first token; excludes queueing and prompt preparation. Final engine timing can differ.";
+}
 const errors = {
   authentication_required: "The access token was not accepted, or has been revoked. Sign in with a valid token.",
   model_not_authorized: "Your token does not have access to this model. Ask your cluster operator.",
@@ -167,7 +190,7 @@ async function openConversation(id) {
   try {
     const loaded = await request(`/api/v1/conversations/${id}`);
     if (ticket !== navigation) return;
-    current = loaded; unsaved = false;
+    current = loaded; unsaved = false; showGenerationMetrics();
     closeWorkspace();
     renderModels(); renderHistory(); renderMessages(); say("");
     if (["pending", "interrupted"].includes(current.conversation.state))
@@ -184,6 +207,7 @@ function newConversation() {
 }
 function resetConversation() {
   unsaved = false;
+  showGenerationMetrics();
   closeWorkspace();
   current = null; $("prompt").value = ""; say(""); renderModels(); renderHistory(); renderMessages(); $("prompt").focus();
   if (window.matchMedia("(max-width: 760px)").matches) sidebar(false);
@@ -198,7 +222,7 @@ async function saveConversation(conversation, target) {
   conversations = [summary, ...conversations.filter(item => item.id !== saved.id)];
   renderHistory(); return saved;
 }
-async function consumeStream(response, onText) {
+async function consumeStream(response, onText, onMetrics = () => {}) {
   const reader = response.body.getReader(), wire = new TextDecoder("utf-8", {fatal: true});
   const text = new TextDecoder("utf-8", {fatal: true});
   let pending = "", done = false, bytes = 0;
@@ -219,13 +243,17 @@ async function consumeStream(response, onText) {
           if (bytes > 65536) throw new Error("Response exceeded the conversation limit; the partial answer is preserved.");
           onText(text.decode(decoded, {stream: true}));
         } else if (kind === "recovering") {
+          onMetrics({phase: "recovering"});
           say(value.phase === "waiting" ?
             "A replica stopped. Waiting for approved replacement capacity (up to 2 minutes). Stop cancels this response." :
             "A replica stopped. Recovering on another approved computer; checking the text already shown…");
         } else if (kind === "done") {
           onText(text.decode()); done = true;
+          onMetrics({...value.metrics, phase: value.recovery_attempts ? "recovered" : "complete",
+            ttft_seconds: value.timing?.ttft_seconds, elapsed_seconds: value.timing?.completion_seconds}, true);
           if (value.recovery_attempts) say("Recovered on another approved replica. The text already shown was verified and was not repeated.");
         }
+        else if (kind === "metrics") onMetrics(value);
         else if (kind === "error") throw new Error(value.message || "Generation failed");
         else throw new Error("Unknown response event");
       }
@@ -258,6 +286,7 @@ async function generate(retry = false) {
   navigation++; opening = null;
   let saved = current;
   busy = true; controller = new AbortController(); controls(); say(""); let started = false, answer = "", complete = false;
+  showGenerationMetrics({phase: "preparing"});
   try {
     conversation.state = "pending";
     saved = await saveConversation(conversation, saved); // Save the question BEFORE sending any text to the model.
@@ -268,15 +297,17 @@ async function generate(retry = false) {
       const response = await fetch("/api/v1/chat", {method: "POST", signal: controller.signal,
         headers: {Authorization: `Bearer ${token}`, "Content-Type": "application/json"},
         body: JSON.stringify({model: model.id, messages: conversation.messages, max_tokens: Math.min(256, model.max_tokens),
-          recovery_wait_seconds: $("recovery-wait").checked ? 120 : 0})});
+          recovery_wait_seconds: $("recovery-wait").checked ? 120 : 0, stream_metrics: true})});
       if (!response.ok) { const problem = await response.json(); throw new Error(explain(problem.error || `Generation failed (${response.status})`)); }
       await consumeStream(response, delta => {
         const nearEnd = $("chat").scrollHeight - $("chat").scrollTop - $("chat").clientHeight < 100;
         answer += delta; partialNode.textContent = answer; if (nearEnd) scrollToEnd();
-      });
+      }, showGenerationMetrics);
       complete = true;
     } finally { clearTimeout(timeout); }
   } catch (error) {
+    showGenerationMetrics({phase: error.name === "AbortError" ? "stopped" : "interrupted",
+      elapsed_seconds: generationMetrics?.elapsed_seconds, generated_tokens: generationMetrics?.generated_tokens});
     say(error.name === "AbortError" ? "Response stopped. The incomplete answer is kept separately from completed turns." : error.message);
   } finally {
     controller = null;
@@ -311,6 +342,7 @@ $("sign-out").onclick = () => {
   if (unsaved && !confirm("This answer is not saved. Sign out without exporting?")) return;
   navigation++; opening = null; unsaved = false;
   token = ""; models = []; conversations = []; current = null;
+  showGenerationMetrics();
   operator = false; management = false; closeWorkspace(); clearWorkspace();
   preparationOperation = ""; preparationInvalidate();
   $("prepare-form").hidden = true; $("prepare-models").replaceChildren(); $("prepare-nodes").replaceChildren();

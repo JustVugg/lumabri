@@ -14,6 +14,11 @@ static void response_timings(void) {
     lmb_response_progress(&m,"PROGRESS req DECODE 3 4",11.5); /* same read, zero observed gap */
     lmb_response_progress(&m,"PROGRESS req DECODE 4 4",11.75);
     lmb_response_text(&m,11.75,1);
+    assert(lmb_response_live_rate(&m,1,11.75)==4);
+    assert(lmb_response_live_rate(&m,1,12.5)==2); /* a pause lowers the live mean */
+    assert(!lmb_response_live_rate(&m,2,12.5)); /* replay is not visible new tokens */
+    assert(!lmb_response_live_rate(&m,1,NAN));
+    assert(!lmb_response_live_rate(&m,1,11.5));
     assert(!lmb_response_summary(&m,stat,1,12,12.5,&s));
     assert(s.text_known && s.ttft_seconds==1.125 && s.generation_seconds==2 && s.completion_seconds==2.5);
     assert(s.token_times_known && s.tokens==4 && s.token_first_seconds==1);
@@ -34,10 +39,12 @@ static void response_timings(void) {
     }
     m=(LmbResponseMetrics){.started=10};
     lmb_response_progress(&m,"PROGRESS req DECODE 1",11);
+    assert(!lmb_response_live_rate(&m,1,12));
     assert(!m.invalid && m.tokens==1); /* legacy optional total */
     assert(!lmb_response_summary(&m,"STAT 1 PERF1 1 0 1 0 1",1,11,11,&s));
     assert(s.token_times_known && !s.quantiles_known && !s.text_known);
     lmb_response_progress(&m,"PROGRESS req DECODE 1",11); assert(m.invalid);
+    assert(!lmb_response_live_rate(&m,1,12));
     m=(LmbResponseMetrics){.started=10};
     lmb_response_progress(&m,"PROGRESS req DECODE 1",9); assert(m.invalid);
     m=(LmbResponseMetrics){.started=10};
