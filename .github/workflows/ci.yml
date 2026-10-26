@@ -485,6 +485,17 @@ jobs:
             /tmp/lmb-installed-fleet-*/installed-fleet-update.json
             /tmp/lmb-service-flow-*/browser-capacity-real-olmoe.*
           retention-days: 7
+      - name: Keep isolated household failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: household-logs-linux
+          path: |
+            /tmp/lumabri-home-flow-*/**/*.log
+            /tmp/lmb-service-flow-*/**/*.log
+            /tmp/lmb-installed-fleet-*/**/*.log
+          include-hidden-files: true
+          retention-days: 3
   macos-household:
     # Real native CPU engines + signed CAS + approvals + streaming. Loopback
     # coverage does not replace the macOS 12.6 / physical household LAN test.
