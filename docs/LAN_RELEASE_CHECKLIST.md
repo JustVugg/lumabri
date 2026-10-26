@@ -9,6 +9,53 @@ execution, cross-platform numerical compatibility, or concurrent capacity.
 The managed-inference roadmap supersedes the older single-chat LAN checklist
 below. Historical observations remain here as evidence, not current promises.
 
+### After the current release: native policies and optional Kubernetes integration
+
+Status: **planned, not implemented or a prerequisite for the current release**.
+Finish the roadmap and acceptance work below before starting this follow-up.
+Household deployments remain autonomous and use the same inference core.
+
+Implement the mechanisms in Lumabri's own C code, extending the existing API,
+planner and reconciliation service. Keep Kubernetes integration optional and
+reuse its existing control plane.
+
+1. **Grouped permissions and quotas.** Extend current per-user grants and
+   admission with explicit group limits for shared inference resources. Account
+   for the aggregate across users and models; keep conversation state private.
+   A group assignment must not implicitly grant a model, donor approval or
+   administrative access. Verify contention between groups, revocation and
+   restart without leaking capacity or crossing permission boundaries.
+2. **Explicit workload requirements.** Extend the existing joint planner and
+   measured cost policies with a single reviewed request for models, authorized
+   machines, memory limits, performance requirements and declared-cost ceilings.
+   Report unmet constraints and missing observations; unknown speed or price
+   must not satisfy a requirement. Reuse durable operation IDs, review fences
+   and reconciliation instead of introducing a second allocation engine.
+3. **A Lumabri Kubernetes controller.** Add a thin, optional integration over the
+   same authenticated service API, with installable manifests, narrowly scoped
+   permissions and declarative model/pool resources. Kubernetes owns pod
+   placement, process restart and infrastructure node scaling through a
+   configured autoscaler/provider. Lumabri owns model partitioning, weight
+   preparation/residency, session/KV accounting, admission and inference
+   replica readiness. Define one authority for each replica decision so two
+   independent autoscalers cannot fight over it.
+
+The integration must report READY only after every required segment is prepared
+and admitted. Shutdown first stops new admissions, drains active work and
+reconciles allocation release before normal pod removal; timeout or unreachable
+state is not proof of release. Forced pod/node loss follows the existing visible
+recovery/replay policy, without claiming uninterrupted KV migration. The
+controller must resume from persisted desired/observed generations after its
+own restart, with no duplicate allocations or replayed approvals.
+
+Acceptance: deploy the packaged integration on a real Kubernetes cluster;
+prepare two OLMoE-derived model identities; exercise separate users, declared
+quotas and contention; change desired replicas; drain and forcibly lose a
+worker; restart the controller; verify readiness, private histories, release
+accounting and refusal when capacity is insufficient. Record cluster/runtime
+versions and artifacts. Fixture checks alone do not certify a datacenter SLO.
+The household path must still work without Kubernetes installed.
+
 ### Roadmap status, October 21, 2026
 
 This table separates implementation from release acceptance. The detailed PR
