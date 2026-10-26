@@ -368,21 +368,15 @@ done:
  * Other nodes are still drained/sealed through normal retirement and their
  * charges remain until every participant acknowledges release. */
 static int api_elastic_failed_candidate(const LmbElasticPolicy *p,uint64_t now,uint64_t wall) {
-    if (!p->enabled || p->faulted || p->phase || wall<p->last_change || wall<p->last_check ||
-        (p->last_change && wall-p->last_change<p->cooldown) ||
-        p->health_revision!=p->route.revision || memcmp(p->health_observer,api_demand.instance,32)) return -1;
-    for (uint32_t i=0;i<p->route.count;i++) {
-        const LmbElasticReplicaHealth *h=&p->health[i];
-        if (h->state!=LMB_ELASTIC_UNREACHABLE || h->failures!=3 || !h->at_ms || now<h->at_ms || now-h->at_ms>120000) continue;
-        LmbResidentPlan *plan=calloc(1,sizeof *plan); int found=-1;
-        if (plan && !api_find_plan(p->route.tracker,p->route.replicas[i].allocation,plan) &&
-            api_route_plan_matches(&p->route,i,plan)) {
-            for (uint32_t node=0;node<plan->execution.count;node++)
-                if (!home_resident_exit_proof(plan,node)) { found=(int)i; break; }
-        }
-        free(plan); return found; /* one bounded candidate per tick */
+    int i=lmb_elastic_failed_next(p,api_demand.instance,now,wall); /* one bounded candidate per tick */
+    if (i<0) return -1;
+    LmbResidentPlan *plan=calloc(1,sizeof *plan); int found=-1;
+    if (plan && !api_find_plan(p->route.tracker,p->route.replicas[i].allocation,plan) &&
+        api_route_plan_matches(&p->route,(unsigned)i,plan)) {
+        for (uint32_t node=0;node<plan->execution.count;node++)
+            if (!home_resident_exit_proof(plan,node)) { found=i; break; }
     }
-    return -1;
+    free(plan); return found;
 }
 static void api_elastic_tick_one(int access,int dir,LmbElasticPolicy *p) {
     uint64_t wall=(uint64_t)time(NULL),mono=lmb_io_monotonic_ms(); LmbModelRoute current;

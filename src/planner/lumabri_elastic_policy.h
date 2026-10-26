@@ -256,4 +256,21 @@ static inline int lmb_elastic_health_choice(LmbElasticPolicy *p,const LmbDemand 
     *reason="restore_available_replica_minimum";
     return LMB_ELASTIC_GROW;
 }
+/* Next confirmed-unreachable replica whose exit may be proved, at most one
+ * per tick. The search starts at the persisted probe cursor, so a replica
+ * whose exit can never be proved (powered-off host) cannot hide a later
+ * failed replica forever. Selection is not evidence of exit. */
+static inline int lmb_elastic_failed_next(const LmbElasticPolicy *p,const uint8_t observer[32],
+                                         uint64_t now,uint64_t wall) {
+    if (!p->enabled || p->faulted || p->phase || wall<p->last_change || wall<p->last_check ||
+        (p->last_change && wall-p->last_change<p->cooldown) ||
+        p->health_revision!=p->route.revision || memcmp(p->health_observer,observer,32)) return -1;
+    for (uint32_t k=0;k<p->route.count;k++) {
+        uint32_t i=(p->health_cursor+k)%p->route.count;
+        const LmbElasticReplicaHealth *h=&p->health[i];
+        if (h->state==LMB_ELASTIC_UNREACHABLE && h->failures==3 && h->at_ms && now>=h->at_ms &&
+            now-h->at_ms<=120000) return (int)i;
+    }
+    return -1;
+}
 #endif
