@@ -5,6 +5,10 @@ a tag stay under Unreleased until a new tag is created.
 
 ## Unreleased
 
+- Raspberry Pi: `segment_node` without `--max-rows` now clamps its 256-row
+  default to the engine's batch cap instead of refusing to start (OLMoE caps
+  at 128), and arm64 Pi kernels report the CPU via the `Model` line of
+  `/proc/cpuinfo` instead of "unknown".
 - Web workspace controls for authorized-machine replica automation: explicit
   computers and memory budget, review before applying, exact policy/route
   revisions, pause/resume/reconciliation, read-only operator visibility and
