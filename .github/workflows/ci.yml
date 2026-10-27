@@ -531,7 +531,13 @@ jobs:
       - name: Preserve the native executables for the fixture job
         working-directory: lumabri
         run: |
-          tar -czf build/arm64-executables.tar.gz lumabri tracker maintainer swarm_probe segment_node segment_chat liblumabri.so test_chat_ui test_hosted_sessions
+          python3 - <<'PYCODE'
+          import runpy, tarfile
+          binaries=runpy.run_path('tools/package_household.py')['BINARIES']
+          with tarfile.open('build/arm64-executables.tar.gz','w:gz') as archive:
+              for name in (*binaries,'liblumabri.so','test_chat_ui','test_hosted_sessions'):
+                  archive.add(name,arcname=name)
+          PYCODE
       - uses: actions/upload-artifact@v4
         with:
           name: linux-arm64-executables
