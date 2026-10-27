@@ -498,12 +498,11 @@ jobs:
             /tmp/lmb-installed-fleet-*/**/*.log
           include-hidden-files: true
           retention-days: 3
-  linux-arm64-household:
+  linux-arm64-build:
     # Native ARM64 execution with the older glibc floor. This is not a
     # physical Raspberry Pi or multi-machine cluster certification.
-    needs: linux
     runs-on: ubuntu-22.04-arm
-    timeout-minutes: 45
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -529,6 +528,43 @@ jobs:
           ./test_calibration
           ./test_backend_routes
           ./test_segment_close
+      - name: Preserve the native executables for the fixture job
+        working-directory: lumabri
+        run: |
+          tar -czf build/arm64-executables.tar.gz lumabri tracker maintainer swarm_probe segment_node segment_chat liblumabri.so test_chat_ui test_hosted_sessions
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-arm64-executables
+          path: lumabri/build/arm64-executables.tar.gz
+          retention-days: 1
+
+  linux-arm64-household:
+    # Native ARM64 execution with the older glibc floor. This is not a
+    # physical Raspberry Pi or multi-machine cluster certification.
+    needs: [linux, linux-arm64-build]
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: lumabri
+      - uses: actions/checkout@v4
+        with:
+          repository: JustVugg/colibri
+          ref: ce370e87d7b623d7759b52ec2007d75fc5b0e87e
+          path: colibri
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-arm64-executables
+          path: lumabri/build
+      - name: Use the exact executables from the native build gate
+        working-directory: lumabri
+        run: |
+          test "$(uname -m)" = aarch64
+          tar -xzf build/arm64-executables.tar.gz
       - uses: actions/download-artifact@v4
         with:
           pattern: tiny-*-checkpoint
