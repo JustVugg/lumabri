@@ -174,6 +174,22 @@ new adapter cannot silently import unwrapped native allocation functions;
 that audit is not a substitute for native adapter validation. ASan builds
 refuse this contract because sanitizer locking interceptors can be no-ops.
 
+For explicitly CPU-resident plans on Linux, Segment and Edge check the
+declared tensor payload against the process's `RLIMIT_MEMLOCK` before loading
+the weights. This is not the entire reservation: preparation headroom, system
+reserve and future buffers must not make a tiny model fail that check. An
+insufficient known allowance produces an explicit error, not a generic tensor
+allocation failure. Unknown limits, privileged exemptions and other kernels
+are left to native lock enforcement. Passing this check does not prove enough
+allowance for page rounding, scratch or simultaneous replacement buffers;
+every actual lock remains mandatory and its failure is diagnosed separately.
+
+Configure the service's locked-memory allowance using the platform's service
+manager or an administrator, then verify that its engine children inherit it.
+Changing a shell's allowance does not update a donor already running in the
+background. Lumabri never raises limits, disables swap or silently switches
+from `engine-locked` to `observe`.
+
 Local reduced OLMoE validation covers two resident checkpoints on the same
 donors, two isolated conversation slots, restart and selective unload. It
 does not establish full-size locked-memory requirements or native macOS

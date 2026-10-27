@@ -13,6 +13,8 @@
 #include "src/runtime/lumabri_serve_control.h"
 #include "src/runtime/lumabri_compute_broker.h"
 #include "src/runtime/lumabri_thread_capacity.h"
+#include "lumabri_planner.h"
+#include "src/runtime/lumabri_memlock.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -2306,6 +2308,8 @@ int main(int argc, char **argv) {
         strlen(model) >= LMB_SEG_MODEL_MAX || strlen(tracker) >= 256) {
         usage(argv[0]); return 2;
     }
+    if (segment_backend_mask==LMB_SEG_CAP_CPU && lmb_memlock_startup())
+        return LMB_MEMLOCK_EXIT;
     uint8_t model_root[32], tokenizer_root[32];
     uint32_t wanted_tokens = 3;
     const char *value = arg_value(argc, argv, "--tokens");
@@ -2352,6 +2356,13 @@ int main(int argc, char **argv) {
     if (edge_limit && (parse_u64(edge_limit, &edge_options.memory_limit_bytes) ||
                         !edge_options.memory_limit_bytes)) {
         fprintf(stderr, "invalid accepted Edge memory limit\n"); return 2;
+    }
+    if (lmb_resident_required() && segment_backend_mask==LMB_SEG_CAP_CPU) {
+        LmbModelShape shape;
+        if (!lmb_shape_from_config(model_dir,&shape) && shape.sizing_verified &&
+            shape.memory_contract==1 &&
+            lmb_memlock_preflight(shape.edge_resident_bytes,"Edge CPU weight payload"))
+            return LMB_MEMLOCK_EXIT;
     }
     ColiEdgeEngine *edge = NULL;
     /* Never hand an uninitialised buffer to the engine ABI: a failure that

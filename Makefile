@@ -55,7 +55,11 @@ test_engine_memory: tests/c/test_engine_memory.c src/runtime/lumabri_engine_memo
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_engine_memory.c src/runtime/lumabri_engine_memory.c -o $@
 test_engine_memory_guard: tests/c/test_engine_memory_guard.c src/runtime/lumabri_engine_memory.h src/runtime/lumabri_resident_guard.h src/runtime/lumabri_process_memory.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_engine_memory_guard.c -o $@
-test check-warnings: test_engine_memory test_engine_memory_guard
+test_memlock: tests/c/test_memlock.c src/runtime/lumabri_memlock.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_memlock.c -o $@
+test check-warnings: test_engine_memory test_engine_memory_guard test_memlock
+test_engine_memory build/engine_memory.o lumabri test_chat_ui segment_node segment_chat: src/runtime/lumabri_memlock.h
+segment_chat: lumabri_planner.h $(wildcard planner_adapters/*.h)
 test check-warnings: test_compute_broker
 test check-warnings: test_portfolio
 test check-warnings: test_reply_stream
@@ -765,6 +769,7 @@ test-sanitize: build/web_assets.h
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_process_memory.c -o build/sanitize/test_process_memory
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_engine_memory.c src/runtime/lumabri_engine_memory.c -o build/sanitize/test_engine_memory
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_engine_memory_guard.c -o build/sanitize/test_engine_memory_guard
+	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_memlock.c -o build/sanitize/test_memlock
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_serve_control.c -o build/sanitize/test_serve_control
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_host_drain.c src/ui/lumabri_tui.c $(MACHINE_SRC) lumabri_run_gate.c -o build/sanitize/test_host_drain
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_node_control.c -o build/sanitize/test_node_control
@@ -799,6 +804,7 @@ test-sanitize: build/web_assets.h
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_process_memory
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_engine_memory
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_engine_memory_guard
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_memlock
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_serve_control
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/sanitize/test_host_drain
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/sanitize/test_node_control
@@ -1143,6 +1149,7 @@ test: all test_weight_cache test_key_rotation test_hedge test_local_fallback tes
 	./test_process_memory
 	./test_engine_memory
 	./test_engine_memory_guard
+	./test_memlock
 	python3 tests/integration/engine_memory_boundary_test.py
 	./test_serve_control
 	./test_host_session_pool
@@ -1201,7 +1208,7 @@ clean:
 	      test_model_family test_planner test_planner_io test_cluster test_memory_budget test_calibration test_catalogue_advice test_metrics test_inventory test_home test_home_expert test_chat_ui test_weight_cache segment_budget_probe \
 	      test_nat_adopt test_rtt_refresh \
 	      test_verify_failover test_segment_v2 test_segment_discovery test_sampling \
-	      test_swarm_detail test_relay_rate test_machine test_meminfo test_process_memory test_engine_memory test_engine_memory_guard test_serve_control test_host_session_pool test_hosted_sessions test_host_drain test_node_control \
+	      test_swarm_detail test_relay_rate test_machine test_meminfo test_process_memory test_engine_memory test_engine_memory_guard test_memlock test_serve_control test_host_session_pool test_hosted_sessions test_host_drain test_node_control \
 	      test_compute_lease test_content_filter test_scheduler test_run_gate \
 	      test_compute_broker test_portfolio test_reply_stream test_api_json test_api_http test_api_access test_chat_store test_model_routes test_replica_admission test_replica_rank test_replay_prefix test_capacity test_portfolio_policy test_elastic_policy test_retired_receipts test_allocation_lifetime \
 	      test_segment_v2_tsan tracker_tsan \
