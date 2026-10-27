@@ -50,6 +50,7 @@ jobs:
         run: |
           make lumabri tracker maintainer swarm_probe liblumabri.dylib test_shim test_machine test_chat_ui test_memory_budget test_planner test_cluster test_calibration test_inventory test_weight_cache CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           ./test_machine
+          make test-agent-control CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           make test_process_memory CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           ./test_process_memory
           make test_engine_memory test_engine_memory_guard test_memlock CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'

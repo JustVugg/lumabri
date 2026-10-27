@@ -2,6 +2,7 @@ tracker
 swarm_probe
 maintainer
 lumabri
+lumabri-agent
 lumibri
 liblumabri.so
 liblumabri.dylib

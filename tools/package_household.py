@@ -17,7 +17,8 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARIES = ("lumabri", "tracker", "maintainer", "segment_node", "segment_chat", "swarm_probe")
+CORE_BINARIES = ("lumabri", "tracker", "maintainer", "segment_node", "segment_chat", "swarm_probe")
+BINARIES = (*CORE_BINARIES, "lumabri-agent")
 
 
 def regular(path, executable=False):

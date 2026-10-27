@@ -26,7 +26,22 @@ OMP_FLAGS =
 endif
 endif
 
-all: tracker maintainer $(SHIM_LIB) test_shim swarm_probe lumabri
+all: tracker maintainer $(SHIM_LIB) test_shim swarm_probe lumabri lumabri-agent
+
+build/agent_docs.h: tools/embed_agent_docs.py docs/RESIDENT_API.md docs/MODEL_PREPARATION_API.md docs/ELASTIC_REPLICAS.md docs/PORTFOLIO_POLICY.md docs/DONOR_AUTHORIZATION.md
+	@mkdir -p build
+	$(PYTHON) tools/embed_agent_docs.py > $@.tmp
+	mv $@.tmp $@
+
+lumabri-agent: src/control/lumabri_agent.c src/runtime/lumabri_api_json.h src/runtime/lumabri_api_http.h build/agent_docs.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) src/control/lumabri_agent.c -o $@
+
+.PHONY: test-agent-control
+test-agent-control: lumabri-agent lumabri
+	$(PYTHON) tests/integration/agent_control_test.py
+
+check-warnings: lumabri-agent
+test: test-agent-control
 
 lumabri test_chat_ui: src/runtime/lumabri_weight_cache.h
 lumabri test_chat_ui: src/runtime/lumabri_prepare_progress.h
@@ -38,7 +53,7 @@ test_weight_cache: tests/c/test_weight_cache.c src/runtime/lumabri_weight_cache.
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_weight_cache.c -o $@
 
 # Native household runtime (Colibri sources are a build-time dependency).
-household: tracker maintainer $(SHIM_LIB) lumabri segment_node segment_chat
+household: tracker maintainer $(SHIM_LIB) lumabri lumabri-agent segment_node segment_chat
 
 lumabri segment_node segment_chat test_calibration test_chat_ui: src/planner/lumabri_link_evidence.h
 lumabri test_calibration test_chat_ui test_portfolio: src/planner/lumabri_workload_facts.h
@@ -1204,14 +1219,14 @@ PREFIX ?= /usr/local
 # optional loop below, a missing Segment service is a build/install failure.
 install-household: household swarm_probe
 	install -d "$(DESTDIR)$(PREFIX)/bin" "$(DESTDIR)$(PREFIX)/lib/lumabri"
-	install -m 755 lumabri tracker maintainer swarm_probe segment_node segment_chat "$(DESTDIR)$(PREFIX)/bin/"
+	install -m 755 lumabri lumabri-agent tracker maintainer swarm_probe segment_node segment_chat "$(DESTDIR)$(PREFIX)/bin/"
 	install -m 644 $(SHIM_LIB) tools/setup-household-firewall.ps1 "$(DESTDIR)$(PREFIX)/lib/lumabri/"
 
 .PHONY: install-household
 
 install: all
 	install -d $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(PREFIX)/lib/lumabri
-	install -m 755 lumabri tracker maintainer swarm_probe $(DESTDIR)$(PREFIX)/bin/
+	install -m 755 lumabri lumabri-agent tracker maintainer swarm_probe $(DESTDIR)$(PREFIX)/bin/
 	install -m 644 $(SHIM_LIB) $(DESTDIR)$(PREFIX)/lib/lumabri/
 	install -m 644 tools/setup-household-firewall.ps1 $(DESTDIR)$(PREFIX)/lib/lumabri/
 	@for b in expert_node expert_node_glm expert_node_inkling expert_node_kimi \
@@ -1222,7 +1237,7 @@ install: all
 	@echo "installed under $(DESTDIR)$(PREFIX)"
 
 clean:
-	rm -f tracker maintainer liblumabri.so liblumabri.dylib test_shim swarm_probe lumabri \
+	rm -f tracker maintainer liblumabri.so liblumabri.dylib test_shim swarm_probe lumabri lumabri-agent \
 	      test_relay_exec test_swarm_fed test_key_rotation test_hedge \
 	      test_local_fallback test_accum_order test_hybrid_parallel test_residency_report \
 	      test_model_family test_planner test_planner_io test_cluster test_memory_budget test_calibration test_catalogue_advice test_metrics test_inventory test_home test_home_expert test_chat_ui test_weight_cache segment_budget_probe \
