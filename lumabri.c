@@ -6564,6 +6564,8 @@ int main(int argc, char **argv) {
         "  lumabri api [start|stop|list|user-add|grant|revoke|serve]   authenticated local inference API\n"
         "  lumabri machine [--json] [--tracker HOST:PORT]             profile this machine\n"
         "  lumabri worker --join HOST:PORT [--ram-gb N]              publish LAN inventory\n"
+        "  lumabri donor --headless --join HOST:PORT --ram-gb N      supervised resident donor\n"
+        "  lumabri donor-policy inspect | accept-current REVIEW      review/approve one local offer\n"
         "  lumabri models --tracker HOST:PORT                       cluster planning preview\n"
         "  lumabri status | limits | pause | resume                    resource governor\n"
         "  lumabri doctor [--household] [--json] [--tracker H:P]     runtime diagnostics\n"

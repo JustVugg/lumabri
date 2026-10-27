@@ -61,7 +61,8 @@ static int cmd_donor_policy(int argc,char **argv) {
             donor_policy_json(&p);
         }
         fputs("]}\n",stdout); closedir(scan);
-    } else if ((argc==1 && !strcmp(argv[0],"inspect")) || (argc==4 && !strcmp(argv[0],"allow-current"))) {
+    } else if ((argc==1 && !strcmp(argv[0],"inspect")) || (argc==4 && !strcmp(argv[0],"allow-current")) ||
+               (argc==2 && !strcmp(argv[0],"accept-current"))) {
         HomeServiceSnapshot s; LmbDonorPolicy p; char review[65]; uint32_t prior;
         lock=lmb_donor_policy_lock(dir);
         if (lock<0 || donor_policy_review(dir,&s,&p,review,&prior)) { home_fail("No live resident Segment offer is available for policy review."); goto done; }
@@ -69,6 +70,21 @@ static int cmd_donor_policy(int argc,char **argv) {
             p.enabled=0; p.allocations=1;
             printf("{\"schema\":1,\"review\":\"%s\",\"proposed_scope\":",review);
             donor_policy_json(&p); puts("}"); rc=0; goto done;
+        }
+        if (!strcmp(argv[0],"accept-current")) {
+            HomeServiceSnapshot after;
+            /* Same immutable offer, keeper and revision as the owner's
+             * review. A lost reply is not permission to accept another offer.
+             * No repeat grant is saved by this one-off command. */
+            if (strcmp(argv[1],review) || home_service_query("donor",HOME_SVC_ACCEPT,&s,&after)) {
+                home_fail("Acceptance not confirmed. Inspect the live donor before retrying; the reviewed offer may have changed."); goto done;
+            }
+            if (after.phase!=LMB_HOME_ACCEPTED) {
+                home_fail("Allocation was not accepted: %.400s",after.detail); goto done;
+            }
+            char allocation[65]; lmb_hex(allocation,s.offer.id,32);
+            printf("{\"schema\":1,\"allocation\":\"%s\",\"state\":\"accepted\",\"repeat_permission\":false}\n",allocation);
+            rc=0; goto done;
         }
         uint32_t ttl,count;
         if (strcmp(argv[1],review) || donor_policy_number(argv[2],&ttl) || ttl<30 || ttl>604800 ||
@@ -88,7 +104,7 @@ static int cmd_donor_policy(int argc,char **argv) {
         p.enabled=0; p.revision++;
         if (lmb_donor_policy_store(dir,&p,expected)) { home_fail("Revocation not confirmed; inspect the saved policy."); goto done; }
         donor_policy_json(&p); putchar('\n'); rc=0;
-    } else fprintf(stderr,"lumabri donor-policy inspect | list | allow-current REVIEW TTL_SECONDS MAX_ALLOCATIONS | revoke ID REVISION\n");
+    } else fprintf(stderr,"lumabri donor-policy inspect | list | accept-current REVIEW | allow-current REVIEW TTL_SECONDS MAX_ALLOCATIONS | revoke ID REVISION\n");
 done:
     if (lock>=0) close(lock);
     close(dir); return rc;
