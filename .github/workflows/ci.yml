@@ -153,7 +153,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: JustVugg/lumabri
-          ref: 01e3f86840f27260ea0e1229586116d8d99a26c3
+          ref: 027b55b1371116b0a289922abb2b2e9bbd8474c7
           path: previous-lumabri
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -523,7 +523,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: JustVugg/lumabri
-          ref: 01e3f86840f27260ea0e1229586116d8d99a26c3
+          ref: 027b55b1371116b0a289922abb2b2e9bbd8474c7
           path: previous-lumabri
       - uses: actions/setup-python@v5
         with:
