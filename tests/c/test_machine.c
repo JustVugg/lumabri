@@ -1,9 +1,13 @@
+#define _GNU_SOURCE
 #include "lumabri_machine.h"
 
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <sched.h>
+#endif
 
 int main(void) {
     assert(lmb_machine_default_reserve_mb(0) == 4096);
@@ -22,6 +26,21 @@ int main(void) {
     assert(profile.ram_available_bytes > 0);
     assert(profile.ram_available_bytes <= profile.ram_total_bytes);
     assert(profile.physical_cores <= profile.logical_cpus);
+#ifdef __linux__
+    cpu_set_t original, single;
+    if (!sched_getaffinity(0, sizeof original, &original)) {
+        CPU_ZERO(&single);
+        for (unsigned i = 0; i < CPU_SETSIZE; i++) {
+            if (!CPU_ISSET(i, &original)) continue;
+            CPU_SET(i, &single); break;
+        }
+        assert(!sched_setaffinity(0, sizeof single, &single));
+        lmb_machine_refresh_resources(&profile, ".");
+        assert(profile.logical_cpus == 1 && profile.physical_cores == 1);
+        assert(!sched_setaffinity(0, sizeof original, &original));
+        lmb_machine_refresh_resources(&profile, ".");
+    }
+#endif
 #ifdef __APPLE__
     assert(profile.cpu_model[0]);
 #endif
