@@ -3,6 +3,7 @@
  * same immutable allocation and live-process fences, not a new approval. */
 #ifndef LMB_RETIREMENT_H
 #define LMB_RETIREMENT_H
+#include "lumabri_journal_index.h"
 _Static_assert(LMB_CLUSTER_MAX_NODES<=32,"retirement release mask must cover every node");
 enum { LMB_RET_HOST_DRAIN, LMB_RET_HOST_SEAL, LMB_RET_NODE_DRAIN,
        LMB_RET_NODE_SEAL, LMB_RET_RELEASE, LMB_RET_DONE };
@@ -80,7 +81,7 @@ static int lmb_retirement_dir(int access) {
     return fd;
 }
 static int lmb_retirement_load(int dir, const char *name, LmbRetirement *r) {
-    int fd=openat(dir,name,O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK);
+    int fd=lmb_journal_open(dir,name,O_RDONLY);
     if (fd<0) return errno==ENOENT ? 1 : -1;
     struct stat s; uint8_t bytes[4096];
     int bad=lmb_api_private_fd(fd,0) || fstat(fd,&s) || s.st_size<88 || s.st_size>(off_t)sizeof bytes;
@@ -89,6 +90,9 @@ static int lmb_retirement_load(int dir, const char *name, LmbRetirement *r) {
 }
 static int lmb_retirement_store(int dir, const char *name, const LmbRetirement *r) {
     LmbBuf bytes={0}; if (lmb_retirement_encode(r,&bytes)) { free(bytes.p); return -1; }
+    int target=lmb_journal_select(dir,name,".retire",256);
+    if (target<0) { free(bytes.p); return -1; }
+    dir=target;
     /* One private directory lock serializes all retirement writers. Fixed
      * transaction name bounds crash debris. Unsafe existing entries fail. */
     struct stat s; int bad=0;
@@ -106,14 +110,8 @@ static int lmb_retirement_store(int dir, const char *name, const LmbRetirement *
     if (fd>=0) { if (!bad && fsync(fd)) bad=1; if (close(fd)) bad=1; }
     if (!bad && renameat(dir,"pending",dir,name)) bad=1;
     if (!bad && fsync(dir)) bad=1;
+    close(target);
     return bad ? -1 : 0;
-}
-static int lmb_retirement_room(int dir) {
-    int copy=openat(dir,".",O_RDONLY|O_DIRECTORY|O_CLOEXEC); if (copy<0) return -1;
-    DIR *entries=fdopendir(copy); if (!entries) { close(copy); return -1; }
-    struct dirent *entry; unsigned count=0;
-    while ((entry=readdir(entries))) if (strlen(entry->d_name)==71 && !strcmp(entry->d_name+64,".retire")) count++;
-    closedir(entries); return count<256 ? 0 : -1;
 }
 static int lmb_retirement_plan_hash(const LmbResidentPlan *p, uint8_t out[64]) {
     LmbBuf b={0};
@@ -224,7 +222,6 @@ static int api_retirement_execute(int access, const char *tracker, const uint8_t
     int loaded=lmb_retirement_load(dir,name,&r);
     if (loaded<0) goto done;
     if (loaded==1) {
-        if (lmb_retirement_room(dir)) goto done;
         memcpy(r.plan_hash,hash,64); r.count=p->execution.count;
         LmbHostControl host={0};
         if (lmb_host_control_rpc(p->host,p->host_key,p->root,0,NULL,&host)) {

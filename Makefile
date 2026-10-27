@@ -148,6 +148,9 @@ lumabri test_chat_ui test_host_session_pool test-home-monitor: src/runtime/lumab
 lumabri test_chat_ui test_host_session_pool test_host_drain test-home-monitor: src/runtime/lumabri_retirement.h
 lumabri test_chat_ui test_host_session_pool test_host_drain test-home-monitor: src/runtime/lumabri_retired_receipts.h
 lumabri test_chat_ui test_host_session_pool test_host_drain test-home-monitor: src/runtime/lumabri_allocation_lifetime.h
+lumabri test_chat_ui test_host_session_pool test_host_drain test-home-monitor test_retired_receipts test_allocation_lifetime test_journal_index: src/runtime/lumabri_journal_index.h
+tracker tracker_tsan test_tracker_history: src/runtime/lumabri_tracker_history.h src/runtime/lumabri_journal_index.h
+test check-warnings: test_tracker_history
 lumabri segment_node test_chat_ui test_home_expert test_host_session_pool test-home-monitor: src/runtime/lumabri_node_control.h
 lumabri test_chat_ui test_host_session_pool test-home-monitor segment_chat test_segment_close: src/runtime/lumabri_request_seed.h src/runtime/lumabri_replay_prefix.h
 lumabri test_chat_ui test_host_session_pool test-home-monitor: src/runtime/lumabri_chat_history.h src/runtime/lumabri_chat_store.h build/web_assets.h
@@ -590,7 +593,7 @@ test_api_access: tests/c/test_api_access.c src/runtime/lumabri_api_access.h $(SE
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_api_access.c -o $@
 
 .PHONY: test-api test-api-gateway
-test-api: test_api_json test_api_http test_api_access test_chat_store test_model_routes test_replica_admission test_replica_rank test_replay_prefix test_capacity test_portfolio_policy test_elastic_policy test_retired_receipts test_allocation_lifetime
+test-api: test_api_json test_api_http test_api_access test_chat_store test_model_routes test_replica_admission test_replica_rank test_replay_prefix test_capacity test_portfolio_policy test_elastic_policy test_retired_receipts test_allocation_lifetime test_journal_index
 	./test_api_json
 	./test_api_http
 	./test_api_access
@@ -604,6 +607,13 @@ test-api: test_api_json test_api_http test_api_access test_chat_store test_model
 	./test_elastic_policy
 	./test_retired_receipts
 	./test_allocation_lifetime
+	./test_journal_index
+
+test_journal_index: tests/c/test_journal_index.c src/runtime/lumabri_journal_index.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_journal_index.c -o $@
+
+test_tracker_history: tests/c/test_tracker_history.c tracker.c lumabri_segment_discovery.c lumabri_segment.c $(SECURE_DEPS) $(HOME_NET_DEPS) lumabri_proto.h lumabri_sha.h lumabri_sign.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_tracker_history.c lumabri_segment_discovery.c lumabri_segment.c -o $@
 
 test_allocation_lifetime: tests/c/test_allocation_lifetime.c src/runtime/lumabri_allocation_lifetime.h src/runtime/lumabri_retired_receipts.h $(SECURE_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_allocation_lifetime.c -o $@
@@ -775,6 +785,8 @@ test-sanitize: build/web_assets.h
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_node_control.c -o build/sanitize/test_node_control
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_retired_receipts.c -o build/sanitize/test_retired_receipts
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_allocation_lifetime.c -o build/sanitize/test_allocation_lifetime
+	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_journal_index.c -o build/sanitize/test_journal_index
+	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_tracker_history.c lumabri_segment_discovery.c lumabri_segment.c -o build/sanitize/test_tracker_history
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_compute_broker.c -o build/sanitize/test_compute_broker
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_compute_lease.c $(MACHINE_SRC) -o build/sanitize/test_compute_lease
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_content_filter.c -o build/sanitize/test_content_filter
@@ -810,6 +822,8 @@ test-sanitize: build/web_assets.h
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/sanitize/test_node_control
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/sanitize/test_retired_receipts
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/sanitize/test_allocation_lifetime
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/sanitize/test_journal_index
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/sanitize/test_tracker_history
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_compute_broker
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_compute_lease
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_content_filter
@@ -1083,6 +1097,7 @@ test: all test_weight_cache test_key_rotation test_hedge test_local_fallback tes
 		test_scheduler test_run_gate test_tcp_latency test_planner_io
 	./test_chat_ui home-settings
 	$(PYTHON) tests/integration/test_prerequisites_test.py
+	./test_tracker_history
 	bash ./tests/integration/selftest.sh
 	bash ./tests/integration/donate_test.sh
 	bash ./tests/integration/signed_donor_test.sh
@@ -1210,7 +1225,7 @@ clean:
 	      test_verify_failover test_segment_v2 test_segment_discovery test_sampling \
 	      test_swarm_detail test_relay_rate test_machine test_meminfo test_process_memory test_engine_memory test_engine_memory_guard test_memlock test_serve_control test_host_session_pool test_hosted_sessions test_host_drain test_node_control \
 	      test_compute_lease test_content_filter test_scheduler test_run_gate \
-	      test_compute_broker test_portfolio test_reply_stream test_api_json test_api_http test_api_access test_chat_store test_model_routes test_replica_admission test_replica_rank test_replay_prefix test_capacity test_portfolio_policy test_elastic_policy test_retired_receipts test_allocation_lifetime \
+	      test_compute_broker test_portfolio test_reply_stream test_api_json test_api_http test_api_access test_chat_store test_model_routes test_replica_admission test_replica_rank test_replay_prefix test_capacity test_portfolio_policy test_elastic_policy test_retired_receipts test_allocation_lifetime test_journal_index test_tracker_history \
 	      test_segment_v2_tsan tracker_tsan \
 	      segment_node segment_chat test_backend_routes test_segment_close test_tcp_latency segment_node_asan segment_chat_asan \
 	      segment_node_tsan segment_chat_tsan \

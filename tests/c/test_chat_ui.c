@@ -406,8 +406,44 @@ int main(int argc, char **argv) {
         assert(preparation_load(dir,id,&loaded)); assert(!unlinkat(dir,file,0));
         assert(!symlinkat("/dev/null",dir,file)); assert(preparation_load(dir,id,&loaded)); assert(!unlinkat(dir,file,0));
         snprintf(file,sizeof file,"%s.intent",id); assert(!unlinkat(dir,file,0));
+        /* Real threshold, exact immutable intents plus evolving snapshots.
+         * History stays reachable through bounded API pages after key 256. */
+        for (unsigned i=1;i<=270;i++) {
+            snprintf(id,sizeof id,"%064x",i); assert(!lmb_unhex(s.instance,id,32));
+            assert(!preparation_intent(dir,id,hash,1));
+            assert(!preparation_save(dir,&s));
+        }
+        close(dir); dir=preparation_dir(access); assert(dir>=0);
+        for (unsigned i=1;i<=270;i++) {
+            snprintf(id,sizeof id,"%064x",i);
+            assert(preparation_intent(dir,id,hash,1)==1);
+            assert(preparation_intent(dir,id,other,1)<0);
+            assert(!preparation_load(dir,id,&loaded) && loaded.state==HOME_SVC_DONE);
+        }
+        Cap page={0}; assert(preparation_list(dir,"tracker-a","",&page)==200);
+        char cursor[65]; snprintf(cursor,sizeof cursor,"%064x",256);
+        snprintf(file,sizeof file,"\"next_cursor\":\"%s",cursor); assert(strstr(page.p,file)); free(page.p); page=(Cap){0};
+        assert(preparation_list(dir,"tracker-a",cursor,&page)==200);
+        snprintf(id,sizeof id,"%064x",270);
+        assert(strstr(page.p,id) && strstr(page.p,"\"next_cursor\":\"\"")); free(page.p); page=(Cap){0};
+        assert(preparation_list(dir,"different-tracker","",&page)==200);
+        assert(strstr(page.p,"\"operations\":[]") && strstr(page.p,file)); free(page.p); page=(Cap){0};
+        assert(preparation_list(dir,"tracker-a","../outside",&page)==400); free(page.p);
+        for (unsigned i=1;i<=270;i++) {
+            snprintf(id,sizeof id,"%064x",i);
+            const char *suffix[]={"intent","state"};
+            for (unsigned j=0;j<2;j++) {
+                snprintf(file,sizeof file,"%s.%s",id,suffix[j]);
+                int at=lmb_journal_location(dir,file); assert(at>=0 && !unlinkat(at,file,0)); close(at);
+            }
+        }
+        int history=lmb_journal_child(dir,LMB_JOURNAL_HISTORY,0); assert(history>=0);
+        int first=lmb_journal_child(history,"00",0); assert(first>=0);
+        assert(!unlinkat(first,"00",AT_REMOVEDIR)); close(first);
+        assert(!unlinkat(history,"00",AT_REMOVEDIR)); close(history);
+        assert(!unlinkat(dir,LMB_JOURNAL_HISTORY,AT_REMOVEDIR));
         close(dir); assert(!unlinkat(access,"preparations",AT_REMOVEDIR)); close(access); assert(!rmdir(tmp));
-        puts("PREPARATION CODEC: PASS"); return 0;
+        puts("PREPARATION CODEC: PASS (270 immutable intents, snapshot identity, restart, bounded history pages)"); return 0;
     }
     if (argc==4 && !strcmp(argv[1],"resident-hold")) {
         assert(!lmb_secure_init()); LmbResidentPlan plan; Engine engine;
@@ -1158,6 +1194,25 @@ int main(int argc, char **argv) {
         assert(!unlink(library_path_a)); assert(!symlink(library_path_b, library_path_a));
         assert(home_resident_library_list(plan.tracker, library, 4) == 1);
         assert(!unlink(library_path_a)); assert(!unlink(library_path_b));
+        for (unsigned i=0;i<80;i++) {
+            plan.allocation[0]=(uint8_t)(i+1);
+            assert(!home_resident_library_save(&plan));
+        }
+        for (unsigned i=0;i<80;i++) {
+            plan.allocation[0]=(uint8_t)(i+1);
+            assert(!api_find_plan(plan.tracker,plan.allocation,&loaded));
+            assert(!memcmp(loaded.allocation,plan.allocation,32));
+        }
+        /* Different file/name, same allocation is ambiguous, even outside
+         * the first UI page. Never authorize release of one by guessing. */
+        strcpy(plan.model,"duplicate-plan"); assert(!home_resident_library_save(&plan));
+        assert(api_find_plan(plan.tracker,plan.allocation,&loaded));
+        assert(!home_resident_library_path(&plan,library_path_a,sizeof library_path_a) && !unlink(library_path_a));
+        strcpy(plan.model,"approved-model");
+        for (unsigned i=0;i<80;i++) {
+            plan.allocation[0]=(uint8_t)(i+1);
+            assert(!home_resident_library_path(&plan,library_path_a,sizeof library_path_a) && !unlink(library_path_a));
+        }
         assert(!home_resident_library_directory(library_directory, sizeof library_directory));
         assert(!rmdir(library_directory));
         assert(home_resident_plan_load("other-household:47300", &loaded));

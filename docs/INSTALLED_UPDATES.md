@@ -100,6 +100,13 @@ then selects the separately retained compatible previous package. It uses
 the current persistent state, not a stale copy. Never downgrade live workers
 under an active fenced placement.
 
+The indexed tracker and lifecycle stores require index-aware binaries. A
+flat-only tracker can appear to start and serve new work while ignoring the
+accepted roots and integrity proofs retained by the newer version. That is
+not a supported rollback. Keep an index-aware previous package; do not delete
+the index or restore a pre-upgrade snapshot to make an older binary usable.
+See [journal compatibility](RESIDENT_API.md#coordinated-retirement-of-an-exact-approved-allocation).
+
 ## Reproducible installed-package gate
 
 From a test checkout, with two clean native packages and one existing tiny
@@ -135,7 +142,11 @@ never a replacement engine or a copied development helper. It verifies:
 `installed-fleet-update.json` records the exact packages, runtime hashes,
 stage results and history revisions without tokens or conversation text.
 Linux and all four native macOS household CI variants test against the pinned
-baseline `01e3f86840f27260ea0e1229586116d8d99a26c3`.
+index-aware baseline `027b55b1371116b0a289922abb2b2e9bbd8474c7`.
+Every stage must preserve the previous exact tracker integrity records and
+write fresh indexed records for its new allocations. A flat-only package is
+rejected by this gate even if it can still run inference. This baseline is a
+compatibility test revision, not a claim that it was a published release.
 
 This gate has no active autonomous policies or unfinished lifecycle operations;
 it does not certify migration of such state. It is a reduced-model loopback,

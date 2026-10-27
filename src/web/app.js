@@ -10,6 +10,7 @@ let operator = false, workspaceOpen = false, workspacePending = false, workspace
 let workspaceExpires = 0;
 let management = false, managementBusy = false;
 let preparationReview = null, preparationBusy = false, preparationOperation = "";
+let preparationNextCursor = "";
 let preparationNames = new Map();
 let elasticPending = false, elasticEditor = null, elasticReview = null, elasticEpoch = 0;
 const utf8 = new TextEncoder();
@@ -344,7 +345,7 @@ $("sign-out").onclick = () => {
   token = ""; models = []; conversations = []; current = null;
   showGenerationMetrics();
   operator = false; management = false; closeWorkspace(); clearWorkspace();
-  preparationOperation = ""; preparationInvalidate();
+  preparationOperation = ""; preparationNextCursor = ""; preparationInvalidate();
   $("prepare-form").hidden = true; $("prepare-models").replaceChildren(); $("prepare-nodes").replaceChildren();
   $("prepare-status").textContent = ""; $("prepare-operation").replaceChildren(new Option("No operation selected", ""));
   $("prepare-cancel").hidden = true;
@@ -557,26 +558,35 @@ async function preparationTask(fn) {
   if (!management || preparationBusy || managementBusy || !workspaceOpen) return;
   preparationBusy = true; managementBusy = true; controls();
   $("prepare-form").inert = true;
-  for (const id of ["prepare-catalogue", "prepare-preview", "prepare-start", "prepare-cancel", "prepare-operation"]) $(id).disabled = true;
+  for (const id of ["prepare-catalogue", "prepare-preview", "prepare-start", "prepare-cancel", "prepare-operation", "prepare-history-first", "prepare-history-next"]) $(id).disabled = true;
   const credential = token, epoch = workspaceEpoch;
   const valid = () => credential === token && epoch === workspaceEpoch && workspaceOpen;
   try { await fn(valid); } catch (error) { if (valid()) $("prepare-status").textContent = error.message; }
   finally {
     preparationBusy = false; managementBusy = false; controls();
     $("prepare-form").inert = false;
-    for (const id of ["prepare-catalogue", "prepare-preview", "prepare-start", "prepare-cancel", "prepare-operation"]) $(id).disabled = false;
+    for (const id of ["prepare-catalogue", "prepare-preview", "prepare-start", "prepare-cancel", "prepare-operation", "prepare-history-first", "prepare-history-next"]) $(id).disabled = false;
   }
 }
-async function loadPreparations() {
+async function loadPreparations(after = "") {
   return preparationTask(async valid => {
-    const data = await request("/api/v1/preparation"); if (!valid()) return;
+    const data = await request(after ? `/api/v1/preparation/after/${after}` : "/api/v1/preparation"); if (!valid()) return;
     const list = data.operations.sort((a, b) => b.updated_at - a.updated_at);
     $("prepare-operation").replaceChildren(new Option("No operation selected", ""));
     for (const entry of list) $("prepare-operation").add(new Option(`${entry.recorded_state} · ${entry.operation.slice(0, 12)} · ${entry.detail}`, entry.operation));
-    preparationOperation = list.some(entry => entry.operation === preparationOperation) ? preparationOperation : list[0]?.operation || "";
+    // Paging must not silently stop observing an in-flight operation outside
+    // this page. Its exact status remains independently addressable.
+    if (preparationOperation && !list.some(entry => entry.operation === preparationOperation))
+      $("prepare-operation").add(new Option(`Selected · ${preparationOperation.slice(0, 12)} · outside this page`, preparationOperation));
+    if (!preparationOperation) preparationOperation = list[0]?.operation || "";
     $("prepare-operation").value = preparationOperation;
+    preparationNextCursor = data.next_cursor || "";
+    $("prepare-history-next").hidden = !preparationNextCursor;
+    $("prepare-history-page").textContent = `${list.length} operations on this page. Pages follow operation IDs, not dates. ${preparationNextCursor ? "More history available." : "End of history."}`;
   });
 }
+$("prepare-history-first").onclick = () => loadPreparations();
+$("prepare-history-next").onclick = () => { if (preparationNextCursor) loadPreparations(preparationNextCursor); };
 $("prepare-catalogue").onclick = () => preparationTask(async valid => {
   const catalogue = await request("/api/v1/catalogue"), workspace = await request("/api/v1/workspace");
   if (!valid()) return;

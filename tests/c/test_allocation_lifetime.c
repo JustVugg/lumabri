@@ -12,7 +12,9 @@ static void wait_success(pid_t pid,const char *phase) {
     assert(WIFEXITED(status) && !WEXITSTATUS(status));
 }
 static void erase_record(int dir,const uint8_t id[32]) {
-    char name[80]; lmb_lifetime_name(id,name); assert(!unlinkat(dir,name,0));
+    char name[80]; lmb_lifetime_name(id,name);
+    int at=lmb_journal_location(dir,name); assert(at>=0);
+    assert(!unlinkat(at,name,0)); close(at);
 }
 int main(int argc,char **argv) {
     (void)lmb_sign; (void)lmb_retired_dir; (void)lmb_retired_store; (void)lmb_retired_sync;
@@ -103,9 +105,31 @@ int main(int argc,char **argv) {
     }
     close(held); wait_success(child,"CLOEXEC"); assert(!lmb_lifetime_prove(dir,r.allocation,&proof));
     erase_record(dir,r.allocation); r.allocation[0]=1; erase_record(dir,r.allocation);
+    /* Cross the actual production flat threshold; older evidence and the
+     * first indexed identity must still reject reuse and prove real exit. */
+    memset(r.allocation,0,sizeof r.allocation); r.allocation[0]=7;
+    for (unsigned i=0;i<=LMB_LIFETIME_MAX;i++) {
+        lmb_put32(r.allocation+4,i+1);
+        held=lmb_lifetime_create(dir,&r); assert(held>=3);
+        assert(lmb_lifetime_prove(dir,r.allocation,&proof)==1);
+        close(held);
+        assert(!lmb_lifetime_unused(dir,r.allocation) && !lmb_lifetime_prove(dir,r.allocation,&proof));
+        assert(lmb_lifetime_create(dir,&r)<0);
+    }
+    close(dir); dir=lmb_lifetime_dir(path,0); assert(dir>=0);
+    for (unsigned i=0;i<=LMB_LIFETIME_MAX;i++) {
+        lmb_put32(r.allocation+4,i+1);
+        assert(!lmb_lifetime_prove(dir,r.allocation,&proof));
+        erase_record(dir,r.allocation);
+    }
+    int history=lmb_journal_child(dir,LMB_JOURNAL_HISTORY,0); assert(history>=0);
+    int first=lmb_journal_child(history,"07",0); assert(first>=0);
+    assert(!unlinkat(first,"00",AT_REMOVEDIR)); close(first);
+    assert(!unlinkat(history,"07",AT_REMOVEDIR)); close(history);
+    assert(!unlinkat(dir,LMB_JOURNAL_HISTORY,AT_REMOVEDIR));
     assert(!unlinkat(dir,"lock",0)); close(dir);
     int base=open(path,O_RDONLY|O_DIRECTORY); assert(base>=0);
     assert(!unlinkat(base,"allocation-lifetimes",AT_REMOVEDIR)); close(base); assert(!rmdir(path));
-    puts("ALLOCATION LIFETIME: PASS (reaped parent is not exit, fork+exec descendants, last close, immutable identity, restart, unsafe/missing records unknown)");
+    puts("ALLOCATION LIFETIME: PASS (fork+exec descendants, last close, 4097 immutable lifetimes, restart, unsafe/missing records unknown)");
     return 0;
 }

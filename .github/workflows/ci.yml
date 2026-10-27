@@ -65,11 +65,13 @@ jobs:
           ./test_node_control
           make test_run_gate CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           ./test_run_gate
-          make test_api_access test_replica_admission test_retired_receipts test_allocation_lifetime CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
+          make test_api_access test_replica_admission test_retired_receipts test_allocation_lifetime test_journal_index test_tracker_history CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           ./test_api_access
           ./test_replica_admission
           ./test_retired_receipts
           ./test_allocation_lifetime
+          ./test_journal_index
+          ./test_tracker_history
           make test_compute_broker CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           ./test_compute_broker
           make test_portfolio CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
@@ -152,7 +154,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: JustVugg/lumabri
-          ref: 01e3f86840f27260ea0e1229586116d8d99a26c3
+          ref: 027b55b1371116b0a289922abb2b2e9bbd8474c7
           path: previous-lumabri
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -534,7 +536,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: JustVugg/lumabri
-          ref: 01e3f86840f27260ea0e1229586116d8d99a26c3
+          ref: 027b55b1371116b0a289922abb2b2e9bbd8474c7
           path: previous-lumabri
       - uses: actions/setup-python@v5
         with:

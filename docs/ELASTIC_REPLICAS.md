@@ -97,10 +97,13 @@ resident Segment plans; it does not switch to disk or Hybrid implicitly.
 Limits: at most 32 policies, 8 replicas per model, 32 selected nodes, a
 30-second minimum cooldown, a 60-second minimum idle grace and one pending
 lifecycle operation per policy. The common preparation keeper additionally
-serializes preparations. Preparation and retirement receipts remain bounded
-at 256 entries each; reaching a receipt limit holds new work for operator
-inspection rather than forgetting an idempotency key.
-Donors also retain up to 256 exact sealed-release receipts. They can confirm
+serializes preparations. Preparation, retirement and sealed-release receipts
+retain exact IDs in private indexed history after the first 256 flat records;
+the threshold no longer limits the number of lifetime operations. History
+requires disk space and is never automatically evicted. Storage failures still
+hold new mutations rather than forget evidence; see
+[journal compatibility](RESIDENT_API.md) before changing installed versions.
+Donors retain exact sealed-release receipts. They can confirm
 an old completed release after a new allocation reuses the slot, without
 unloading that new allocation. An interrupted release intent is not a receipt
 of completion, and failed/unreachable allocations remain charged until their

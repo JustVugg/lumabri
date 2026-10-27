@@ -11,8 +11,8 @@
  * direct peer-to-peer remains the first choice and the relay the fallback.
  *
  * Placement/liveness state is in memory and rebuilt from heartbeats after a
- * restart. Name-to-identity ownership is the exception: it is persisted
- * before admission, so restarting the tracker cannot reopen an honest name.
+ * restart. Ownership, checkpoint roots and integrity proofs are durable;
+ * bounded RAM caches never turn an old name or file into a new first claim.
  *
  *   ./tracker [--port 7300]
  */
@@ -29,6 +29,7 @@
 #include "lumabri_secure.h"
 #include "lumabri_inventory.h"
 #include "lumabri_home_discovery.h"
+#include "src/runtime/lumabri_tracker_history.h"
 
 #define MAX_PEERS  64
 #define MAX_FILES  4096
@@ -219,6 +220,7 @@ static void segment_generation_bump(void) {
 typedef struct { char name[64]; uint8_t pubkey[32]; int is_expert; } Binding;
 static Binding g_bindings[MAX_BINDINGS];
 static int g_nbindings;
+static unsigned g_binding_cursor;
 
 static int binding_name_ok(const char *s) {
     if (!s || !*s || strlen(s) >= 64) return 0;
@@ -232,6 +234,23 @@ static int binding_find(const char *name, int is_expert) {
         if (g_bindings[i].is_expert == is_expert &&
             !strcmp(g_bindings[i].name, name)) return i;
     return -1;
+}
+
+static void binding_remember(const char *name,int is_expert,const uint8_t pk[32]) {
+    int at=binding_find(name,is_expert);
+    if (at<0) at=g_nbindings<MAX_BINDINGS ? g_nbindings++ : (int)(g_binding_cursor++%MAX_BINDINGS);
+    Binding *x=&g_bindings[at]; memset(x,0,sizeof *x);
+    x->is_expert=is_expert; snprintf(x->name,sizeof x->name,"%s",name); memcpy(x->pubkey,pk,32);
+}
+
+/* The append-only bindings file remains readable by older releases. The
+ * exact index validates duplicates even when they exceed the RAM cache. */
+static int binding_history_accept(TrackerHistory *h,const char *name,int is_expert,const uint8_t pk[32]) {
+    char key[80]; tracker_history_key(is_expert ? "binding-E" : "binding-M",name,"",key);
+    LmbBuf saved={0}; int rc=tracker_history_read(h,key,&saved);
+    if (!rc) rc=saved.len!=32 || memcmp(saved.p,pk,32) ? -1 : 0;
+    else if (rc==1) { LmbBuf payload={(uint8_t *)pk,32,32}; rc=tracker_history_write(h,key,&payload); }
+    free(saved.p); return rc;
 }
 
 static int binding_path_default(void) {
@@ -259,8 +278,11 @@ static int bindings_load(void) {
     struct stat st;
     if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_uid != geteuid() ||
         (st.st_mode & 022)) { close(fd); errno = EACCES; return -1; }
+    if (flock(fd,LOCK_SH)) { close(fd); return -1; }
+    TrackerHistory history;
+    if (tracker_history_begin(g_bindings_path,&history)) { close(fd); return -1; }
     FILE *fp = fdopen(fd, "r");
-    if (!fp) { close(fd); return -1; }
+    if (!fp) { tracker_history_end(&history); close(fd); return -1; }
     char line[768]; int rc = 0;
     while (fgets(line, sizeof line, fp)) {
         size_t n = strlen(line);
@@ -269,17 +291,16 @@ static int bindings_load(void) {
         char *a = strchr(line, '\t'), *b = a ? strchr(a + 1, '\t') : NULL;
         if (!a || !b || a != line + 1 || (line[0] != 'M' && line[0] != 'E')) { rc = -1; break; }
         *a++ = 0; *b++ = 0;
-        if (strlen(a) != 64 || !binding_name_ok(b) || g_nbindings >= MAX_BINDINGS) { rc = -1; break; }
+        if (strlen(a) != 64 || !binding_name_ok(b)) { rc = -1; break; }
         Binding x = {0}; x.is_expert = line[0] == 'E';
         snprintf(x.name, sizeof x.name, "%s", b);
         if (lmb_unhex(x.pubkey, a, 32)) { rc = -1; break; }
-        int old = binding_find(x.name, x.is_expert);
-        if (old >= 0) {
-            if (memcmp(g_bindings[old].pubkey, x.pubkey, 32)) { rc = -1; break; }
-        } else g_bindings[g_nbindings++] = x;
+        if (binding_history_accept(&history,x.name,x.is_expert,x.pubkey)) { rc=-1; break; }
+        binding_remember(x.name,x.is_expert,x.pubkey);
     }
     if (ferror(fp)) rc = -1;
     fclose(fp);
+    tracker_history_end(&history);
     return rc;
 }
 
@@ -289,7 +310,7 @@ static int binding_check_or_add(const char *name, int is_expert,
                                 const uint8_t pk[32]) {
     int old = binding_find(name, is_expert);
     if (old >= 0) return memcmp(g_bindings[old].pubkey, pk, 32) ? -1 : 0;
-    if (!binding_name_ok(name) || g_nbindings >= MAX_BINDINGS) return -1;
+    if (!binding_name_ok(name)) return -1;
     int flags = O_RDWR | O_CREAT;
 #ifdef O_NOFOLLOW
     flags |= O_NOFOLLOW;
@@ -331,11 +352,14 @@ static int binding_check_or_add(const char *name, int is_expert,
         fclose(rf);
     }
     if (disk_bad) { flock(fd, LOCK_UN); close(fd); return -1; }
+    TrackerHistory history;
+    if (tracker_history_begin(g_bindings_path,&history)) { close(fd); return -1; }
+    int history_bad=binding_history_accept(&history,name,is_expert,pk);
+    tracker_history_end(&history);
+    if (history_bad) { close(fd); return -1; }
     if (disk_found) {
         flock(fd, LOCK_UN); close(fd);
-        Binding *x = &g_bindings[g_nbindings++];
-        memset(x, 0, sizeof *x); x->is_expert = is_expert;
-        snprintf(x->name, sizeof x->name, "%s", name); memcpy(x->pubkey, pk, 32);
+        binding_remember(name,is_expert,pk);
         return 0;
     }
     char hex[65], row[768]; lmb_hex(hex, pk, 32);
@@ -353,9 +377,7 @@ static int binding_check_or_add(const char *name, int is_expert,
     if (ok && fsync(fd)) ok = 0;
     flock(fd, LOCK_UN); close(fd);
     if (!ok) return -1;
-    Binding *x = &g_bindings[g_nbindings++];
-    memset(x, 0, sizeof *x); x->is_expert = is_expert;
-    snprintf(x->name, sizeof x->name, "%s", name); memcpy(x->pubkey, pk, 32);
+    binding_remember(name,is_expert,pk);
     return 0;
 }
 
@@ -372,12 +394,61 @@ typedef struct {
 } GTruth;
 static GTruth g_truth[MAX_FILES];
 static int g_ntruth;
+static unsigned g_truth_cursor;
 static LmbTrustKeys g_trust; /* --pubkey: one key or an overlap keyring */
 #define g_have_pubkey (g_trust.n != 0)
 
 #define MAX_MODELS 128
 typedef struct { LmbModelIdentity id; int used, sig_rank; } GModel;
 static GModel g_models[MAX_MODELS];
+static unsigned g_model_cursor;
+
+static int model_sig_rank(const LmbModelIdentity *id) {
+    if (!g_have_pubkey || !id->has_sig) return -1;
+    size_t size=0; uint8_t *msg=lmb_model_id_msg(id->model,id->root,&size);
+    int rank=msg ? lmb_trust_match(&g_trust,id->sig,msg,size) : -1;
+    free(msg); return rank;
+}
+static int model_history_read(TrackerHistory *history,const char *model,GModel *out) {
+    char key[80]; tracker_history_key("model",model,"",key);
+    LmbBuf b={0}; int rc=tracker_history_read(history,key,&b);
+    if (rc) return rc;
+    memset(out,0,sizeof *out); LmbCur c={b.p,b.len,0}; uint32_t signed_id=0;
+    int bad=lmb_cur_str(&c,out->id.model,sizeof out->id.model) || strcmp(out->id.model,model) ||
+        lmb_cur_bytes(&c,out->id.root,32) || lmb_cur_u32(&c,&signed_id) || signed_id>1 ||
+        (signed_id && lmb_cur_bytes(&c,out->id.sig,64)) || c.off!=c.len;
+    free(b.p);
+    if (bad) return -1;
+    out->id.has_sig=(int)signed_id; out->used=1; out->sig_rank=model_sig_rank(&out->id); return 0;
+}
+static int model_history_write(TrackerHistory *history,const LmbModelIdentity *id) {
+    char key[80]; tracker_history_key("model",id->model,"",key); LmbBuf b={0};
+    int bad=lmb_buf_str(&b,id->model) || lmb_buf_bytes(&b,id->root,32) ||
+        lmb_buf_u32(&b,id->has_sig ? 1u : 0u) || (id->has_sig && lmb_buf_bytes(&b,id->sig,64)) ||
+        tracker_history_write(history,key,&b);
+    free(b.p); return bad ? -1 : 0;
+}
+static GModel *model_remember(const GModel *model) {
+    unsigned at=MAX_MODELS;
+    for (unsigned i=0;i<MAX_MODELS;i++) {
+        if (g_models[i].used && !strcmp(g_models[i].id.model,model->id.model)) { at=i; break; }
+        if (!g_models[i].used && at==MAX_MODELS) at=i;
+    }
+    if (at==MAX_MODELS) at=g_model_cursor++%MAX_MODELS;
+    g_models[at]=*model; return &g_models[at];
+}
+/* Exact lookup: 0 found, 1 absent, -1 unsafe/unreadable metadata. Cache
+ * eviction never changes the first accepted root for a model name. */
+static int model_lookup(const char *name,GModel **out) {
+    for (unsigned i=0;i<MAX_MODELS;i++)
+        if (g_models[i].used && !strcmp(g_models[i].id.model,name)) { *out=&g_models[i]; return 0; }
+    TrackerHistory history;
+    if (tracker_history_begin(g_bindings_path,&history)) return -1;
+    GModel value; int rc=model_history_read(&history,name,&value);
+    tracker_history_end(&history);
+    if (!rc) *out=model_remember(&value);
+    return rc;
+}
 
 /* under g_lk. A first identity must describe exactly the hash inventory in
  * that registration; later partial donors may forward the already accepted
@@ -386,49 +457,114 @@ static int model_identity_check(const char *model, const LmbModelIdentity *id,
                                 const PFile *files, uint32_t n,
                                 uint8_t *const *hashes, const uint32_t *nh) {
     if (strcmp(model, id->model)) return 0;
-    int sig_rank = -1;
-    if (g_have_pubkey) {
-        if (!id->has_sig) return 0;
-        size_t ml = 0;
-        uint8_t *msg = lmb_model_id_msg(model, id->root, &ml);
-        if (msg) sig_rank = lmb_trust_match(&g_trust, id->sig, msg, ml);
-        int ok = sig_rank >= 0;
-        free(msg);
-        if (!ok) return 0;
-    }
+    int sig_rank=model_sig_rank(id);
+    if (g_have_pubkey && sig_rank<0) return 0;
     for (int i = 0; i < MAX_MODELS; i++)
         if (g_models[i].used && !strcmp(g_models[i].id.model, model)) {
             if (memcmp(g_models[i].id.root, id->root, 32)) return 0;
             if (g_models[i].id.has_sig && !id->has_sig) return 0;
-            if ((!g_models[i].id.has_sig && id->has_sig) ||
-                (id->has_sig && sig_rank > g_models[i].sig_rank)) {
-                g_models[i].id = *id; g_models[i].sig_rank = sig_rank;
-            }
-            return 1;
+            if (!((!g_models[i].id.has_sig && id->has_sig) ||
+                (id->has_sig && sig_rank>g_models[i].sig_rank))) return 1;
+            break;
         }
-    LmbModelItem *items = (LmbModelItem *)calloc(n ? n : 1, sizeof *items);
-    if (!items) return 0;
-    for (uint32_t i = 0; i < n; i++) {
-        /* Empty files legitimately have a zero-length hash vector. */
-        if (nh[i] && !hashes[i]) { free(items); return 0; }
-        items[i].path = files[i].path; items[i].size = files[i].size;
-        items[i].nh = nh[i]; items[i].hashes = hashes[i];
+    TrackerHistory history;
+    if (tracker_history_begin(g_bindings_path,&history)) return 0;
+    GModel saved; int rc=model_history_read(&history,model,&saved),ok=0;
+    if (rc<0) goto done;
+    if (!rc) {
+        if (memcmp(saved.id.root,id->root,32) || (saved.id.has_sig && !id->has_sig)) goto done;
+    } else {
+        LmbModelItem *items=calloc(n ? n : 1,sizeof *items);
+        if (!items) goto done;
+        for (uint32_t i=0;i<n;i++) {
+            if (nh[i] && !hashes[i]) { free(items); goto done; }
+            items[i]=(LmbModelItem){files[i].path,files[i].size,nh[i],hashes[i]};
+        }
+        uint8_t root[32];
+        int bad=lmb_model_root(model,items,n,root) || memcmp(root,id->root,32);
+        free(items); if (bad) goto done;
     }
-    uint8_t root[32];
-    int ok = lmb_model_root(model, items, n, root) == 0 &&
-             memcmp(root, id->root, 32) == 0;
-    free(items);
-    if (!ok) return 0;
-    for (int i = 0; i < MAX_MODELS; i++)
-        if (!g_models[i].used) {
-            g_models[i].used = 1; g_models[i].id = *id;
-            g_models[i].sig_rank = sig_rank;
-            return 1;
-        }
-    return 0;
+    if (rc==1 || (!saved.id.has_sig && id->has_sig) || (id->has_sig && sig_rank>saved.sig_rank)) {
+        if (model_history_write(&history,id)) goto done;
+        saved=(GModel){.id=*id,.used=1,.sig_rank=sig_rank};
+    }
+    model_remember(&saved); ok=1;
+done:
+    tracker_history_end(&history); return ok;
 }
 
-/* under g_lk; steals *hash on first sight. Returns 1 ok / 0 rejected.
+static int truth_sig_rank(const GTruth *value) {
+    if (!g_have_pubkey || !value->has_sig) return -1;
+    size_t size=0; uint8_t *msg=lmb_truth_msg(value->model,value->path,LMB_HASH_CHUNK,
+        value->size,value->hash,value->nh,&size);
+    int rank=msg ? lmb_trust_match(&g_trust,value->sig,msg,size) : -1;
+    free(msg); return rank;
+}
+static int truth_history_read(TrackerHistory *history,const char *model,const char *path,GTruth *out) {
+    char key[80]; tracker_history_key("truth",model,path,key);
+    LmbBuf b={0}; int rc=tracker_history_read(history,key,&b);
+    if (rc) return rc;
+    memset(out,0,sizeof *out); LmbCur c={b.p,b.len,0}; uint32_t signed_truth=0;
+    int bad=lmb_cur_str(&c,out->model,sizeof out->model) || strcmp(out->model,model) ||
+        lmb_cur_str(&c,out->path,sizeof out->path) || strcmp(out->path,path) ||
+        lmb_cur_u64(&c,&out->size) || lmb_cur_u32(&c,&out->nh) || out->nh>LMB_MAX_BODY/32 ||
+        out->nh!=out->size/LMB_HASH_CHUNK+(out->size%LMB_HASH_CHUNK!=0) ||
+        lmb_cur_u32(&c,&signed_truth) || signed_truth>1 ||
+        (signed_truth && lmb_cur_bytes(&c,out->sig,64)) || (size_t)out->nh*32!=c.len-c.off;
+    if (!bad && out->nh) {
+        out->hash=malloc((size_t)out->nh*32);
+        bad=!out->hash || lmb_cur_bytes(&c,out->hash,(size_t)out->nh*32);
+    }
+    free(b.p);
+    if (bad) { free(out->hash); out->hash=NULL; return -1; }
+    out->has_sig=(int)signed_truth; out->sig_rank=truth_sig_rank(out); return 0;
+}
+static int truth_history_write(TrackerHistory *history,const GTruth *value) {
+    char key[80]; tracker_history_key("truth",value->model,value->path,key); LmbBuf b={0};
+    int bad=lmb_buf_str(&b,value->model) || lmb_buf_str(&b,value->path) || lmb_buf_u64(&b,value->size) ||
+        lmb_buf_u32(&b,value->nh) || lmb_buf_u32(&b,value->has_sig ? 1u : 0u) ||
+        (value->has_sig && lmb_buf_bytes(&b,value->sig,64)) ||
+        (value->nh && lmb_buf_bytes(&b,value->hash,(size_t)value->nh*32)) || tracker_history_write(history,key,&b);
+    free(b.p); return bad ? -1 : 0;
+}
+/* Preserve the legacy empty-model HASHES query with an exact path index,
+ * rather than scanning every historical checkpoint or depending on eviction. */
+static int truth_alias(TrackerHistory *history,const char *path,char model[64],int create) {
+    char key[80]; tracker_history_key("truth-path","",path,key); LmbBuf b={0};
+    int rc=tracker_history_read(history,key,&b);
+    if (!rc) {
+        LmbCur c={b.p,b.len,0}; char saved[64];
+        rc=lmb_cur_str(&c,saved,sizeof saved) || c.off!=c.len ? -1 : 0;
+        if (!rc && !create) snprintf(model,64,"%s",saved);
+    } else if (rc==1 && create) {
+        rc=lmb_buf_str(&b,model) || tracker_history_write(history,key,&b) ? -1 : 0;
+    }
+    free(b.p); return rc;
+}
+static GTruth *truth_remember(GTruth *value) {
+    int at=-1;
+    for (int i=0;i<g_ntruth;i++)
+        if (!strcmp(g_truth[i].model,value->model) && !strcmp(g_truth[i].path,value->path)) { at=i; break; }
+    if (at<0) at=g_ntruth<MAX_FILES ? g_ntruth++ : (int)(g_truth_cursor++%MAX_FILES);
+    free(g_truth[at].hash); g_truth[at]=*value; value->hash=NULL; return &g_truth[at];
+}
+static int truth_lookup(const char *model,const char *path,GTruth **out) {
+    for (int i=0;i<g_ntruth;i++)
+        if ((!*model || !strcmp(g_truth[i].model,model)) && !strcmp(g_truth[i].path,path)) {
+            *out=&g_truth[i]; return 0;
+        }
+    TrackerHistory history;
+    if (tracker_history_begin(g_bindings_path,&history)) return -1;
+    char name[64]; snprintf(name,sizeof name,"%s",model);
+    int rc=*model ? 0 : truth_alias(&history,path,name,0);
+    GTruth value;
+    if (!rc) rc=truth_history_read(&history,name,path,&value);
+    tracker_history_end(&history);
+    if (!rc) *out=truth_remember(&value);
+    return rc;
+}
+
+/* under g_lk; steals *hash when caching a new value. Returns 1 ok / 0 rejected.
  *
  * With --pubkey the tracker stops being an authority and becomes a witness:
  * a truth claim is accepted only if it carries the operator's signature,
@@ -442,42 +578,32 @@ static int truth_check(const char *model, const char *path, uint64_t size,
     uint64_t expected_nh = size / LMB_HASH_CHUNK +
                            (size % LMB_HASH_CHUNK != 0);
     if (expected_nh != nh || (nh && !*hash)) return 0;
-    int sig_rank = -1;
-    if (g_have_pubkey) {
-        if (!has_sig) return 0;
-        size_t mlen = 0;
-        uint8_t *msg = lmb_truth_msg(model, path, LMB_HASH_CHUNK, size,
-                                     *hash, nh, &mlen);
-        if (!msg) return 0;
-        sig_rank = lmb_trust_match(&g_trust, sig, msg, mlen);
-        int ok = sig_rank >= 0;
-        free(msg);
-        if (!ok) return 0;
-    }
+    GTruth value={.size=size,.nh=nh,.hash=*hash,.has_sig=has_sig};
+    snprintf(value.model,sizeof value.model,"%s",model); snprintf(value.path,sizeof value.path,"%s",path);
+    if (has_sig) memcpy(value.sig,sig,64);
+    int sig_rank=truth_sig_rank(&value); value.sig_rank=sig_rank;
+    if (g_have_pubkey && sig_rank<0) return 0;
     for (int i = 0; i < g_ntruth; i++)
         if (!strcmp(g_truth[i].model, model) && !strcmp(g_truth[i].path, path)) {
             if (g_truth[i].nh != nh || g_truth[i].size != size ||
                 (nh && memcmp(g_truth[i].hash, *hash, (size_t)nh * 32))) return 0;
-            if ((!g_truth[i].has_sig && has_sig) ||
-                (has_sig && sig_rank > g_truth[i].sig_rank)) {
-                memcpy(g_truth[i].sig, sig, 64);
-                g_truth[i].has_sig = 1;
-                g_truth[i].sig_rank = sig_rank;
-            }
-            return 1;
+            if (!((!g_truth[i].has_sig && has_sig) ||
+                (has_sig && sig_rank>g_truth[i].sig_rank))) return 1;
+            break;
         }
-    if (g_ntruth == MAX_FILES) return 0;      /* full means reject, never accept blind */
-    GTruth *t = &g_truth[g_ntruth++];
-    snprintf(t->model, sizeof t->model, "%s", model);
-    snprintf(t->path, sizeof t->path, "%s", path);
-    t->nh = nh;
-    t->size = size;
-    t->hash = *hash;
-    t->has_sig = has_sig;
-    t->sig_rank = sig_rank;
-    if (has_sig) memcpy(t->sig, sig, 64);
-    *hash = NULL;
-    return 1;
+    TrackerHistory history;
+    if (tracker_history_begin(g_bindings_path,&history)) return 0;
+    GTruth saved={0}; int rc=truth_history_read(&history,model,path,&saved),ok=0;
+    if (rc<0) goto done;
+    if (!rc && (saved.nh!=nh || saved.size!=size || (nh && memcmp(saved.hash,*hash,(size_t)nh*32)))) goto done;
+    int upgrade=rc==1 || (!saved.has_sig && has_sig) || (has_sig && sig_rank>saved.sig_rank);
+    if (upgrade && truth_history_write(&history,&value)) goto done;
+    if (truth_alias(&history,path,value.model,1)) goto done;
+    if (upgrade) { truth_remember(&value); *hash=NULL; }
+    else truth_remember(&saved);
+    ok=1;
+done:
+    free(saved.hash); tracker_history_end(&history); return ok;
 }
 
 static double now_s(void) {
@@ -1132,10 +1258,10 @@ static int handle_epeers(int fd, LmbMsg *m) {
  * old expert-only peer must never be selected for a stateful session. */
 
 static int segment_model_root_ok(const LmbSegAdvert *advert) {
-    for (int i = 0; i < MAX_MODELS; i++)
-        if (g_models[i].used && !strcmp(g_models[i].id.model, advert->model))
-            return !memcmp(g_models[i].id.root, advert->model_root,
-                           LMB_SEG_ROOT_BYTES);
+    GModel *known=NULL; int rc=model_lookup(advert->model,&known);
+    if (rc<0) return 0;
+    if (!rc) return (!g_have_pubkey || known->sig_rank>=0) &&
+        !memcmp(known->id.root,advert->model_root,LMB_SEG_ROOT_BYTES);
     /* Private/development swarms may register compute before the origin. The
      * query still requires an exact root; once a signed origin is known, a
      * conflicting heartbeat is rejected here. */
@@ -1662,22 +1788,16 @@ static int handle_hashes(int fd, LmbMsg *m) {
     uint8_t *copy = NULL, sig[64];
     char found_model[64] = "";
     int found = 0, has_sig = 0;
-    /* an empty model matches any, exactly as PLACEMENT treats it */
-    for (int i = 0; i < g_ntruth; i++)
-        if ((!model[0] || !strcmp(g_truth[i].model, model)) &&
-            !strcmp(g_truth[i].path, path)) {
-            found = 1;
-            nh = g_truth[i].nh;
-            size = g_truth[i].size;
-            has_sig = g_truth[i].has_sig;
-            if (has_sig) memcpy(sig, g_truth[i].sig, 64);
-            snprintf(found_model, sizeof found_model, "%s", g_truth[i].model);
-            if (nh) {
-                copy = (uint8_t *)malloc((size_t)nh * 32);
-                if (copy) memcpy(copy, g_truth[i].hash, (size_t)nh * 32);
-            }
-            break;
+    GTruth *known=NULL;
+    if (!truth_lookup(model,path,&known) && (!g_have_pubkey || known->sig_rank>=0)) {
+        found=1; nh=known->nh; size=known->size; has_sig=known->has_sig;
+        if (has_sig) memcpy(sig,known->sig,64);
+        snprintf(found_model,sizeof found_model,"%s",known->model);
+        if (nh) {
+            copy=malloc((size_t)nh*32);
+            if (copy) memcpy(copy,known->hash,(size_t)nh*32);
         }
+    }
     pthread_mutex_unlock(&g_lk);
     if (!found) { send_err(fd, "no integrity data"); return 0; }
     if (nh && !copy) { send_err(fd, "oom"); return -1; }
@@ -1706,10 +1826,10 @@ static int handle_model_id(int fd, LmbMsg *m) {
     LmbModelIdentity id = {0};
     int found = 0;
     pthread_mutex_lock(&g_lk);
-    for (int i = 0; i < MAX_MODELS; i++)
-        if (g_models[i].used && !strcmp(g_models[i].id.model, model)) {
-            id = g_models[i].id; found = 1; break;
-        }
+    GModel *known=NULL;
+    if (!model_lookup(model,&known) && (!g_have_pubkey || known->sig_rank>=0)) {
+        id=known->id; found=1;
+    }
     pthread_mutex_unlock(&g_lk);
     if (!found) { send_err(fd, "no complete model identity"); return 0; }
     LmbBuf b = {0};

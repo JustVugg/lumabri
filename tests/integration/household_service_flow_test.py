@@ -41,6 +41,7 @@ def parse_args(argv=None):
     parser.add_argument("--elastic-recovery", action="store_true", help="wait within an interrupted turn for replacement capacity; requires a disposable codec proxy")
     parser.add_argument("--placement-comparison", action="store_true", help="compare two real joint placements with declared fixture prices, then apply the measured cost policy")
     parser.add_argument("--soak-seconds", type=int, default=0, help="repeat approved real two-model work, overload and client stops for 10–3600 seconds")
+    parser.add_argument("--lifecycle-cycles", type=int, default=0, help="repeat public preparation, inference and retirement; use 270 to cross historical journal limits")
     parser.add_argument("--gateway-packages", nargs=2, type=Path, metavar=("PREVIOUS", "CANDIDATE"),
                         help="test installed gateway upgrade/rollback using two distinct native packages; engines remain running")
     parser.add_argument("--https-nginx", type=Path, help="test two resident models through an existing NGINX binary with verified local TLS")
@@ -52,6 +53,10 @@ def parse_args(argv=None):
             args.joint != "complete" or args.donor_policy or args.placement_comparison):
         parser.error("--soak-seconds requires 10–3600, --api-prepare --joint complete, without --donor-policy or --placement-comparison")
     installed_manifest = None
+    if args.lifecycle_cycles and (not 2 <= args.lifecycle_cycles <= 300 or not args.api_prepare or
+            args.joint != "complete" or args.installed_package or args.donor_policy or args.soak_seconds or
+            args.gateway_packages or args.https_nginx or args.placement_comparison):
+        parser.error("--lifecycle-cycles requires 2–300, --api-prepare --joint complete, without other lifecycle extensions")
     if args.installed_package:
         if (not args.api_prepare or args.joint != "complete" or args.donor_ram_gb < 1.5 or args.sessions != 2 or
                 args.runtime_dir != Path(__file__).resolve().parents[2] or args.donor_policy or args.elastic or
@@ -323,6 +328,11 @@ def main():
         assert retained == expected, "incomplete allocation survived or a ready allocation was unloaded"
         if api_prepare:
             api_prepare.finish(args.joint == "complete")
+        if args.lifecycle_cycles:
+            from lifecycle_history_test import verify_lifecycle_history
+            verify_lifecycle_history(api_prepare, until, service, {"a": a, "b": b}, tmp, args.lifecycle_cycles)
+            assert_locked_evidence(0, 4 + 2 * args.lifecycle_cycles)
+            return
         if args.installed_package:
             def detach():
                 for terminal in (a, b):

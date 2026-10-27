@@ -8,8 +8,8 @@
 #   pass 2  warm   — served from the local mirror
 #   pass 3  offline — tracker and maintainers are DEAD; the warm mirror must
 #                     still serve everything (the whole point of the design)
-#   pass 5  replaced — same path and size, different bytes; the complete-model
-#                     identity must invalidate every old block map
+#   pass 5  replaced — same path and size, new checkpoint name; durable identity
+#                     rejects rebinding, while a reviewed new identity resets maps
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -81,7 +81,7 @@ NATENV=(LD_PRELOAD="$PWD/liblumabri.so"
         LUMABRI_BLOCK_MIB=1)
 env "${NATENV[@]}" ./test_shim "$T/vroot2" "$T/src"
 
-echo "· pass 5: same-size checkpoint replacement invalidates the warm mirror"
+echo "· pass 5: durable checkpoint identity and same-size warm mirror replacement"
 kill "${PIDS[@]}" 2>/dev/null || true
 wait 2>/dev/null || true
 PIDS=()
@@ -112,11 +112,24 @@ mv "$T/a.new" "$T/src/a.bin"             # new bytes, exactly the same size
 
 ./tracker --port 7390 & PIDS+=($!)
 sleep 0.3
+# A tracker restart must not let new bytes silently claim an accepted name.
+# Keep the old evidence and cache; publish the replacement as a new identity.
+set +e
+timeout 5 ./maintainer --root "$T/src" --port 7391 --tracker 127.0.0.1:7390 \
+    --name complete --model-name src > "$T/rebound.out" 2> "$T/rebound.err"
+REBOUND=$?
+set -e
+[ "$REBOUND" -ne 0 ] && [ "$REBOUND" -ne 124 ] && \
+    grep -q 'local model root differs from the swarm identity' "$T/rebound.err" || {
+    echo "   REPLACEMENT FAILED: accepted checkpoint identity was reopened"
+    cat "$T/rebound.err"
+    exit 1
+}
 ./maintainer --root "$T/src" --port 7391 --tracker 127.0.0.1:7390 \
-             --name complete --model-name src & PIDS+=($!)
+             --name complete --model-name src-v2 & PIDS+=($!)
 wait_port 7391
 sleep 0.5
-env "${IDENV[@]}" ./test_shim "$T/vroot3" "$T/src" \
+env "${IDENV[@]}" LUMABRI_MODEL=src-v2 ./test_shim "$T/vroot3" "$T/src" \
     > "$T/replaced.out" 2> "$T/replaced.err"
 grep -q "model identity changed" "$T/replaced.err" || {
     echo "   REPLACEMENT FAILED: old cache identity was not invalidated"

@@ -118,10 +118,12 @@ class Fleet:
         self.retired = []
         self.operations = []
         self.expected_files = {}
+        self.tracker_history = {}
         self.previous_instances = {}
         self.report = {"schema": 1, "scope": "installed_quiescent_household_update_reduced_olmoe",
             "run_complete": False, "live_rolling_upgrade": False, "state_snapshot_restored": False,
-            "automatic_approval": False, "stages": [],
+            "automatic_approval": False, "indexed_tracker_history_required": True,
+            "harness_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), "stages": [],
             "packages": [{"commit": m["lumabri"]["commit"], "colibri_commit": m["colibri_checkout"]["commit"],
                 "manifest_sha256": hashlib.sha256((p / "manifest.json").read_bytes()).hexdigest(),
                 "runtime_sha256": {name: entry["sha256"] for name, entry in m["files"].items()
@@ -377,7 +379,7 @@ class Fleet:
                 for lock in (self.root / node / ".lumabri/service").glob("*.lock"):
                     with lock.open("rb") as guard:
                         fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                for lock in (self.root / node / ".lumabri/service/allocation-lifetimes").glob("*.lifetime"):
+                for lock in (self.root / node / ".lumabri/service/allocation-lifetimes").rglob("*.lifetime"):
                     assert lock.stat().st_size == 188 and lock.read_bytes().startswith(b"LMBLIF1\0")
                     with lock.open("rb") as guard:
                         fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -399,6 +401,20 @@ class Fleet:
             paths.extend(p for p in access.glob("*") if p.suffix in (".user", ".manager", ".operator"))
         self.expected_files = {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
         assert len(self.expected_files) >= 20
+        # Starting an old tracker successfully is not a safe rollback: it may
+        # leave the newer integrity index on disk while ignoring it. Require
+        # every package to publish this stage's fresh identities into the
+        # durable index, and retain the previous exact records across switches.
+        history = self.root / "owner/.lumabri/tracker_peer_bindings.history"
+        current = {p: hashlib.sha256(p.read_bytes()).hexdigest()
+                   for p in history.glob("*.entry") if p.is_file()}
+        assert current.keys() > self.tracker_history.keys(), (
+            "installed rollback requires an index-aware tracker; "
+            "this stage did not persist fresh checkpoint/peer integrity records")
+        for path, digest in self.tracker_history.items():
+            assert current[path] == digest, "version switch altered retained tracker integrity evidence"
+        self.tracker_history = current
+        self.expected_files.update(current)
 
     def locks(self):
         count = 0
@@ -434,6 +450,7 @@ class Fleet:
                     "completed_allocations": allocations, "fresh_approvals": 2,
                     "models": [m["id"] for m in self.routes], "history_revisions": [h["revision"] for h in self.history],
                     "retained_durable_files": len(self.expected_files), "all_services_stopped": True,
+                    "indexed_tracker_records": len(self.tracker_history),
                     "cumulative_locked_engines": count})
                 self.save()
                 print(f"INSTALLED FLEET: {label} PASS (two real models, fresh consent, persistent identity/history, complete retirement and stop)", flush=True)

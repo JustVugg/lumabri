@@ -163,7 +163,10 @@ echo "   ✓ tracker refused the unsigned claim"
 echo "· 3c) a LYING tracker is caught by the chatter's own key"
 # the rogue tracker has no operator key and invents its own truth: it takes
 # the rogue's (different) bytes as gospel and serves them unsigned
-./tracker --port 7463 > "$T/evil.log" 2>&1 & PIDS+=($!)
+# It is a separate authority, not a restart of the trusted tracker's durable
+# identity store. Otherwise the accepted root correctly blocks the lie before
+# it reaches the chatter, leaving the client-side signature check untested.
+./tracker --port 7463 --peer-bindings "$T/evil-peer-bindings" > "$T/evil.log" 2>&1 & PIDS+=($!)
 wait_log "$T/evil.log" 'listening on' "${PIDS[3]}"
 ./maintainer --root "$T/rogue" --port 7464 --tracker 127.0.0.1:7463 \
              --name rogue2 --model-name src > "$T/rogue2.log" 2>&1 & PIDS+=($!)

@@ -204,6 +204,31 @@ tested version pair, not arbitrary downgrade compatibility.
 
 ## Deployment acceptance
 
+Repeated lifecycle acceptance is separate from a request soak: a soak reuses
+the same allocations and cannot discover a lifetime-count limit. For the
+indexed journal path, run the public API gate with real reduced OLMoE and
+fresh donor approval on every cycle (isolated local homes only):
+
+```sh
+LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py \
+  --models-dir build/home-flow-models --joint complete --api-prepare \
+  --donor-ram-gb 1.5 --sessions 2 --lifecycle-cycles 270
+```
+
+It prepares, infers and retires each allocation, checks zero charged donor
+memory, restarts controllers across the thresholds, then queries every old
+receipt and all preparation-history pages. It never deletes journal files.
+Use `--lifecycle-cycles 2` for a short wiring check; that does **not** prove the
+256-cycle boundary. The 4097-lifetime unit test separately covers the inherited
+lock store's real threshold. Neither gate proves physical LAN performance.
+The tracker stays running throughout the repeated lifecycle gate. Its 128-model,
+4096-file and 4096-binding tables are bounded caches, not lifetime limits.
+`test_tracker_history` separately exceeds each cache and checks restart,
+concurrent first publication, changed-root/hash refusal, current signing-key
+validation and corrupted historical records.
+See [journal compatibility](docs/RESIDENT_API.md) before downgrading an indexed
+store; old flat-only binaries are not a supported rollback target for it.
+
 Before declaring a release supported, run its exact installed package on each
 advertised platform and deployment topology. At minimum:
 

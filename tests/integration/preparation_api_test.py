@@ -25,6 +25,8 @@ class PreparationAPI:
         self.cli("start", "--tracker", tracker, "--port", str(self.port))
         assert self.http("/api/v1/preparation", {}, self.reader)[0] == 403
         assert self.http("/api/v1/preparation", token=self.reader)[0] == 403
+        assert self.http("/api/v1/preparation/after/" + "1" * 64, token=self.reader)[0] == 403
+        assert self.http("/api/v1/preparation/after/invalid")[0] == 400
         status, catalogue = self.http("/api/v1/catalogue", token=self.reader)
         assert status == 200 and {m["name"] for m in catalogue["models"]} == {"model-a", "model-b"}, catalogue
         assert all(m["source_ready"] and m["decode_tok_s"] is None for m in catalogue["models"])
