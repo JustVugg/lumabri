@@ -19,6 +19,14 @@ int main(void) {
     LmbResidentGuard g=guard();
     assert(!lmb_resident_guard_observe(&g,&m)); /* unrelated pages remain reported */
     assert(m.compressed==4096);
+    g.process_budget=20480;
+    assert(!lmb_resident_guard_observe(&g,&m));
+    g.process_budget=20479;
+    assert(lmb_resident_guard_observe(&g,&m));
+    assert(atomic_load(&g.fault)==LMB_RESIDENT_OVER_BUDGET);
+    g.process_budget=32768;
+    assert(lmb_resident_guard_observe(&g,&m)); /* budget faults are latched too */
+    g=guard();
     g.retained_lock_status=NULL;
     assert(lmb_resident_guard_observe(&g,&m));
     g.retained_lock_status=raw_status;

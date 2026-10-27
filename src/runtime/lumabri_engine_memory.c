@@ -1,5 +1,6 @@
-/* Compile WITHOUT the override header. Payloads keep the libc free ABI and
- * have disjoint page-aligned extents: freeing one cannot unlock another.
+/* Compile WITHOUT the override header. Payloads keep the libc free ABI.
+ * Small objects share reference-counted locked pages; large/aligned objects
+ * have disjoint page-aligned extents. Freeing one cannot unlock another.
  * This allocator never raises a resource limit or changes machine policy. */
 #define _GNU_SOURCE
 #include "lumabri_engine_memory.h"
@@ -23,12 +24,18 @@
 typedef struct Allocation {
     void *ptr;
     size_t requested, extent;
-    int mapping;
+    int mapping, shared_pages;
     struct Allocation *next;
 } Allocation;
+typedef struct LockedPage {
+    uintptr_t address;
+    size_t references;
+    struct LockedPage *next;
+} LockedPage;
 static pthread_mutex_t allocation_lock=PTHREAD_MUTEX_INITIALIZER;
 static pthread_once_t configure_once=PTHREAD_ONCE_INIT;
 static Allocation *allocations[LMB_ENGINE_BUCKETS];
+static LockedPage *locked_pages[LMB_ENGINE_BUCKETS];
 static LmbEngineMemory evidence;
 static size_t page_size;
 static pid_t owner_pid;
@@ -78,7 +85,14 @@ static Allocation *overlap(const void *ptr, size_t bytes) {
     for (unsigned i=0;i<LMB_ENGINE_BUCKETS;i++)
         for (Allocation *p=allocations[i];p;p=p->next) {
             uintptr_t low=(uintptr_t)p->ptr;
-            if (begin<low+p->extent && end>low) return p;
+            uintptr_t high=low+p->extent;
+            /* VM operations round to page boundaries, including the libc
+             * neighbours of small engine objects. Protect those pages too. */
+            if (p->shared_pages) {
+                low&=~(uintptr_t)(page_size-1);
+                high=(high+page_size-1)&~(uintptr_t)(page_size-1);
+            }
+            if (begin<high && end>low) return p;
         }
     return NULL;
 }
@@ -92,6 +106,60 @@ static int extent_for(size_t bytes, size_t *extent) {
     if (!page_size || bytes>SIZE_MAX-(page_size-1)) { errno=ENOMEM; return -1; }
     *extent=(bytes+page_size-1)&~(page_size-1);
     return 0;
+}
+
+static LockedPage **page_lookup(uintptr_t address) {
+    LockedPage **at=&locked_pages[bucket((void *)address)];
+    while (*at && (*at)->address!=address) at=&(*at)->next;
+    return at;
+}
+/* allocation_lock covers both ledgers and all OS lock transitions. */
+static void release_page(uintptr_t address) {
+    LockedPage **at=page_lookup(address), *entry=*at;
+    if (!entry || !entry->references) { (void)fault_locked(EINVAL); return; }
+    if (--entry->references) return;
+    if (munlock((void *)address,page_size)) (void)fault_locked(errno);
+    *at=entry->next;
+    evidence.locked_bytes-=page_size;
+    free(entry);
+}
+static void release_pages(void *ptr, size_t extent) {
+    uintptr_t first=(uintptr_t)ptr&~(uintptr_t)(page_size-1);
+    uintptr_t last=((uintptr_t)ptr+extent-1)&~(uintptr_t)(page_size-1);
+    for (uintptr_t page=first;;page+=page_size) {
+        release_page(page);
+        if (page==last) break;
+    }
+}
+static int retain_pages(void *ptr, size_t extent) {
+    uintptr_t first=(uintptr_t)ptr&~(uintptr_t)(page_size-1);
+    uintptr_t last=((uintptr_t)ptr+extent-1)&~(uintptr_t)(page_size-1);
+    for (uintptr_t page=first;;page+=page_size) {
+        LockedPage **at=page_lookup(page), *entry=*at;
+        int rc=0;
+        if (entry) {
+            if (entry->references==SIZE_MAX) rc=ENOMEM;
+            else entry->references++;
+        } else {
+            entry=calloc(1,sizeof *entry);
+            if (!entry || evidence.locked_bytes>UINT64_MAX-page_size) rc=ENOMEM;
+            else if (mlock((void *)page,page_size)) {
+                rc=errno;
+                lmb_memlock_failure(page_size,evidence.locked_bytes,rc);
+            }
+            if (rc) free(entry);
+            else {
+                entry->address=page; entry->references=1;
+                *at=entry;
+                evidence.locked_bytes+=page_size;
+            }
+        }
+        if (rc) {
+            for (uintptr_t done=first;done!=page;done+=page_size) release_page(done);
+            return rc;
+        }
+        if (page==last) return 0;
+    }
 }
 
 void lmb_engine_memory_snapshot(LmbEngineMemory *out) {
@@ -108,7 +176,9 @@ void lmb_engine_memory_snapshot(LmbEngineMemory *out) {
 static void *allocate(size_t bytes, size_t alignment) {
     size_t extent;
     if (extent_for(bytes,&extent)) return NULL;
-    if (alignment<page_size) alignment=page_size;
+    int shared_pages=bytes<=page_size/2 && alignment<page_size;
+    if (shared_pages) extent=bytes ? bytes : 1;
+    else if (alignment<page_size) alignment=page_size;
     pthread_mutex_lock(&allocation_lock);
     if (evidence.fault || owner_pid!=getpid() ||
         evidence.requested_bytes>UINT64_MAX-bytes || evidence.locked_bytes>UINT64_MAX-extent) {
@@ -116,8 +186,14 @@ static void *allocate(size_t bytes, size_t alignment) {
     }
     Allocation *entry=calloc(1,sizeof *entry);
     void *ptr=NULL;
-    int rc=entry ? posix_memalign(&ptr,alignment,extent) : ENOMEM;
-    if (!rc && mlock(ptr,extent)) {
+    int rc=ENOMEM;
+    if (entry) {
+        if (shared_pages && alignment<=_Alignof(max_align_t)) {
+            ptr=malloc(extent); rc=ptr ? 0 : ENOMEM;
+        } else rc=posix_memalign(&ptr,alignment,extent);
+    }
+    if (!rc && shared_pages) rc=retain_pages(ptr,extent);
+    else if (!rc && mlock(ptr,extent)) {
         rc=errno;
         lmb_memlock_failure(extent,evidence.locked_bytes,rc);
     }
@@ -126,21 +202,23 @@ static void *allocate(size_t bytes, size_t alignment) {
         pthread_mutex_unlock(&allocation_lock); return NULL;
     }
     entry->ptr=ptr; entry->extent=extent; entry->requested=bytes;
+    entry->shared_pages=shared_pages;
     entry->next=allocations[bucket(ptr)]; allocations[bucket(ptr)]=entry;
-    evidence.allocations++; evidence.requested_bytes+=bytes; evidence.locked_bytes+=extent;
+    evidence.allocations++; evidence.requested_bytes+=bytes;
+    if (!shared_pages) evidence.locked_bytes+=extent;
     pthread_mutex_unlock(&allocation_lock);
     return ptr;
 }
 
 void *lmb_engine_malloc(size_t bytes) {
     if (!enabled()) return malloc(bytes);
-    return allocate(bytes,page_size);
+    return allocate(bytes,_Alignof(max_align_t));
 }
 void *lmb_engine_calloc(size_t count, size_t bytes) {
     if (!enabled()) return calloc(count,bytes);
     if (bytes && count>SIZE_MAX/bytes) { errno=ENOMEM; return NULL; }
     size_t total=count*bytes;
-    void *ptr=allocate(total,page_size);
+    void *ptr=allocate(total,_Alignof(max_align_t));
     if (ptr) memset(ptr,0,total);
     return ptr;
 }
@@ -152,8 +230,12 @@ void lmb_engine_free(void *ptr) {
     if (!entry) { pthread_mutex_unlock(&allocation_lock); free(ptr); return; }
     if (entry->mapping) { (void)fault_locked(EINVAL); pthread_mutex_unlock(&allocation_lock); return; }
     *at=entry->next;
-    if (munlock(ptr,entry->extent)) (void)fault_locked(errno);
-    evidence.allocations--; evidence.requested_bytes-=entry->requested; evidence.locked_bytes-=entry->extent;
+    if (entry->shared_pages) release_pages(ptr,entry->extent);
+    else {
+        if (munlock(ptr,entry->extent)) (void)fault_locked(errno);
+        evidence.locked_bytes-=entry->extent;
+    }
+    evidence.allocations--; evidence.requested_bytes-=entry->requested;
     free(ptr); free(entry);
     pthread_mutex_unlock(&allocation_lock);
 }
@@ -170,7 +252,7 @@ void *lmb_engine_realloc(void *ptr, size_t bytes) {
     pthread_mutex_unlock(&allocation_lock);
     /* Realloc's caller owns the pointer exclusively, as with libc. A failed
      * replacement leaves the old payload and its lock intact. */
-    void *next=allocate(bytes,page_size);
+    void *next=allocate(bytes,_Alignof(max_align_t));
     if (next) { memcpy(next,ptr,previous<bytes ? previous : bytes); lmb_engine_free(ptr); }
     return next;
 }
@@ -246,10 +328,18 @@ int lmb_engine_munmap(void *ptr, size_t bytes) {
 }
 
 static int owned_range(const void *ptr, size_t bytes) {
-    Allocation *entry=overlap(ptr,bytes);
-    if (!entry) return 0;
-    uintptr_t p=(uintptr_t)ptr, low=(uintptr_t)entry->ptr;
-    return p>=low && p-low<=entry->extent && bytes<=entry->extent-(p-low) ? 1 : -1;
+    if (!bytes) return 0;
+    Allocation *exact=*lookup((void *)ptr);
+    if (exact && bytes<=exact->extent) return 1;
+    uintptr_t p=(uintptr_t)ptr;
+    /* Several small allocations may share a protected page. The first page
+     * overlap need not be the object actually containing this range. */
+    for (unsigned i=0;i<LMB_ENGINE_BUCKETS;i++)
+        for (Allocation *entry=allocations[i];entry;entry=entry->next) {
+            uintptr_t low=(uintptr_t)entry->ptr;
+            if (p>=low && p-low<=entry->extent && bytes<=entry->extent-(p-low)) return 1;
+        }
+    return overlap(ptr,bytes) ? -1 : 0;
 }
 int lmb_engine_mlock(const void *ptr, size_t bytes) {
     if (!enabled()) return mlock(ptr,bytes);
