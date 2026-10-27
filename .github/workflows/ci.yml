@@ -16,23 +16,34 @@ concurrency:
 
 jobs:
   kubernetes-workers:
-    needs: linux
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: lumabri
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
         with:
-          name: household-candidate-linux
-          path: build/container-input
-      - uses: actions/download-artifact@v4
+          path: lumabri
+      - uses: actions/checkout@v4
         with:
-          name: tiny-olmoe-checkpoint
-          path: build/container-fixture
+          repository: JustVugg/colibri
+          ref: ce370e87d7b623d7759b52ec2007d75fc5b0e87e
+          path: colibri
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build the native candidate and reduced fixture from pinned sources
+        run: |
+          make household swarm_probe ENGINE=../colibri/c -j2
+          python3 tools/package_household.py --colibri-root ../colibri --output build/container-candidate
+          python3 -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          python3 -m pip install safetensors huggingface_hub transformers
+          python3 ../colibri/c/tools/make_olmoe_tiny.py --output build/container-fixture-source --force
+          python3 ../colibri/c/tools/make_edge_tiny_tokenizer.py build/container-fixture-source --vocab-size 128
+          python3 ../colibri/c/tools/convert_olmoe_merged.py --model build/container-fixture-source --out build/container-fixture --min-free-gb 0
       - name: Build only the verified native candidate into the runtime image
         run: |
-          mkdir -p build/container-candidate
-          tar -xzf build/container-input/lumabri-linux-candidate.tar.gz -C build/container-candidate
           python3 tools/prepare_container_context.py --package build/container-candidate --output build/container-context
           docker build --tag lumabri-resident-ci build/container-context
           docker run --rm lumabri-resident-ci machine --json
@@ -61,7 +72,9 @@ jobs:
         if: always()
         with:
           name: kubernetes-resident-evidence
-          path: build/kubernetes-workers.json
+          path: |
+            lumabri/build/kubernetes-workers.json
+            lumabri/build/container-candidate/manifest.json
   windows-network-helper:
     # Validate the permission helper without changing runner firewall rules.
     # This does not certify a native Windows model runtime.
