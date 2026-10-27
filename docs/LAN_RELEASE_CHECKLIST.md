@@ -9,7 +9,54 @@ execution, cross-platform numerical compatibility, or concurrent capacity.
 The managed-inference roadmap supersedes the older single-chat LAN checklist
 below. Historical observations remain here as evidence, not current promises.
 
-### Roadmap status, October 26, 2026
+### After the current release: native policies and optional Kubernetes integration
+
+Status: **planned, not implemented or a prerequisite for the current release**.
+Finish the roadmap and acceptance work below before starting this follow-up.
+Household deployments remain autonomous and use the same inference core.
+
+Implement the mechanisms in Lumabri's own C code, extending the existing API,
+planner and reconciliation service. Keep Kubernetes integration optional and
+reuse its existing control plane.
+
+1. **Grouped permissions and quotas.** Extend current per-user grants and
+   admission with explicit group limits for shared inference resources. Account
+   for the aggregate across users and models; keep conversation state private.
+   A group assignment must not implicitly grant a model, donor approval or
+   administrative access. Verify contention between groups, revocation and
+   restart without leaking capacity or crossing permission boundaries.
+2. **Explicit workload requirements.** Extend the existing joint planner and
+   measured cost policies with a single reviewed request for models, authorized
+   machines, memory limits, performance requirements and declared-cost ceilings.
+   Report unmet constraints and missing observations; unknown speed or price
+   must not satisfy a requirement. Reuse durable operation IDs, review fences
+   and reconciliation instead of introducing a second allocation engine.
+3. **A Lumabri Kubernetes controller.** Add a thin, optional integration over the
+   same authenticated service API, with installable manifests, narrowly scoped
+   permissions and declarative model/pool resources. Kubernetes owns pod
+   placement, process restart and infrastructure node scaling through a
+   configured autoscaler/provider. Lumabri owns model partitioning, weight
+   preparation/residency, session/KV accounting, admission and inference
+   replica readiness. Define one authority for each replica decision so two
+   independent autoscalers cannot fight over it.
+
+The integration must report READY only after every required segment is prepared
+and admitted. Shutdown first stops new admissions, drains active work and
+reconciles allocation release before normal pod removal; timeout or unreachable
+state is not proof of release. Forced pod/node loss follows the existing visible
+recovery/replay policy, without claiming uninterrupted KV migration. The
+controller must resume from persisted desired/observed generations after its
+own restart, with no duplicate allocations or replayed approvals.
+
+Acceptance: deploy the packaged integration on a real Kubernetes cluster;
+prepare two OLMoE-derived model identities; exercise separate users, declared
+quotas and contention; change desired replicas; drain and forcibly lose a
+worker; restart the controller; verify readiness, private histories, release
+accounting and refusal when capacity is insufficient. Record cluster/runtime
+versions and artifacts. Fixture checks alone do not certify a datacenter SLO.
+The household path must still work without Kubernetes installed.
+
+### Roadmap status, October 27, 2026
 
 This table separates implementation from release acceptance. The detailed PR
 entries below record the exact evidence; an open PR is not an integrated release.
@@ -17,14 +64,14 @@ entries below record the exact evidence; an open PR is not an integrated release
 | Step | Delivered or implemented | Remaining acceptance boundary |
 | --- | --- | --- |
 | 2 — Inventory and measurements | Runtime/backend checks; memory, workload, link, preparation and model observations; declared machine costs | Missing facts stay unknown. Pinned distributed adapters expose CPU execution, not an enabled household GPU path. |
-| 3 — Several resident models | Independent reservations, private state, selective unload and effective owned CPU locks | Final-package memory-pressure and sustained workload checks on the deployment machines. |
+| 3 — Several resident models | Independent reservations, private state, selective unload and effective owned CPU locks; installed Linux candidate passed the 30-minute reduced-model workload below | Memory pressure and the sustained workload on the actual deployment machines remain separate checks. |
 | 4 — Controlled concurrency | Bounded compute/session admission, isolated users, cancellation, timing and 1/2/4/8-slot gates | Per-deployment latency/capacity envelope; configured slots are not a single-user speed guarantee. |
 | 5 — Joint placement and cost | Bounded joint memory/cost search, measured portfolio selection/application, static-versus-managed comparison (#224), shared capacity API (#225) and browser controls (#226) | New placements still require preparation and measurement; declared cost is not billed savings. |
 | 6 — Shared service and interfaces | Permanent keepers, common preparation/retirement operations, TUI, authenticated API, web chat and private history; explicit private HTTPS upstream (#238) | Verified local TLS/OLMoE gate, not installed remote/datacenter certification. |
 | 7 — Recovery | Approved-replica replay; unavailable-capacity replacement, same-turn wait and durable exit/release proofs merged in #227–230 after all eight checks passed | Final-package fault tests on deployment machines. No instantaneous KV migration. |
 | 8 — Authorized elasticity | Opt-in replica growth, drain, retirement, scale-to-zero/wake, budgets and cooldown | Sustained burst/idle validation on actual machines; failed ownership remains charged without proof. |
 | 9 — Infrastructure provisioning (outside first-release scope) | Lumabri uses existing, authorized machines; no paid resources created | Creating/removing cloud VMs belongs to the deployment infrastructure. A Kubernetes integration would delegate this to its configured node autoscaler; that integration is not delivered. |
-| 10 — Release | Native CI, allowlisted package assembly and hash verification | Final installed-package LAN/datacenter, sustained-load, update and rollback evidence. Native Windows inference and notarized macOS distribution are not delivered. |
+| 10 — Release | Native CI, allowlisted package assembly and hash verification; integrated Linux candidate lifecycle, sustained workload and quiescent version-switch evidence below | Final merged packages, native CI and installed LAN/datacenter acceptance. Rollback must preserve the indexed-history guarantees; a flat-only target is not supported after migration. Native Windows inference and notarized macOS distribution are not delivered. |
 
 The model source stays local to the requesting installation. Neither this table
 nor tiny-checkpoint CI claims that arbitrary models are downloaded automatically,
@@ -38,6 +85,46 @@ Lumabri responsibilities. Kubernetes is optional: household installations
 continue to use authorized computers directly. Removing a machine must still
 be coordinated with active inference; an infrastructure autoscaler alone does
 not preserve conversation state or resident model coverage.
+
+### Integrated Linux candidate, October 27
+
+These are completed local acceptance runs, not an announcement of a merged
+release. The installed package was built from clean integration commit
+`b44608c1afb4ba054558afa2c7556b317de66f07`, using pinned Colibri
+`ce370e87d7b623d7759b52ec2007d75fc5b0e87e`. Its manifest SHA-256 is
+`dbb3699feeb0478ad703f2df6e46e55fc0c69a8b296e3c0a850e427c092d2761`.
+Later integration commit `4d6c43d` changes only CI diagnostics, a signature-test
+fixture and roadmap documentation; it does not change the runtime sources.
+
+- **Installed sustained workload:** 1,800.657 seconds, with 9,598 completed
+  requests, 4,116 explicit overload refusals, 1,372 client disconnects after
+  visible text and no unexpected failed turns. All 15,086 outcomes are retained
+  in `managed-soak.json`. Sixty-one quiescent samples show aggregate RSS from
+  87,859,200 to 88,920,064 bytes (also the maximum), unchanged reservations and
+  process identities. Four prepared engines reported effective payload locks.
+  TUI detach, manager/API restart, private history, selective model retirement
+  and final release all passed; package hashes remained unchanged.
+- **Whole-household version switch:** the index-aware pair `027b55b` → `b44608c`
+  → `027b55b` passed with fresh approvals, private histories, grants and durable
+  records retained in the same four isolated homes. All twelve prepared engines
+  reported locks. The tracker index grew from 21 to 37 to 53 records, preserving
+  every previous entry byte-for-byte. Both packages remained unchanged. The
+  strengthened gate also rejected the old flat-only `01e3f86` package explicitly;
+  the earlier successful process restart with that target was insufficient
+  rollback evidence. This is a quiescent compatible-pair check, not a live rolling
+  update or a downgrade to arbitrary older versions. See
+  [journal compatibility](RESIDENT_API.md#coordinated-retirement-of-an-exact-approved-allocation).
+- **Lifetime history:** a separate public-API run completed 270 prepare,
+  inference and retirement cycles, including controller restarts and complete
+  retrieval of old receipts across two history pages. There were no unexpected
+  failures or residual donor charges. The indexed tracker and 4,097-lifetime
+  unit tests cover their separate cache thresholds.
+
+The installed workload uses two independently resident checkpoint identities
+derived from the same tiny OLMoE weights on Linux loopback. It does not certify
+model quality, full-size capacity, physical LAN performance or a datacenter
+latency target. Final-head native CI and final-package deployment acceptance
+remain required. Report checksums are recorded with the local release evidence.
 
 The following PRs passed all eight final-head CI checks before normal merge on
 October 20–21 (no squash). Historical local-run revisions below remain unchanged;
@@ -170,9 +257,9 @@ they are not retroactively described as different binaries.
   checks. Its default is still the ten-second CI smoke. Reports distinguish
   requested duration, observed duration, package identity and driver hashes.
   The initial explicit eleven-second run passed (122 outcomes, four effective
-  payload locks) against the downloaded #242 Linux package. Sustained acceptance
-  requires a completed report from the longer installed run; the older
-  checkout-based run above is not a substitute. Separately, post-merge main
+  payload locks) against the downloaded #242 Linux package. The completed
+  30-minute installed run for the newer integrated candidate is recorded above;
+  the older checkout-based run is not substituted for it. Separately, post-merge main
   CI run `39612543891` failed when its
   HTTPS test started a new chat after gateway admission ended but before the
   cancelled remote slot was reset. The candidate test now observes the exact
