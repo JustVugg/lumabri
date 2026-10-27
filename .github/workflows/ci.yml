@@ -15,6 +15,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  kubernetes-control:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the optional C controller and verify TLS/API contracts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev pkg-config
+          make test-kubernetes CFLAGS='-O2 -Wall -Wextra -Werror'
+      - name: Real Kubernetes admission, RBAC, status and finalizer
+        run: sh tools/ci_kubernetes_control.sh
   windows-network-helper:
     # Validate the permission helper without changing runner firewall rules.
     # This does not certify a native Windows model runtime.
@@ -165,7 +177,11 @@ jobs:
           cache-dependency-path: lumabri/requirements-test.txt
       - name: Install test dependencies
         working-directory: lumabri
-        run: python -m pip install --requirement requirements-test.txt
+        run: |
+          python -m pip install --requirement requirements-test.txt
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev pkg-config
+          make lumabri-kube CFLAGS='-O2 -Wall -Wextra -Werror'
       - name: Extract isolated HTTPS proxy for local tests
         run: |
           sudo apt-get update
@@ -288,7 +304,7 @@ jobs:
             LUMABRI_TEST_BROWSER=1 python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint "$outcome" --api-prepare --donor-ram-gb 1 --sessions 2
           done
           LUMABRI_TEST_BROWSER=1 LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-ram-gb 2 --sessions 2 --placement-comparison
-          LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-ram-gb 1.5 --sessions 2 --soak-seconds 10
+          LUMABRI_TEST_KUBERNETES=1 LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-ram-gb 1.5 --sessions 2 --soak-seconds 10
           LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-ram-gb 1.5 --sessions 2 --https-nginx "$LUMABRI_TEST_NGINX"
           make segment_budget_probe
           python3 tests/integration/segment_physical_budget_test.py

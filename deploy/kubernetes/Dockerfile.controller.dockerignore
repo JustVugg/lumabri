@@ -1,0 +1,9 @@
+# Only build inputs for the optional controller. No keys, caches, checkpoints,
+# working-tree binaries or Git history enter the Docker build context.
+**
+!Makefile
+!*.h
+!src/
+!src/**/
+!src/**/*.h
+!src/control/lumabri_kube.c
