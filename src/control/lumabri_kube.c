@@ -295,6 +295,9 @@ done:
 int main(int argc,char **argv) {
     Settings s={.api_port=47380}; int once=0;
     for (int i=1;i<argc;i++) {
+        if (!strcmp(argv[i],"--help")) {
+            puts("lumabri-kube --server https://HOST:PORT --ca FILE --service-token FILE --api-token FILE --namespace NAME [--api-port PORT] [--once]"); return 0;
+        }
         if (!strcmp(argv[i],"--once")) once=1;
         else if (i+1<argc && !strcmp(argv[i],"--server")) s.server=argv[++i];
         else if (i+1<argc && !strcmp(argv[i],"--ca")) s.ca=argv[++i];

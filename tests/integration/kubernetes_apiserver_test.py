@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 
 from kubernetes_control_test import Cluster, FINALIZER, ROOT
 
@@ -36,6 +37,17 @@ def main():
     kubectl("create", "namespace", namespace)
     try:
         kubectl("apply", "-f", str(ROOT / "deploy/kubernetes/rbac.yaml"))
+        # A fresh quota initially has unknown usage. Admission correctly
+        # refuses creates until the quota controller has observed the CRD.
+        deadline = time.monotonic() + 60
+        resource = "count/replicapolicies.lumabri.io"
+        while True:
+            quota = json.loads(kubectl("get", "resourcequota", "lumabri-policy-count", "-o", "json").stdout)
+            status = quota.get("status", {})
+            if status.get("hard", {}).get(resource) == "32" and resource in status.get("used", {}):
+                break
+            assert time.monotonic() < deadline, quota
+            time.sleep(.5)
         identity = "system:serviceaccount:" + namespace + ":lumabri-policy-controller"
         for resource in ("secrets", "pods", "deployments", "roles"):
             denied = kubectl("auth", "can-i", "get", resource, "--as", identity, success=False)

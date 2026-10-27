@@ -27,6 +27,10 @@ jobs:
           make test-kubernetes CFLAGS='-O2 -Wall -Wextra -Werror'
       - name: Real Kubernetes admission, RBAC, status and finalizer
         run: sh tools/ci_kubernetes_control.sh
+      - name: Build the optional controller container from the restricted context
+        run: |
+          docker build --file deploy/kubernetes/Dockerfile.controller --tag lumabri-controller-ci .
+          docker run --rm lumabri-controller-ci --help
   windows-network-helper:
     # Validate the permission helper without changing runner firewall rules.
     # This does not certify a native Windows model runtime.
