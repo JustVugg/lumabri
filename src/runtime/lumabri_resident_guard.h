@@ -24,10 +24,11 @@
 
 typedef struct {
     int enabled,locked,engine_locked;
+    uint64_t process_budget;
     int (*retained_lock_status)(uint64_t *);
     _Atomic int fault;
 } LmbResidentGuard;
-enum { LMB_RESIDENT_OK=0,LMB_RESIDENT_PAGED=1,LMB_RESIDENT_COMPRESSED=2,LMB_RESIDENT_UNKNOWN=3,LMB_RESIDENT_LOCK_FAILED=4 };
+enum { LMB_RESIDENT_OK=0,LMB_RESIDENT_PAGED=1,LMB_RESIDENT_COMPRESSED=2,LMB_RESIDENT_UNKNOWN=3,LMB_RESIDENT_LOCK_FAILED=4,LMB_RESIDENT_OVER_BUDGET=5 };
 
 static inline int lmb_resident_memory_reason(const LmbProcessMemory *m) {
     if(!(m->known&LMB_PM_RSS))return LMB_RESIDENT_UNKNOWN;
@@ -42,6 +43,7 @@ static inline const char *lmb_resident_memory_reason_text(int reason) {
     case LMB_RESIDENT_COMPRESSED:return "process pages compressed; physical residency no longer verified";
     case LMB_RESIDENT_UNKNOWN:return "process memory evidence unavailable";
     case LMB_RESIDENT_LOCK_FAILED:return "engine allocation lock contract failed";
+    case LMB_RESIDENT_OVER_BUDGET:return "process memory exceeds the approved reservation";
     default:return "resident observation current";
     }
 }
@@ -66,9 +68,16 @@ static inline int lmb_resident_guard_observe(LmbResidentGuard *g,const LmbProces
          * against successfully locked engine payloads. It remains charged
          * by the process governor, and is never relabelled as zero. */
     }
+    /* The engine's payload ledger does not include libc bookkeeping, thread
+     * stacks or retained shim tables. Charge the native process as well. */
+    if (!reason && g->process_budget && lmb_process_memory_charge(m)>g->process_budget)
+        reason=LMB_RESIDENT_OVER_BUDGET;
     if(reason) {
         int expected=0;
         if(atomic_compare_exchange_strong(&g->fault,&expected,reason)) {
+            if (reason==LMB_RESIDENT_OVER_BUDGET)
+                fprintf(stderr,"[resident-memory] process_bytes=%llu approved_bytes=%llu\n",
+                    (unsigned long long)lmb_process_memory_charge(m),(unsigned long long)g->process_budget);
             fprintf(stderr,"[resident-memory] %s; refusing inference, weights are not silently reloaded\n",lmb_resident_memory_reason_text(reason));
             lmb_resident_guard_report(g,"lost",m);
         }

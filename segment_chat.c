@@ -2357,6 +2357,7 @@ int main(int argc, char **argv) {
                         !edge_options.memory_limit_bytes)) {
         fprintf(stderr, "invalid accepted Edge memory limit\n"); return 2;
     }
+    lmb_resident_process_guard.process_budget=edge_options.memory_limit_bytes;
     if (lmb_resident_required() && segment_backend_mask==LMB_SEG_CAP_CPU) {
         LmbModelShape shape;
         if (!lmb_shape_from_config(model_dir,&shape) && shape.sizing_verified &&

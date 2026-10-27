@@ -150,9 +150,12 @@ and Apple's [TASK_VM_INFO fields](https://github.com/apple-oss-distributions/xnu
 The default remains `observe`. Apple exposes `mlockall` in headers but its
 implementation returns `ENOSYS`; `mlock` can instead wire explicit ranges.
 Lumabri compiles its disposable engine copies and Segment runtime with
-namespaced allocation entry points. Each owned heap or anonymous-mapping
-payload has a separate page-aligned extent, locked **before** it is returned
-to the engine. Freeing it unlocks only that extent. Later KV and scratch
+namespaced allocation entry points. Small heap objects share reference-counted
+locked pages rather than reserving a whole page for each tokenizer string.
+Large or explicitly page-aligned payloads and anonymous mappings retain separate
+page-aligned extents. Every payload is locked **before** it is returned to the
+engine; a shared page is unlocked only after its final owned object is freed.
+Later KV and scratch
 allocations follow the same rule; an OS lock failure latches a fault rather
 than falling back to unlocked memory. Reallocation temporarily needs both
 extents. File mappings and partial removal of owned mappings are refused.
@@ -161,10 +164,15 @@ The upstream Colibri checkout and numerical kernels remain unchanged.
 Explicitly retained raw tensor tables in the shim have their own page locks.
 READY requires both contracts and sealed external weight input. The
 `[engine-memory]` record separates requested payload bytes, rounded locked
-bytes and shim-retained locked bytes. The ordinary process governor still
+bytes (counting shared pages once) and shim-retained locked bytes. The ordinary process governor still
 charges RSS/compression/swap conservatively. Compression of unrelated
 libc, stack or code pages does not invalidate successfully locked owned
 payloads and is **not** reported as zero.
+
+The hosted Edge also checks its approved process reservation before READY and
+around inference. This includes native allocator overhead, not just the tensor
+sizes reported by the adapter. Exceeding that reservation latches a fault;
+sharing a locked page never authorizes spending another allocation's RAM.
 
 This does not lock every process mapping or claim GPU-driver coverage. Page
 rounding and live replacement buffers increase memory consumption and can

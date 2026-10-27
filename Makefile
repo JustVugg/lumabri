@@ -51,7 +51,7 @@ test check-warnings: test_host_session_pool test_hosted_sessions test_host_drain
 
 test_node_control: tests/c/test_node_control.c lumabri_proto.h src/runtime/lumabri_node_control.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_node_control.c -o $@
-test_engine_memory: tests/c/test_engine_memory.c src/runtime/lumabri_engine_memory.c src/runtime/lumabri_engine_memory.h
+test_engine_memory: tests/c/test_engine_memory.c src/runtime/lumabri_engine_memory.c src/runtime/lumabri_engine_memory.h src/runtime/lumabri_process_memory.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_engine_memory.c src/runtime/lumabri_engine_memory.c -o $@
 test_engine_memory_guard: tests/c/test_engine_memory_guard.c src/runtime/lumabri_engine_memory.h src/runtime/lumabri_resident_guard.h src/runtime/lumabri_process_memory.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_engine_memory_guard.c -o $@
@@ -919,6 +919,11 @@ $(COLIBRI_SEGMENT_LIB): $(HYBRID_ENGINE_DIR)/.prepared build/segment_hybrid_brid
 		segment-edge-library
 	$(AR) rcs $@ build/segment_hybrid_bridge.o build/v41_adapter.o build/engine_memory.o
 	python3 tools/check_engine_memory.py $@
+
+# Optional local Edge memory diagnostic; requires an existing checkpoint.
+build/bench_edge_memory: tests/c/bench_edge_memory.c src/runtime/lumabri_process_memory.h $(COLIBRI_SEGMENT_LIB)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(OMP_FLAGS) -pthread -I$(ENGINE) \
+		tests/c/bench_edge_memory.c $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
 
 # Optional diagnostic; requires explicit, already approved household routes.
 build/bench_home_hybrid: tests/c/bench_home_hybrid.c tests/c/bench_hybrid_numeric.h tests/c/bench_block_verify.h tests/c/bench_causal_spec.h lumabri_client.h lumabri_proto.h $(SECURE_DEPS) $(COLIBRI_SEGMENT_LIB)
