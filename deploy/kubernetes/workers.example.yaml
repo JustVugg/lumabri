@@ -1,0 +1,93 @@
+# Owner-provided image, household Secret and storage are required.
+# No model is loaded merely by applying this worker pool.
+apiVersion: v1
+kind: Service
+metadata:
+  name: lumabri-workers
+spec:
+  clusterIP: None
+  selector:
+    app: lumabri-worker
+  ports:
+    - name: donor-control
+      port: 47301
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: lumabri-workers
+spec:
+  serviceName: lumabri-workers
+  replicas: 2
+  updateStrategy:
+    type: OnDelete
+  selector:
+    matchLabels:
+      app: lumabri-worker
+  template:
+    metadata:
+      labels:
+        app: lumabri-worker
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        runAsNonRoot: true
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: runtime
+          image: OWNER_REGISTRY/lumabri:VERIFIED_NATIVE_IMAGE
+          command: [lumabri, donor, --headless, --join, '$(LUMABRI_TRACKER)', --ram-gb, '1.5']
+          env:
+            - name: LUMABRI_TRACKER
+              value: lumabri-tracker:47300
+            - name: LUMABRI_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: lumabri-household
+                  key: token
+            - name: LUMABRI_ADVERTISE
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: LUMABRI_RAM_RESERVE_MB
+              value: '256'
+          resources:
+            requests:
+              cpu: '2'
+              memory: 2Gi
+            limits:
+              cpu: '2'
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+              add: [IPC_LOCK]
+          readinessProbe:
+            exec:
+              command: [lumabri, service, live, donor]
+            periodSeconds: 5
+            timeoutSeconds: 3
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/lumabri
+            - name: temp
+              mountPath: /tmp
+      volumes:
+        - name: temp
+          emptyDir:
+            sizeLimit: 64Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: state
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 16Gi

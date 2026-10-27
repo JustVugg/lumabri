@@ -229,6 +229,9 @@ def main():
             t = Terminal(name, command, headless=True)
             until(lambda: service(name)["donor"]["live"], "headless donor did not become available")
             assert service(name)["donor"]["pid"] == t.p.pid, "supervised donor detached"
+            probe = subprocess.run([str(runtime / "lumabri"), "service", "live", "donor"], env=env(name),
+                                   text=True, capture_output=True, timeout=10)
+            assert probe.returncode == 0, probe.stderr
             assert not service(name)["manager"]["live"], "headless donor spawned an unnecessary manager"
             duplicate = subprocess.run([str(runtime / "lumabri"), *command], env=env(name),
                                        stdin=subprocess.DEVNULL, text=True, capture_output=True, timeout=15)

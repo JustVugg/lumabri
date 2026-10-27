@@ -15,6 +15,53 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  kubernetes-workers:
+    needs: linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: household-candidate-linux
+          path: build/container-input
+      - uses: actions/download-artifact@v4
+        with:
+          name: tiny-olmoe-checkpoint
+          path: build/container-fixture
+      - name: Build only the verified native candidate into the runtime image
+        run: |
+          mkdir -p build/container-candidate
+          tar -xzf build/container-input/lumabri-linux-candidate.tar.gz -C build/container-candidate
+          python3 tools/prepare_container_context.py --package build/container-candidate --output build/container-context
+          docker build --tag lumabri-resident-ci build/container-context
+          docker run --rm lumabri-resident-ci machine --json
+      - name: Add reduced models and a driver only to the disposable test image
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          import shutil
+          source = Path('build/container-fixture')
+          assert (source / 'config.json').is_file()
+          assert sum(p.stat().st_size for p in source.rglob('*') if p.is_file()) < 32 << 20
+          target = Path('build/container-test')
+          for name in ('model-a', 'model-b'):
+              shutil.copytree(source, target / 'fixtures' / name)
+          config = target / 'fixtures/model-b/config.json'
+          body = json.loads(config.read_text())
+          body['_lumabri_test_variant'] = 'separate-kubernetes-pods'
+          config.write_text(json.dumps(body))
+          (target / 'Dockerfile').write_text('FROM lumabri-resident-ci\nUSER root\nRUN apt-get update && apt-get install --no-install-recommends -y python3 && rm -rf /var/lib/apt/lists/*\nCOPY --chown=10001:10001 fixtures /fixtures\nUSER 10001:10001\n')
+          PY
+          docker build --tag lumabri-resident-test:ci build/container-test
+      - name: Real resident engines in separate Kubernetes worker Pods
+        run: KUBE_WORKER_TEST_IMAGE=lumabri-resident-test:ci sh tools/ci_kubernetes_workers.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kubernetes-resident-evidence
+          path: build/kubernetes-workers.json
   windows-network-helper:
     # Validate the permission helper without changing runner firewall rules.
     # This does not certify a native Windows model runtime.
