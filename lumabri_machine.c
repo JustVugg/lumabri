@@ -247,7 +247,10 @@ static void cpu_profile(LmbMachineProfile *profile) {
             } else if (!strncmp(line, "core id", 7)) {
                 char *colon = strchr(line, ':'); if (colon) core = atoi(colon + 1);
             } else if ((!strncmp(line, "model name", 10) ||
-                        !strncmp(line, "Hardware", 8)) && !profile->cpu_model[0]) {
+                        !strncmp(line, "Hardware", 8) ||
+                        !strncmp(line, "Model", 5)) && !profile->cpu_model[0]) {
+                /* arm64 Raspberry Pi kernels print neither "model name" nor
+                 * "Hardware", only "Model : Raspberry Pi 5 Model B Rev 1.0". */
                 char *colon = strchr(line, ':');
                 if (colon) {
                     while (*++colon == ' ' || *colon == '\t') {}

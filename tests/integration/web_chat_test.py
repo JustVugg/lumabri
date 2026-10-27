@@ -229,6 +229,31 @@ async def history_races(page, port, token):
     print("WEB HISTORY RACES: PASS (existing/new turns, stale success/error, stop/retry, unsaved export, delete/navigation/logout/failure)", flush=True)
 
 
+async def live_metrics_display(page):
+    # Keep the stream open while checking changing values; a final snapshot
+    # alone would not prove that speed is visible during a response.
+    await page.evaluate("""() => {
+        const stream = new ReadableStream({start(c) { window.metricsController = c; }});
+        window.metricsRead = consumeStream(new Response(stream), () => {}, showGenerationMetrics);
+        window.sendMetricEvent = (kind, value) => metricsController.enqueue(new TextEncoder().encode(
+            'event: ' + kind + '\\ndata: ' + JSON.stringify(value) + '\\n\\n'));
+        sendMetricEvent('metrics', {phase: 'prefill', decode_tok_s: null, elapsed_seconds: 1});
+    }""")
+    await expect(page.locator('#generation-speed')).to_have_text('Preparing prompt…')
+    await page.evaluate("sendMetricEvent('metrics', {phase:'decode', decode_tok_s:6.5, generated_tokens:5, ttft_seconds:1.2})")
+    await expect(page.locator('#generation-speed')).to_have_text('6.50 tok/s')
+    await expect(page.locator('#generation-detail')).to_contain_text('Live decode average')
+    await page.evaluate("sendMetricEvent('metrics', {phase:'decode', decode_tok_s:7.25, generated_tokens:8})")
+    await expect(page.locator('#generation-speed')).to_have_text('7.25 tok/s')
+    await page.evaluate("sendMetricEvent('recovering', {message:'fixture'})")
+    await expect(page.locator('#generation-speed')).to_have_text('Recovering…')
+    await page.evaluate("sendMetricEvent('done', {recovery_attempts:1, metrics:null}); metricsController.close(); metricsRead")
+    await expect(page.locator('#generation-speed')).to_have_text('Recovered')
+    await expect(page.locator('#generation-detail')).to_contain_text('Speed unavailable')
+    await page.locator('#new-chat').click()
+    await expect(page.locator('#generation-metrics')).to_be_hidden()
+
+
 async def exercise(port, alice, bob, artifacts, env):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -272,6 +297,7 @@ async def exercise(port, alice, bob, artifacts, env):
         await page.locator("#login-form button").click()
         await expect(page.locator("#composer-area")).to_be_visible()
         await expect(page.locator("#workspace-open")).to_be_hidden()
+        await live_metrics_display(page)
         await page.locator("#prompt").fill("First private question")
         await page.locator("#send").click()
         await expect(page.locator("#save-status")).to_have_text("Saved privately on this computer")
@@ -279,6 +305,8 @@ async def exercise(port, alice, bob, artifacts, env):
         assert await page.locator(".assistant script").count() == 0
         assert len(requests) == 1 and requests[0]["messages"] == [{"role": "user", "content": "First private question"}]
         assert requests[0]["recovery_wait_seconds"] == 120
+        assert requests[0]["stream_metrics"] is True
+        await expect(page.locator("#generation-detail")).to_contain_text("Speed unavailable")
         await page.locator("#recovery-wait").uncheck()
         await page.locator("#prompt").fill("Second question")
         await page.locator("#prompt").press("Enter")
@@ -304,6 +332,7 @@ async def exercise(port, alice, bob, artifacts, env):
         await page.locator("#history button").click()
         await expect(page.locator(".message.user")).to_have_count(2)
         # A concurrent update must reject the stale tab BEFORE generation.
+        await expect(page.locator("#generation-metrics")).to_be_hidden()
         headers = {"Authorization": "Bearer " + alice}
         listing = await page.request.get(f"http://127.0.0.1:{port}/api/v1/conversations", headers=headers)
         chat_id = (await listing.json())["conversations"][0]["id"]
