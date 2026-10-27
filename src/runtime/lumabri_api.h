@@ -188,8 +188,38 @@ fail:
 typedef struct {
     int fd; double first; LmbReplayPrefix replay;
     LmbResponseMetrics timing;
+    int metrics; uint32_t attempts; double last_metrics;
+    const char *phase;
     char error[LMB_REPLY_HEADER]; int retryable;
 } ApiObservedStream;
+static int api_live_metrics(ApiObservedStream *stream, int force) {
+    double now=nowd();
+    if (!stream->metrics || (!force && now-stream->last_metrics<.25)) return 0;
+    double rate=lmb_response_live_rate(&stream->timing,stream->attempts,now);
+    int known=stream->attempts==1 && !stream->timing.invalid && stream->timing.tokens;
+    char count[32]="null",speed[64]="null",first[64]="null";
+    if (known) snprintf(count,sizeof count,"%u",stream->timing.tokens);
+    if (rate>0) snprintf(speed,sizeof speed,"%.3f",rate);
+    if (stream->timing.text_seen)
+        snprintf(first,sizeof first,"%.3f",stream->timing.first_text-stream->timing.started);
+    char payload[512];
+    int n=snprintf(payload,sizeof payload,
+        "{\"phase\":\"%s\",\"scope\":\"gateway_observed\",\"generated_tokens\":%s,"
+        "\"decode_tok_s\":%s,\"elapsed_seconds\":%.3f,\"ttft_seconds\":%s}",
+        stream->attempts>1 ? "recovering" : stream->phase,count,speed,now-stream->timing.started,first);
+    if (n<0 || (size_t)n>=sizeof payload) return -1;
+    stream->last_metrics=now;
+    return api_event(stream->fd,"metrics",payload);
+}
+static int api_final_metrics(Cap *payload, const char *stat, uint32_t attempts) {
+    LmbGenerationMetrics m;
+    if (attempts!=1 || lmb_metrics_parse(stat,&m)) return cap_str(payload,",\"metrics\":null");
+    double rate=lmb_metrics_decode_rate(&m); char speed[64]="null";
+    if (rate>0) snprintf(speed,sizeof speed,"%.3f",rate);
+    return api_addf(payload,",\"metrics\":{\"scope\":\"engine_reported\",\"generated_tokens\":%u,"
+        "\"decode_tok_s\":%s,\"prefill_seconds\":%.9f,\"decode_seconds\":%.9f}",
+        m.generated_tokens,speed,m.prefill_seconds,m.decode_seconds);
+}
 static int api_emitted_delta(void *opaque, const unsigned char *bytes, size_t length) {
     ApiObservedStream *stream=opaque;
     double now=nowd();
@@ -199,7 +229,15 @@ static int api_emitted_delta(void *opaque, const unsigned char *bytes, size_t le
 }
 static int api_observed_progress(void *opaque, const char *line) {
     ApiObservedStream *stream=opaque;
-    lmb_response_progress(&stream->timing,line,nowd()); return 0;
+    const char *phase=stream->phase, *tail=strchr(line+9,' ');
+    if (tail) {
+        tail++;
+        if (!strncmp(tail,"QUEUED ",7)) stream->phase="queued";
+        else if (!strncmp(tail,"PREFILL ",8)) stream->phase="prefill";
+        else if (!strncmp(tail,"DECODE",6) && (!tail[6] || tail[6]==' ')) stream->phase="decode";
+    }
+    lmb_response_progress(&stream->timing,line,nowd());
+    return api_live_metrics(stream,strcmp(phase,stream->phase)!=0);
 }
 static int api_response_timing(Cap *payload, LmbResponseMetrics *timing, const char *stat,
     uint32_t attempts, double generation_end, double completed) {
@@ -230,13 +268,14 @@ static int api_observed_error(void *opaque, const char *message) {
 }
 static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUser *user, const char *body, size_t length) {
     double started=nowd();
-    LmbJsonToken tokens[1024]; LmbJson j; int fields[4];
-    const char *const keys[]={"model","messages","max_tokens","recovery_wait_seconds"};
+    LmbJsonToken tokens[1024]; LmbJson j; int fields[5];
+    const char *const keys[]={"model","messages","max_tokens","recovery_wait_seconds","stream_metrics"};
     char id[65]; uint8_t allocation[32]; uint32_t max_new,wait_seconds=0;
-    if (lmb_json_parse(&j,body,length,tokens,1024) || lmb_json_fields(&j,0,keys,4,fields) ||
+    if (lmb_json_parse(&j,body,length,tokens,1024) || lmb_json_fields(&j,0,keys,5,fields) ||
         fields[0]<0 || fields[1]<0 || fields[2]<0 || lmb_api_json_string(&j,(unsigned)fields[0],id,sizeof id) ||
         strlen(id)!=64 || lmb_unhex(allocation,id,32) || lmb_json_uint(&j,(unsigned)fields[2],&max_new) || !max_new ||
-        (fields[3]>=0 && (lmb_json_uint(&j,(unsigned)fields[3],&wait_seconds) || wait_seconds>120))) {
+        (fields[3]>=0 && (lmb_json_uint(&j,(unsigned)fields[3],&wait_seconds) || wait_seconds>120)) ||
+        (fields[4]>=0 && tokens[fields[4]].kind!=LMB_JSON_TRUE && tokens[fields[4]].kind!=LMB_JSON_FALSE)) {
         api_error(fd,400,"invalid_chat_request"); return;
     }
     if (!lmb_api_user_allows(user,allocation)) { api_error(fd,403,"model_not_authorized"); return; }
@@ -274,10 +313,12 @@ static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUs
     const char *header="HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\n"
         "Connection: close\r\nX-Content-Type-Options: nosniff\r\nX-Accel-Buffering: no\r\n\r\n";
     if (api_write(fd,header,strlen(header))) { demand_outcome=LMB_DEMAND_CANCELLED; goto finished; }
-    ApiObservedStream observed={.fd=fd,.replay={.limit=UINT64_C(8)<<20},.timing={.started=started}};
-    LmbReplyStream stream; LmbReplySink sink={api_observed_delta,api_observed_progress,api_observed_error,&observed};
-    int client_closed=0;
+    ApiObservedStream observed={.fd=fd,.replay={.limit=UINT64_C(8)<<20},.timing={.started=started},
+        .metrics=fields[4]>=0 && tokens[fields[4]].kind==LMB_JSON_TRUE,.attempts=1,.phase="preparing"};
+    LmbReplyStream stream={0}; LmbReplySink sink={api_observed_delta,api_observed_progress,api_observed_error,&observed};
+    int client_closed=api_live_metrics(&observed,1)!=0;
     for (;;) {
+      if (client_closed) break;
       int transport_failed=0;
       if (lmb_reply_init(&stream,engine.request_id,UINT64_C(8)<<20,sink)) break;
       observed.error[0]=0; observed.retryable=0;
@@ -295,6 +336,7 @@ static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUs
             if (got<=0) { transport_failed=1; break; }
             lmb_reply_feed(&stream,bytes,(size_t)got,NULL);
         }
+        if (stream.status==LMB_REPLY_MORE && api_live_metrics(&observed,0)) { client_closed=1; break; }
       }
       if (client_closed || api_stopping || stream.status==LMB_REPLY_DONE || stream.status==LMB_REPLY_ABORTED ||
           !recoverable || attempts>=3 || !(transport_failed || (stream.status==LMB_REPLY_ERROR && observed.retryable))) break;
@@ -323,6 +365,7 @@ static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUs
       if (lmb_api_user_load(access_dir,user->name,&current) || memcmp(current.digest,user->digest,sizeof user->digest) ||
           !lmb_api_user_allows(&current,allocation)) { snprintf(observed.error,sizeof observed.error,"Access revoked during recovery"); break; }
       memcpy(attempted[attempts++],selected->allocation,32);
+      observed.attempts=attempts;
       lmb_replay_begin(&observed.replay);
       if (submit_serve2_seeded(&engine,history.p ? history.p : "",prompt,(int)max_new,seeded ? &request_seed : NULL)) {
           snprintf(observed.error,sizeof observed.error,"Recovery submission failed; response remains incomplete"); break;
@@ -345,7 +388,8 @@ static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUs
         if (!cap_str(&payload,"{\"stats\":") && !api_json_text(&payload,stream.stat) &&
             !api_addf(&payload,",\"observation_saved\":%s,\"recovery_attempts\":%u,\"stats_scope\":\"%s\"",
                 observation_saved ? "true" : "false",attempts-1,attempts>1 ? "final_attempt_only" : "single_attempt") &&
-            !api_response_timing(&payload,&observed.timing,stream.stat,attempts,generation_end,nowd()) && !cap_str(&payload,"}"))
+            !api_response_timing(&payload,&observed.timing,stream.stat,attempts,generation_end,nowd()) &&
+            (!observed.metrics || !api_final_metrics(&payload,stream.stat,attempts)) && !cap_str(&payload,"}"))
             (void)api_event(fd,"done",payload.p);
         free(payload.p);
     } else if (!client_closed && !api_stopping) {

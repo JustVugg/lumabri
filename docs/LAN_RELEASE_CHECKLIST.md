@@ -9,7 +9,7 @@ execution, cross-platform numerical compatibility, or concurrent capacity.
 The managed-inference roadmap supersedes the older single-chat LAN checklist
 below. Historical observations remain here as evidence, not current promises.
 
-### Roadmap status, October 21, 2026
+### Roadmap status, October 26, 2026
 
 This table separates implementation from release acceptance. The detailed PR
 entries below record the exact evidence; an open PR is not an integrated release.
@@ -23,13 +23,21 @@ entries below record the exact evidence; an open PR is not an integrated release
 | 6 — Shared service and interfaces | Permanent keepers, common preparation/retirement operations, TUI, authenticated API, web chat and private history; explicit private HTTPS upstream (#238) | Verified local TLS/OLMoE gate, not installed remote/datacenter certification. |
 | 7 — Recovery | Approved-replica replay; unavailable-capacity replacement, same-turn wait and durable exit/release proofs merged in #227–230 after all eight checks passed | Final-package fault tests on deployment machines. No instantaneous KV migration. |
 | 8 — Authorized elasticity | Opt-in replica growth, drain, retirement, scale-to-zero/wake, budgets and cooldown | Sustained burst/idle validation on actual machines; failed ownership remains charged without proof. |
-| 9 — Provider and actual savings | No paid resources created | Explicitly deferred provider choice, account access and spending authority; implementation and billing comparison remain. |
+| 9 — Infrastructure provisioning (outside first-release scope) | Lumabri uses existing, authorized machines; no paid resources created | Creating/removing cloud VMs belongs to the deployment infrastructure. A Kubernetes integration would delegate this to its configured node autoscaler; that integration is not delivered. |
 | 10 — Release | Native CI, allowlisted package assembly and hash verification | Final installed-package LAN/datacenter, sustained-load, update and rollback evidence. Native Windows inference and notarized macOS distribution are not delivered. |
 
 The model source stays local to the requesting installation. Neither this table
 nor tiny-checkpoint CI claims that arbitrary models are downloaded automatically,
 that every added machine increases single-chat speed, or that the full roadmap
 is complete. See [deployment acceptance](../PRODUCTION.md#deployment-acceptance).
+
+The October 26 scope decision removes direct cloud-provider provisioning from
+first-release requirements. Model placement, resident memory, admission,
+replica preparation/draining, recovery and declared resource costs remain
+Lumabri responsibilities. Kubernetes is optional: household installations
+continue to use authorized computers directly. Removing a machine must still
+be coordinated with active inference; an infrastructure autoscaler alone does
+not preserve conversation state or resident model coverage.
 
 The following PRs passed all eight final-head CI checks before normal merge on
 October 20–21 (no squash). Historical local-run revisions below remain unchanged;

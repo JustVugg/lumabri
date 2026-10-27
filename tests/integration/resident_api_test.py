@@ -49,9 +49,11 @@ def verify_resident_api(runtime, env, tracker, first_model_name, artifacts, obse
         response = conn.getresponse(); status, data = response.status, response.read()
         conn.close(); return status, data
 
-    def chat(token, target, prompt="hi"):
-        return request("/api/v1/chat", token, json.dumps({"model": target, "max_tokens": 8,
-                       "messages": [{"role": "user", "content": prompt}]}))
+    def chat(token, target, prompt="hi", metrics=False):
+        payload = {"model": target, "max_tokens": 8, "messages": [{"role": "user", "content": prompt}]}
+        if metrics:
+            payload["stream_metrics"] = True
+        return request("/api/v1/chat", token, json.dumps(payload))
 
     try:
         cli("start", "--tracker", tracker, "--port", str(port))
@@ -89,7 +91,8 @@ def verify_resident_api(runtime, env, tracker, first_model_name, artifacts, obse
         # More opens than available slots verifies acknowledged retirement.
         before_samples = assert_stage_record(observed_plan)
         for turn in range(6):
-            status, data = chat(alice, first["id"])
+            metrics = turn % 2 == 1
+            status, data = chat(alice, first["id"], metrics=metrics)
             assert status == 200, (status, data)
             events = []
             for block in data.decode().split("\n\n"):
@@ -98,7 +101,18 @@ def verify_resident_api(runtime, env, tracker, first_model_name, artifacts, obse
                 lines = block.splitlines()
                 assert len(lines) == 2 and lines[0].startswith("event: ") and lines[1].startswith("data: "), block
                 events.append((lines[0][7:], json.loads(lines[1][6:])))
-            assert events and events[-1][0] == "done" and all(e[0] in ("delta", "done") for e in events), events
+            allowed = ("delta", "done", "metrics") if metrics else ("delta", "done")
+            assert events and events[-1][0] == "done" and all(e[0] in allowed for e in events), events
+            if metrics:
+                samples = [e[1] for e in events if e[0] == "metrics"]
+                assert samples and all(s["scope"] == "gateway_observed" for s in samples)
+                assert samples[0]["decode_tok_s"] is None
+                assert all(s["generated_tokens"] is None or 1 <= s["generated_tokens"] <= 8 for s in samples)
+                final = events[-1][1]["metrics"]
+                assert final["scope"] == "engine_reported" and final["generated_tokens"] == 8
+                assert abs(final["decode_tok_s"] - 7 / final["decode_seconds"]) <= .001
+            else:
+                assert "metrics" not in events[-1][1], "legacy stream changed without opt-in"
             raw = b"".join(base64.b64decode(e[1]["bytes"], validate=True) for e in events if e[0] == "delta")
             assert raw and "STAT " in events[-1][1]["stats"]
             assert events[-1][1]["observation_saved"], "valid stable-workload API turn was not observed"
