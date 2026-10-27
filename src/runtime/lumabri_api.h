@@ -768,6 +768,16 @@ static int cmd_api(int argc, char **argv) {
                          !lmb_api_https_origin_valid(https_origin))) goto usage;
     if (!strcmp(tracker,settings.tracker) && home_settings_activate(&settings)) return 1;
     if (!strcmp(argv[0],"stop") && !count) return home_service_stop_role("api") ? 1 : 0;
+    /* A fresh terminal has no LUMABRI_ENCRYPT override. Initialize the same
+     * authenticated transport as the household TUI before probing donors or
+     * forking the gateway. Local credential administration stays available
+     * even when the household transport cannot be initialized. */
+    int local_access=!strcmp(argv[0],"user-add") || !strcmp(argv[0],"revoke") ||
+        !strcmp(argv[0],"operator-grant") || !strcmp(argv[0],"operator-revoke") ||
+        !strcmp(argv[0],"manage-grant") || !strcmp(argv[0],"manage-revoke") ||
+        !strcmp(argv[0],"list") || !strcmp(argv[0],"capacity-remove") ||
+        !strcmp(argv[0],"model-remove");
+    if (!local_access && home_private_network()) return 1;
     char path[1200];
     if (checked_printf(path,sizeof path,"%s/.lumabri/api-access",getenv("HOME") ? getenv("HOME") : ".")) return 1;
     int dir=lmb_api_access_dir(path,1); if (dir<0) { fprintf(stderr,"Cannot open private API access directory\n"); return 1; }

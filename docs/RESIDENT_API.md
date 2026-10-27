@@ -897,6 +897,16 @@ into the controller with a small native C build tool. The same binary remains
 relocatable. The browser never saves the token or transcripts in localStorage,
 sessionStorage or cookies; refreshing the page requires the token again.
 
+The gateway and network management commands enable the household's authenticated
+peer encryption themselves, including from a new terminal. The saved household
+key is used when targeting the saved tracker. Explicitly setting
+`LUMABRI_ENCRYPT=0` prevents network operations instead of contacting donors in
+plaintext. Local access administration and `api stop` remain available. This
+peer transport is separate from the browser's loopback HTTP connection or an
+explicitly configured HTTPS proxy.
+If a gateway from an older build is already running, restart only that gateway
+with `api stop` followed by `api start`; resident weights are not unloaded.
+
 Choose an approved resident model, write a question and send. The page shows
 the user's message alongside the streaming reply, with Stop, New conversation,
 collapsible history, JSON export and confirmed deletion. Model selection is
