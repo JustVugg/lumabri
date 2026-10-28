@@ -4,7 +4,7 @@
 
 #include "lumabri_segment.h"
 
-#include "lumabri_proto.h"
+#include "src/protocol/lumabri_wire.h"
 #include "lumabri_sha.h"
 
 #include <pthread.h>
