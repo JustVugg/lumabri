@@ -50,6 +50,9 @@ def main():
     run([sys.executable,'tools/check_engine_memory.py',archive,'--nm',args.nm,'--windows-input'])
     run([args.cc,*flags,'-Werror',root/'tests/c/test_segment_windows.c',archive,
          '-static','-lwinpthread','-lpsapi','-lm','-o',output/'test_segment_windows.exe'])
+    run([args.cc,*flags,'-Werror',root/'tests/c/test_segment_v2.c',
+         root/'lumabri_segment.c','-static','-lwinpthread',
+         '-o',output/'test_segment_v2.exe'])
     print('Native inference gate:',output/'test_segment_windows.exe')
 
 
