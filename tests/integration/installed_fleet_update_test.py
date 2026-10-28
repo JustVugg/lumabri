@@ -35,8 +35,10 @@ def packages(paths):
     # The gateway check additionally requires different revisions AND real
     # executable bytes, and the same engine revision. Both packages must be
     # complete; a gateway-only bundle is not a whole-household upgrade.
-    for path in paths:
-        checked_package(path)
+    for index, path in enumerate(paths):
+        # The explicit previous release predates the optional MCP executable.
+        # The candidate must include it; core runtime completeness is unchanged.
+        checked_package(path, require_agent=index != 0)
     return candidate_pair(paths)
 
 

@@ -425,6 +425,16 @@ def main():
             # The planner may co-locate both models on one selected donor.
             # Each prepared model still requires locked Segment and Edge payloads.
             assert_locked_evidence(0, 4)
+        if os.environ.get("LUMABRI_TEST_KUBERNETES") == "1":
+            assert args.joint == "complete" and api_prepare
+            from kubernetes_control_test import verify_resident_kubernetes
+            api_prepare.cli("start", "--tracker", tracker, "--port", str(api_prepare.port))
+            try:
+                code, operation = api_prepare.http("/api/v1/preparation", {"action": "status", "operation": api_prepare.operation})
+                assert code == 200 and operation["state"] == "done", operation
+                verify_resident_kubernetes(api_prepare, operation["allocations"])
+            finally:
+                api_prepare.cli("stop")
         if args.soak_seconds:
             from managed_soak_test import verify_managed_soak
             verify_managed_soak(api_prepare, until, service, tmp, args.soak_seconds)

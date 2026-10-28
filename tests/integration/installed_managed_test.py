@@ -14,7 +14,7 @@ from installed_gateway_update_test import native_package
 from managed_soak_test import verify_managed_soak
 
 
-def checked_package(directory):
+def checked_package(directory, require_agent=True):
     directory = directory.resolve(strict=True)
     manifest = native_package.verify(directory)
     if (manifest["system"] != platform.system() or
@@ -24,7 +24,8 @@ def checked_package(directory):
         if manifest[key]["tracked_changes"]:
             raise ValueError("record clean source revisions before installed acceptance")
     launcher = "Lumabri.command" if platform.system() == "Darwin" else "start-lumabri"
-    required = {f"bin/{name}" for name in native_package.BINARIES} | {launcher}
+    binaries = native_package.BINARIES if require_agent else native_package.CORE_BINARIES
+    required = {f"bin/{name}" for name in binaries} | {launcher}
     if not required <= manifest["files"].keys():
         raise ValueError("complete household package and launcher are required")
     for name in manifest["files"]:

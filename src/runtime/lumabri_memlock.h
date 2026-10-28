@@ -8,8 +8,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <sys/resource.h>
 #include <unistd.h>
+#endif
 
 #define LMB_MEMLOCK_EXIT 78
 
@@ -68,13 +72,18 @@ static inline int lmb_memlock_preflight(uint64_t weight_bytes, const char *role)
 static inline int lmb_memlock_startup(void) {
     /* The config/manifest parser is namespaced too. Explain a zero/sub-page
      * allowance before even its first allocation can fail. */
+#ifdef _WIN32
+    SYSTEM_INFO info; GetSystemInfo(&info);
+    long page=(long)info.dwPageSize;
+#else
     long page=sysconf(_SC_PAGESIZE);
+#endif
     return page>0 ? lmb_memlock_preflight((uint64_t)page,"CPU runtime's first locked page") : 0;
 }
 
 static inline void lmb_memlock_failure(size_t bytes, uint64_t owned, int error) {
     LmbMemlockLimit limit=lmb_memlock_limit();
-    fprintf(stderr,"[resident-memory] mlock failed: %s; requested=%llu bytes, "
+    fprintf(stderr,"[resident-memory] native page lock failed: %s; requested=%llu bytes, "
         "already_owned_locked=%llu bytes",strerror(error),
         (unsigned long long)bytes,(unsigned long long)owned);
     if (limit.known && !limit.unlimited && !limit.exempt)

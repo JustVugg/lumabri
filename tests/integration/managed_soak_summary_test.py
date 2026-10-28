@@ -3,7 +3,7 @@ import subprocess
 import unittest
 from unittest.mock import Mock, patch
 
-from managed_soak_test import hosts_quiescent, process_sample, summaries
+from managed_soak_test import hosts_quiescent, process_sample, processes_quiescent, summaries
 
 
 class SoakReportTest(unittest.TestCase):
@@ -53,8 +53,8 @@ class SoakReportTest(unittest.TestCase):
 
     def test_only_owned_descendants_and_unknown_descriptors(self):
         result = subprocess.CompletedProcess([], 0, stdout=(
-            "100 1 8 lumabri\n101 100 20 /tmp/runtime/segment_node\n"
-            "102 101 4 segment_chat\n999 1 999999 unrelated\n"))
+            "100 1 8 S lumabri\n101 100 20 Sl /tmp/runtime/segment_node\n"
+            "102 101 4 Sl segment_chat\n999 1 999999 R unrelated\n"))
         with patch("managed_soak_test.subprocess.run", return_value=result), \
              patch("managed_soak_test.Path.is_dir", return_value=True), \
              patch("managed_soak_test.Path.iterdir", side_effect=PermissionError):
@@ -65,10 +65,25 @@ class SoakReportTest(unittest.TestCase):
         self.assertEqual(sample["processes"]["101"]["program"], "segment_node")
 
     def test_missing_owner_is_not_a_zero_resource_sample(self):
-        result = subprocess.CompletedProcess([], 0, stdout="999 1 1024 unrelated\n")
+        result = subprocess.CompletedProcess([], 0, stdout="999 1 1024 R unrelated\n")
         with patch("managed_soak_test.subprocess.run", return_value=result):
             with self.assertRaises(AssertionError):
                 process_sample({100})
+
+    def test_gateway_worker_cannot_enter_stable_baseline(self):
+        # Reproduce the CI failure: a zero-RSS HTTP zombie can be present in
+        # both samples before the parent's next poll/reap. It must disappear,
+        # not become a permanent PID expected throughout the workload.
+        permanent = {"100": {"parent": 1, "state": "S"},
+                     "200": {"parent": 1, "state": "S"},
+                     "201": {"parent": 200, "state": "Sl"}}
+        self.assertTrue(processes_quiescent({"processes": permanent}, 100))
+        for state in ("S", "R", "Z", "Z+"):
+            observed = {"processes": {**permanent, "101": {"parent": 100, "state": state}}}
+            self.assertFalse(processes_quiescent(observed, 100))
+            self.assertFalse(processes_quiescent(observed, 100))
+        lost_engine = {**permanent, "201": {"parent": 200, "state": "Z"}}
+        self.assertFalse(processes_quiescent({"processes": lost_engine}, 100))
 
 
 if __name__ == "__main__":

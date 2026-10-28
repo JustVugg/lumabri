@@ -164,6 +164,9 @@ class PreparationAPI:
         assert history["operations"][0]["operation"] == self.operation
         assert history["operations"][0]["allocations"] == result["allocations"]
         (Path(self.env["HOME"]).parent / "preparation-api.json").write_text(json.dumps(result, indent=2))
+        if success and (self.runtime / "lumabri-agent").exists():
+            from agent_control_test import verify_resident_agent
+            verify_resident_agent(self, ready)
         self.cli("stop")
 
     def reload_authorized(self, until):
