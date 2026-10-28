@@ -198,6 +198,28 @@ Changing a shell's allowance does not update a donor already running in the
 background. Lumabri never raises limits, disables swap or silently switches
 from `engine-locked` to `observe`.
 
+## Linux container resource boundaries
+
+Inventory, preparation admission and the live governor use the smaller of
+host RAM and the current cgroup's visible memory limits. For cgroup v2 this
+includes `memory.max` and `memory.high`; v1 uses `memory.limit_in_bytes`.
+Available memory also respects each visible ancestor's remaining headroom,
+including other processes and page cache charged there. A missing or unreadable
+required observation offers no RAM. An exhausted group pauses admission rather
+than falling back to the host's free memory. No cgroup settings are changed.
+
+The automatic CPU thread budget is bounded by affinity and the ceiling of each
+visible CPU quota. It is a concurrency limit, not a speed estimate or a claim
+that a fractional quota provides a full core. Live refresh picks up changes.
+Limits above a cgroup namespace's visible mount cannot be inspected; operators
+must set usable limits on the worker's visible group as well. This boundary
+does not itself deploy pods or certify a Kubernetes cluster.
+
+`make test-container-limits` covers v1/v2 hierarchy and failure fixtures.
+The CI also runs `build/tests/probe-container-budget` in a disposable native
+Linux scope with 512 MiB and one CPU, checking live memory charging and
+governor refusal. Ordinary host services and OS-wide limits are unaffected.
+
 Local reduced OLMoE validation covers two resident checkpoints on the same
 donors, two isolated conversation slots, restart and selective unload. It
 does not establish full-size locked-memory requirements or native macOS

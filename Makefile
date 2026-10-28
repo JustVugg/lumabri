@@ -144,7 +144,7 @@ check-warnings:
 SECURE_DEPS = lumabri_secure.h lumabri_crypto.h
 HOME_NET_DEPS = lumabri_home_net.h lumabri_home_discovery.h lumabri_platform.h lumabri_wakeup.h lumabri_runtime_probe.h src/runtime/lumabri_resident_plan.h
 MACHINE_SRC = lumabri_machine.c
-MACHINE_DEPS = lumabri_machine.h $(MACHINE_SRC)
+MACHINE_DEPS = lumabri_machine.h $(MACHINE_SRC) src/runtime/lumabri_container_limits.h
 lumabri test_chat_ui test_host_session_pool test-home-monitor test_calibration: src/planner/lumabri_turn_observation.h
 lumabri tracker test_chat_ui test_inventory test_home: src/planner/lumabri_resource_facts.h src/planner/lumabri_workload_facts.h
 PLANNER_ADAPTER_DEPS = $(wildcard planner_adapters/*.h)
@@ -764,6 +764,20 @@ test_relay_rate: tests/c/test_relay_rate.c lumabri_segment.c lumabri_segment.h \
 
 test_machine: tests/c/test_machine.c $(MACHINE_DEPS) lumabri_proto.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_machine.c $(MACHINE_SRC) -o $@
+
+.PHONY: test-container-limits
+test-container-limits: build/tests/container-limits
+	./build/tests/container-limits
+
+build/tests/container-limits: tests/c/test_container_limits.c src/runtime/lumabri_container_limits.h
+	@mkdir -p build/tests
+	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_container_limits.c -o $@
+
+build/tests/probe-container-budget: tests/c/probe_container_budget.c $(MACHINE_DEPS) lumabri_proto.h
+	@mkdir -p build/tests
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/probe_container_budget.c $(MACHINE_SRC) -o $@
+
+test check-warnings: test-container-limits
 
 test_process_memory: tests/c/test_process_memory.c src/runtime/lumabri_process_memory.h src/runtime/lumabri_resident_guard.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_process_memory.c -o $@
