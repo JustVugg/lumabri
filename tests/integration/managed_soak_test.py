@@ -39,13 +39,13 @@ def summaries(rows):
 
 
 def process_sample(roots):
-    output = subprocess.run(["ps", "-axo", "pid=,ppid=,rss=,comm="],
+    output = subprocess.run(["ps", "-axo", "pid=,ppid=,rss=,stat=,comm="],
         text=True, capture_output=True, check=True, timeout=10).stdout
     rows = {}
     for line in output.splitlines():
-        pid, parent, rss, command = line.split(None, 3)
+        pid, parent, rss, state, command = line.split(None, 4)
         rows[int(pid)] = {"parent": int(parent), "rss_bytes": int(rss) * 1024,
-                          "program": Path(command).name}
+                          "program": Path(command).name, "state": state}
     assert roots <= rows.keys(), "fixture service exited during sustained workload"
     owned = set(roots)
     while True:
@@ -63,6 +63,17 @@ def process_sample(roots):
             # Never disable that protection or invent a zero descriptor count.
             row["descriptors"] = None
     return {"processes": result, "rss_bytes": sum(row["rss_bytes"] for row in result.values())}
+
+
+def processes_quiescent(observed, gateway_pid):
+    """No temporary gateway worker or unreaped child belongs in the baseline.
+
+    Two identical samples can both precede the API's 250 ms reap interval.
+    Keep such children in the sample and wait for their exit, rather than
+    discarding their resources or pinning their PID into the baseline.
+    """
+    return all(row["parent"] != gateway_pid and not row["state"].startswith("Z")
+               for row in observed["processes"].values())
 
 
 def hosts_quiescent(request, allocations):
@@ -203,9 +214,13 @@ def verify_managed_soak(api, until, service, artifacts, seconds, max_growth_mib=
             # Require a quiet sample, never assert on that transient fork.
             ids = set(observed["processes"])
             stable = (ids == set(baseline["processes"])) if baseline else ids == previous
-            if stable:
+            if stable and processes_quiescent(observed, gateway_pid):
                 break
-            assert time.monotonic() < deadline, "owned process set did not return to quiescence"
+            if time.monotonic() >= deadline:
+                report["resource_sample_failure"] = {"gateway_pid": gateway_pid,
+                    "baseline_pids": sorted(baseline["processes"]) if baseline else None,
+                    "last_sample": observed}
+                raise AssertionError("owned process set did not return to quiescence")
             previous = ids; time.sleep(.2)
         observed["elapsed_seconds"] = time.monotonic() - started if started else 0
         report["resources"].append(observed)
@@ -231,7 +246,8 @@ def verify_managed_soak(api, until, service, artifacts, seconds, max_growth_mib=
         for i in range(8):
             api.cli("grant", f"soak-{i}", model_ids[i % 2], "--tracker", api.tracker)
         reservations = reservation_sample(); report["reservations"] = reservations
-        roots = {s["pid"] for s in reservations.values()} | {service("chatter")["api"]["pid"]}
+        gateway_pid = service("chatter")["api"]["pid"]
+        roots = {s["pid"] for s in reservations.values()} | {gateway_pid}
         for i in range(3):
             burst("warmup", 2, i)
         burst("overload", 8, -1); burst("disconnect", 2, -1); burst("after-disconnect", 2, -1)
