@@ -40,6 +40,17 @@ lumabri-agent: src/control/lumabri_agent.c src/runtime/lumabri_api_json.h src/ru
 test-agent-control: lumabri-agent lumabri
 	$(PYTHON) tests/integration/agent_control_test.py
 
+# Optional integration only; household runtimes do not acquire a curl/TLS
+# dependency. libcurl >= 7.85 is required for the Kubernetes HTTPS client.
+CURL_CFLAGS ?= $(shell pkg-config --cflags libcurl)
+CURL_LIBS ?= $(shell pkg-config --libs libcurl)
+lumabri-kube: src/control/lumabri_kube.c src/planner/lumabri_elastic_json.h src/planner/lumabri_elastic_policy.h src/runtime/lumabri_api_json.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(CURL_CFLAGS) -pthread $< $(CURL_LIBS) -o $@
+
+.PHONY: test-kubernetes
+test-kubernetes: lumabri-kube
+	$(PYTHON) tests/integration/kubernetes_control_test.py
+
 check-warnings: lumabri-agent
 test: test-agent-control
 
@@ -1251,7 +1262,7 @@ install: all
 	@echo "installed under $(DESTDIR)$(PREFIX)"
 
 clean:
-	rm -f tracker maintainer liblumabri.so liblumabri.dylib test_shim swarm_probe lumabri lumabri-agent \
+	rm -f tracker maintainer liblumabri.so liblumabri.dylib test_shim swarm_probe lumabri lumabri-agent lumabri-kube \
 	      test_relay_exec test_swarm_fed test_key_rotation test_hedge \
 	      test_local_fallback test_accum_order test_hybrid_parallel test_residency_report \
 	      test_model_family test_planner test_planner_io test_cluster test_memory_budget test_calibration test_catalogue_advice test_metrics test_inventory test_home test_home_expert test_chat_ui test_weight_cache segment_budget_probe \

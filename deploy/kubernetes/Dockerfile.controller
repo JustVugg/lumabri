@@ -1,0 +1,13 @@
+# Optional controller image; does not contain a model or inference runtime.
+FROM debian:bookworm-slim AS build
+RUN apt-get update && apt-get install --no-install-recommends -y build-essential pkg-config libcurl4-openssl-dev && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY . .
+RUN make lumabri-kube CFLAGS='-O2 -Wall -Wextra -Werror'
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install --no-install-recommends -y libcurl4 ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY --from=build /src/lumabri-kube /usr/local/bin/lumabri-kube
+COPY --from=build /src/LICENSE /usr/share/doc/lumabri-controller/LICENSE
+USER 10001:10001
+ENTRYPOINT ["/usr/local/bin/lumabri-kube"]
