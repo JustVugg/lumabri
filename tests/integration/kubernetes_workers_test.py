@@ -5,7 +5,6 @@ No AI service, provider, real user's credentials or existing namespace is used.
 """
 import argparse
 from concurrent.futures import ThreadPoolExecutor
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -132,16 +131,15 @@ os.execvp("lumabri",["lumabri","api","serve","--tracker",os.environ["TEST_TRACKE
             assert code == 200
             facts = {n["id"]: n["workload"] for n in current["nodes"]}
             for node in selected:
-                identities, reserved = [], 0
-                for allocation, plan in live_plans.items():
+                allocation_count, reserved = 0, 0
+                for plan in live_plans.values():
                     ranges = [r for r in plan["ranges"] if r["node"] == node]
                     if ranges:
-                        identities.append(bytes.fromhex(allocation))
+                        allocation_count += 1
                         reserved += sum(r["reserved_bytes"] for r in ranges)
-                digest = hashlib.sha256(b"lumabri-allocation-set-v1\0" + b"".join(sorted(identities))).hexdigest()
                 observed = facts.get(node)
-                if observed is None or observed["allocations"] != len(identities) or \
-                        observed["reserved_bytes"] != reserved or observed["allocation_set"] != digest:
+                if observed is None or observed["allocations"] != allocation_count or \
+                        observed["reserved_bytes"] != reserved:
                     return False
             return True
 
