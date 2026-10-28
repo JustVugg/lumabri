@@ -1,6 +1,6 @@
 /* Compile WITHOUT the override header. Ordinary payloads keep the libc ABI.
- * Small objects share reference-counted locked pages; large/aligned objects
- * have disjoint page-aligned extents. Freeing one cannot unlock another.
+ * Heap objects share reference-counted locked pages. Dedicated aligned
+ * extents have their own locks. Freeing one cannot unlock another.
  * This allocator never raises a resource limit or changes machine policy. */
 #define _GNU_SOURCE
 #include "lumabri_engine_memory.h"
@@ -205,7 +205,7 @@ static void *allocate(size_t bytes, size_t alignment) {
      * ordinary malloc/calloc/realloc payloads on the ordinary CRT heap;
      * reference-count their pages even for large objects. Only explicit
      * alignment requests can use the aligned CRT allocation family. */
-    if (alignment<=_Alignof(max_align_t)) shared_pages=1;
+    if (alignment<=LMB_MEMORY_MALLOC_ALIGNMENT) shared_pages=1;
 #endif
     if (shared_pages) extent=bytes ? bytes : 1;
     else if (alignment<page_size) alignment=page_size;
@@ -218,7 +218,7 @@ static void *allocate(size_t bytes, size_t alignment) {
     void *ptr=NULL;
     int rc=ENOMEM;
     if (entry) {
-        if (shared_pages && alignment<=_Alignof(max_align_t)) {
+        if (shared_pages && alignment<=LMB_MEMORY_MALLOC_ALIGNMENT) {
             ptr=malloc(extent); rc=ptr ? 0 : ENOMEM;
         } else { rc=lmb_memory_aligned(&ptr,alignment,extent); entry->native_aligned=1; }
     }
@@ -244,13 +244,13 @@ static void *allocate(size_t bytes, size_t alignment) {
 
 void *lmb_engine_malloc(size_t bytes) {
     if (!enabled()) return malloc(bytes);
-    return allocate(bytes,_Alignof(max_align_t));
+    return allocate(bytes,LMB_MEMORY_MALLOC_ALIGNMENT);
 }
 void *lmb_engine_calloc(size_t count, size_t bytes) {
     if (!enabled()) return calloc(count,bytes);
     if (bytes && count>SIZE_MAX/bytes) { errno=ENOMEM; return NULL; }
     size_t total=count*bytes;
-    void *ptr=allocate(total,_Alignof(max_align_t));
+    void *ptr=allocate(total,LMB_MEMORY_MALLOC_ALIGNMENT);
     if (ptr) memset(ptr,0,total);
     return ptr;
 }
@@ -295,7 +295,7 @@ void *lmb_engine_realloc(void *ptr, size_t bytes) {
     unlock_allocations();
     /* Realloc's caller owns the pointer exclusively, as with libc. A failed
      * replacement leaves the old payload and its lock intact. */
-    void *next=allocate(bytes,_Alignof(max_align_t));
+    void *next=allocate(bytes,LMB_MEMORY_MALLOC_ALIGNMENT);
     if (next) { memcpy(next,ptr,previous<bytes ? previous : bytes); lmb_engine_free(ptr); }
     return next;
 }

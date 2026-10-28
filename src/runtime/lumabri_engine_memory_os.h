@@ -9,6 +9,9 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <malloc.h>
+/* CRT malloc alignment comes from the native ABI; MSVC does not expose
+ * max_align_t in every C11 SDK combination. */
+#define LMB_MEMORY_MALLOC_ALIGNMENT MEMORY_ALLOCATION_ALIGNMENT
 #ifndef ESTALE
 #define ESTALE EIO
 #endif
@@ -79,6 +82,7 @@ static inline int lmb_memory_unlockall(void) { errno=ENOTSUP; return -1; }
 #else
 #include <unistd.h>
 #include <sys/mman.h>
+#define LMB_MEMORY_MALLOC_ALIGNMENT _Alignof(max_align_t)
 static inline uint64_t lmb_memory_pid(void) { return (uint64_t)getpid(); }
 static inline size_t lmb_memory_pagesize(void) {
     long page=sysconf(_SC_PAGESIZE); return page>0 ? (size_t)page : 0;
