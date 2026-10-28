@@ -1,3 +1,6 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #define _DEFAULT_SOURCE
 #define _POSIX_C_SOURCE 200809L
 

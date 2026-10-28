@@ -84,6 +84,13 @@ static int home_service_stop_role(const char *role) {
 
 static int cmd_service(int argc, char **argv) {
     const char *action = argc ? argv[0] : "status";
+    if (argc==2 && !strcmp(action,"live")) {
+        HomeServiceSnapshot s;
+        if (!home_service_role(argv[1])) return 2;
+        /* Supervisor probe only. A live keeper is not model readiness. */
+        return home_service_query(argv[1],HOME_SVC_STATUS,NULL,&s) || s.state!=HOME_SVC_RUNNING ||
+            (!strcmp(argv[1],"donor") && !s.compute_enabled) ? 1 : 0;
+    }
     if (argc > 2 || (argc == 2 && strcmp(argv[1], "--json"))) return 2;
     if (!strcmp(action, "start")) return home_service_ensure() ? 1 : 0;
     if (!strcmp(action, "restart")) {

@@ -1,5 +1,49 @@
 # Household service and resident plans
 
+For a supervisor or container without an interactive terminal, run:
+
+```sh
+lumabri donor --headless --join TRACKER:PORT --ram-gb LIMIT
+```
+
+Configure the household authentication key and transport identity as for the
+interactive donor. `--headless` keeps the donor in the foreground under the
+same PID. It exposes the same private, same-user control socket, multi-model
+reservations and compute scheduler as Share resources. It does not fork a
+manager or detach, and a second donor with the same HOME is rejected. Do not
+combine it with the legacy `LUMABRI_HOME_FOREGROUND` diagnostic mode.
+
+Starting this process does not approve incoming requests. The machine's owner
+can attach the normal TUI, or use another process with the same UID and HOME:
+
+```sh
+lumabri donor-policy inspect
+lumabri donor-policy accept-current REVIEW
+```
+
+Read the proposed requester, checkpoint, layer interval, memory and session
+limits before supplying the returned `review` value. Acceptance is for that
+one immutable offer and service incarnation; a stale review is rejected. The
+command creates no repeat permission. After an uncertain reply, inspect live
+state instead of accepting a replacement request. The existing
+`allow-current` command remains a separate, time-limited repeat permission.
+Network API credentials cannot issue either local-owner approval.
+
+`lumabri service status --json` observes this process from other terminals.
+Closing those terminals leaves it running. SIGTERM or `service stop` releases
+its engines and reservations. A supervisor restart starts an empty donor;
+saved allocations and old approvals are not replayed. Drain active sessions
+through the management API before planned shutdown. A forced process or Pod
+termination is a worker failure, not transparent migration.
+
+Give each worker a private writable HOME and cache directory, the complete
+installed household runtime, and an OS locked-memory allowance sufficient for
+its approved engines. Container memory and CPU limits still apply. Do not use
+an `emptyDir` memory volume for checkpoint staging without including those
+bytes in the memory budget. A live donor or Pod is not proof that a model is
+ready: inference still waits for every approved segment and Edge to reach
+READY. This mode does not install a supervisor or provision machines.
+
 The TUI is a client. Closing it no longer stops sharing, the household tracker,
 or an approved preparation. New donor requests still require explicit owner
 approval in **Share resources**. Leaving that view is not accepting an offer.
