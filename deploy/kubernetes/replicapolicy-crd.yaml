@@ -1,0 +1,85 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: replicapolicies.lumabri.io
+spec:
+  group: lumabri.io
+  scope: Namespaced
+  names:
+    plural: replicapolicies
+    singular: replicapolicy
+    kind: ReplicaPolicy
+    shortNames: [lmbrp]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: PolicyRevision
+          type: integer
+          jsonPath: .status.policyRevision
+        - name: Min
+          type: integer
+          jsonPath: .spec.min_replicas
+        - name: Max
+          type: integer
+          jsonPath: .spec.max_replicas
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            apiVersion: {type: string}
+            kind: {type: string}
+            metadata: {type: object}
+            spec:
+              type: object
+              required: [action, id, revision, route_revision, enabled, min_replicas, max_replicas, cooldown_seconds, idle_seconds, up_rejections, ttft_ms, max_reserved_bytes, source_model, nodes, context, sessions, max_new, adopt_allocations]
+              x-kubernetes-validations:
+                - rule: self.id == oldSelf.id
+                  message: A resource cannot adopt a different logical model.
+                - rule: self.min_replicas <= self.max_replicas
+                  message: Minimum replicas cannot exceed maximum replicas.
+                - rule: self.max_new <= self.context
+                  message: Output limit cannot exceed context.
+              properties:
+                action: {type: string, enum: [configure]}
+                id: {type: string, pattern: '^[0-9a-f]{64}$', maxLength: 64}
+                revision: {type: integer, minimum: 1, maximum: 4294967292}
+                route_revision: {type: integer, minimum: 1, maximum: 4294967294}
+                enabled: {type: boolean}
+                min_replicas: {type: integer, minimum: 0, maximum: 8}
+                max_replicas: {type: integer, minimum: 1, maximum: 8}
+                cooldown_seconds: {type: integer, minimum: 30, maximum: 86400}
+                idle_seconds: {type: integer, minimum: 60, maximum: 604800}
+                up_rejections: {type: integer, minimum: 1, maximum: 1000000}
+                ttft_ms: {type: integer, minimum: 0, maximum: 3600000}
+                max_reserved_bytes: {type: string, pattern: '^[1-9][0-9]{0,18}$', maxLength: 19}
+                source_model: {type: string, minLength: 1, maxLength: 63}
+                nodes:
+                  type: array
+                  minItems: 1
+                  maxItems: 32
+                  x-kubernetes-list-type: atomic
+                  items: {type: string, pattern: '^[0-9a-f]{64}$', maxLength: 64}
+                context: {type: integer, minimum: 1, maximum: 131072}
+                sessions: {type: integer, minimum: 1, maximum: 8}
+                max_new: {type: integer, minimum: 1, maximum: 4096}
+                adopt_allocations:
+                  type: array
+                  maxItems: 8
+                  x-kubernetes-list-type: atomic
+                  items: {type: string, pattern: '^[0-9a-f]{64}$', maxLength: 64}
+            status:
+              type: object
+              properties:
+                observedGeneration: {type: integer, minimum: 0}
+                phase: {type: string, enum: [Invalid, Unknown, Applying, Applied, Faulted, Conflict, Pausing]}
+                policyRevision: {type: integer, minimum: 0}
+                reason: {type: string, maxLength: 256}
+                scope: {type: string, enum: [replica_policy_not_live_model_readiness]}
