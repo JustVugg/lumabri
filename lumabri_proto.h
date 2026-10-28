@@ -20,359 +20,16 @@
 #ifndef LUMABRI_PROTO_H
 #define LUMABRI_PROTO_H
 
+#include "src/protocol/lumabri_socket.h"
 #include <errno.h>
-#include <fcntl.h>
-#include <netdb.h>
-#include <poll.h>
 #include <signal.h>
 #include <stdatomic.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <sys/time.h>
 #include <time.h>
-#include <unistd.h>
-
-/* Public helpers live in headers so every Lumabri binary stays a single
- * translation unit. A particular binary intentionally uses only a subset;
- * mark that contract explicitly without hiding warnings in ordinary .c code. */
-#ifndef LMB_MAYBE_UNUSED
-#if defined(__GNUC__) || defined(__clang__)
-#define LMB_MAYBE_UNUSED __attribute__((unused))
-#else
-#define LMB_MAYBE_UNUSED
-#endif
-#endif
-
-#ifndef MSG_NOSIGNAL
-#define MSG_NOSIGNAL 0     /* platforms without it deliver SIGPIPE; the
-                              daemons ignore the signal themselves */
-#endif
-
-#define LMB_MAGIC     0x31424D4Cu           /* "LMB1" read as little-endian */
-#define LMB_MAX_BODY  (64u << 20)   /* a REGISTER carrying block hashes for a
-                                       whole huge model must fit: 32 B/MiB */
-#define LMB_MAX_PAY   (64u << 20)
-#define LMB_MAX_CONTROL_BODY (4u << 20)
-#define LMB_MAX_PLACEMENT_BODY (8u << 20) /* 4096 long paths, eight replicas */
-#define LMB_MAX_SMALL_BODY   (64u << 10)
-/* A DeepSeek prefill may queue dozens of cold experts behind one CPU gate;
- * 30 s incorrectly declared a healthy disk-backed node dead.  Connections
- * remain bounded separately, so five minutes is a safe default for bulk
- * work while deployments may lower it with LUMABRI_IO_TIMEOUT_MS. */
-#define LMB_DEFAULT_IO_TIMEOUT_MS 300000
-#define LMB_DEFAULT_MAX_CONNECTIONS 256u
-#define LMB_EXPERT_MANIFEST_MAGIC 0x324D454Cu /* "LEM2": versioned EXEC manifest */
-#define LMB_MODEL_ID_MAGIC         0x3144494Du /* "MID1": signed model identity */
-#define LMB_MODEL_ROOT_LEN 32
-#define LMB_BUILD_PROFILE_MAX 384
-/* Rows an EXEC may carry. A real batch is a prompt's worth of positions, so
- * this is generous; it exists so a length can never be chosen to overflow
- * the size arithmetic on a model with a large hidden dimension. */
-#define LMB_MAX_EXEC_ROWS 4096u
-#define LMB_PATH_MAX  512
-#define LMB_TOKEN_MAX 127u
-#define LMB_HASH_CHUNK (1u << 20)   /* integrity granularity: sha256 per MiB */
-#define LMB_HASH_MAGIC 0x48414853u  /* "SHAH": optional hash section marker */
-#define LMB_PEER_AUTH_MAGIC 0x52554150u /* "PAUR": trailing peer-identity block */
-
-/* Segment v2 is model-neutral: the opcodes carry versioned envelopes from
- * lumabri_segment.h, while model math and state stay behind the Colibri ABI.
- * No existing binary dispatches these operations until an adapter explicitly
- * opts in, so adding the wire vocabulary does not change local inference. */
-#define LMB_SEG_V2_MAGIC          0x32474553u /* "SEG2" */
-#define LMB_SEG_V2_VERSION        2u
-#define LMB_SEG_ASSIGN_MAGIC      0x31415347u /* "GSA1" */
-#define LMB_SEG_ASSIGN_VERSION    2u
-
-/* Optional executor telemetry is negotiated on the existing EREG LMB_OK.
- * Every extension has its own magic, version, and bounded payload length so
- * old peers keep using the exact legacy body and new peers can skip versions
- * they do not understand without changing any opcode. */
-#define LMB_EREG_CAP_MAGIC       0x50414345u /* "ECAP" */
-#define LMB_EREG_CAP_VERSION     1u
-#define LMB_EREG_CAP_STATS       0x00000001u
-#define LMB_EREG_STATS_MAGIC     0x31545345u /* "EST1" */
-#define LMB_EREG_STATS_VERSION   2u
-#define LMB_EREG_STATS_LENGTH_V1 12u
-#define LMB_EREG_STATS_LENGTH    40u
-#define LMB_EXPERT_STATE_ASSIGNED 1u
-#define LMB_EXPERT_STATE_LOADING  2u
-#define LMB_EXPERT_STATE_RAM_READY 3u
-#define LMB_EXPERT_STATE_VRAM_READY 4u
-#define LMB_EXPERT_STATE_ACTIVE   5u
-#define LMB_EXPERT_STATE_DRAINING 6u
-#define LMB_EXPERT_RESIDENT_RAM   (1u << 0)
-#define LMB_EXPERT_RESIDENT_VRAM  (1u << 1)
-#define LMB_EXPERT_DISK_FALLBACK  (1u << 2)
-#define LMB_SWARM_EXEC_MAGIC     0x31585753u /* "SWX1" */
-#define LMB_SWARM_EXEC_VERSION   1u
-#define LMB_SWARM_DETAIL_VERSION 2u
-#define LMB_SWARM_ROLE_STORAGE   (1u << 0)
-#define LMB_SWARM_ROLE_EXPERT    (1u << 1)
-#define LMB_SWARM_ROLE_SEGMENT   (1u << 2)
-
-/* Both arguments must point at the fixed LMB_TOKEN_MAX+1 authentication
- * buffers used by the daemons.  Compare the complete buffers so a remote
- * caller cannot learn a shared invite token one prefix at a time. */
-static LMB_MAYBE_UNUSED int lmb_token_equal(const char a[LMB_TOKEN_MAX + 1],
-                                            const char b[LMB_TOKEN_MAX + 1]) {
-    unsigned diff = 0;
-    for (size_t i = 0; i <= LMB_TOKEN_MAX; i++)
-        diff |= (unsigned)(uint8_t)a[i] ^ (unsigned)(uint8_t)b[i];
-    return diff == 0;
-}
-
-enum {
-    LMB_PING = 1, LMB_OK = 2, LMB_ERR = 3,
-    LMB_MANIFEST = 4, LMB_MANIFEST_R = 5,
-    LMB_READ = 6, LMB_READ_R = 7,
-    LMB_REGISTER = 8, LMB_PLACEMENT = 9, LMB_PLACEMENT_R = 10,
-    /* phase 2 — the peer EXECUTES the expert instead of shipping its bytes:
-     * EXEC carries one activation row, EXEC_R carries the expert's output.
-     * EMANIFEST asks which (layer,expert) pairs a node actually holds. */
-    LMB_EXEC = 11, LMB_EXEC_R = 12,
-    LMB_EMANIFEST = 13, LMB_EMANIFEST_R = 14,
-    /* SWARM: anonymous network status from the tracker. No names, no
-     * addresses in the reply — per peer only: model, bytes held, bytes
-     * served, reads served, seconds since last heartbeat. */
-    LMB_SWARM = 15, LMB_SWARM_R = 16,
-    /* Relay, the NAT-survival floor: a maintainer that cannot accept inbound
-     * connections still serves, through the tracker. RREAD goes chatter →
-     * tracker {model,path,off,len}; the tracker forwards RREAD_FWD {id,...}
-     * down the maintainer's persistent control connection (the same one that
-     * heartbeats), the maintainer answers RREAD_R {id} + pay, the tracker
-     * routes the payload back. Direct peer-to-peer stays the first choice;
-     * the relay is the fallback that makes zero router configuration work.
-     * QUIC + hole punching later removes the relay from the path; it cannot
-     * remove the need for this floor (symmetric NATs defeat punching too). */
-    LMB_RREAD = 17, LMB_RREAD_FWD = 18, LMB_RREAD_R = 19,
-    /* AUTH: private swarms. When the tracker runs with --token, the first
-     * frame on every connection must be AUTH {str token}; everything else on
-     * an unauthenticated connection is refused. Clients send it whenever
-     * LUMABRI_TOKEN is set. */
-    LMB_AUTH = 20,
-    /* ASSIGN: "the server decides". A joining maintainer offers a byte
-     * budget and the files it already holds; the tracker answers with the
-     * slice it should pull and serve, rarest-first — the least-replicated
-     * files of the model come first, so every new donor heals the swarm
-     * where it is thinnest. body: {str model, u64 budget, u32 n, n×str path}
-     * reply: {u32 n, n×{str path, u64 size}} */
-    LMB_ASSIGN = 21, LMB_ASSIGN_R = 22,
-    /* Phase-2 discovery — the bootstrap-and-delegate policy. An expert node
-     * advertises itself with EREG {name, addr, model, u32 nexperts} on a
-     * heartbeat, exactly like a maintainer REGISTERs; a chatter asks
-     * EPEERS {model} and gets the live expert-capable addresses back. The
-     * machine that `lumabri serve`s a model always runs one expert node, so
-     * a brand-new swarm works from minute zero with the server executing
-     * every expert; donors that join later are discovered and win the calls
-     * they are nearest for; a donor that dies fails over — ultimately back
-     * to the server, which holds everything. */
-    LMB_EREG = 23, LMB_EPEERS = 24, LMB_EPEERS_R = 25,
-    /* Integrity for the open swarm. A registering maintainer appends a
-     * sha256 per LMB_HASH_CHUNK of every file it holds; the tracker keeps
-     * the FIRST announcement of each (model, path) as ground truth — the
-     * origin server registers before any donor exists — and rejects the
-     * files of any later registrant whose hashes disagree (poison dies at
-     * the index). HASHES {model, path} → HASHES_R {str model, u32 chunk,
-     * u32 n, u64 size, u32 has_sig, [64 sig]} + pay (n × 32 raw bytes) hands
-     * the truth to chatters and pulling donors,
-     * which verify every fetched block against it: a lying peer's bytes
-     * are rejected and refetched elsewhere, loudly. The root of trust is
-     * the swarm operator (tracker + origin), never the peers. The reply
-     * carries model and size because the signature is over all of it: a
-     * verifier must be able to rebuild the signed message itself, and a
-     * courier that could not supply the fields could rewrite them. Keep this
-     * comment in step with the encoder — it went stale once and the donor's
-     * decoder went stale with it, reading the model string as a chunk size
-     * and calling the whole record malformed. */
-    LMB_HASHES = 26, LMB_HASHES_R = 27,
-    /* "the server decides", for compute. A donor of disk already gets its
-     * slice assigned rarest-first; a donor of COMPUTE had to be told which
-     * experts to hold by hand (--stride 9:3), which means knowing how many
-     * other donors exist and which index is free — coordination the swarm
-     * was supposed to remove. EASSIGN {model, slots, n_experts, capacity,
-     * u32 mask_len, routed mask, u32 have_len, held bitmap} asks the tracker
-     * instead; the reply {u32 n, n×{u32 layer, u32 eid}} is the set to hold,
-     * least-replicated first, keeping whatever the node already has so a
-     * restart does not re-download. A node that passes --layers/--stride
-     * opts out and is simply counted like any other replica. */
-    LMB_EASSIGN = 28, LMB_EASSIGN_R = 29,
-    /* A single signed identity for the complete model. The origin hashes the
-     * canonical list of {path,size,block hashes}, signs that 32-byte root,
-     * and the tracker only carries it. Expert nodes include the same record
-     * in EMANIFEST, so a chatter cannot accidentally mix checkpoints. */
-    LMB_MODEL_ID = 30, LMB_MODEL_ID_R = 31,
-    /* NAT relay for compute. REXEC is {str model,u32 n_experts,EXEC body}
-     * plus the activation payload. The tracker chooses a registered holder,
-     * forwards {u32 id,EXEC body}+pay over its outbound EREG connection, and
-     * returns the output. Direct EXEC remains preferred; this is the floor
-     * for symmetric NATs and networks where no inbound port can be opened. */
-    LMB_REXEC = 32, LMB_REXEC_FWD = 33, LMB_REXEC_R = 34,
-    /* Relay coverage is separate from EPEERS because an unreachable/NATed
-     * node has no direct EMANIFEST to query. Expert heartbeats append their
-     * engine/build/shape metadata; ECOVER returns the OR of compatible live
-     * holders' bitmaps, allowing the chatter to enable remote execution only
-     * when every routed expert has either a direct or relayed path. */
-    LMB_ECOVER = 35, LMB_ECOVER_R = 36,
-    /* Peer identity. A control connection asks CHALLENGE and gets a 32-byte
-     * random nonce; its REGISTER/EREG then carries {pubkey, sig} over that
-     * nonce, so the tracker binds each name to the key that first claimed it
-     * and refuses a different key under the same name. */
-    LMB_CHALLENGE = 37, LMB_CHALLENGE_R = 38,
-
-    /* Model-neutral Segment v2. Every state-mutating operation carries a
-     * session id, request id, lease id, fencing epoch and route generation.
-     * Snapshot/restore payloads are chunked; the 64 MiB frame cap therefore
-     * never becomes a limit on the complete remote state. */
-    LMB_SEG_OPEN = 39, LMB_SEG_OPEN_R = 40,
-    LMB_SEG_RUN = 41, LMB_SEG_RUN_R = 42,
-    LMB_SEG_SNAPSHOT = 43, LMB_SEG_SNAPSHOT_R = 44,
-    LMB_SEG_RESTORE = 45, LMB_SEG_RESTORE_R = 46,
-    LMB_SEG_CLOSE = 47, LMB_SEG_CLOSE_R = 48,
-    LMB_SEG_HEALTH = 49, LMB_SEG_HEALTH_R = 50,
-
-    /* Segment control plane. SREG is the signed, persistent heartbeat of a
-     * range-native executor; its reply assigns the lease/fencing owner.
-     * SEG_ROUTES is a model/schema/numeric compatibility query and returns a
-     * generation-fenced immutable placement snapshot. Neither opcode is used
-     * from the per-token or per-layer inference path. */
-    LMB_SEG_REGISTER = 51, LMB_SEG_REGISTER_R = 52,
-    LMB_SEG_ROUTES = 53, LMB_SEG_ROUTES_R = 54,
-    /* A compute donor names the model/engine and receives one of the
-     * origin's exact layer-aligned ranges, rarest first.  The subsequent
-     * signed SEG_REGISTER remains the authority; this is only placement. */
-    LMB_SEG_ASSIGN = 55, LMB_SEG_ASSIGN_R = 56,
-    /* Stateful Segment relay. The caller names one exact registered peer and
-     * wraps an ordinary Segment request. The tracker only forwards bytes over
-     * that peer's signed outbound control connection; the executor remains
-     * the sole authority for session, lease and request-id validation. */
-    LMB_RSEG = 57, LMB_RSEG_FWD = 58, LMB_RSEG_R = 59,
-    /* Human-facing observability. Unlike the legacy anonymous SWARM reply,
-     * this endpoint returns the peer names chosen by their operators plus
-     * role/load counters. It deliberately omits network addresses and public
-     * keys: the TUI can explain who is doing work without leaking how to
-     * reach a private donor. The body is versioned independently. */
-    LMB_SWARM_DETAIL = 60, LMB_SWARM_DETAIL_R = 61,
-    /* NAT probe: "dial me back at this port". The tracker connects to the
-     * requester's OBSERVED address, so a caller can only ever probe itself. */
-    LMB_REACH = 64, LMB_REACH_R = 65,
-    /* A donor that cannot fit its assigned range releases the short-lived
-     * placement promise immediately, so another READY-capable machine need
-     * not wait for its timeout. This grants no lease or execution authority. */
-    LMB_SEG_ASSIGN_RELEASE = 62,
-    /* Targeted tunnel dialects, for peers that only the tracker can reach.
-     * TEXEC carries one ordinary EXEC to ONE named holder and answers with
-     * a plain LMB_EXEC_R, so a chatter can treat "peer behind the tracker"
-     * exactly like any other replica: same sockets, same predictors, same
-     * hedging, same spot-check. TMAN fetches that peer's expert manifest
-     * the same way. */
-    LMB_TEXEC = 66,
-    LMB_TMAN = 67, LMB_TMAN_FWD = 68, LMB_TMAN_R = 69,
-    /* Where an executor's experts live. ERES_R body: u32 resident_flags
-     * (LMB_EXPERT_RESIDENT_VRAM / _RAM / LMB_EXPERT_DISK_FALLBACK), u32 state,
-     * u32 caps, then u32 hot_experts, u32 held_experts, u32 hot_permille.
-     *
-     * The flag alone cannot describe a node that keeps a RAM cache in front
-     * of on-disk experts: holding a third of a model hot reads exactly like
-     * holding none of it. The three counts say how much is hot, out of how
-     * much, and how often a call is actually served without a disk read —
-     * measured once enough calls have gone through, and an opening
-     * estimate from the slot ratio before that. A chatter asks once after the
-     * manifest; an older node answers ERR and is treated as "unknown", or
-     * answers the first three fields alone and is read exactly as before.
-     * Additive: the manifest itself is unchanged, so old chatters keep
-     * admitting new nodes. */
-    LMB_ERES = 70, LMB_ERES_R = 71,
-    /* EXEC with an explicit encoding. Body: u32 layer, eid, D, nrows,
-     * enc_in, then the router weights when the engine wants them applied
-     * remotely (body_len == 20 + nrows*4); pay is nrows*D floats when
-     * enc_in == 0, nrows*D bf16 halves when enc_in == 1. Reply body: u32
-     * enc_out; pay likewise. A value travels as bf16 only when it IS a
-     * bf16 (low 16 bits zero), so the arithmetic is unchanged: engines that
-     * round their MoE input and expert output to bf16 (DeepSeek V4 does)
-     * pay half the bytes, others keep floats, and nothing is approximated.
-     * Advertised by an executor as bit 0 of the caps word ERES_R carries
-     * third, after residency and state; an older node never receives EXEC2. */
-    LMB_EXEC2 = 72, LMB_EXEC2_R = 73,
-    /* An inference host: it owns the engine, the dense weights and the KV,
-     * and a client sends it text. HELLO_R body: model_type, engine kind,
-     * backend ("cpu"/"cuda"), u32 free sessions, u32 measured tok/s in
-     * thousandths — zero meaning nobody has measured this host yet, which
-     * is a state the screen shows rather than a number it invents.
-     *
-     * HOST_STREAM payloads carry chunks of the SUBMIT/DATA/DONE codec. When
-     * transport encryption is enabled they remain authenticated and encrypted;
-     * a local socketpair unwraps them so the terminal-facing Engine API still
-     * sees an ordinary byte stream. */
-    LMB_HOST_HELLO = 74, LMB_HOST_HELLO_R = 75,
-    LMB_HOST_STREAM = 76,
-    LMB_MACHINE_REPORT = 77, LMB_MACHINE_LIST = 78, LMB_MACHINE_LIST_R = 79,
-    LMB_HOME_OFFER = 80, LMB_HOME_STATUS = 81, LMB_HOME_COMMIT = 82,
-    LMB_HOME_START_HOST = 83, LMB_HOME_CANCEL = 84, LMB_HOME_PULSE = 85,
-    LMB_HOME_DETACH = 86, /* close requester control; retain prepared weights */
-    LMB_HOME_FEATURES = 87, LMB_HOME_HYBRID_ROUTES = 88, LMB_HOME_EXPERT = 89,
-    LMB_HOME_QUERY = 90, LMB_HOME_RELEASE = 91, /* pinned requester, exact allocation + root */
-    LMB_LINK_PROBE = 92, LMB_LINK_PROBE_R = 93, /* bounded authenticated echo */
-    LMB_HOST_CONTROL = 94, LMB_HOST_CONTROL_R = 95, /* approved requester only; fenced drain/resume */
-    LMB_HOME_NODE_CONTROL = 96, LMB_HOME_NODE_CONTROL_R = 97, /* keeper -> owned Segment channel */
-    LMB_HOME_RETIRED_RELEASE = 98, LMB_HOME_RETIRED_RELEASE_R = 99, /* irreversible idle-node fence */
-    /* Optional Segment RUN telemetry. GET on a separate connection is safe
-     * against old trackers (ERR); PUT is accepted only from the registered
-     * executor control connection. SGD1 discovery remains byte-for-byte v1. */
-    LMB_SEG_COMPUTE_GET = 100, LMB_SEG_COMPUTE_GET_R = 101,
-    LMB_SEG_COMPUTE_PUT = 102, LMB_SEG_COMPUTE_PUT_R = 103,
-    LMB_HOME_EXIT_PROOF = 104, LMB_HOME_EXIT_PROOF_R = 105, /* immutable allocation, all descendants exited */
-};
-#define LMB_CAP_EXEC2 (1u << 0)
-#define LMB_ENC_F32  0u
-#define LMB_ENC_BF16 1u
-
-/* bf16 on the wire, exact or not at all */
-static LMB_MAYBE_UNUSED int lmb_bf16_exact(const float *v, size_t n) {
-    for (size_t i = 0; i < n; i++) {
-        uint32_t bits; memcpy(&bits, &v[i], 4);
-        if (bits & 0xFFFFu) return 0;
-    }
-    return 1;
-}
-static LMB_MAYBE_UNUSED void lmb_bf16_pack(uint16_t *dst, const float *src, size_t n) {
-    for (size_t i = 0; i < n; i++) {
-        uint32_t bits; memcpy(&bits, &src[i], 4);
-        dst[i] = (uint16_t)(bits >> 16);
-    }
-}
-static LMB_MAYBE_UNUSED void lmb_bf16_unpack(float *dst, const uint16_t *src, size_t n) {
-    for (size_t i = 0; i < n; i++) {
-        uint32_t bits = (uint32_t)src[i] << 16;
-        memcpy(&dst[i], &bits, 4);
-    }
-}
-
-/* REGISTER body: str name, str addr, str model, u64 held_bytes,
- *                u64 served_bytes, u64 served_reads, u32 n { str path, u64 size }
- * PLACEMENT body: empty = every model; str model = that model's files only. */
-
-typedef struct {
-    uint32_t op;
-    uint8_t *body; uint32_t body_len;
-    uint8_t *pay;  uint32_t pay_len;
-    /* Encrypted frames are decrypted into one allocation and body/pay point
-     * inside it.  Plain frames keep the legacy two-allocation layout. */
-    uint8_t *storage;
-    uint32_t rx_reserved;
-} LmbMsg;
-
-typedef struct {
-    char model[64];
-    uint8_t root[LMB_MODEL_ROOT_LEN];
-    uint8_t sig[64];
-    int has_sig;
-} LmbModelIdentity;
+#include "src/protocol/lumabri_wire.h"
 
 /* ---- full-buffer socket I/O ------------------------------------------- */
 
@@ -381,11 +38,12 @@ typedef struct {
  * where it has no business changing the process's SIGPIPE disposition. A
  * peer that vanishes mid-frame must surface as EPIPE on this call, never as
  * a signal that kills the engine before failover can run. */
-static int lmb_write_full(int fd, const void *buf, size_t n) {
+static int lmb_write_full(LmbSocket fd, const void *buf, size_t n) {
     const uint8_t *p = (const uint8_t *)buf;
     while (n) {
-        ssize_t w = send(fd, p, n, MSG_NOSIGNAL);
+        ptrdiff_t w = lmb_socket_send(fd, p, n);
         if (w < 0) { if (errno == EINTR) continue; return -1; }
+        if (!w) { errno = ECONNRESET; return -1; }
         p += w; n -= (size_t)w;
     }
     return 0;
@@ -394,25 +52,21 @@ static int lmb_write_full(int fd, const void *buf, size_t n) {
 static _Thread_local uint64_t lmb_read_deadline_ms;
 
 static uint64_t lmb_io_monotonic_ms(void) {
-    struct timespec now;
-    if (clock_gettime(CLOCK_MONOTONIC, &now)) return 0;
-    return (uint64_t)now.tv_sec * 1000u + (uint64_t)now.tv_nsec / 1000000u;
+    return lmb_socket_now_ms();
 }
 
-static int lmb_read_full(int fd, void *buf, size_t n) {
+static int lmb_socket_read_full(LmbSocket fd, void *buf, size_t n) {
     uint8_t *p = (uint8_t *)buf;
     while (n) {
         if (lmb_read_deadline_ms) {
             uint64_t now = lmb_io_monotonic_ms();
             if (!now || now >= lmb_read_deadline_ms) { errno = ETIMEDOUT; return -1; }
             uint64_t left = lmb_read_deadline_ms-now;
-            struct pollfd ready = {fd, POLLIN, 0};
-            int rc = poll(&ready, 1, left < 1000 ? (int)left : 1000);
+            int rc = lmb_socket_wait(fd, 0, left < 1000 ? (int)left : 1000);
             if (rc < 0 && errno != EINTR) return -1;
             if (rc <= 0) continue;
-            if (!(ready.revents & POLLIN)) { errno = ECONNRESET; return -1; }
         }
-        ssize_t r = read(fd, p, n);
+        ptrdiff_t r = lmb_socket_receive(fd, p, n);
         if (r < 0) { if (errno == EINTR) continue; return -1; }
         if (r == 0) { errno = ECONNRESET; return -1; } /* EOF, not stale errno */
         p += r; n -= (size_t)r;
@@ -420,97 +74,33 @@ static int lmb_read_full(int fd, void *buf, size_t n) {
     return 0;
 }
 
-/* ---- frames ------------------------------------------------------------ */
-
-static void lmb_put32(uint8_t *p, uint32_t v) {
-    p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8);
-    p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
-}
-static uint32_t lmb_get32(const uint8_t *p) {
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-
-/* A frame's legal shape is determined before allocating it. REGISTER is the
- * only large-body request because it may carry every block hash of a huge
- * model. Bulk byte and activation frames may have a large payload but only a
- * small body. Thus no unknown or control op can reserve 64+64 MiB merely by
- * writing a hostile preamble. */
-static void lmb_frame_caps(uint32_t op, uint32_t *body_cap, uint32_t *pay_cap) {
-    *body_cap = LMB_MAX_SMALL_BODY;
-    *pay_cap = 0;
-    switch (op) {
-    case LMB_LINK_PROBE:
-    case LMB_LINK_PROBE_R:
-        *body_cap = 16; *pay_cap = 64u << 10;
-        break;
-    case LMB_HOME_EXPERT:
-        *body_cap = 80;
-        *pay_cap = 256u << 10; /* One activation, at most 65536 float cells. */
-        break;
-    case LMB_REGISTER:
-        *body_cap = LMB_MAX_BODY;
-        break;
-    case LMB_MANIFEST_R:
-    case LMB_SWARM_R:
-    case LMB_SWARM_DETAIL_R:
-    case LMB_MACHINE_LIST_R:
-    case LMB_EPEERS_R:
-    case LMB_EMANIFEST_R:
-    case LMB_EASSIGN_R:
-    case LMB_SEG_ROUTES_R:
-        *body_cap = LMB_MAX_CONTROL_BODY;
-        break;
-    case LMB_PLACEMENT_R:
-        *body_cap = LMB_MAX_PLACEMENT_BODY;
-        break;
-    case LMB_READ_R:
-    case LMB_RREAD_R:
-    case LMB_HASHES_R:
-    case LMB_EXEC_R:
-    case LMB_EXEC2_R:
-    case LMB_REXEC_R:
-    case LMB_TEXEC:
-    case LMB_TMAN_R:
-    case LMB_SEG_RUN:
-    case LMB_SEG_RUN_R:
-    case LMB_SEG_SNAPSHOT_R:
-    case LMB_SEG_RESTORE:
-    case LMB_HOST_STREAM:
-    case LMB_RSEG:
-    case LMB_RSEG_FWD:
-    case LMB_RSEG_R:
-        *pay_cap = LMB_MAX_PAY;
-        if (op == LMB_RSEG || op == LMB_RSEG_FWD || op == LMB_RSEG_R)
-            *body_cap = LMB_MAX_CONTROL_BODY;
-        break;
-    case LMB_RREAD_FWD:
-    case LMB_EXEC:
-    case LMB_EXEC2:
-    case LMB_REXEC:
-    case LMB_REXEC_FWD:
-        *body_cap = LMB_MAX_CONTROL_BODY;
-        *pay_cap = LMB_MAX_PAY;
-        break;
-    default:
-        break;
+/* File/pipe descriptors are a separate namespace on Windows. Metadata stores
+ * use this helper; network frame readers always use lmb_socket_read_full. */
+static LMB_MAYBE_UNUSED int lmb_read_full(int fd, void *buf, size_t n) {
+    unsigned char *p = buf;
+    while (n) {
+#ifdef _WIN32
+        int r = _read(fd, p, n > INT_MAX ? INT_MAX : (unsigned)n);
+#else
+        ssize_t r = read(fd, p, n);
+#endif
+        if (r < 0) { if (errno == EINTR) continue; return -1; }
+        if (!r) { errno = ECONNRESET; return -1; }
+        p += r; n -= (size_t)r;
     }
+    return 0;
 }
 
-static int lmb_frame_shape_ok(uint32_t op, uint32_t body_len, uint32_t pay_len) {
-    uint32_t bc, pc;
-    lmb_frame_caps(op, &bc, &pc);
-    return body_len <= bc && pay_len <= pc;
-}
+/* ---- frames ------------------------------------------------------------ */
 
 /* Optional encrypted transport. lumabri_secure.h, when a component enables
  * it, points these at its AEAD channel: a fd that has been handshaked routes
  * through them, an ordinary fd falls through to plaintext (the hook returns
  * -2). Static per translation unit, so only a .c that opts in is affected. */
-static int (*lmb_enc_send)(int, uint32_t, const void *, uint32_t, const void *, uint32_t);
-static int (*lmb_enc_recv)(int, LmbMsg *);
-static int (*lmb_enc_wrap)(int fd, int is_client, const char *addr);
-static void (*lmb_enc_forget)(int fd);
+static int (*lmb_enc_send)(LmbSocket, uint32_t, const void *, uint32_t, const void *, uint32_t);
+static int (*lmb_enc_recv)(LmbSocket, LmbMsg *);
+static int (*lmb_enc_wrap)(LmbSocket fd, int is_client, const char *addr);
+static void (*lmb_enc_forget)(LmbSocket fd);
 static int lmb_env_int(const char *name, int fallback, int lo, int hi);
 
 /* Bound aggregate receive memory, not just each individual frame.  Without
@@ -541,12 +131,12 @@ static void lmb_rx_release(LmbMsg *m) {
     }
 }
 
-static int lmb_close(int fd) {
+static int lmb_close(LmbSocket fd) {
     if (lmb_enc_forget) lmb_enc_forget(fd);
-    return close(fd);
+    return lmb_socket_close(fd);
 }
 
-static int lmb_send(int fd, uint32_t op, const void *body, uint32_t body_len,
+static int lmb_send(LmbSocket fd, uint32_t op, const void *body, uint32_t body_len,
                     const void *pay, uint32_t pay_len) {
     if (lmb_enc_send) { int r = lmb_enc_send(fd, op, body, body_len, pay, pay_len);
                         if (r != -2) return r; }
@@ -561,11 +151,11 @@ static int lmb_send(int fd, uint32_t op, const void *body, uint32_t body_len,
 }
 
 /* Receives one frame; mallocs body/pay. Returns 0, or -1 on error/EOF. */
-static int lmb_recv(int fd, LmbMsg *m) {
+static int lmb_recv(LmbSocket fd, LmbMsg *m) {
     if (lmb_enc_recv) { int r = lmb_enc_recv(fd, m); if (r != -2) return r; }
     uint8_t pre[16];
     memset(m, 0, sizeof *m);
-    if (lmb_read_full(fd, pre, 16)) return -1;
+    if (lmb_socket_read_full(fd, pre, 16)) return -1;
     if (lmb_get32(pre) != LMB_MAGIC) { errno = EPROTO; return -1; }
     m->op = lmb_get32(pre + 4);
     m->body_len = lmb_get32(pre + 8);
@@ -578,7 +168,7 @@ static int lmb_recv(int fd, LmbMsg *m) {
     if (total64 > UINT32_MAX || lmb_rx_reserve(m, (uint32_t)total64)) return -1;
     if (m->body_len) {
         if (!(m->body = (uint8_t *)malloc(m->body_len))) { lmb_rx_release(m); return -1; }
-        if (lmb_read_full(fd, m->body, m->body_len)) {
+        if (lmb_socket_read_full(fd, m->body, m->body_len)) {
             free(m->body); m->body = NULL; lmb_rx_release(m); return -1;
         }
     }
@@ -586,7 +176,7 @@ static int lmb_recv(int fd, LmbMsg *m) {
         if (!(m->pay = (uint8_t *)malloc(m->pay_len))) {
             free(m->body); m->body = NULL; lmb_rx_release(m); return -1;
         }
-        if (lmb_read_full(fd, m->pay, m->pay_len)) {
+        if (lmb_socket_read_full(fd, m->pay, m->pay_len)) {
             free(m->body); free(m->pay); m->body = m->pay = NULL;
             lmb_rx_release(m); return -1;
         }
@@ -594,7 +184,7 @@ static int lmb_recv(int fd, LmbMsg *m) {
     return 0;
 }
 
-static inline int lmb_recv_limited(int fd, LmbMsg *m, uint32_t limit) {
+static inline int lmb_recv_limited(LmbSocket fd, LmbMsg *m, uint32_t limit) {
     uint32_t previous = lmb_rx_frame_limit;
     lmb_rx_frame_limit = limit < previous ? limit : previous;
     int rc = lmb_recv(fd, m);
@@ -603,7 +193,7 @@ static inline int lmb_recv_limited(int fd, LmbMsg *m, uint32_t limit) {
 }
 
 /* Absolute whole-frame deadline, not a timeout restarted by every byte. */
-static inline int lmb_recv_bounded(int fd, LmbMsg *m, uint32_t limit, uint32_t timeout_ms) {
+static inline int lmb_recv_bounded(LmbSocket fd, LmbMsg *m, uint32_t limit, uint32_t timeout_ms) {
     uint64_t now = lmb_io_monotonic_ms(), previous = lmb_read_deadline_ms;
     if (!now || !timeout_ms) { memset(m, 0, sizeof *m); errno = EINVAL; return -1; }
     lmb_read_deadline_ms = previous && previous < now + timeout_ms ? previous : now + timeout_ms;
@@ -697,7 +287,7 @@ static LMB_MAYBE_UNUSED int lmb_buf_peer_auth(LmbBuf *b, const uint8_t pk[32],
 
 /* Ask the tracker for this connection's identity nonce. 0 and fills nonce, or
  * -1. Sent once per control connection, right after connect (and AUTH). */
-static LMB_MAYBE_UNUSED int lmb_request_challenge(int fd, uint8_t nonce[32]) {
+static LMB_MAYBE_UNUSED int lmb_request_challenge(LmbSocket fd, uint8_t nonce[32]) {
     if (lmb_send(fd, LMB_CHALLENGE, NULL, 0, NULL, 0)) return -1;
     LmbMsg m;
     if (lmb_recv(fd, &m)) return -1;
@@ -950,11 +540,9 @@ static int lmb_env_int(const char *name, int fallback, int lo, int hi) {
     return (int)v;
 }
 
-static void lmb_set_io_timeout(int fd, int timeout_ms) {
+static LMB_MAYBE_UNUSED void lmb_set_io_timeout(LmbSocket fd, int timeout_ms) {
     if (timeout_ms <= 0) return;
-    struct timeval tv = { timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+    (void)lmb_socket_timeout(fd, timeout_ms);
 }
 
 /* Thread-per-connection keeps persistent pooled sockets simple, but it must
@@ -986,7 +574,7 @@ static LMB_MAYBE_UNUSED void lmb_conn_gate_leave(LmbConnGate *g) {
  * operator needs opposite actions for them: one is a firewall rule, the other
  * is a process that is not running. Only the value read immediately after a
  * failed connect is meaningful. */
-static LMB_MAYBE_UNUSED int lmb_connect_errno;
+static _Thread_local LMB_MAYBE_UNUSED int lmb_connect_errno;
 
 static LMB_MAYBE_UNUSED const char *lmb_connect_why(void) {
     switch (lmb_connect_errno) {
@@ -1003,58 +591,67 @@ static LMB_MAYBE_UNUSED const char *lmb_connect_why(void) {
 /* addr is "host:port". Bounded connect: an unreachable peer must cost
  * `timeout_ms`, not the kernel's minutes — the caller has a relay to fall
  * back to. Returns a blocking fd with TCP_NODELAY, or -1. */
-static int lmb_connect_ms_io(const char *addr, int timeout_ms, int io_timeout_ms) {
+static LmbSocket lmb_connect_ms_io(const char *addr, int timeout_ms, int io_timeout_ms) {
     char host[256];
     lmb_connect_errno = 0;
+    if (!addr || timeout_ms <= 0 || io_timeout_ms <= 0) {
+        errno = lmb_connect_errno = EINVAL; return LMB_INVALID_SOCKET;
+    }
+    if (lmb_socket_init()) { lmb_connect_errno = errno; return LMB_INVALID_SOCKET; }
     const char *colon = strrchr(addr, ':');
-    if (!colon || (size_t)(colon - addr) >= sizeof host) return -1;
-    memcpy(host, addr, (size_t)(colon - addr)); host[colon - addr] = 0;
+    if (!colon || colon == addr || !colon[1] || (size_t)(colon - addr) >= sizeof host) {
+        errno = lmb_connect_errno = EINVAL; return LMB_INVALID_SOCKET;
+    }
+    size_t hostlen = (size_t)(colon - addr);
+    const char *start = addr;
+    if (addr[0] == '[' && hostlen >= 3 && colon[-1] == ']') { start++; hostlen -= 2; }
+    memcpy(host, start, hostlen); host[hostlen] = 0;
     struct addrinfo hints, *res = NULL;
     memset(&hints, 0, sizeof hints);
     hints.ai_family = AF_UNSPEC; hints.ai_socktype = SOCK_STREAM;
-    if (getaddrinfo(host, colon + 1, &hints, &res)) return -1;
-    int fd = -1;
+    if (getaddrinfo(host, colon + 1, &hints, &res)) {
+        errno = lmb_connect_errno = EHOSTUNREACH; return LMB_INVALID_SOCKET;
+    }
+    LmbSocket fd = LMB_INVALID_SOCKET;
+    uint64_t until = lmb_socket_now_ms() + (uint64_t)timeout_ms;
     for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
-        fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (fd < 0) continue;
-        int fl = fcntl(fd, F_GETFL, 0);
-        fcntl(fd, F_SETFL, fl | O_NONBLOCK);
-        int r = connect(fd, ai->ai_addr, ai->ai_addrlen);
-        if (r < 0 && errno == EINPROGRESS) {
-            struct pollfd pf = { fd, POLLOUT, 0 };
-            int err = -1;
-            socklen_t el = sizeof err;
-            int ready = poll(&pf, 1, timeout_ms);
-            if (ready > 0 &&
-                getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &el) == 0 && err == 0)
-                r = 0;
-            else
-                lmb_connect_errno = ready == 0 ? ETIMEDOUT
-                                   : (err > 0 ? err : errno);
-        } else if (r < 0) {
-            lmb_connect_errno = errno;
+        fd = lmb_socket_open(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (fd == LMB_INVALID_SOCKET) { lmb_connect_errno = errno; continue; }
+        int r = lmb_socket_nonblocking(fd, 1);
+        if (!r) r = lmb_socket_connect(fd, ai->ai_addr, (LmbSocketLength)ai->ai_addrlen);
+        if (r < 0 && (errno == EINPROGRESS || errno == EWOULDBLOCK)) {
+            for (;;) {
+                uint64_t now = lmb_socket_now_ms();
+                if (now >= until) { errno = ETIMEDOUT; break; }
+                int ready = lmb_socket_wait(fd, 1, (int)(until - now));
+                if (ready < 0 && errno == EINTR) continue;
+                if (ready > 0) r = lmb_socket_peer_error(fd);
+                else if (!ready) errno = ETIMEDOUT;
+                break;
+            }
         }
-        if (r == 0) { fcntl(fd, F_SETFL, fl); lmb_connect_errno = 0; break; }
-        close(fd); fd = -1;
+        if (!r) r = lmb_socket_nonblocking(fd, 0);
+        if (!r) r = lmb_socket_nodelay(fd);
+        if (!r) r = lmb_socket_timeout(fd, io_timeout_ms);
+        if (!r) { lmb_connect_errno = 0; break; }
+        lmb_connect_errno = errno;
+        lmb_socket_close(fd); fd = LMB_INVALID_SOCKET;
+        if (lmb_socket_now_ms() >= until) break;
     }
     freeaddrinfo(res);
-    if (fd >= 0) {
-        int one = 1;
-        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-        lmb_set_io_timeout(fd, io_timeout_ms);
-        /* when this component has enabled encryption, every outbound
-         * connection handshakes here, before any frame is sent */
-        if (lmb_enc_wrap && lmb_enc_wrap(fd, 1, addr)) { lmb_close(fd); fd = -1; }
+    if (fd != LMB_INVALID_SOCKET && lmb_enc_wrap && lmb_enc_wrap(fd, 1, addr)) {
+        lmb_connect_errno = errno; lmb_close(fd); fd = LMB_INVALID_SOCKET;
     }
+    if (fd == LMB_INVALID_SOCKET) errno = lmb_connect_errno;
     return fd;
 }
 
-static int lmb_connect_ms(const char *addr, int timeout_ms) {
+static LmbSocket lmb_connect_ms(const char *addr, int timeout_ms) {
     return lmb_connect_ms_io(addr, timeout_ms,
                             lmb_env_int("LUMABRI_IO_TIMEOUT_MS", LMB_DEFAULT_IO_TIMEOUT_MS,
                                         100, 3600000));
 }
-static int lmb_connect(const char *addr) { return lmb_connect_ms(addr, 5000); }
+static LmbSocket lmb_connect(const char *addr) { return lmb_connect_ms(addr, 5000); }
 
 /* ---- userspace network emulation ---------------------------------------
  * Measuring what a LAN or a WAN would cost normally means a netem qdisc,
@@ -1098,8 +695,12 @@ static inline void lmb_emu_delay(void) {
         if (lmb_emu_seed % 1000000u < (unsigned)lmb_emu_loss_ppm) us += lmb_emu_rto_us;
     }
     if (us <= 0) return;
+#ifdef _WIN32
+    Sleep((DWORD)(us / 1000 + (us % 1000 != 0)));
+#else
     struct timespec ts = { us / 1000000, (us % 1000000) * 1000 };
     while (nanosleep(&ts, &ts) && errno == EINTR) { }
+#endif
 }
 
 static inline int lmb_emu_active(void) {
@@ -1107,25 +708,26 @@ static inline int lmb_emu_active(void) {
     return lmb_emu_rtt_us > 0 || lmb_emu_jitter_us > 0 || lmb_emu_loss_ppm > 0;
 }
 
-static LMB_MAYBE_UNUSED int lmb_listen(int port) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return -1;
-    int one = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+static LMB_MAYBE_UNUSED LmbSocket lmb_listen(int port) {
+    if (port < 0 || port > 65535) { errno = EINVAL; return LMB_INVALID_SOCKET; }
+    LmbSocket fd = lmb_socket_open(AF_INET, SOCK_STREAM, 0);
+    if (fd == LMB_INVALID_SOCKET) return fd;
+    if (lmb_socket_bind_policy(fd)) { lmb_socket_close(fd); return LMB_INVALID_SOCKET; }
     struct sockaddr_in sa;
     memset(&sa, 0, sizeof sa);
     sa.sin_family = AF_INET;
     sa.sin_addr.s_addr = htonl(INADDR_ANY);
     sa.sin_port = htons((uint16_t)port);
     if (bind(fd, (struct sockaddr *)&sa, sizeof sa) || listen(fd, 64)) {
-        close(fd); return -1;
+        (void)lmb_socket_error();
+        int saved = errno; lmb_socket_close(fd); errno = saved; return LMB_INVALID_SOCKET;
     }
     return fd;
 }
 
 /* Sends AUTH if LUMABRI_TOKEN is set. Call right after connecting to a
  * tracker. Returns 0 (also when no token is configured). */
-static int lmb_auth(int fd) {
+static int lmb_auth(LmbSocket fd) {
     const char *tok = getenv("LUMABRI_TOKEN");
     if (!tok || !tok[0]) return 0;
     if (strlen(tok) > LMB_TOKEN_MAX) { errno = EMSGSIZE; return -1; }
@@ -1147,8 +749,8 @@ static int lmb_auth(int fd) {
 static int lmb_request_pay(const char *addr, uint32_t op,
                            const void *body, uint32_t body_len,
                            const void *pay, uint32_t pay_len, LmbMsg *resp) {
-    int fd = lmb_connect(addr);
-    if (fd < 0) return -1;
+    LmbSocket fd = lmb_connect(addr);
+    if (fd == LMB_INVALID_SOCKET) return -1;
     int rc = lmb_auth(fd);
     if (rc == 0) rc = lmb_send(fd, op, body, body_len, pay, pay_len);
     if (rc == 0) rc = lmb_recv(fd, resp);

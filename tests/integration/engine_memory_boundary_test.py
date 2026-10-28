@@ -25,4 +25,11 @@ for native in audit.NATIVE:
     for prefix in ("__imp_", "__imp__"):
         assert audit.violations(owned + runtime.replace("lmb_engine_malloc", prefix + native))
 assert audit.violations("unrecognized: __imp_VirtualAlloc")
+input_boundary = "lib.a:engine_io_windows.o: U __imp_ReadFile\n"
+assert not audit.violations(owned+runtime+input_boundary,windows_input=True)
+assert audit.violations(owned+runtime,windows_input=True)
+for native in audit.INPUT:
+    assert audit.violations(owned+input_boundary+runtime.replace(
+        "lmb_engine_malloc","__imp_"+native),windows_input=True),native
+assert audit.violations(owned+runtime+input_boundary+"unknown: __imp_ReadFile",windows_input=True)
 print("ENGINE MEMORY AUDIT: PASS (ELF/Mach-O/PE imports, missing ownership, native bypass)")
