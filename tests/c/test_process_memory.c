@@ -63,6 +63,20 @@ static void test_charge_and_guard(void) {
     assert(lmb_resident_guard_observe(&unknown, &m) == -1);
     assert(atomic_load(&unknown.fault) == LMB_RESIDENT_UNKNOWN);
     assert(!lmb_resident_guard_observe(&disabled, &m));
+    /* Windows private commit includes resident private pages. Count those
+     * once when EX2 supplies their size; missing or inconsistent evidence
+     * must never make trimmed private pages available for a new model. */
+    m=(LmbProcessMemory){.known=LMB_PM_RSS|LMB_PM_PRIVATE_COMMIT|LMB_PM_PRIVATE_RSS,
+        .rss=100,.private_commit=200,.private_rss=80};
+    assert(lmb_process_memory_charge(&m)==220);
+    m.rss=40; m.private_rss=20;
+    assert(lmb_process_memory_charge(&m)==220);
+    m.known&=~LMB_PM_PRIVATE_RSS;
+    assert(lmb_process_memory_charge(&m)==240);
+    m.known|=LMB_PM_PRIVATE_RSS; m.private_rss=300;
+    assert(lmb_process_memory_charge(&m)==240);
+    m.private_commit=UINT64_MAX;
+    assert(lmb_process_memory_charge(&m)==UINT64_MAX);
 }
 
 static void test_json_and_native_probe(void) {
