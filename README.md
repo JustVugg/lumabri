@@ -30,7 +30,7 @@ promising that every additional device makes inference faster.
 Build from source with a compatible Colibri checkout:
 
 ```sh
-make ENGINE=/path/to/colibri/c
+make household swarm_probe ENGINE=/path/to/colibri/c
 ./lumabri
 ```
 
@@ -163,6 +163,9 @@ API and its bundled chat page. An operator creates a user token, grants it
 specific models or allocations and runs `lumabri api start`; open the printed local URL.
 The page provides model selection, streaming, Stop, collapsible private
 history and export. No separate web server or browser-side AI engine is needed.
+During a response, the speed indicator updates in tok/s once enough tokens have
+arrived. It shows the measured response rate, not the model's guaranteed capacity;
+preparation, recovery and unavailable measurements have separate labels.
 See [setup, limits and privacy](docs/RESIDENT_API.md). The default endpoint is
 loopback-only: do not expose plain HTTP directly. For other authorized
 computers, use the explicit [HTTPS reverse-proxy setup](docs/HTTPS_INGRESS.md).
@@ -196,27 +199,27 @@ a READY-time snapshot, not a live utilization or speed measurement.
 
 ## What has actually been checked?
 
-- Linux-environment build with warnings treated as errors.
-- A real encrypted tracker, two donor TUIs, Colibri Segment engines and hosted
-  generation using a tiny synthetic OLMoE checkpoint on loopback.
-- Arrow/Enter navigation, all-party approval, rejection, slash completion,
-  terminal restoration and resource release.
-- Terminal images are frames from that integration test, not performance
-  claims for a large model or a multi-computer LAN.
-- The browser capacity path has been exercised with two real reduced OLMoE
-  models: measure, compare, confirm routing, then chat through both models.
-  Cancellation, authorization, stale measurements and changed model revisions
-  have separate regression checks.
+CI builds and runs the CPU runtime on Linux and native macOS Intel and Apple
+Silicon. Its integration tests use real Colibri engines with reduced checkpoints:
 
-Native macOS Intel and Apple Silicon CI covers the real Tiny household flow.
-A user-operated Windows/WSL-to-macOS 12.6 Intel trial also completed two Tiny
-responses with all model computation on the Mac and source weights on the PC.
-This is a smoke test, not a performance or large-model certification.
+- An encrypted tracker, two donor TUIs, approval and rejection, hosted streaming,
+  terminal navigation and resource release.
+- Multiple resident models, isolated conversations, bounded concurrent requests,
+  cancellation, selective unloading and service restart.
+- The browser capacity path: measure, compare, confirm routing and chat through
+  both models; permission checks and invalidation of stale measurements.
+- Bounded replica policies and recovery/replay, including refusal when permission
+  or capacity is missing.
 
-**Not yet certified:** general physical-LAN reliability, native Windows,
-GPU household execution, all model families,
-multi-session household use, or transparent recovery after losing a donor.
-WSL testing is not native Windows certification.
+Physical PC-to-Mac trials have also run OLMoE with different layer ranges on each
+computer. Those observations apply to the tested package and configuration;
+they do not certify every LAN, model family, context length or concurrent load.
+The reduced-model tests establish runtime behavior, not large-model speed.
+See the [release evidence](docs/LAN_RELEASE_CHECKLIST.md) for the recorded scope.
+
+Native Windows inference and GPU household execution are not delivered by these
+CPU checks. Windows/WSL testing is not native Windows certification. Recovery
+can require visible interruption and replay; it is not instantaneous KV migration.
 
 Adapter registration is broader than tested household execution. A checkpoint
 appearing in the catalogue does not make its sizing or backend supported.
