@@ -15,6 +15,66 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  kubernetes-workers:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: lumabri
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: lumabri
+      - uses: actions/checkout@v4
+        with:
+          repository: JustVugg/colibri
+          ref: ce370e87d7b623d7759b52ec2007d75fc5b0e87e
+          path: colibri
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build the native candidate and reduced fixture from pinned sources
+        run: |
+          make household swarm_probe ENGINE=../colibri/c -j2
+          python3 tools/package_household.py --colibri-root ../colibri --output build/container-candidate
+          python3 -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          python3 -m pip install safetensors huggingface_hub transformers
+          python3 ../colibri/c/tools/make_olmoe_tiny.py --output build/container-fixture-source --force
+          python3 ../colibri/c/tools/make_edge_tiny_tokenizer.py build/container-fixture-source --vocab-size 128
+          python3 ../colibri/c/tools/convert_olmoe_merged.py --model build/container-fixture-source --out build/container-fixture --min-free-gb 0
+      - name: Build only the verified native candidate into the runtime image
+        run: |
+          python3 tools/prepare_container_context.py --package build/container-candidate --output build/container-context
+          docker build --tag lumabri-resident-ci build/container-context
+          docker run --rm lumabri-resident-ci machine --json
+      - name: Add reduced models and a driver only to the disposable test image
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          import shutil
+          source = Path('build/container-fixture')
+          assert (source / 'config.json').is_file()
+          assert sum(p.stat().st_size for p in source.rglob('*') if p.is_file()) < 32 << 20
+          target = Path('build/container-test')
+          for name in ('model-a', 'model-b'):
+              shutil.copytree(source, target / 'fixtures' / name)
+          config = target / 'fixtures/model-b/config.json'
+          body = json.loads(config.read_text())
+          body['_lumabri_test_variant'] = 'separate-kubernetes-pods'
+          config.write_text(json.dumps(body))
+          (target / 'Dockerfile').write_text('FROM lumabri-resident-ci\nUSER root\nRUN apt-get update && apt-get install --no-install-recommends -y python3 && rm -rf /var/lib/apt/lists/*\nCOPY --chown=10001:10001 fixtures /fixtures\nUSER 10001:10001\n')
+          PY
+          docker build --tag lumabri-resident-test:ci build/container-test
+      - name: Real resident engines in separate Kubernetes worker Pods
+        run: KUBE_WORKER_TEST_IMAGE=lumabri-resident-test:ci sh tools/ci_kubernetes_workers.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kubernetes-resident-evidence
+          path: |
+            lumabri/build/kubernetes-workers.json
+            lumabri/build/container-candidate/manifest.json
   windows-network-helper:
     # Validate the permission helper without changing runner firewall rules.
     # This does not certify a native Windows model runtime.
