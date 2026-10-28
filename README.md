@@ -199,8 +199,9 @@ a READY-time snapshot, not a live utilization or speed measurement.
 
 ## What has actually been checked?
 
-CI builds and runs the CPU runtime on Linux and native macOS Intel and Apple
-Silicon. Its integration tests use real Colibri engines with reduced checkpoints:
+CI builds and runs the CPU runtime on Linux x86-64 and ARM64, and native macOS
+Intel and Apple Silicon. Its integration tests use real Colibri engines with
+reduced checkpoints:
 
 - An encrypted tracker, two donor TUIs, approval and rejection, hosted streaming,
   terminal navigation and resource release.
@@ -217,9 +218,11 @@ they do not certify every LAN, model family, context length or concurrent load.
 The reduced-model tests establish runtime behavior, not large-model speed.
 See the [release evidence](docs/LAN_RELEASE_CHECKLIST.md) for the recorded scope.
 
-Native Windows inference and GPU household execution are not delivered by these
-CPU checks. Windows/WSL testing is not native Windows certification. Recovery
-can require visible interruption and replay; it is not instantaneous KV migration.
+The native Windows household service and GPU household execution are not
+delivered by these CPU checks. Windows/WSL testing is not native Windows
+certification. ARM64 CI does not certify a physical Raspberry Pi cluster.
+Recovery can require visible interruption and replay; it is not instantaneous
+KV migration.
 
 Adapter registration is broader than tested household execution. A checkpoint
 appearing in the catalogue does not make its sizing or backend supported.
@@ -245,6 +248,18 @@ household tracker runs independently of the owner's window. Allow the installed
 `lumabri` and `segment_node` executables through the donor's application
 firewall rather than disabling the firewall. Rebuilding an unsigned executable
 may require reviewing its application permission again.
+
+## Authorized servers and containers
+
+The same resident worker can run without a terminal under a process supervisor.
+It keeps model approval, memory accounting and session limits; starting a worker
+does not approve a model. See the [headless service](docs/HOUSEHOLD_SERVICE.md)
+and [container worker deployment](docs/KUBERNETES_WORKERS.md) for the commands
+and Kubernetes example.
+
+The container gate exercises real reduced-model inference across separate
+Kubernetes Pods, including a model that needs both workers' memory. This is
+deployment evidence for that configuration, not a large-model throughput claim.
 
 ## Development and diagnostics
 
