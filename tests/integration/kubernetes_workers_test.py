@@ -113,16 +113,17 @@ os.execvp("lumabri",["lumabri","api","serve","--tracker",os.environ["TEST_TRACKE
             return result["status"], result["body"] if raw else json.loads(result["body"])
 
         nodes = []
+        excluded_nodes = set()
         def inventory():
             code, workspace = http("/api/v1/workspace")
             assert code == 200
-            nodes[:] = [n["id"] for n in workspace["nodes"] if n["workload"] is not None and n["runtime_threads"]]
+            nodes[:] = [n["id"] for n in workspace["nodes"] if n["workload"] is not None and n["runtime_threads"] and n["id"] not in excluded_nodes]
             return len(nodes) == 2
         until(inventory)
-        allocations = []
         reviews = set()
-        for model in ("model-a", "model-b"):
-            intent = {"models": [model], "nodes": nodes, "context": 128, "sessions": 2, "max_new": 8}
+        def prepare_model(model, selected):
+            allocations = []
+            intent = {"models": [model], "nodes": selected, "context": 128, "sessions": 2, "max_new": 8}
             code, preview = http("/api/v1/preparation", {"action": "preview", **intent})
             assert code == 200, preview
             operation = secrets.token_hex(32)
@@ -154,10 +155,19 @@ os.execvp("lumabri",["lumabri","api","serve","--tracker",os.environ["TEST_TRACKE
                     return True
                 return False
             until(prepare, 180)
+            return allocations[0]
+
+        # These fixtures fit on one worker. Exercise co-residence deliberately;
+        # selecting a pool does not promise that every worker enters the plan.
+        allocations = [prepare_model(model, nodes[:1]) for model in ("model-a", "model-b")]
         code, workspace = http("/api/v1/workspace")
         assert code == 200
-        for allocation in workspace["allocations"]:
-            assert {r["node"] for r in allocation["ranges"]} == set(nodes), "model did not span both workers"
+        colocated = [a for a in workspace["allocations"] if a["id"] in allocations]
+        assert len(colocated) == 2
+        for allocation in colocated:
+            assert {r["node"] for r in allocation["ranges"]} == set(nodes[:1])
+        whole_plan = next(a for a in colocated if a["id"] == allocations[0])
+        whole_bytes = sum(r["reserved_bytes"] for r in whole_plan["ranges"])
         for allocation in allocations:
             cli("grant", "cluster-test", allocation, "--tracker", tracker)
 
@@ -169,19 +179,57 @@ os.execvp("lumabri",["lumabri","api","serve","--tracker",os.environ["TEST_TRACKE
             return {"allocation": allocation, "complete": True}
         with ThreadPoolExecutor(max_workers=2) as pool:
             report["turns"] = list(pool.map(turn, allocations))
-        report["workers"] = {}
-        for worker in ("worker-a", "worker-b"):
+        def lock_evidence(worker, expected_models, budget=1500000000):
             state = status(worker)
-            assert state["live"] and state["model_count"] == 2, state
+            assert state["live"] and state["model_count"] == expected_models, state
             log = execute(worker, "cat", "/var/lib/lumabri/.lumabri/home/engines.log").stdout
-            assert log.count("event=ready policy=engine-locked fault=0") >= 2
+            assert log.count("event=ready policy=engine-locked fault=0") >= expected_models
             locks = re.findall(r"\[engine-memory\] allocations=(\d+) requested_bytes=(\d+) locked_bytes=(\d+) retained_locked_bytes=(\d+)", log)
-            assert len(locks) >= 2 and all(int(n) > 0 and 0 < int(wanted) <= int(locked) for n, wanted, locked, retained in locks)
+            assert len(locks) >= expected_models and all(int(n) > 0 and 0 < int(wanted) <= int(locked) for n, wanted, locked, retained in locks)
             assert "event=lost" not in log and "event=ready policy=observe" not in log
-            report["workers"][worker] = {"model_count": state["model_count"], "reserved_bytes": state["reserved_total_bytes"], "locks_verified": True}
+            assert state["reserved_total_bytes"] <= budget
+            return {"model_count": state["model_count"], "reserved_bytes": state["reserved_total_bytes"], "locks_verified": True}
+        occupied = [w for w in ("worker-a", "worker-b") if status(w)["model_count"]]
+        assert len(occupied) == 1
+        report["co_resident"] = {occupied[0]: lock_evidence(occupied[0], 2)}
+
+        # Release one model through the ordinary coordinated retirement;
+        # the other must keep serving from the same resident worker.
+        def retire(allocation):
+            until(lambda: json.loads(cli("retire", allocation, "--tracker", tracker))["complete"], 60)
+        retire(allocations[1])
+        report["surviving_turn"] = turn(allocations[0])
+        retire(allocations[0])
+        until(lambda: all(status(w)["model_count"] == 0 for w in ("worker-a", "worker-b")))
+
+        # Use measured planner reservations to make this SAME checkpoint too
+        # large for either offered budget. Restart only our empty test workers;
+        # no invented performance hint or planner override forces the split.
+        excluded_nodes.update(nodes)
+        limited_bytes = whole_bytes - 65536
+        assert limited_bytes > 32 << 20
+        for worker in ("worker-a", "worker-b"):
+            kube("delete", "pod", worker, "--wait=true", "--timeout=60s")
+            pod(worker, ["lumabri", "donor", "--headless", "--join", tracker, "--name", worker,
+                         "--ram-gb", format(limited_bytes / 1e9, ".9f")], donor=True)
+        until(inventory)
+        for node in nodes:
+            code, refused = http("/api/v1/preparation", {"action": "preview", "models": ["model-a"],
+                                "nodes": [node], "context": 128, "sessions": 2, "max_new": 8})
+            assert code == 422, ("single worker unexpectedly fits", refused)
+        split = prepare_model("model-a", nodes)
+        code, workspace = http("/api/v1/workspace")
+        assert code == 200
+        plan = next(a for a in workspace["allocations"] if a["id"] == split)
+        assert {r["node"] for r in plan["ranges"]} == set(nodes), plan
+        cli("grant", "cluster-test", split, "--tracker", tracker)
+        report["split_turn"] = turn(split)
+        report["split_ranges"] = plan["ranges"]
+        report["split_offer_bytes"] = limited_bytes
+        report["workers"] = {w: lock_evidence(w, 1, limited_bytes) for w in ("worker-a", "worker-b")}
         report["complete"] = True
         args.report.write_text(json.dumps(report, indent=2) + "\n")
-        print("KUBERNETES WORKERS: PASS (two resident OLMoE identities, two worker Pods, real streaming, local approval, effective locks)")
+        print("KUBERNETES WORKERS: PASS (co-resident models, selective retirement, memory-required cross-Pod Segment chain, real streaming, effective locks)")
     finally:
         if not report["complete"]:
             for name in ("tracker", "gateway", "worker-a", "worker-b"):

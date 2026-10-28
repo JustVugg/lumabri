@@ -35,7 +35,10 @@ both deliberately for larger ones. CPU and memory facts respect the container
 limits. Each worker gets separate persistent state and endpoint identity.
 
 The tracker and gateway must run the same compatible runtime. Run `tracker`
-with its authenticated household configuration. The gateway can run
+with its authenticated household configuration (`--household-discovery` uses
+`LUMABRI_TOKEN`). The gateway's saved household must contain the same tracker
+and key: reopening that household deliberately replaces an inherited key.
+The gateway can run
 `lumabri api serve --tracker TRACKER:PORT`; its HTTP listener stays on loopback.
 Expose it through the documented HTTPS proxy in the same Pod, not by disabling
 API origin checks or publishing the private donor control socket. The gateway
@@ -51,8 +54,9 @@ approved engine memory under typical container runtimes. It is not permission
 to exceed the cgroup memory limit. If cluster policy prohibits effective locks,
 preparation must fail; there is no disk/swap fallback. The test inspects actual
 engine lock evidence instead of treating a declared capability as proof.
-Checkpoint staging uses persistent disk **before** READY; never mount it on a
-memory-backed volume without charging those bytes to the container budget.
+Checkpoint sources and cache metadata can occupy disk during preparation;
+resident donor weights are prepared in engine memory. Never place source data
+on a memory-backed volume without charging those bytes to the container budget.
 
 ## Approval and lifecycle
 
@@ -86,6 +90,10 @@ their own storage lifecycle and cost.
 `kubernetes_workers_test.py` runs only against an explicitly disposable kind
 context. It uses the candidate's real native engines, two reduced OLMoE
 checkpoint identities, separate tracker/gateway/worker Pods, live owner
-approvals, streaming chat and effective lock observations. It does not certify
+approvals, streaming chat and effective lock observations. It first co-locates
+two models and retires one without interrupting the other. It then limits the
+empty workers' offered RAM below the observed whole-model reservation, verifies
+that neither can run it alone, and exercises the complete split Segment chain.
+It does not certify
 large-model throughput, multiple physical hosts, ARM hardware or a specific
 datacenter network. Those require their corresponding deployment evidence.
