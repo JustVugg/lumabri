@@ -261,6 +261,16 @@ The container gate exercises real reduced-model inference across separate
 Kubernetes Pods, including a model that needs both workers' memory. This is
 deployment evidence for that configuration, not a large-model throughput claim.
 
+For administration, [MCP tools](docs/AGENT_CONTROL.md) let compatible agents
+inspect the cluster through the same authenticated API. Management actions
+require a separate grant and keep the existing memory budgets, review checks
+and donor permissions. The inference service continues if the agent exits.
+
+An optional [Kubernetes controller](docs/KUBERNETES_CONTROL.md) reconciles
+existing, authorized replica policies. Kubernetes manages the containers;
+Lumabri manages model placement and resident inference. The controller does
+not create servers or grant access to a donor.
+
 ## Development and diagnostics
 
 ```sh
