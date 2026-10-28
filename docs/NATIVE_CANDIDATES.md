@@ -62,6 +62,13 @@ The latest measured speed is historical, not a guarantee for the next turn.
   drives, hard links and reparse paths are refused. Existing corrupt or unsafe
   keys are never silently replaced. The gate uses disposable files and does
   not change installed identities or firewall settings.
+- Native Windows local service control uses the same versioned snapshots,
+  preparation records and mutation fences as Unix. Its acceptance test uses
+  separate Windows processes: private local named pipes, duplicate-keeper
+  refusal, bounded malformed input, independent client exit, manager restart,
+  atomic journal replacement and crash recovery. A journal never grants
+  permission to replay an approval. This gate does not yet deliver the full
+  native Windows household service or package.
 - Neither a GPU detector nor a manifest entry proves accelerated execution.
   These candidates use the verified CPU path. Each participating machine
   must permit the household's fixed LAN ports in its own firewall.

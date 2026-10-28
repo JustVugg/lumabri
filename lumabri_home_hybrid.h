@@ -3,7 +3,9 @@
 #define LUMABRI_HOME_HYBRID_H
 #include "lumabri_proto.h"
 #include <stddef.h>
+#ifndef _WIN32
 #include <arpa/inet.h>
+#endif
 #define LMB_HOME_HYBRID_MAX 31u
 #define LMB_HOME_HYBRID_ENV 10000u
 enum { LMB_HYBRID_NONE, LMB_HYBRID_COORDINATOR, LMB_HYBRID_ACCELERATOR };

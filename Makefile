@@ -162,7 +162,7 @@ lumabri test_chat_ui: src/runtime/lumabri_preload.h
 lumabri test_chat_ui: src/runtime/lumabri_preparation_api.h src/runtime/lumabri_preparation_store.h src/runtime/lumabri_preparation_request.h
 lumabri test_chat_ui: src/runtime/lumabri_donor_policy.h src/runtime/lumabri_donor_policy_store.h src/runtime/lumabri_donor_policy_cli.h src/runtime/lumabri_content_identity.h
 lumabri test_chat_ui: src/runtime/lumabri_demand.h src/runtime/lumabri_demand_runtime.h
-lumabri test_chat_ui: src/runtime/lumabri_service.h src/runtime/lumabri_service_manager.h
+lumabri test_chat_ui: src/runtime/lumabri_service.h src/runtime/lumabri_service_windows.h src/protocol/lumabri_service_wire.h src/runtime/lumabri_service_manager.h
 lumabri test_chat_ui: src/runtime/lumabri_joint_prepare.h
 lumabri test_chat_ui: src/ui/lumabri_resident_ui.h
 lumabri test_chat_ui: src/runtime/lumabri_resident_control.h
