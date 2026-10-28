@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "lumabri_machine.h"
 #include "lumabri_proto.h"
+#include "src/runtime/lumabri_container_limits.h"
 
 #include <arpa/inet.h>
 #include <dirent.h>
@@ -18,6 +19,9 @@
 #include <sys/utsname.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <sched.h>
+#endif
 #ifdef __APPLE__
 #include <mach/mach.h>
 #include <sys/sysctl.h>
@@ -118,6 +122,19 @@ static void meminfo(uint64_t *total, uint64_t *available,
         if (swap_free) *swap_free = 0;
     }
     if (file) fclose(file);
+#ifdef __linux__
+    LmbContainerLimits budget;
+    if (lmb_container_limits_probe(&budget)) {
+        /* A present but unreadable hierarchy must not become host capacity. */
+        if (total) *total = 0;
+        if (available) *available = 0;
+    } else {
+        if (total && *total > budget.memory_max) *total = budget.memory_max;
+        if (available && *available > budget.memory_available)
+            *available = budget.memory_available;
+        if (total && available && *available > *total) *available = *total;
+    }
+#endif
 #endif
 }
 
@@ -274,6 +291,32 @@ static void cpu_profile(LmbMachineProfile *profile) {
     long online = sysconf(_SC_NPROCESSORS_ONLN);
     profile->logical_cpus = online > 0 ? (uint32_t)online : processors;
     profile->physical_cores = nseen ? nseen : profile->logical_cpus;
+#ifdef __linux__
+    /* sched_getaffinity includes cpuset restrictions. Retry with a larger
+     * bitmap on large hosts rather than assuming CPU_SETSIZE is sufficient. */
+    int affinity_known = 0;
+    for (unsigned n = 128; n <= 65536; n *= 2) {
+        size_t bytes = CPU_ALLOC_SIZE(n);
+        cpu_set_t *set = CPU_ALLOC(n);
+        if (!set) break;
+        CPU_ZERO_S(bytes, set);
+        int rc = sched_getaffinity(0, bytes, set), saved = errno;
+        if (!rc) {
+            unsigned count = (unsigned)CPU_COUNT_S(bytes, set);
+            affinity_known = count != 0;
+            if (count && count < profile->logical_cpus) profile->logical_cpus = count;
+        }
+        CPU_FREE(set);
+        if (!rc || saved != EINVAL) break;
+    }
+    if (!affinity_known) profile->logical_cpus = 1;
+    LmbContainerLimits budget;
+    if (lmb_container_limits_probe(&budget)) profile->logical_cpus = 1;
+    else if (profile->logical_cpus > budget.cpu_threads)
+        profile->logical_cpus = budget.cpu_threads;
+    if (profile->physical_cores > profile->logical_cpus)
+        profile->physical_cores = profile->logical_cpus;
+#endif
     const char *isa = "generic";
     if (strstr(flags, " avx512_bf16 ") || strstr(flags, " avx512bf16 ")) isa = "avx512bf16";
     else if (strstr(flags, " avx512_vnni ") || strstr(flags, " avx512vnni ")) isa = "avx512vnni";
@@ -428,6 +471,7 @@ static double monotonic_seconds(void) {
 }
 
 void lmb_machine_refresh_resources(LmbMachineProfile *profile, const char *disk_path) {
+    cpu_profile(profile); /* quotas/cpusets may change without restarting */
     meminfo(&profile->ram_total_bytes, &profile->ram_available_bytes,
             &profile->swap_total_bytes, &profile->swap_free_bytes);
     struct statvfs disk;
@@ -648,7 +692,7 @@ LmbGovernorState lmb_governor_poll(LmbGovernor *governor) {
     } else {
         uint64_t available = 0, swap_total = 0, swap_free = 0;
         meminfo(NULL, &available, &swap_total, &swap_free);
-        int ram_critical = available &&
+        int ram_critical = !available ||
             available < governor->ram_reserve_bytes / 2;
         int swap_critical = swap_total && swap_free < swap_total / 20 &&
             available < governor->ram_reserve_bytes;

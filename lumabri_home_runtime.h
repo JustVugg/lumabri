@@ -559,12 +559,13 @@ static void home_donor_lost_requester(HomeDonor *d, const char *reason) {
  * signed-identity change, then restores matching blocks from the shared CAS.
  * Session/KV state never goes into these weight caches. The shim still checks
  * current signed inventory, accepted root and each block hash on reuse. */
-static int home_donor_launch(HomeDonor *d, int edge) {
+static int home_donor_launch(HomeDonor *d, int edge,char *error,size_t error_size) {
+    snprintf(error,error_size,"%s",edge ? "Cannot start the chat host." : "Cannot start the accepted Segment engine.");
     if (home_lifetime_begin(d)) return -1;
-    char current_runtime[65];
-    if (lmb_runtime_identity(d->bin_dir, d->runtime_epoch, &d->runtime_cache, current_runtime) ||
-        strcmp(current_runtime, d->runtime_id)) {
-        fprintf(stderr, "The installed runtime changed. Restart Share resources before accepting a new plan.\n");
+    char runtime_error[256];
+    if (lmb_runtime_identity_check(d->bin_dir,d->runtime_epoch,&d->runtime_cache,d->runtime_id,runtime_error,sizeof runtime_error)) {
+        snprintf(error,error_size,"%s",runtime_error);
+        fprintf(stderr,"[runtime] %s\n",runtime_error);
         return -1;
     }
     const LmbHomeOffer *o = &d->transaction.offer;
@@ -902,6 +903,7 @@ static int home_donor_offer(HomeDonor *d, int incoming, const char *tracker,
 
 static int home_donor_message(HomeDonor *d) {
     LmbMsg m = {0};
+    char launch_error[256];
     if (lmb_recv(d->client, &m)) { lmb_msg_free(&m); return -1; }
     LmbHomeTransaction *t = &d->transaction;
     int rc = m.pay_len || m.body_len < 32 || memcmp(m.body, t->offer.id, 32) ||
@@ -936,13 +938,13 @@ static int home_donor_message(HomeDonor *d) {
             }
             rc = (t->offer.hybrid_role == LMB_HYBRID_COORDINATOR && !d->hybrid_routes_ready) ||
                  lmb_home_commit(t, m.body);
-            if (!rc && home_donor_launch(d, 0))
-                home_donor_release(d, LMB_HOME_FAILED, "Cannot start the accepted Segment engine.");
+            if (!rc && home_donor_launch(d, 0,launch_error,sizeof launch_error))
+                home_donor_release(d, LMB_HOME_FAILED,launch_error);
             break;
         case LMB_HOME_START_HOST:
             rc = lmb_home_start_host(t, m.body);
-            if (!rc && home_donor_launch(d, 1))
-                home_donor_release(d, LMB_HOME_FAILED, "Cannot start the chat host.");
+            if (!rc && home_donor_launch(d, 1,launch_error,sizeof launch_error))
+                home_donor_release(d, LMB_HOME_FAILED,launch_error);
             break;
         default: rc = -1; break;
         }

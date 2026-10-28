@@ -18,11 +18,11 @@ typedef struct {
     char arch[32];
     char cpu_model[128];
     char isa[32];
-    uint32_t logical_cpus;
-    uint32_t physical_cores;
+    uint32_t logical_cpus; /* bounded by affinity and ceil(cgroup CPU quota) */
+    uint32_t physical_cores; /* never exceeds the usable thread budget */
     uint32_t numa_nodes;
-    uint64_t ram_total_bytes;
-    uint64_t ram_available_bytes;
+    uint64_t ram_total_bytes; /* physical RAM bounded by visible cgroup limits */
+    uint64_t ram_available_bytes; /* also bounded by each parent's headroom */
     uint64_t swap_total_bytes;
     uint64_t swap_free_bytes;
     uint32_t gpu_count;
