@@ -1047,9 +1047,11 @@ static int cmd_donor_inner(int argc, char **argv) {
     (void)home_resident_required();
     home_error[0] = 0;
     const char *tracker = NULL, *name = NULL, *disk = NULL;
+    int headless = 0;
     uint64_t limit = UINT64_MAX;
     for (int i = 0; i < argc; i++) {
-        if (!strcmp(argv[i], "--join") && i + 1 < argc) tracker = argv[++i];
+        if (!strcmp(argv[i], "--headless")) headless = 1;
+        else if (!strcmp(argv[i], "--join") && i + 1 < argc) tracker = argv[++i];
         else if (!strcmp(argv[i], "--name") && i + 1 < argc) name = argv[++i];
         else if (!strcmp(argv[i], "--disk") && i + 1 < argc) disk = argv[++i];
         else if (!strcmp(argv[i], "--ram-gb") && i + 1 < argc) {
@@ -1058,17 +1060,21 @@ static int cmd_donor_inner(int argc, char **argv) {
             limit = (uint64_t)(gb * 1e9);
         } else return 2;
     }
-    if (!tracker || !*tracker || strlen(tracker) >= 256 || !isatty(0) ||
+    if (!tracker || !*tracker || strlen(tracker) >= 256 || (!headless && !isatty(0)) ||
         (name && (!*name || strlen(name) >= 64 || lmb_inventory_text(name))) || home_private_network())
         return 2;
+    if (headless && home_service_foreground())
+        return home_fail("Headless sharing uses the resident service. Remove LUMABRI_HOME_FOREGROUND before starting it.");
     int background = !home_service_foreground();
     if (background && !home_resident_required()) return home_fail("Background sharing requires resident weights. Disk-cache diagnostics require LUMABRI_HOME_FOREGROUND=1.");
     HomeService service = {.lock = -1, .listener = -1, .reply = -1};
     if (background) {
-        if (home_service_ensure()) return home_fail("Cannot start the private household service.");
+        if (!headless && home_service_ensure()) return home_fail("Cannot start the private household service.");
         HomeServiceSnapshot existing;
-        if (!home_service_query("donor", HOME_SVC_STATUS, NULL, &existing))
+        if (!home_service_query("donor", HOME_SVC_STATUS, NULL, &existing)) {
+            if (headless) return home_fail("A donor already owns this service directory. No duplicate donor was started.");
             return home_service_donor_ui(tracker);
+        }
     }
     HomeDonor d = {0}; d.client = d.lease = d.weight_lease = d.segment_ready = d.host_ready = d.node_control = -1;
     exe_dir(d.bin_dir, sizeof d.bin_dir);
@@ -1123,10 +1129,12 @@ static int cmd_donor_inner(int argc, char **argv) {
         snprintf(service.snapshot.tracker, sizeof service.snapshot.tracker, "%s", tracker);
         service.snapshot.ram = ram; service.snapshot.threads = d.thread_capacity;
         if (home_service_save(&service)) { home_service_close(&service); return home_fail("Cannot persist sharing configuration. No resources were shared."); }
-        int detached = home_service_detach(&service, -1);
-        if (detached < 0) { home_service_close(&service); return home_fail("Cannot detach the sharing service."); }
-        if (detached) return home_service_donor_ui(tracker);
-        home_donor_keeper = 1;
+        if (!headless) {
+            int detached = home_service_detach(&service, -1);
+            if (detached < 0) { home_service_close(&service); return home_fail("Cannot detach the sharing service."); }
+            if (detached) return home_service_donor_ui(tracker);
+            home_donor_keeper = 1;
+        }
     }
     int port, listener = home_listen(&port);
     if (listener < 0) return home_fail("Cannot open a donor port in the household range: %s. Close another sharing window and retry.", strerror(errno));

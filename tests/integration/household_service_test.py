@@ -29,9 +29,12 @@ def main():
 
         try:
             assert not manager()["live"]
+            assert run("live", "manager", check=False).returncode == 1
+            assert run("live", "unknown", check=False).returncode == 2
             run("start")
             initial = manager()
             assert initial["live"] and initial["pid"] > 0, initial
+            assert run("live", "manager").returncode == 0
             # Multiple independent clients never create another manager.
             procs = [subprocess.Popen([str(ROOT / "lumabri"), "service", "start"],
                                      env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -78,6 +81,7 @@ def main():
             assert manager()["live"]
             run("stop")
             assert manager()["state"] == "stopped"
+            assert run("live", "manager", check=False).returncode == 1
             # Unsafe service directories fail closed instead of chmod/adoption.
             directory.chmod(0o777)
             assert run("start", check=False).returncode != 0

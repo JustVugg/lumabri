@@ -31,6 +31,66 @@ jobs:
         run: |
           docker build --file deploy/kubernetes/Dockerfile.controller --tag lumabri-controller-ci .
           docker run --rm lumabri-controller-ci --help
+  kubernetes-workers:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: lumabri
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: lumabri
+      - uses: actions/checkout@v4
+        with:
+          repository: JustVugg/colibri
+          ref: ce370e87d7b623d7759b52ec2007d75fc5b0e87e
+          path: colibri
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build the native candidate and reduced fixture from pinned sources
+        run: |
+          make household swarm_probe ENGINE=../colibri/c -j2
+          python3 tools/package_household.py --colibri-root ../colibri --output build/container-candidate
+          python3 -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          python3 -m pip install safetensors huggingface_hub transformers
+          python3 ../colibri/c/tools/make_olmoe_tiny.py --output build/container-fixture-source --force
+          python3 ../colibri/c/tools/make_edge_tiny_tokenizer.py build/container-fixture-source --vocab-size 128
+          python3 ../colibri/c/tools/convert_olmoe_merged.py --model build/container-fixture-source --out build/container-fixture --min-free-gb 0
+      - name: Build only the verified native candidate into the runtime image
+        run: |
+          python3 tools/prepare_container_context.py --package build/container-candidate --output build/container-context
+          docker build --tag lumabri-resident-ci build/container-context
+          docker run --rm lumabri-resident-ci machine --json
+      - name: Add reduced models and a driver only to the disposable test image
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          import shutil
+          source = Path('build/container-fixture')
+          assert (source / 'config.json').is_file()
+          assert sum(p.stat().st_size for p in source.rglob('*') if p.is_file()) < 32 << 20
+          target = Path('build/container-test')
+          for name in ('model-a', 'model-b'):
+              shutil.copytree(source, target / 'fixtures' / name)
+          config = target / 'fixtures/model-b/config.json'
+          body = json.loads(config.read_text())
+          body['_lumabri_test_variant'] = 'separate-kubernetes-pods'
+          config.write_text(json.dumps(body))
+          (target / 'Dockerfile').write_text('FROM lumabri-resident-ci\nUSER root\nRUN apt-get update && apt-get install --no-install-recommends -y python3 && rm -rf /var/lib/apt/lists/*\nCOPY --chown=10001:10001 fixtures /fixtures\nUSER 10001:10001\n')
+          PY
+          docker build --tag lumabri-resident-test:ci build/container-test
+      - name: Real resident engines in separate Kubernetes worker Pods
+        run: KUBE_WORKER_TEST_IMAGE=lumabri-resident-test:ci sh tools/ci_kubernetes_workers.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kubernetes-resident-evidence
+          path: |
+            lumabri/build/kubernetes-workers.json
+            lumabri/build/container-candidate/manifest.json
   windows-network-helper:
     # Validate the permission helper without changing runner firewall rules.
     # This does not certify a native Windows model runtime.
@@ -49,6 +109,9 @@ jobs:
       - name: Execute create, update and remove against strict command doubles
         shell: powershell
         run: ./tests/integration/firewall_helper_test.ps1
+      - name: Verify native Windows process memory observations
+        shell: powershell
+        run: ./tools/ci_windows_process_memory.ps1
   macos-workspace:
     # Native frontend gate, not certification of Segment, GPU or a real LAN.
     strategy:
@@ -315,6 +378,7 @@ jobs:
           done
           LUMABRI_TEST_BROWSER=1 LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-ram-gb 2 --sessions 2 --placement-comparison
           LUMABRI_TEST_KUBERNETES=1 LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-ram-gb 1.5 --sessions 2 --soak-seconds 10
+          LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --headless-donors --donor-ram-gb 1.5 --sessions 2
           LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-ram-gb 1.5 --sessions 2 --https-nginx "$LUMABRI_TEST_NGINX"
           make segment_budget_probe
           python3 tests/integration/segment_physical_budget_test.py
@@ -525,6 +589,145 @@ jobs:
             /tmp/lmb-installed-fleet-*/**/*.log
           include-hidden-files: true
           retention-days: 3
+  linux-arm64-build:
+    # Native ARM64 execution with the older glibc floor. This is not a
+    # physical Raspberry Pi or multi-machine cluster certification.
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: lumabri
+      - uses: actions/checkout@v4
+        with:
+          repository: JustVugg/colibri
+          ref: ce370e87d7b623d7759b52ec2007d75fc5b0e87e
+          path: colibri
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify native architecture and build portable CPU runtime
+        working-directory: lumabri
+        run: |
+          test "$(uname -m)" = aarch64
+          make household swarm_probe test_machine test_process_memory test_engine_memory test_engine_memory_guard test_memlock test_calibration test_backend_routes test_segment_close test_chat_ui test_hosted_sessions ENGINE=../colibri/c CFLAGS='-O2 -Wall -Wextra -Werror' -j2
+          ./test_machine
+          ./test_process_memory
+          ./test_engine_memory
+          ./test_engine_memory_guard
+          ./test_memlock
+          ./test_calibration
+          ./test_backend_routes
+          ./test_segment_close
+      - name: Preserve the native executables for the fixture job
+        working-directory: lumabri
+        run: |
+          python3 - <<'PYCODE'
+          import runpy, tarfile
+          binaries=runpy.run_path('tools/package_household.py')['BINARIES']
+          with tarfile.open('build/arm64-executables.tar.gz','w:gz') as archive:
+              for name in (*binaries,'liblumabri.so','test_chat_ui','test_hosted_sessions'):
+                  archive.add(name,arcname=name)
+          PYCODE
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-arm64-executables
+          path: lumabri/build/arm64-executables.tar.gz
+          retention-days: 1
+
+  linux-arm64-household:
+    # Native ARM64 execution with the older glibc floor. This is not a
+    # physical Raspberry Pi or multi-machine cluster certification.
+    needs: [linux, linux-arm64-build]
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: lumabri
+      - uses: actions/checkout@v4
+        with:
+          repository: JustVugg/colibri
+          ref: ce370e87d7b623d7759b52ec2007d75fc5b0e87e
+          path: colibri
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-arm64-executables
+          path: lumabri/build
+      - name: Use the exact executables from the native build gate
+        working-directory: lumabri
+        run: |
+          test "$(uname -m)" = aarch64
+          tar -xzf build/arm64-executables.tar.gz
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: tiny-*-checkpoint
+          path: lumabri/build/arm64-fixtures
+      - name: Arrange the exact fixture bytes from the Linux oracle job
+        working-directory: lumabri
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import shutil
+          root=Path('build/arm64-fixtures')
+          for family in ('olmoe','qwen36','inkling','kimi','glm','glm53','qwen38','qwen38-fp8','v4'):
+              target=Path('build/arm64-models')/family/(family+'-tiny')
+              target.parent.mkdir(parents=True,exist_ok=True)
+              shutil.copytree(root/('tiny-'+family+'-checkpoint'),target)
+          shutil.copytree(root/'tiny-v41-boundary-checkpoint',Path('build/v41-tiny'))
+          PY
+      - name: Native adapter and resident household execution
+        working-directory: lumabri
+        env:
+          LUMABRI_RESIDENT_REQUIRED: '1'
+          LUMABRI_RESIDENCY_POLICY: engine-locked
+        run: |
+          # Only this disposable test shell and its children receive the
+          # allowance. No system-wide swap/locking settings are changed.
+          sudo prlimit --pid $$ --memlock=12884901888:12884901888
+          python3 - <<'PY'
+          import subprocess
+          cases=[('olmoe',[]),('qwen36',[]),('inkling',[]),
+                 ('kimi',['--donor-ram-gb','4.5']),('glm',[]),('glm53',[]),
+                 ('qwen38',['--context','512','--expect-greedy']),
+                 ('qwen38-fp8',['--context','512','--expect-greedy']),
+                 ('v4',['--donor-ram-gb','1.0'])]
+          for family,extra in cases:
+              subprocess.run(['python3','tests/integration/home_flow_test.py',
+                  '--models-dir','build/arm64-models/'+family,'--expect-metrics',*extra],check=True)
+          PY
+          make test-v41-range-existing test-v41-transport-existing test-v41-abi-existing test-v41-memory-existing ENGINE=../colibri/c CFLAGS='-O2 -Wall -Wextra -Werror'
+      - name: Validate installed ARM64 package and two co-resident models
+        working-directory: lumabri
+        env:
+          LUMABRI_RESIDENCY_POLICY: engine-locked
+        run: |
+          sudo prlimit --pid $$ --memlock=12884901888:12884901888
+          python3 tools/package_household.py --colibri-root ../colibri --output 'build/native arm64 candidate'
+          python3 tests/integration/household_doctor_test.py --runtime-dir 'build/native arm64 candidate/bin'
+          python3 tests/integration/household_service_flow_test.py --installed-package 'build/native arm64 candidate' --models-dir build/arm64-models/olmoe --joint complete --api-prepare --donor-ram-gb 1.5 --sessions 2
+          python3 tests/integration/home_flow_test.py --runtime-dir 'build/native arm64 candidate/bin' --models-dir build/arm64-models/olmoe --kill-donor
+          python3 tools/package_household.py --verify 'build/native arm64 candidate'
+          tar -czf build/lumabri-linux-arm64-candidate.tar.gz -C 'build/native arm64 candidate' .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: household-candidate-linux-arm64
+          path: lumabri/build/lumabri-linux-arm64-candidate.tar.gz
+          retention-days: 7
+      - name: Retain native failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-arm64-failure-diagnostics
+          path: |
+            /tmp/lmb-service-flow-*/**/*.log
+            /tmp/lumabri-home-flow-*/**/*.log
+          include-hidden-files: true
+          retention-days: 3
+
   macos-household:
     # Real native CPU engines + signed CAS + approvals + streaming. Loopback
     # coverage does not replace the macOS 12.6 / physical household LAN test.
@@ -652,6 +855,7 @@ jobs:
           LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-policy --donor-ram-gb 1.5 --sessions 2 --elastic
           LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-ram-gb 2 --sessions 2 --placement-comparison
           LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-ram-gb 1.5 --sessions 2 --soak-seconds 10
+          LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --headless-donors --donor-ram-gb 1.5 --sessions 2
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --repeat-cached --clear-cached --expect-metrics --expect-calibration
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --kill-donor
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --expect-selected-no-fit

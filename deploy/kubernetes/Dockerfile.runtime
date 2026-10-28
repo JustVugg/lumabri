@@ -1,0 +1,16 @@
+# Build using the verified, minimal context produced by
+# tools/prepare_container_context.py. No source checkout or model in the image.
+FROM ubuntu:24.04 AS verify
+RUN apt-get update && apt-get install --no-install-recommends -y python3 && rm -rf /var/lib/apt/lists/*
+COPY package_household.py /check/package_household.py
+COPY runtime /opt/lumabri
+RUN python3 /check/package_household.py --verify /opt/lumabri && python3 -c 'import json,platform; m=json.load(open("/opt/lumabri/manifest.json")); assert m["system"]=="Linux" and m["architecture"]==platform.machine(), "wrong native package architecture"'
+
+FROM ubuntu:24.04
+RUN apt-get update && apt-get install --no-install-recommends -y libgomp1 ca-certificates && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /var/lib/lumabri && chown 10001:10001 /var/lib/lumabri && chmod 700 /var/lib/lumabri
+COPY --from=verify /opt/lumabri /opt/lumabri
+ENV HOME=/var/lib/lumabri PATH=/opt/lumabri/bin:$PATH LUMABRI_ENCRYPT=1 LUMABRI_RESIDENT_REQUIRED=1 LUMABRI_RESIDENCY_POLICY=engine-locked
+USER 10001:10001
+WORKDIR /var/lib/lumabri
+ENTRYPOINT ["/opt/lumabri/bin/lumabri"]
