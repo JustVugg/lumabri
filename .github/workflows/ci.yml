@@ -55,6 +55,9 @@ jobs:
           set -o pipefail
           ./build/windows-segment/test_segment_windows.exe "$(cygpath -w "$PWD/build/fixture")" 2>&1 | tee build/windows-segment-evidence.log
           ./build/windows-segment/test_segment_v2.exe 2>&1 | tee -a build/windows-segment-evidence.log
+          ./build/windows-segment/test_socket_transport.exe 2>&1 | tee -a build/windows-segment-evidence.log
+          ./build/windows-segment/test_secure_transport.exe 2>&1 | tee -a build/windows-segment-evidence.log
+          ./build/windows-segment/test_crypto_vectors.exe 2>&1 | tee -a build/windows-segment-evidence.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
