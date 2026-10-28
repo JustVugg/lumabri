@@ -33,6 +33,9 @@ jobs:
       - name: Execute create, update and remove against strict command doubles
         shell: powershell
         run: ./tests/integration/firewall_helper_test.ps1
+      - name: Verify native Windows process memory observations
+        shell: powershell
+        run: ./tools/ci_windows_process_memory.ps1
   macos-workspace:
     # Native frontend gate, not certification of Segment, GPU or a real LAN.
     strategy:
