@@ -17,6 +17,9 @@ NATIVE = set("malloc calloc realloc reallocarray free cfree posix_memalign align
              "VirtualAlloc VirtualAllocEx VirtualAlloc2 VirtualFree VirtualFreeEx "
              "VirtualLock VirtualUnlock HeapAlloc HeapReAlloc HeapFree "
              "MapViewOfFile MapViewOfFileEx UnmapViewOfFile".split())
+INPUT = set("ReadFile ReadFileEx ReadFileScatter fread fread_s fread_nolock "
+            "read pread pread64 fgets fgetc getc getw fscanf vfscanf "
+            "getline getdelim".split())
 
 
 def native_name(symbol):
@@ -28,7 +31,7 @@ def native_name(symbol):
     return symbol.split("@", 1)[0].split("$", 1)[0]
 
 
-def violations(output):
+def violations(output, windows_input=False):
     violations = []
     members = set()
     for line in output.splitlines():
@@ -36,7 +39,7 @@ def violations(output):
         match = re.match(r".*[\[(:]([^\[\]():]+\.o)[\]):]:?\s+(?:U\s+)?(\S+)\s*$", line)
         if not match:
             symbol = line.split()[-1] if line.split() else ""
-            if native_name(symbol) in NATIVE:
+            if native_name(symbol) in NATIVE | (INPUT if windows_input else set()):
                 violations.append(f"unrecognized nm ownership: {line}")
             continue
         member, symbol = match.groups()
@@ -44,20 +47,28 @@ def violations(output):
         symbol = native_name(symbol)
         if member != "engine_memory.o" and symbol in NATIVE:
             violations.append(f"{member}: unwrapped {symbol}")
+        if windows_input and member != "engine_io_windows.o" and symbol in INPUT:
+            violations.append(f"{member}: unwrapped checkpoint input {symbol}")
     if "engine_memory.o" not in members or len(members) < 2:
         violations.append("missing allocator or engine objects in archive inspection")
+    if windows_input and "engine_io_windows.o" not in members:
+        violations.append("missing Windows checkpoint-input boundary")
     return violations
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("archive")
+    parser.add_argument("--nm", default="nm")
+    parser.add_argument("--windows-input", action="store_true")
     args = parser.parse_args()
-    result = subprocess.run(["nm", "-A", "-u", args.archive], text=True, capture_output=True, check=True)
-    problems = violations(result.stdout)
+    result = subprocess.run([args.nm, "-A", "-u", args.archive], text=True, capture_output=True, check=True)
+    problems = violations(result.stdout,args.windows_input)
     if problems:
         parser.exit(1, "ENGINE MEMORY BOUNDARY: FAIL\n" + "\n".join(problems) + "\n")
     print("ENGINE MEMORY BOUNDARY: PASS (native allocator imports confined to engine_memory.o)")
+    if args.windows_input:
+        print("ENGINE INPUT BOUNDARY: PASS (native file reads confined to engine_io_windows.o)")
 
 
 if __name__ == "__main__":
