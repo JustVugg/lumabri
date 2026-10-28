@@ -1,4 +1,4 @@
-"""The ownership audit must reject both GNU and Apple unwrapped imports."""
+"""The ownership audit must reject ELF, Mach-O and PE native bypasses."""
 import importlib.util
 from pathlib import Path
 
@@ -18,4 +18,11 @@ for owned, runtime in (
         assert audit.violations(owned + bad.replace(native, native + "$UNIX2003")), native
     assert audit.violations(owned)
 assert audit.violations("")
-print("ENGINE MEMORY AUDIT: PASS (GNU/Apple imports, missing ownership, native bypass)")
+owned = "lib.a:engine_memory.o: U __imp_VirtualLock\n"
+runtime = "lib.a:olmoe.o: U lmb_engine_malloc\n"
+assert not audit.violations(owned + runtime)
+for native in audit.NATIVE:
+    for prefix in ("__imp_", "__imp__"):
+        assert audit.violations(owned + runtime.replace("lmb_engine_malloc", prefix + native))
+assert audit.violations("unrecognized: __imp_VirtualAlloc")
+print("ENGINE MEMORY AUDIT: PASS (ELF/Mach-O/PE imports, missing ownership, native bypass)")
