@@ -36,6 +36,7 @@ def parse_args(argv=None):
     parser.add_argument("--joint", choices=("complete", "reject", "cancel"), help="select and prepare two models together from the TUI")
     parser.add_argument("--sessions", type=int, choices=(1, 2, 4, 8), default=1)
     parser.add_argument("--api-prepare", action="store_true", help="apply the joint plan through authenticated management API")
+    parser.add_argument("--headless-donors", action="store_true", help="run supervised donors without terminals; approve exact offers through the local owner CLI")
     parser.add_argument("--donor-policy", action="store_true", help="authorize bounded repeat placement on the donor, then retire and reload it")
     parser.add_argument("--elastic", action="store_true", help="real gateway pressure, replica preparation, drain, retirement and on-demand wake")
     parser.add_argument("--elastic-recovery", action="store_true", help="wait within an interrupted turn for replacement capacity; requires a disposable codec proxy")
@@ -49,6 +50,9 @@ def parse_args(argv=None):
     parser.add_argument("--prepare-timeout", type=int, default=180)
     parser.add_argument("--measure-sessions", action="store_true", help="also benchmark the single-slot baseline")
     args = parser.parse_args(argv)
+    if args.headless_donors and (not args.api_prepare or args.joint != "complete" or args.donor_policy or
+            args.installed_package or args.lifecycle_cycles or args.placement_comparison or args.gateway_packages or args.https_nginx):
+        parser.error("--headless-donors requires --api-prepare --joint complete without other lifecycle extensions")
     if args.soak_seconds and (not 10 <= args.soak_seconds <= 3600 or not args.api_prepare or
             args.joint != "complete" or args.donor_policy or args.placement_comparison):
         parser.error("--soak-seconds requires 10–3600, --api-prepare --joint complete, without --donor-policy or --placement-comparison")
@@ -176,14 +180,15 @@ def main():
         print(f"OWNED ENGINE LOCKS: PASS ({total} prepared engines; effective native locks, no fallback)", flush=True)
 
     class Terminal(TerminalText):
-        def __init__(self, name, argv=None, program="lumabri"):
+        def __init__(self, name, argv=None, program="lumabri", headless=False):
             super().__init__()
             assert not args.installed_package or program == "lumabri", "installed test must not use development helpers"
-            self.master, slave = pty.openpty()
-            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 140, 0, 0))
+            self.master, slave = os.pipe() if headless else pty.openpty()
+            if not headless:
+                fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 140, 0, 0))
             self.log = open(tmp / f"{name}-{len(terminals)}.terminal.log", "wb")
             self.p = subprocess.Popen([str(runtime / program), *(argv or [])], cwd=runtime, env=env(name),
-                                      stdin=slave, stdout=slave, stderr=slave)
+                                      stdin=subprocess.DEVNULL if headless else slave, stdout=slave, stderr=slave)
             os.close(slave); terminals.append(self)
 
         def drain(self):
@@ -219,6 +224,17 @@ def main():
         return {s["role"]: s for s in json.loads(p.stdout)["services"]} if action == "status" else None
 
     def sharing(name):
+        if args.headless_donors:
+            command = ["donor", "--headless", "--join", tracker, "--name", name, "--ram-gb", str(args.donor_ram_gb)]
+            t = Terminal(name, command, headless=True)
+            until(lambda: service(name)["donor"]["live"], "headless donor did not become available")
+            assert service(name)["donor"]["pid"] == t.p.pid, "supervised donor detached"
+            assert not service(name)["manager"]["live"], "headless donor spawned an unnecessary manager"
+            duplicate = subprocess.run([str(runtime / "lumabri"), *command], env=env(name),
+                                       stdin=subprocess.DEVNULL, text=True, capture_output=True, timeout=15)
+            assert duplicate.returncode != 0 and "already owns" in duplicate.stderr, duplicate.stderr
+            assert service(name)["donor"]["pid"] == t.p.pid
+            return t
         t = Terminal(name)
         until(lambda: t.has("your workspace"), "workspace missing")
         t.send("\x1b[B" * 3 + "\r")
@@ -275,7 +291,7 @@ def main():
                 key = (name, state["model"])
                 if state["phase"] != 1 or key in handled:
                     continue
-                if not approval_frame_ready(terminal, state["model"], repeat=args.donor_policy):
+                if not args.headless_donors and not approval_frame_ready(terminal, state["model"], repeat=args.donor_policy):
                     continue
                 handled.add(key)
                 if ready and args.joint == "reject":
@@ -289,7 +305,20 @@ def main():
                         assert result.returncode == 0, result.stderr
                     cancelled = True
                 else:
-                    if args.donor_policy:
+                    if args.headless_donors:
+                        def local_owner(*parts, success=True):
+                            result = subprocess.run([str(runtime / "lumabri"), "donor-policy", *parts], env=env(name),
+                                                    text=True, capture_output=True, timeout=20)
+                            assert (result.returncode == 0) == success, (parts, result.stdout, result.stderr)
+                            return json.loads(result.stdout) if success else None
+                        reviewed = local_owner("inspect")
+                        local_owner("accept-current", "0" * 64, success=False)
+                        assert service(name)["donor"]["phase"] == 1, "invalid review accepted an allocation"
+                        accepted = local_owner("accept-current", reviewed["review"])
+                        assert accepted["state"] == "accepted" and not accepted["repeat_permission"]
+                        local_owner("accept-current", reviewed["review"], success=False)
+                        assert local_owner("list")["policies"] == [], "one-off acceptance created a repeat grant"
+                    elif args.donor_policy:
                         content = subprocess.run([str(runtime / "test_chat_ui"), "donor-content-check"], env=env(name),
                             text=True, capture_output=True, timeout=20)
                         assert content.returncode == 0, (content.stdout, content.stderr)
@@ -473,6 +502,30 @@ def main():
         a, b = sharing("a"), sharing("b")
         if args.joint:
             joint_flow(a, b)
+            if args.headless_donors:
+                before = {name: service(name)["donor"] for name in ("a", "b")}
+                for name, terminal in (("a", a), ("b", b)):
+                    terminal.p.terminate()
+                    until(lambda: terminal.p.poll() is not None, "supervised donor did not handle SIGTERM", 20)
+                    assert terminal.p.returncode == 0
+                    after = service(name)["donor"]
+                    assert not after["live"] and after["state"] == "stopped", after
+                    for child in (before[name]["segment_pid"], before[name]["host_pid"]):
+                        if child:
+                            try:
+                                os.kill(child, 0)
+                            except ProcessLookupError:
+                                pass
+                            else:
+                                raise AssertionError(f"supervised donor left engine {child} running")
+                    replacement = sharing(name)
+                    fresh = service(name)["donor"]
+                    assert fresh["instance"] != before[name]["instance"]
+                    assert fresh["model_count"] == fresh["reserved_total_bytes"] == 0, "restart replayed old allocations"
+                    replacement.p.terminate()
+                    until(lambda: replacement.p.poll() is not None, "replacement did not stop", 20)
+                    assert replacement.p.returncode == 0
+                print("HEADLESS DONORS: PASS (no TTY, same PID, singleton, exact one-off approval, real inference, SIGTERM releases children, empty restart)", flush=True)
             return
         base_args = ["models", "--models-dir", str(args.models_dir.resolve()), "--tracker", tracker,
                      "--context", "128", "--max-new", "8", "--sessions", str(args.sessions)]
