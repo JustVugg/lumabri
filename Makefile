@@ -53,6 +53,7 @@ test_node_control: tests/c/test_node_control.c lumabri_proto.h src/runtime/lumab
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_node_control.c -o $@
 test_engine_memory: tests/c/test_engine_memory.c src/runtime/lumabri_engine_memory.c src/runtime/lumabri_engine_memory.h src/runtime/lumabri_process_memory.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_engine_memory.c src/runtime/lumabri_engine_memory.c -o $@
+test_engine_memory build/engine_memory.o: src/runtime/lumabri_engine_memory_os.h
 test_engine_memory_guard: tests/c/test_engine_memory_guard.c src/runtime/lumabri_engine_memory.h src/runtime/lumabri_resident_guard.h src/runtime/lumabri_process_memory.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_engine_memory_guard.c -o $@
 test_memlock: tests/c/test_memlock.c src/runtime/lumabri_memlock.h

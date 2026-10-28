@@ -18,6 +18,10 @@ int lmb_engine_posix_memalign(void **ptr, size_t alignment, size_t bytes);
 void *lmb_engine_aligned_alloc(size_t alignment, size_t bytes);
 char *lmb_engine_strdup(const char *text);
 char *lmb_engine_strndup(const char *text, size_t max);
+#ifdef _WIN32
+void *lmb_engine_win_aligned_malloc(size_t bytes, size_t alignment);
+void lmb_engine_win_aligned_free(void *ptr);
+#endif
 void *lmb_engine_mmap(void *addr, size_t bytes, int prot, int flags, int fd, off_t offset);
 int lmb_engine_munmap(void *addr, size_t bytes);
 int lmb_engine_mlock(const void *addr, size_t bytes);

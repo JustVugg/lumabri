@@ -12,7 +12,20 @@ import subprocess
 NATIVE = set("malloc calloc realloc reallocarray free cfree posix_memalign aligned_alloc "
              "memalign valloc pvalloc strdup strndup mmap mmap64 munmap mremap "
              "mlock munlock mlockall munlockall madvise posix_madvise "
-             "vm_allocate vm_deallocate mach_vm_allocate mach_vm_deallocate".split())
+             "vm_allocate vm_deallocate mach_vm_allocate mach_vm_deallocate "
+             "aligned_malloc aligned_free aligned_realloc aligned_recalloc "
+             "VirtualAlloc VirtualAllocEx VirtualAlloc2 VirtualFree VirtualFreeEx "
+             "VirtualLock VirtualUnlock HeapAlloc HeapReAlloc HeapFree "
+             "MapViewOfFile MapViewOfFileEx UnmapViewOfFile".split())
+
+
+def native_name(symbol):
+    symbol = symbol.lstrip("_")
+    # PE/COFF import-address entries keep an imp_ prefix after leading
+    # underscores. They are real native calls, not namespaced wrappers.
+    if symbol.startswith("imp_"):
+        symbol = symbol[4:].lstrip("_")
+    return symbol.split("@", 1)[0].split("$", 1)[0]
 
 
 def violations(output):
@@ -23,12 +36,12 @@ def violations(output):
         match = re.match(r".*[\[(:]([^\[\]():]+\.o)[\]):]:?\s+(?:U\s+)?(\S+)\s*$", line)
         if not match:
             symbol = line.split()[-1] if line.split() else ""
-            if symbol.lstrip("_").split("@", 1)[0].split("$", 1)[0] in NATIVE:
+            if native_name(symbol) in NATIVE:
                 violations.append(f"unrecognized nm ownership: {line}")
             continue
         member, symbol = match.groups()
         members.add(member)
-        symbol = symbol.lstrip("_").split("@", 1)[0].split("$", 1)[0]
+        symbol = native_name(symbol)
         if member != "engine_memory.o" and symbol in NATIVE:
             violations.append(f"{member}: unwrapped {symbol}")
     if "engine_memory.o" not in members or len(members) < 2:
