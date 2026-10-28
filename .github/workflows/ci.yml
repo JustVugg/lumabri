@@ -15,6 +15,50 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  windows-segment:
+    # Native PE/COFF + Win32 execution. This tests the inference boundary;
+    # the complete household service is not certified for Windows yet.
+    needs: linux
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: msys2 {0}
+        working-directory: lumabri
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: lumabri
+      - uses: actions/checkout@v4
+        with:
+          repository: JustVugg/colibri
+          ref: ce370e87d7b623d7759b52ec2007d75fc5b0e87e
+          path: colibri
+      - uses: actions/download-artifact@v4
+        with:
+          name: tiny-olmoe-checkpoint
+          path: lumabri/build/fixture
+      - uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884
+        with:
+          msystem: UCRT64
+          update: false
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-binutils
+            mingw-w64-ucrt-x86_64-python
+      - name: Build and audit native engine memory and checkpoint input
+        run: python3 tools/build_windows_segment.py --engine ../colibri/c
+      - name: Compare resident full and split OLMoE inference on Windows
+        run: |
+          set -o pipefail
+          ./build/windows-segment/test_segment_windows.exe "$(cygpath -w "$PWD/build/fixture")" 2>&1 | tee build/windows-segment-evidence.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-segment-evidence
+          path: lumabri/build/windows-segment-evidence.log
   kubernetes-control:
     runs-on: ubuntu-24.04
     timeout-minutes: 15

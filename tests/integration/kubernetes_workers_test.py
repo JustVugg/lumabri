@@ -121,8 +121,31 @@ os.execvp("lumabri",["lumabri","api","serve","--tracker",os.environ["TEST_TRACKE
             return len(nodes) == 2
         until(inventory)
         reviews = set()
+        live_plans = {}
+
+        def inventory_caught_up(selected):
+            # A READY receipt precedes the next signed inventory heartbeat.
+            # Review the next model only after that heartbeat reflects our
+            # completed allocation. Never retry an OFFER or relax its fence.
+            code, current = http("/api/v1/workspace")
+            assert code == 200
+            facts = {n["id"]: n["workload"] for n in current["nodes"]}
+            for node in selected:
+                allocation_count, reserved = 0, 0
+                for plan in live_plans.values():
+                    ranges = [r for r in plan["ranges"] if r["node"] == node]
+                    if ranges:
+                        allocation_count += 1
+                        reserved += sum(r["reserved_bytes"] for r in ranges)
+                observed = facts.get(node)
+                if observed is None or observed["allocations"] != allocation_count or \
+                        observed["reserved_bytes"] != reserved:
+                    return False
+            return True
+
         def prepare_model(model, selected):
             allocations = []
+            until(lambda: inventory_caught_up(selected), 30)
             intent = {"models": [model], "nodes": selected, "context": 128, "sessions": 2, "max_new": 8}
             code, preview = http("/api/v1/preparation", {"action": "preview", **intent})
             assert code == 200, preview
@@ -155,6 +178,10 @@ os.execvp("lumabri",["lumabri","api","serve","--tracker",os.environ["TEST_TRACKE
                     return True
                 return False
             until(prepare, 180)
+            code, current = http("/api/v1/workspace")
+            assert code == 200
+            live_plans[allocations[0]] = next(a for a in current["allocations"] if a["id"] == allocations[0])
+            until(lambda: inventory_caught_up(selected), 30)
             return allocations[0]
 
         # These fixtures fit on one worker. Exercise co-residence deliberately;
@@ -197,6 +224,7 @@ os.execvp("lumabri",["lumabri","api","serve","--tracker",os.environ["TEST_TRACKE
         # the other must keep serving from the same resident worker.
         def retire(allocation):
             until(lambda: json.loads(cli("retire", allocation, "--tracker", tracker))["complete"], 60)
+            live_plans.pop(allocation)
         retire(allocations[1])
         report["surviving_turn"] = turn(allocations[0])
         retire(allocations[0])
