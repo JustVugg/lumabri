@@ -53,6 +53,7 @@ jobs:
         run: |
           make lumabri tracker maintainer swarm_probe liblumabri.dylib test_shim test_machine test_chat_ui test_memory_budget test_planner test_cluster test_calibration test_inventory test_weight_cache CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           ./test_machine
+          make test-container-limits CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           make test_process_memory CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           ./test_process_memory
           make test_engine_memory test_engine_memory_guard test_memlock CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
@@ -191,6 +192,11 @@ jobs:
           make test ENGINE=../colibri/c
           python3 tests/integration/api_https_test.py --nginx "$LUMABRI_TEST_NGINX"
           make test-runtime-probe CFLAGS='-O2 -Wall -Wextra -Werror'
+      - name: Native container resource boundary
+        working-directory: lumabri
+        run: |
+          make build/tests/probe-container-budget CFLAGS='-O2 -Wall -Wextra -Werror'
+          sudo systemd-run --scope --unit=lumabri-ci-resource-probe -p MemoryMax=512M -p CPUQuota=100% "$PWD/build/tests/probe-container-budget"
       - name: Sanitizers
         working-directory: lumabri
         run: make test-sanitize

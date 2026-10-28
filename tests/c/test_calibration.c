@@ -70,19 +70,36 @@ static void identity_tests(void) {
         FILE *f = fopen(path, "wb"); CHECK(f != NULL, "cannot create fake runtime binary");
         if (f) { fputs("fixture", f); fclose(f); }
     }
-    LmbRuntimeIdentityCache cache = {0}; char epoch[65], first[65], second[65];
+    LmbRuntimeIdentityCache cache = {0}; char epoch[65], first[65], second[65], detail[256];
     memset(epoch, 'a', 64); epoch[64] = 0;
     CHECK(!lmb_runtime_identity(dir, epoch, &cache, first), "runtime identity failed");
     CHECK(!lmb_runtime_identity(dir, epoch, &cache, second) && !strcmp(first, second), "unchanged runtime identity moved");
+    CHECK(!lmb_runtime_identity_check(dir,epoch,&cache,first,detail,sizeof detail) && !detail[0], "unchanged runtime refused");
+    snprintf(path,sizeof path,"%s/segment_node",dir);
+    CHECK(!chmod(path,0600),"cannot change metadata");
+    CHECK(!lmb_runtime_identity_check(dir,epoch,&cache,first,detail,sizeof detail),"metadata-only change invalidated executable contents");
+    if (geteuid()!=0) {
+        CHECK(!chmod(path,0000),"cannot deny fixture access");
+        CHECK(lmb_runtime_identity_check(dir,epoch,&cache,first,detail,sizeof detail) &&
+              errno==EACCES && strstr(detail,"segment_node") && strstr(detail,"Cannot verify") &&
+              !strstr(detail,"changed"),"read denial misreported as an update: %s",detail);
+        CHECK(!chmod(path,0600),"cannot restore fixture access");
+        CHECK(!lmb_runtime_identity_check(dir,epoch,&cache,first,detail,sizeof detail),"restored unchanged binary refused");
+    }
     epoch[0] = 'b';
     CHECK(!lmb_runtime_identity(dir, epoch, &cache, second) && strcmp(first, second), "new donor epoch retained speed key");
     epoch[0] = 'a'; snprintf(path, sizeof path, "%s/segment_node", dir);
     FILE *f = fopen(path, "ab"); if (f) { fputs("updated", f); fclose(f); }
+    CHECK(lmb_runtime_identity_check(dir,epoch,&cache,first,detail,sizeof detail) &&
+          strstr(detail,"segment_node changed") && errno==ESTALE,"content update not identified: %s",detail);
     CHECK(!lmb_runtime_identity(dir, epoch, &cache, second) && strcmp(first, second), "changed binary retained speed key");
     for (unsigned i = 0; i < 4; i++) {
         snprintf(path, sizeof path, "%s/%s", dir, binaries[i]); CHECK(!unlink(path), "cannot remove fake runtime");
     }
     CHECK(lmb_runtime_identity(dir, epoch, &cache, second) && !second[0], "missing runtime retained identity");
+    CHECK(lmb_runtime_identity_check(dir,epoch,&cache,first,detail,sizeof detail) &&
+          errno==ENOENT && strstr(detail,"lumabri") && strstr(detail,"Cannot verify") &&
+          !strstr(detail,"changed"),"missing runtime misreported: %s",detail);
     snprintf(path, sizeof path, "%s/config.json", dir);
     f = fopen(path, "wb"); if (f) { fputs("{}\n", f); fclose(f); }
     CHECK(lmb_checkpoint_identity(dir, second, NULL, NULL) && !second[0], "uncached checkpoint was assigned an identity");
