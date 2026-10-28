@@ -149,15 +149,16 @@ static LMB_MAYBE_UNUSED int lmb_journal_page(int dir,const char *suffix,const ch
     int history=lmb_journal_child(dir,LMB_JOURNAL_HISTORY,0);
     if (history<0) return errno==ENOENT ? 0 : -1;
     int bad=0;
+    static const char hex[]="0123456789abcdef";
     for (unsigned i=0;i<256 && !bad;i++) {
-        char first[3]; snprintf(first,sizeof first,"%02x",i);
+        char first[3]={hex[(i>>4)&15],hex[i&15],0};
         if (after[0] && strncmp(first,after,2)<0) continue;
         if (page->count>LMB_JOURNAL_PAGE && strncmp(first,page->names[LMB_JOURNAL_PAGE],2)>0) break;
         int parent=lmb_journal_child(history,first,0);
         if (parent<0) { if (errno!=ENOENT) bad=errno; continue; }
         for (unsigned j=0;j<256 && !bad;j++) {
-            char second[3],prefix[5]; snprintf(second,sizeof second,"%02x",j);
-            snprintf(prefix,sizeof prefix,"%02x%02x",i,j);
+            char second[3]={hex[(j>>4)&15],hex[j&15],0};
+            char prefix[5]={first[0],first[1],second[0],second[1],0};
             if (after[0] && strncmp(prefix,after,4)<0) continue;
             if (page->count>LMB_JOURNAL_PAGE && strncmp(prefix,page->names[LMB_JOURNAL_PAGE],4)>0) break;
             int bucket=lmb_journal_child(parent,second,0);

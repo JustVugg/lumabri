@@ -2,6 +2,9 @@
  * links a single L instead of one per compilation unit. deepseek_v4_p2p.py
  * gives the units extern declarations of these four; here are the definitions.
  * Generated/placed by the Makefile; safe to regenerate. */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #define LUMABRI_P2P
 #define LUMIBRI_P2P
 #include "lumabri_client.h"
