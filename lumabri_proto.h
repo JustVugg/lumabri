@@ -20,29 +20,16 @@
 #ifndef LUMABRI_PROTO_H
 #define LUMABRI_PROTO_H
 
+#include "src/protocol/lumabri_socket.h"
 #include <errno.h>
-#include <fcntl.h>
-#include <netdb.h>
-#include <poll.h>
 #include <signal.h>
 #include <stdatomic.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <sys/time.h>
 #include <time.h>
-#include <unistd.h>
-
 #include "src/protocol/lumabri_wire.h"
-
-#ifndef MSG_NOSIGNAL
-#define MSG_NOSIGNAL 0     /* platforms without it deliver SIGPIPE; the
-                              daemons ignore the signal themselves */
-#endif
 
 /* ---- full-buffer socket I/O ------------------------------------------- */
 
@@ -51,11 +38,12 @@
  * where it has no business changing the process's SIGPIPE disposition. A
  * peer that vanishes mid-frame must surface as EPIPE on this call, never as
  * a signal that kills the engine before failover can run. */
-static int lmb_write_full(int fd, const void *buf, size_t n) {
+static int lmb_write_full(LmbSocket fd, const void *buf, size_t n) {
     const uint8_t *p = (const uint8_t *)buf;
     while (n) {
-        ssize_t w = send(fd, p, n, MSG_NOSIGNAL);
+        ptrdiff_t w = lmb_socket_send(fd, p, n);
         if (w < 0) { if (errno == EINTR) continue; return -1; }
+        if (!w) { errno = ECONNRESET; return -1; }
         p += w; n -= (size_t)w;
     }
     return 0;
@@ -64,27 +52,40 @@ static int lmb_write_full(int fd, const void *buf, size_t n) {
 static _Thread_local uint64_t lmb_read_deadline_ms;
 
 static uint64_t lmb_io_monotonic_ms(void) {
-    struct timespec now;
-    if (clock_gettime(CLOCK_MONOTONIC, &now)) return 0;
-    return (uint64_t)now.tv_sec * 1000u + (uint64_t)now.tv_nsec / 1000000u;
+    return lmb_socket_now_ms();
 }
 
-static int lmb_read_full(int fd, void *buf, size_t n) {
+static int lmb_socket_read_full(LmbSocket fd, void *buf, size_t n) {
     uint8_t *p = (uint8_t *)buf;
     while (n) {
         if (lmb_read_deadline_ms) {
             uint64_t now = lmb_io_monotonic_ms();
             if (!now || now >= lmb_read_deadline_ms) { errno = ETIMEDOUT; return -1; }
             uint64_t left = lmb_read_deadline_ms-now;
-            struct pollfd ready = {fd, POLLIN, 0};
-            int rc = poll(&ready, 1, left < 1000 ? (int)left : 1000);
+            int rc = lmb_socket_wait(fd, 0, left < 1000 ? (int)left : 1000);
             if (rc < 0 && errno != EINTR) return -1;
             if (rc <= 0) continue;
-            if (!(ready.revents & POLLIN)) { errno = ECONNRESET; return -1; }
         }
-        ssize_t r = read(fd, p, n);
+        ptrdiff_t r = lmb_socket_receive(fd, p, n);
         if (r < 0) { if (errno == EINTR) continue; return -1; }
         if (r == 0) { errno = ECONNRESET; return -1; } /* EOF, not stale errno */
+        p += r; n -= (size_t)r;
+    }
+    return 0;
+}
+
+/* File/pipe descriptors are a separate namespace on Windows. Metadata stores
+ * use this helper; network frame readers always use lmb_socket_read_full. */
+static LMB_MAYBE_UNUSED int lmb_read_full(int fd, void *buf, size_t n) {
+    unsigned char *p = buf;
+    while (n) {
+#ifdef _WIN32
+        int r = _read(fd, p, n > INT_MAX ? INT_MAX : (unsigned)n);
+#else
+        ssize_t r = read(fd, p, n);
+#endif
+        if (r < 0) { if (errno == EINTR) continue; return -1; }
+        if (!r) { errno = ECONNRESET; return -1; }
         p += r; n -= (size_t)r;
     }
     return 0;
@@ -96,10 +97,10 @@ static int lmb_read_full(int fd, void *buf, size_t n) {
  * it, points these at its AEAD channel: a fd that has been handshaked routes
  * through them, an ordinary fd falls through to plaintext (the hook returns
  * -2). Static per translation unit, so only a .c that opts in is affected. */
-static int (*lmb_enc_send)(int, uint32_t, const void *, uint32_t, const void *, uint32_t);
-static int (*lmb_enc_recv)(int, LmbMsg *);
-static int (*lmb_enc_wrap)(int fd, int is_client, const char *addr);
-static void (*lmb_enc_forget)(int fd);
+static int (*lmb_enc_send)(LmbSocket, uint32_t, const void *, uint32_t, const void *, uint32_t);
+static int (*lmb_enc_recv)(LmbSocket, LmbMsg *);
+static int (*lmb_enc_wrap)(LmbSocket fd, int is_client, const char *addr);
+static void (*lmb_enc_forget)(LmbSocket fd);
 static int lmb_env_int(const char *name, int fallback, int lo, int hi);
 
 /* Bound aggregate receive memory, not just each individual frame.  Without
@@ -130,12 +131,12 @@ static void lmb_rx_release(LmbMsg *m) {
     }
 }
 
-static int lmb_close(int fd) {
+static int lmb_close(LmbSocket fd) {
     if (lmb_enc_forget) lmb_enc_forget(fd);
-    return close(fd);
+    return lmb_socket_close(fd);
 }
 
-static int lmb_send(int fd, uint32_t op, const void *body, uint32_t body_len,
+static int lmb_send(LmbSocket fd, uint32_t op, const void *body, uint32_t body_len,
                     const void *pay, uint32_t pay_len) {
     if (lmb_enc_send) { int r = lmb_enc_send(fd, op, body, body_len, pay, pay_len);
                         if (r != -2) return r; }
@@ -150,11 +151,11 @@ static int lmb_send(int fd, uint32_t op, const void *body, uint32_t body_len,
 }
 
 /* Receives one frame; mallocs body/pay. Returns 0, or -1 on error/EOF. */
-static int lmb_recv(int fd, LmbMsg *m) {
+static int lmb_recv(LmbSocket fd, LmbMsg *m) {
     if (lmb_enc_recv) { int r = lmb_enc_recv(fd, m); if (r != -2) return r; }
     uint8_t pre[16];
     memset(m, 0, sizeof *m);
-    if (lmb_read_full(fd, pre, 16)) return -1;
+    if (lmb_socket_read_full(fd, pre, 16)) return -1;
     if (lmb_get32(pre) != LMB_MAGIC) { errno = EPROTO; return -1; }
     m->op = lmb_get32(pre + 4);
     m->body_len = lmb_get32(pre + 8);
@@ -167,7 +168,7 @@ static int lmb_recv(int fd, LmbMsg *m) {
     if (total64 > UINT32_MAX || lmb_rx_reserve(m, (uint32_t)total64)) return -1;
     if (m->body_len) {
         if (!(m->body = (uint8_t *)malloc(m->body_len))) { lmb_rx_release(m); return -1; }
-        if (lmb_read_full(fd, m->body, m->body_len)) {
+        if (lmb_socket_read_full(fd, m->body, m->body_len)) {
             free(m->body); m->body = NULL; lmb_rx_release(m); return -1;
         }
     }
@@ -175,7 +176,7 @@ static int lmb_recv(int fd, LmbMsg *m) {
         if (!(m->pay = (uint8_t *)malloc(m->pay_len))) {
             free(m->body); m->body = NULL; lmb_rx_release(m); return -1;
         }
-        if (lmb_read_full(fd, m->pay, m->pay_len)) {
+        if (lmb_socket_read_full(fd, m->pay, m->pay_len)) {
             free(m->body); free(m->pay); m->body = m->pay = NULL;
             lmb_rx_release(m); return -1;
         }
@@ -183,7 +184,7 @@ static int lmb_recv(int fd, LmbMsg *m) {
     return 0;
 }
 
-static inline int lmb_recv_limited(int fd, LmbMsg *m, uint32_t limit) {
+static inline int lmb_recv_limited(LmbSocket fd, LmbMsg *m, uint32_t limit) {
     uint32_t previous = lmb_rx_frame_limit;
     lmb_rx_frame_limit = limit < previous ? limit : previous;
     int rc = lmb_recv(fd, m);
@@ -192,7 +193,7 @@ static inline int lmb_recv_limited(int fd, LmbMsg *m, uint32_t limit) {
 }
 
 /* Absolute whole-frame deadline, not a timeout restarted by every byte. */
-static inline int lmb_recv_bounded(int fd, LmbMsg *m, uint32_t limit, uint32_t timeout_ms) {
+static inline int lmb_recv_bounded(LmbSocket fd, LmbMsg *m, uint32_t limit, uint32_t timeout_ms) {
     uint64_t now = lmb_io_monotonic_ms(), previous = lmb_read_deadline_ms;
     if (!now || !timeout_ms) { memset(m, 0, sizeof *m); errno = EINVAL; return -1; }
     lmb_read_deadline_ms = previous && previous < now + timeout_ms ? previous : now + timeout_ms;
@@ -286,7 +287,7 @@ static LMB_MAYBE_UNUSED int lmb_buf_peer_auth(LmbBuf *b, const uint8_t pk[32],
 
 /* Ask the tracker for this connection's identity nonce. 0 and fills nonce, or
  * -1. Sent once per control connection, right after connect (and AUTH). */
-static LMB_MAYBE_UNUSED int lmb_request_challenge(int fd, uint8_t nonce[32]) {
+static LMB_MAYBE_UNUSED int lmb_request_challenge(LmbSocket fd, uint8_t nonce[32]) {
     if (lmb_send(fd, LMB_CHALLENGE, NULL, 0, NULL, 0)) return -1;
     LmbMsg m;
     if (lmb_recv(fd, &m)) return -1;
@@ -539,11 +540,9 @@ static int lmb_env_int(const char *name, int fallback, int lo, int hi) {
     return (int)v;
 }
 
-static void lmb_set_io_timeout(int fd, int timeout_ms) {
+static LMB_MAYBE_UNUSED void lmb_set_io_timeout(LmbSocket fd, int timeout_ms) {
     if (timeout_ms <= 0) return;
-    struct timeval tv = { timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+    (void)lmb_socket_timeout(fd, timeout_ms);
 }
 
 /* Thread-per-connection keeps persistent pooled sockets simple, but it must
@@ -575,7 +574,7 @@ static LMB_MAYBE_UNUSED void lmb_conn_gate_leave(LmbConnGate *g) {
  * operator needs opposite actions for them: one is a firewall rule, the other
  * is a process that is not running. Only the value read immediately after a
  * failed connect is meaningful. */
-static LMB_MAYBE_UNUSED int lmb_connect_errno;
+static _Thread_local LMB_MAYBE_UNUSED int lmb_connect_errno;
 
 static LMB_MAYBE_UNUSED const char *lmb_connect_why(void) {
     switch (lmb_connect_errno) {
@@ -592,58 +591,67 @@ static LMB_MAYBE_UNUSED const char *lmb_connect_why(void) {
 /* addr is "host:port". Bounded connect: an unreachable peer must cost
  * `timeout_ms`, not the kernel's minutes — the caller has a relay to fall
  * back to. Returns a blocking fd with TCP_NODELAY, or -1. */
-static int lmb_connect_ms_io(const char *addr, int timeout_ms, int io_timeout_ms) {
+static LmbSocket lmb_connect_ms_io(const char *addr, int timeout_ms, int io_timeout_ms) {
     char host[256];
     lmb_connect_errno = 0;
+    if (!addr || timeout_ms <= 0 || io_timeout_ms <= 0) {
+        errno = lmb_connect_errno = EINVAL; return LMB_INVALID_SOCKET;
+    }
+    if (lmb_socket_init()) { lmb_connect_errno = errno; return LMB_INVALID_SOCKET; }
     const char *colon = strrchr(addr, ':');
-    if (!colon || (size_t)(colon - addr) >= sizeof host) return -1;
-    memcpy(host, addr, (size_t)(colon - addr)); host[colon - addr] = 0;
+    if (!colon || colon == addr || !colon[1] || (size_t)(colon - addr) >= sizeof host) {
+        errno = lmb_connect_errno = EINVAL; return LMB_INVALID_SOCKET;
+    }
+    size_t hostlen = (size_t)(colon - addr);
+    const char *start = addr;
+    if (addr[0] == '[' && hostlen >= 3 && colon[-1] == ']') { start++; hostlen -= 2; }
+    memcpy(host, start, hostlen); host[hostlen] = 0;
     struct addrinfo hints, *res = NULL;
     memset(&hints, 0, sizeof hints);
     hints.ai_family = AF_UNSPEC; hints.ai_socktype = SOCK_STREAM;
-    if (getaddrinfo(host, colon + 1, &hints, &res)) return -1;
-    int fd = -1;
+    if (getaddrinfo(host, colon + 1, &hints, &res)) {
+        errno = lmb_connect_errno = EHOSTUNREACH; return LMB_INVALID_SOCKET;
+    }
+    LmbSocket fd = LMB_INVALID_SOCKET;
+    uint64_t until = lmb_socket_now_ms() + (uint64_t)timeout_ms;
     for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
-        fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (fd < 0) continue;
-        int fl = fcntl(fd, F_GETFL, 0);
-        fcntl(fd, F_SETFL, fl | O_NONBLOCK);
-        int r = connect(fd, ai->ai_addr, ai->ai_addrlen);
-        if (r < 0 && errno == EINPROGRESS) {
-            struct pollfd pf = { fd, POLLOUT, 0 };
-            int err = -1;
-            socklen_t el = sizeof err;
-            int ready = poll(&pf, 1, timeout_ms);
-            if (ready > 0 &&
-                getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &el) == 0 && err == 0)
-                r = 0;
-            else
-                lmb_connect_errno = ready == 0 ? ETIMEDOUT
-                                   : (err > 0 ? err : errno);
-        } else if (r < 0) {
-            lmb_connect_errno = errno;
+        fd = lmb_socket_open(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (fd == LMB_INVALID_SOCKET) { lmb_connect_errno = errno; continue; }
+        int r = lmb_socket_nonblocking(fd, 1);
+        if (!r) r = lmb_socket_connect(fd, ai->ai_addr, (LmbSocketLength)ai->ai_addrlen);
+        if (r < 0 && (errno == EINPROGRESS || errno == EWOULDBLOCK)) {
+            for (;;) {
+                uint64_t now = lmb_socket_now_ms();
+                if (now >= until) { errno = ETIMEDOUT; break; }
+                int ready = lmb_socket_wait(fd, 1, (int)(until - now));
+                if (ready < 0 && errno == EINTR) continue;
+                if (ready > 0) r = lmb_socket_peer_error(fd);
+                else if (!ready) errno = ETIMEDOUT;
+                break;
+            }
         }
-        if (r == 0) { fcntl(fd, F_SETFL, fl); lmb_connect_errno = 0; break; }
-        close(fd); fd = -1;
+        if (!r) r = lmb_socket_nonblocking(fd, 0);
+        if (!r) r = lmb_socket_nodelay(fd);
+        if (!r) r = lmb_socket_timeout(fd, io_timeout_ms);
+        if (!r) { lmb_connect_errno = 0; break; }
+        lmb_connect_errno = errno;
+        lmb_socket_close(fd); fd = LMB_INVALID_SOCKET;
+        if (lmb_socket_now_ms() >= until) break;
     }
     freeaddrinfo(res);
-    if (fd >= 0) {
-        int one = 1;
-        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-        lmb_set_io_timeout(fd, io_timeout_ms);
-        /* when this component has enabled encryption, every outbound
-         * connection handshakes here, before any frame is sent */
-        if (lmb_enc_wrap && lmb_enc_wrap(fd, 1, addr)) { lmb_close(fd); fd = -1; }
+    if (fd != LMB_INVALID_SOCKET && lmb_enc_wrap && lmb_enc_wrap(fd, 1, addr)) {
+        lmb_connect_errno = errno; lmb_close(fd); fd = LMB_INVALID_SOCKET;
     }
+    if (fd == LMB_INVALID_SOCKET) errno = lmb_connect_errno;
     return fd;
 }
 
-static int lmb_connect_ms(const char *addr, int timeout_ms) {
+static LmbSocket lmb_connect_ms(const char *addr, int timeout_ms) {
     return lmb_connect_ms_io(addr, timeout_ms,
                             lmb_env_int("LUMABRI_IO_TIMEOUT_MS", LMB_DEFAULT_IO_TIMEOUT_MS,
                                         100, 3600000));
 }
-static int lmb_connect(const char *addr) { return lmb_connect_ms(addr, 5000); }
+static LmbSocket lmb_connect(const char *addr) { return lmb_connect_ms(addr, 5000); }
 
 /* ---- userspace network emulation ---------------------------------------
  * Measuring what a LAN or a WAN would cost normally means a netem qdisc,
@@ -687,8 +695,12 @@ static inline void lmb_emu_delay(void) {
         if (lmb_emu_seed % 1000000u < (unsigned)lmb_emu_loss_ppm) us += lmb_emu_rto_us;
     }
     if (us <= 0) return;
+#ifdef _WIN32
+    Sleep((DWORD)(us / 1000 + (us % 1000 != 0)));
+#else
     struct timespec ts = { us / 1000000, (us % 1000000) * 1000 };
     while (nanosleep(&ts, &ts) && errno == EINTR) { }
+#endif
 }
 
 static inline int lmb_emu_active(void) {
@@ -696,25 +708,26 @@ static inline int lmb_emu_active(void) {
     return lmb_emu_rtt_us > 0 || lmb_emu_jitter_us > 0 || lmb_emu_loss_ppm > 0;
 }
 
-static LMB_MAYBE_UNUSED int lmb_listen(int port) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return -1;
-    int one = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+static LMB_MAYBE_UNUSED LmbSocket lmb_listen(int port) {
+    if (port < 0 || port > 65535) { errno = EINVAL; return LMB_INVALID_SOCKET; }
+    LmbSocket fd = lmb_socket_open(AF_INET, SOCK_STREAM, 0);
+    if (fd == LMB_INVALID_SOCKET) return fd;
+    if (lmb_socket_bind_policy(fd)) { lmb_socket_close(fd); return LMB_INVALID_SOCKET; }
     struct sockaddr_in sa;
     memset(&sa, 0, sizeof sa);
     sa.sin_family = AF_INET;
     sa.sin_addr.s_addr = htonl(INADDR_ANY);
     sa.sin_port = htons((uint16_t)port);
     if (bind(fd, (struct sockaddr *)&sa, sizeof sa) || listen(fd, 64)) {
-        close(fd); return -1;
+        (void)lmb_socket_error();
+        int saved = errno; lmb_socket_close(fd); errno = saved; return LMB_INVALID_SOCKET;
     }
     return fd;
 }
 
 /* Sends AUTH if LUMABRI_TOKEN is set. Call right after connecting to a
  * tracker. Returns 0 (also when no token is configured). */
-static int lmb_auth(int fd) {
+static int lmb_auth(LmbSocket fd) {
     const char *tok = getenv("LUMABRI_TOKEN");
     if (!tok || !tok[0]) return 0;
     if (strlen(tok) > LMB_TOKEN_MAX) { errno = EMSGSIZE; return -1; }
@@ -736,8 +749,8 @@ static int lmb_auth(int fd) {
 static int lmb_request_pay(const char *addr, uint32_t op,
                            const void *body, uint32_t body_len,
                            const void *pay, uint32_t pay_len, LmbMsg *resp) {
-    int fd = lmb_connect(addr);
-    if (fd < 0) return -1;
+    LmbSocket fd = lmb_connect(addr);
+    if (fd == LMB_INVALID_SOCKET) return -1;
     int rc = lmb_auth(fd);
     if (rc == 0) rc = lmb_send(fd, op, body, body_len, pay, pay_len);
     if (rc == 0) rc = lmb_recv(fd, resp);

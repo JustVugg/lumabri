@@ -5,6 +5,8 @@ CFLAGS  ?= -O2 -Wall -Wextra
 ENGINE  ?= ../colibri/c
 # Shared headers remain in the repository root during the staged layout cleanup.
 override CPPFLAGS += -I.
+SIGN_DEPS = lumabri_sign.h src/crypto/lumabri_sign_core.h src/crypto/lumabri_random.h
+PROTO_DEPS = lumabri_proto.h src/protocol/lumabri_wire.h src/protocol/lumabri_socket.h
 PLATFORM := $(shell uname -s)
 SHIM_LIB = liblumabri.so
 SHIM_FLAGS = -shared -fPIC -ldl
@@ -75,7 +77,7 @@ lumabri segment_node segment_chat test_chat_ui test_host_session_pool test-home-
 test check-warnings: test_serve_control
 test check-warnings: test_host_session_pool test_hosted_sessions test_host_drain test_node_control
 
-test_node_control: tests/c/test_node_control.c lumabri_proto.h src/protocol/lumabri_wire.h src/runtime/lumabri_node_control.h
+test_node_control: tests/c/test_node_control.c $(PROTO_DEPS) src/runtime/lumabri_node_control.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_node_control.c -o $@
 test_engine_memory: tests/c/test_engine_memory.c src/runtime/lumabri_engine_memory.c src/runtime/lumabri_engine_memory.h src/runtime/lumabri_process_memory.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_engine_memory.c src/runtime/lumabri_engine_memory.c -o $@
@@ -104,7 +106,7 @@ test_compute_broker: tests/c/test_compute_broker.c src/runtime/lumabri_compute_b
 test_serve_control: tests/c/test_serve_control.c src/runtime/lumabri_serve_control.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_serve_control.c -o $@
 
-test_hosted_sessions: tests/c/test_hosted_sessions.c lumabri_proto.h src/protocol/lumabri_wire.h lumabri_secure.h lumabri_metrics.h src/runtime/lumabri_session_limits.h
+test_hosted_sessions: tests/c/test_hosted_sessions.c $(PROTO_DEPS) lumabri_secure.h lumabri_metrics.h src/runtime/lumabri_session_limits.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_hosted_sessions.c -o $@ -lm
 
 test_host_session_pool: tests/c/test_host_session_pool.c lumabri src/runtime/lumabri_host_sessions.h
@@ -139,10 +141,10 @@ check-warnings:
 		test_hedge test_local_fallback test_nat_adopt test_verify_failover test_rtt_refresh test_segment_v2 test_exec2 test_accum_order test_hybrid_parallel test_residency_report test_model_family test_planner test_cluster test_memory_budget test_calibration test_metrics \
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
 		test_meminfo test_process_memory test_engine_memory test_engine_memory_guard test_serve_control test_host_session_pool test_hosted_sessions test_host_drain test_node_control test_compute_broker test_compute_lease test_content_filter \
-		test_scheduler test_run_gate test_inventory test_home test_chat_ui test_weight_cache test_planner_io test_portfolio test_reply_stream test_chat_store test_model_routes test_replica_admission test_replica_rank test_replay_prefix test_capacity test_portfolio_policy \
+		test_scheduler test_run_gate test_inventory test_home test_chat_ui test_weight_cache test_planner_io test_portfolio test_reply_stream test_chat_store test_model_routes test_replica_admission test_replica_rank test_replay_prefix test_capacity test_portfolio_policy test_socket_transport test_secure_transport \
 		CFLAGS='$(CFLAGS) -Werror'
 
-SECURE_DEPS = lumabri_secure.h lumabri_crypto.h
+SECURE_DEPS = lumabri_secure.h lumabri_crypto.h src/protocol/lumabri_secure_channel.h $(SIGN_DEPS) $(PROTO_DEPS)
 HOME_NET_DEPS = lumabri_home_net.h lumabri_home_discovery.h lumabri_platform.h lumabri_wakeup.h lumabri_runtime_probe.h src/runtime/lumabri_resident_plan.h
 MACHINE_SRC = lumabri_machine.c
 MACHINE_DEPS = lumabri_machine.h $(MACHINE_SRC) src/runtime/lumabri_container_limits.h
@@ -200,7 +202,7 @@ test_elastic_policy: tests/c/test_elastic_policy.c $(ELASTIC_DEPS) src/runtime/l
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_elastic_policy.c -o $@
 lumabri test_chat_ui: lumabri_run_gate.c lumabri_run_gate.h src/runtime/lumabri_host_sessions.h
 
-lumabri: $(HOME_NET_DEPS) src/runtime/lumabri_probe_deadline.h lumabri.c src/ui/lumabri_tui.c src/ui/lumabri_tui.h src/ui/lumabri_visual.h src/ui/lumabri_chat_editor.h src/ui/lumabri_execution_view.h lumabri_proto.h src/protocol/lumabri_wire.h lumabri_sign.h \
+lumabri: $(HOME_NET_DEPS) src/runtime/lumabri_probe_deadline.h lumabri.c src/ui/lumabri_tui.c src/ui/lumabri_tui.h src/ui/lumabri_visual.h src/ui/lumabri_chat_editor.h src/ui/lumabri_execution_view.h $(PROTO_DEPS) $(SIGN_DEPS) \
 		lumabri_inventory.h lumabri_home.h lumabri_home_runtime.h src/ui/lumabri_home_ui.h lumabri_ready.h \
 		lumabri_families.h lumabri_planner.h lumabri_cluster.h lumabri_memory_budget.h lumabri_checkpoint_inventory.h lumabri_content.h \
 		lumabri_calibration.h $(SECURE_DEPS) $(MACHINE_DEPS)
@@ -258,7 +260,7 @@ MISSING_CHATTERS = $(filter-out $(CHATTER_ENGINES),$(HAVE_ENGINES))
 # into the chatter and expert-node build for that family. Compiler/ISA/OpenMP
 # details are appended at runtime by lmb_build_profile().
 ENGINE_PROFILE_DEPS := $(sort $(wildcard $(ENGINE)/*.h)) \
-                       lumabri_client.h lumabri_proto.h src/protocol/lumabri_wire.h lumabri_sign.h lumabri_sha.h \
+                       lumabri_client.h $(PROTO_DEPS) $(SIGN_DEPS) lumabri_sha.h \
                        $(SECURE_DEPS)
 define engine_source_id
 $(shell sha256sum $(ENGINE)/$(1).c $(ENGINE_PROFILE_DEPS) \
@@ -307,7 +309,7 @@ phase2-all: engines chatters
 # One expert-node binary per engine. The body is the same file; everything
 # engine-shaped lives in expert_engines/<name>.h, which pulls in the engine's
 # own source so remote and local run the same kernels on the same weights.
-EXPERT_DEPS = expert_node.c lumabri_proto.h src/protocol/lumabri_wire.h lumabri_sign.h $(SECURE_DEPS) $(MACHINE_DEPS)
+EXPERT_DEPS = expert_node.c $(PROTO_DEPS) $(SIGN_DEPS) $(SECURE_DEPS) $(MACHINE_DEPS)
 
 expert_node: $(EXPERT_DEPS) expert_engines/olmoe.h $(ENGINE)/olmoe.c \
              engine_patches/olmoe-p2p.diff $(ENGINE_PROFILE_DEPS)
@@ -468,7 +470,7 @@ build/%_p2p.c: $(ENGINE)/%.c engine_patches/make_patches.py engine_patches/%-p2p
 	python3 engine_patches/make_patches.py --engine-dir $(ENGINE) --apply-one $*.c --out $@
 	@sed -i 's/if (L\.on) {/if (lumi_layer_on(layer)) {/' $@
 
-ENGINE_P2P_DEPS = lumabri_client.h lumibri_client.h lumabri_proto.h src/protocol/lumabri_wire.h lumabri_sign.h \
+ENGINE_P2P_DEPS = lumabri_client.h lumibri_client.h $(PROTO_DEPS) $(SIGN_DEPS) \
                   $(SECURE_DEPS)
 
 olmoe_p2p: build/olmoe_p2p.c $(ENGINE_P2P_DEPS) build/srcid_olmoe
@@ -535,45 +537,45 @@ test-engines: test-phase2 test-phase2-glm test-phase2-inkling test-phase2-kimi
 
 tracker: $(HOME_NET_DEPS) tracker.c lumabri_segment_discovery.c lumabri_segment_discovery.h \
 		 lumabri_inventory.h lumabri_machine.h \
-		 lumabri_segment.c lumabri_segment.h lumabri_proto.h src/protocol/lumabri_wire.h lumabri_sha.h \
-		 lumabri_sign.h $(SECURE_DEPS)
+		 lumabri_segment.c lumabri_segment.h $(PROTO_DEPS) lumabri_sha.h \
+		 $(SIGN_DEPS) $(SECURE_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tracker.c lumabri_segment_discovery.c \
 		lumabri_segment.c -o $@
 
-maintainer: maintainer.c $(HOME_NET_DEPS) lumabri_content.h lumabri_proto.h src/protocol/lumabri_wire.h lumabri_sha.h \
-		lumabri_sign.h $(SECURE_DEPS)
+maintainer: maintainer.c $(HOME_NET_DEPS) lumabri_content.h $(PROTO_DEPS) lumabri_sha.h \
+		$(SIGN_DEPS) $(SECURE_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread maintainer.c -o $@
 
 # The shim interposes libc symbols, so it must not itself be interposable
 # state: -fPIC shared object, resolved via RTLD_NEXT at load time.
-$(SHIM_LIB): lumashim.c lumabri_proto.h src/protocol/lumabri_wire.h lumabri_sha.h lumabri_sign.h $(SECURE_DEPS)
+$(SHIM_LIB): lumashim.c $(PROTO_DEPS) lumabri_sha.h $(SIGN_DEPS) $(SECURE_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread lumashim.c -o $@ $(SHIM_FLAGS)
 
 test_shim: tests/c/test_shim.c lumabri_content.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_shim.c -o $@
 
-test_relay_exec: tests/c/test_relay_exec.c lumabri_proto.h src/protocol/lumabri_wire.h
+test_relay_exec: tests/c/test_relay_exec.c $(PROTO_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_relay_exec.c -o $@
 
-test_key_rotation: tests/c/test_key_rotation.c lumabri_sign.h
+test_key_rotation: tests/c/test_key_rotation.c $(SIGN_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_key_rotation.c -o $@
 
-test_hedge: tests/c/test_hedge.c lumabri_client.h lumabri_proto.h src/protocol/lumabri_wire.h lumabri_sign.h $(SECURE_DEPS)
+test_hedge: tests/c/test_hedge.c lumabri_client.h $(PROTO_DEPS) $(SIGN_DEPS) $(SECURE_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_hedge.c -o $@
 
-swarm_rows_bench: swarm_rows_bench.c lumabri_proto.h src/protocol/lumabri_wire.h $(SECURE_DEPS)
+swarm_rows_bench: swarm_rows_bench.c $(PROTO_DEPS) $(SECURE_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread swarm_rows_bench.c -o $@ -lm
 
-test_exec2: tests/c/test_exec2.c lumabri_proto.h src/protocol/lumabri_wire.h $(SECURE_DEPS)
+test_exec2: tests/c/test_exec2.c $(PROTO_DEPS) $(SECURE_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_exec2.c -o $@ -lm
 
-test_local_fallback: tests/c/test_local_fallback.c lumabri_client.h lumabri_proto.h src/protocol/lumabri_wire.h lumabri_sign.h $(SECURE_DEPS)
+test_local_fallback: tests/c/test_local_fallback.c lumabri_client.h $(PROTO_DEPS) $(SIGN_DEPS) $(SECURE_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_local_fallback.c -o $@
 
-test_accum_order: tests/c/test_accum_order.c lumabri_client.h lumabri_proto.h src/protocol/lumabri_wire.h lumabri_sign.h $(SECURE_DEPS)
+test_accum_order: tests/c/test_accum_order.c lumabri_client.h $(PROTO_DEPS) $(SIGN_DEPS) $(SECURE_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_accum_order.c -o $@ -lm
 
-test_residency_report: tests/c/test_residency_report.c lumabri_client.h lumabri_proto.h src/protocol/lumabri_wire.h lumabri_sign.h $(SECURE_DEPS)
+test_residency_report: tests/c/test_residency_report.c lumabri_client.h $(PROTO_DEPS) $(SIGN_DEPS) $(SECURE_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_residency_report.c -o $@ -lm
 
 test_model_family: tests/c/test_model_family.c lumabri_families.h
@@ -597,17 +599,25 @@ test_calibration: tests/c/test_calibration.c lumabri_calibration.h lumabri_calib
 test_catalogue_advice: tests/c/test_catalogue_advice.c src/planner/lumabri_catalogue_advice.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_catalogue_advice.c -o $@
 
-test_tcp_latency: tests/c/test_tcp_latency.c $(SECURE_DEPS) lumabri_proto.h src/protocol/lumabri_wire.h lumabri_sign.h
+test_socket_transport: tests/c/test_socket_transport.c $(PROTO_DEPS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Wno-unused-function -pthread $< -o $@
+
+test_secure_transport: tests/c/test_secure_transport.c $(SECURE_DEPS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Wno-unused-function -pthread $< -o $@
+
+test check-warnings: test_socket_transport test_secure_transport
+
+test_tcp_latency: tests/c/test_tcp_latency.c $(SECURE_DEPS) $(PROTO_DEPS) $(SIGN_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_tcp_latency.c -o $@
 
 test_metrics: tests/c/test_metrics.c lumabri_metrics.h lumabri_stage_metrics.h src/runtime/lumabri_response_metrics.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_metrics.c -o $@
 
-test_hybrid_parallel: tests/c/test_hybrid_parallel.c src/runtime/lumabri_q8_reference.h lumabri_client.h lumabri_proto.h src/protocol/lumabri_wire.h lumabri_sign.h $(SECURE_DEPS)
+test_hybrid_parallel: tests/c/test_hybrid_parallel.c src/runtime/lumabri_q8_reference.h lumabri_client.h $(PROTO_DEPS) $(SIGN_DEPS) $(SECURE_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_hybrid_parallel.c -o $@ -lm
 
 
-test_inventory: tests/c/test_inventory.c lumabri_inventory.h lumabri_machine.h lumabri_proto.h src/protocol/lumabri_wire.h lumabri_sign.h $(SECURE_DEPS)
+test_inventory: tests/c/test_inventory.c lumabri_inventory.h lumabri_machine.h $(PROTO_DEPS) $(SIGN_DEPS) $(SECURE_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_inventory.c -o $@
 
 test_api_json: tests/c/test_api_json.c src/runtime/lumabri_api_json.h
@@ -639,7 +649,7 @@ test-api: test_api_json test_api_http test_api_access test_chat_store test_model
 test_journal_index: tests/c/test_journal_index.c src/runtime/lumabri_journal_index.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_journal_index.c -o $@
 
-test_tracker_history: tests/c/test_tracker_history.c tracker.c lumabri_segment_discovery.c lumabri_segment.c $(SECURE_DEPS) $(HOME_NET_DEPS) lumabri_proto.h src/protocol/lumabri_wire.h lumabri_sha.h lumabri_sign.h
+test_tracker_history: tests/c/test_tracker_history.c tracker.c lumabri_segment_discovery.c lumabri_segment.c $(SECURE_DEPS) $(HOME_NET_DEPS) $(PROTO_DEPS) lumabri_sha.h $(SIGN_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_tracker_history.c lumabri_segment_discovery.c lumabri_segment.c -o $@
 
 test_allocation_lifetime: tests/c/test_allocation_lifetime.c src/runtime/lumabri_allocation_lifetime.h src/runtime/lumabri_retired_receipts.h $(SECURE_DEPS)
@@ -696,7 +706,7 @@ test-chat-history: build/web_assets.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_chat_history.c src/ui/lumabri_tui.c lumabri_machine.c lumabri_run_gate.c -o build/tests/chat-history
 	./build/tests/chat-history
 
-test_home: tests/c/test_home.c lumabri_home.h lumabri_inventory.h lumabri_families.h lumabri_proto.h src/protocol/lumabri_wire.h
+test_home: tests/c/test_home.c lumabri_home.h lumabri_inventory.h lumabri_families.h $(PROTO_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_home.c -o $@
 
 test_chat_ui: $(HOME_NET_DEPS) $(SECURE_DEPS) src/runtime/lumabri_probe_deadline.h tests/c/test_chat_ui.c lumabri.c src/ui/lumabri_tui.c src/ui/lumabri_tui.h src/ui/lumabri_visual.h src/ui/lumabri_chat_editor.h src/ui/lumabri_execution_view.h lumabri_home_runtime.h src/ui/lumabri_home_ui.h lumabri_ready.h lumabri_cluster.h lumabri_memory_budget.h lumabri_checkpoint_inventory.h lumabri_content.h
@@ -734,36 +744,36 @@ test-chat-ui: lumabri test_chat_ui test-ready-pipe
 segment_budget_probe: segment_budget_probe.c lumabri_planner.h lumabri_families.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) segment_budget_probe.c -o $@
 
-test_rtt_refresh: tests/c/test_rtt_refresh.c lumabri_client.h lumabri_proto.h src/protocol/lumabri_wire.h lumabri_sign.h $(SECURE_DEPS)
+test_rtt_refresh: tests/c/test_rtt_refresh.c lumabri_client.h $(PROTO_DEPS) $(SIGN_DEPS) $(SECURE_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_rtt_refresh.c -o $@
 
-test_nat_adopt: tests/c/test_nat_adopt.c lumabri_client.h lumabri_proto.h src/protocol/lumabri_wire.h lumabri_sign.h $(SECURE_DEPS)
+test_nat_adopt: tests/c/test_nat_adopt.c lumabri_client.h $(PROTO_DEPS) $(SIGN_DEPS) $(SECURE_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_nat_adopt.c -o $@
 
-test_verify_failover: tests/c/test_verify_failover.c lumabri_client.h lumabri_proto.h src/protocol/lumabri_wire.h lumabri_sign.h
+test_verify_failover: tests/c/test_verify_failover.c lumabri_client.h $(PROTO_DEPS) $(SIGN_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_verify_failover.c -o $@
 
 test_segment_v2: tests/c/test_segment_v2.c lumabri_segment.c lumabri_segment.h \
-		 lumabri_proto.h src/protocol/lumabri_wire.h lumabri_sha.h
+		 $(PROTO_DEPS) lumabri_sha.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_segment_v2.c lumabri_segment.c -o $@
 
 test_segment_discovery: tests/c/test_segment_discovery.c lumabri_segment_discovery.c \
 		lumabri_segment_discovery.h lumabri_segment.c lumabri_segment.h \
-		lumabri_proto.h src/protocol/lumabri_wire.h lumabri_sign.h lumabri_sha.h
+		$(PROTO_DEPS) $(SIGN_DEPS) lumabri_sha.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_segment_discovery.c \
 		lumabri_segment_discovery.c lumabri_segment.c -o $@
 
-test_swarm_detail: tests/c/test_swarm_detail.c lumabri_proto.h src/protocol/lumabri_wire.h
+test_swarm_detail: tests/c/test_swarm_detail.c $(PROTO_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_swarm_detail.c -o $@
 
-swarm_probe: swarm_probe.c lumabri_proto.h src/protocol/lumabri_wire.h lumabri_sign.h $(SECURE_DEPS)
+swarm_probe: swarm_probe.c $(PROTO_DEPS) $(SIGN_DEPS) $(SECURE_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread swarm_probe.c -o $@
 
 test_relay_rate: tests/c/test_relay_rate.c lumabri_segment.c lumabri_segment.h \
-		lumabri_proto.h src/protocol/lumabri_wire.h
+		$(PROTO_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_relay_rate.c lumabri_segment.c -o $@
 
-test_machine: tests/c/test_machine.c $(MACHINE_DEPS) lumabri_proto.h src/protocol/lumabri_wire.h
+test_machine: tests/c/test_machine.c $(MACHINE_DEPS) $(PROTO_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_machine.c $(MACHINE_SRC) -o $@
 
 .PHONY: test-container-limits
@@ -774,7 +784,7 @@ build/tests/container-limits: tests/c/test_container_limits.c src/runtime/lumabr
 	@mkdir -p build/tests
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_container_limits.c -o $@
 
-build/tests/probe-container-budget: tests/c/probe_container_budget.c $(MACHINE_DEPS) lumabri_proto.h src/protocol/lumabri_wire.h
+build/tests/probe-container-budget: tests/c/probe_container_budget.c $(MACHINE_DEPS) $(PROTO_DEPS)
 	@mkdir -p build/tests
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/probe_container_budget.c $(MACHINE_SRC) -o $@
 
@@ -785,10 +795,10 @@ test_process_memory: tests/c/test_process_memory.c src/runtime/lumabri_process_m
 
 test check-warnings: test_process_memory
 
-test_meminfo: tests/c/test_meminfo.c $(MACHINE_DEPS) lumabri_proto.h src/protocol/lumabri_wire.h
+test_meminfo: tests/c/test_meminfo.c $(MACHINE_DEPS) $(PROTO_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_meminfo.c $(MACHINE_SRC) -o $@
 
-test_compute_lease: tests/c/test_compute_lease.c $(MACHINE_DEPS) lumabri_proto.h src/protocol/lumabri_wire.h
+test_compute_lease: tests/c/test_compute_lease.c $(MACHINE_DEPS) $(PROTO_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_compute_lease.c $(MACHINE_SRC) -o $@
 
 test_content_filter: tests/c/test_content_filter.c lumabri_content.h
@@ -908,14 +918,14 @@ ENGINE_MEMORY_FLAGS = -include $(HYBRID_ROOT)/src/runtime/lumabri_engine_memory_
 SEGMENT_CFLAGS = $(CFLAGS) -I. -I$(ENGINE) $(OMP_FLAGS) $(ENGINE_MEMORY_FLAGS)
 SEGMENT_COMMON = segment_colibri.h src/runtime/lumabri_thread_capacity.h src/runtime/lumabri_resident.h src/runtime/lumabri_process_memory.h src/runtime/lumabri_resident_guard.h src/runtime/lumabri_backend_policy.h lumabri_segment.c lumabri_segment.h \
 		lumabri_segment_discovery.c lumabri_segment_discovery.h \
-		lumabri_proto.h src/protocol/lumabri_wire.h lumabri_sign.h lumabri_sha.h $(SECURE_DEPS)
+		$(PROTO_DEPS) $(SIGN_DEPS) lumabri_sha.h $(SECURE_DEPS)
 
 HYBRID_PATCH_INPUTS = tools/prepare_resident_adapters.py engine_patches/make_patches.py \
 	src/runtime/lumabri_engine_memory_override.h src/runtime/lumabri_engine_memory.h \
 	lumabri_home_hybrid.h src/runtime/lumabri_hybrid_policy.h src/runtime/lumabri_q8_reference.h \
 	engine_patches/deepseek_v4_p2p.py $(wildcard engine_patches/*-p2p.diff) \
 	lumabri_client.h lumibri_client.h lumi_v4_ext.h lumi_v4_bridge.c \
-	lumabri_proto.h src/protocol/lumabri_wire.h lumabri_sign.h lumabri_secure.h lumabri_crypto.h \
+	$(PROTO_DEPS) $(SIGN_DEPS) $(SECURE_DEPS) \
 	lumabri_sha.h
 
 .PHONY: segment-options-force
@@ -967,7 +977,7 @@ build/bench_edge_memory: tests/c/bench_edge_memory.c src/runtime/lumabri_process
 		tests/c/bench_edge_memory.c $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
 
 # Optional diagnostic; requires explicit, already approved household routes.
-build/bench_home_hybrid: tests/c/bench_home_hybrid.c tests/c/bench_hybrid_numeric.h tests/c/bench_block_verify.h tests/c/bench_causal_spec.h lumabri_client.h lumabri_proto.h src/protocol/lumabri_wire.h $(SECURE_DEPS) $(COLIBRI_SEGMENT_LIB)
+build/bench_home_hybrid: tests/c/bench_home_hybrid.c tests/c/bench_hybrid_numeric.h tests/c/bench_block_verify.h tests/c/bench_causal_spec.h lumabri_client.h $(PROTO_DEPS) $(SECURE_DEPS) $(COLIBRI_SEGMENT_LIB)
 	$(CC) $(CPPFLAGS) -O2 $(ENGINE_CPU_FLAGS) $(OMP_FLAGS) $(ENGINE_MEMORY_FLAGS) -pthread -I$(HYBRID_ENGINE_DIR) \
 		-include lumi_v4_ext.h -DLUMABRI_P2P -DLUMIBRI_P2P -DCOLI_SEGMENT_ADAPTER -DCOLI_EDGE_ADAPTER \
 		tests/c/bench_home_hybrid.c $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
@@ -1017,7 +1027,7 @@ build/v41_range_core.c: tools/prepare_v41_range.py $(ENGINE)/deepseek_v41.c
 build/test_v41_range: tests/c/test_v41_range.c engine_patches/v41_boundary.h engine_patches/v41_lifecycle.h build/v41_range_core.c build/segment-sources build/segment-options
 	$(CC) $(CPPFLAGS) -O2 $(OMP_FLAGS) -pthread -I. -Ibuild -I$(ENGINE) tests/c/test_v41_range.c -o $@ -lm $(OMP_LIBS)
 
-build/test_v41_transport: tests/c/test_v41_transport.c engine_patches/v41_boundary.h engine_patches/v41_lifecycle.h build/v41_range_core.c lumabri_segment.c lumabri_segment.h lumabri_proto.h src/protocol/lumabri_wire.h $(SECURE_DEPS) build/segment-sources build/segment-options
+build/test_v41_transport: tests/c/test_v41_transport.c engine_patches/v41_boundary.h engine_patches/v41_lifecycle.h build/v41_range_core.c lumabri_segment.c lumabri_segment.h $(PROTO_DEPS) $(SECURE_DEPS) build/segment-sources build/segment-options
 	$(CC) $(CPPFLAGS) -O2 $(OMP_FLAGS) -pthread -I. -Ibuild -I$(ENGINE) tests/c/test_v41_transport.c lumabri_segment.c -o $@ -lm $(OMP_LIBS)
 
 build/test_v41_abi: tests/c/test_v41_abi.c engine_patches/v41_adapter.h engine_patches/v41_boundary.h engine_patches/v41_lifecycle.h $(wildcard planner_adapters/*.h) src/runtime/lumabri_v41_contract.h build/v41_range_core.c build/segment-sources build/segment-options
@@ -1079,7 +1089,7 @@ test-segment-priority-real: tracker segment-direct
 test-relay-exec: tracker expert_node test_relay_exec fixture
 	bash ./tests/integration/relay_exec_test.sh
 
-test_swarm_fed: tests/c/test_swarm_fed.c lumabri_proto.h src/protocol/lumabri_wire.h
+test_swarm_fed: tests/c/test_swarm_fed.c $(PROTO_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_swarm_fed.c -o $@
 
 test-swarm-fed: tracker maintainer liblumabri.so expert_node test_swarm_fed fixture
@@ -1202,6 +1212,8 @@ test: all test_weight_cache test_key_rotation test_hedge test_local_fallback tes
 	./test_catalogue_advice
 	./test_metrics
 	./test_hybrid_parallel
+	./test_secure_transport
+	./test_socket_transport
 	./test_tcp_latency
 	./test_nat_adopt
 	bash ./tests/integration/rtt_refresh_test.sh
@@ -1273,7 +1285,7 @@ clean:
 	      test_compute_lease test_content_filter test_scheduler test_run_gate \
 	      test_compute_broker test_portfolio test_reply_stream test_api_json test_api_http test_api_access test_chat_store test_model_routes test_replica_admission test_replica_rank test_replay_prefix test_capacity test_portfolio_policy test_elastic_policy test_retired_receipts test_allocation_lifetime test_journal_index test_tracker_history \
 	      test_segment_v2_tsan tracker_tsan \
-	      segment_node segment_chat test_backend_routes test_segment_close test_tcp_latency segment_node_asan segment_chat_asan \
+	      segment_node segment_chat test_backend_routes test_segment_close test_tcp_latency test_socket_transport test_secure_transport segment_node_asan segment_chat_asan \
 	      segment_node_tsan segment_chat_tsan \
 	      olmoe_p2p colibri_p2p inkling_p2p kimi_k3_p2p deepseek_p2p qwen36_p2p \
 	      expert_node expert_node_glm expert_node_inkling expert_node_kimi \

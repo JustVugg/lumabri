@@ -53,6 +53,14 @@ def main():
     run([args.cc,*flags,'-Werror',root/'tests/c/test_segment_v2.c',
          root/'lumabri_segment.c','-static','-lwinpthread',
          '-o',output/'test_segment_v2.exe'])
+    run([args.cc,*flags,'-Werror','-Wno-unused-function',
+         root/'tests/c/test_socket_transport.c','-static','-lwinpthread','-lws2_32',
+         '-o',output/'test_socket_transport.exe'])
+    run([args.cc,*flags,'-Werror','-Wno-unused-function',
+         root/'tests/c/test_secure_transport.c','-static','-lwinpthread','-lws2_32','-lbcrypt',
+         '-o',output/'test_secure_transport.exe'])
+    run([args.cc,*flags,'-Werror','-Wno-unused-function',
+         root/'tests/c/test_crypto_vectors.c','-static','-o',output/'test_crypto_vectors.exe'])
     print('Native inference gate:',output/'test_segment_windows.exe')
 
 

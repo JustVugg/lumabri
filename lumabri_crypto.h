@@ -14,7 +14,7 @@
 
 #include <stdint.h>
 #include <string.h>
-#include "lumabri_sign.h"          /* SHA-512 + Curve25519 field ops */
+#include "src/crypto/lumabri_sign_core.h" /* SHA-512 + Curve25519 field ops */
 
 /* ---- ChaCha20 (RFC 8439 §2.3) ------------------------------------------ */
 
