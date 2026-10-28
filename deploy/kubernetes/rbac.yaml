@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: lumabri-policy-controller
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: lumabri-policy-controller
+rules:
+  - apiGroups: [lumabri.io]
+    resources: [replicapolicies]
+    verbs: [get, list, patch]
+  - apiGroups: [lumabri.io]
+    resources: [replicapolicies/status]
+    verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: lumabri-policy-controller
+subjects:
+  - kind: ServiceAccount
+    name: lumabri-policy-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: lumabri-policy-controller
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: lumabri-policy-count
+spec:
+  hard:
+    count/replicapolicies.lumabri.io: "32"

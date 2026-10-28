@@ -66,6 +66,10 @@ class InstalledContractTest(unittest.TestCase):
                 record = copy.deepcopy(manifest); record[key]["tracked_changes"] = True; invalid.append(record)
             for name in (launcher, "bin/lumabri", "bin/segment_node", "bin/segment_chat"):
                 record = copy.deepcopy(manifest); del record["files"][name]; invalid.append(record)
+            legacy = copy.deepcopy(manifest); del legacy["files"]["bin/lumabri-agent"]
+            invalid.append(legacy)
+            with patch.object(native_package, "verify", return_value=legacy):
+                self.assertEqual(checked_package(directory, require_agent=False), (directory, legacy))
             for name in ("bin/test_chat_ui", "bin/segment_chat.real", "tests/helper.py", "build/runtime"):
                 record = copy.deepcopy(manifest); record["files"][name] = {}; invalid.append(record)
             for record in invalid:
