@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import subprocess
 import time
@@ -93,12 +94,12 @@ def main():
     kube("create", "namespace", namespace)
     try:
         create({"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "household-key"}, "stringData": {"token": secret}})
-        tracker = pod("tracker", ["tracker", "--port", "47300"]) + ":47300"
+        tracker = pod("tracker", ["tracker", "--port", "47300", "--household-discovery"]) + ":47300"
         for name in ("worker-a", "worker-b"):
             pod(name, ["lumabri", "donor", "--headless", "--join", tracker, "--name", name, "--ram-gb", "1.5"], donor=True)
         init_gateway = '''import os,pathlib
 h=pathlib.Path(os.environ["HOME"])/".lumabri"; h.mkdir(mode=0o700,exist_ok=True)
-p=h/"home.conf"; p.write_text("models=/fixtures\\ntracker="+os.environ["TEST_TRACKER"]+"\\n"); p.chmod(0o600)
+p=h/"home.conf"; p.write_text("models=/fixtures\\ntracker="+os.environ["TEST_TRACKER"]+"\\ntoken="+os.environ["LUMABRI_TOKEN"]+"\\n"); p.chmod(0o600)
 os.execvp("lumabri",["lumabri","api","serve","--tracker",os.environ["TEST_TRACKER"],"--port","47380"])
 '''
         pod("gateway", ["python3", "-c", init_gateway], tracker=tracker)
@@ -174,7 +175,9 @@ os.execvp("lumabri",["lumabri","api","serve","--tracker",os.environ["TEST_TRACKE
             assert state["live"] and state["model_count"] == 2, state
             log = execute(worker, "cat", "/var/lib/lumabri/.lumabri/home/engines.log").stdout
             assert log.count("event=ready policy=engine-locked fault=0") >= 2
-            assert "[engine-memory] allocations=" in log and "event=lost" not in log
+            locks = re.findall(r"\[engine-memory\] allocations=(\d+) requested_bytes=(\d+) locked_bytes=(\d+) retained_locked_bytes=(\d+)", log)
+            assert len(locks) >= 2 and all(int(n) > 0 and 0 < int(wanted) <= int(locked) for n, wanted, locked, retained in locks)
+            assert "event=lost" not in log and "event=ready policy=observe" not in log
             report["workers"][worker] = {"model_count": state["model_count"], "reserved_bytes": state["reserved_total_bytes"], "locks_verified": True}
         report["complete"] = True
         args.report.write_text(json.dumps(report, indent=2) + "\n")
@@ -184,6 +187,7 @@ os.execvp("lumabri",["lumabri","api","serve","--tracker",os.environ["TEST_TRACKE
             for name in ("tracker", "gateway", "worker-a", "worker-b"):
                 print(name, kube("logs", name, "--tail=30", check=False).stdout)
                 if name.startswith("worker"):
+                    print(execute(name, "lumabri", "service", "status", "--json", check=False).stdout)
                     print(execute(name, "tail", "-n", "35", "/var/lib/lumabri/.lumabri/home/engines.log", check=False).stdout)
         kube("delete", "namespace", namespace, "--wait=false", check=False)
 
