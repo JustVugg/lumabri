@@ -46,6 +46,7 @@ jobs:
           ./build/windows-control/test_peer_identity_windows.exe 2>&1 | tee -a build/windows-control-evidence.log
           ./build/windows-control/test_runtime_probe.exe 2>&1 | tee -a build/windows-control-evidence.log
           ./build/windows-control/test_process_probe_windows.exe 2>&1 | tee -a build/windows-control-evidence.log
+          ./build/windows-control/test_owned_process_windows.exe 2>&1 | tee -a build/windows-control-evidence.log
           ./build/windows-control/test_service_windows.exe 2>&1 | tee -a build/windows-control-evidence.log
       - uses: actions/upload-artifact@v4
         if: always()
@@ -90,7 +91,7 @@ jobs:
       - name: Compare resident full and split OLMoE inference on Windows
         run: |
           set -o pipefail
-          ./build/windows-segment/test_segment_windows.exe "$(cygpath -w "$PWD/build/fixture")" 2>&1 | tee build/windows-segment-evidence.log
+          ./build/windows-segment/test_owned_process_windows.exe --engine "$(cygpath -w "$PWD/build/windows-segment/test_segment_windows.exe")" "$(cygpath -w "$PWD/build/fixture")" 2>&1 | tee build/windows-segment-evidence.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:

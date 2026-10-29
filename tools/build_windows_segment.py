@@ -28,7 +28,9 @@ def main():
     def run(command):
         subprocess.run([str(v) for v in command],cwd=root,check=True)
     flags=['-I'+str(root),'-I'+str(source),'-O2','-Wall','-Wextra',
-           '-D_FILE_OFFSET_BITS=64','-D_WIN32_WINNT=0x0601']
+           '-D_FILE_OFFSET_BITS=64','-D_WIN32_WINNT=0x0A00']
+    run([args.cc,*flags,'-Werror','-municode',root/'tests/c/test_owned_process_windows.c',
+         '-static','-o',output/'test_owned_process_windows.exe'])
     if args.only != 'contracts':
         run([sys.executable,'-X','utf8','tools/prepare_engine_source.py','--source',
              Path(args.engine).resolve(),'--output',source])
