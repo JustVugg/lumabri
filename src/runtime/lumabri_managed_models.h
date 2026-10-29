@@ -37,7 +37,10 @@ static int api_route_append(Cap *body, int access, const char *tracker, const Lm
     for (uint32_t i=0;!bad && i<snapshot->count;i++) {
         const LmbModelRoute *route=&snapshot->routes[i];
         if (strcmp(route->tracker,tracker) || (user && !lmb_api_user_allows(user,route->id))) continue;
-        bad=api_route_record(body,route,(*comma)++,user==NULL);
+        if (api_dialect) {
+            char id[65]; lmb_hex(id,route->id,32);
+            bad=api_compat_model(body,id,route->name,(*comma)++);
+        } else bad=api_route_record(body,route,(*comma)++,user==NULL);
     }
     free(snapshot); close(dir); return bad ? -1 : 0;
 }

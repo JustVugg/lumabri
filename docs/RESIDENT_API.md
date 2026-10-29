@@ -241,8 +241,10 @@ not download a model, approve a donor, change placement or evict weights.
 The TUI and gateway use the same authenticated allocation checks, hosted
 connection, chat templates and incremental reply decoder.
 
-The default endpoint is loopback-only (`127.0.0.1`). It is **not an OpenAI API**
-and must not be exposed through a public plain-HTTP port forward. Explicit
+The native `/api/v1/chat` protocol remains available. Applications can also use
+the [OpenAI Chat Completions and Anthropic Messages text subsets](CLIENT_APIS.md).
+The default endpoint is loopback-only (`127.0.0.1`) and must not be exposed
+through a public plain-HTTP port forward. Explicit
 [HTTPS mode](HTTPS_INGRESS.md) uses a private Unix upstream and a separately
 configured same-user TLS proxy. The default bundled browser chat opens at
 `http://127.0.0.1:47380/`.

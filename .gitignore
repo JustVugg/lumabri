@@ -88,3 +88,5 @@ test_node_control
 
 /test_socket_transport
 /test_secure_transport
+
+/test_api_compat
