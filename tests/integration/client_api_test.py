@@ -31,7 +31,11 @@ def verify_client_protocols(port, alice, bob, first, second):
     version = {"anthropic-version": "2023-06-01"}
     messages = [{"role": "user", "content": "hi"}]
     base = {"model": first, "messages": messages, "max_tokens": 8, "temperature": 0}
+    initial_history = {}
     for token, model in ((alice, first), (bob, second)):
+        status, history = json_request("/api/v1/conversations", token=token)
+        assert status == 200
+        initial_history[token] = history
         status, answer = json_request("/v1/models", token=token)
         assert status == 200 and answer["object"] == "list", answer
         assert [m["id"] for m in answer["data"]] == [model], answer
@@ -108,8 +112,10 @@ def verify_client_protocols(port, alice, bob, first, second):
             assert status == 429 and time.monotonic() < deadline, (status, data)
             time.sleep(.1)
 
-    # No automatic conversation persistence or cross-user history.
-    assert json_request("/api/v1/conversations")[1]["conversations"] == []
+    # API calls preserve each user's history, including conversations already
+    # created by the real browser test in the combined acceptance flow.
+    for token, history in initial_history.items():
+        assert json_request("/api/v1/conversations", token=token) == (200, history)
     if os.environ.get("LUMABRI_TEST_CLIENT_SDKS") == "1":
         import openai as oa
         import anthropic as an

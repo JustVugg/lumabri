@@ -132,7 +132,7 @@ static int api_compat_payload(ApiCompat *c,const LmbJson *j,unsigned messages,En
     if (kind==EK_QWEN38 && *sys) {
         /* Keep the family default reasoning instruction in the same system turn. */
         if (cap_str(out,"<|im_start|>system\n") || cap_str(out,sys) || cap_str(out,"\n\n") ||
-            cap_str(out,QW38_SYS+strlen("<|im_start|>system\n"))) return -1;
+            cap_str(out,&QW38_SYS[strlen("<|im_start|>system\n")])) return -1;
     } else if (serve2_prefix(out,kind)) return -1;
     if (*sys) {
         int bad=0;
