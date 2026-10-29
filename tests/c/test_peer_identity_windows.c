@@ -148,7 +148,8 @@ int wmain(int argc, wchar_t **argv) {
     wchar_t base[512], root[640], key_w[700], link_w[700];
     assert(GetTempPathW(512, base));
     assert(swprintf(root, 640, L"%lslumabri-identity-%lu-\x00e8", base, GetCurrentProcessId()) > 0);
-    char dir[2048], key[2048], pins[2048], known[2048]; utf8(dir, sizeof dir, root);
+    char dir[2048], key[2048], pins[sizeof dir + 32], known[sizeof dir + 32];
+    utf8(dir, sizeof dir, root);
     assert(!lmb_private_mkdir(dir));
     assert(swprintf(key_w, 700, L"%ls\\peer.key", root) > 0); utf8(key, sizeof key, key_w);
     process_race(key_w);
@@ -160,7 +161,9 @@ int wmain(int argc, wchar_t **argv) {
     assert(!lmb_peer_identity(key, sk, pk) && !memcmp(saved, pk, 32));
     HANDLE h = lmb_private_open(key, 0, 0, NULL); DWORD flags = 0;
     assert(h != INVALID_HANDLE_VALUE && GetHandleInformation(h, &flags) && !(flags & HANDLE_FLAG_INHERIT)); CloseHandle(h);
-    snprintf(pins, sizeof pins, "%s\\pins", dir); snprintf(known, sizeof known, "%s\\known_hosts", dir);
+    int pn = snprintf(pins, sizeof pins, "%s\\pins", dir);
+    int kn = snprintf(known, sizeof known, "%s\\known_hosts", dir);
+    assert(pn > 0 && (size_t)pn < sizeof pins && kn > 0 && (size_t)kn < sizeof known);
     assert(!lmb_sec_pin_file(pins, "localhost:1234", pk, 1));
     assert(!lmb_sec_pin_file(pins, "localhost:1234", pk, 0));
     pk[0] ^= 1; assert(lmb_sec_pin_file(pins, "localhost:1234", pk, 1)); pk[0] ^= 1;
