@@ -7,6 +7,37 @@
 
 static const char *const home_service_roles[] = {"manager", "donor", "tracker", "prepare", "api"};
 
+static void home_service_wait_ms(unsigned milliseconds) {
+#ifdef _WIN32
+    Sleep(milliseconds);
+#else
+    (void)poll(NULL, 0, (int)milliseconds);
+#endif
+}
+
+/* A successful probe of the singleton lock, not an absent RPC endpoint or a
+ * saved PID, is the authority to start a replacement. */
+static int home_service_lock_available(const char *role) {
+    char path[1200];
+    if (home_service_path(role, "lock", path, sizeof path)) return -1;
+#ifdef _WIN32
+    HANDLE lock = lmb_private_open(path, 0, 0, NULL);
+    if (lock == INVALID_HANDLE_VALUE) return errno == ENOENT ? 1 : -1;
+    OVERLAPPED at = {0};
+    int free_lock = LockFileEx(lock, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                              0, MAXDWORD, MAXDWORD, &at) != 0;
+    DWORD error = free_lock ? ERROR_SUCCESS : GetLastError();
+    CloseHandle(lock);
+    return free_lock ? 1 : error == ERROR_LOCK_VIOLATION ? 0 : -1;
+#else
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return errno == ENOENT ? 1 : -1;
+    int rc = flock(fd, LOCK_EX | LOCK_NB), error = errno;
+    close(fd);
+    return !rc ? 1 : error == EWOULDBLOCK || error == EAGAIN ? 0 : -1;
+#endif
+}
+
 static void home_service_reconcile(HomeService *manager) {
     unsigned live = 0, interrupted = 0;
     for (unsigned i = 1; i < sizeof home_service_roles / sizeof *home_service_roles; i++) {
@@ -18,15 +49,39 @@ static void home_service_reconcile(HomeService *manager) {
         "%u live keeper(s), %u interrupted operation(s). Old approvals are never replayed.", live, interrupted);
 }
 
+static int home_service_manager_run(HomeService *manager) {
+    double reconciled = -2;
+    int rc = 0;
+    while (!g_stopping) {
+        if (nowd() - reconciled >= 2) { home_service_reconcile(manager); reconciled = nowd(); }
+        if (home_service_save(manager)) { rc = 1; break; }
+        int op = home_service_poll(manager);
+        if (op == HOME_SVC_STOP) break;
+        home_service_answer(manager);
+        home_service_wait_ms(50);
+    }
+    manager->snapshot.state = rc ? HOME_SVC_FAILED : HOME_SVC_STOPPED;
+    if (home_service_save(manager)) rc = 1;
+    home_service_answer(manager); home_service_close(manager);
+    return rc;
+}
+
+#ifdef _WIN32
+#include "src/runtime/lumabri_manager_windows.h"
+#endif
+
 static int home_service_ensure(void) {
     if (home_service_foreground()) return 0;
     HomeServiceSnapshot existing;
     if (!home_service_query("manager", HOME_SVC_STATUS, NULL, &existing)) return 0;
+#ifdef _WIN32
+    return home_service_manager_start_windows();
+#else
     HomeService manager;
     if (home_service_open(&manager, "manager")) {
         /* Another terminal can be starting the same singleton. */
         for (int i = 0; i < 20; i++) {
-            (void)poll(NULL, 0, 50);
+            home_service_wait_ms(50);
             if (!home_service_query("manager", HOME_SVC_STATUS, NULL, &existing)) return 0;
         }
         return -1;
@@ -38,46 +93,28 @@ static int home_service_ensure(void) {
     if (detached) {
         for (int i = 0; i < 40; i++) {
             if (!home_service_query("manager", HOME_SVC_STATUS, NULL, &existing)) return 0;
-            (void)poll(NULL, 0, 50);
+            home_service_wait_ms(50);
         }
         return -1;
     }
-    double reconciled = 0;
-    while (!g_stopping) {
-        if (nowd() - reconciled >= 2) { home_service_reconcile(&manager); reconciled = nowd(); }
-        if (home_service_save(&manager)) break;
-        int op = home_service_poll(&manager);
-        if (op == HOME_SVC_STOP) break;
-        home_service_answer(&manager);
-        (void)poll(NULL, 0, 50);
-    }
-    manager.snapshot.state = HOME_SVC_STOPPED;
-    (void)home_service_save(&manager); home_service_answer(&manager); home_service_close(&manager);
-    _exit(0);
+    _exit(home_service_manager_run(&manager));
+#endif
 }
 
 static int home_service_stop_role(const char *role) {
     HomeServiceSnapshot before, after;
     if (home_service_query(role, HOME_SVC_STATUS, NULL, &before)) {
         /* No socket is not proof of no live keeper. Consult its lock. */
-        char path[1200];
-        if (home_service_path(role, "lock", path, sizeof path)) return -1;
-        int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-        if (fd < 0) return errno == ENOENT ? 0 : -1;
-        int rc = flock(fd, LOCK_EX | LOCK_NB); close(fd); return rc;
+        return home_service_lock_available(role) == 1 ? 0 : -1;
     }
     int rc = home_service_query(role, HOME_SVC_STOP, &before, &after);
     /* Cleanup can take longer than one RPC deadline. Do not kill a saved PID
      * or start its replacement until the real singleton lock is released. */
     for (int i = 0; i < 60; i++) {
-        char path[1200];
-        if (home_service_path(role, "lock", path, sizeof path)) return -1;
-        int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-        if (fd >= 0) {
-            int free_lock = !flock(fd, LOCK_EX | LOCK_NB); close(fd);
-            if (free_lock) return 0;
-        }
-        (void)poll(NULL, 0, 100);
+        int available = home_service_lock_available(role);
+        if (available == 1) return 0;
+        if (available < 0) return -1;
+        home_service_wait_ms(100);
     }
     (void)rc; return -1;
 }

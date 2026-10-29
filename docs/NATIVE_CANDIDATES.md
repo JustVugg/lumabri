@@ -69,6 +69,16 @@ The latest measured speed is historical, not a guarantee for the next turn.
   atomic journal replacement and crash recovery. A journal never grants
   permission to replay an approval. This gate does not yet deliver the full
   native Windows household service or package.
+- The native `lumabri.exe` control entrypoint can now start, inspect, restart
+  and stop the private background manager with `service`, and report the
+  Windows machine inventory with `machine --json`. The shared manager loop
+  observes existing keepers without replaying approvals. Its native acceptance
+  test starts eight clients concurrently, closes the launchers, restarts and
+  crashes the manager, and verifies that a separate keeper retains its state.
+  This is the control entrypoint, not a connected Windows household TUI/donor
+  or a complete Windows package. Build it with
+  `python tools/build_windows_segment.py --only contracts`; the executable is
+  in `build/windows-segment`. Unsupported commands fail explicitly.
 - Native engine ownership requires Windows 10 version 1607 or later. The
   supervisor assigns the process tree to its private Job Object atomically at
   creation, passes only explicitly selected handles and signals readiness with

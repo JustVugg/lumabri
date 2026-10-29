@@ -60,6 +60,13 @@ def main():
         print('Native inference gate:',output/'test_segment_windows.exe')
     if args.only == 'inference':
         return
+    run([args.cc,*flags,'-Werror','-Wno-unused-function','-Wno-unused-variable','-municode',
+         root/'lumabri.c',root/'lumabri_machine.c','-static','-lwinpthread','-lws2_32',
+         '-lbcrypt','-liphlpapi','-lpsapi','-ladvapi32','-ldxgi','-ldxguid',
+         '-o',output/'lumabri.exe'])
+    run([args.cc,*flags,'-Werror','-Wno-unused-function','-municode',
+         root/'tests/c/test_manager_windows.c','-static','-lwinpthread','-lws2_32',
+         '-lbcrypt','-ladvapi32','-o',output/'test_manager_windows.exe'])
     run([args.cc,*flags,'-Werror',root/'tests/c/test_machine_windows.c',
          root/'lumabri_machine.c','-static','-lwinpthread','-lws2_32','-liphlpapi',
          '-lpsapi','-ladvapi32','-ldxgi','-ldxguid','-o',output/'test_machine_windows.exe'])
