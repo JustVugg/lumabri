@@ -27,16 +27,16 @@ static int lmb_v41_u32(const char *j,const char *a,const char *alias,
 static char *lmb_v41_read_json(const char *root,const char *name,size_t cap,uint64_t *bytes) {
     char path[1024];int n=snprintf(path,sizeof path,"%s/%s",root,name);
     if(n<0 || (size_t)n>=sizeof path)return NULL;
-    int fd=open(path,O_RDONLY|O_CLOEXEC);if(fd<0)return NULL;
-    struct stat st;char *s=NULL;
-    if(!fstat(fd,&st) && S_ISREG(st.st_mode) && st.st_size>=2 && (uint64_t)st.st_size<=cap) {
-        s=malloc((size_t)st.st_size+1);
+    int fd=lmb_plan_open(path);if(fd<0)return NULL;
+    uint64_t size;char *s=NULL;
+    if(!lmb_plan_file_size(fd,&size) && size>=2 && size<=cap) {
+        s=malloc((size_t)size+1);
         if(s) {
-            if(lmb_plan_read_at(fd,s,(size_t)st.st_size,0) || memchr(s,0,(size_t)st.st_size)) {free(s);s=NULL;}
+            if(lmb_plan_read_at(fd,s,(size_t)size,0) || memchr(s,0,(size_t)size)) {free(s);s=NULL;}
             else {
-                s[st.st_size]=0;const char *end=lmb_plan_object_end(lmb_plan_space(s));
+                s[size]=0;const char *end=lmb_plan_object_end(lmb_plan_space(s));
                 if(!end || *lmb_plan_space(end)){free(s);s=NULL;}
-                else if(bytes)*bytes=(uint64_t)st.st_size;
+                else if(bytes)*bytes=size;
             }
         }
     }

@@ -16,7 +16,6 @@
 #include "lumabri_visual.h"
 
 #include <errno.h>
-#include <poll.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <time.h>
@@ -24,19 +23,30 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#ifdef _WIN32
+#include "lumabri_console_windows.h"
+#else
+#include <poll.h>
 #include <sys/ioctl.h>
 #include <termios.h>
-#include <unistd.h>
+#endif
 
 /* ---- terminal ----------------------------------------------------------- */
 
+#ifdef _WIN32
+static LmbConsole g_console;
+#else
 static struct termios g_saved;
+#endif
 static int g_saved_valid;
 static volatile sig_atomic_t g_resized;
 static volatile sig_atomic_t g_quit;
 static int g_pending_key = -1;
 
+#ifndef _WIN32
 static void on_winch(int sig) { (void)sig; g_resized = 1; }
+#endif
 static void on_int(int sig)   { (void)sig; g_quit = 1; }
 
 /* Leaving a terminal in raw mode is the one bug a TUI can inflict on the
@@ -45,14 +55,21 @@ static void on_int(int sig)   { (void)sig; g_quit = 1; }
 static void cooked(void) {
     g_pending_key = -1;
     if (!g_saved_valid) return;
-    tcsetattr(STDIN_FILENO, TCSANOW, &g_saved);
-    g_saved_valid = 0;
     fputs("\x1b[?25h\x1b[?1049l", stdout);   /* cursor back, main screen back */
     fflush(stdout);
+#ifdef _WIN32
+    lmb_console_close(&g_console);
+#else
+    tcsetattr(STDIN_FILENO, TCSANOW, &g_saved);
+#endif
+    g_saved_valid = 0;
 }
 
 static int raw(void) {
     g_pending_key = -1;
+#ifdef _WIN32
+    if (lmb_console_open(&g_console)) return -1;
+#else
     if (!isatty(STDIN_FILENO)) return -1;
     if (tcgetattr(STDIN_FILENO, &g_saved)) return -1;
     struct termios t = g_saved;
@@ -60,6 +77,7 @@ static int raw(void) {
     t.c_cc[VMIN] = 0;
     t.c_cc[VTIME] = 0;
     if (tcsetattr(STDIN_FILENO, TCSANOW, &t)) return -1;
+#endif
     g_saved_valid = 1;
     atexit(cooked);
     fputs("\x1b[?1049h\x1b[?25l", stdout);   /* alternate screen, hide cursor */
@@ -69,12 +87,16 @@ static int raw(void) {
 typedef struct { int w, h; } Size;
 
 static Size term_size(void) {
-    struct winsize ws;
     Size s = { 100, 30 };
+#ifdef _WIN32
+    lmb_console_size(&s.w, &s.h);
+#else
+    struct winsize ws;
     if (ioctl(1, TIOCGWINSZ, &ws) == 0) {
         if (ws.ws_col > 0) s.w = ws.ws_col;
         if (ws.ws_row > 0) s.h = ws.ws_row;
     }
+#endif
     /* A terminal narrower than this cannot show the table without wrapping
      * into nonsense, so the compact view takes over rather than the layout
      * silently degrading. */
@@ -430,6 +452,12 @@ static void draw_detail(const LmbTuiState *st, Size sz, int sel) {
  * as three bytes. Unknown CSI sequences are dropped; an ordinary key after
  * Esc is retained as a separate action rather than silently consumed. */
 static int read_key(int timeout_ms) {
+#ifdef _WIN32
+    int resized = 0;
+    int key = lmb_console_key(&g_console, timeout_ms, &resized);
+    if (resized) g_resized = 1;
+    return key;
+#else
     unsigned char ch;
     if (g_pending_key >= 0) {
         ch = (unsigned char)g_pending_key; g_pending_key = -1;
@@ -454,6 +482,7 @@ static int read_key(int timeout_ms) {
     case 'B': return 'j';        /* down  */
     default:  return 0;
     }
+#endif
 }
 
 typedef struct {
@@ -481,8 +510,12 @@ static void refresh_start(RefreshJob *job, const LmbTuiState *st) {
 }
 
 static double refresh_clock(void) {
+#ifdef _WIN32
+    return GetTickCount64() / 1000.0;
+#else
     struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
     return t.tv_sec + t.tv_nsec / 1e9;
+#endif
 }
 
 static int joint_rows(const LmbTuiState *st) {
@@ -697,10 +730,12 @@ int lmb_tui_run(LmbTuiState *st, int snapshot, const char *keys) {
                         "plain listing\n");
         return 1;
     }
+#ifndef _WIN32
     signal(SIGWINCH, on_winch);
+    signal(SIGHUP, on_int);
+#endif
     signal(SIGINT, on_int);
     signal(SIGTERM, on_int);
-    signal(SIGHUP, on_int);
 
     const char *kp = keys;
     RefreshJob job = {0};

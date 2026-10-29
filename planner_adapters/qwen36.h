@@ -78,7 +78,7 @@ static int LMB_UNUSED lmb_qwen36_metadata(const char *root, LmbModelShape *m, Lm
     char path[1024], json[65536];
     int length = snprintf(path, sizeof path, "%s/qwen36_meta.json", root);
     if (length < 0 || (size_t)length >= sizeof path) return -1;
-    FILE *file = fopen(path, "rb");
+    FILE *file = lmb_plan_fopen(path);
     if (!file) return -1;
     size_t n = fread(json, 1, sizeof json - 1, file);
     int invalid = ferror(file) || !feof(file);

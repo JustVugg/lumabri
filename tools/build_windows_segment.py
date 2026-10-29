@@ -60,6 +60,11 @@ def main():
         print('Native inference gate:',output/'test_segment_windows.exe')
     if args.only == 'inference':
         return
+    run([args.cc,*flags,'-Werror',root/'tests/c/test_planner_windows.c',
+         '-static','-o',output/'test_planner_windows.exe'])
+    run([args.cc,*flags,'-Werror','-municode',root/'tests/c/test_tui_windows.c',
+         root/'src/ui/lumabri_tui.c','-static','-lwinpthread',
+         '-o',output/'test_tui_windows.exe'])
     run([args.cc,*flags,'-Werror',root/'tests/c/test_segment_v2.c',
          root/'lumabri_segment.c','-static','-lwinpthread',
          '-o',output/'test_segment_v2.exe'])

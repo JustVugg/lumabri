@@ -341,7 +341,7 @@ static LMB_UNUSED int lmb_shape_from_config(const char *model_dir,
     char path[1024];
     int path_len=snprintf(path, sizeof path, "%s/config.json", model_dir);
     if(path_len<0 || (size_t)path_len>=sizeof path) return -1;
-    FILE *f = fopen(path, "rb");
+    FILE *f = lmb_plan_fopen(path);
     if (!f) return -1;
     char buf[65536];
     size_t n = fread(buf, 1, sizeof buf - 1, f);
