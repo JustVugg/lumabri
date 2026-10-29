@@ -9,6 +9,9 @@
 #include <unistd.h>
 #include <errno.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "src/crypto/lumabri_identity_windows.h"
+#endif
 
 /* A keyring file contains one 64-hex public key per whitespace-separated
  * field.  A literal spec may contain the same keys separated by commas.
@@ -43,7 +46,11 @@ static LMB_MAYBE_UNUSED int lmb_trust_load_spec(LmbTrustKeys *t,
     LmbTrustKeys add = {0};
     size_t before = t->n;
     char *save = NULL;
+#ifdef _WIN32
+    for (char *p = strtok_s(copy, ",", &save); p; p = strtok_s(NULL, ",", &save))
+#else
     for (char *p = strtok_r(copy, ",", &save); p; p = strtok_r(NULL, ",", &save))
+#endif
         if (lmb_trust_add_hex(&add, p)) { free(copy); return -1; }
     free(copy);
     if (!add.n) return -1;
@@ -68,6 +75,10 @@ static LMB_MAYBE_UNUSED int lmb_trust_load_spec(LmbTrustKeys *t,
  * cannot be created. */
 static LMB_MAYBE_UNUSED int lmb_peer_identity(const char *path, uint8_t sk[64],
                                               uint8_t pk[32]) {
+    if (!path || !*path) { errno = EINVAL; return -1; }
+#ifdef _WIN32
+    return lmb_windows_peer_identity(path, sk, pk);
+#else
     /* Two roles on one machine (a serve's maintainer and expert node) start
      * together and both may find no key. Exclusive-create on the real path so
      * exactly one writes it; the loser re-reads the winner's file instead of
@@ -122,6 +133,7 @@ static LMB_MAYBE_UNUSED int lmb_peer_identity(const char *path, uint8_t sk[64],
         return 0;
     }
     return -1;
+#endif
 }
 
 /* This machine's default peer-key path: $LUMABRI_PEER_KEY, else
@@ -129,6 +141,9 @@ static LMB_MAYBE_UNUSED int lmb_peer_identity(const char *path, uint8_t sk[64],
 static LMB_MAYBE_UNUSED const char *lmb_peer_key_path(char *buf, size_t cap) {
     const char *e = getenv("LUMABRI_PEER_KEY");
     if (e && e[0]) { snprintf(buf, cap, "%s", e); return buf; }
+#ifdef _WIN32
+    if (lmb_private_default_path(buf, cap, "peer.key") && cap) buf[0] = 0;
+#else
     const char *home = getenv("HOME");
     if (home && home[0]) {
         char dir[400];
@@ -136,6 +151,7 @@ static LMB_MAYBE_UNUSED const char *lmb_peer_key_path(char *buf, size_t cap) {
         mkdir(dir, 0700);
         snprintf(buf, cap, "%s/peer.key", dir);
     } else snprintf(buf, cap, "./.lumabri_peer.key");
+#endif
     return buf;
 }
 

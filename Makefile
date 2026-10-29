@@ -5,7 +5,7 @@ CFLAGS  ?= -O2 -Wall -Wextra
 ENGINE  ?= ../colibri/c
 # Shared headers remain in the repository root during the staged layout cleanup.
 override CPPFLAGS += -I.
-SIGN_DEPS = lumabri_sign.h src/crypto/lumabri_sign_core.h src/crypto/lumabri_random.h
+SIGN_DEPS = lumabri_sign.h src/crypto/lumabri_sign_core.h src/crypto/lumabri_random.h src/crypto/lumabri_identity_windows.h src/runtime/lumabri_private_file_windows.h
 PROTO_DEPS = lumabri_proto.h src/protocol/lumabri_wire.h src/protocol/lumabri_socket.h
 PLATFORM := $(shell uname -s)
 SHIM_LIB = liblumabri.so
