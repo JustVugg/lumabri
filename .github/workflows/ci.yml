@@ -59,6 +59,8 @@ jobs:
           ./build/windows-segment/test_secure_transport.exe 2>&1 | tee -a build/windows-segment-evidence.log
           ./build/windows-segment/test_crypto_vectors.exe 2>&1 | tee -a build/windows-segment-evidence.log
           ./build/windows-segment/test_peer_identity_windows.exe 2>&1 | tee -a build/windows-segment-evidence.log
+          ./build/windows-segment/test_runtime_probe.exe 2>&1 | tee -a build/windows-segment-evidence.log
+          ./build/windows-segment/test_process_probe_windows.exe 2>&1 | tee -a build/windows-segment-evidence.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:

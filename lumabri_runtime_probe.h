@@ -4,15 +4,29 @@
 #define LUMABRI_RUNTIME_PROBE_H
 #include <errno.h>
 #include <fcntl.h>
+#include <stdlib.h>
+#ifdef _WIN32
+#include "src/runtime/lumabri_process_probe_windows.h"
+#else
 #include <poll.h>
 #include <signal.h>
-#include <stdlib.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 
 static int lmb_runtime_thread_capacity(const char *binary, unsigned *capacity) {
-    int fds[2];
+    if (!capacity) { errno = EINVAL; return -1; }
     *capacity = 0;
+    char reply[32] = {0}; size_t used = 0;
+#ifdef _WIN32
+    const char *args[] = {"--thread-capacity"}; DWORD status;
+    if (lmb_windows_probe_capture(binary, args, 1, reply, sizeof reply, &used, &status, 2000) ||
+        status || !used) return -1;
+    if (used >= 2 && reply[used - 2] == '\r' && reply[used - 1] == '\n') {
+        used--; reply[used - 1] = '\n';
+    }
+#else
+    int fds[2];
     if (pipe(fds)) return -1;
     (void)fcntl(fds[0], F_SETFD, FD_CLOEXEC);
     (void)fcntl(fds[1], F_SETFD, FD_CLOEXEC);
@@ -25,7 +39,6 @@ static int lmb_runtime_thread_capacity(const char *binary, unsigned *capacity) {
     }
     close(fds[1]);
     if (child < 0) { close(fds[0]); return -1; }
-    char reply[32] = {0}; size_t used = 0;
     int status = 0, finished = 0, bad = 0;
     (void)fcntl(fds[0], F_SETFL, O_NONBLOCK);
     /* Both output and process exit are bounded, including a broken binary
@@ -52,6 +65,7 @@ static int lmb_runtime_thread_capacity(const char *binary, unsigned *capacity) {
         return -1;
     }
     if (bad || !WIFEXITED(status) || WEXITSTATUS(status) || !used) return -1;
+#endif
     reply[used] = 0;
     for (size_t i = 0; i + 1 < used; i++) if (reply[i] < '0' || reply[i] > '9') return -1;
     if (reply[used - 1] != '\n') return -1;

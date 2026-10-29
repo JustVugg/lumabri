@@ -5,6 +5,14 @@
 #include <stdio.h>
 #include <string.h>
 
+static void set_mode(const char *mode) {
+#ifdef _WIN32
+    assert(!_putenv_s("LMB_TEST_CAPACITY", mode));
+#else
+    assert(!setenv("LMB_TEST_CAPACITY", mode, 1));
+#endif
+}
+
 int main(int argc, char **argv) {
     uint64_t backend = 999;
     assert(lmb_backend_request("cpu", NULL));
@@ -24,18 +32,29 @@ int main(int argc, char **argv) {
     }
     if (argc == 2 && !strcmp(argv[1], "--thread-capacity")) {
         const char *mode = getenv("LMB_TEST_CAPACITY");
-        if (mode && !strcmp(mode, "hang")) { puts("1"); fflush(stdout); for (;;) pause(); }
+        /* Windows removes an environment variable when assigned an empty value. */
+        if (mode && !strcmp(mode, "empty")) mode = "";
+        if (mode && !strcmp(mode, "hang")) {
+            puts("1"); fflush(stdout);
+#ifdef _WIN32
+            Sleep(INFINITE);
+#else
+            for (;;) pause();
+#endif
+        }
         puts(mode ? mode : "1");
         return 0;
     }
     unsigned value = 99;
     assert(!lmb_runtime_thread_capacity(argv[0], &value) && value == 1);
-    setenv("LMB_TEST_CAPACITY", "8", 1);
+    set_mode("8");
     assert(!lmb_runtime_thread_capacity(argv[0], &value) && value == 8);
-    const char *bad[] = {"0", "257", "garbage", "8 trailing", "", "999999999999999999999999999999999999", "hang"};
+    const char *bad[] = {"0", "257", "garbage", "8 trailing", "empty", "999999999999999999999999999999999999", "hang"};
     for (unsigned i = 0; i < sizeof bad / sizeof *bad; i++) {
-        setenv("LMB_TEST_CAPACITY", bad[i], 1);
-        assert(lmb_runtime_thread_capacity(argv[0], &value) && value == 0);
+        set_mode(bad[i]);
+        int rc = lmb_runtime_thread_capacity(argv[0], &value);
+        if (!rc || value) fprintf(stderr, "Unexpected capacity for %s: rc=%d value=%u\n", bad[i], rc, value);
+        assert(rc && value == 0);
     }
     assert(lmb_runtime_thread_capacity("/nonexistent/lumabri-test-runtime", &value));
     puts("runtime probe: valid, malformed, missing and hung executable PASS");
