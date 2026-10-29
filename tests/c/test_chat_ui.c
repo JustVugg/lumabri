@@ -717,7 +717,25 @@ int main(int argc, char **argv) {
     if (argc == 4 && !strcmp(argv[1], "resident-release")) {
         assert(!lmb_secure_init()); LmbResidentPlan plan;
         assert(!home_resident_plan_read(argv[2], argv[3], &plan));
-        for (uint32_t i = 0; i < plan.execution.count; i++) assert(!home_resident_peer(&plan, i, 1));
+        uint64_t deadline=lmb_io_monotonic_ms()+15000;
+        uint64_t prior=lmb_read_deadline_ms;
+        lmb_read_deadline_ms=prior && prior<deadline ? prior : deadline;
+        for (uint32_t i = 0; i < plan.execution.count; i++) {
+            /* A forced test release can acknowledge pending descendant exit,
+             * or lose its reply. Send it only once, then require the donor's
+             * authenticated proof for this exact immutable allocation. An
+             * absent/unreachable process is never a successful release. */
+            (void)home_resident_peer(&plan, i, 1);
+            printf("RELEASE WAITING FOR EXIT PROOF %u\n",i); fflush(stdout);
+            int proved=0;
+            while (lmb_io_monotonic_ms()<deadline) {
+                if (!home_resident_exit_proof(&plan,i)) { proved=1; break; }
+                (void)poll(NULL,0,20);
+            }
+            if (!proved) fprintf(stderr,"Release unconfirmed: donor %u has not proved exit of the approved allocation.\n",i);
+            assert(proved);
+        }
+        lmb_read_deadline_ms=prior;
         return 0;
     }
     if (argc==4 && !strcmp(argv[1],"resident-node-guards")) {

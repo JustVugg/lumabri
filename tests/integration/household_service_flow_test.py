@@ -1,5 +1,6 @@
 """Real Segment engines across service/TUI lifetimes (loopback, not LAN)."""
 import argparse
+from contextlib import ExitStack
 import fcntl
 import json
 import os
@@ -834,9 +835,35 @@ def main():
             # The authenticated release names the first allocation, not the
             # keeper's currently selected second model.
             if not args.replicas:
-                release = subprocess.run([str(runtime / "test_chat_ui"), "resident-release", str(first_plan), tracker],
-                                         env=env("chatter"), text=True, capture_output=True, timeout=20)
-                assert release.returncode == 0, release.stderr
+                # Reaping an immediate engine owner does not prove that its
+                # descendants closed the inherited lifetime fence. Hold an
+                # extra shared description to make that boundary deterministic,
+                # including on Darwin where the owner is a supervisor process.
+                release = None
+                try:
+                    with ExitStack() as held:
+                        for name in ("a", "b"):
+                            matches = list((tmp / name / ".lumabri/service/allocation-lifetimes").rglob(allocation + ".lifetime"))
+                            assert len(matches) == 1, matches
+                            fence = held.enter_context(matches[0].open("r+b"))
+                            fcntl.flock(fence.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+                        release = subprocess.Popen([str(runtime / "test_chat_ui"), "resident-release", str(first_plan), tracker],
+                                                   env=env("chatter"), text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        until(lambda: select.select([release.stdout], [], [], 0)[0], "release did not reach exit reconciliation", 10)
+                        line = release.stdout.readline()
+                        assert line.startswith("RELEASE WAITING FOR EXIT PROOF"), (line, release.poll())
+                        assert release.poll() is None, "release succeeded while a lifetime holder remained"
+                        for name in ("a", "b"):
+                            state = service(name)["donor"]
+                            assert state["reserved_total_bytes"] == second_live[name]["reserved_total_bytes"], "pending exit freed RAM early"
+                    _, release_error = release.communicate(timeout=20)
+                    assert release.returncode == 0, release_error
+                    print("RELEASE LIFETIME: PASS (pending descendants retain reservations; exact exit proof completes release)", flush=True)
+                finally:
+                    if release is not None:
+                        if release.poll() is None:
+                            release.kill(); release.wait(timeout=5)
+                        release.stdout.close(); release.stderr.close()
             assert all(service(name)["donor"]["model_count"] == 1 for name in ("a", "b"))
             if args.replicas:
                 # Status describes the currently displayed allocation, which
