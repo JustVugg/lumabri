@@ -48,6 +48,15 @@ int main(void) {
     r.has_origin=0; assert(!lmb_api_http_https_origin(&r,"https://chat.example.test"));
     strcpy(r.host,"chat.example.test:443"); assert(lmb_api_http_https_origin(&r,"https://chat.example.test"));
     strcpy(r.host,"evil.test"); assert(lmb_api_http_https_origin(&r,"https://chat.example.test"));
+    const char *claude="POST /v1/messages HTTP/1.1\r\nHost: localhost:47380\r\nx-api-key: local.secret\r\nanthropic-version: 2023-06-01\r\nContent-Length: 2\r\n\r\n";
+    assert(!lmb_api_http_parse(&r,claude,strlen(claude)));
+    assert(!strcmp(r.api_key,"local.secret") && !strcmp(r.anthropic_version,"2023-06-01"));
+    const char *duplicates[]={"x-api-key: a\r\nX-API-KEY: b", "anthropic-version: a\r\nAnthropic-Version: b",
+        "anthropic-beta: a\r\nAnthropic-Beta: b"};
+    for (unsigned i=0;i<3;i++) {
+        char header[512]; snprintf(header,sizeof header,"GET /v1/models HTTP/1.1\r\nHost: localhost:47380\r\n%s\r\n\r\n",duplicates[i]);
+        assert(lmb_api_http_parse(&r,header,strlen(header)));
+    }
     puts("API HTTP: PASS (framing, bounds, duplicate headers, explicit loopback/HTTPS origin policy)");
     return 0;
 }

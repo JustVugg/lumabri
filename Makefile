@@ -166,7 +166,7 @@ lumabri test_chat_ui: src/runtime/lumabri_service.h src/runtime/lumabri_service_
 lumabri test_chat_ui: src/runtime/lumabri_joint_prepare.h
 lumabri test_chat_ui: src/ui/lumabri_resident_ui.h
 lumabri test_chat_ui: src/runtime/lumabri_resident_control.h
-lumabri test_chat_ui: src/runtime/lumabri_api.h src/runtime/lumabri_api_http.h src/runtime/lumabri_api_json.h src/runtime/lumabri_api_access.h src/runtime/lumabri_api_proxy.h
+lumabri test_chat_ui: src/runtime/lumabri_api_compat.h src/runtime/lumabri_api.h src/runtime/lumabri_api_http.h src/runtime/lumabri_api_json.h src/runtime/lumabri_api_access.h src/runtime/lumabri_api_proxy.h
 lumabri test_chat_ui test_host_session_pool test-home-monitor test_elastic_policy: src/runtime/lumabri_recovery_wait.h src/runtime/lumabri_recovery_policy.h
 lumabri test_chat_ui test_host_session_pool test-home-monitor test_api_access: src/runtime/lumabri_operator_access.h src/runtime/lumabri_workspace.h
 lumabri test_chat_ui test_host_session_pool test-home-monitor: src/runtime/lumabri_management.h
@@ -629,8 +629,13 @@ test_api_http: tests/c/test_api_http.c src/runtime/lumabri_api_http.h
 test_api_access: tests/c/test_api_access.c src/runtime/lumabri_api_access.h $(SECURE_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_api_access.c -o $@
 
+# Client protocols exercise the same compiled gateway and templates.
+test_api_compat: tests/c/test_api_compat.c lumabri.c lumabri $(wildcard src/runtime/*.h)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_api_compat.c src/ui/lumabri_tui.c lumabri_machine.c lumabri_run_gate.c -o $@
+
 .PHONY: test-api test-api-gateway
-test-api: test_api_json test_api_http test_api_access test_chat_store test_model_routes test_replica_admission test_replica_rank test_replay_prefix test_capacity test_portfolio_policy test_elastic_policy test_retired_receipts test_allocation_lifetime test_journal_index
+test-api: test_api_compat test_api_json test_api_http test_api_access test_chat_store test_model_routes test_replica_admission test_replica_rank test_replay_prefix test_capacity test_portfolio_policy test_elastic_policy test_retired_receipts test_allocation_lifetime test_journal_index
+	./test_api_compat
 	./test_api_json
 	./test_api_http
 	./test_api_access
@@ -1283,7 +1288,7 @@ clean:
 	      test_verify_failover test_segment_v2 test_segment_discovery test_sampling \
 	      test_swarm_detail test_relay_rate test_machine test_meminfo test_process_memory test_engine_memory test_engine_memory_guard test_memlock test_serve_control test_host_session_pool test_hosted_sessions test_host_drain test_node_control \
 	      test_compute_lease test_content_filter test_scheduler test_run_gate \
-	      test_compute_broker test_portfolio test_reply_stream test_api_json test_api_http test_api_access test_chat_store test_model_routes test_replica_admission test_replica_rank test_replay_prefix test_capacity test_portfolio_policy test_elastic_policy test_retired_receipts test_allocation_lifetime test_journal_index test_tracker_history \
+	      test_compute_broker test_portfolio test_reply_stream test_api_compat test_api_json test_api_http test_api_access test_chat_store test_model_routes test_replica_admission test_replica_rank test_replay_prefix test_capacity test_portfolio_policy test_elastic_policy test_retired_receipts test_allocation_lifetime test_journal_index test_tracker_history \
 	      test_segment_v2_tsan tracker_tsan \
 	      segment_node segment_chat test_backend_routes test_segment_close test_tcp_latency test_socket_transport test_secure_transport segment_node_asan segment_chat_asan \
 	      segment_node_tsan segment_chat_tsan \

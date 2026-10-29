@@ -100,6 +100,7 @@ typedef struct {
     int32_t *tokens;
     size_t token_count;
     size_t prompt_count;
+    int ended_by_eos;
     double elapsed_seconds;
     double decode_seconds;
     LmbGenerationMetrics metrics;
@@ -1891,6 +1892,7 @@ static int segment_generate(ColiEdgeEngine *edge,
     result->text_bytes = text_bytes;
     result->tokens = generated;
     result->token_count = generated_count;
+    result->ended_by_eos = generated_count && generated[generated_count-1] == cap->eos_token_id;
     result->prompt_count = prompt_count;
     double finished_at=monotonic_seconds();
     result->elapsed_seconds = finished_at - started;
@@ -2244,8 +2246,9 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
         fprintf(stderr, "[segment-stage] request=%u ", request_id);
         stage_observations_print(stderr, &result);
         fputc('\n', stderr); fflush(stderr);
-        printf("DONE %u STAT %zu %.3f 0 0 %zu 0", request_id,
-               result.token_count, lmb_metrics_decode_rate(&result.metrics), result.prompt_count);
+        printf("DONE %u STAT %zu %.3f 0 0 %zu 0 STOP1 %s", request_id,
+               result.token_count, lmb_metrics_decode_rate(&result.metrics), result.prompt_count,
+               result.ended_by_eos ? "eos" : "length");
         int links_valid = result.stages_valid && result.stage_count && result.stage_count <= LMB_STAGE_PROFILE_MAX;
         for (size_t i = 0; links_valid && i < result.stage_count; i++)
             links_valid = lmb_link_current(&result.links[i], (double)time(NULL));

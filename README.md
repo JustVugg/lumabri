@@ -25,6 +25,15 @@ promising that every additional device makes inference faster.
 
 ![The household workspace](docs/images/workspace.png)
 
+## Connect your application
+
+Use the same resident service through the OpenAI Chat Completions or Anthropic
+Messages **text API subsets**, with streaming and per-model permissions.
+Give your application a Lumabri URL, its own API token and an authorized model ID.
+`GET /api/v1/client-config` returns the connection settings without secrets.
+See [client examples and exact compatibility](docs/CLIENT_APIS.md), including
+how to expose an existing gateway through a Kubernetes Service.
+
 ## Start here
 
 Build from source with a compatible Colibri checkout:

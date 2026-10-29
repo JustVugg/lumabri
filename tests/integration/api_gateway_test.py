@@ -45,6 +45,10 @@ def main():
                     assert server.poll() is None and time.monotonic() < deadline
                     time.sleep(.05)
             assert request("invalid")[0] == 401
+            status, body = request(path="/api/v1/client-config")
+            config = json.loads(body)
+            assert status == 200 and config["openai_base_url"] == f"http://127.0.0.1:{port}/v1"
+            assert config["anthropic_base_url"] == f"http://127.0.0.1:{port}" and token not in body.decode()
             status, body = request(); assert status == 200 and json.loads(body) == {"schema": 1, "models": []}
             assert request(path="/api/v1/workspace")[0] == 403
             assert request(path="/api/v1/demand")[0] == 403

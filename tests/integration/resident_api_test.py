@@ -88,6 +88,8 @@ def verify_resident_api(runtime, env, tracker, first_model_name, artifacts, obse
         if os.environ.get("LUMABRI_TEST_BROWSER") == "1":
             from resident_web_test import verify_resident_browser
             verify_resident_browser(port, alice, bob, first["id"], artifacts)
+        from client_api_test import verify_client_protocols
+        verify_client_protocols(port, alice, bob, first["id"], second["id"])
         # More opens than available slots verifies acknowledged retirement.
         before_samples = assert_stage_record(observed_plan)
         for turn in range(6):

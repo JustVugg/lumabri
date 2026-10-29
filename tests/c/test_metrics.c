@@ -67,7 +67,7 @@ int main(void) {
     puts("RESPONSE TIMING: PASS (visible text vs token notifications, exact bounded quantiles, missing telemetry, replay exclusion)");
     LmbStageSample samples[LMB_STAGE_PROFILE_MAX] = {{0}};
     uint32_t count = 99;
-    const char *profile = "STAT 9 4 0 0 20 0 STAGES1 2 0 12 8 0.8 12 16 8 1.2 PERF1 9 8 15 2 17.2";
+    const char *profile = "STAT 9 4 0 0 20 0 STOP1 length STAGES1 2 0 12 8 0.8 12 16 8 1.2 PERF1 9 8 15 2 17.2";
     assert(!lmb_stage_samples_parse(profile, samples, &count) && count == 2);
     assert(samples[0].begin == 0 && samples[0].end == 12 && samples[0].calls == 8 &&
            samples[0].seconds == .8 && samples[1].seconds == 1.2);

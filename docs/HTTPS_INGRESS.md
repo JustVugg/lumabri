@@ -5,7 +5,7 @@ other authorized computers, explicitly select a single HTTPS origin and use
 a TLS reverse proxy on the **same machine and OS account**. Lumabri does not
 implement TLS, acquire certificates, open a firewall or provision a server.
 The same API serves browser chat, private history and operator controls.
-This does not add OpenAI API compatibility.
+The same endpoint also serves the [OpenAI/Anthropic text client protocols](CLIENT_APIS.md).
 
 ## Trust boundary
 
