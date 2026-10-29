@@ -15,6 +15,43 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  windows-control:
+    # No Colibri or fixture dependency: diagnose native control failures early.
+    runs-on: windows-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: msys2 {0}
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884
+        with:
+          msystem: UCRT64
+          update: false
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-binutils
+            mingw-w64-ucrt-x86_64-python
+      - name: Build native protocol, identity and service controls
+        run: python3 tools/build_windows_segment.py --only contracts --output build/windows-control
+      - name: Exercise real Windows processes and transports
+        run: |
+          set -o pipefail
+          ./build/windows-control/test_segment_v2.exe 2>&1 | tee -a build/windows-control-evidence.log
+          ./build/windows-control/test_socket_transport.exe 2>&1 | tee -a build/windows-control-evidence.log
+          ./build/windows-control/test_secure_transport.exe 2>&1 | tee -a build/windows-control-evidence.log
+          ./build/windows-control/test_crypto_vectors.exe 2>&1 | tee -a build/windows-control-evidence.log
+          ./build/windows-control/test_peer_identity_windows.exe 2>&1 | tee -a build/windows-control-evidence.log
+          ./build/windows-control/test_runtime_probe.exe 2>&1 | tee -a build/windows-control-evidence.log
+          ./build/windows-control/test_process_probe_windows.exe 2>&1 | tee -a build/windows-control-evidence.log
+          ./build/windows-control/test_service_windows.exe 2>&1 | tee -a build/windows-control-evidence.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-control-evidence
+          path: build/windows-control-evidence.log
   windows-segment:
     # Native PE/COFF + Win32 execution. This tests the inference boundary;
     # the complete household service is not certified for Windows yet.
@@ -49,18 +86,11 @@ jobs:
             mingw-w64-ucrt-x86_64-binutils
             mingw-w64-ucrt-x86_64-python
       - name: Build and audit native engine memory and checkpoint input
-        run: python3 tools/build_windows_segment.py --engine ../colibri/c
+        run: python3 tools/build_windows_segment.py --engine ../colibri/c --only inference
       - name: Compare resident full and split OLMoE inference on Windows
         run: |
           set -o pipefail
           ./build/windows-segment/test_segment_windows.exe "$(cygpath -w "$PWD/build/fixture")" 2>&1 | tee build/windows-segment-evidence.log
-          ./build/windows-segment/test_segment_v2.exe 2>&1 | tee -a build/windows-segment-evidence.log
-          ./build/windows-segment/test_socket_transport.exe 2>&1 | tee -a build/windows-segment-evidence.log
-          ./build/windows-segment/test_secure_transport.exe 2>&1 | tee -a build/windows-segment-evidence.log
-          ./build/windows-segment/test_crypto_vectors.exe 2>&1 | tee -a build/windows-segment-evidence.log
-          ./build/windows-segment/test_peer_identity_windows.exe 2>&1 | tee -a build/windows-segment-evidence.log
-          ./build/windows-segment/test_runtime_probe.exe 2>&1 | tee -a build/windows-segment-evidence.log
-          ./build/windows-segment/test_process_probe_windows.exe 2>&1 | tee -a build/windows-segment-evidence.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:

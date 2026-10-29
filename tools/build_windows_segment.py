@@ -12,44 +12,52 @@ import sys
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--engine',required=True)
+    parser.add_argument('--engine')
+    parser.add_argument('--only',choices=('all','inference','contracts'),default='all')
     parser.add_argument('--output',default='build/windows-segment')
     parser.add_argument('--cc',default='gcc')
     parser.add_argument('--ar',default='ar')
     parser.add_argument('--nm',default='nm')
     args=parser.parse_args()
+    if args.only != 'contracts' and not args.engine:
+        parser.error('--engine is required for inference builds')
     root=Path(__file__).resolve().parents[1]
     output=Path(args.output).resolve()
+    output.mkdir(parents=True,exist_ok=True)
     source=output/'colibri-source'
     def run(command):
         subprocess.run([str(v) for v in command],cwd=root,check=True)
-    run([sys.executable,'-X','utf8','tools/prepare_engine_source.py','--source',
-         Path(args.engine).resolve(),'--output',source])
-    run([sys.executable,'-X','utf8','tools/prepare_resident_adapters.py','--copy',source])
     flags=['-I'+str(root),'-I'+str(source),'-O2','-Wall','-Wextra',
            '-D_FILE_OFFSET_BITS=64','-D_WIN32_WINNT=0x0601']
-    memory=root/'src/runtime/lumabri_engine_memory_override.h'
-    inputs=root/'src/runtime/lumabri_engine_io_windows_override.h'
-    objects=[]
-    for name in ('olmoe','segment_runtime','edge_runtime','engine_memory','engine_io_windows'):
-        file=(source/(name+'.c') if name in ('olmoe','segment_runtime','edge_runtime')
-              else root/'src/runtime'/('lumabri_'+name+'.c'))
-        extra=['-Werror']
-        if name=='olmoe':
-            # Upstream embedding units contain unused standalone helpers.
-            extra=['-Werror=implicit-function-declaration','-Wno-unused-function',
-                   '-DCOLI_SEGMENT_ADAPTER','-DCOLI_EDGE_ADAPTER',
-                   '-DOLMOE_NO_MAIN','-DLUMABRI_P2P','-include','pthread.h',
-                   '-include',root/'lumi_v4_ext.h']
-        if name not in ('engine_memory','engine_io_windows'):
-            extra+=['-include',memory,'-include',inputs]
-        obj=output/(name+'.o')
-        run([args.cc,*flags,*extra,'-c',file,'-o',obj]);objects.append(obj)
-    archive=output/'liblumabri_windows_olmoe.a'
-    run([args.ar,'rcs',archive,*objects])
-    run([sys.executable,'tools/check_engine_memory.py',archive,'--nm',args.nm,'--windows-input'])
-    run([args.cc,*flags,'-Werror',root/'tests/c/test_segment_windows.c',archive,
-         '-static','-lwinpthread','-lpsapi','-lm','-o',output/'test_segment_windows.exe'])
+    if args.only != 'contracts':
+        run([sys.executable,'-X','utf8','tools/prepare_engine_source.py','--source',
+             Path(args.engine).resolve(),'--output',source])
+        run([sys.executable,'-X','utf8','tools/prepare_resident_adapters.py','--copy',source])
+        memory=root/'src/runtime/lumabri_engine_memory_override.h'
+        inputs=root/'src/runtime/lumabri_engine_io_windows_override.h'
+        objects=[]
+        for name in ('olmoe','segment_runtime','edge_runtime','engine_memory','engine_io_windows'):
+            file=(source/(name+'.c') if name in ('olmoe','segment_runtime','edge_runtime')
+                  else root/'src/runtime'/('lumabri_'+name+'.c'))
+            extra=['-Werror']
+            if name=='olmoe':
+                # Upstream embedding units contain unused standalone helpers.
+                extra=['-Werror=implicit-function-declaration','-Wno-unused-function',
+                       '-DCOLI_SEGMENT_ADAPTER','-DCOLI_EDGE_ADAPTER',
+                       '-DOLMOE_NO_MAIN','-DLUMABRI_P2P','-include','pthread.h',
+                       '-include',root/'lumi_v4_ext.h']
+            if name not in ('engine_memory','engine_io_windows'):
+                extra+=['-include',memory,'-include',inputs]
+            obj=output/(name+'.o')
+            run([args.cc,*flags,*extra,'-c',file,'-o',obj]);objects.append(obj)
+        archive=output/'liblumabri_windows_olmoe.a'
+        run([args.ar,'rcs',archive,*objects])
+        run([sys.executable,'tools/check_engine_memory.py',archive,'--nm',args.nm,'--windows-input'])
+        run([args.cc,*flags,'-Werror',root/'tests/c/test_segment_windows.c',archive,
+             '-static','-lwinpthread','-lpsapi','-lm','-o',output/'test_segment_windows.exe'])
+        print('Native inference gate:',output/'test_segment_windows.exe')
+    if args.only == 'inference':
+        return
     run([args.cc,*flags,'-Werror',root/'tests/c/test_segment_v2.c',
          root/'lumabri_segment.c','-static','-lwinpthread',
          '-o',output/'test_segment_v2.exe'])
@@ -68,7 +76,10 @@ def main():
          '-static','-o',output/'test_runtime_probe.exe'])
     run([args.cc,*flags,'-Werror','-municode',root/'tests/c/test_process_probe_windows.c',
          '-static','-o',output/'test_process_probe_windows.exe'])
-    print('Native inference gate:',output/'test_segment_windows.exe')
+    run([args.cc,*flags,'-Werror','-Wno-unused-function','-municode',
+         root/'tests/c/test_service_windows.c','-static','-lwinpthread',
+         '-lws2_32','-lbcrypt','-ladvapi32','-o',output/'test_service_windows.exe'])
+    print('Native contract gates:',output)
 
 
 if __name__=='__main__':
