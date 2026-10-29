@@ -161,6 +161,23 @@ conversation and exit.
 Prepared resident models are also available through the authenticated local
 API and its bundled chat page. An operator creates a user token, grants it
 specific models or allocations and runs `lumabri api start`; open the printed local URL.
+For example, after preparing a model in the TUI, run these commands on its
+requesting computer, using the same Lumabri configuration:
+
+```sh
+./lumabri api list
+./lumabri api user-add local-chat
+# Replace MODEL_ID with the ID shown by api list.
+./lumabri api grant local-chat MODEL_ID
+./lumabri api start
+```
+
+Keep the token printed by `user-add` private and enter it on the chat page.
+Choose the granted model and send a message. This account can chat with that
+model; it cannot approve donors or administer the cluster. For the optional
+read-only **Computers & models** view, explicitly grant
+`./lumabri api operator-grant local-chat`.
+
 The page provides model selection, streaming, Stop, collapsible private
 history and export. No separate web server or browser-side AI engine is needed.
 During a response, the speed indicator updates in tok/s once enough tokens have
