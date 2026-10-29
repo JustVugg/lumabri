@@ -271,6 +271,49 @@ existing, authorized replica policies. Kubernetes manages the containers;
 Lumabri manages model placement and resident inference. The controller does
 not create servers or grant access to a donor.
 
+### Kubernetes: from workers to model policies
+
+Start with a verified Linux package for your workers' architecture. Build the
+resident image, configure the example with your tracker, household secret,
+image digest and memory limits, then apply it in your own namespace:
+
+```sh
+python3 tools/prepare_container_context.py --package /path/to/linux-candidate --output /tmp/lumabri-image
+docker build --tag lumabri-resident:local /tmp/lumabri-image
+# Configure deploy/kubernetes/workers.example.yaml for your cluster first.
+kubectl -n lumabri apply -f deploy/kubernetes/workers.example.yaml
+```
+
+The image must be available to the cluster. The namespace, authenticated
+tracker and gateway must already be configured; the worker example is not a
+complete cluster installer. Follow the [worker setup](docs/KUBERNETES_WORKERS.md)
+for those prerequisites, approvals, networking and storage.
+
+For declarative control of an existing Lumabri replica policy, install the
+optional controller's API and namespaced permissions:
+
+```sh
+make lumabri-kube
+kubectl apply -f deploy/kubernetes/replicapolicy-crd.yaml
+kubectl -n lumabri apply -f deploy/kubernetes/rbac.yaml
+```
+
+Run `lumabri-kube` beside the gateway with the dedicated credentials and
+arguments in the [controller setup](docs/KUBERNETES_CONTROL.md). Installing the
+CRD alone does not activate it or authorize workers.
+
+| What happens | Lumabri's behavior |
+| --- | --- |
+| A model needs more memory than one worker offers | A feasible approved plan can split its layers across workers. Chat waits for the whole chain to be ready. |
+| Demand rises for an explicitly enabled replica policy | The service can prepare additional replicas on authorized machines, within that policy's limits and available resources. |
+| Demand falls | The policy can drain eligible surplus replicas before release; active sessions are not discarded to free memory. |
+| An administrator deletes a `ReplicaPolicy` | Automation pauses and resident weights remain. Deletion does not stop a server or unload the model. |
+| A worker disappears | Configured recovery needs an authorized replacement and sufficient memory. Otherwise the conversation stays incomplete and the interruption is shown. |
+
+Kubernetes supplies and supervises the Pods. Lumabri manages the resident
+models and their sessions within them. Model replicas and Kubernetes Pod
+replicas are different: Lumabri's controller does not create or delete Pods.
+
 ## Development and diagnostics
 
 ```sh
