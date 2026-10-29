@@ -4,8 +4,9 @@ One accepted request still authorizes **one immutable allocation**. It does not
 give the requester permission to load another model or reuse an old approval.
 
 For unattended reloading, the donor's local owner can explicitly authorize a
-bounded repeat placement. This is a prerequisite for elasticity, **not yet an
-automatic replica scaler**. It creates neither a cloud server nor a charge.
+bounded repeat placement. This permission allows matching loads; automatic
+placement additionally requires an explicit [replica policy](ELASTIC_REPLICAS.md).
+The permission itself creates neither a replica nor a cloud server or charge.
 
 ## From the TUI
 

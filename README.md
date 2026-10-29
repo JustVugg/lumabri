@@ -39,7 +39,7 @@ how to expose an existing gateway through a Kubernetes Service.
 Build from source with a compatible Colibri checkout:
 
 ```sh
-make ENGINE=/path/to/colibri/c
+make household swarm_probe ENGINE=/path/to/colibri/c
 ./lumabri
 ```
 
@@ -170,8 +170,28 @@ conversation and exit.
 Prepared resident models are also available through the authenticated local
 API and its bundled chat page. An operator creates a user token, grants it
 specific models or allocations and runs `lumabri api start`; open the printed local URL.
+For example, after preparing a model in the TUI, run these commands on its
+requesting computer, using the same Lumabri configuration:
+
+```sh
+./lumabri api list
+./lumabri api user-add local-chat
+# Replace MODEL_ID with the ID shown by api list.
+./lumabri api grant local-chat MODEL_ID
+./lumabri api start
+```
+
+Keep the token printed by `user-add` private and enter it on the chat page.
+Choose the granted model and send a message. This account can chat with that
+model; it cannot approve donors or administer the cluster. For the optional
+read-only **Computers & models** view, explicitly grant
+`./lumabri api operator-grant local-chat`.
+
 The page provides model selection, streaming, Stop, collapsible private
 history and export. No separate web server or browser-side AI engine is needed.
+During a response, the speed indicator updates in tok/s once enough tokens have
+arrived. It shows the measured response rate, not the model's guaranteed capacity;
+preparation, recovery and unavailable measurements have separate labels.
 See [setup, limits and privacy](docs/RESIDENT_API.md). The default endpoint is
 loopback-only: do not expose plain HTTP directly. For other authorized
 computers, use the explicit [HTTPS reverse-proxy setup](docs/HTTPS_INGRESS.md).
@@ -205,27 +225,30 @@ a READY-time snapshot, not a live utilization or speed measurement.
 
 ## What has actually been checked?
 
-- Linux-environment build with warnings treated as errors.
-- A real encrypted tracker, two donor TUIs, Colibri Segment engines and hosted
-  generation using a tiny synthetic OLMoE checkpoint on loopback.
-- Arrow/Enter navigation, all-party approval, rejection, slash completion,
-  terminal restoration and resource release.
-- Terminal images are frames from that integration test, not performance
-  claims for a large model or a multi-computer LAN.
-- The browser capacity path has been exercised with two real reduced OLMoE
-  models: measure, compare, confirm routing, then chat through both models.
-  Cancellation, authorization, stale measurements and changed model revisions
-  have separate regression checks.
+CI builds and runs the CPU runtime on Linux x86-64 and ARM64, and native macOS
+Intel and Apple Silicon. Its integration tests use real Colibri engines with
+reduced checkpoints:
 
-Native macOS Intel and Apple Silicon CI covers the real Tiny household flow.
-A user-operated Windows/WSL-to-macOS 12.6 Intel trial also completed two Tiny
-responses with all model computation on the Mac and source weights on the PC.
-This is a smoke test, not a performance or large-model certification.
+- An encrypted tracker, two donor TUIs, approval and rejection, hosted streaming,
+  terminal navigation and resource release.
+- Multiple resident models, isolated conversations, bounded concurrent requests,
+  cancellation, selective unloading and service restart.
+- The browser capacity path: measure, compare, confirm routing and chat through
+  both models; permission checks and invalidation of stale measurements.
+- Bounded replica policies and recovery/replay, including refusal when permission
+  or capacity is missing.
 
-**Not yet certified:** general physical-LAN reliability, native Windows,
-GPU household execution, all model families,
-multi-session household use, or transparent recovery after losing a donor.
-WSL testing is not native Windows certification.
+Physical PC-to-Mac trials have also run OLMoE with different layer ranges on each
+computer. Those observations apply to the tested package and configuration;
+they do not certify every LAN, model family, context length or concurrent load.
+The reduced-model tests establish runtime behavior, not large-model speed.
+See the [release evidence](docs/LAN_RELEASE_CHECKLIST.md) for the recorded scope.
+
+The native Windows household service and GPU household execution are not
+delivered by these CPU checks. Windows/WSL testing is not native Windows
+certification. ARM64 CI does not certify a physical Raspberry Pi cluster.
+Recovery can require visible interruption and replay; it is not instantaneous
+KV migration.
 
 Adapter registration is broader than tested household execution. A checkpoint
 appearing in the catalogue does not make its sizing or backend supported.
@@ -251,6 +274,71 @@ household tracker runs independently of the owner's window. Allow the installed
 `lumabri` and `segment_node` executables through the donor's application
 firewall rather than disabling the firewall. Rebuilding an unsigned executable
 may require reviewing its application permission again.
+
+## Authorized servers and containers
+
+The same resident worker can run without a terminal under a process supervisor.
+It keeps model approval, memory accounting and session limits; starting a worker
+does not approve a model. See the [headless service](docs/HOUSEHOLD_SERVICE.md)
+and [container worker deployment](docs/KUBERNETES_WORKERS.md) for the commands
+and Kubernetes example.
+
+The container gate exercises real reduced-model inference across separate
+Kubernetes Pods, including a model that needs both workers' memory. This is
+deployment evidence for that configuration, not a large-model throughput claim.
+
+For administration, [MCP tools](docs/AGENT_CONTROL.md) let compatible agents
+inspect the cluster through the same authenticated API. Management actions
+require a separate grant and keep the existing memory budgets, review checks
+and donor permissions. The inference service continues if the agent exits.
+
+An optional [Kubernetes controller](docs/KUBERNETES_CONTROL.md) reconciles
+existing, authorized replica policies. Kubernetes manages the containers;
+Lumabri manages model placement and resident inference. The controller does
+not create servers or grant access to a donor.
+
+### Kubernetes: from workers to model policies
+
+Start with a verified Linux package for your workers' architecture. Build the
+resident image, configure the example with your tracker, household secret,
+image digest and memory limits, then apply it in your own namespace:
+
+```sh
+python3 tools/prepare_container_context.py --package /path/to/linux-candidate --output /tmp/lumabri-image
+docker build --tag lumabri-resident:local /tmp/lumabri-image
+# Configure deploy/kubernetes/workers.example.yaml for your cluster first.
+kubectl -n lumabri apply -f deploy/kubernetes/workers.example.yaml
+```
+
+The image must be available to the cluster. The namespace, authenticated
+tracker and gateway must already be configured; the worker example is not a
+complete cluster installer. Follow the [worker setup](docs/KUBERNETES_WORKERS.md)
+for those prerequisites, approvals, networking and storage.
+
+For declarative control of an existing Lumabri replica policy, install the
+optional controller's API and namespaced permissions:
+
+```sh
+make lumabri-kube
+kubectl apply -f deploy/kubernetes/replicapolicy-crd.yaml
+kubectl -n lumabri apply -f deploy/kubernetes/rbac.yaml
+```
+
+Run `lumabri-kube` beside the gateway with the dedicated credentials and
+arguments in the [controller setup](docs/KUBERNETES_CONTROL.md). Installing the
+CRD alone does not activate it or authorize workers.
+
+| What happens | Lumabri's behavior |
+| --- | --- |
+| A model needs more memory than one worker offers | A feasible approved plan can split its layers across workers. Chat waits for the whole chain to be ready. |
+| Demand rises for an explicitly enabled replica policy | The service can prepare additional replicas on authorized machines, within that policy's limits and available resources. |
+| Demand falls | The policy can drain eligible surplus replicas before release; active sessions are not discarded to free memory. |
+| An administrator deletes a `ReplicaPolicy` | Automation pauses and resident weights remain. Deletion does not stop a server or unload the model. |
+| A worker disappears | Configured recovery needs an authorized replacement and sufficient memory. Otherwise the conversation stays incomplete and the interruption is shown. |
+
+Kubernetes supplies and supervises the Pods. Lumabri manages the resident
+models and their sessions within them. Model replicas and Kubernetes Pod
+replicas are different: Lumabri's controller does not create or delete Pods.
 
 ## Development and diagnostics
 
