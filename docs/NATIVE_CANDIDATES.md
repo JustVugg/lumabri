@@ -76,6 +76,12 @@ The latest measured speed is historical, not a guarantee for the next turn.
   never authorizes termination. Native tests cover owner crashes, descendants,
   cooperative stop, Unicode paths and arguments, and resident OLMoE inference
   under this supervisor. Capability probes use the same bounded ownership path.
+- The shared C catalogue also has a native Windows console backend. A ConPTY
+  test (Windows 10 1809 or later) drives actual navigation, donor selection,
+  model review, resize and Ctrl-C, and checks restoration of console modes and
+  code pages. Checkpoint inspection accepts UTF-8 paths and 64-bit file extents;
+  its Windows gate verifies bounded reads of a sparse shard larger than 4 GiB.
+  These gates do not replace the pending complete donor/service integration.
 - Neither a GPU detector nor a manifest entry proves accelerated execution.
   These candidates use the verified CPU path. Each participating machine
   must permit the household's fixed LAN ports in its own firewall.

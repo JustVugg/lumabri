@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
+#include "files.h"
 
 typedef struct {
     char name[512], dtype[32];
@@ -105,10 +106,20 @@ static const char *lmb_plan_object_end(const char *p) {
 static int lmb_plan_read_at(int fd, void *buffer, size_t size, uint64_t offset) {
     unsigned char *p = buffer;
     while (size) {
+        size_t chunk = size > 1048576 ? 1048576 : size;
+#ifdef _WIN32
+        /* Each inventory call owns its descriptor; no shared seek position.
+         * 64-bit offsets are required for real checkpoint shards on Windows. */
+        if (offset > INT64_MAX || _lseeki64(fd, (int64_t)offset, SEEK_SET) < 0) {
+            if (offset > INT64_MAX) errno = EOVERFLOW;
+            return -1;
+        }
+        int n = _read(fd, p, (unsigned)chunk);
+#else
         off_t at = (off_t)offset;
         if (at < 0 || (uint64_t)at != offset) { errno = EOVERFLOW; return -1; }
-        size_t chunk = size > 1048576 ? 1048576 : size;
         ssize_t n = pread(fd, p, chunk, at);
+#endif
         if (n < 0 && errno == EINTR) continue;
         if (n <= 0) { if (!n) errno = EIO; return -1; }
         if ((uint64_t)n > UINT64_MAX - offset) { errno = EOVERFLOW; return -1; }
@@ -119,17 +130,17 @@ static int lmb_plan_read_at(int fd, void *buffer, size_t size, uint64_t offset) 
 
 static int lmb_plan_tensor_file_id(const char *path, uint64_t *header_budget,
                                 LmbPlanTensorVisit visit, void *opaque, uint32_t file_id) {
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    int fd = lmb_plan_open(path);
     if (fd < 0) return -1;
-    struct stat st;
+    uint64_t file_size;
     unsigned char prefix[8];
     uint64_t bytes = 0;
     int rc = -1;
     char *json = NULL;
-    if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_size < 10 ||
+    if (lmb_plan_file_size(fd, &file_size) || file_size < 10 ||
         lmb_plan_read_at(fd, prefix, 8, 0)) goto done;
     for (unsigned i = 0; i < 8; i++) bytes |= (uint64_t)prefix[i] << (8 * i);
-    if (bytes > *header_budget || bytes > (uint64_t)st.st_size - 8 || bytes < 2) goto done;
+    if (bytes > *header_budget || bytes > file_size - 8 || bytes < 2) goto done;
     *header_budget -= bytes;
     json = malloc((size_t)bytes + 1);
     if (!json || lmb_plan_read_at(fd, json, (size_t)bytes, 8)) goto done;
@@ -155,7 +166,7 @@ static int lmb_plan_tensor_file_id(const char *path, uint64_t *header_budget,
                 lmb_plan_array(lmb_json_member(p, "shape"), t.shape, 8, &t.rank) ||
                 lmb_plan_array(lmb_json_member(p, "data_offsets"), offsets, 2, &noffsets) ||
                 noffsets != 2 || offsets[0] > offsets[1] ||
-                offsets[1] > (uint64_t)st.st_size - 8 - bytes) goto done;
+                offsets[1] > file_size - 8 - bytes) goto done;
             t.elements = 1;
             for (unsigned i = 0; i < t.rank; i++) t.elements = lmb_size_mul(t.elements, t.shape[i]);
             unsigned width = !strcmp(t.dtype, "F32") ? 4 :
@@ -197,23 +208,43 @@ static int LMB_UNUSED lmb_plan_tensor_file(const char *path, uint64_t *header_bu
 }
 
 static int lmb_plan_tensors(const char *root, LmbPlanTensorVisit visit, void *opaque) {
+#ifdef _WIN32
+    wchar_t *wide = lmb_plan_wide(root); if (!wide) return -1;
+    _WDIR *dir = _wopendir(wide); free(wide);
+#else
     DIR *dir = opendir(root);
+#endif
     if (!dir) return -1;
     uint64_t budget = UINT64_C(64) << 20;
     unsigned files = 0;
     int rc = 0;
     for (;;) {
         errno = 0;
+#ifdef _WIN32
+        struct _wdirent *e = _wreaddir(dir);
+#else
         struct dirent *e = readdir(dir);
+#endif
         if (!e) { if (errno) rc = -1; break; }
-        size_t n = strlen(e->d_name);
-        if (n < 12 || strcmp(e->d_name + n - 12, ".safetensors")) continue;
+#ifdef _WIN32
+        char name[1024];
+        if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, e->d_name, -1,
+                                 name, sizeof name, NULL, NULL)) { rc = -1; break; }
+#else
+        const char *name = e->d_name;
+#endif
+        size_t n = strlen(name);
+        if (n < 12 || strcmp(name + n - 12, ".safetensors")) continue;
         char path[1024];
-        int len = snprintf(path, sizeof path, "%s/%s", root, e->d_name);
+        int len = snprintf(path, sizeof path, "%s/%s", root, name);
         if (++files > 512 || len < 0 || (size_t)len >= sizeof path ||
             lmb_plan_tensor_file_id(path, &budget, visit, opaque, files)) { rc = -1; break; }
     }
+#ifdef _WIN32
+    _wclosedir(dir);
+#else
     closedir(dir);
+#endif
     return files ? rc : -1;
 }
 #endif

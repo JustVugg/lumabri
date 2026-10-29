@@ -176,13 +176,15 @@ static int LMB_UNUSED lmb_inkling_memory(const char *root, const char *json, Lmb
         m->memory[i].state_fixed_bytes = lmb_size_mul(2 * (kvdim + h), (uint64_t)(conv - 1) * 4);
         m->memory[i].resident_bytes = lmb_size_add(m->memory[i].resident_bytes, 32768);
     }
-    char path[1024]; struct stat st;
+    char path[1024];
     int len = snprintf(path, sizeof path, "%s/dense-int4g64", root);
     if (len < 0 || (size_t)len >= sizeof path) return -1;
-    if (!stat(path, &st)) {
+    int directory = lmb_plan_optional_directory(path);
+    if (directory < 0) return -1;
+    if (directory) {
         v.sidecar = 1;
-        if (!S_ISDIR(st.st_mode) || lmb_plan_tensors(path, lmb_inkling_tensor, &v)) return -1;
-    } else if (errno != ENOENT) return -1;
+        if (lmb_plan_tensors(path, lmb_inkling_tensor, &v)) return -1;
+    }
     uint64_t wide = h + (uint64_t)(heads + 2u * kv) * hd + (uint64_t)(sh + 2u * sk) * sd +
         (uint64_t)(heads + sh) * rel + (uint64_t)shared * (h + inter) +
         (uint64_t)topk * (h + inter) + experts + dense;

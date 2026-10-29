@@ -48,6 +48,8 @@ jobs:
           ./build/windows-control/test_process_probe_windows.exe 2>&1 | tee -a build/windows-control-evidence.log
           ./build/windows-control/test_owned_process_windows.exe 2>&1 | tee -a build/windows-control-evidence.log
           ./build/windows-control/test_service_windows.exe 2>&1 | tee -a build/windows-control-evidence.log
+          ./build/windows-control/test_planner_windows.exe 2>&1 | tee -a build/windows-control-evidence.log
+          ./build/windows-control/test_tui_windows.exe 2>&1 | tee -a build/windows-control-evidence.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
