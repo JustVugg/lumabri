@@ -47,6 +47,16 @@ def main():
             status, body, headers = proxy.request("/api/v1/models", token)
             assert status == 200 and json.loads(body)["models"] == []
             assert headers["Cache-Control"] == "no-store"
+            status, body, _ = proxy.request("/api/v1/client-config", token)
+            config = json.loads(body)
+            assert status == 200 and config["openai_base_url"] == proxy.origin + "/v1"
+            assert config["anthropic_base_url"] == proxy.origin and token not in body.decode()
+            status, body, _ = proxy.request("/v1/models", token)
+            assert status == 200 and json.loads(body) == {"object": "list", "data": []}
+            sample = json.dumps({"model": "01" * 32, "max_tokens": 8, "messages": [{"role": "user", "content": "hi"}]})
+            status, body, _ = proxy.request("/v1/messages", body=sample,
+                headers={"x-api-key": token, "anthropic-version": "2023-06-01"})
+            assert status == 403 and json.loads(body)["error"]["message"] == "model_not_authorized", body
             assert proxy.request("/api/v1/workspace", token)[0] == 403
             for headers in ({"Origin": "https://evil.test"}, {"Origin": "null"},
                             {"Host": "evil.test", "X-Forwarded-Host": proxy.authority},

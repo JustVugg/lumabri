@@ -15,6 +15,9 @@
 
 #define LMB_API_CHILDREN 16u
 #define LMB_API_TURN_SECONDS 300u
+enum { API_NATIVE, API_OPENAI, API_ANTHROPIC };
+/* Each HTTP connection runs in its own child; no cross-request mutable dialect. */
+static int api_dialect;
 static volatile sig_atomic_t api_stopping;
 static void api_stop(int sig) { (void)sig; api_stopping=1; }
 
@@ -38,7 +41,14 @@ static int api_response(int fd, unsigned status, const char *body) {
 static void api_error(int fd, unsigned status, const char *code) {
     /* code is a server-owned constant, never an unescaped engine/client string. */
     fprintf(stderr,"[api-request] status=%u code=%s\n",status,code);
-    char body[192]; snprintf(body,sizeof body,"{\"error\":\"%s\"}\n",code);
+    char body[512];
+    const char *type=status==401 ? "authentication_error" : status==403 ? "permission_error" :
+        status==429 ? "rate_limit_error" : status>=500 ? "api_error" : "invalid_request_error";
+    if (api_dialect==API_ANTHROPIC)
+        snprintf(body,sizeof body,"{\"type\":\"error\",\"error\":{\"type\":\"%s\",\"message\":\"%s\"}}\n",type,code);
+    else if (api_dialect==API_OPENAI)
+        snprintf(body,sizeof body,"{\"error\":{\"type\":\"%s\",\"code\":\"%s\",\"param\":null,\"message\":\"%s\"}}\n",type,code,code);
+    else snprintf(body,sizeof body,"{\"error\":\"%s\"}\n",code);
     (void)api_response(fd,status,body);
 }
 static int api_addf(Cap *c, const char *format, ...) {
@@ -89,6 +99,7 @@ static int api_event(int fd, const char *event, const char *json) {
     return n<0 || (size_t)n>=sizeof header || api_write(fd,header,(size_t)n) ||
         api_write(fd,json,strlen(json)) || api_write(fd,"\n\n",2) ? -1 : 0;
 }
+#include "lumabri_api_compat.h"
 /* The byte codec may split a UTF-8 scalar between DATA frames. Preserve every
  * byte; clients base64-decode deltas into ONE streaming UTF-8 decoder. */
 static int api_delta(void *opaque, const unsigned char *data, size_t n) {
@@ -137,12 +148,13 @@ static int home_managed_retire(const char *tracker, const uint8_t allocation[32]
 static int api_models(int fd, int access_dir, const char *tracker, const LmbApiUser *user) {
     LmbResidentPlan *plans=calloc(64,sizeof *plans); Cap body={0};
     if (!plans) { if (fd>=0) api_error(fd,500,"allocation_failed"); return -1; }
-    size_t n=home_resident_library_list(tracker,plans,64); int bad=cap_str(&body,"{\"schema\":1,\"models\":["),comma=0;
+    size_t n=home_resident_library_list(tracker,plans,64); int bad=cap_str(&body,api_dialect ? "{\"object\":\"list\",\"data\":[" : "{\"schema\":1,\"models\":["),comma=0;
     for (size_t i=0; i<n && !bad; i++) {
         const LmbResidentPlan *p=&plans[i];
         if (!lmb_home_nonzero(p->allocation,32) || (user && !lmb_api_user_allows(user,p->allocation))) continue;
         char id[65]; lmb_hex(id,p->allocation,32);
-        bad=api_addf(&body,"%s{\"id\":\"%s\",\"name\":",comma++ ? "," : "",id) ||
+        bad=api_dialect ? api_compat_model(&body,id,p->model,comma++) :
+            api_addf(&body,"%s{\"id\":\"%s\",\"name\":",comma++ ? "," : "",id) ||
             api_json_text(&body,p->model) || api_addf(&body,",\"context\":%u,\"max_tokens\":%u,"
                 "\"sessions\":%u,\"state\":\"saved_plan\"}",p->context,p->max_new,p->sessions ? p->sessions : 1);
     }
@@ -181,6 +193,7 @@ fail:
 #include "lumabri_response_metrics.h"
 typedef struct {
     int fd; double first; LmbReplayPrefix replay;
+    ApiCompat *compat;
     LmbResponseMetrics timing;
     int metrics; uint32_t attempts; double last_metrics;
     const char *phase;
@@ -219,7 +232,7 @@ static int api_emitted_delta(void *opaque, const unsigned char *bytes, size_t le
     double now=nowd();
     if (length && !stream->first) stream->first=now;
     lmb_response_text(&stream->timing,now,length);
-    return api_delta(&stream->fd,bytes,length);
+    return stream->compat ? api_compat_delta(stream->fd,stream->compat,bytes,length) : api_delta(&stream->fd,bytes,length);
 }
 static int api_observed_progress(void *opaque, const char *line) {
     ApiObservedStream *stream=opaque;
@@ -230,6 +243,7 @@ static int api_observed_progress(void *opaque, const char *line) {
         else if (!strncmp(tail,"PREFILL ",8)) stream->phase="prefill";
         else if (!strncmp(tail,"DECODE",6) && (!tail[6] || tail[6]==' ')) stream->phase="decode";
     }
+    if (stream->compat && api_compat_progress(stream->fd,stream->compat,line)) return -1;
     lmb_response_progress(&stream->timing,line,nowd());
     return api_live_metrics(stream,strcmp(phase,stream->phase)!=0);
 }
@@ -260,7 +274,7 @@ static int api_observed_error(void *opaque, const char *message) {
     snprintf(stream->error,sizeof stream->error,"%s",message);
     return 0; /* The request loop emits one terminal error, or visible recovery. */
 }
-static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUser *user, const char *body, size_t length) {
+static void api_chat_run(int fd, int access_dir, const char *tracker, const LmbApiUser *user, const char *body, size_t length, ApiCompat *compat) {
     double started=nowd();
     LmbJsonToken tokens[1024]; LmbJson j; int fields[5];
     const char *const keys[]={"model","messages","max_tokens","recovery_wait_seconds","stream_metrics"};
@@ -291,6 +305,7 @@ static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUs
     int wait_authorized=wait_seconds && contract.count && !api_recovery_capture(access_dir,&contract,recovery_key);
     int recoverable=(seeded || engine.greedy_only) && (contract.count>1 || wait_authorized);
     uint64_t request_seed=0; if (seeded) lmb_random((uint8_t *)&request_seed,sizeof request_seed);
+    if (compat && compat->has_seed) request_seed=compat->seed;
     uint8_t attempted[3][32]; uint32_t attempts=1;
     memcpy(attempted[0],selected->allocation,32);
     LmbCalibration *observation=calloc(1,sizeof *observation); char records[1200], why[200]; int observing=0;
@@ -298,17 +313,23 @@ static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUs
     if (observation && !home_resident_observation_seed(selected,observation,records) &&
         !catalog_workload_capture_once(tracker,&observation->key,why,sizeof why)) observing=1;
     Cap history={0}; char *prompt=NULL;
-    if (api_messages(&j,(unsigned)fields[1],engine.kind,&history,&prompt)) {
+    if (compat && ((compat->has_seed && !seeded) ||
+        (compat->has_temperature && compat->temperature>0 && engine.greedy_only))) {
+        demand_outcome=LMB_DEMAND_INVALID; api_error(fd,400,"sampling_not_supported_by_model"); goto finished;
+    }
+    if (compat ? api_compat_payload(compat,&j,(unsigned)fields[1],engine.kind) :
+        api_messages(&j,(unsigned)fields[1],engine.kind,&history,&prompt)) {
         demand_outcome=LMB_DEMAND_INVALID; api_error(fd,400,"unsupported_messages_or_limits"); goto finished;
     }
-    if (submit_serve2_seeded(&engine,history.p ? history.p : "",prompt,(int)max_new,seeded ? &request_seed : NULL)) {
+    if (compat ? api_compat_submit(&engine,compat,max_new,seeded ? &request_seed : NULL) :
+        submit_serve2_seeded(&engine,history.p ? history.p : "",prompt,(int)max_new,seeded ? &request_seed : NULL)) {
         api_error(fd,503,"submit_failed"); goto finished;
     }
     const char *header="HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\n"
         "Connection: close\r\nX-Content-Type-Options: nosniff\r\nX-Accel-Buffering: no\r\n\r\n";
-    if (api_write(fd,header,strlen(header))) { demand_outcome=LMB_DEMAND_CANCELLED; goto finished; }
+    if ((!compat || compat->streaming) && api_write(fd,header,strlen(header))) { demand_outcome=LMB_DEMAND_CANCELLED; goto finished; }
     ApiObservedStream observed={.fd=fd,.replay={.limit=UINT64_C(8)<<20},.timing={.started=started},
-        .metrics=fields[4]>=0 && tokens[fields[4]].kind==LMB_JSON_TRUE,.attempts=1,.phase="preparing"};
+        .compat=compat,.metrics=fields[4]>=0 && tokens[fields[4]].kind==LMB_JSON_TRUE,.attempts=1,.phase="preparing"};
     LmbReplyStream stream={0}; LmbReplySink sink={api_observed_delta,api_observed_progress,api_observed_error,&observed};
     int client_closed=api_live_metrics(&observed,1)!=0;
     for (;;) {
@@ -341,7 +362,7 @@ static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUs
           !lmb_api_user_allows(&current,allocation)) { snprintf(observed.error,sizeof observed.error,"Access revoked during recovery"); break; }
       struct pollfd client={fd,POLLIN,0};
       if (poll(&client,1,0)!=0) { client_closed=1; break; }
-      if (api_event(fd,"recovering","{\"message\":\"Replica interrupted; replaying on another approved replica and verifying the visible prefix\"}")) { client_closed=1; break; }
+      if (!compat && api_event(fd,"recovering","{\"message\":\"Replica interrupted; replaying on another approved replica and verifying the visible prefix\"}")) { client_closed=1; break; }
       engine_stop(&engine); if (permit>=0) close(permit); permit=-1;
       status=api_model_open_ex(access_dir,tracker,allocation,max_new,&engine,&permit,selected,&error,
           &contract,&attempted[0][0],attempts,seeded,NULL);
@@ -361,7 +382,8 @@ static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUs
       memcpy(attempted[attempts++],selected->allocation,32);
       observed.attempts=attempts;
       lmb_replay_begin(&observed.replay);
-      if (submit_serve2_seeded(&engine,history.p ? history.p : "",prompt,(int)max_new,seeded ? &request_seed : NULL)) {
+      if (compat ? api_compat_submit(&engine,compat,max_new,seeded ? &request_seed : NULL) :
+        submit_serve2_seeded(&engine,history.p ? history.p : "",prompt,(int)max_new,seeded ? &request_seed : NULL)) {
           snprintf(observed.error,sizeof observed.error,"Recovery submission failed; response remains incomplete"); break;
       }
     }
@@ -378,6 +400,12 @@ static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUs
         if (engine_finish(&engine)) fprintf(stderr,"[api] host cleanup observation timed out\n");
         if (permit>=0) close(permit);
         permit=-1;
+        if (compat) {
+            if (api_compat_finish(fd,compat,stream.stat)) {
+                demand_outcome=LMB_DEMAND_FAILED;
+                api_compat_failure(fd,compat,"Missing completion metadata or invalid text; update the household runtime");
+            }
+        } else {
         Cap payload={0};
         if (!cap_str(&payload,"{\"stats\":") && !api_json_text(&payload,stream.stat) &&
             !api_addf(&payload,",\"observation_saved\":%s,\"recovery_attempts\":%u,\"stats_scope\":\"%s\"",
@@ -386,6 +414,7 @@ static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUs
             (!observed.metrics || !api_final_metrics(&payload,stream.stat,attempts)) && !cap_str(&payload,"}"))
             (void)api_event(fd,"done",payload.p);
         free(payload.p);
+        }
     } else if (!client_closed && !api_stopping) {
         const char *reason=observed.replay.mismatch || (stream.status==LMB_REPLY_DONE && !lmb_replay_complete(&observed.replay)) ?
             "Recovery did not reproduce the visible prefix; response remains incomplete" :
@@ -396,7 +425,8 @@ static void api_chat(int fd, int access_dir, const char *tracker, const LmbApiUs
         if (engine_finish(&engine)) fprintf(stderr,"[api] error cleanup observation timed out\n");
         if (permit>=0) close(permit);
         permit=-1;
-        (void)api_engine_error(&fd,reason);
+        if (compat) api_compat_failure(fd,compat,reason);
+        else (void)api_engine_error(&fd,reason);
     }
     if (client_closed) demand_outcome=LMB_DEMAND_CANCELLED;
     if (observed.first>started) demand_ttft=(uint64_t)((observed.first-started)*1000000.0);
@@ -406,6 +436,16 @@ finished:
     if (permit>=0) close(permit);
     api_demand_send(LMB_DEMAND_END,demand_outcome,demand_ttft,(uint64_t)((nowd()-started)*1000000.0));
     g_execution_view=NULL; free(observation); free(selected);
+}
+static void api_chat(int fd,int access,const char *tracker,const LmbApiUser *user,const char *body,size_t size) {
+    api_chat_run(fd,access,tracker,user,body,size,NULL);
+}
+static void api_client_chat(int fd,int access,const char *tracker,const LmbApiUser *user,const char *body,size_t size,int anthropic_modern) {
+    if (!api_dialect) { api_chat(fd,access,tracker,user,body,size); return; }
+    ApiCompat request={.dialect=api_dialect,.anthropic_modern=anthropic_modern};
+    if (api_compat_request(&request,body,size)) api_error(fd,400,"unsupported_or_invalid_chat_parameters");
+    else api_chat_run(fd,access,tracker,user,request.normalized.p,request.normalized.len,&request);
+    api_compat_free(&request);
 }
 static void api_capacity_apply_http(int fd,int access,const char *tracker,const char *body,size_t size);
 static void api_capacity_http(int fd,int access,const char *tracker,const char *path,const char *body,size_t size);
@@ -429,13 +469,23 @@ static void api_connection_dispatch(int fd, int access_dir, unsigned port, const
     }
     LmbApiHttp request;
     if (!complete || lmb_api_http_parse(&request,header,length)) { api_error(fd,400,"invalid_http_request"); return; }
+    api_dialect=!strcmp(request.path,"/v1/messages") ? API_ANTHROPIC : !strncmp(request.path,"/v1/",4) ? API_OPENAI : API_NATIVE;
     if (https_origin ? lmb_api_http_https_origin(&request,https_origin) : lmb_api_http_origin(&request,port)) {
         api_error(fd,403,"origin_or_host_rejected"); return;
     }
     if (api_web(fd,&request)) return;
+    if (request.api_key[0]) {
+        if (api_dialect!=API_ANTHROPIC || request.has_authorization ||
+            checked_printf(request.authorization,sizeof request.authorization,"Bearer %s",request.api_key)) {
+            api_error(fd,400,"ambiguous_or_unsupported_credentials"); return;
+        }
+    }
+    if (api_dialect==API_ANTHROPIC && ((strcmp(request.anthropic_version,"2023-06-01") && strcmp(request.anthropic_version,"2026-10-21")) || request.anthropic_beta)) {
+        api_error(fd,400,"unsupported_anthropic_version_or_beta"); return;
+    }
     LmbApiUser user;
     if (lmb_api_authorize(access_dir,request.authorization,&user)) { api_error(fd,401,"authentication_required"); return; }
-    lmb_api_wipe(header,sizeof header); lmb_api_wipe(request.authorization,sizeof request.authorization);
+    lmb_api_wipe(header,sizeof header); lmb_api_wipe(request.authorization,sizeof request.authorization); lmb_api_wipe(request.api_key,sizeof request.api_key);
     int permit=lmb_api_user_permit(access_dir,user.name,2);
     if (permit<0) { api_error(fd,429,"user_request_limit"); return; }
     const char *history_path="/api/v1/conversations";
@@ -452,7 +502,21 @@ static void api_connection_dispatch(int fd, int access_dir, unsigned port, const
     const char *preparation_after="/api/v1/preparation/after/";
     int preparation_page=!strncmp(request.path,preparation_after,strlen(preparation_after));
     int management=preparation || policy || elastic || capacity || capacity_apply || !strncmp(request.path,"/api/v1/allocations/",20);
-    if (management && !strcmp(request.method,"POST") && !lmb_management_allows(access_dir,&user))
+    if (!strcmp(request.path,"/api/v1/client-config") && !strcmp(request.method,"GET") && !request.length) {
+        char origin[160];
+        if (https_origin) snprintf(origin,sizeof origin,"%s",https_origin);
+        else snprintf(origin,sizeof origin,"http://127.0.0.1:%u",port);
+        Cap config={0};
+        int bad=api_addf(&config,"{\"schema\":1,\"openai_base_url\":\"%s/v1\",",origin) ||
+            api_addf(&config,"\"anthropic_base_url\":\"%s\",\"models_url\":\"%s/v1/models\",",origin,origin) || cap_str(&config,
+            "\"anthropic_version\":\"2026-10-21\",\"anthropic_versions\":[\"2023-06-01\",\"2026-10-21\"],"
+            "\"credential\":\"Your Lumabri API token\",\"model\":\"An id returned by models_url for your token\","
+            "\"scope\":\"text_chat\",\"streaming\":true,\"tools\":false,\"responses_api\":false,"
+            "\"remote_reachability_verified\":false}");
+        if (bad) api_error(fd,500,"allocation_failed"); else (void)api_response(fd,200,config.p);
+        free(config.p);
+    }
+    else if (management && !strcmp(request.method,"POST") && !lmb_management_allows(access_dir,&user))
         api_error(fd,403,"management_permission_required");
     else if (!strcmp(request.method,"GET") && !strcmp(request.path,"/api/v1/session") && !request.length) {
         char response[96]; snprintf(response,sizeof response,"{\"schema\":1,\"operator\":%s,\"management\":%s}",
@@ -489,12 +553,12 @@ static void api_connection_dispatch(int fd, int access_dir, unsigned port, const
     else if (!strcmp(request.method,"GET") && !strcmp(request.path,"/api/v1/workspace") && !request.length) {
         if (lmb_operator_allows(access_dir,&user)) (void)api_workspace(fd,access_dir,tracker);
         else api_error(fd,403,"operator_permission_required");
-    } else if (!strcmp(request.method,"GET") && !strcmp(request.path,"/api/v1/models") && !request.length)
+    } else if (!strcmp(request.method,"GET") && (!strcmp(request.path,"/api/v1/models") || !strcmp(request.path,"/v1/models")) && !request.length)
         api_models(fd,access_dir,tracker,&user);
     else if (history && !strcmp(request.method,"GET") && !request.length)
         api_history(fd,access_dir,&user,&request,NULL,0);
     else if (management && request.length>(preparation || elastic ? 8192u : policy ? 4096u : capacity || capacity_apply ? 2048u : 512u)) api_error(fd,413,"management_request_too_large");
-    else if (((!strcmp(request.method,"POST") && (!strcmp(request.path,"/api/v1/chat") || management)) ||
+    else if (((!strcmp(request.method,"POST") && (!strcmp(request.path,"/api/v1/chat") || !strcmp(request.path,"/v1/chat/completions") || !strcmp(request.path,"/v1/messages") || management)) ||
               (history && (!strcmp(request.method,"POST") || !strcmp(request.method,"DELETE")))) &&
              request.has_length && request.length && request.json) {
         char *body=malloc((size_t)request.length+1); size_t at=0;
@@ -516,7 +580,7 @@ static void api_connection_dispatch(int fd, int access_dir, unsigned port, const
             else if (capacity) api_capacity_http(fd,access_dir,tracker,request.path,body,at);
             else if (management) api_management(fd,access_dir,tracker,&user,&request,body,at);
             else if (history) api_history(fd,access_dir,&user,&request,body,at);
-            else api_chat(fd,access_dir,tracker,&user,body,at);
+            else api_client_chat(fd,access_dir,tracker,&user,body,at,!strcmp(request.anthropic_version,"2026-10-21"));
             lmb_api_wipe(body,(size_t)request.length+1); free(body);
         }
     } else api_error(fd,400,"unsupported_endpoint_or_framing");
