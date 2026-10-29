@@ -1,32 +1,36 @@
 #define _GNU_SOURCE
 #include "lumabri_machine.h"
 #include "lumabri_proto.h"
-#include "src/runtime/lumabri_container_limits.h"
-
-#include <arpa/inet.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <ifaddrs.h>
 #include <limits.h>
-#include <net/if.h>
-#include <netinet/in.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
+#include <unistd.h>
+#ifdef _WIN32
+#include "src/runtime/lumabri_machine_windows.h"
+#else
+#include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <netinet/in.h>
 #include <sys/statvfs.h>
 #include <sys/file.h>
 #include <sys/utsname.h>
-#include <time.h>
-#include <unistd.h>
+#endif
 #ifdef __linux__
 #include <sched.h>
+#include "src/runtime/lumabri_container_limits.h"
 #endif
 #ifdef __APPLE__
 #include <mach/mach.h>
 #include <sys/sysctl.h>
 #endif
 
+#ifndef _WIN32
 static int read_u64_file(const char *path, uint64_t *value) {
     FILE *file = fopen(path, "r");
     unsigned long long parsed = 0;
@@ -37,6 +41,7 @@ static int read_u64_file(const char *path, uint64_t *value) {
     *value = (uint64_t)parsed;
     return 0;
 }
+#endif
 
 static uint64_t kib_to_bytes(unsigned long long kib) {
     if (kib > (unsigned long long)(UINT64_MAX >> 10)) return UINT64_MAX;
@@ -88,7 +93,9 @@ int lmb_machine_read_meminfo(FILE *file, uint64_t *total,
 
 static void meminfo(uint64_t *total, uint64_t *available,
                     uint64_t *swap_total, uint64_t *swap_free) {
-#ifdef __APPLE__
+#ifdef _WIN32
+    lmb_machine_win_memory(total, available, swap_total, swap_free);
+#elif defined(__APPLE__)
     uint64_t mt = 0, ma = 0;
     size_t size = sizeof mt;
     if (sysctlbyname("hw.memsize", &mt, &size, NULL, 0)) mt = 0;
@@ -166,6 +173,31 @@ uint64_t lmb_machine_total_ram(void) {
 int lmb_machine_compute_lease_acquire(const char *model, const char *tracker,
                                       char *owner, size_t owner_size) {
     if (owner && owner_size) owner[0] = 0;
+#ifdef _WIN32
+    char path[2048];
+    if (lmb_private_default_path(path, sizeof path, "compute-donor.lock")) return -1;
+    HANDLE h = lmb_private_open(path, 1, 1, NULL);
+    if (h == INVALID_HANDLE_VALUE) return -1;
+    OVERLAPPED at = {0};
+    if (!LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                    0, MAXDWORD, MAXDWORD, &at)) {
+        if (owner && owner_size) snprintf(owner, owner_size, "another compute donor owns the lease");
+        DWORD error = GetLastError(); CloseHandle(h); return lmb_private_error(error);
+    }
+    char text[1024];
+    int n = snprintf(text, sizeof text, "pid=%lu model=%s tracker=%s\n", GetCurrentProcessId(),
+        model && *model ? model : "?", tracker && *tracker ? tracker : "?");
+    DWORD written;
+    if (n < 0 || n >= (int)sizeof text || !SetEndOfFile(h) ||
+        !WriteFile(h, text, (DWORD)n, &written, NULL) || written != (DWORD)n || !FlushFileBuffers(h)) {
+        CloseHandle(h); errno = EIO; return -1;
+    }
+    /* The keeper owns this lease. Its engine Job Object dies with it; native
+     * engine processes must not inherit an independent machine-wide lease. */
+    int fd = _open_osfhandle((intptr_t)h, _O_RDWR | _O_BINARY | _O_NOINHERIT);
+    if (fd < 0) CloseHandle(h);
+    return fd;
+#else
     const char *home = getenv("HOME");
     if (!home || !home[0]) { errno = ENOENT; return -1; }
     char directory[1200], path[1280];
@@ -216,10 +248,13 @@ int lmb_machine_compute_lease_acquire(const char *model, const char *tracker,
         return -1;
     }
     return fd;
+#endif
 }
 
 static void cpu_profile(LmbMachineProfile *profile) {
-#ifdef __APPLE__
+#ifdef _WIN32
+    lmb_machine_win_cpu(profile);
+#elif defined(__APPLE__)
     unsigned logical = 0, physical = 0;
     size_t size = sizeof logical;
     (void)sysctlbyname("hw.logicalcpu", &logical, &size, NULL, 0);
@@ -329,6 +364,10 @@ static void cpu_profile(LmbMachineProfile *profile) {
 }
 
 static void numa_profile(LmbMachineProfile *profile) {
+#ifdef _WIN32
+    /* CPU profiling already counts the NUMA nodes of usable processors. */
+    if (!profile->numa_nodes) profile->numa_nodes = 1;
+#else
     DIR *dir = opendir("/sys/devices/system/node");
     struct dirent *entry;
     if (!dir) { profile->numa_nodes = 1; return; }
@@ -338,9 +377,13 @@ static void numa_profile(LmbMachineProfile *profile) {
             profile->numa_nodes++;
     closedir(dir);
     if (!profile->numa_nodes) profile->numa_nodes = 1;
+#endif
 }
 
 static void gpu_profile(LmbMachineProfile *profile) {
+#ifdef _WIN32
+    lmb_machine_win_gpu(profile);
+#else
     DIR *dir = opendir("/sys/class/drm");
     struct dirent *entry;
     if (!dir) return;
@@ -362,6 +405,7 @@ static void gpu_profile(LmbMachineProfile *profile) {
         }
     }
     closedir(dir);
+#endif
 }
 
 /* How fast this machine reads a file it has not cached.
@@ -376,6 +420,9 @@ static void gpu_profile(LmbMachineProfile *profile) {
  * O_DIRECT where the filesystem allows it, so the number is the disk and
  * not the page cache. A failure leaves zero, which prints as unmeasured. */
 static uint64_t disk_read_speed(const char *path) {
+#ifdef _WIN32
+    return lmb_machine_win_disk_speed(path);
+#else
     if (!path || !path[0]) return 0;
     char probe[1024];
     int plen = snprintf(probe, sizeof probe, "%s/.lumabri_disk_probe.XXXXXX", path);
@@ -416,6 +463,7 @@ static uint64_t disk_read_speed(const char *path) {
                   (double)(t1.tv_nsec - t0.tv_nsec) * 1e-9;
     if (secs <= 0.0 || got == 0) return 0;
     return (uint64_t)((double)got / secs);
+#endif
 }
 
 /* Which GPU backends this build can actually drive.
@@ -450,6 +498,9 @@ static int public_address(uint32_t host_order) {
 }
 
 static void network_profile(LmbMachineProfile *profile) {
+#ifdef _WIN32
+    lmb_machine_win_network(profile);
+#else
     struct ifaddrs *all = NULL;
     if (getifaddrs(&all)) return;
     for (struct ifaddrs *it = all; it; it = it->ifa_next) {
@@ -462,30 +513,55 @@ static void network_profile(LmbMachineProfile *profile) {
         }
     }
     freeifaddrs(all);
+#endif
 }
 
 static double monotonic_seconds(void) {
+#ifdef _WIN32
+    LARGE_INTEGER ticks, frequency;
+    if (QueryPerformanceFrequency(&frequency) && QueryPerformanceCounter(&ticks))
+        return (double)ticks.QuadPart / frequency.QuadPart;
+    return GetTickCount64() / 1000.0;
+#else
     struct timespec time;
     clock_gettime(CLOCK_MONOTONIC, &time);
     return time.tv_sec + time.tv_nsec / 1e9;
+#endif
+}
+
+static void disk_and_load_profile(LmbMachineProfile *profile, const char *disk_path) {
+    profile->disk_available_bytes = 0;
+    profile->load_one = -1.0;
+#ifdef _WIN32
+    profile->disk_available_bytes = lmb_machine_win_disk_free(disk_path);
+    /* Windows CPU utilization is not a Unix one-minute load average. */
+#else
+    struct statvfs disk;
+    if (!statvfs(disk_path && *disk_path ? disk_path : ".", &disk))
+        profile->disk_available_bytes = (uint64_t)disk.f_bavail * disk.f_frsize;
+    double loads[1];
+    if (getloadavg(loads, 1) == 1) profile->load_one = loads[0];
+#endif
 }
 
 void lmb_machine_refresh_resources(LmbMachineProfile *profile, const char *disk_path) {
     cpu_profile(profile); /* quotas/cpusets may change without restarting */
     meminfo(&profile->ram_total_bytes, &profile->ram_available_bytes,
             &profile->swap_total_bytes, &profile->swap_free_bytes);
-    struct statvfs disk;
-    if (!statvfs(disk_path && *disk_path ? disk_path : ".", &disk))
-        profile->disk_available_bytes = (uint64_t)disk.f_bavail * disk.f_frsize;
-    double loads[1];
-    profile->load_one = -1.0;
-    if (getloadavg(loads, 1) == 1) profile->load_one = loads[0];
+    disk_and_load_profile(profile, disk_path);
 }
 
 int lmb_machine_probe(LmbMachineProfile *profile, const char *disk_path,
                       const char *tracker) {
     if (!profile) return -1;
     memset(profile, 0, sizeof *profile);
+#ifdef _WIN32
+    wchar_t name[256]; DWORD length = sizeof name/sizeof *name;
+    if (GetComputerNameExW(ComputerNameDnsHostname, name, &length))
+        (void)WideCharToMultiByte(CP_UTF8, 0, name, -1, profile->hostname,
+                                sizeof profile->hostname, NULL, NULL);
+    snprintf(profile->os, sizeof profile->os, "Windows");
+#else
     struct utsname system;
     if (!uname(&system)) {
         snprintf(profile->hostname, sizeof profile->hostname, "%.63s", system.nodename);
@@ -495,6 +571,7 @@ int lmb_machine_probe(LmbMachineProfile *profile, const char *disk_path,
     } else {
         (void)gethostname(profile->hostname, sizeof profile->hostname);
     }
+#endif
     cpu_profile(profile);
     numa_profile(profile);
     meminfo(&profile->ram_total_bytes, &profile->ram_available_bytes,
@@ -502,25 +579,20 @@ int lmb_machine_probe(LmbMachineProfile *profile, const char *disk_path,
     gpu_profile(profile);
     profile->gpu_backends = gpu_backends();
     network_profile(profile);
-    struct statvfs disk;
-    if (!statvfs(disk_path && *disk_path ? disk_path : ".", &disk))
-        profile->disk_available_bytes = (uint64_t)disk.f_bavail * disk.f_frsize;
+    disk_and_load_profile(profile, disk_path);
     /* Writing and reading 8 MB is cheap, but it is still I/O on somebody's
      * machine: LUMABRI_NO_DISK_PROBE=1 leaves it unmeasured, and unmeasured
      * prints as unmeasured rather than as a default. */
     if (!lmb_env_int("LUMABRI_NO_DISK_PROBE", 0, 0, 1))
         profile->disk_read_bps = disk_read_speed(
             disk_path && *disk_path ? disk_path : ".");
-    double loads[1];
-    profile->load_one = -1.0;
-    if (getloadavg(loads, 1) == 1) profile->load_one = loads[0];
     profile->tracker_rtt_ms = -1.0;
     if (tracker && *tracker) {
         double start = monotonic_seconds();
-        int fd = lmb_connect(tracker);
-        if (fd >= 0) {
+        LmbSocket fd = lmb_connect(tracker);
+        if (fd != LMB_INVALID_SOCKET) {
             profile->tracker_rtt_ms = (monotonic_seconds() - start) * 1000.0;
-            close(fd);
+            lmb_close(fd);
         }
     }
     return 0;
@@ -589,22 +661,45 @@ void lmb_machine_print(FILE *out, const LmbMachineProfile *p, int json) {
 static int state_path(char *path, size_t cap) {
     const char *forced = getenv("LUMABRI_GOVERNOR_FILE");
     if (forced && *forced) return snprintf(path, cap, "%s", forced) >= (int)cap ? -1 : 0;
+#ifdef _WIN32
+    return lmb_private_default_path(path, cap, "governor.state");
+#else
     const char *home = getenv("HOME");
     if (!home || !*home) return -1;
     return snprintf(path, cap, "%s/.lumabri/governor.state", home) >= (int)cap ? -1 : 0;
+#endif
 }
 
 int lmb_governor_manual_paused(void) {
     char path[1024], value[32] = "";
+#ifdef _WIN32
+    if (state_path(path, sizeof path)) return 1;
+    FILE *file = lmb_private_stream(path, 0, 0);
+    if (!file) return errno == ENOENT ? 0 : 1;
+    size_t n = fread(value, 1, sizeof value, file);
+    int active = !ferror(file) && n == 7 && !memcmp(value, "active\n", 7);
+    lmb_private_stream_close(file);
+    return !active;
+#else
     if (state_path(path, sizeof path)) return 0;
     FILE *file = fopen(path, "r");
     if (!file) return 0;
     if (!fgets(value, sizeof value, file)) value[0] = 0;
     fclose(file);
     return !strncmp(value, "paused", 6);
+#endif
 }
 
 int lmb_governor_set_manual(int paused) {
+#ifdef _WIN32
+    char path[2048];
+    if (state_path(path, sizeof path)) return -1;
+    FILE *file = lmb_private_stream(path, 1, 1); if (!file) return -1;
+    const char *text = paused ? "paused\n" : "active\n";
+    int bad = fwrite(text, 1, 7, file) != 7 || fflush(file) ||
+        _chsize_s(_fileno(file), 7) || lmb_private_stream_flush(file);
+    lmb_private_stream_close(file); return bad ? -1 : 0;
+#else
     char path[1024], dir[1024], temporary[1100];
     if (state_path(path, sizeof path)) return -1;
     snprintf(dir, sizeof dir, "%s", path);
@@ -629,6 +724,7 @@ int lmb_governor_set_manual(int paused) {
     if (!bad && rename(temporary, path)) { bad = 1; saved = errno; }
     if (bad) { unlink(temporary); errno = saved; return -1; }
     return 0;
+#endif
 }
 
 const char *lmb_governor_state_name(LmbGovernorState state) {

@@ -82,6 +82,13 @@ The latest measured speed is historical, not a guarantee for the next turn.
   code pages. Checkpoint inspection accepts UTF-8 paths and 64-bit file extents;
   its Windows gate verifies bounded reads of a sparse shard larger than 4 GiB.
   These gates do not replace the pending complete donor/service integration.
+- Native Windows inventory uses physical/available RAM bounded by commit and
+  visible Job Object limits, processor affinity, physical cores, NUMA, DXGI
+  hardware detection and free disk space. A shared job memory ceiling uses the
+  reported peak as a conservative bound; it can understate released capacity.
+  Detection does not enable a GPU backend or add shared system RAM as VRAM.
+  The native governor test checks bounded memory, single-CPU affinity, exclusive
+  donor leases, private pause state and recovery without changing user settings.
 - Neither a GPU detector nor a manifest entry proves accelerated execution.
   These candidates use the verified CPU path. Each participating machine
   must permit the household's fixed LAN ports in its own firewall.
