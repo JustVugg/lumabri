@@ -1,0 +1,17 @@
+# Routes to an EXISTING Lumabri gateway + same-user TLS proxy Pod.
+# This does not deploy the gateway, provision a certificate or approve workers.
+# Follow docs/CLIENT_APIS.md and docs/HTTPS_INGRESS.md before applying.
+# Match the selector and targetPort to YOUR proxy deployment.
+apiVersion: v1
+kind: Service
+metadata:
+  name: lumabri-api
+spec:
+  type: ClusterIP
+  selector:
+    app: lumabri-api
+  ports:
+    - name: https
+      port: 443
+      targetPort: 8443
+      protocol: TCP

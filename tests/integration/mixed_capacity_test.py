@@ -92,6 +92,8 @@ def verify_mixed_capacity(runtime, env, tracker, artifacts):
               "production_capacity_certified": False, "run_complete": False, "rounds": [], "summaries": []}
     try:
         cli("start", "--port", str(port))
+        from client_api_test import verify_client_concurrency
+        verify_client_concurrency(port, users[:2], [m["id"] for m in models])
         report["inventory_before"] = snapshot()
         cases = [("solo-a", [0]), ("solo-b", [1])]
         cases += [(f"mixed-{n}", list(range(n))) for n in (2, 4, 8)]

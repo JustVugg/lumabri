@@ -13,8 +13,10 @@
 #define LMB_API_BODY_MAX (1u << 20)
 typedef struct {
     char method[8], path[128], host[128], authorization[128], origin[160];
+    char api_key[128], anthropic_version[32];
+    int anthropic_beta;
     uint32_t length;
-    int has_length, json, has_origin;
+    int has_length, json, has_origin, has_authorization;
 } LmbApiHttp;
 static inline int lmb_api_ascii_equal(const char *a, const char *b) {
     for (; *a && *b; a++,b++) {
@@ -74,7 +76,13 @@ static inline int lmb_api_http_parse(LmbApiHttp *r, const void *bytes, size_t le
         if (lmb_api_ascii_equal(line,"Host")) {
             bit=1; if (!*v || lmb_api_copy(r->host,sizeof r->host,v)) return -1;
         } else if (lmb_api_ascii_equal(line,"Authorization")) {
-            bit=2; if (lmb_api_copy(r->authorization,sizeof r->authorization,v)) return -1;
+            bit=2; r->has_authorization=1; if (lmb_api_copy(r->authorization,sizeof r->authorization,v)) return -1;
+        } else if (lmb_api_ascii_equal(line,"x-api-key")) {
+            bit=32; if (!*v || lmb_api_copy(r->api_key,sizeof r->api_key,v)) return -1;
+        } else if (lmb_api_ascii_equal(line,"anthropic-version")) {
+            bit=64; if (!*v || lmb_api_copy(r->anthropic_version,sizeof r->anthropic_version,v)) return -1;
+        } else if (lmb_api_ascii_equal(line,"anthropic-beta")) {
+            bit=128; r->anthropic_beta=1;
         } else if (lmb_api_ascii_equal(line,"Content-Length")) {
             bit=4; if (!*v) return -1;
             uint32_t n=0;

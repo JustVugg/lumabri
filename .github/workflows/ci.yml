@@ -453,7 +453,7 @@ jobs:
             # not a hope that the shared runner never compresses a process.
             # The flow asserts effective locks on every prepared engine.
             LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester --multi-model --sessions 1 --api --replicas --recovery
-            LUMABRI_TEST_BROWSER=1 LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester --multi-model --sessions 4 --api --replicas --recovery --portfolio-policy
+            LUMABRI_TEST_CLIENT_SDKS=1 LUMABRI_TEST_BROWSER=1 LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester --multi-model --sessions 4 --api --replicas --recovery --portfolio-policy
             LUMABRI_TEST_BROWSER=1 LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-policy --donor-ram-gb 1.5 --sessions 2 --elastic --elastic-recovery
           )
           for outcome in complete reject cancel; do
