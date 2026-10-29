@@ -5,7 +5,7 @@ CFLAGS  ?= -O2 -Wall -Wextra
 ENGINE  ?= ../colibri/c
 # Shared headers remain in the repository root during the staged layout cleanup.
 override CPPFLAGS += -I.
-SIGN_DEPS = lumabri_sign.h src/crypto/lumabri_sign_core.h src/crypto/lumabri_random.h
+SIGN_DEPS = lumabri_sign.h src/crypto/lumabri_sign_core.h src/crypto/lumabri_random.h src/crypto/lumabri_identity_windows.h src/runtime/lumabri_private_file_windows.h
 PROTO_DEPS = lumabri_proto.h src/protocol/lumabri_wire.h src/protocol/lumabri_socket.h
 PLATFORM := $(shell uname -s)
 SHIM_LIB = liblumabri.so
@@ -116,7 +116,7 @@ test_host_drain: tests/c/test_host_drain.c lumabri src/runtime/lumabri_host_sess
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_host_drain.c src/ui/lumabri_tui.c $(MACHINE_SRC) lumabri_run_gate.c -o $@
 
 .PHONY: test-runtime-probe
-test-runtime-probe: tests/c/test_runtime_probe.c lumabri_runtime_probe.h src/runtime/lumabri_backend_policy.h lumabri_segment.h
+test-runtime-probe: tests/c/test_runtime_probe.c lumabri_runtime_probe.h src/runtime/lumabri_process_probe_windows.h src/runtime/lumabri_backend_policy.h lumabri_segment.h
 	mkdir -p build/tests
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_runtime_probe.c -o build/tests/runtime-probe
 	./build/tests/runtime-probe
@@ -145,7 +145,7 @@ check-warnings:
 		CFLAGS='$(CFLAGS) -Werror'
 
 SECURE_DEPS = lumabri_secure.h lumabri_crypto.h src/protocol/lumabri_secure_channel.h $(SIGN_DEPS) $(PROTO_DEPS)
-HOME_NET_DEPS = lumabri_home_net.h lumabri_home_discovery.h lumabri_platform.h lumabri_wakeup.h lumabri_runtime_probe.h src/runtime/lumabri_resident_plan.h
+HOME_NET_DEPS = lumabri_home_net.h lumabri_home_discovery.h lumabri_platform.h lumabri_wakeup.h lumabri_runtime_probe.h src/runtime/lumabri_process_probe_windows.h src/runtime/lumabri_resident_plan.h
 MACHINE_SRC = lumabri_machine.c
 MACHINE_DEPS = lumabri_machine.h $(MACHINE_SRC) src/runtime/lumabri_container_limits.h
 lumabri test_chat_ui test_host_session_pool test-home-monitor test_calibration: src/planner/lumabri_turn_observation.h

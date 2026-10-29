@@ -54,6 +54,14 @@ The latest measured speed is historical, not a guarantee for the next turn.
   not a universal static binary. Use the recorded compatible OS/runtime.
   Windows/WSL runs this Linux candidate. Native Windows inference is not
   included and is not certified by the firewall helper.
+- Separate native Windows developer gates exercise resident OLMoE, the Segment
+  protocol, encrypted TCP and persistent peer identities. These are not a
+  packaged Windows household service. The native identity store defaults to
+  `%LOCALAPPDATA%\Lumabri`, using protected owner/System ACLs and bounded file
+  locks. Explicit credential paths must also be private local files; shared
+  drives, hard links and reparse paths are refused. Existing corrupt or unsafe
+  keys are never silently replaced. The gate uses disposable files and does
+  not change installed identities or firewall settings.
 - Neither a GPU detector nor a manifest entry proves accelerated execution.
   These candidates use the verified CPU path. Each participating machine
   must permit the household's fixed LAN ports in its own firewall.

@@ -67,11 +67,9 @@ static int secure_pair(int sp[2], LmbSecure *client, LmbSecure *server) {
 }
 
 static int registered(int fd) {
-    if (fd < 0 || fd >= LMB_SEC_MAXFD) return 0;
-    pthread_mutex_lock(&g_sec_lk);
-    int yes = g_sec_reg[fd] && !g_sec_reg[fd]->closing;
-    pthread_mutex_unlock(&g_sec_lk);
-    return yes;
+    LmbSecEntry *entry = lmb_sec_acquire(fd);
+    if (!entry) return 0;
+    lmb_sec_release(entry); return 1;
 }
 
 static void raw_frame(const LmbSecure *s, int fd, uint64_t ctr,
@@ -187,6 +185,13 @@ int main(int argc, char **argv) {
         lmb_sec_pin_file(pins, "rotate:4", pk_c, 0)) {
         printf("  FAIL strict pin overlap rotation\n"); fail = 1;
     } else printf("  ok   strict pins accept old+new rotation overlap\n");
+
+    pf = fopen(pins, "w");
+    if (!pf) return 1;
+    fprintf(pf, "rotate:4 %s\nrotate:4 a\n", hs); fclose(pf);
+    if (!lmb_sec_pin_file(pins, "rotate:4", pk_s, 0)) {
+        printf("  FAIL truncated pin accepted\n"); fail = 1;
+    } else printf("  ok   malformed pin refuses even an earlier matching key\n");
 
     /* 6: exercise the transparent registry and its close lifecycle. */
     setenv("LUMABRI_ENCRYPT", "1", 1);
