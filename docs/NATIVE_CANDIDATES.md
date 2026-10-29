@@ -69,6 +69,13 @@ The latest measured speed is historical, not a guarantee for the next turn.
   atomic journal replacement and crash recovery. A journal never grants
   permission to replay an approval. This gate does not yet deliver the full
   native Windows household service or package.
+- Native engine ownership requires Windows 10 version 1607 or later. The
+  supervisor assigns the process tree to its private Job Object atomically at
+  creation, passes only explicitly selected handles and signals readiness with
+  an inherited event. Stop confirms the entire tree has exited; a saved PID
+  never authorizes termination. Native tests cover owner crashes, descendants,
+  cooperative stop, Unicode paths and arguments, and resident OLMoE inference
+  under this supervisor. Capability probes use the same bounded ownership path.
 - Neither a GPU detector nor a manifest entry proves accelerated execution.
   These candidates use the verified CPU path. Each participating machine
   must permit the household's fixed LAN ports in its own firewall.

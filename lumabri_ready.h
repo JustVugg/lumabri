@@ -2,9 +2,31 @@
 #ifndef LUMABRI_READY_H
 #define LUMABRI_READY_H
 #include <stdlib.h>
-#include <unistd.h>
 #include <limits.h>
 #include <errno.h>
+#ifdef _WIN32
+#include <windows.h>
+#include <stdint.h>
+
+static int lmb_ready_notify(void) {
+    char value[32];
+    DWORD length = GetEnvironmentVariableA("LUMABRI_READY_HANDLE", value, sizeof value);
+    if (!length) return GetLastError() == ERROR_ENVVAR_NOT_FOUND ? 0 : -1;
+    if (length >= sizeof value) return -1;
+    uintptr_t raw = 0;
+    for (DWORD i = 0; i < length; i++) {
+        if (value[i] < '0' || value[i] > '9' || raw > (UINTPTR_MAX - (unsigned)(value[i] - '0')) / 10) return -1;
+        raw = raw * 10 + (unsigned)(value[i] - '0');
+    }
+    if (!raw || raw == UINTPTR_MAX) return -1;
+    HANDLE ready = (HANDLE)raw;
+    int rc = SetEvent(ready) ? 0 : -1;
+    CloseHandle(ready);
+    SetEnvironmentVariableA("LUMABRI_READY_HANDLE", NULL);
+    return rc;
+}
+#else
+#include <unistd.h>
 #include <fcntl.h>
 
 /* Linux can create CLOEXEC descriptors atomically. macOS has no pipe2;
@@ -38,4 +60,5 @@ static int lmb_ready_notify(void) {
     unsetenv("LUMABRI_READY_FD");
     return rc;
 }
+#endif
 #endif
