@@ -99,6 +99,9 @@ def main():
     run([args.cc,*flags,'-Werror','-Wno-unused-function','-municode',
          root/'tests/c/test_compute_windows.c','-static','-lwinpthread',
          '-lws2_32','-lbcrypt','-ladvapi32','-o',output/'test_compute_windows.exe'])
+    run([args.cc,*flags,'-Werror','-Wno-unused-function','-municode',
+         root/'tests/c/test_node_control_windows.c','-static','-lwinpthread',
+         '-lws2_32','-lbcrypt','-ladvapi32','-o',output/'test_node_control_windows.exe'])
     print('Native contract gates:',output)
 
 
