@@ -1,4 +1,6 @@
 numpy==2.4.6
+# Independent image-preprocessing oracle; never a runtime dependency.
+Pillow==12.2.0
 # Official client protocol acceptance; never runtime dependencies.
 openai==3.3.1
 anthropic==2.3.0
