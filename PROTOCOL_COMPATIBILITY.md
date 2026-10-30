@@ -77,3 +77,19 @@ are removed when their connection closes. LIST returns version, count and,
 for each row, age in milliseconds followed by its report without signature.
 The authenticated tracker is trusted to relay inventory; this is not a public
 hardware attestation or permission to run a model.
+
+## Resident image input in the hosted codec
+
+A vision-enabled Edge announces `LUMABRI_VISION 1` before `READY`; hosted HELLO
+capabilities carry bit 4. A client sends `SUBMITV` only after negotiation.
+Its limits, request ID, slot, sampling, cancellation and retirement semantics
+are the same as `SUBMIT`. The body is an `LMBIMG01` versioned frame: big-endian
+32-bit text length and image count, UTF-8 rendered prompt, then ordered image
+records containing replacement offset, replacement span, PNG/JPEG format ID,
+encoded length and bytes. Maximum frame size is 1 MiB, with four images and
+64 KiB of rendered text. All spans and lengths are validated before decoding.
+
+Legacy or text-only runtimes reject this command; no fallback tokenizes a
+binary image frame as text. Vision weights load before resident sealing.
+Image rows are injected before Segment RUN and reapplied during recovery
+replay. Image turns do not reuse KV based only on equal placeholder token IDs.

@@ -1,4 +1,4 @@
-"""Client protocol acceptance against actual resident OLMoE, no mock generation.
+"""Client protocol acceptance against actual resident models, no mock generation.
 Called by the existing two-model/user/service acceptance test. SDK checks are
 explicitly enabled in CI/developer venvs; HTTP contract checks always run.
 """
@@ -26,6 +26,10 @@ def verify_client_protocols(port, alice, bob, first, second):
         status, data = request(path, **kwargs)
         return status, json.loads(data)
 
+    status, connection = json_request("/api/v1/client-config")
+    assert status == 200 and connection["tools"] and connection["responses_api"]
+    assert connection["responses_storage"] is False and connection["images"]["max_images"] == 4
+
     openai = "/v1/chat/completions"
     anthropic = "/v1/messages"
     version = {"anthropic-version": "2023-06-01"}
@@ -49,7 +53,7 @@ def verify_client_protocols(port, alice, bob, first, second):
     for path, headers in ((openai, {}), (anthropic, version)):
         status, answer = json_request(path, token=bob, body=base, headers=headers)
         assert status == 403 and isinstance(answer["error"], dict)
-        for extra in ({"tools": []}, {"thinking": {"type": "enabled"}}, {"unknown": True}):
+        for extra in ({"tools": {}}, {"thinking": {"type": "enabled"}}, {"unknown": True}):
             assert request(path, body={**base, **extra}, headers=headers)[0] == 400
         assert request(path, body=base, headers={**headers, "Origin": "https://untrusted.invalid"})[0] == 403
 
@@ -81,6 +85,38 @@ def verify_client_protocols(port, alice, bob, first, second):
     assert events[0]["message"]["usage"]["input_tokens"] == prompt_count
     assert events[-2]["usage"]["output_tokens"] == 8 and events[-2]["delta"]["stop_reason"] == "max_tokens"
     assert "".join(e["delta"]["text"] for e in events if e["type"] == "content_block_delta") == text
+
+    # Responses uses its own event vocabulary and the same real model/slots.
+    response_base = {"model": first, "input": "hi", "max_output_tokens": 8, "temperature": 0, "store": False}
+    status, full_r = json_request("/v1/responses", body=response_base)
+    assert status == 200 and full_r["status"] == "incomplete", full_r
+    assert full_r["output"][0]["content"][0]["text"] == text
+    assert full_r["usage"]["input_tokens"] == prompt_count and full_r["usage"]["output_tokens"] == 8
+    assert full_r["temperature"] == 0
+    assert request("/v1/responses", token=bob, body=response_base)[0] == 403
+    assert request("/v1/responses", token="invalid", body=response_base)[0] == 401
+    status, data = request("/v1/responses", body={**response_base, "stream": True})
+    assert status == 200
+    events = [json.loads(line[6:]) for line in data.decode().splitlines() if line.startswith("data: ")]
+    assert [e["sequence_number"] for e in events] == list(range(len(events)))
+    assert events[-1]["type"] == "response.incomplete"
+    assert "".join(e["delta"] for e in events if e["type"] == "response.output_text.delta") == text
+    assert events[-1]["response"]["usage"] == full_r["usage"]
+
+    # The real model receives function results, not just the last user text.
+    # Tiny random weights do not demonstrate function-selection quality; the
+    # production wire parser/SDK tests cover generated function events.
+    if os.environ.get("LUMABRI_TEST_TOOL_HISTORY") == "1":
+        call = {"id": "call_weather", "type": "function", "function": {"name": "weather", "arguments": '{"city":"Roma"}'}}
+        weather_turns = [{"role": "user", "content": "Weather?"}, {"role": "assistant", "content": None, "tool_calls": [call]},
+                         {"role": "tool", "tool_call_id": "call_weather", "content": "Sunny"}]
+        status, tools_o = json_request(openai, body={**base, "messages": weather_turns})
+        assert status == 200 and tools_o["usage"]["prompt_tokens"] > prompt_count, tools_o
+        status, tools_r = json_request("/v1/responses", body={**response_base, "input": [weather_turns[0],
+            {"type": "function_call", "call_id": "call_weather", **call["function"]},
+            {"type": "function_call_output", "call_id": "call_weather", "output": "Sunny"}]})
+        assert status == 200 and tools_r["output"][0]["content"][0]["text"] == tools_o["choices"][0]["message"]["content"], tools_r
+        assert tools_r["usage"]["input_tokens"] == tools_o["usage"]["prompt_tokens"]
 
     # System roles and multiple turns take exactly the same template path.
     turns = [{"role": "user", "content": "hello"}, {"role": "assistant", "content": "hello"},
@@ -127,6 +163,11 @@ def verify_client_protocols(port, alice, bob, first, second):
                 chunks = list(stream)
             assert chunks[-1].usage.completion_tokens == 8
             assert "".join(c.choices[0].delta.content or "" for c in chunks if c.choices) == text
+            result = client.responses.create(**response_base)
+            assert result.output_text == text and result.usage.input_tokens == prompt_count
+            with client.responses.create(**response_base, stream=True) as stream:
+                events = list(stream)
+            assert events[-1].type == "response.incomplete" and events[-1].response.output_text == text
         with an.Anthropic(base_url=f"http://127.0.0.1:{port}", api_key=alice, max_retries=0, timeout=30,
                           default_headers={"anthropic-version": "2023-06-01"}) as client:
             # SDK 2.x removed typed sampling arguments; its supported extra_body
@@ -149,7 +190,7 @@ def verify_client_protocols(port, alice, bob, first, second):
             assert 1 <= result.usage.output_tokens <= 8 and result.stop_reason in ("max_tokens", "end_turn")
         assert request(anthropic, body=base, headers={"anthropic-version": "2026-10-21"})[0] == 400
         print(f"OFFICIAL CLIENT SDKS: PASS (openai {oa.__version__}, anthropic {an.__version__}; local inference)", flush=True)
-    print("CLIENT PROTOCOLS: PASS (real resident models, both dialects, isolation, streaming, usage, cancellation)", flush=True)
+    print("CLIENT PROTOCOLS: PASS (real resident models, three protocols, isolation, streaming, usage, cancellation)", flush=True)
 
 
 def verify_client_concurrency(port, tokens, models):

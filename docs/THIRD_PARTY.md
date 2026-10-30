@@ -1,5 +1,16 @@
 # Third-party build inputs
 
+## Embedded image decoder
+
+- File: `src/vendor/stb_image.h`, unmodified v2.30 from commit
+  `003501f6d7a8668ce8b6d875e34dd97ad0d5d5b5` of `nothings/stb`.
+- SHA-256: `594c2fe35d49488b4382dbfaec8f98366defca819d916ac95becf3e75f4200b3`.
+- Copyright: Sean Barrett and contributors. The complete dual MIT/public-domain
+  license remains in the header. Lumabri uses the MIT option.
+- Integration: PNG/JPEG memory decoding only, no file I/O, bounded dimensions
+  and allocation accounting. Resizing and model patch preparation are separate
+  Lumabri code in `src/runtime/lumabri_image.c`.
+
 ## Colibri V4.1 resident adapter
 
 - Source: `JustVugg/colibri`, tag `v1.12.1`, commit

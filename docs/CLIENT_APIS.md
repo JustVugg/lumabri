@@ -1,7 +1,8 @@
 # Connect applications to Lumabri
 
-Lumabri provides a **text chat subset** of the OpenAI Chat Completions and
-Anthropic Messages protocols. Inference runs on your approved Colibri cluster;
+Lumabri implements documented subsets of OpenAI Chat Completions, OpenAI
+Responses and Anthropic Messages, including function calls and inline images
+on the Qwen3.8 vision runtime. Inference runs on your approved Colibri cluster;
 no prompt, key or request is sent to either external provider. These adapters
 share the existing gateway, model permissions, admission, cancellation and
 replica recovery. There is no second inference service to deploy.
@@ -89,13 +90,112 @@ The SDKs are application dependencies, not Lumabri runtime dependencies.
 Set `LUMABRI_MODEL` to an actual ID returned for your token. A model name such
 as `gpt-*` or `claude-*` does not select a local model automatically.
 
+## Responses client
+
+```python
+with client.responses.create(
+    model=os.environ["LUMABRI_MODEL"],
+    input="Explain this briefly.",
+    max_output_tokens=128,
+    store=False,
+    stream=True,
+) as stream:
+    for event in stream:
+        if event.type == "response.output_text.delta":
+            print(event.delta, end="", flush=True)
+        elif event.type == "response.incomplete":
+            print("\nOutput limit reached:", event.response.incomplete_details)
+```
+
+Responses accepts string input, message items, `function_call` and matching
+`function_call_output` items. Send the conversation history with each request.
+`instructions`, function `tools`, `tool_choice`, `parallel_tool_calls`,
+`max_output_tokens`, sampling and streaming are supported. This endpoint does
+not store responses: use `store=False`; `previous_response_id`, background
+responses, retrieval/deletion and nonempty `include` are rejected. A token
+limit emits `response.incomplete`, never a false `response.completed`.
+
+## Function calls
+
+Offer functions through OpenAI `tools`/`tool_choice`, Responses flat function
+definitions, or Anthropic `tools`/`tool_choice`. Lumabri supplies the definitions
+to the local model and returns its generated calls. Your application decides
+which functions to execute and returns results with matching call IDs.
+
+```python
+messages = [{"role": "user", "content": "What is the temperature in Rome?"}]
+reply = client.chat.completions.create(
+    model=os.environ["LUMABRI_MODEL"], messages=messages, max_tokens=256,
+    tools=[{"type": "function", "function": {
+        "name": "get_weather", "description": "Read current weather for a city",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}},
+                       "required": ["city"]},
+    }}],
+)
+# Inspect reply.choices[0].message.tool_calls in your own application.
+# Validate and authorize each operation before executing it.
+```
+
+Chat Completions returns `tool_calls` and `finish_reason: tool_calls`;
+Anthropic returns `tool_use` blocks and `stop_reason: tool_use`; Responses
+returns `function_call` output items. Their corresponding result formats are
+accepted on the next turn. Unknown, duplicate or unmatched results are rejected.
+There are at most 64 function definitions and 16 calls in a turn.
+
+The generic function prompt does not add tool-selection ability to a model
+that was not trained for it. Generated calls must name a declared function and
+contain a complete JSON object. Required/named tool choice and disabled
+parallel calls are enforced. Tool-enabled replies are buffered until validated,
+then emitted in the client's full or streaming format; malformed/truncated
+calls produce an error. `strict:true` is not supported, and applications must
+validate argument values against their own schemas. Lumabri never executes
+functions supplied by a chat client.
+
+## Images
+
+Use a checkpoint with actual Qwen3.8 visual tensors, not a text-only export.
+Its visual tower and temporary work are included in the approved Edge budget;
+images are decoded in memory and projected by Colibri before the same Segment
+chain runs. Other adapters currently return `images_not_supported_by_model`.
+
+```python
+import base64
+from pathlib import Path
+
+encoded = base64.b64encode(Path("photo.png").read_bytes()).decode("ascii")
+response = client.responses.create(
+    model=os.environ["LUMABRI_MODEL"], store=False, max_output_tokens=128,
+    input=[{"role": "user", "content": [
+        {"type": "input_text", "text": "Describe this image."},
+        {"type": "input_image", "image_url": "data:image/png;base64," + encoded},
+    ]}],
+)
+print(response.output_text)
+```
+
+Chat Completions uses `image_url: {"url": "data:image/png;base64,..."}`;
+Anthropic uses `{"type":"image","source":{"type":"base64",
+"media_type":"image/png","data":"..."}}`. JPEG is also accepted. Only user
+message content accepts images. `detail` may be omitted or `auto`.
+
+Limits are explicit: four images, 768 KiB encoded bytes per image, 4 megapixels
+per source image, 1 MiB for the entire JSON request, and at most 256 visual
+tokens per image. Resize large photos before sending. The pinned Colibri
+processor uses RGB, patch merging and normalization; it does not infer
+unsupported resolution modes. There is no remote URL fetch, filesystem-path
+access, video or image generation. Reusing the same image placeholder with a
+different image resets the conversation's runtime state rather than reusing
+incompatible KV. The client must resupply prior images when they are needed
+in a later turn.
+
 ## Exact compatibility boundary
 
 | Endpoint | Supported |
 | --- | --- |
 | `GET /v1/models` | OpenAI list shape; only this credential's authorized allocations and managed model IDs. `created: 0` means no creation timestamp is recorded. Listing does not assert that a replica is ready. |
-| `POST /v1/chat/completions` | Text, full JSON response or streamed `chat.completion.chunk` / `[DONE]`; one choice; usage when requested. |
-| `POST /v1/messages` | Text, full Message response or ordered Messages SSE events; `anthropic-version: 2023-06-01` or `2026-10-21`; no beta extensions. |
+| `POST /v1/chat/completions` | Text, inline images, function calls/results, full JSON response or streamed `chat.completion.chunk` / `[DONE]`; one choice; usage when requested. |
+| `POST /v1/messages` | Text, inline images, tool use/results, full Message response or ordered Messages SSE events; `anthropic-version: 2023-06-01` or `2026-10-21`; no beta extensions. |
+| `POST /v1/responses` | Stateless text/image/function input; full Response or Responses SSE lifecycle, usage and incomplete/error status. |
 | `GET /api/v1/client-config` | Authenticated connection sheet without credentials. |
 
 Both chat endpoints accept `model`, `messages`, `max_tokens` and `stream`.
@@ -126,8 +226,9 @@ For SDK 2.x calls that need sampling parameters, select `2023-06-01` through
 System messages retain their family-specific system role. Model reasoning
 text remains text; it is not converted into signed Anthropic thinking blocks.
 
-**Not implemented:** OpenAI Responses, embeddings, audio/images, tools/function
-calling, assistant prefills, JSON-schema generation, stop strings, penalties,
+**Not implemented:** embeddings, audio/video, remote image URLs, file IDs,
+server-executed tools, `strict:true` schema-constrained generation, assistant
+prefills, JSON-schema text generation, stop strings, penalties,
 log probabilities, provider prompt caching and beta features. Unsupported
 fields are rejected before model execution; they are never silently ignored.
 This does not imply drop-in support for every agent or UI using those APIs.

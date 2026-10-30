@@ -429,6 +429,10 @@ jobs:
       - name: Household TUI — approvals through real Segment generation
         working-directory: lumabri
         run: |
+          make test_api_compat
+          mkdir -p build/client-wire-fixtures
+          ./test_api_compat build/client-wire-fixtures
+          python3 tests/integration/client_api_sdk_wire_test.py build/client-wire-fixtures
           ./test_backend_routes
           make test_segment_close ENGINE=../colibri/c
           ./test_segment_close
@@ -454,7 +458,8 @@ jobs:
             # not a hope that the shared runner never compresses a process.
             # The flow asserts effective locks on every prepared engine.
             LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester --multi-model --sessions 1 --api --replicas --recovery
-            LUMABRI_TEST_CLIENT_SDKS=1 LUMABRI_TEST_BROWSER=1 LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester --multi-model --sessions 4 --api --replicas --recovery --portfolio-policy
+            python3 tests/integration/client_api_fixture.py build/home-flow-models/olmoe-tiny build/client-api-models
+            LUMABRI_TEST_CLIENT_SDKS=1 LUMABRI_TEST_TOOL_HISTORY=1 LUMABRI_TEST_BROWSER=1 LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/client-api-models --context 2048 --keep-requester --multi-model --sessions 4 --api --replicas --recovery --portfolio-policy
             LUMABRI_TEST_BROWSER=1 LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --joint complete --api-prepare --donor-policy --donor-ram-gb 1.5 --sessions 2 --elastic --elastic-recovery
           )
           for outcome in complete reject cancel; do
@@ -573,6 +578,17 @@ jobs:
           OMP_NUM_THREADS=2 build/qwen38-greedy-oracle qwen38 build/qwen38-contract/qwen38-tiny build/qwen38-contract/qwen38-tiny/ref.json
           python3 tests/integration/home_flow_test.py --models-dir build/qwen38-contract --context 512 --expect-greedy --kill-donor
           SPLIT_MODEL_DIR=build/qwen38-contract/qwen38-tiny SPLIT_ENGINE=qwen38 SPLIT_MODEL=qwen38-bf16 SPLIT_ROUNDS=1 SPLIT_THREADS=2 SPLIT_TOKENS=8 PORT=10740 bash tests/integration/segment_split_test.sh
+      - name: Resident vision — independent pixels, split layers and client APIs
+        working-directory: lumabri
+        run: |
+          make test_image_prepare build/test_vision_segment ENGINE=../colibri/c CFLAGS='-O2 -Wall -Wextra -Werror'
+          ./test_image_prepare
+          python3 tests/integration/image_prepare_test.py ./test_image_prepare ../colibri/c/tools/qwen38_image.py
+          python3 tests/integration/prepare_vision_fixture.py --engine ../colibri/c --text build/qwen38-contract/qwen38-tiny --out build/qwen38-vision/model
+          ./test_image_prepare build/qwen38-vision/model/image-0.png png --mutate
+          python3 tests/integration/planner_tensor_contract_test.py --family qwen38 --model build/qwen38-vision/model
+          OMP_NUM_THREADS=2 COLI_NO_OMP_TUNE=1 build/test_vision_segment build/qwen38-vision/model
+          LUMABRI_TEST_IMAGES_DIR=build/qwen38-vision/model LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/qwen38-vision --context 2048 --donor-ram-gb 2 --keep-requester --multi-model --sessions 2 --api
       - uses: actions/upload-artifact@v4
         with:
           name: tiny-qwen38-checkpoint

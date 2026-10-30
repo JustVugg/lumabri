@@ -15,7 +15,7 @@
 
 #define LMB_API_CHILDREN 16u
 #define LMB_API_TURN_SECONDS 300u
-enum { API_NATIVE, API_OPENAI, API_ANTHROPIC };
+enum { API_NATIVE, API_OPENAI, API_ANTHROPIC, API_RESPONSES };
 /* Each HTTP connection runs in its own child; no cross-request mutable dialect. */
 static int api_dialect;
 static volatile sig_atomic_t api_stopping;
@@ -46,7 +46,7 @@ static void api_error(int fd, unsigned status, const char *code) {
         status==429 ? "rate_limit_error" : status>=500 ? "api_error" : "invalid_request_error";
     if (api_dialect==API_ANTHROPIC)
         snprintf(body,sizeof body,"{\"type\":\"error\",\"error\":{\"type\":\"%s\",\"message\":\"%s\"}}\n",type,code);
-    else if (api_dialect==API_OPENAI)
+    else if (api_dialect==API_OPENAI || api_dialect==API_RESPONSES)
         snprintf(body,sizeof body,"{\"error\":{\"type\":\"%s\",\"code\":\"%s\",\"param\":null,\"message\":\"%s\"}}\n",type,code,code);
     else snprintf(body,sizeof body,"{\"error\":\"%s\"}\n",code);
     (void)api_response(fd,status,body);
@@ -317,6 +317,9 @@ static void api_chat_run(int fd, int access_dir, const char *tracker, const LmbA
         (compat->has_temperature && compat->temperature>0 && engine.greedy_only))) {
         demand_outcome=LMB_DEMAND_INVALID; api_error(fd,400,"sampling_not_supported_by_model"); goto finished;
     }
+    if (compat && compat->images && compat->images->count && !engine.vision_supported) {
+        demand_outcome=LMB_DEMAND_INVALID; api_error(fd,400,"images_not_supported_by_model"); goto finished;
+    }
     if (compat ? api_compat_payload(compat,&j,(unsigned)fields[1],engine.kind) :
         api_messages(&j,(unsigned)fields[1],engine.kind,&history,&prompt)) {
         demand_outcome=LMB_DEMAND_INVALID; api_error(fd,400,"unsupported_messages_or_limits"); goto finished;
@@ -443,7 +446,8 @@ static void api_chat(int fd,int access,const char *tracker,const LmbApiUser *use
 static void api_client_chat(int fd,int access,const char *tracker,const LmbApiUser *user,const char *body,size_t size,int anthropic_modern) {
     if (!api_dialect) { api_chat(fd,access,tracker,user,body,size); return; }
     ApiCompat request={.dialect=api_dialect,.anthropic_modern=anthropic_modern};
-    if (api_compat_request(&request,body,size)) api_error(fd,400,"unsupported_or_invalid_chat_parameters");
+    if ((api_dialect==API_RESPONSES ? api_responses_request(&request,body,size) :
+        api_compat_request(&request,body,size))) api_error(fd,400,"unsupported_or_invalid_chat_parameters");
     else api_chat_run(fd,access,tracker,user,request.normalized.p,request.normalized.len,&request);
     api_compat_free(&request);
 }
@@ -469,7 +473,8 @@ static void api_connection_dispatch(int fd, int access_dir, unsigned port, const
     }
     LmbApiHttp request;
     if (!complete || lmb_api_http_parse(&request,header,length)) { api_error(fd,400,"invalid_http_request"); return; }
-    api_dialect=!strcmp(request.path,"/v1/messages") ? API_ANTHROPIC : !strncmp(request.path,"/v1/",4) ? API_OPENAI : API_NATIVE;
+    api_dialect=!strcmp(request.path,"/v1/messages") ? API_ANTHROPIC :
+        !strcmp(request.path,"/v1/responses") ? API_RESPONSES : !strncmp(request.path,"/v1/",4) ? API_OPENAI : API_NATIVE;
     if (https_origin ? lmb_api_http_https_origin(&request,https_origin) : lmb_api_http_origin(&request,port)) {
         api_error(fd,403,"origin_or_host_rejected"); return;
     }
@@ -511,7 +516,10 @@ static void api_connection_dispatch(int fd, int access_dir, unsigned port, const
             api_addf(&config,"\"anthropic_base_url\":\"%s\",\"models_url\":\"%s/v1/models\",",origin,origin) || cap_str(&config,
             "\"anthropic_version\":\"2026-10-21\",\"anthropic_versions\":[\"2023-06-01\",\"2026-10-21\"],"
             "\"credential\":\"Your Lumabri API token\",\"model\":\"An id returned by models_url for your token\","
-            "\"scope\":\"text_chat\",\"streaming\":true,\"tools\":false,\"responses_api\":false,"
+            "\"scope\":\"chat_tools_images_responses\",\"streaming\":true,\"tools\":true,\"responses_api\":true,"
+            "\"responses_storage\":false,\"images\":{\"adapter\":\"qwen38\",\"requires_visual_weights\":true,"
+            "\"sources\":[\"inline_base64\"],\"formats\":[\"image/png\",\"image/jpeg\"],\"max_images\":4,"
+            "\"max_encoded_bytes_per_image\":786432,\"max_request_bytes\":1048576,\"max_image_tokens\":256},"
             "\"remote_reachability_verified\":false}");
         if (bad) api_error(fd,500,"allocation_failed"); else (void)api_response(fd,200,config.p);
         free(config.p);
@@ -558,7 +566,7 @@ static void api_connection_dispatch(int fd, int access_dir, unsigned port, const
     else if (history && !strcmp(request.method,"GET") && !request.length)
         api_history(fd,access_dir,&user,&request,NULL,0);
     else if (management && request.length>(preparation || elastic ? 8192u : policy ? 4096u : capacity || capacity_apply ? 2048u : 512u)) api_error(fd,413,"management_request_too_large");
-    else if (((!strcmp(request.method,"POST") && (!strcmp(request.path,"/api/v1/chat") || !strcmp(request.path,"/v1/chat/completions") || !strcmp(request.path,"/v1/messages") || management)) ||
+    else if (((!strcmp(request.method,"POST") && (!strcmp(request.path,"/api/v1/chat") || !strcmp(request.path,"/v1/chat/completions") || !strcmp(request.path,"/v1/messages") || !strcmp(request.path,"/v1/responses") || management)) ||
               (history && (!strcmp(request.method,"POST") || !strcmp(request.method,"DELETE")))) &&
              request.has_length && request.length && request.json) {
         char *body=malloc((size_t)request.length+1); size_t at=0;
