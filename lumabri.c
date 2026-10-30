@@ -24,6 +24,9 @@
  * already on this disk — the right mode on the machine that serves it,
  * where mirroring would mean a second copy of the same bytes.
  */
+#ifdef _WIN32
+#include "src/platform/lumabri_windows_main.h"
+#else
 #define _GNU_SOURCE
 #include "lumabri_ready.h"
 #include "lumabri_platform.h"
@@ -6582,3 +6585,4 @@ int main(int argc, char **argv) {
         "  lumabri key   [--out NAME]                                 operator keypair\n");
     return 2;
 }
+#endif /* native Windows entrypoint / POSIX household */
