@@ -9,8 +9,7 @@ from pathlib import Path
 import sys
 
 import anthropic
-import httpx
-import httpx2
+import httpx2 as httpx
 import openai
 
 MODEL = "01" * 32
@@ -70,7 +69,7 @@ for streaming in (False, True):
         assert json.loads(choice.message.tool_calls[0].function.arguments) == {"city": "Roma"}
 
     with anthropic.Anthropic(api_key="local-contract-test", base_url="http://lumabri.test",
-                             http_client=transport(f"tools-2-{int(streaming)}.http", httpx2)) as client:
+                             http_client=transport(f"tools-2-{int(streaming)}.http")) as client:
         if streaming:
             with client.messages.stream(model=MODEL, max_tokens=32, messages=[{"role": "user", "content": "hi"}]) as stream:
                 list(stream)

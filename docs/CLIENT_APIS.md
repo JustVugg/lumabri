@@ -282,9 +282,15 @@ Do not inject a shared token or relax the owner-only upstream permissions.
 
 `make test-api` covers strict parsing, family system framing, sampling values,
 UTF-8 split across engine frames, complete/error termination and token usage.
-The existing two-model resident service test also runs both protocols against
+The existing two-model resident service test also runs all three protocols against
 real reduced OLMoE engines: equivalent greedy text/usage, model isolation,
 concurrent different-model requests, cancellation and follow-up requests.
 Set `LUMABRI_TEST_CLIENT_SDKS=1` with the official Python `openai` and `anthropic`
 packages installed to exercise their full-response and streaming consumers.
 No provider key or external inference service is used by these tests.
+
+The vision gate compares preprocessing with the pinned Colibri reference and
+visual rows with an independent Transformers model, then checks local/split
+greedy inference and full/streamed image requests. These generated checkpoints
+exercise arithmetic, transport and memory; they do not measure the visual
+answer quality or function-selection quality of a trained model.
