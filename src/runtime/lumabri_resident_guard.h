@@ -6,10 +6,16 @@
 #include <stdlib.h>
 #include <stdatomic.h>
 #include <errno.h>
+#ifndef _WIN32
 #include <sys/mman.h>
-#ifdef LMB_ENGINE_MEMORY_OVERRIDE_H
+#endif
+#if defined(LMB_ENGINE_MEMORY_OVERRIDE_H) || defined(LMB_ENGINE_MEMORY_LINKED)
 #include "lumabri_engine_memory.h"
+#ifdef _WIN32
+#include "lumabri_engine_io_windows.h"
+#else
 #include <dlfcn.h>
+#endif
 #endif
 
 /* AddressSanitizer intercepts locking calls as successful no-ops. A sanitizer
@@ -48,16 +54,25 @@ static inline const char *lmb_resident_memory_reason_text(int reason) {
     }
 }
 static inline void lmb_resident_guard_report(LmbResidentGuard *g,const char *event,const LmbProcessMemory *m) {
+#ifdef _WIN32
+    _lock_file(stderr);
+#else
     flockfile(stderr);
+#endif
     fprintf(stderr,"[resident-memory] event=%s policy=%s fault=%d ",event,g->engine_locked?"engine-locked":g->locked?"locked":"observe",atomic_load(&g->fault));
-    lmb_process_memory_json(stderr,m);fputc('\n',stderr);funlockfile(stderr);
+    lmb_process_memory_json(stderr,m);fputc('\n',stderr);
+#ifdef _WIN32
+    _unlock_file(stderr);
+#else
+    funlockfile(stderr);
+#endif
 }
 static inline int lmb_resident_guard_observe(LmbResidentGuard *g,const LmbProcessMemory *m) {
     if(!g->enabled)return 0;
     int reason=lmb_resident_memory_reason(m);
     if (g->engine_locked) {
         reason=LMB_RESIDENT_LOCK_FAILED;
-#ifdef LMB_ENGINE_MEMORY_OVERRIDE_H
+#if defined(LMB_ENGINE_MEMORY_OVERRIDE_H) || defined(LMB_ENGINE_MEMORY_LINKED)
         LmbEngineMemory owned; lmb_engine_memory_snapshot(&owned);
         uint64_t retained=0;
         if ((m->known&LMB_PM_RSS) && owned.enabled && !owned.fault &&
@@ -98,9 +113,13 @@ static inline int lmb_resident_guard_begin(LmbResidentGuard *g) {
     }
     g->enabled=1;
     if (!strcmp(mode,"engine-locked")) {
-#ifdef LMB_ENGINE_MEMORY_OVERRIDE_H
+#if defined(LMB_ENGINE_MEMORY_OVERRIDE_H) || defined(LMB_ENGINE_MEMORY_LINKED)
         g->engine_locked=1;
+#ifdef _WIN32
+        g->retained_lock_status=lmb_engine_input_lock_status;
+#else
         g->retained_lock_status=(int (*)(uint64_t *))dlsym(RTLD_DEFAULT,"lmb_weights_lock_status");
+#endif
 #else
         fprintf(stderr,"[resident-memory] engine allocation locking not compiled into this runtime; refusing READY\n");return -1;
 #endif
@@ -108,6 +127,8 @@ static inline int lmb_resident_guard_begin(LmbResidentGuard *g) {
     if(!strcmp(mode,"locked")) {
 #ifdef LMB_RESIDENT_ASAN
         fprintf(stderr,"[resident-memory] strict locking unavailable in AddressSanitizer builds; refusing READY\n");return -1;
+#elif defined(_WIN32)
+        fprintf(stderr,"[resident-memory] whole-process locking is unavailable on Windows; use engine-locked, refusing READY\n");return -1;
 #else
         /* Lock current weights and future conversation/scratch allocations.
          * The OS must grant this, otherwise there is no READY and no fallback.
@@ -126,7 +147,7 @@ static inline int lmb_resident_guard_begin(LmbResidentGuard *g) {
         fprintf(stderr,"[resident-memory] lock call succeeded but the OS reports zero locked bytes; refusing READY\n");return -1;
     }
     if(lmb_resident_guard_observe(g,&m))return -1;
-#ifdef LMB_ENGINE_MEMORY_OVERRIDE_H
+#if defined(LMB_ENGINE_MEMORY_OVERRIDE_H) || defined(LMB_ENGINE_MEMORY_LINKED)
     if (g->engine_locked) {
         LmbEngineMemory owned; lmb_engine_memory_snapshot(&owned);
         uint64_t retained=0; (void)g->retained_lock_status(&retained);

@@ -66,6 +66,17 @@ int lmb_engine_input_seal(void) {
     if(!valid) errno=EPERM;
     return valid ? 0 : -1;
 }
+int lmb_engine_input_lock_status(uint64_t *retained_bytes) {
+    /* Native input owns no retained file mappings. Every prepared tensor is
+     * covered by the engine allocator; post-seal input attempts are faults. */
+    if(!retained_bytes) { errno=EINVAL; return -1; }
+    *retained_bytes=0;
+    AcquireSRWLockShared(&input_lock);
+    int valid=input_sealed && !InterlockedCompareExchange64(&input_denied,0,0);
+    ReleaseSRWLockShared(&input_lock);
+    if(!valid) errno=EPERM;
+    return valid ? 0 : -1;
+}
 void lmb_engine_input_snapshot(LmbEngineInput *out) {
     if(!out) return;
     AcquireSRWLockExclusive(&input_lock);
