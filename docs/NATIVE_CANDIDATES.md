@@ -76,6 +76,13 @@ The latest measured speed is historical, not a guarantee for the next turn.
   separate-process crashes and repeated restart without leaked handles.
   This supplies compute admission for the worker integration; it does not
   by itself connect the native household donor.
+- The shared residency guard now checks native Windows engine locks and input
+  sealing during real OLMoE generation. Inherited worker control and reserved
+  TCP listener handoff also have native process tests, including incomplete
+  replies, stale mutations and a mismatched port. Listener handoff uses
+  Winsock duplication for the owned child; it never rebinds a released port.
+  The production worker and donor startup still need to be connected before
+  these components constitute a native household deployment.
 - The native `lumabri.exe` control entrypoint can now start, inspect, restart
   and stop the private background manager with `service`, and report the
   Windows machine inventory with `machine --json`. The shared manager loop

@@ -3,14 +3,30 @@
 #ifndef LUMABRI_HOME_NET_H
 #define LUMABRI_HOME_NET_H
 #include "lumabri_proto.h"
+#ifndef _WIN32
 #include <arpa/inet.h>
 #include <ifaddrs.h>
 #include <net/if.h>
+#endif
 #include <limits.h>
 
 #define LMB_HOME_PORT_BASE 47300
 #define LMB_HOME_PORT_COUNT 16
 
+static inline int lmb_home_port_base(void) {
+    const char *s = getenv("LUMABRI_HOME_PORT_BASE");
+    if (!s || !*s) return LMB_HOME_PORT_BASE;
+    char *end; errno = 0;
+    long n = strtol(s, &end, 10);
+    if (errno || *end || n < 1024 || n > 65536 - LMB_HOME_PORT_COUNT) {
+        errno = EINVAL; return -1;
+    }
+    return (int)n;
+}
+
+#ifdef _WIN32
+#include "src/platform/lumabri_home_net_windows.h"
+#else
 /* Consume a socket reserved by our launcher. Holding it across exec avoids
  * two concurrently approved donors choosing the same apparently free port.
  * Restore CLOEXEC before any engine descendants are launched. */
@@ -38,17 +54,6 @@ static inline int lmb_home_take_listener(int port) {
         getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &opt) || type != SOCK_STREAM || listen(fd, 64) ||
         fcntl(fd, F_SETFD, FD_CLOEXEC)) { close(fd); errno = EINVAL; return -1; }
     return fd;
-}
-
-static inline int lmb_home_port_base(void) {
-    const char *s = getenv("LUMABRI_HOME_PORT_BASE");
-    if (!s || !*s) return LMB_HOME_PORT_BASE;
-    char *end; errno = 0;
-    long n = strtol(s, &end, 10);
-    if (errno || *end || n < 1024 || n > 65536 - LMB_HOME_PORT_COUNT) {
-        errno = EINVAL; return -1;
-    }
-    return (int)n;
 }
 
 static inline int lmb_home_listen_service(int *port) {
@@ -126,4 +131,5 @@ static inline int lmb_home_subnet(const char *ip, char *out, size_t cap) {
     }
     freeifaddrs(all); return rc;
 }
+#endif
 #endif
