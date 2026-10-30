@@ -1,13 +1,16 @@
 #ifndef LUMABRI_PLAN_QWEN38_H
 #define LUMABRI_PLAN_QWEN38_H
-/* Text-only float/BF16 and block-FP8-expert Qwen4-Exp contract, pinned Colibri 12a5c464.
+/* Float/BF16 and block-FP8-expert Qwen4-Exp contract with optional resident
+ * vision boundaries, pinned Colibri 1.12.1.
  * PLE tables are row-read by the native engine: reserve their complete source
  * footprint as well as all expert slots, without advertising a disk mode or
  * claiming that admission has warmed the filesystem cache. */
 #include <float.h>
 #include <math.h>
+#include "qwen38_vision.h"
 typedef struct {
     LmbModelShape *m;
+    LmbQ38Vision vision;
     uint32_t h, hc, rank, qh, kvh, hd, ih, id, budget, ratio;
     uint32_t e, k, inter, shared, kh, vh, kd, vd, conv, cd;
     uint32_t pd, pc, nh, nd, parts, ple;
@@ -28,6 +31,8 @@ static int lmb_q38_tensor(const LmbPlanTensor *t, void *opaque) {
     LmbQwen38Inventory *v=opaque;
     LmbModelShape *m=v->m;
     const char *name=t->name;
+    int visual=lmb_q38_vision_tensor(t,&v->vision);
+    if (visual) return visual<0 ? -1 : 0;
     if (strcmp(name,"lm_head.weight")) {
         uint8_t prefix=!strncmp(name,"model.language_model.",21) ? 2 : !strncmp(name,"model.",6) ? 1 : 0;
         if (!prefix) return 0;
@@ -178,8 +183,8 @@ static int lmb_q38_tensor(const LmbPlanTensor *t, void *opaque) {
 
 static int LMB_UNUSED lmb_qwen38_memory(const char *root, const char *whole,
                                         const char *json, LmbModelShape *m) {
-    if (lmb_json_member(whole,"vision_config")) return -1;
     LmbQwen38Inventory v={.m=m};
+    if (lmb_q38_vision_config(whole,m->hidden,m->vocab,&v.vision)) return -1;
     uint32_t layers, maxctx, eos, ik, ns;
     char str[64];
     if (lmb_json_string(json,"output_gate_type",str,sizeof str) || strcmp(str,"sigmoid")) return -1;
@@ -252,6 +257,7 @@ static int LMB_UNUSED lmb_qwen38_memory(const char *root, const char *whole,
     v.experts=calloc((size_t)layers*v.e,sizeof(*v.experts));
     if(!v.experts) return -1;
     int rc=lmb_plan_tensors(root,lmb_q38_tensor,&v);
+    if (lmb_q38_vision_finish(&v.vision,m)) rc=-1;
     if(v.edge!=31 || (v.ple_seen&511)!=511) rc=-1;
     uint64_t rows=0;
     for(unsigned i=0;i<(v.table_whole ? 1 : v.parts);i++) {

@@ -235,6 +235,22 @@ def prepare(root):
                 raise RuntimeError("qwen36: resident policy anchor changed")
         path.write_text(source.replace(anchor, anchor + addition, 1))
     other_adapters(root)
+    path = root / "qwen38.c"
+    source = path.read_text()
+    replacements = {
+        "} Qwen38EdgeEngine;": '} Qwen38EdgeEngine;\n#include "engine_patches/qwen38_vision_edge.h"',
+        "    q38_weight_free(&model->embed);": "    lmb_q38_vision_close(model);\n    q38_weight_free(&model->embed);",
+        "    uint64_t resident=model->resident_weight_bytes;": '''    if (lmb_q38_vision_open(model,options->model_dir)) {
+        qwen38_edge_engine_destroy(engine);
+        return coli_edge_adapter_error(error,error_size,"unsupported or unavailable resident vision tower");
+    }
+    uint64_t resident=model->resident_weight_bytes;''',
+    }
+    for anchor, replacement in replacements.items():
+        if source.count(anchor) != 1:
+            raise RuntimeError("Qwen3.8 vision Edge anchor changed: " + anchor)
+        source = source.replace(anchor, replacement, 1)
+    path.write_text(source)
 
 
 if __name__ == "__main__":
