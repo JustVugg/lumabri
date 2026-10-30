@@ -4,24 +4,49 @@
 #ifndef LUMABRI_API_COMPAT_H
 #define LUMABRI_API_COMPAT_H
 
+typedef struct ApiTools ApiTools;
+typedef struct ApiImages ApiImages;
 typedef struct {
     int dialect, streaming, include_usage, begun, input_known, anthropic_modern;
     int has_temperature, has_top_p, has_seed;
     double temperature, top_p;
     uint64_t seed;
-    uint32_t input_tokens;
-    char model[65], id[80]; long long created;
+    uint32_t input_tokens, maximum, sequence;
+    char model[65], id[80], item_id[80]; long long created;
     Cap normalized, system, payload, output;
+    Cap response_instructions, response_tools, response_choice;
+    ApiTools *tools;
+    ApiImages *images;
     unsigned char pending[4]; size_t pending_size, output_bytes;
 } ApiCompat;
 
+static int api_responses_begin(int fd,ApiCompat *c);
+static int api_responses_delta(int fd,ApiCompat *c,const char *text);
+static int api_responses_finish(int fd,ApiCompat *c,int eos,unsigned input,unsigned output);
+static void api_responses_failure(int fd,ApiCompat *c,const char *message);
+static void api_tools_free(ApiTools *tools);
+static void api_images_free(ApiImages *images);
+static int api_tools_buffering(const ApiCompat *c);
+static int api_tools_complete(int fd,ApiCompat *c,int eos);
+static unsigned api_tools_count(const ApiCompat *c);
+static int api_tools_wire(Cap *p,const ApiCompat *c,int dialect);
+static int api_tools_stream(int fd,ApiCompat *c);
+
 static void api_compat_free(ApiCompat *c) {
-    Cap *parts[]={&c->normalized,&c->system,&c->payload,&c->output};
-    for (unsigned i=0;i<4;i++) {
+    Cap *parts[]={&c->normalized,&c->system,&c->payload,&c->output,&c->response_instructions,&c->response_tools,&c->response_choice};
+    for (unsigned i=0;i<sizeof parts/sizeof *parts;i++) {
         if (parts[i]->p) { lmb_api_wipe(parts[i]->p,parts[i]->len); free(parts[i]->p); }
     }
-    memset(c,0,sizeof *c);
+    api_tools_free(c->tools); api_images_free(c->images); memset(c,0,sizeof *c);
 }
+static int api_json_token(Cap *out,const LmbJson *j,unsigned index) {
+    if (index>=j->count) return -1;
+    const LmbJsonToken *t=&j->tokens[index];
+    size_t begin=t->begin,end=t->end;
+    if (t->kind==LMB_JSON_STRING) { if (!begin || end>=j->size) return -1; begin--; end++; }
+    return begin>end || end>j->size ? -1 : cap_add(out,(const char *)j->text+begin,end-begin);
+}
+#include "lumabri_api_images.h"
 static int api_compat_number(const LmbJson *j,int index,double low,double high,double *out) {
     if (index<0 || j->tokens[index].kind!=LMB_JSON_NUMBER) return -1;
     const LmbJsonToken *t=&j->tokens[index]; char text[64]; size_t n=t->end-t->begin;
@@ -57,7 +82,7 @@ static int api_compat_turn(Cap *body,const char *role,Cap *text,int comma) {
 /* A strict subset: reject unsupported parameters before touching a replica.
  * Consecutive same-role text turns are joined; final assistant prefills are not
  * supported by the current resident chat contract. */
-static int api_compat_request(ApiCompat *c,const char *body,size_t length) {
+static int api_compat_request_text(ApiCompat *c,const char *body,size_t length) {
     LmbJsonToken tokens[2048]; LmbJson j; int f[11];
     const char *const openai[]={"model","messages","max_tokens","stream","temperature","top_p",
         "seed","max_completion_tokens","stream_options","n","store"};
@@ -71,6 +96,7 @@ static int api_compat_request(ApiCompat *c,const char *body,size_t length) {
     if (c->dialect==API_OPENAI && f[7]>=0) { if (limit>=0) return -1; limit=f[7]; }
     if ((c->dialect==API_ANTHROPIC && limit<0) ||
         (limit>=0 && lmb_json_uint(&j,(unsigned)limit,&maximum)) || !maximum || maximum>4096) return -1;
+    c->maximum=maximum;
     if (f[3]>=0) {
         if (tokens[f[3]].kind!=LMB_JSON_TRUE && tokens[f[3]].kind!=LMB_JSON_FALSE) return -1;
         c->streaming=tokens[f[3]].kind==LMB_JSON_TRUE;
@@ -168,7 +194,7 @@ static int api_compat_payload(ApiCompat *c,const LmbJson *j,unsigned messages,En
             if (bad) goto fail;
         }
     }
-    return 0;
+    return api_images_payload(c);
 fail:
     free(user); return -1;
 }
@@ -176,10 +202,12 @@ static int api_compat_submit(Engine *e,ApiCompat *c,uint32_t max_new,const uint6
     double temperature=c->has_temperature ? c->temperature : e->greedy_only ? 0 : c->dialect==API_ANTHROPIC ? 1 : .7;
     double top_p=c->has_top_p ? c->top_p : .95;
     if ((e->greedy_only && temperature>0) || (seed && !e->request_seed_supported)) return -1;
+    if (c->images && c->images->count && !e->vision_supported) return -1;
+    c->temperature=temperature; c->top_p=top_p; c->has_temperature=1; c->has_top_p=1;
     unsigned id=++e->request_sequence; if (!id) id=++e->request_sequence;
     char header[192],suffix[32]="";
     if (seed) snprintf(suffix,sizeof suffix," %llu",(unsigned long long)*seed);
-    int n=snprintf(header,sizeof header,"SUBMIT %u 0 %zu %u %.17g %.17g%s\n",id,c->payload.len,max_new,temperature,top_p,suffix);
+    int n=snprintf(header,sizeof header,"%s %u 0 %zu %u %.17g %.17g%s\n",c->images && c->images->count ? "SUBMITV" : "SUBMIT",id,c->payload.len,max_new,temperature,top_p,suffix);
     snprintf(e->request_id,sizeof e->request_id,"%u",id);
     return n<0 || (size_t)n>=sizeof header || engine_write_full(e->to,header,(size_t)n) ||
         engine_write_full(e->to,c->payload.p,c->payload.len) || engine_write_full(e->to,"\n",1) ? -1 : 0;
@@ -189,6 +217,7 @@ static int api_compat_data_event(int fd,const char *json) {
 }
 static int api_compat_begin(int fd,ApiCompat *c) {
     if (c->begun || !c->streaming) return 0;
+    if (c->dialect==API_RESPONSES) return api_responses_begin(fd,c);
     Cap p={0}; int bad;
     if (c->dialect==API_OPENAI) {
         bad=api_addf(&p,"{\"id\":\"%s\",\"object\":\"chat.completion.chunk\",\"created\":%lld,\"model\":\"%s\","
@@ -214,6 +243,8 @@ static int api_compat_progress(int fd,ApiCompat *c,const char *line) {
     return 0;
 }
 static int api_compat_text_delta(int fd,ApiCompat *c,const char *text) {
+    if (api_tools_buffering(c)) return cap_str(&c->output,text);
+    if (c->dialect==API_RESPONSES) return api_responses_delta(fd,c,text);
     if (!c->streaming) return cap_str(&c->output,text);
     if (api_compat_begin(fd,c)) return -1;
     Cap p={0}; int bad;
@@ -253,23 +284,29 @@ static int api_compat_finish(int fd,ApiCompat *c,const char *stat) {
         !input || input>1048576 || !output || output>4096 || (!eos && !limit) ||
         (c->input_known && input!=c->input_tokens)) return -1;
     c->input_known=1; c->input_tokens=input;
+    if (api_tools_complete(fd,c,eos)) return -1;
+    if (c->dialect==API_RESPONSES) return api_responses_finish(fd,c,eos,input,output);
     Cap p={0}; int bad=0;
-    const char *reason=c->dialect==API_OPENAI ? (eos ? "stop" : "length") : (eos ? "end_turn" : "max_tokens");
+    unsigned calls=api_tools_count(c);
+    const char *reason=c->dialect==API_OPENAI ? (calls ? "tool_calls" : eos ? "stop" : "length") : (calls ? "tool_use" : eos ? "end_turn" : "max_tokens");
     if (!c->streaming) {
         if (c->dialect==API_OPENAI) {
             bad=api_addf(&p,"{\"id\":\"%s\",\"object\":\"chat.completion\",\"created\":%lld,\"model\":\"%s\","
                 "\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":",c->id,c->created,c->model) ||
-                api_json_text(&p,c->output.p ? c->output.p : "") || api_addf(&p,"},\"finish_reason\":\"%s\"}],"
+                (calls && !c->output.len ? cap_str(&p,"null") : api_json_text(&p,c->output.p ? c->output.p : "")) ||
+                (calls && (cap_str(&p,",\"tool_calls\":[") || api_tools_wire(&p,c,API_OPENAI) || cap_str(&p,"]"))) ||
+                api_addf(&p,"},\"finish_reason\":\"%s\"}],"
                 "\"usage\":{\"prompt_tokens\":%u,\"completion_tokens\":%u,\"total_tokens\":%u}}",reason,input,output,input+output);
         } else {
             bad=api_addf(&p,"{\"id\":\"%s\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"%s\","
                 "\"content\":[{\"type\":\"text\",\"text\":",c->id,c->model) || api_json_text(&p,c->output.p ? c->output.p : "") ||
-                api_addf(&p,"}],\"stop_reason\":\"%s\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":%u,\"output_tokens\":%u}}",reason,input,output);
+                cap_str(&p,"}") || (calls && (cap_str(&p,",") || api_tools_wire(&p,c,API_ANTHROPIC))) ||
+                api_addf(&p,"],\"stop_reason\":\"%s\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":%u,\"output_tokens\":%u}}",reason,input,output);
         }
         if (!bad) bad=api_response(fd,200,p.p);
     } else if (api_compat_begin(fd,c)) bad=1;
     else if (c->dialect==API_OPENAI) {
-        bad=api_addf(&p,"{\"id\":\"%s\",\"object\":\"chat.completion.chunk\",\"created\":%lld,\"model\":\"%s\","
+        bad=api_tools_stream(fd,c) || api_addf(&p,"{\"id\":\"%s\",\"object\":\"chat.completion.chunk\",\"created\":%lld,\"model\":\"%s\","
             "\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"%s\"}]%s}",c->id,c->created,c->model,reason,
             c->include_usage ? ",\"usage\":null" : "") || api_compat_data_event(fd,p.p);
         if (!bad && c->include_usage) {
@@ -280,7 +317,7 @@ static int api_compat_finish(int fd,ApiCompat *c,const char *stat) {
         }
         if (!bad) bad=api_compat_data_event(fd,"[DONE]");
     } else {
-        bad=api_event(fd,"content_block_stop","{\"type\":\"content_block_stop\",\"index\":0}") ||
+        bad=api_event(fd,"content_block_stop","{\"type\":\"content_block_stop\",\"index\":0}") || api_tools_stream(fd,c) ||
             api_addf(&p,"{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"%s\",\"stop_sequence\":null},"
                 "\"usage\":{\"output_tokens\":%u}}",reason,output) || api_event(fd,"message_delta",p.p) ||
             api_event(fd,"message_stop","{\"type\":\"message_stop\"}");
@@ -288,6 +325,7 @@ static int api_compat_finish(int fd,ApiCompat *c,const char *stat) {
     free(p.p); return bad ? -1 : 0;
 }
 static void api_compat_failure(int fd,ApiCompat *c,const char *message) {
+    if (c->dialect==API_RESPONSES) { api_responses_failure(fd,c,message); return; }
     if (!c->streaming) { api_error(fd,502,"generation_incomplete"); return; }
     Cap p={0};
     if (!cap_str(&p,c->dialect==API_ANTHROPIC ? "{\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":" :
@@ -302,4 +340,6 @@ static int api_compat_model(Cap *body,const char *id,const char *name,int comma)
     return api_addf(body,"%s{\"id\":\"%s\",\"object\":\"model\",\"created\":0,\"owned_by\":\"lumabri\",\"name\":",comma ? "," : "",id) ||
         api_json_text(body,name) || cap_str(body,"}") ? -1 : 0;
 }
+#include "lumabri_api_tools.h"
+#include "lumabri_api_responses.h"
 #endif

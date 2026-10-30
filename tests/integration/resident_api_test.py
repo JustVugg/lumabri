@@ -90,6 +90,9 @@ def verify_resident_api(runtime, env, tracker, first_model_name, artifacts, obse
             verify_resident_browser(port, alice, bob, first["id"], artifacts)
         from client_api_test import verify_client_protocols
         verify_client_protocols(port, alice, bob, first["id"], second["id"])
+        if os.environ.get("LUMABRI_TEST_IMAGES_DIR"):
+            from client_api_images_test import verify_images
+            verify_images(port, alice, first["id"], os.environ["LUMABRI_TEST_IMAGES_DIR"])
         # More opens than available slots verifies acknowledged retirement.
         before_samples = assert_stage_record(observed_plan)
         for turn in range(6):
@@ -138,7 +141,9 @@ def verify_resident_api(runtime, env, tracker, first_model_name, artifacts, obse
                 assert status == 200 and json.loads(data)["conversation"]["messages"][-1]["content"].encode() == raw
         assert assert_stage_record(observed_plan) >= before_samples + 6, "completed API turns did not update the planner"
         before_rejected = observed_plan.read_bytes()
-        status, data = chat(alice, first["id"], "overflow " * 200)
+        # Exceed both the ordinary 128-token fixture and the extended 2048-token
+        # tool-history fixture, while staying below the API's text/body limits.
+        status, data = chat(alice, first["id"], "overflow " * 4096)
         assert status == 200 and b"event: error" in data and b"event: done" not in data
         assert observed_plan.read_bytes() == before_rejected, "rejected generation changed the speed record"
         deadline = time.monotonic() + 5
@@ -192,7 +197,7 @@ def verify_resident_api(runtime, env, tracker, first_model_name, artifacts, obse
         cli("revoke", "alice")
         assert request("/api/v1/models", alice)[0] == 401
         assert request("/api/v1/models", bob)[0] == 200
-        print("RESIDENT API: PASS (real OLMoE, approved allocations, distinct users, private history, TUI coexistence, manager restart, streaming, repeated close, cancellation, revoke)", flush=True)
+        print("RESIDENT API: PASS (real resident inference, approved allocations, distinct users, private history, TUI coexistence, manager restart, streaming, repeated close, cancellation, revoke)", flush=True)
     finally:
         cli("stop")
         assert not service("status")["api"]["live"]

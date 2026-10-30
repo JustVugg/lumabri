@@ -27,8 +27,9 @@ promising that every additional device makes inference faster.
 
 ## Connect your application
 
-Use the same resident service through the OpenAI Chat Completions or Anthropic
-Messages **text API subsets**, with streaming and per-model permissions.
+Use the same resident service through OpenAI Chat Completions, OpenAI Responses
+or Anthropic Messages: streaming, function calls and inline images on supported
+vision runtimes, with per-model permissions.
 Give your application a Lumabri URL, its own API token and an authorized model ID.
 `GET /api/v1/client-config` returns the connection settings without secrets.
 See [client examples and exact compatibility](docs/CLIENT_APIS.md), including

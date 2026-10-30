@@ -36,6 +36,7 @@ def parse_args(argv=None):
     parser.add_argument("--portfolio-policy", action="store_true", help="exercise bounded permanent policy with explicit test machine prices")
     parser.add_argument("--joint", choices=("complete", "reject", "cancel"), help="select and prepare two models together from the TUI")
     parser.add_argument("--sessions", type=int, choices=(1, 2, 4, 8), default=1)
+    parser.add_argument("--context", type=int, choices=(128, 512, 2048), default=128)
     parser.add_argument("--api-prepare", action="store_true", help="apply the joint plan through authenticated management API")
     parser.add_argument("--headless-donors", action="store_true", help="run supervised donors without terminals; approve exact offers through the local owner CLI")
     parser.add_argument("--donor-policy", action="store_true", help="authorize bounded repeat placement on the donor, then retire and reload it")
@@ -262,7 +263,7 @@ def main():
             chat = None
         else:
             chat = Terminal("chatter", ["models", "--models-dir", str(combined), "--tracker", tracker,
-                                   "--context", "128", "--max-new", "8", "--sessions", str(args.sessions)])
+                                   "--context", str(args.context), "--max-new", "8", "--sessions", str(args.sessions)])
             until(lambda: "3 computers visible" in current_frame(chat), "joint inventory missing")
             chat.send("\t")
             until(lambda: "Nothing is selected automatically" in current_frame(chat), "joint node view missing")
@@ -394,7 +395,7 @@ def main():
             observed = {}
             def joint_inventory_committed():
                 result = subprocess.run([str(runtime / "lumabri"), "models", "--models-dir", str(combined),
-                                         "--tracker", tracker, "--context", "128", "--sessions", str(args.sessions), "--json"],
+                                         "--tracker", tracker, "--context", str(args.context), "--sessions", str(args.sessions), "--json"],
                                         env=env("chatter"), text=True, capture_output=True, timeout=30)
                 assert result.returncode == 0, result.stderr
                 observed.clear()
@@ -542,7 +543,7 @@ def main():
                 print("HEADLESS DONORS: PASS (no TTY, same PID, singleton, exact one-off approval, real inference, SIGTERM releases children, empty restart)", flush=True)
             return
         base_args = ["models", "--models-dir", str(args.models_dir.resolve()), "--tracker", tracker,
-                     "--context", "128", "--max-new", "8", "--sessions", str(args.sessions)]
+                     "--context", str(args.context), "--max-new", "8", "--sessions", str(args.sessions)]
         chat = Terminal("chatter", base_args)
         until(lambda: "3 computers visible" in current_frame(chat), "signed inventory missing")
         chat.send("\t")
@@ -698,7 +699,7 @@ def main():
             (combined / configs[0].parent.name).symlink_to(configs[0].parent.resolve(), target_is_directory=True)
             (combined / second_model.name).symlink_to(second_model, target_is_directory=True)
             preview_args = [str(runtime / "lumabri"), "models", "--models-dir", str(combined),
-                            "--tracker", tracker, "--context", "128", "--sessions", "2", "--json"]
+                            "--tracker", tracker, "--context", str(args.context), "--sessions", "2", "--json"]
             observed = []
             def workload_ready(expected=1):
                 result = subprocess.run(preview_args, env=env("chatter"), capture_output=True, text=True, timeout=30)
@@ -721,7 +722,7 @@ def main():
             assert all(n["added_reserved_bytes"] <= n["offered_ram_bytes"] for n in joint["nodes"])
             assert all(service(name)["donor"]["model_count"] == 1 for name in ("a", "b")), "preview changed allocations"
             another = Terminal("chatter", ["models", "--models-dir", str(second_models), "--tracker", tracker,
-                                            "--context", "128", "--max-new", "8"])
+                                            "--context", str(args.context), "--max-new", "8"])
             until(lambda: "3 computers visible" in current_frame(another), "second-model inventory missing")
             another.send("\t")
             until(lambda: "Nothing is selected automatically" in current_frame(another), "second selection missing")
@@ -794,7 +795,7 @@ def main():
                 third_models = tmp / "replica-models"
                 shutil.copytree(configs[0].parent, third_models / "replica-checkpoint")
                 replica = Terminal("chatter", ["models", "--models-dir", str(third_models), "--tracker", tracker,
-                                               "--context", "128", "--max-new", "8", "--sessions",
+                                               "--context", str(args.context), "--max-new", "8", "--sessions",
                                                str(args.sessions) if args.portfolio_policy else "2"])
                 until(lambda: "3 computers visible" in current_frame(replica), "replica inventory missing")
                 replica.send("\t")

@@ -18,6 +18,7 @@
 #include "src/runtime/lumabri_thread_capacity.h"
 #include "lumabri_planner.h"
 #include "src/runtime/lumabri_memlock.h"
+#include "src/runtime/lumabri_vision.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -82,6 +83,7 @@ typedef struct {
     int32_t *committed_tokens;
     size_t committed_count;
     size_t checkpoint_count;
+    int image_turn; /* token IDs alone cannot identify image embeddings */
 } SegmentConversation;
 
 #include "lumabri_metrics.h"
@@ -1268,7 +1270,8 @@ static int conversation_recover_attempt(
             .token_ids = history + offset, .token_count = rows,
             .output = buffer_a, .output_bytes = bytes,
         };
-        if (coli_edge_embed(edge, &embed, error, error_size)) {
+        if (coli_edge_embed(edge, &embed, error, error_size) ||
+            lmb_vision_overlay(offset,rows,buffer_a,cap->state_width)) {
             free(history); goto recovery_failed;
         }
         uint8_t *first = buffer_a, *second = buffer_b;
@@ -1570,6 +1573,9 @@ static int segment_generate(ColiEdgeEngine *edge,
             goto cleanup;
     }
 
+    if (lmb_vision_tokens(prompt_tokens,prompt_count)) {
+        snprintf(error,error_size,"Image tokens do not match the prepared vision rows"); goto cleanup;
+    }
     if (conversation) {
         int same_route = conversation_route_equal(conversation, chain,
                                                   chain_count,
@@ -1679,7 +1685,8 @@ static int segment_generate(ColiEdgeEngine *edge,
             .token_ids = prompt_tokens + offset, .token_count = rows,
             .output = buffer_a, .output_bytes = bytes,
         };
-        if (coli_edge_embed(edge, &embed, error, error_size)) goto cleanup;
+        if (coli_edge_embed(edge, &embed, error, error_size) ||
+            lmb_vision_overlay(offset,rows,buffer_a,cap->state_width)) goto cleanup;
         uint8_t *first = buffer_a, *second = buffer_b;
         int failed = chain_run_observed(active_chain, active_count,
                                prompt_tokens + offset, rows,
@@ -1703,7 +1710,8 @@ static int segment_generate(ColiEdgeEngine *edge,
             goto cleanup;
         }
         if (failed) {
-            if (coli_edge_embed(edge, &embed, error, error_size)) goto cleanup;
+            if (coli_edge_embed(edge, &embed, error, error_size) ||
+                lmb_vision_overlay(offset,rows,buffer_a,cap->state_width)) goto cleanup;
             first = buffer_a; second = buffer_b;
             if (chain_run(active_chain, active_count,
                           prompt_tokens + offset, rows,
@@ -2090,6 +2098,7 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
     /* The optional seeded SUBMIT field is accepted only by clients that
      * discover this explicit capability; ordinary six-field SUBMIT remains. */
     fputs("\nLUMABRI_RESET 1\n", stdout);
+    if (lmb_vision_available()) fputs("LUMABRI_VISION 1\n",stdout);
     fputs("LUMABRI_REQUEST_SEED 1\n", stdout);
     if (controlled) printf("LUMABRI_SLOTS %u\n", slots);
     printf("LUMABRI_SAMPLING %s\nLUMABRI_NUMERIC %u %s\n" SEGMENT_FRAME_READY "\nSTAT 0 0 0 0\n",
@@ -2133,7 +2142,8 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
         double temperature = 0.0, top_p = 0.0;
         char seed_text[24]=""; uint64_t request_seed=0;
         char trailing = 0;
-        int fields=sscanf(header, "SUBMIT %u %u %zu %u %lf %lf %23s %c",
+        int vision=!strncmp(header,"SUBMITV ",8);
+        int fields=sscanf(header, vision ? "SUBMITV %u %u %zu %u %lf %lf %23s %c" : "SUBMIT %u %u %zu %u %lf %lf %23s %c",
                    &request_id, &slot, &prompt_bytes, &max_tokens,
                    &temperature, &top_p, seed_text, &trailing);
         if ((fields!=6 && fields!=7) || (fields==7 && lmb_request_seed(seed_text,&request_seed)) ||
@@ -2169,10 +2179,22 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
             free(prompt); result_code = 1; break;
         }
         home_edge_control = &control;
-        int bad=serve_select_chain(serve_discovery_snapshot,discovery,&control,
+        lmb_vision_clear();
+        int bad=0;
+        if ((vision || conversation->image_turn) && conversation_reset(conversation)) bad=1;
+        if (!bad && vision) {
+            char *expanded=NULL; size_t expanded_bytes=0; int permit=-1;
+            if (lmb_compute_acquire(&permit,30000,home_edge_cancel,NULL) ||
+                lmb_vision_prepare(prompt,prompt_bytes,&expanded,&expanded_bytes) || home_edge_cancel(NULL)) bad=1;
+            lmb_compute_release(&permit);
+            if (!bad) { free(prompt); prompt=expanded; prompt_bytes=expanded_bytes; conversation->image_turn=1; }
+            else free(expanded);
+        }
+        if (bad) snprintf(error,sizeof error,"Invalid image input, unavailable vision tower, or reset/cancellation failure");
+        if (!bad) bad=serve_select_chain(serve_discovery_snapshot,discovery,&control,
                                   discovery_timeout_ms,cap->num_layers,context,max_rows,
                                   &snapshot,chain,&chain_count);
-        if (bad) {
+        if (bad && !error[0]) {
             snprintf(error, sizeof error,
                      "no complete compatible Segment chain");
             result.replica_unavailable=1;
@@ -2222,6 +2244,8 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
                             conversation->chain_count);
         }
         home_edge_control = NULL;
+        if (!bad && conversation->active) conversation->image_turn=vision;
+        lmb_vision_clear();
         lmb_serve_control_stop(&control);
         free(prompt);
         if (atomic_load(&control.cancelled)) {

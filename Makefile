@@ -166,7 +166,7 @@ lumabri test_chat_ui: src/runtime/lumabri_service.h src/runtime/lumabri_service_
 lumabri test_chat_ui: src/runtime/lumabri_joint_prepare.h
 lumabri test_chat_ui: src/ui/lumabri_resident_ui.h
 lumabri test_chat_ui: src/runtime/lumabri_resident_control.h
-lumabri test_chat_ui: src/runtime/lumabri_api_compat.h src/runtime/lumabri_api.h src/runtime/lumabri_api_http.h src/runtime/lumabri_api_json.h src/runtime/lumabri_api_access.h src/runtime/lumabri_api_proxy.h
+lumabri test_chat_ui: src/runtime/lumabri_api_compat.h src/runtime/lumabri_api_tools.h src/runtime/lumabri_api_responses.h src/runtime/lumabri_api.h src/runtime/lumabri_api_http.h src/runtime/lumabri_api_json.h src/runtime/lumabri_api_access.h src/runtime/lumabri_api_proxy.h
 lumabri test_chat_ui test_host_session_pool test-home-monitor test_elastic_policy: src/runtime/lumabri_recovery_wait.h src/runtime/lumabri_recovery_policy.h
 lumabri test_chat_ui test_host_session_pool test-home-monitor test_api_access: src/runtime/lumabri_operator_access.h src/runtime/lumabri_workspace.h
 lumabri test_chat_ui test_host_session_pool test-home-monitor: src/runtime/lumabri_management.h
@@ -634,7 +634,12 @@ test_api_compat: tests/c/test_api_compat.c lumabri.c lumabri $(wildcard src/runt
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_api_compat.c src/ui/lumabri_tui.c lumabri_machine.c lumabri_run_gate.c -o $@
 
 .PHONY: test-api test-api-gateway
-test-api: test_api_compat test_api_json test_api_http test_api_access test_chat_store test_model_routes test_replica_admission test_replica_rank test_replay_prefix test_capacity test_portfolio_policy test_elastic_policy test_retired_receipts test_allocation_lifetime test_journal_index
+test_image_prepare: tests/c/test_image_prepare.c src/runtime/lumabri_image.c src/runtime/lumabri_image.h src/vendor/stb_image.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) -std=c11 tests/c/test_image_prepare.c src/runtime/lumabri_image.c -o $@ -lm
+
+
+test-api: test_image_prepare test_api_compat test_api_json test_api_http test_api_access test_chat_store test_model_routes test_replica_admission test_replica_rank test_replay_prefix test_capacity test_portfolio_policy test_elastic_policy test_retired_receipts test_allocation_lifetime test_journal_index
+	./test_image_prepare
 	./test_api_compat
 	./test_api_json
 	./test_api_http
@@ -926,6 +931,7 @@ SEGMENT_COMMON = segment_colibri.h src/runtime/lumabri_thread_capacity.h src/run
 		$(PROTO_DEPS) $(SIGN_DEPS) lumabri_sha.h $(SECURE_DEPS)
 
 HYBRID_PATCH_INPUTS = tools/prepare_resident_adapters.py engine_patches/make_patches.py \
+	engine_patches/qwen38_vision_edge.h src/runtime/lumabri_vision.h src/runtime/lumabri_image.h \
 	src/runtime/lumabri_engine_memory_override.h src/runtime/lumabri_engine_memory.h \
 	lumabri_home_hybrid.h src/runtime/lumabri_hybrid_policy.h src/runtime/lumabri_q8_reference.h \
 	engine_patches/deepseek_v4_p2p.py $(wildcard engine_patches/*-p2p.diff) \
@@ -968,12 +974,17 @@ build/engine_memory.o: src/runtime/lumabri_engine_memory.c src/runtime/lumabri_e
 build/v41_adapter.o: engine_patches/v41_adapter.c engine_patches/v41_adapter.h engine_patches/v41_boundary.h engine_patches/v41_lifecycle.h src/runtime/lumabri_v41_contract.h lumabri_planner.h $(wildcard planner_adapters/*.h) build/v41_range_core.c build/segment-sources build/segment-options
 	$(CC) $(CPPFLAGS) -O2 $(ENGINE_CPU_FLAGS) $(OMP_FLAGS) $(ENGINE_MEMORY_FLAGS) -pthread -I. -Ibuild -I$(ENGINE) -c engine_patches/v41_adapter.c -o $@
 
-$(COLIBRI_SEGMENT_LIB): $(HYBRID_ENGINE_DIR)/.prepared build/segment_hybrid_bridge.o build/v41_adapter.o build/engine_memory.o tools/check_engine_memory.py
+build/image.o: src/runtime/lumabri_image.c src/runtime/lumabri_image.h src/vendor/stb_image.h build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(ENGINE_MEMORY_FLAGS) -c $< -o $@
+build/vision.o: src/runtime/lumabri_vision.c src/runtime/lumabri_vision.h src/runtime/lumabri_media.h src/runtime/lumabri_image.h build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(ENGINE_MEMORY_FLAGS) -c $< -o $@
+
+$(COLIBRI_SEGMENT_LIB): $(HYBRID_ENGINE_DIR)/.prepared build/segment_hybrid_bridge.o build/v41_adapter.o build/engine_memory.o build/image.o build/vision.o tools/check_engine_memory.py
 	env -u MAKEFLAGS $(MAKE) -C $(HYBRID_ENGINE_DIR) MAKEOVERRIDES= \
 		COLI_V4_SUPPORTED=1 CC='$(CC)' \
 		CFLAGS='-O2 $(ENGINE_CPU_FLAGS) $(CPPFLAGS) $(OMP_FLAGS) $(ENGINE_MEMORY_FLAGS) -pthread -I$(HYBRID_ROOT) -include $(HYBRID_ROOT)/lumi_v4_ext.h -DLUMABRI_P2P -DLUMIBRI_P2P' \
 		segment-edge-library
-	$(AR) rcs $@ build/segment_hybrid_bridge.o build/v41_adapter.o build/engine_memory.o
+	$(AR) rcs $@ build/segment_hybrid_bridge.o build/v41_adapter.o build/engine_memory.o build/image.o build/vision.o
 	python3 tools/check_engine_memory.py $@
 
 # Optional local Edge memory diagnostic; requires an existing checkpoint.
@@ -1288,7 +1299,7 @@ clean:
 	      test_verify_failover test_segment_v2 test_segment_discovery test_sampling \
 	      test_swarm_detail test_relay_rate test_machine test_meminfo test_process_memory test_engine_memory test_engine_memory_guard test_memlock test_serve_control test_host_session_pool test_hosted_sessions test_host_drain test_node_control \
 	      test_compute_lease test_content_filter test_scheduler test_run_gate \
-	      test_compute_broker test_portfolio test_reply_stream test_api_compat test_api_json test_api_http test_api_access test_chat_store test_model_routes test_replica_admission test_replica_rank test_replay_prefix test_capacity test_portfolio_policy test_elastic_policy test_retired_receipts test_allocation_lifetime test_journal_index test_tracker_history \
+	      test_compute_broker test_portfolio test_reply_stream test_image_prepare test_api_compat test_api_json test_api_http test_api_access test_chat_store test_model_routes test_replica_admission test_replica_rank test_replay_prefix test_capacity test_portfolio_policy test_elastic_policy test_retired_receipts test_allocation_lifetime test_journal_index test_tracker_history \
 	      test_segment_v2_tsan tracker_tsan \
 	      segment_node segment_chat test_backend_routes test_segment_close test_tcp_latency test_socket_transport test_secure_transport segment_node_asan segment_chat_asan \
 	      segment_node_tsan segment_chat_tsan \
@@ -1307,3 +1318,9 @@ clean:
         test-segment-relay-real test-segment-failover-real test-segment-hybrid \
         test-machine-governor test-doctor test-sanitize test-thread-sanitize \
         production-gate
+
+# Media parsing changes must rebuild gateway consumers.
+lumabri test_chat_ui test_api_compat: src/runtime/lumabri_api_images.h src/runtime/lumabri_media.h src/runtime/lumabri_image.h
+
+build/test_vision_segment: tests/c/test_vision_segment.c $(COLIBRI_SEGMENT_LIB)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(OMP_FLAGS) -pthread -I$(ENGINE) $< $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
