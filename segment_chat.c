@@ -2183,7 +2183,7 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
         int bad=0;
         if ((vision || conversation->image_turn) && conversation_reset(conversation)) bad=1;
         if (!bad && vision) {
-            char *expanded=NULL; size_t expanded_bytes=0; int permit=-1;
+            char *expanded=NULL; size_t expanded_bytes=0; LmbComputePermit permit=LMB_COMPUTE_INVALID;
             if (lmb_compute_acquire(&permit,30000,home_edge_cancel,NULL) ||
                 lmb_vision_prepare(prompt,prompt_bytes,&expanded,&expanded_bytes) || home_edge_cancel(NULL)) bad=1;
             lmb_compute_release(&permit);
