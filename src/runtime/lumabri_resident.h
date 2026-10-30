@@ -4,7 +4,11 @@
 #define LUMABRI_RESIDENT_H
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include "lumabri_engine_io_windows.h"
+#else
 #include <dlfcn.h>
+#endif
 #include <stdio.h>
 #include "lumabri_resident_guard.h"
 
@@ -23,7 +27,11 @@ static int lmb_resident_required(void) {
  * A missing hook cannot silently fall back to inference from disk. */
 static int lmb_resident_seal(void) {
     if (!lmb_resident_required()) return 0;
+#ifdef _WIN32
+    int (*seal)(void) = lmb_engine_input_seal;
+#else
     int (*seal)(void) = (int (*)(void))dlsym(RTLD_DEFAULT, "lmb_weights_seal");
+#endif
     if (!seal || seal()) {
         fprintf(stderr, "[resident] cannot seal weight input; refusing READY\n");
         return -1;

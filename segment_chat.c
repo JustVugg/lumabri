@@ -36,7 +36,7 @@ static int home_edge_cancel(void *unused) {
 }
 #define LMB_EDGE_COMPUTE(name, type) \
 static int home_edge_##name(ColiEdgeEngine *edge, type *request, char *error, size_t size) { \
-    int permit = -1; \
+    LmbComputePermit permit = LMB_COMPUTE_INVALID; \
     if (lmb_compute_acquire(&permit, 30000, home_edge_cancel, NULL)) { \
         snprintf(error, size, "Local compute admission unavailable or expired"); return -1; \
     } \
@@ -2183,7 +2183,7 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
         int bad=0;
         if ((vision || conversation->image_turn) && conversation_reset(conversation)) bad=1;
         if (!bad && vision) {
-            char *expanded=NULL; size_t expanded_bytes=0; int permit=-1;
+            char *expanded=NULL; size_t expanded_bytes=0; LmbComputePermit permit=LMB_COMPUTE_INVALID;
             if (lmb_compute_acquire(&permit,30000,home_edge_cancel,NULL) ||
                 lmb_vision_prepare(prompt,prompt_bytes,&expanded,&expanded_bytes) || home_edge_cancel(NULL)) bad=1;
             lmb_compute_release(&permit);

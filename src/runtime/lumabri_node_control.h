@@ -63,10 +63,34 @@ static LMB_MAYBE_UNUSED int lmb_node_control_decode(const uint8_t *in, size_t by
         (s->draining==LMB_NODE_CONTROL_RETIRED && (s->sessions || s->experts))) return -1;
     return (int)lmb_get32(in+4);
 }
-/* Raw AF_UNIX only, never an encrypted network descriptor. Absolute deadline
+/* A private inherited channel, never an encrypted network descriptor. Absolute deadline
  * covers partial messages too; a timed-out RPC poisons the channel rather
  * than letting a late reply be mistaken for the following command. */
-static LMB_MAYBE_UNUSED int lmb_node_control_io(int fd, void *data, size_t size,
+#ifdef _WIN32
+#include "src/runtime/lumabri_pipe_windows.h"
+typedef HANDLE LmbNodeChannel;
+#define LMB_NODE_CHANNEL_INVALID INVALID_HANDLE_VALUE
+static LMB_MAYBE_UNUSED int lmb_node_control_io(LmbNodeChannel fd,void *data,size_t size,
+                                               int writing,uint64_t deadline) {
+    return lmb_pipe_io(fd,data,size,writing,deadline);
+}
+static LMB_MAYBE_UNUSED void lmb_node_channel_close(LmbNodeChannel fd) { CloseHandle(fd); }
+static LMB_MAYBE_UNUSED void lmb_node_channel_shutdown(LmbNodeChannel fd) { (void)CancelIoEx(fd,NULL); }
+static LMB_MAYBE_UNUSED int lmb_node_channel_wait(LmbNodeChannel fd,uint32_t timeout_ms) {
+    return lmb_pipe_wait_read(fd,timeout_ms);
+}
+#else
+typedef int LmbNodeChannel;
+#define LMB_NODE_CHANNEL_INVALID (-1)
+static LMB_MAYBE_UNUSED void lmb_node_channel_close(LmbNodeChannel fd) { (close)(fd); }
+static LMB_MAYBE_UNUSED void lmb_node_channel_shutdown(LmbNodeChannel fd) { (void)shutdown(fd,SHUT_RDWR); }
+static LMB_MAYBE_UNUSED int lmb_node_channel_wait(LmbNodeChannel fd,uint32_t timeout_ms) {
+    struct pollfd ready={fd,POLLIN,0};
+    int rc=poll(&ready,1,(int)timeout_ms);
+    if (rc<0 && errno==EINTR) return 0;
+    return rc<0 || (ready.revents&(POLLERR|POLLHUP|POLLNVAL)) ? -1 : rc;
+}
+static LMB_MAYBE_UNUSED int lmb_node_control_io(LmbNodeChannel fd, void *data, size_t size,
                                                int writing, uint64_t deadline) {
     uint8_t *p=data;
     while (size) {
@@ -83,14 +107,15 @@ static LMB_MAYBE_UNUSED int lmb_node_control_io(int fd, void *data, size_t size,
     }
     return 0;
 }
-static LMB_MAYBE_UNUSED int lmb_node_control_local(int *fd, const uint8_t *request, uint8_t *reply) {
-    if (*fd<0) return -1;
+#endif
+static LMB_MAYBE_UNUSED int lmb_node_control_local(LmbNodeChannel *fd, const uint8_t *request, uint8_t *reply) {
+    if (*fd==LMB_NODE_CHANNEL_INVALID) return -1;
     uint64_t now=lmb_io_monotonic_ms();
     LmbNodeControl decoded;
     int bad=!now || lmb_node_control_io(*fd,(void *)request,LMB_NODE_CONTROL_REQUEST_BYTES,1,now+2000) ||
         lmb_node_control_io(*fd,reply,LMB_NODE_CONTROL_REPLY_BYTES,0,now+2000) ||
         lmb_node_control_decode(reply,LMB_NODE_CONTROL_REPLY_BYTES,&decoded)<0;
-    if (bad) { (close)(*fd); *fd=-1; return -1; }
+    if (bad) { lmb_node_channel_close(*fd); *fd=LMB_NODE_CHANNEL_INVALID; return -1; }
     return 0;
 }
 #endif

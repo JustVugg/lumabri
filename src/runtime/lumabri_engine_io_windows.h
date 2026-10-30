@@ -13,6 +13,7 @@ typedef struct {
 BOOL WINAPI lmb_engine_ReadFile(HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED);
 size_t lmb_engine_fread(void *,size_t,size_t,FILE *);
 int lmb_engine_input_seal(void);
+int lmb_engine_input_lock_status(uint64_t *retained_bytes);
 void lmb_engine_input_snapshot(LmbEngineInput *);
 #endif
 #endif
