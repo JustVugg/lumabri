@@ -892,7 +892,7 @@ static int handle_run(Node *node, int fd, const LmbMsg *msg) {
                 .cancel_user_data = node,
             };
             char error[256] = "";
-            int permit = -1;
+            LmbComputePermit permit = LMB_COMPUTE_INVALID;
             uint32_t remaining = lmb_compute_remaining(admission_began, node->run_wait_ms);
             if (admitted == 1 && (!remaining || lmb_compute_acquire(&permit, remaining, run_should_cancel, node)))
                 status = LMB_SEG_STATUS_BUSY;
@@ -1246,7 +1246,7 @@ static int handle_home_expert(Node *node, int fd, const LmbMsg *msg) {
         pthread_mutex_lock(&node->sessions_lock); node->control.experts--; pthread_mutex_unlock(&node->sessions_lock);
         return rc;
     }
-    int permit = -1;
+    LmbComputePermit permit = LMB_COMPUTE_INVALID;
     float *out = malloc((size_t)D * sizeof(float));
     uint32_t remaining = lmb_compute_remaining(admission_began, node->run_wait_ms);
     int bad = !out || !remaining || lmb_compute_acquire(&permit, remaining, run_should_cancel, node) ||

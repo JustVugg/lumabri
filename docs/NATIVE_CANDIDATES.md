@@ -69,6 +69,13 @@ The latest measured speed is historical, not a guarantee for the next turn.
   atomic journal replacement and crash recovery. A journal never grants
   permission to replay an approval. This gate does not yet deliver the full
   native Windows household service or package.
+- The per-donor compute permit also has a native Windows implementation:
+  private same-user named pipes, a bounded FIFO, queue deadlines and
+  cancellation. The connected process owns its permit; exit releases it.
+  Native tests cover overload, invalid requests, Unicode profile paths,
+  separate-process crashes and repeated restart without leaked handles.
+  This supplies compute admission for the worker integration; it does not
+  by itself connect the native household donor.
 - The native `lumabri.exe` control entrypoint can now start, inspect, restart
   and stop the private background manager with `service`, and report the
   Windows machine inventory with `machine --json`. The shared manager loop

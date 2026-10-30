@@ -4,6 +4,10 @@
  * Same-UID IPC is not a sandbox against arbitrary programs of that user. */
 #ifndef LUMABRI_COMPUTE_BROKER_H
 #define LUMABRI_COMPUTE_BROKER_H
+#define LMB_COMPUTE_PENDING_MAX 32
+#ifdef _WIN32
+#include "src/runtime/lumabri_compute_windows.h"
+#else
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -18,7 +22,8 @@
 #include <time.h>
 #include <unistd.h>
 
-#define LMB_COMPUTE_PENDING_MAX 32
+typedef int LmbComputePermit;
+#define LMB_COMPUTE_INVALID (-1)
 
 static inline uint64_t lmb_compute_now(void) {
     struct timespec t;
@@ -54,7 +59,7 @@ static inline uint32_t lmb_compute_remaining(uint64_t began, uint32_t budget) {
 
 /* Success sets a live permit fd, or -1 for unmanaged CLI diagnostics. A
  * configured but dead broker NEVER silently falls back to unbounded compute. */
-static inline int lmb_compute_acquire(int *permit, uint32_t wait_ms,
+static inline int lmb_compute_acquire(LmbComputePermit *permit, uint32_t wait_ms,
                                       int (*cancel)(void *), void *opaque) {
     *permit = -1;
     const char *path = getenv("LUMABRI_COMPUTE_SOCKET");
@@ -121,7 +126,7 @@ static inline int lmb_compute_acquire(int *permit, uint32_t wait_ms,
     int error = errno ? errno : ECONNRESET; close(fd); errno = error; return -1;
 }
 
-static inline void lmb_compute_release(int *permit) {
+static inline void lmb_compute_release(LmbComputePermit *permit) {
     if (*permit >= 0) close(*permit);
     *permit = -1;
 }
@@ -251,5 +256,6 @@ static inline void lmb_compute_broker_stop(LmbComputeBroker *broker) {
     atomic_store(&broker->stop, 1); pthread_join(broker->thread, NULL);
     close(broker->listener); unlink(broker->path); broker->listener = -1; broker->started = 0;
 }
+#endif
 #endif
 #endif
