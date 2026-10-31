@@ -1325,3 +1325,6 @@ lumabri test_chat_ui test_api_compat: src/runtime/lumabri_api_images.h src/runti
 
 build/test_vision_segment: tests/c/test_vision_segment.c $(COLIBRI_SEGMENT_LIB)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(OMP_FLAGS) -pthread -I$(ENGINE) $< $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
+
+# Portable durable evidence formats shared by both keeper implementations.
+lumabri test_chat_ui test_host_session_pool test_host_drain test-home-monitor test_retired_receipts test_allocation_lifetime: src/protocol/lumabri_retired_receipt_wire.h src/protocol/lumabri_allocation_lifetime_wire.h
