@@ -1493,26 +1493,9 @@ static void preflight_signal(NodePreflight *fd, char status) {
 }
 
 #ifdef _WIN32
+#include "src/runtime/lumabri_working_set_windows.h"
 static int node_working_set(uint32_t memory_limit_mb) {
-    uint64_t requested=(uint64_t)memory_limit_mb<<20, allowed=0;
-    const char *reserve_name=getenv("LUMABRI_SEGMENT_RAM_RESERVE_MB") ?
-        "LUMABRI_SEGMENT_RAM_RESERVE_MB" : "LUMABRI_RAM_RESERVE_MB";
-    uint64_t reserve=(uint64_t)lmb_env_int(reserve_name,
-        (int)lmb_machine_default_reserve_mb(lmb_machine_total_ram()),256,262144)<<20;
-    /* VirtualLock's quota follows the process minimum working set. Changing
-     * it is not itself a residence guarantee: owned page locks and the
-     * process guard below remain mandatory. Never raise a system-wide limit.
-     * https://learn.microsoft.com/windows/win32/api/memoryapi/nf-memoryapi-virtuallock */
-    if (!requested || requested>SIZE_MAX ||
-        lmb_process_budget(requested,available_memory_bytes(),reserve,&allowed) ||
-        allowed<requested ||
-        !SetProcessWorkingSetSize(GetCurrentProcess(),(SIZE_T)requested,(SIZE_T)requested)) {
-        fprintf(stderr,"[resident-memory] Windows cannot admit the explicit %llu-byte process working set; "
-            "check the approved memory limit and available RAM (OS error %lu)\n",
-            (unsigned long long)requested,(unsigned long)GetLastError());
-        return -1;
-    }
-    return 0;
+    return lmb_windows_working_set((uint64_t)memory_limit_mb<<20,"LUMABRI_SEGMENT_RAM_RESERVE_MB");
 }
 static int segment_node_main(int argc, char **argv) {
 #else

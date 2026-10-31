@@ -53,7 +53,7 @@ LMB_EDGE_COMPUTE(logits, ColiEdgeLogitsRequest)
 
 typedef struct {
     LmbSegRouteEntry route;
-    int fd;
+    LmbSocket fd;
     int direct_failed;
     int opened;
     int failure_transport;
@@ -158,7 +158,8 @@ static void usage(const char *program) {
         "((--prompt TEXT | --prompt-ids CSV) | --serve) "
         "[--expect-ids CSV] [--tokens N] [--context N] [--max-rows N] "
         "[--temperature F --top-p F --seed N] "
-        "[--discovery-timeout-ms N] [--retry-first-run] [--direct-only] [--json]\n",
+        "[--discovery-timeout-ms N] [--retry-first-run] [--direct-only] [--json] "
+        "[--checkpoint-signer HEX64 --model-bytes N (native Windows)]\n",
         program);
 }
 
@@ -395,7 +396,7 @@ static int select_chain(const LmbSegRouteSnapshot *snapshot, uint32_t layers,
         if (!best) return -1;
         memset(&chain[count], 0, sizeof chain[count]);
         chain[count].route = *best;
-        chain[count].fd = -1;
+        chain[count].fd = LMB_INVALID_SOCKET;
         cursor = best->advert.layer_end;
         count++;
     }
@@ -492,16 +493,16 @@ static int remote_request(RemoteSegment *remote, uint32_t op,
     remote->transport_error[0] = 0;
     if (!remote->direct_failed &&
         (remote->route.transport & LMB_SEG_TRANSPORT_DIRECT)) {
-        if (remote->fd < 0) {
+        if (remote->fd == LMB_INVALID_SOCKET) {
             remote->fd = lmb_connect(remote->route.advert.addr);
-            if (remote->fd < 0)
+            if (remote->fd == LMB_INVALID_SOCKET)
                 snprintf(remote->transport_error,
                          sizeof remote->transport_error,
                          "cannot reach %s at %s: %s",
                          remote->route.advert.peer_name,
                          remote->route.advert.addr, lmb_connect_why());
         }
-        if (remote->fd >= 0) {
+        if (remote->fd != LMB_INVALID_SOCKET) {
             if (lmb_send(remote->fd, op, body, body_len, pay, pay_len))
                 snprintf(remote->transport_error,
                          sizeof remote->transport_error,
@@ -521,8 +522,8 @@ static int remote_request(RemoteSegment *remote, uint32_t op,
             }
         }
         lmb_msg_free(response);
-        if (remote->fd >= 0) lmb_close(remote->fd);
-        remote->fd = -1;
+        if (remote->fd != LMB_INVALID_SOCKET) lmb_close(remote->fd);
+        remote->fd = LMB_INVALID_SOCKET;
         remote->direct_failed = 1;
     }
     if (segment_direct_only) {
@@ -554,7 +555,7 @@ static int remote_request(RemoteSegment *remote, uint32_t op,
  * which one happened. */
 static void remote_measure_link(RemoteSegment *remote) {
     memset(&remote->link, 0, sizeof remote->link);
-    if (remote->fd < 0 || remote->direct_failed) return;
+    if (remote->fd == LMB_INVALID_SOCKET || remote->direct_failed) return;
     uint8_t nonce[16], *bytes = malloc(LMB_LINK_BYTES);
     if (!bytes) return;
     lmb_random(nonce, sizeof nonce);
@@ -577,7 +578,7 @@ static void remote_measure_link(RemoteSegment *remote) {
     if (!bad) (void)lmb_link_observed(&remote->link, samples, samples[3], (double)time(NULL));
     /* Probe failure is not inference failure, but a partial reply cannot be
      * left on the RUN stream. Reconnect lazily without abandoning the session. */
-    lmb_close(remote->fd); remote->fd = -1;
+    lmb_close(remote->fd); remote->fd = LMB_INVALID_SOCKET;
 }
 
 static int remote_open(RemoteSegment *remote, const LmbSegId *session_id,
@@ -656,8 +657,8 @@ static int remote_open(RemoteSegment *remote, const LmbSegId *session_id,
         return 0;
     }
     lmb_msg_free(&msg);
-    if (remote->fd >= 0) lmb_close(remote->fd);
-    remote->fd = -1;
+    if (remote->fd != LMB_INVALID_SOCKET) lmb_close(remote->fd);
+    remote->fd = LMB_INVALID_SOCKET;
     return -1;
 }
 
@@ -954,11 +955,11 @@ static int remote_close(RemoteSegment *remote) {
     if (!lmb_seg_control_encode(&control, &body, &body_len)) {
         for (unsigned attempt = 0; attempt < 4 && lmb_io_monotonic_ms() < deadline; attempt++) {
             lmb_read_deadline_ms = deadline;
-            if (remote->fd >= 0) lmb_close(remote->fd);
-            remote->fd = -1;
+            if (remote->fd != LMB_INVALID_SOCKET) lmb_close(remote->fd);
+            remote->fd = LMB_INVALID_SOCKET;
             if (remote->route.transport & LMB_SEG_TRANSPORT_DIRECT) {
                 remote->fd = lmb_connect_ms_io(remote->route.advert.addr, 250, 250);
-                remote->direct_failed = remote->fd < 0;
+                remote->direct_failed = remote->fd == LMB_INVALID_SOCKET;
             }
             lmb_read_deadline_ms = deadline;
             LmbMsg message = {0}; LmbSegReply reply;
@@ -972,13 +973,13 @@ static int remote_close(RemoteSegment *remote) {
             int retry = bad || (matched && reply.status == LMB_SEG_STATUS_BUSY);
             lmb_msg_free(&message);
             if (closed || !retry) break;
-            (void)poll(NULL, 0, 20);
+            sleep_ms(20);
         }
     }
     lmb_read_deadline_ms = prior_deadline;
     free(body);
-    if (remote->fd >= 0) lmb_close(remote->fd);
-    remote->fd = -1;
+    if (remote->fd != LMB_INVALID_SOCKET) lmb_close(remote->fd);
+    remote->fd = LMB_INVALID_SOCKET;
     if (closed) remote->opened = 0;
     else fprintf(stderr, "[segment-session] CLOSE not confirmed for %s [%u:%u]; session is not forgotten\n",
                  remote->route.advert.peer_name, remote->route.advert.layer_begin, remote->route.advert.layer_end);
@@ -1209,7 +1210,7 @@ static int conversation_recover_attempt(
             return -1;
         }
         replacement[i].route = *route;
-        replacement[i].fd = -1;
+        replacement[i].fd = LMB_INVALID_SOCKET;
     }
 
     LmbSegId session_id;
@@ -1299,8 +1300,8 @@ static int conversation_recover_attempt(
          * timeout sending CLOSE to the dead transport after recovery succeeded;
          * the abandoned session is fenced and expires by TTL. */
         if (i == failed_index && old->failure_transport) {
-            if (old->fd >= 0) lmb_close(old->fd);
-            old->fd = -1;
+            if (old->fd != LMB_INVALID_SOCKET) lmb_close(old->fd);
+            old->fd = LMB_INVALID_SOCKET;
             old->opened = 0;
         }
         remote_dispose(old);
@@ -1596,7 +1597,7 @@ static int segment_generate(ColiEdgeEngine *edge,
             conversation->chain_count = chain_count;
             conversation->route_generation = route_generation;
             for (size_t i = 0; i < chain_count; i++)
-                conversation->chain[i].fd = -1;
+                conversation->chain[i].fd = LMB_INVALID_SOCKET;
         } else {
             prefilled = conversation->committed_count;
             if (prefilled)
@@ -1611,7 +1612,7 @@ static int segment_generate(ColiEdgeEngine *edge,
         LmbSegId session_id;
         lmb_random(session_id.bytes, sizeof session_id.bytes);
         for (; opened < active_count; opened++) {
-            active_chain[opened].fd = -1;
+            active_chain[opened].fd = LMB_INVALID_SOCKET;
             if (remote_open_current(&active_chain[opened], &session_id, model_root,
                             tokenizer_root, context, max_rows, open_refresh_discovery, discovery,
                             error, error_size)) {
@@ -2070,7 +2071,7 @@ static int serve_select_chain(ServeSnapshotFn observe, void *opaque,
         refresh=now>=next_refresh;
         if (refresh) next_refresh=now+250u;
         uint64_t left=deadline-now;
-        (void)poll(NULL,0,(int)(left<50u ? left : 50u));
+        sleep_ms((unsigned)(left<50u ? left : 50u));
     }
 }
 
@@ -2302,7 +2303,15 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
     return result_code;
 }
 
+#ifdef _WIN32
+#include "src/runtime/lumabri_checkpoint_windows.h"
+#include "src/runtime/lumabri_working_set_windows.h"
+#include <fcntl.h>
+#include <io.h>
+static int segment_chat_main(int argc,char **argv) {
+#else
 int main(int argc, char **argv) {
+#endif
     if (argc == 2 && !strcmp(argv[1], "--thread-capacity")) {
         printf("%u\n", lmb_engine_thread_capacity());
         return 0;
@@ -2387,7 +2396,25 @@ int main(int argc, char **argv) {
                         !edge_options.memory_limit_bytes)) {
         fprintf(stderr, "invalid accepted Edge memory limit\n"); return 2;
     }
+#ifdef _WIN32
+    if (lmb_windows_working_set(edge_options.memory_limit_bytes,"LUMABRI_EDGE_RAM_RESERVE_MB")) return 3;
+#endif
     lmb_resident_process_guard.process_budget=edge_options.memory_limit_bytes;
+    const char *checkpoint_signer=arg_value(argc,argv,"--checkpoint-signer");
+    const char *checkpoint_bytes=arg_value(argc,argv,"--model-bytes");
+    if (checkpoint_signer || checkpoint_bytes) {
+#ifdef _WIN32
+        uint8_t signer[32];uint64_t bytes=0;
+        if (!checkpoint_signer || !checkpoint_bytes || !model_root_text || !lmb_resident_required() ||
+            strlen(checkpoint_signer)!=64 || lmb_unhex(signer,checkpoint_signer,32) ||
+            parse_u64(checkpoint_bytes,&bytes) || !bytes ||
+            lmb_checkpoint_windows_prepare(model_dir,tracker,model,signer,model_root,bytes)) {
+            fprintf(stderr,"[segment-chat] cannot prepare the approved signed checkpoint\n");return 3;
+        }
+#else
+        fprintf(stderr,"--checkpoint-signer and --model-bytes require the native Windows input bridge\n");return 2;
+#endif
+    }
     if (lmb_resident_required() && segment_backend_mask==LMB_SEG_CAP_CPU) {
         LmbModelShape shape;
         if (!lmb_shape_from_config(model_dir,&shape) && shape.sizing_verified &&
@@ -2612,3 +2639,25 @@ int main(int argc, char **argv) {
     free(expected);
     return 0;
 }
+
+#ifdef _WIN32
+int wmain(int argc,wchar_t **wide) {
+    if (GetACP()!=CP_UTF8) {
+        fprintf(stderr,"Native Edge requires the UTF-8 runtime manifest and Windows 10 version 1903 or newer\n");return 2;
+    }
+    /* Codec lengths count UTF-8 bytes. CRT text translation would change
+     * embedded newlines and turn control-Z into EOF on Windows pipes. */
+    if (_setmode(0,_O_BINARY)<0 || _setmode(1,_O_BINARY)<0) return 1;
+    char **argv=calloc((size_t)argc+1,sizeof *argv);if (!argv) return 1;
+    int rc=1;
+    for (int i=0;i<argc;i++) {
+        int n=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,wide[i],-1,NULL,0,NULL,NULL);
+        if (!n || !(argv[i]=malloc((size_t)n)) ||
+            !WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,wide[i],-1,argv[i],n,NULL,NULL)) goto done;
+    }
+    rc=segment_chat_main(argc,argv);
+ done:
+    for (int i=0;i<argc;i++) free(argv[i]);
+    free(argv);return rc;
+}
+#endif

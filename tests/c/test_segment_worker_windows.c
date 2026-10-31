@@ -5,9 +5,10 @@
 #include "src/runtime/lumabri_owned_process_windows.h"
 #include <assert.h>
 #include "segment_worker_fixture_windows.h"
+#include "segment_chat_fixture_windows.h"
 
 int wmain(int argc,wchar_t **wide) {
-    assert(argc==4); /* worker.exe, checkpoint, tracker:port */
+    assert(argc==4 || argc==5); /* worker.exe, checkpoint, tracker:port, optional chat.exe */
     SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX);
     char binary[6144],model[6144],tracker[128];
     assert(WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,wide[1],-1,binary,sizeof binary,NULL,NULL));
@@ -62,7 +63,7 @@ int wmain(int argc,wchar_t **wide) {
         "--range","0:4","--port",port_text,"--tracker",tracker,"--advertise",address,
         "--name","windows-worker","--model-root",remote ? root : "1111111111111111111111111111111111111111111111111111111111111111",
         "--tokenizer-root","2222222222222222222222222222222222222222222222222222222222222222",
-        "--context","64","--max-rows","16","--sessions","1","--threads","1","--memory-limit-mb","128",
+        "--context",argc==5 ? "512" : "64","--max-rows","16","--sessions",argc==5 ? "2" : "1","--threads","1","--memory-limit-mb","128",
         "--checkpoint-signer",signer,"--model-bytes",size_text,"--model-layers","4"};
     LmbProcessLaunch launch={.binary=binary,.args=args,.nargs=sizeof args/sizeof *args-(remote ? 0 : 6),
         .environment=environment,.nenvironment=sizeof environment/sizeof *environment,
@@ -90,6 +91,12 @@ int wmain(int argc,wchar_t **wide) {
     assert(current.revision==1 && !current.sessions && !current.draining);
     printf("READY %d %lu\n",port,(unsigned long)GetProcessId(child.process));fflush(stdout);
     if (selftest) {fixture_chat(&fixture,model,0);fixture_chat(&fixture,model,0);}
+    if (argc==5) {
+        char chat_binary[6144];assert(remote);
+        assert(WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,wide[4],-1,chat_binary,sizeof chat_binary,NULL,NULL));
+        fixture_native_chat(&fixture,chat_binary,directory,tracker);
+        preparation_reads=atomic_load(&fixture.checkpoint.reads);
+    }
     char command[32];
     const char *checks[]={"query\n","drain\n","resume\n","drain\n","retire\n","stop\n"};
     for (unsigned step=0;;step++) {
@@ -134,6 +141,12 @@ int wmain(int argc,wchar_t **wide) {
     swprintf(path,2400,L"%ls\\known",folder);DeleteFileW(path);
     swprintf(path,2400,L"%ls\\parent.key",folder);DeleteFileW(path);
     swprintf(path,2400,L"%ls\\parent.known",folder);DeleteFileW(path);
+    if (argc==5) {
+        swprintf(path,2400,L"%ls\\edge.key",folder);DeleteFileW(path);
+        swprintf(path,2400,L"%ls\\edge.known",folder);DeleteFileW(path);
+        swprintf(path,2400,L"%ls\\edge-oracle",folder);RemoveDirectoryW(path);
+        swprintf(path,2400,L"%ls\\edge-serve",folder);RemoveDirectoryW(path);
+    }
     RemoveDirectoryW(folder);
     puts("WORKER STOPPED");
     if (selftest) puts("NATIVE WORKER: PASS (72 oracle tokens, encrypted production process, isolated turns, drain refusal/resume/retire)");

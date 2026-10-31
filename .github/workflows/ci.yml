@@ -111,6 +111,10 @@ jobs:
           ./build/windows-segment/test_checkpoint_windows.exe 2>&1 | tee -a build/windows-segment-evidence.log
           ./build/windows-segment/test_checkpoint_windows.exe --invalid-handle 2>&1 | tee -a build/windows-segment-evidence.log
           ./build/windows-segment/test_segment_worker_windows.exe "$(cygpath -w "$PWD/build/windows-segment/segment_node.exe")" "$(cygpath -w "$PWD/build/fixture")" remote-selftest 2>&1 | tee -a build/windows-segment-evidence.log
+      - name: Run native Edge and Segment with the production chat codec
+        run: |
+          set -o pipefail
+          ./build/windows-segment/test_segment_worker_windows.exe "$(cygpath -w "$PWD/build/windows-segment/segment_node.exe")" "$(cygpath -w "$PWD/build/fixture")" remote-selftest "$(cygpath -w "$PWD/build/windows-segment/segment_chat.exe")" 2>&1 | tee -a build/windows-segment-evidence.log
       - name: Approve allocations through the native keeper and retain resident workers
         run: |
           set -o pipefail
