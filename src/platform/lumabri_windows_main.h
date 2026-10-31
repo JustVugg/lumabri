@@ -89,7 +89,7 @@ static int lmb_windows_main(int argc, char **argv) {
           "  lumabri machine --json\n\n"
           "  lumabri donor --join HOST:PORT --ram-gb N [--headless]\n"
           "  lumabri share  (reopen the sharing service's approval screen)\n\n"
-          "Native chat hosting and household setup are not connected in this build yet.\n", stderr);
+          "Approved OLMoE chat hosting is available on donors. Native household setup and the chat client are not connected yet.\n", stderr);
     return argc == 2 && !strcmp(argv[1], "--help") ? 0 : 2;
 }
 

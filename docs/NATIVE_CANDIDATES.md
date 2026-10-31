@@ -110,14 +110,17 @@ The latest measured speed is historical, not a guarantee for the next turn.
   and control-Z bytes. The native gate compares 24 generated token IDs with a
   local oracle and exercises two conversation slots, reset, cancellation and
   reuse, malformed control, EOF, and no further checkpoint-source reads after
-  readiness. This is a native engine gate; the donor still refuses Edge offers
-  until the host gateway and approved allocation lifecycle are connected.
+  readiness. The native donor connects this engine to approved hosted
+  allocations, as described below.
 - Hosted authentication, framing and the bounded session pool now share one
   implementation across Unix and native Windows pipe transports. The native
   gate runs that pool with encrypted clients and real Edge/Segment processes:
   two slots, BUSY at capacity, cancellation/reuse, and oversized-frame refusal
-  without interrupting another conversation. Windows donor Edge offers remain
-  disabled until approval, host readiness and retirement are connected.
+  without interrupting another conversation. The donor starts Edge only after
+  the approved Segment is ready and the requester sends START_HOST. It waits
+  for the actual engine capabilities and readiness before publishing the host.
+  The approved RAM reservation is split between Segment, Edge and gateway
+  buffers; each process cannot independently spend the entire reservation.
 - The native `lumabri.exe` control entrypoint can now start, inspect, restart
   and stop the private background manager with `service`, and report the
   Windows machine inventory with `machine --json`. The shared manager loop
@@ -130,20 +133,26 @@ The latest measured speed is historical, not a guarantee for the next turn.
   in `build/windows-segment`. Unsupported commands fail explicitly.
 - The native donor keeper now accepts encrypted household offers and waits
   for approval through the same private, revision-fenced service API as Unix.
-  Each approved allocation owns a resident OLMoE worker, reserved listener,
-  memory reservation and immutable lifetime record. Up to four allocations
+  Each approved allocation owns a resident OLMoE worker and, when requested,
+  an Edge host, reserved listeners, memory reservation and immutable lifetime
+  record. Up to four allocations
   share one bounded compute FIFO; closing the requester or restarting the
   manager preserves prepared workers. Release waits for process and inherited
   handle exit. Terminal receipts can be reconciled after an interrupted reply;
   old allocation IDs and approvals are never replayed.
-  The native gate prepares two allocations, compares 72 oracle tokens, retires
-  one without interrupting the other, and checks that inference makes no further
-  checkpoint-source reads. Separate tests check inherited lifetime fences,
+  The native gate prepares two allocations, compares 72 oracle tokens, runs
+  two hosted chat slots, restarts the manager without replacing the engines,
+  retires the host allocation without interrupting the other worker, and
+  checks that inference makes no further checkpoint-source reads. The host
+  must drain and acknowledge every retained conversation's remote CLOSE
+  before coordinated retirement. Allocation memory stays reserved until the
+  gateway thread, owned processes and inherited lifetime handles have exited.
+  Separate tests check inherited lifetime fences,
   missing/corrupt evidence and receipt replay.
   This developer entry requires a reachable authenticated tracker and owner
   approval. The native screen and signed inventory are described below.
-  Repeat policies, native Edge hosting and a complete Windows package are
-  not delivered by this gate. Unsupported Edge/Hybrid or model
+  Repeat policies, native household setup/chat client and a complete Windows
+  package are not delivered by this gate. Unsupported Hybrid or model
   allocations are explicitly refused; registering adapters is not sufficient
   to claim their native execution.
 - Native engine ownership requires Windows 10 version 1607 or later. The

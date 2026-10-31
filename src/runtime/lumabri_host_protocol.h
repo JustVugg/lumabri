@@ -15,6 +15,9 @@ typedef struct {
     const uint8_t *client_key; /* optional identity bound by an accepted home plan */
     const char *model_root; /* authenticated accepted checkpoint, not a peer's label */
     uint32_t slots, routed_slot, sessions_free;
+    int (*ready)(void *);
+    void (*sealed)(void *);
+    void *lifecycle;
     int pooled; /* return from bridge after one turn, including a one-slot pool */
 } HostState;
 
@@ -279,7 +282,7 @@ static inline int host_bridge(LmbSocket fd, LmbHostEngine *e, const HostState *h
     int broken = 0;
     for (;;) {
         int n = host_engine_wait(fd,e,1000);
-        if (g_stopping) break;
+        if (host_engine_stopping(e)) break;
         if (n < 0) { broken = 1; break; }
         int expired = host_expired(&input, h, last_input, nowd());
         if (expired) {
@@ -327,13 +330,13 @@ static inline int host_bridge(LmbSocket fd, LmbHostEngine *e, const HostState *h
 static inline int host_reset_conversation(LmbHostEngine *e, const HostState *h,
                                    HostInput *in, HostOutput *out) {
     if (!e->segment || !e->reset_supported || in->payload_left ||
-        in->need_terminator || g_stopping) return -1;
+        in->need_terminator || host_engine_stopping(e)) return -1;
     char bytes[16384];
     double deadline = in->active ? in->started + h->request_seconds : nowd();
     if (h->slots > 1) deadline = nowd() + 30;
     int reset_sent = 0;
     for (;;) {
-        if (g_stopping) return -1;
+        if (host_engine_stopping(e)) return -1;
         if (!in->active && !reset_sent) {
             uint8_t nonce[16];
             lmb_random(nonce, sizeof nonce);

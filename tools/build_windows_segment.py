@@ -36,7 +36,7 @@ def main():
     run([args.cc,*flags,'-Werror','-municode',root/'tests/c/test_owned_process_windows.c',
          '-static','-o',output/'test_owned_process_windows.exe'])
     run([args.cc,*flags,'-Werror','-Wno-unused-function','-Wno-unused-variable','-municode',
-         root/'lumabri.c',root/'lumabri_machine.c',resource,'-static','-lwinpthread','-lws2_32',
+         root/'lumabri.c',root/'lumabri_machine.c',root/'lumabri_run_gate.c',resource,'-static','-lwinpthread','-lws2_32',
          '-lbcrypt','-liphlpapi','-lpsapi','-ladvapi32','-ldxgi','-ldxguid',
          '-o',output/'lumabri.exe'])
     if args.only != 'contracts':

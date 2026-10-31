@@ -14,10 +14,12 @@
 #include "src/runtime/lumabri_inventory_windows.h"
 #define LMB_COMPUTE_BROKER_SERVER
 #include "src/runtime/lumabri_compute_broker.h"
+#include "src/runtime/lumabri_host_windows.h"
 
 typedef struct {
     LmbHomeTransaction transaction;
     LmbOwnedProcess worker;
+    LmbWindowsHost host;
     LmbSocket client,listener;
     HANDLE ready,control,preflight,handoff,lifetime;
     uint32_t port;
@@ -35,11 +37,11 @@ typedef struct {
     LmbMachineProfile machine;
     LmbComputeBroker compute;
     LmbSocket listener;
-    HANDLE executable;
+    HANDLE executable,edge_executable;
     int lease,opened,stopping;
     unsigned selected,thread_capacity;
     uint64_t budget,reserve;
-    char worker[1600],tracker[256],ip[64],control[64],compute_path[1400];
+    char worker[1600],edge_binary[1600],tracker[256],ip[64],control[64],compute_path[1400];
 } LmbWindowsDonor;
 
 static void lmb_donor_handle_close(HANDLE *h) {
@@ -49,7 +51,7 @@ static void lmb_donor_handle_close(HANDLE *h) {
 static int lmb_donor_status_windows(LmbSocket fd,const LmbWindowsDonorSlot *slot) {
     const LmbHomeTransaction *t=&slot->transaction; LmbBuf b={0};
     int bad=lmb_buf_u32(&b,LMB_HOME_VERSION) || lmb_buf_bytes(&b,t->offer.id,32) ||
-        lmb_buf_u32(&b,t->phase) || lmb_buf_u32(&b,slot->port) || lmb_buf_u32(&b,0) ||
+        lmb_buf_u32(&b,t->phase) || lmb_buf_u32(&b,slot->port) || lmb_buf_u32(&b,slot->host.port) ||
         lmb_buf_str(&b,t->reason) || lmb_send(fd,LMB_HOME_STATUS,b.p,(uint32_t)b.len,NULL,0);
     free(b.p); return bad ? -1 : 0;
 }
@@ -74,7 +76,7 @@ static void lmb_donor_snapshot_windows(LmbWindowsDonor *d) {
     LmbWindowsDonorSlot *slot=&d->slots[d->selected];
     s->phase=slot->transaction.phase;s->offer=slot->transaction.offer;
     s->has_offer=lmb_home_offer_valid(&s->offer);s->retained=slot->retained;
-    s->threads=d->thread_capacity;s->segment_pid=slot->worker.pid;s->ram=d->budget;
+    s->threads=d->thread_capacity;s->segment_pid=slot->worker.pid;s->host_pid=slot->host.child.pid;s->ram=d->budget;
     s->reserved_total=lmb_donor_reserved_windows(d);s->model_count=0;
     s->compute_enabled=d->compute.started && !atomic_load(&d->compute.stop);
     s->compute_active=s->compute_enabled ? atomic_load(&d->compute.active) : 0;
@@ -100,9 +102,8 @@ static void lmb_donor_inventory_windows(LmbWindowsDonor *d,LmbMachineReport *r) 
     snprintf(r->control_addr,sizeof r->control_addr,"%s",d->control);
     snprintf(r->runtime_id,sizeof r->runtime_id,"%s",d->runtime_id);
     r->runtime_threads=d->thread_capacity;r->roles.known=1;
-    /* These are the keeper's accepted roles, not every adapter in Colibri.
-     * Edge and Hybrid are explicitly unavailable in this native build. */
-    strcpy(r->roles.segment,"olmoe");r->facts=lmb_resource_facts_local(d->machine.load_one);
+    /* Publish only the roles with complete approved native lifecycle paths. */
+    strcpy(r->roles.segment,"olmoe");strcpy(r->roles.edge,"olmoe");r->facts=lmb_resource_facts_local(d->machine.load_one);
     HomeServiceSnapshot *s=&d->service.snapshot;
     r->workload=(LmbWorkloadFacts){.known=1,.allocations=s->model_count,.reserved_bytes=s->reserved_total,
         .compute_policy=s->compute_enabled ? LMB_COMPUTE_LOCAL_FIFO : LMB_COMPUTE_UNKNOWN,
@@ -111,13 +112,16 @@ static void lmb_donor_inventory_windows(LmbWindowsDonor *d,LmbMachineReport *r) 
 }
 static int lmb_donor_runtime_id_windows(LmbWindowsDonor *d) {
     LmbSha hash;lmb_sha_init(&hash);uint8_t block[65536],digest[32];DWORD n;
-    LARGE_INTEGER zero={0};if (!SetFilePointerEx(d->executable,zero,NULL,FILE_BEGIN)) return -1;
-    lmb_sha_update(&hash,"lumabri-native-donor-cpu-olmoe-v1",sizeof "lumabri-native-donor-cpu-olmoe-v1");
+    lmb_sha_update(&hash,"lumabri-native-donor-host-cpu-olmoe-v1",sizeof "lumabri-native-donor-host-cpu-olmoe-v1");
     lmb_sha_update(&hash,d->service.snapshot.instance,32);
-    for (;;) {
-        if (!ReadFile(d->executable,block,sizeof block,&n,NULL)) return -1;
-        if (!n) break;
-        lmb_sha_update(&hash,block,n);
+    HANDLE files[]={d->executable,d->edge_executable};
+    for (unsigned i=0;i<2;i++) {
+        LARGE_INTEGER zero={0};if (!SetFilePointerEx(files[i],zero,NULL,FILE_BEGIN)) return -1;
+        for (;;) {
+            if (!ReadFile(files[i],block,sizeof block,&n,NULL)) return -1;
+            if (!n) break;
+            lmb_sha_update(&hash,block,n);
+        }
     }
     lmb_sha_final(&hash,digest);lmb_hex(d->runtime_id,digest,32);return 0;
 }
@@ -128,6 +132,11 @@ static int lmb_donor_release_windows(LmbWindowsDonor *d,LmbWindowsDonorSlot *s,
         s->release_phase=phase;snprintf(s->release_reason,sizeof s->release_reason,"%s",reason);
     }
     s->release_pending=1;
+    if (lmb_windows_host_close(&s->host)) {
+        s->transaction.phase=LMB_HOME_FAILED;
+        snprintf(s->transaction.reason,sizeof s->transaction.reason,"Waiting for the owned host to exit; memory remains reserved.");
+        return -1;
+    }
     if (s->worker.process && (lmb_owned_process_stop(&s->worker,0,1000) || lmb_owned_process_close(&s->worker))) {
         s->transaction.phase=LMB_HOME_FAILED;
         snprintf(s->transaction.reason,sizeof s->transaction.reason,"Waiting for the owned worker to exit; memory remains reserved.");
@@ -185,7 +194,7 @@ static int lmb_donor_launch_windows(LmbWindowsDonor *d,LmbWindowsDonorSlot *s) {
     char threads[16],compute[1440],reserve[96];
     snprintf(range,sizeof range,"%u:%u",o->begin,o->end);snprintf(port_text,sizeof port_text,"%d",port);
     snprintf(address,sizeof address,"%s:%d",d->ip,port);snprintf(name,sizeof name,"home-%.12s-%u",id,o->begin);
-    snprintf(ctx,sizeof ctx,"%u",o->context);snprintf(ram,sizeof ram,"%llu",(unsigned long long)(o->ram_bytes>>20));
+    snprintf(ctx,sizeof ctx,"%u",o->context);snprintf(ram,sizeof ram,"%llu",(unsigned long long)((o->ram_bytes-o->edge_ram_bytes)>>20));
     snprintf(bytes,sizeof bytes,"%llu",(unsigned long long)o->model_bytes);snprintf(layers,sizeof layers,"%u",o->layers);
     snprintf(sessions,sizeof sessions,"%u",o->sessions ? o->sessions : 1);snprintf(threads,sizeof threads,"%u",o->threads);
     snprintf(compute,sizeof compute,"LUMABRI_COMPUTE_SOCKET=%s",d->compute_path);
@@ -211,6 +220,17 @@ static int lmb_donor_launch_windows(LmbWindowsDonor *d,LmbWindowsDonorSlot *s) {
  done:
     for (unsigned i=0;i<2;i++) {lmb_donor_handle_close(&handoff[i]);lmb_donor_handle_close(&control[i]);lmb_donor_handle_close(&preflight[i]);}
     CloseHandle(log);return rc;
+}
+
+static int lmb_donor_host_launch_windows(LmbWindowsDonor *d,LmbWindowsDonorSlot *s) {
+    char id[65],folder[1600],log_path[1440];lmb_hex(id,s->transaction.offer.id,32);
+    if (snprintf(folder,sizeof folder,"%s/checkpoints/%s-edge",d->service.directory,id)>=(int)sizeof folder ||
+        snprintf(log_path,sizeof log_path,"%s/engines.log",d->service.directory)>=(int)sizeof log_path) return -1;
+    HANDLE log=lmb_private_open(log_path,1,1,NULL);if (log==INVALID_HANDLE_VALUE) return -1;
+    LARGE_INTEGER end={0};int bad=!SetFilePointerEx(log,end,NULL,FILE_END);
+    if (!bad) bad=lmb_windows_host_start(&s->host,d->edge_binary,folder,&s->transaction.offer,d->compute_path,
+        d->reserve,s->lifetime,(HANDLE)_get_osfhandle(d->lease),log);
+    CloseHandle(log);return bad ? -1 : 0;
 }
 
 static int lmb_donor_authorize_windows(LmbSocket fd,LmbMsg *m) {
@@ -257,7 +277,8 @@ static void lmb_donor_retire_windows(LmbWindowsDonor *d,LmbWindowsDonorSlot *s,L
         }
     }
     if (found) {
-        if (!s || !s->retained || s->control==INVALID_HANDLE_VALUE) return;
+        if (!s || !s->retained || s->control==INVALID_HANDLE_VALUE ||
+            (s->transaction.offer.runs_edge && !atomic_load(&s->host.sealed))) return;
         uint8_t request[LMB_NODE_CONTROL_REQUEST_BYTES];LmbNodeControl state;
         lmb_node_control_request(request,LMB_NODE_CONTROL_QUERY,NULL);
         if (lmb_node_control_local(&s->control,request,reply+64) ||
@@ -308,8 +329,11 @@ static void lmb_donor_incoming_windows(LmbWindowsDonor *d,LmbSocket fd) {
     if (m.op!=LMB_HOME_OFFER || lmb_home_offer_unpack(&c,&offer) ||
         !lmb_secure_peer_matches(fd,offer.requester)) goto done;
     const char *reason=NULL;const LmbModelFamily *family=lmb_family_for(offer.model_type);
-    if (!family || strcmp(family->segment_id,"olmoe") || offer.runs_edge || offer.hybrid_role || offer.edge_ram_bytes)
-        reason="This native runtime provides resident OLMoE Segment only; Edge/Hybrid are unavailable.";
+    if (!family || strcmp(family->segment_id,"olmoe") || offer.hybrid_role)
+        reason="This native runtime provides resident OLMoE Edge/Segment; Hybrid is unavailable.";
+    else if (offer.runs_edge && (memcmp(offer.edge_peer,g_sec_pk,32) ||
+        offer.edge_ram_bytes<=(uint64_t)(offer.sessions ? offer.sessions : 1)*LMB_HOST_SESSION_BYTES+(32u<<20)))
+        reason="The approved Edge identity or memory budget does not match this host.";
     else if (offer.threads>d->thread_capacity) reason="Requested threads exceed the installed runtime capacity.";
     else if (strcmp(offer.tracker,d->tracker)) reason="Household mismatch; no resources were shared.";
     else if (lmb_allocation_unused_windows(d->service.directory,offer.id)!=1) reason="Allocation identity was already used; request a new plan.";
@@ -344,6 +368,11 @@ static void lmb_donor_message_windows(LmbWindowsDonor *d,LmbWindowsDonorSlot *s)
             bad=lmb_home_commit(t,m.body);
             if (!bad && lmb_donor_launch_windows(d,s))
                 (void)lmb_donor_release_windows(d,s,LMB_HOME_FAILED,"Cannot start the approved resident worker; see engines.log.");
+            break;
+        case LMB_HOME_START_HOST:
+            bad=lmb_home_start_host(t,m.body);
+            if (!bad && lmb_donor_host_launch_windows(d,s))
+                (void)lmb_donor_release_windows(d,s,LMB_HOME_FAILED,"Cannot start the approved Edge host; see engines.log.");
             break;
         case LMB_HOME_CANCEL:
             (void)lmb_donor_release_windows(d,s,LMB_HOME_CLOSED,"Requester cancelled the plan.");break;
@@ -398,8 +427,16 @@ static int lmb_donor_step_windows(LmbWindowsDonor *d) {
                 lmb_home_mark_segment_ready(&s->transaction)) {
                 (void)lmb_donor_release_windows(d,s,LMB_HOME_FAILED,"Worker did not confirm resident preparation.");continue;
             }
-            s->retained=1;lmb_donor_handle_close(&s->preflight);lmb_donor_handle_close(&s->handoff);lmb_donor_handle_close(&s->ready);
+            s->retained=!s->transaction.offer.runs_edge;lmb_donor_handle_close(&s->preflight);lmb_donor_handle_close(&s->handoff);lmb_donor_handle_close(&s->ready);
             lmb_socket_close(s->listener);s->listener=LMB_INVALID_SOCKET;
+            if (s->client!=LMB_INVALID_SOCKET && lmb_donor_status_windows(s->client,s)) lmb_donor_lost_windows(d,s);
+        }
+        if (s->host.started && WaitForSingleObject(s->host.done,0)==WAIT_OBJECT_0) {
+            (void)lmb_donor_release_windows(d,s,LMB_HOME_FAILED,"The approved Edge host stopped; see engines.log.");continue;
+        }
+        if (s->transaction.phase==LMB_HOME_STARTING_HOST && s->host.ready &&
+            WaitForSingleObject(s->host.ready,0)==WAIT_OBJECT_0) {
+            s->transaction.phase=LMB_HOME_READY;s->retained=1;
             if (s->client!=LMB_INVALID_SOCKET && lmb_donor_status_windows(s->client,s)) lmb_donor_lost_windows(d,s);
         }
         if (s->client!=LMB_INVALID_SOCKET && lmb_socket_wait(s->client,0,0)==1) lmb_donor_message_windows(d,s);
@@ -445,12 +482,12 @@ static void lmb_donor_close_windows(LmbWindowsDonor *d) {
         (void)home_service_save(&d->service);home_service_close(&d->service);d->opened=0;
     }
     if (d->lease>=0) {_close(d->lease);d->lease=-1;}
-    lmb_donor_handle_close(&d->executable);
+    lmb_donor_handle_close(&d->executable);lmb_donor_handle_close(&d->edge_executable);
 }
 static int lmb_donor_open_windows(LmbWindowsDonor *d,const char *worker,const char *tracker,uint64_t limit) {
-    memset(d,0,sizeof *d);d->listener=LMB_INVALID_SOCKET;d->lease=-1;d->executable=INVALID_HANDLE_VALUE;
+    memset(d,0,sizeof *d);d->listener=LMB_INVALID_SOCKET;d->lease=-1;d->executable=d->edge_executable=INVALID_HANDLE_VALUE;
     for (unsigned i=0;i<4;i++) {
-        d->slots[i].client=d->slots[i].listener=LMB_INVALID_SOCKET;
+        d->slots[i].client=d->slots[i].listener=d->slots[i].host.listener=LMB_INVALID_SOCKET;
         d->slots[i].control=d->slots[i].handoff=d->slots[i].lifetime=d->slots[i].preflight=d->slots[i].ready=INVALID_HANDLE_VALUE;
     }
     if (!limit || strlen(worker)>=sizeof d->worker || strlen(tracker)>=sizeof d->tracker ||
@@ -475,6 +512,17 @@ static int lmb_donor_open_windows(LmbWindowsDonor *d,const char *worker,const ch
         (info.dwFileAttributes&(FILE_ATTRIBUTE_REPARSE_POINT|FILE_ATTRIBUTE_DIRECTORY)) ||
         lmb_runtime_thread_capacity(worker,&d->thread_capacity) ||
         lmb_machine_probe(&d->machine,d->service.directory,NULL)) goto bad;
+    snprintf(d->edge_binary,sizeof d->edge_binary,"%s",worker);
+    char *slash=strrchr(d->edge_binary,'/'),*back=strrchr(d->edge_binary,'\\');
+    if (!slash || (back && back>slash)) slash=back;
+    if (!slash || (size_t)(slash+1-d->edge_binary)+sizeof "segment_chat.exe">sizeof d->edge_binary) goto bad;
+    strcpy(slash+1,"segment_chat.exe");wide=lmb_process_wide(d->edge_binary);if (!wide) goto bad;
+    d->edge_executable=CreateFileW(wide,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,NULL);free(wide);
+    unsigned edge_threads=0;
+    if (d->edge_executable==INVALID_HANDLE_VALUE || !GetFileInformationByHandle(d->edge_executable,&info) ||
+        (info.dwFileAttributes&(FILE_ATTRIBUTE_REPARSE_POINT|FILE_ATTRIBUTE_DIRECTORY)) ||
+        lmb_runtime_thread_capacity(d->edge_binary,&edge_threads)) goto bad;
+    if (edge_threads<d->thread_capacity) d->thread_capacity=edge_threads;
     d->reserve=lmb_machine_ram_reserve();
     d->budget=d->machine.ram_available_bytes>d->reserve ? d->machine.ram_available_bytes-d->reserve : 0;
     if (d->budget>limit) d->budget=limit;
