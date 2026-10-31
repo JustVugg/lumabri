@@ -80,7 +80,7 @@ static void run_pool(unsigned slots, int reject_retirement_reset) {
         pid_t child=fork(); assert(child>=0);
         if (!child) { close(to[1]); close(from[0]); close(listener); codec(to[0],from[1],release[0],reset_fault); }
         close(to[0]); close(from[1]); close(release[0]);
-        Engine engine={.pid=child,.to=to[1],.from=from[0],.segment=1,.reset_supported=1,.session_slots=slots,
+        LmbHostEngine engine={.to=to[1],.from=from[0],.segment=1,.reset_supported=1,.session_slots=slots,
             .numeric_abi=1,.numeric_class="test-drain-cpu"};
         HostState state={.engine=&engine,.slots=slots,.max_frame=1024,.max_new=8,.idle_seconds=10,
             .request_seconds=20,.client_key=client_key,.model_root=root,.model_type="olmoe",.engine_kind="olmoe"};
@@ -302,7 +302,7 @@ int main(void) {
         assert(total==(1u<<20)); close(channel[0]); _exit(0);
     }
     close(channel[0]); char *large=calloc(1,1u<<20); assert(large);
-    Engine writer={.to=channel[1],.session_slots=1};
+    LmbHostEngine writer={.to=channel[1],.session_slots=1};
     assert(!host_engine_write(&writer,large,1u<<20)); free(large); close(channel[1]);
     int reader_status;
     assert(waitpid(reader,&reader_status,0)==reader && WIFEXITED(reader_status) && !WEXITSTATUS(reader_status));

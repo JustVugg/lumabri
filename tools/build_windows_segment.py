@@ -80,7 +80,7 @@ def main():
              root/'src/runtime/lumabri_vision.c',root/'src/runtime/lumabri_image.c',
              native_input,resource,archive,*libraries,'-o',output/'segment_chat.exe'])
         run([args.cc,*flags,'-Werror','-Wno-unused-function','-municode',
-             root/'tests/c/test_segment_worker_windows.c',*protocol,resource,archive,*libraries,
+             root/'tests/c/test_segment_worker_windows.c',*protocol,root/'lumabri_run_gate.c',resource,archive,*libraries,
              '-o',output/'test_segment_worker_windows.exe'])
         run([args.cc,*flags,'-Werror','-Wno-unused-function',
              root/'tests/c/test_checkpoint_windows.c',native_input,resource,archive,*libraries,

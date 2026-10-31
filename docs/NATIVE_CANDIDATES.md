@@ -112,6 +112,12 @@ The latest measured speed is historical, not a guarantee for the next turn.
   reuse, malformed control, EOF, and no further checkpoint-source reads after
   readiness. This is a native engine gate; the donor still refuses Edge offers
   until the host gateway and approved allocation lifecycle are connected.
+- Hosted authentication, framing and the bounded session pool now share one
+  implementation across Unix and native Windows pipe transports. The native
+  gate runs that pool with encrypted clients and real Edge/Segment processes:
+  two slots, BUSY at capacity, cancellation/reuse, and oversized-frame refusal
+  without interrupting another conversation. Windows donor Edge offers remain
+  disabled until approval, host readiness and retirement are connected.
 - The native `lumabri.exe` control entrypoint can now start, inspect, restart
   and stop the private background manager with `service`, and report the
   Windows machine inventory with `machine --json`. The shared manager loop

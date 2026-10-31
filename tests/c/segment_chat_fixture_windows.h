@@ -11,7 +11,7 @@ static void native_chat_read(NativeChatFixture *c,void *out,size_t n) {
             Sleep(1);continue;
         }
         DWORD wanted=available<n ? available : (DWORD)n;
-        assert(ReadFile(c->output,p,wanted,&got,NULL) && got);
+        assert(!lmb_pipe_io(c->output,p,wanted,0,GetTickCount64()+5000));got=wanted;
         p+=got;n-=got;
     }
 }
@@ -25,7 +25,7 @@ static void native_chat_line(NativeChatFixture *c,char *line,size_t cap) {
     assert(!"unbounded codec header");
 }
 static void native_chat_write(NativeChatFixture *c,const void *data,size_t n) {
-    DWORD done=0;assert(n<=4096 && WriteFile(c->input,data,(DWORD)n,&done,NULL) && done==n);
+    assert(n<=4096 && !lmb_pipe_io(c->input,(void *)data,n,1,GetTickCount64()+5000));
 }
 static void native_chat_stop(NativeChatFixture *c,int expected) {
     CloseHandle(c->input);c->input=NULL;
@@ -58,8 +58,10 @@ static void native_chat_start(NativeChatFixture *c,const char *binary,const char
         "--prompt-ids","1","--tokens","24","--expect-ids",expected,"--json"};
     size_t nargs=sizeof args/sizeof *args;
     if (serve) {nargs-=7;args[nargs++]="--serve";args[nargs++]="--sessions";args[nargs++]="2";}
-    HANDLE child_input,child_output;
-    assert(CreatePipe(&child_input,&c->input,NULL,4096) && CreatePipe(&c->output,&child_output,NULL,4096));
+    HANDLE input[2],output[2];
+    assert(!lmb_pipe_process_pair(input) && !lmb_pipe_process_pair(output));
+    c->input=input[0];c->output=output[0];
+    HANDLE child_input=input[1],child_output=output[1];
     LmbProcessLaunch launch={.binary=binary,.args=args,.nargs=nargs,.environment=env,
         .nenvironment=sizeof env/sizeof *env,.input=child_input,.output=child_output,
         .error=GetStdHandle(STD_ERROR_HANDLE)};
@@ -70,7 +72,9 @@ static void native_chat_turn(NativeChatFixture *c,unsigned id,unsigned slot,char
     char command[128];int n=snprintf(command,sizeof command,"SUBMIT %u %u 5 %u 0 1\nhi\n\x1a?\n",id,slot,cancel ? 256 : 8);
     native_chat_write(c,command,(size_t)n);*size=0;
     char line[2048];native_chat_line(c,line,sizeof line);
-    snprintf(command,sizeof command,"ACCEPT %u",id);assert(!strcmp(line,command));
+    snprintf(command,sizeof command,"ACCEPT %u",id);
+    if (strcmp(line,command)) fprintf(stderr,"Native chat expected %s; received %s\n",command,line);
+    assert(!strcmp(line,command));
     if (cancel) {n=snprintf(command,sizeof command,"CANCEL %u\n",cancel==2 ? id+1 : id);native_chat_write(c,command,(size_t)n);}
     for (;;) {
         unsigned received=0;size_t bytes=0;
@@ -82,7 +86,9 @@ static void native_chat_turn(NativeChatFixture *c,unsigned id,unsigned slot,char
         }
         if (!strncmp(line,"PROGRESS ",9)) continue;
         if (cancel) {
-            snprintf(command,sizeof command,"ERROR %u request cancelled",id);assert(!strcmp(line,command));
+            snprintf(command,sizeof command,"ERROR %u request cancelled",id);
+            if (strcmp(line,command)) {fprintf(stderr,"Native chat terminal expected %s; received %s\n",command,line);fflush(stderr);}
+            assert(!strcmp(line,command));
         } else {
             unsigned tokens=0;assert(sscanf(line,"DONE %u STAT %u",&received,&tokens)==2 && received==id && tokens==8);
         }

@@ -8,7 +8,8 @@
 typedef struct HostSessionPool HostSessionPool;
 typedef struct {
     HostSessionPool *pool;
-    int fd, used, reset_needed, admitted;
+    LmbSocket fd;
+    int used, reset_needed, admitted;
     uint32_t index;
 } HostSessionSlot;
 
@@ -31,7 +32,7 @@ static int host_session_draining(HostSessionPool *pool) {
     return draining;
 }
 
-static void host_session_control(int fd, HostSessionPool *pool, const LmbMsg *request) {
+static void host_session_control(LmbSocket fd, HostSessionPool *pool, const LmbMsg *request) {
     const HostState *h=&pool->host;
     uint8_t root[32], expected_root[32], instance[32]; uint32_t version,action; uint64_t expected;
     LmbCur c={request->body,request->body_len,0};
@@ -85,19 +86,16 @@ static int host_session_cancelled(void *opaque) {
     /* No pipelined requests while queued. Any incoming frame is either a
      * cancellation or a protocol violation; close just this conversation.
      * Do not block the FIFO gate mutex reading an incomplete network frame. */
-    struct pollfd p = {slot->fd, POLLIN, 0};
-    int ready = poll(&p, 1, 0);
-    return ready > 0 && p.revents;
+    return lmb_socket_wait(slot->fd,0,0)!=0;
 }
 
 static int host_session_receive(HostSessionSlot *slot, HostState *h, HostInput *in) {
     double deadline = nowd() + h->idle_seconds;
     while (!g_stopping && !atomic_load(&slot->pool->stop) && nowd() < deadline) {
         if (host_session_draining(slot->pool)) return -1;
-        struct pollfd p = {slot->fd, POLLIN, 0};
-        int ready = poll(&p, 1, 100);
+        int ready=lmb_socket_wait(slot->fd,0,100);
         if (ready < 0 && errno == EINTR) continue;
-        if (ready < 0 || (p.revents & (POLLHUP|POLLERR|POLLNVAL))) return -1;
+        if (ready < 0) return -1;
         if (!ready) continue;
         LmbMsg msg = {0};
         int bad = lmb_recv_bounded(slot->fd, &msg, h->max_frame + sizeof in->header, 2000) || msg.op != LMB_HOST_STREAM ||
@@ -110,7 +108,7 @@ static int host_session_receive(HostSessionSlot *slot, HostState *h, HostInput *
     return -1;
 }
 
-static void host_session_error(int fd, const char *id, const char *reason) {
+static void host_session_error(LmbSocket fd, const char *id, const char *reason) {
     char line[256];
     int n = snprintf(line, sizeof line, "ERROR %s %s\n", id, reason);
     if (n > 0 && (size_t)n < sizeof line)
@@ -208,13 +206,13 @@ static void *host_session_worker(void *opaque) {
     }
     pthread_mutex_lock(&pool->lock);
     if (slot->admitted) { slot->admitted=0; pool->control.requests--; }
-    lmb_close(slot->fd); slot->fd = -1; slot->used = 0; slot->reset_needed = reset_needed;
+    lmb_close(slot->fd); slot->fd = LMB_INVALID_SOCKET; slot->used = 0; slot->reset_needed = reset_needed;
     pool->workers--; pthread_cond_broadcast(&pool->empty);
     pthread_mutex_unlock(&pool->lock);
     return NULL;
 }
 
-static int host_sessions_run(int listener, const HostState *h, uint32_t queue_ms) {
+static int host_sessions_run(LmbSocket listener, const HostState *h, uint32_t queue_ms) {
     HostSessionPool pool = {.host=*h, .queue_ms=queue_ms};
     pool.host.pooled=1;
     pool.control.revision=1; lmb_random(pool.control.instance,sizeof pool.control.instance);
@@ -224,21 +222,19 @@ static int host_sessions_run(int listener, const HostState *h, uint32_t queue_ms
         pthread_cond_destroy(&pool.empty); pthread_mutex_destroy(&pool.lock); return 1;
     }
     for (uint32_t i = 0; i < h->slots; i++) {
-        pool.slots[i].pool = &pool; pool.slots[i].index = i; pool.slots[i].fd = -1;
+        pool.slots[i].pool = &pool; pool.slots[i].index = i; pool.slots[i].fd = LMB_INVALID_SOCKET;
     }
-    int flags = fcntl(h->engine->to, F_GETFL, 0);
-    if (flags < 0 || fcntl(h->engine->to, F_SETFL, flags | O_NONBLOCK) || lmb_ready_notify()) {
+    if (host_engine_prepare(h->engine) || lmb_ready_notify()) {
         lmb_run_gate_destroy(&pool.turns); pthread_cond_destroy(&pool.empty); pthread_mutex_destroy(&pool.lock);
         return 1;
     }
     while (!g_stopping && !atomic_load(&pool.stop)) {
-        struct pollfd p = {listener, POLLIN, 0};
-        int ready = poll(&p, 1, 100);
+        int ready=lmb_socket_wait(listener,0,100);
         if (ready < 0 && errno == EINTR) continue;
-        if (ready < 0 || (p.revents & (POLLERR|POLLHUP|POLLNVAL))) break;
+        if (ready < 0) break;
         if (!ready) continue;
-        int fd = accept(listener, NULL, NULL);
-        if (fd < 0) continue;
+        LmbSocket fd = accept(listener, NULL, NULL);
+        if (fd == LMB_INVALID_SOCKET) continue;
         LmbMsg request={0};
         if (host_read_request(fd,h,&request)) { lmb_close(fd); continue; }
         if (request.op==LMB_HOST_CONTROL) {
@@ -262,13 +258,13 @@ static int host_sessions_run(int listener, const HostState *h, uint32_t queue_ms
         pthread_mutex_lock(&pool.lock);
         pthread_t worker;
         if (greet_failed || pthread_create(&worker, NULL, host_session_worker, slot)) {
-            lmb_close(fd); slot->fd = -1; slot->used = 0; pool.workers--;
+            lmb_close(fd); slot->fd = LMB_INVALID_SOCKET; slot->used = 0; pool.workers--;
         } else pthread_detach(worker);
         pthread_mutex_unlock(&pool.lock);
     }
     atomic_store(&pool.stop, 1);
     pthread_mutex_lock(&pool.lock);
-    for (uint32_t i = 0; i < h->slots; i++) if (pool.slots[i].used) shutdown(pool.slots[i].fd, SHUT_RDWR);
+    for (uint32_t i = 0; i < h->slots; i++) if (pool.slots[i].used) host_socket_shutdown(pool.slots[i].fd);
     while (pool.workers) pthread_cond_wait(&pool.empty, &pool.lock);
     pthread_mutex_unlock(&pool.lock);
     lmb_run_gate_destroy(&pool.turns); pthread_cond_destroy(&pool.empty); pthread_mutex_destroy(&pool.lock);

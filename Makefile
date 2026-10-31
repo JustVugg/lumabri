@@ -72,6 +72,7 @@ lumabri segment_node segment_chat test_calibration test_chat_ui: src/planner/lum
 lumabri test_calibration test_chat_ui test_portfolio: src/planner/lumabri_workload_facts.h
 segment_node segment_chat test_backend_routes test_home_expert: engine_patches/segment_owned.h src/runtime/lumabri_v41_contract.h
 segment_chat test_backend_routes: src/runtime/lumabri_serve_control.h
+lumabri test_chat_ui test_host_session_pool test_host_drain test-home-monitor: src/runtime/lumabri_host_protocol.h src/runtime/lumabri_host_engine.h
 lumabri segment_chat test_backend_routes test_chat_ui test_home test_home_monitor test_memory_budget test_cluster: src/runtime/lumabri_session_limits.h
 lumabri segment_node segment_chat test_chat_ui test_host_session_pool test-home-monitor: src/runtime/lumabri_compute_broker.h
 test check-warnings: test_serve_control
