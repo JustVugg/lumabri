@@ -10,11 +10,12 @@
 #define LMB_ROUTE_REPLICAS 8u
 #define LMB_ROUTE_BYTES 4096u
 enum { LMB_ROUTE_ORDERED=0, LMB_ROUTE_OBSERVED_DECODE=1, LMB_ROUTE_DECLARED_COST=2,
-       LMB_ROUTE_LOAD_AWARE=3, LMB_ROUTE_POLICY_LAST=LMB_ROUTE_LOAD_AWARE };
+       LMB_ROUTE_LOAD_AWARE=3, LMB_ROUTE_LATENCY_AWARE=4, LMB_ROUTE_POLICY_LAST=LMB_ROUTE_LATENCY_AWARE };
 static inline const char *lmb_route_policy_name(uint32_t policy) {
     return policy==LMB_ROUTE_ORDERED ? "ordered" : policy==LMB_ROUTE_OBSERVED_DECODE ? "observed-decode" :
         policy==LMB_ROUTE_DECLARED_COST ? "declared-cost" :
-        policy==LMB_ROUTE_LOAD_AWARE ? "load-aware" : "invalid";
+        policy==LMB_ROUTE_LOAD_AWARE ? "load-aware" :
+        policy==LMB_ROUTE_LATENCY_AWARE ? "latency-aware" : "invalid";
 }
 typedef struct {
     uint8_t allocation[32], root[32], host_key[32];

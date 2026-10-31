@@ -146,9 +146,66 @@ static void load_tests(void) {
     e[1].usable=e[2].usable=0;
     assert(!strcmp(lmb_replica_rank(LMB_ROUTE_LOAD_AWARE,e,3,1000,order),"no_approved_plan"));
 }
+static void latency_tests(void) {
+    LmbReplicaEvidence e[3]={0}; uint32_t order[LMB_ROUTE_REPLICAS];
+    const char *ranked="recent_workload_and_ttft_observations",*load_only="recent_workload_observations";
+    for (unsigned i=0;i<3;i++) e[i]=(LmbReplicaEvidence){.usable=1,.observation_current=1,
+        .decode_tok_s=100-i*20,.ttft_seconds=3-i,.measured_at=1000,
+        .prompt_tokens=4,.generated_tokens=8,.observation_source=LMB_CAL_SOURCE_SESSION,
+        .load={.nodes=2,.max_pending=1,.total_pending=2,.max_age_ms=1000}};
+#define LATENCY() lmb_replica_rank(LMB_ROUTE_LATENCY_AWARE,e,3,1000,order)
+    /* Interactive preference chooses the first token, not a faster decode
+     * that only starts after a longer prefill. Nothing is moved or admitted. */
+    assert(!strcmp(LATENCY(),ranked) && order[0]==2 && order[1]==1);
+    e[0].load.max_pending=e[0].load.total_pending=0;
+    assert(!strcmp(LATENCY(),ranked) && order[0]==0 && order[1]==2);
+    e[0].load=e[1].load;
+    e[0].ttft_seconds=1.04;
+    assert(!strcmp(LATENCY(),ranked) && order[0]==0); /* stable 5% band */
+    e[0].ttft_seconds=1.08; e[1].ttft_seconds=1.04;
+    assert(!strcmp(LATENCY(),ranked) && order[0]==1); /* no transitive tie */
+    e[0].ttft_seconds=3; e[1].ttft_seconds=2;
+    double invalid[]={0,-1,NAN,INFINITY};
+    for (unsigned i=0;i<sizeof invalid/sizeof *invalid;i++) {
+        e[2].ttft_seconds=invalid[i];
+        assert(!strcmp(LATENCY(),load_only) && order[0]==0);
+    }
+    e[2].ttft_seconds=1;
+    e[2].observation_source=LMB_CAL_SOURCE_PROBE;
+    assert(!strcmp(LATENCY(),load_only) && order[0]==0);
+    e[2].observation_source=LMB_CAL_SOURCE_UNKNOWN;
+    assert(!strcmp(LATENCY(),load_only) && order[0]==0);
+    e[2].observation_source=LMB_CAL_SOURCE_SESSION;
+    e[2].prompt_tokens++;
+    assert(!strcmp(LATENCY(),load_only) && order[0]==0);
+    e[2].prompt_tokens--; e[2].generated_tokens++;
+    assert(!strcmp(LATENCY(),load_only) && order[0]==0);
+    e[2].generated_tokens--;
+    e[2].observation_current=0;
+    assert(!strcmp(LATENCY(),load_only) && order[0]==0);
+    e[2].observation_current=1; e[2].measured_at=699;
+    assert(!strcmp(LATENCY(),load_only) && order[0]==0);
+    e[2].measured_at=1001;
+    assert(!strcmp(LATENCY(),load_only) && order[0]==0);
+    e[2].measured_at=1000;
+    /* First-token observations don't need eight tokens of decode. Conversely
+     * a known decode rate cannot fill in a missing first-token measurement. */
+    for (unsigned i=0;i<3;i++) {e[i].generated_tokens=1;e[i].decode_tok_s=NAN;}
+    assert(!strcmp(LATENCY(),ranked) && order[0]==2);
+    e[2].load.max_age_ms=LMB_REPLICA_LOAD_MAX_AGE_MS+1;
+    assert(!strcmp(LATENCY(),"workload_missing_or_expired") && order[0]==0);
+    e[2].load=e[1].load; e[1].load.nodes=0;
+    assert(!strcmp(LATENCY(),"workload_missing_or_expired") && order[0]==0);
+    e[1].usable=0;
+    assert(!strcmp(LATENCY(),ranked) && order[0]==2 && order[2]==1);
+    e[0].usable=e[2].usable=0;
+    assert(!strcmp(LATENCY(),"no_approved_plan"));
+#undef LATENCY
+}
+
 int main(void) {
     (void)lmb_sign;
-    profile_tests(); rank_tests(); load_tests();
+    profile_tests(); rank_tests(); load_tests(); latency_tests();
     puts("REPLICA PREFERENCES: PASS (bounded private observations, exact provenance, expiry, missing prices, stable rank)");
     return 0;
 }

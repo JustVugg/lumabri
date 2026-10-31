@@ -111,6 +111,12 @@ int main(void) {
     loaded.policy=LMB_ROUTE_POLICY_LAST+1; assert(!lmb_route_valid(&loaded));
     load_bytes.p[load_bytes.len-4]=255; assert(lmb_route_decode(load_bytes.p,load_bytes.len,&decoded));
     free(load_bytes.p);
+    loaded.policy=LMB_ROUTE_LATENCY_AWARE; load_bytes=(LmbBuf){0};
+    assert(!lmb_route_encode(&loaded,&load_bytes));
+    assert(!lmb_route_decode(load_bytes.p,load_bytes.len,&decoded) && decoded.policy==LMB_ROUTE_LATENCY_AWARE);
+    assert(!strcmp(lmb_route_policy_name(decoded.policy),"latency-aware"));
+    free(load_bytes.p);
+
     char temporary[]="/tmp/lmb-model-routes-XXXXXX"; assert(mkdtemp(temporary));
     int access=lmb_api_access_dir(temporary,0); assert(access>=0);
     int dir=lmb_route_dir(access,1); assert(dir>=0);

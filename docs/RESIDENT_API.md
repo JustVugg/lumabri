@@ -332,6 +332,7 @@ order. It can be changed without loading, moving or unloading any weights:
 ./lumabri api model-policy MODEL_ID observed-decode
 ./lumabri api model-policy MODEL_ID declared-cost
 ./lumabri api model-policy MODEL_ID load-aware
+./lumabri api model-policy MODEL_ID latency-aware
 ```
 
 `observed-decode` prefers the faster **last observed decode**, only when all
@@ -359,6 +360,20 @@ observed peak/total pending compute turns and report age.
 Before rolling back to a gateway version without this policy, switch affected
 models back to `ordered`. Older readers reject an unknown policy instead of
 silently changing its meaning.
+
+`latency-aware` uses the same fresh compute-load ordering, but breaks equal-load
+ties by **lower observed time to first token**, instead of decode rate. All
+available plans must have a valid positive first-token measurement within five
+minutes, exact configuration provenance, matching prompt/output lengths, and the
+same measurement source (short probe or real session). Differences within five
+percent retain the operator's order. Missing or incomparable timing leaves the
+load ordering in place; missing load restores operator order. A zero or unknown
+first-token time never wins. The policy uses the last completed observation,
+not a prediction for a new prompt or a latency guarantee. It neither transfers
+KV nor assumes that a replica has a cached prefix. Logs report the observation,
+source and token counts used; no estimated speed is added to the catalogue.
+Before rolling back to a gateway that lacks `latency-aware`, switch the model
+back to `ordered`.
 
 `declared-cost` prefers the lower sum of declared whole-machine hourly prices
 for the replica's participating computers (each counted once). Every candidate
