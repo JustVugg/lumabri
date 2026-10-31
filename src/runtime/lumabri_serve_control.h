@@ -6,8 +6,13 @@
 #define LMB_SERVE_CONTROL_H
 #include <pthread.h>
 #include <stdatomic.h>
+#ifdef _WIN32
+#include <windows.h>
+#include <io.h>
+#else
 #include <poll.h>
 #include <unistd.h>
+#endif
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
@@ -32,6 +37,16 @@ static void *lmb_serve_control_reader(void *opaque) {
             struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
             if ((double)(now.tv_sec-began.tv_sec) + (now.tv_nsec-began.tv_nsec)/1e9 >= 1.0) break;
         }
+#ifdef _WIN32
+        HANDLE input=(HANDLE)_get_osfhandle(0);DWORD available=0;
+        /* The hosted codec uses a private pipe, never a console. Peek does
+         * not consume the following SUBMIT while the control reader stops. */
+        if (input==INVALID_HANDLE_VALUE || GetFileType(input)!=FILE_TYPE_PIPE ||
+            !PeekNamedPipe(input,NULL,0,NULL,&available,NULL)) break;
+        if (!available) {Sleep(25);continue;}
+        char ch;DWORD got;
+        if (!ReadFile(input,&ch,1,&got,NULL) || got!=1 || length>=sizeof line-1) break;
+#else
         struct pollfd p = {STDIN_FILENO, POLLIN, 0};
         int ready = poll(&p, 1, 25);
         if (ready < 0 && errno == EINTR) continue;
@@ -41,6 +56,7 @@ static void *lmb_serve_control_reader(void *opaque) {
         ssize_t got = read(STDIN_FILENO, &ch, 1);
         if (got < 0 && errno == EINTR) continue;
         if (got != 1 || length >= sizeof line-1) break;
+#endif
         atomic_fetch_add(&c->received, 1);
         if (ch != '\n') {
             if (!length) clock_gettime(CLOCK_MONOTONIC, &began);

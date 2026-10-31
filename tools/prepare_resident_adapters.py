@@ -235,6 +235,24 @@ def prepare(root):
                 raise RuntimeError("qwen36: resident policy anchor changed")
         path.write_text(source.replace(anchor, anchor + addition, 1))
     other_adapters(root)
+    # OLMoE Edge loads embedding, head, normalization and tokenizer eagerly.
+    # The native input boundary needs its own preparation acknowledgement:
+    # it cannot borrow the flag from a Segment in a different process.
+    path=root / "olmoe.c"
+    source=path.read_text()
+    start=source.index("static int olmoe_edge_engine_open(")
+    at=source.index("    memset(capabilities,",start)
+    code='''
+    if (REQUIRED) {
+        if (lmb_resident_budget_exceeded(options->memory_limit_bytes)) {
+            olmoe_edge_engine_destroy(engine);
+            return coli_edge_adapter_error(error,error_size,
+                "resident Edge preparation exceeded the approved memory budget");
+        }
+        lmb_resident_adapter_prepared();
+    }
+'''.replace("REQUIRED",REQUIRED)
+    path.write_text(source[:at]+code+source[at:])
     path = root / "qwen38.c"
     source = path.read_text()
     replacements = {

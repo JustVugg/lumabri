@@ -23,6 +23,7 @@ typedef struct {
     LmbMachineReport machine_report;
     LmbSegOwner owner;
     CheckpointFixture checkpoint;
+    int32_t oracle_tokens[24];
 } WorkerFixture;
 
 static void *fixture_tracker(void *opaque) {
@@ -81,6 +82,20 @@ static void *fixture_tracker(void *opaque) {
                     assert(!lmb_seg_registration_reply_encode(&f->owner,&body,&size));
                     assert(!lmb_send(fd,LMB_SEG_REGISTER_R,body,size,NULL,0));free(body);
                     SetEvent(f->registered);
+                } else if (m.op==LMB_SEG_ROUTES) {
+                    LmbSegQuery query;assert(!lmb_seg_query_decode(m.body,m.body_len,&query));
+                    LmbSegRouteSnapshot *routes=calloc(1,sizeof *routes);assert(routes);
+                    routes->route_generation=f->owner.route_generation;
+                    pthread_mutex_lock(&f->lock);
+                    for (unsigned k=0;k<f->nadverts;k++) if (lmb_seg_advert_compatible(&f->adverts[k],&query)) {
+                        LmbSegRouteEntry *entry=&routes->entries[routes->count++];
+                        entry->advert=f->adverts[k];entry->owner=f->owner;entry->transport=LMB_SEG_TRANSPORT_DIRECT;
+                    }
+                    pthread_mutex_unlock(&f->lock);
+                    routes->complete=lmb_seg_route_complete(routes,&query);
+                    uint8_t *body=NULL;uint32_t size=0;
+                    assert(!lmb_seg_route_encode(routes,&body,&size));
+                    assert(!lmb_send(fd,LMB_SEG_ROUTES_R,body,size,NULL,0));free(body);free(routes);
                 } else {
                     /* Optional telemetry probe is deliberately absent here. */
                     assert(m.op==LMB_SEG_COMPUTE_GET);
@@ -174,6 +189,7 @@ static void fixture_chat_with_advert(WorkerFixture *f,const char *model,int reje
         assert(!coli_edge_select(edge,&pick,error,sizeof error));
         pick.input=expected;pick.token_ids=&oracle;
         assert(!coli_edge_select(edge,&pick,error,sizeof error) && selected==oracle);token=selected;
+        f->oracle_tokens[position]=oracle;
     }
     LmbSegControl close={.session_id=open.session_id,.owner=open.owner,.sequence=reply.next_sequence};
     lmb_random(close.request_id.bytes,16);assert(!lmb_seg_control_encode(&close,&body,&size));

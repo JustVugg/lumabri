@@ -103,6 +103,15 @@ The latest measured speed is historical, not a guarantee for the next turn.
   spaces and non-ASCII text.
   That test uses a signed lease fixture; a separate Windows/Linux loopback
   test also exercises the production tracker and Linux Edge.
+- Native `segment_chat.exe` uses the same Edge, discovery and SUBMIT/DATA/DONE
+  implementation as Unix. Its Windows input bridge verifies the approved
+  checkpoint, admits the explicit `LUMABRI_EDGE_RAM_BYTES` working-set budget,
+  and seals weight input before readiness. Binary pipes preserve embedded LF
+  and control-Z bytes. The native gate compares 24 generated token IDs with a
+  local oracle and exercises two conversation slots, reset, cancellation and
+  reuse, malformed control, EOF, and no further checkpoint-source reads after
+  readiness. This is a native engine gate; the donor still refuses Edge offers
+  until the host gateway and approved allocation lifecycle are connected.
 - The native `lumabri.exe` control entrypoint can now start, inspect, restart
   and stop the private background manager with `service`, and report the
   Windows machine inventory with `machine --json`. The shared manager loop
@@ -176,6 +185,7 @@ checkpoint:
 ```sh
 python tools/build_windows_segment.py --engine /path/to/colibri/c --only inference
 build/windows-segment/test_segment_worker_windows.exe C:/absolute/path/to/segment_node.exe C:/absolute/path/to/tiny-olmoe selftest
+build/windows-segment/test_segment_worker_windows.exe C:/absolute/path/to/segment_node.exe C:/absolute/path/to/tiny-olmoe remote-selftest C:/absolute/path/to/segment_chat.exe
 ```
 
 The worker executable is also in `build/windows-segment`. The test launches

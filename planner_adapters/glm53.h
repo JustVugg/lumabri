@@ -42,7 +42,7 @@ static int lmb_glm53_tensor(const LmbPlanTensor *t, void *opaque) {
     if (!field || *field++ != '.') return -1;
     if (layer >= m->layers) return 0;
     uint64_t H = v->h, P = (uint64_t)v->kh * v->kd, HC = v->hc;
-    uint64_t hyper = HC * HC + 2 * HC;
+    uint64_t hyper_weights = HC * HC + 2 * HC;
     static const char *const names[] = {
         "input_layernorm.weight", "post_attention_layernorm.weight",
         "hc_attn_fn", "hc_attn_base", "hc_attn_scale", "hc_ffn_fn", "hc_ffn_base", "hc_ffn_scale",
@@ -60,7 +60,7 @@ static int lmb_glm53_tensor(const LmbPlanTensor *t, void *opaque) {
         "mlp.shared_experts.gate_proj.weight", "mlp.shared_experts.up_proj.weight", "mlp.shared_experts.down_proj.weight"
     };
     uint64_t counts[] = {
-        H,H, hyper*HC*H,hyper,3,hyper*HC*H,hyper,3,
+        H,H, hyper_weights*HC*H,hyper_weights,3,hyper_weights*HC*H,hyper_weights,3,
         (uint64_t)v->qrank*H,v->qrank,(uint64_t)v->heads*v->nope*v->qrank,
         (uint64_t)v->kvrank*H,v->kvrank,(uint64_t)v->heads*(v->nope+v->vd)*v->kvrank,
         H*(v->full[layer] ? (uint64_t)v->heads*v->vd : P),
