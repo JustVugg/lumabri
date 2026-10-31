@@ -84,6 +84,5 @@ static void api_route_order(const char *tracker, const LmbModelRoute *route,
             known ? lmb_cal_source_name(chosen->observation_source) : "unknown",
             known ? chosen->prompt_tokens : 0,known ? chosen->generated_tokens : 0);
     }
-
 }
 #endif
