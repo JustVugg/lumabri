@@ -2,6 +2,7 @@
  * encrypted data plane are the production executable, in a separate process.
  * Full tracker interoperability is also exercised by the PC/Linux lab gate. */
 #include "lumabri_sign.h"
+#include "lumabri_inventory.h"
 #include "lumabri_secure.h"
 #include "lumabri_segment_discovery.h"
 #include "edge_runtime.h"
@@ -17,7 +18,9 @@ typedef struct {
     pthread_t thread;
     pthread_mutex_t lock;
     atomic_int stop;
-    LmbSegAdvert advert;
+    LmbSegAdvert advert,adverts[4];
+    unsigned nadverts,machine_reports;
+    LmbMachineReport machine_report;
     LmbSegOwner owner;
     CheckpointFixture checkpoint;
 } WorkerFixture;
@@ -51,6 +54,15 @@ static void *fixture_tracker(void *opaque) {
                 } else if (m.op==LMB_CHALLENGE) {
                     lmb_random(nonce[i],32);challenged[i]=1;
                     assert(!lmb_send(fd,LMB_CHALLENGE_R,nonce[i],32,NULL,0));
+                } else if (m.op==LMB_MACHINE_REPORT) {
+                    assert(challenged[i] && m.body_len>64);
+                    LmbCur c={m.body,m.body_len-64,0};LmbMachineReport report;
+                    assert(!lmb_inventory_unpack(&c,&report) && c.off==c.len && lmb_secure_peer_matches(fd,report.identity));
+                    LmbBuf transcript={0};assert(!lmb_buf_str(&transcript,"lumabri.machine.v1") &&
+                        !lmb_buf_bytes(&transcript,nonce[i],32) && !lmb_buf_bytes(&transcript,m.body,c.len));
+                    assert(!lmb_sign_verify(m.body+c.len,transcript.p,transcript.len,report.identity));free(transcript.p);
+                    pthread_mutex_lock(&f->lock);f->machine_report=report;f->machine_reports++;pthread_mutex_unlock(&f->lock);
+                    assert(!lmb_send(fd,LMB_OK,NULL,0,NULL,0));
                 } else if (m.op==LMB_SEG_REGISTER) {
                     assert(challenged[i] && m.body_len>100);
                     size_t n=m.body_len-100;LmbSegAdvert advert;
@@ -61,7 +73,10 @@ static void *fixture_tracker(void *opaque) {
                                                 advert.addr,transcript,sizeof transcript);
                     assert(len && !lmb_sign_verify(m.body+n+36,transcript,len,m.body+n+4));
                     assert(lmb_secure_peer_matches(fd,m.body+n+4));
-                    pthread_mutex_lock(&f->lock);f->advert=advert;pthread_mutex_unlock(&f->lock);
+                    pthread_mutex_lock(&f->lock);f->advert=advert;
+                    unsigned slot=0;while (slot<f->nadverts && strcmp(f->adverts[slot].peer_name,advert.peer_name)) slot++;
+                    assert(slot<4);f->adverts[slot]=advert;if (slot==f->nadverts) f->nadverts++;
+                    pthread_mutex_unlock(&f->lock);
                     uint8_t *body=NULL;uint32_t size=0;
                     assert(!lmb_seg_registration_reply_encode(&f->owner,&body,&size));
                     assert(!lmb_send(fd,LMB_SEG_REGISTER_R,body,size,NULL,0));free(body);
@@ -105,9 +120,9 @@ static LmbSegReply fixture_exchange(LmbSocket fd,uint32_t op,const void *body,ui
     lmb_msg_free(&m);return reply;
 }
 
-static void fixture_chat(WorkerFixture *f,const char *model,int reject_open) {
+static void fixture_chat_with_advert(WorkerFixture *f,const char *model,int reject_open,const LmbSegAdvert *selected) {
     assert(WaitForSingleObject(f->registered,10000)==WAIT_OBJECT_0);
-    LmbSegAdvert a;pthread_mutex_lock(&f->lock);a=f->advert;pthread_mutex_unlock(&f->lock);
+    LmbSegAdvert a;pthread_mutex_lock(&f->lock);a=selected ? *selected : f->advert;pthread_mutex_unlock(&f->lock);
     LmbSegOpen open={.owner=f->owner,.layer_begin=a.layer_begin,.layer_end=a.layer_end,
         .context_tokens=64,.max_rows=1,.state_dtype=a.state_dtype,.state_width=a.state_width,
         .ttl_ms=60000,.capabilities=a.capabilities};
@@ -166,4 +181,8 @@ static void fixture_chat(WorkerFixture *f,const char *model,int reject_open) {
     assert(reply.status==LMB_SEG_STATUS_OK);lmb_close(fd);
     free(input);free(output);free(expected);coli_segment_session_destroy(session);
     assert(!coli_segment_engine_close(reference,error,sizeof error));coli_edge_engine_close(edge);
+}
+
+static void fixture_chat(WorkerFixture *f,const char *model,int reject_open) {
+    fixture_chat_with_advert(f,model,reject_open,NULL);
 }

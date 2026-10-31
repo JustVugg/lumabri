@@ -1,6 +1,5 @@
-/* Start the shared manager as an independent, same-user Windows process.
- * Only this manager (which owns no engines) may be detached. Engine children
- * retain their kill-on-close ownership job for their whole lifetime. */
+/* Independent same-user keepers. A starter detaches only the verified keeper
+ * after READY. Workers retain their separate kill-on-close ownership jobs. */
 #ifndef LUMABRI_MANAGER_WINDOWS_H
 #define LUMABRI_MANAGER_WINDOWS_H
 #include "src/runtime/lumabri_owned_process_windows.h"
@@ -20,21 +19,20 @@ static int home_service_manager_entry_windows(void) {
     return home_service_manager_run(&manager);
 }
 
-static int home_service_manager_start_windows(void) {
+static int home_service_keeper_start_windows(const char *role,const char *const *args,size_t nargs) {
     wchar_t executable[2048]; char binary[6144], log_path[1200];
     DWORD n = GetModuleFileNameW(NULL, executable, 2048);
     if (!n || n >= 2048 || !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
             executable, -1, binary, sizeof binary, NULL, NULL) ||
-        home_service_path("manager", "log", log_path, sizeof log_path)) return -1;
+        home_service_path(role, "log", log_path, sizeof log_path)) return -1;
     HANDLE log = lmb_private_open(log_path, 1, 1, NULL);
     if (log == INVALID_HANDLE_VALUE) return -1;
     LARGE_INTEGER end = {0};
     if (!SetFilePointerEx(log, end, NULL, FILE_END)) { CloseHandle(log); return -1; }
     HANDLE ready = CreateEventW(NULL, TRUE, FALSE, NULL);
     if (!ready) { CloseHandle(log); return -1; }
-    const char *args[] = {"--internal-manager"};
     LmbChildHandle handoff = {"LUMABRI_READY_HANDLE", ready};
-    LmbProcessLaunch launch = {.binary = binary, .args = args, .nargs = 1,
+    LmbProcessLaunch launch = {.binary = binary, .args = args, .nargs = nargs,
         .output = log, .error = log, .handles = &handoff, .nhandles = 1};
     LmbOwnedProcess child = {0};
     int rc = lmb_owned_process_start(&child, &launch);
@@ -50,7 +48,7 @@ static int home_service_manager_start_windows(void) {
          * READY alone is not enough, but a busy endpoint is not failure. */
         ULONGLONG until = GetTickCount64() + 2000;
         do {
-            if (!home_service_query("manager", HOME_SVC_STATUS, NULL, &snapshot)) {
+            if (!home_service_query(role, HOME_SVC_STATUS, NULL, &snapshot)) {
                 observed = snapshot.pid == child.pid && snapshot.state == HOME_SVC_RUNNING;
                 break;
             }
@@ -59,7 +57,7 @@ static int home_service_manager_start_windows(void) {
     }
     if (observed) {
         /* READY and the authenticated endpoint must agree on this actual
-         * child. Until now a crashed starter kills its incomplete manager.
+         * child. Until now a crashed starter kills its incomplete keeper.
          * After handoff, closing the terminal must leave it alive. */
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
         if (QueryInformationJobObject(child.job, JobObjectExtendedLimitInformation,
@@ -82,10 +80,14 @@ static int home_service_manager_start_windows(void) {
     }
     if (raced) {
         for (unsigned i = 0; i < 40; i++) {
-            if (!home_service_query("manager", HOME_SVC_STATUS, NULL, &snapshot)) return 0;
+            if (!home_service_query(role, HOME_SVC_STATUS, NULL, &snapshot)) return 0;
             home_service_wait_ms(50);
         }
     }
     return -1;
+}
+static int home_service_manager_start_windows(void) {
+    const char *args[]={"--internal-manager"};
+    return home_service_keeper_start_windows("manager",args,1);
 }
 #endif

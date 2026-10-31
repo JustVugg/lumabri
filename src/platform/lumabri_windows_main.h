@@ -20,8 +20,55 @@ static void doctor_json_string(const char *value) {
     fputc('"', stdout);
 }
 #include "src/runtime/lumabri_service_manager.h"
+#include "src/runtime/lumabri_donor_windows.h"
+#include "src/ui/lumabri_donor_windows.h"
+#include <math.h>
+
+static int home_donor_entry_windows(int argc,char **argv,int internal) {
+    const char *tracker=NULL;uint64_t limit=0;int headless=0;
+    for (int i=0;i<argc;i++) {
+        if (!strcmp(argv[i],"--join") && i+1<argc) tracker=argv[++i];
+        else if (!strcmp(argv[i],"--ram-gb") && i+1<argc) {
+            char *end;double value=strtod(argv[++i],&end);
+            if (!*argv[i] || *end || !isfinite(value) || value<=0 || value>1048576) return 2;
+            limit=(uint64_t)(value*1e9);
+        } else if (!strcmp(argv[i],"--headless")) headless=1;
+        else return 2;
+    }
+    if (!tracker || !limit)
+        return home_fail("Use donor --join HOST:PORT --ram-gb N. Add --headless only to start without the approval screen.");
+    if (internal) {
+        if (!getenv("LUMABRI_READY_HANDLE")) return 2;
+        wchar_t exe[1024];char worker[1600];DWORD n=GetModuleFileNameW(NULL,exe,1024);
+        if (!n || n>=1024) return 1;
+        wchar_t *end=wcsrchr(exe,L'\\');if (!end) return 1;
+        *end=0;
+        if (!WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,exe,-1,worker,sizeof worker,NULL,NULL) ||
+            strlen(worker)+sizeof "/segment_node.exe">sizeof worker) return 1;
+        strcat(worker,"/segment_node.exe");
+        if (lmb_secure_init() || !lmb_secure_enabled()) return home_fail("Encrypted household authentication is required.");
+        LmbWindowsDonor *donor=calloc(1,sizeof *donor);if (!donor) return 1;
+        if (lmb_donor_open_windows(donor,worker,tracker,limit)) {free(donor);return home_fail("Cannot start the native donor; no resources were shared.");}
+        int rc=lmb_ready_notify();
+        while (!rc && !g_stopping && !lmb_donor_step_windows(donor)) Sleep(10);
+        lmb_donor_close_windows(donor);free(donor);return rc ? 1 : 0;
+    }
+    HomeServiceSnapshot old;
+    if (!home_service_query("donor",HOME_SVC_STATUS,NULL,&old))
+        return strcmp(old.tracker,tracker) ? home_fail("Stop the sharing service before joining another household.") :
+            headless ? 0 : lmb_donor_ui_windows(tracker);
+    if (home_service_ensure()) return home_fail("Cannot start the household manager.");
+    const char *args[32];if (argc>30) return 2;args[0]="--internal-donor";
+    for (int i=0;i<argc;i++) args[i+1]=argv[i];
+    if (home_service_keeper_start_windows("donor",args,(size_t)argc+1)) return 1;
+    return headless ? 0 : lmb_donor_ui_windows(tracker);
+}
+
 
 static int lmb_windows_main(int argc, char **argv) {
+    if (argc==1 || (argc==2 && !strcmp(argv[1],"share"))) return lmb_donor_ui_windows(NULL);
+    if (argc>=2 && (!strcmp(argv[1],"donor") || !strcmp(argv[1],"--internal-donor")))
+        return home_donor_entry_windows(argc-2,argv+2,!strcmp(argv[1],"--internal-donor"));
     if (argc == 2 && !strcmp(argv[1], "--internal-manager"))
         return home_service_manager_entry_windows();
     if (argc >= 2 && !strcmp(argv[1], "service")) {
@@ -40,7 +87,9 @@ static int lmb_windows_main(int argc, char **argv) {
           "  lumabri service [start|status|restart|stop] [--json]\n"
           "  lumabri service live ROLE\n"
           "  lumabri machine --json\n\n"
-          "Household TUI, donor and model preparation are not connected in this native build yet.\n", stderr);
+          "  lumabri donor --join HOST:PORT --ram-gb N [--headless]\n"
+          "  lumabri share  (reopen the sharing service's approval screen)\n\n"
+          "Native chat hosting and household setup are not connected in this build yet.\n", stderr);
     return argc == 2 && !strcmp(argv[1], "--help") ? 0 : 2;
 }
 

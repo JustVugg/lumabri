@@ -158,13 +158,13 @@ static int lmb_private_mkdir(const char *path) {
 
 /* Keep a handle to each parent until the final file is opened and checked;
  * lack of FILE_SHARE_DELETE prevents a concurrent parent rename/replacement. */
-static HANDLE lmb_private_open(const char *path, int write, int create, int *created) {
+static HANDLE lmb_private_open_sharing(const char *path, int write, int create, int *created, DWORD sharing) {
     LmbPrivatePath p; LmbPrivateSecurity s;
     if (created) *created = 0;
     if (lmb_private_path(path, &p)) return INVALID_HANDLE_VALUE;
     if (lmb_private_security(&s)) { lmb_private_path_close(&p); return INVALID_HANDLE_VALUE; }
     HANDLE h = CreateFileW(p.path, READ_CONTROL | GENERIC_READ | (write ? GENERIC_WRITE : 0),
-        FILE_SHARE_READ | FILE_SHARE_WRITE, &s.attributes, create ? OPEN_ALWAYS : OPEN_EXISTING,
+        sharing, &s.attributes, create ? OPEN_ALWAYS : OPEN_EXISTING,
         FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
     DWORD error = GetLastError();
     if (h == INVALID_HANDLE_VALUE) lmb_private_error(error);
@@ -173,6 +173,10 @@ static HANDLE lmb_private_open(const char *path, int write, int create, int *cre
     } else if (created) *created = create && error != ERROR_ALREADY_EXISTS;
     lmb_private_security_free(&s); lmb_private_path_close(&p);
     return h;
+}
+
+static HANDLE lmb_private_open(const char *path,int write,int create,int *created) {
+    return lmb_private_open_sharing(path,write,create,created,FILE_SHARE_READ|FILE_SHARE_WRITE);
 }
 
 static int lmb_private_lock(HANDLE h, int exclusive) {

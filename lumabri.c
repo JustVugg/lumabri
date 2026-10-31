@@ -5509,6 +5509,7 @@ static int catalog_inventory(LmbTuiState *st) {
         snprintf(node->name, sizeof node->name, "%s", r->machine.hostname);
         snprintf(node->addr, sizeof node->addr, "%s", r->control_addr);
         node->ram_budget_bytes = r->ram_budget_bytes;
+        node->roles = r->roles;
         node->vram_budget_bytes = r->machine.vram_available_bytes;
         node->threads = r->machine.logical_cpus;
         if (r->runtime_threads && node->threads > r->runtime_threads) node->threads = r->runtime_threads;
@@ -5944,6 +5945,13 @@ static void catalog_json(const LmbTuiState *st) {
         }
         fputs(",\"runtime_state\":", stdout);
         json_string(stdout, st->runtime_ids[i][0] ? "identified" : "unknown");
+        fputs(",\"runtime_roles\":",stdout);
+        if (!node->roles.known) fputs("null",stdout);
+        else {
+            fputs("{\"segment\":",stdout);json_string(stdout,node->roles.segment);
+            fputs(",\"edge\":",stdout);json_string(stdout,node->roles.edge);
+            fputs(",\"hybrid\":",stdout);json_string(stdout,node->roles.hybrid);fputc('}',stdout);
+        }
         fputc('}', stdout);
     }
     fputs("],\"models\":[", stdout);

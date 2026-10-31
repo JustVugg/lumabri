@@ -35,6 +35,10 @@ def main():
     run([windres,'-I',root,root/'src/platform/lumabri_windows.rc','-O','coff','-o',resource])
     run([args.cc,*flags,'-Werror','-municode',root/'tests/c/test_owned_process_windows.c',
          '-static','-o',output/'test_owned_process_windows.exe'])
+    run([args.cc,*flags,'-Werror','-Wno-unused-function','-Wno-unused-variable','-municode',
+         root/'lumabri.c',root/'lumabri_machine.c',resource,'-static','-lwinpthread','-lws2_32',
+         '-lbcrypt','-liphlpapi','-lpsapi','-ladvapi32','-ldxgi','-ldxguid',
+         '-o',output/'lumabri.exe'])
     if args.only != 'contracts':
         run([sys.executable,'-X','utf8','tools/prepare_engine_source.py','--source',
              Path(args.engine).resolve(),'--output',source])
@@ -77,12 +81,14 @@ def main():
         run([args.cc,*flags,'-Werror','-Wno-unused-function',
              root/'tests/c/test_checkpoint_windows.c',native_input,resource,archive,*libraries,
              '-o',output/'test_checkpoint_windows.exe'])
+        run([args.cc,*flags,'-Werror','-Wno-unused-function','-municode',
+             root/'tests/c/test_donor_windows.c',*protocol,resource,archive,*libraries,
+             '-o',output/'test_donor_windows.exe'])
     if args.only == 'inference':
         return
-    run([args.cc,*flags,'-Werror','-Wno-unused-function','-Wno-unused-variable','-municode',
-         root/'lumabri.c',root/'lumabri_machine.c',resource,'-static','-lwinpthread','-lws2_32',
-         '-lbcrypt','-liphlpapi','-lpsapi','-ladvapi32','-ldxgi','-ldxguid',
-         '-o',output/'lumabri.exe'])
+    run([args.cc,*flags,'-Werror','-Wno-unused-function','-municode',
+         root/'tests/c/test_allocation_windows.c',resource,'-static','-lwinpthread','-lws2_32',
+         '-lbcrypt','-ladvapi32','-o',output/'test_allocation_windows.exe'])
     run([args.cc,*flags,'-Werror','-Wno-unused-function','-municode',
          root/'tests/c/test_manager_windows.c','-static','-lwinpthread','-lws2_32',
          '-lbcrypt','-ladvapi32','-o',output/'test_manager_windows.exe'])

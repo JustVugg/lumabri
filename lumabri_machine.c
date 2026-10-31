@@ -176,13 +176,13 @@ int lmb_machine_compute_lease_acquire(const char *model, const char *tracker,
 #ifdef _WIN32
     char path[2048];
     if (lmb_private_default_path(path, sizeof path, "compute-donor.lock")) return -1;
-    HANDLE h = lmb_private_open(path, 1, 1, NULL);
-    if (h == INVALID_HANDLE_VALUE) return -1;
-    OVERLAPPED at = {0};
-    if (!LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-                    0, MAXDWORD, MAXDWORD, &at)) {
-        if (owner && owner_size) snprintf(owner, owner_size, "another compute donor owns the lease");
-        DWORD error = GetLastError(); CloseHandle(h); return lmb_private_error(error);
+    /* Sharing denial follows the duplicated file object into workers.
+     * Byte locks are process-owned and cannot fence a surviving child after
+     * its keeper exits. The caller explicitly passes only this lease. */
+    HANDLE h = lmb_private_open_sharing(path, 1, 1, NULL, 0);
+    if (h == INVALID_HANDLE_VALUE) {
+        if (owner && owner_size) snprintf(owner,owner_size,"another compute donor owns the lease");
+        return -1;
     }
     char text[1024];
     int n = snprintf(text, sizeof text, "pid=%lu model=%s tracker=%s\n", GetCurrentProcessId(),
@@ -192,8 +192,8 @@ int lmb_machine_compute_lease_acquire(const char *model, const char *tracker,
         !WriteFile(h, text, (DWORD)n, &written, NULL) || written != (DWORD)n || !FlushFileBuffers(h)) {
         CloseHandle(h); errno = EIO; return -1;
     }
-    /* The keeper owns this lease. Its engine Job Object dies with it; native
-     * engine processes must not inherit an independent machine-wide lease. */
+    /* No ambient inheritance. The native keeper explicitly duplicates the
+     * same lease handle into every owned engine. Last close releases it. */
     int fd = _open_osfhandle((intptr_t)h, _O_RDWR | _O_BINARY | _O_NOINHERIT);
     if (fd < 0) CloseHandle(h);
     return fd;

@@ -8,6 +8,8 @@
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <io.h>
+#include <fcntl.h>
 
 typedef struct {
     HANDLE input, output;
@@ -16,27 +18,81 @@ typedef struct {
     int active;
     WORD repeated;
     int repeated_key;
+    int rebound, saved_fd[2];
+    HANDLE saved_handle[2];
+    int std_was_crt[2];
 } LmbConsole;
+
+static inline void lmb_console_restore_stdio(LmbConsole *c) {
+    if (!c->rebound) return;
+    fflush(stdout);
+    for (int i=0;i<2;i++) {
+        if (c->saved_fd[i]>=0) { _dup2(c->saved_fd[i],i);_close(c->saved_fd[i]); }
+        SetStdHandle(i ? STD_OUTPUT_HANDLE : STD_INPUT_HANDLE,
+            c->std_was_crt[i] ? (HANDLE)_get_osfhandle(i) : c->saved_handle[i]);
+    }
+    c->rebound=0;
+}
+
+/* A process created inside ConPTY can inherit the launcher's redirected CRT
+ * descriptors even though it has its own console. An explicitly opened TUI
+ * binds that console and restores the original descriptors when detached. */
+static inline int lmb_console_bind_stdio(LmbConsole *c) {
+    HANDLE input=CreateFileW(L"CONIN$",GENERIC_READ|GENERIC_WRITE,
+        FILE_SHARE_READ|FILE_SHARE_WRITE,NULL,OPEN_EXISTING,0,NULL);
+    HANDLE output=CreateFileW(L"CONOUT$",GENERIC_READ|GENERIC_WRITE,
+        FILE_SHARE_READ|FILE_SHARE_WRITE,NULL,OPEN_EXISTING,0,NULL);
+    if (input==INVALID_HANDLE_VALUE || output==INVALID_HANDLE_VALUE) {
+        if (input!=INVALID_HANDLE_VALUE) CloseHandle(input);
+        if (output!=INVALID_HANDLE_VALUE) CloseHandle(output);
+        return -1;
+    }
+    int fds[2]={_open_osfhandle((intptr_t)input,_O_RDONLY|_O_BINARY),
+                _open_osfhandle((intptr_t)output,_O_WRONLY|_O_BINARY)};
+    if (fds[0]<0 || fds[1]<0) {
+        if (fds[0]>=0) _close(fds[0]);else CloseHandle(input);
+        if (fds[1]>=0) _close(fds[1]);else CloseHandle(output);
+        return -1;
+    }
+    c->saved_fd[0]=_dup(0);c->saved_fd[1]=_dup(1);
+    c->saved_handle[0]=GetStdHandle(STD_INPUT_HANDLE);c->saved_handle[1]=GetStdHandle(STD_OUTPUT_HANDLE);
+    for (int i=0;i<2;i++) c->std_was_crt[i]=c->saved_handle[i]==(HANDLE)_get_osfhandle(i);
+    int bad=c->saved_fd[0]<0 || c->saved_fd[1]<0;
+    c->rebound=1;
+    if (!bad) bad=_dup2(fds[0],0) || _dup2(fds[1],1) ||
+        !SetStdHandle(STD_INPUT_HANDLE,(HANDLE)_get_osfhandle(0)) ||
+        !SetStdHandle(STD_OUTPUT_HANDLE,(HANDLE)_get_osfhandle(1));
+    _close(fds[0]);_close(fds[1]);
+    if (bad) {lmb_console_restore_stdio(c);return -1;}
+    return 0;
+}
 
 static inline int lmb_console_open(LmbConsole *c) {
     if (c->active) return -1;
     c->input = GetStdHandle(STD_INPUT_HANDLE);
     c->output = GetStdHandle(STD_OUTPUT_HANDLE);
     if (!GetConsoleMode(c->input, &c->input_mode) ||
-        !GetConsoleMode(c->output, &c->output_mode)) return -1;
+        !GetConsoleMode(c->output, &c->output_mode)) {
+        if (lmb_console_bind_stdio(c)) return -1;
+        c->input=GetStdHandle(STD_INPUT_HANDLE);c->output=GetStdHandle(STD_OUTPUT_HANDLE);
+        if (!GetConsoleMode(c->input,&c->input_mode) || !GetConsoleMode(c->output,&c->output_mode)) {
+            lmb_console_restore_stdio(c);return -1;
+        }
+    }
     c->input_cp = GetConsoleCP(); c->output_cp = GetConsoleOutputCP();
     /* Quick Edit freezes the entire process during selection. ReadConsoleInputW
      * supplies keys and resize events without a locale-dependent byte stream. */
     DWORD input = (c->input_mode | ENABLE_WINDOW_INPUT | ENABLE_EXTENDED_FLAGS) &
         ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_QUICK_EDIT_MODE |
           ENABLE_PROCESSED_INPUT | ENABLE_VIRTUAL_TERMINAL_INPUT);
-    if (!SetConsoleMode(c->input, input)) return -1;
+    if (!SetConsoleMode(c->input, input)) {lmb_console_restore_stdio(c);return -1;}
     if (!SetConsoleMode(c->output, c->output_mode | ENABLE_PROCESSED_OUTPUT |
                         ENABLE_VIRTUAL_TERMINAL_PROCESSING) ||
         !SetConsoleCP(CP_UTF8) || !SetConsoleOutputCP(CP_UTF8)) {
         SetConsoleMode(c->input, c->input_mode);
         SetConsoleMode(c->output, c->output_mode);
         SetConsoleCP(c->input_cp); SetConsoleOutputCP(c->output_cp);
+        lmb_console_restore_stdio(c);
         return -1;
     }
     c->repeated = 0; c->active = 1;
@@ -50,6 +106,7 @@ static inline void lmb_console_close(LmbConsole *c) {
     SetConsoleMode(c->output, c->output_mode);
     SetConsoleCP(c->input_cp); SetConsoleOutputCP(c->output_cp);
     c->active = 0; c->repeated = 0;
+    lmb_console_restore_stdio(c);
 }
 
 static inline void lmb_console_size(int *width, int *height) {
