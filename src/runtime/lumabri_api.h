@@ -937,7 +937,7 @@ usage:
         "lumabri api model-add NAME APPROVED_ALLOCATION... [--tracker HOST:PORT]\n"
         "lumabri api model-set MODEL_ID APPROVED_ALLOCATION... [--tracker HOST:PORT]\n"
         "lumabri api model-remove MODEL_ID [--tracker HOST:PORT]\n"
-        "lumabri api model-policy MODEL_ID ordered|observed-decode|declared-cost|load-aware [--tracker HOST:PORT]\n"
+        "lumabri api model-policy MODEL_ID ordered|observed-decode|declared-cost|load-aware|latency-aware [--tracker HOST:PORT]\n"
         "lumabri api retire ALLOCATION_ID [--tracker HOST:PORT]\n"
         "lumabri api replica ALLOCATION_ID [status|drain|resume] [--tracker HOST:PORT]\n"
         "lumabri api segments ALLOCATION_ID [status|drain|resume] [--tracker HOST:PORT]\n"

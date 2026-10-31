@@ -40,6 +40,7 @@ static int api_replica_evidence(const LmbModelRoute *route, const LmbResidentPla
     LmbCalibration observed;
     if (!lmb_cal_profile_load(records,&seed.key,&observed)) {
         out->observation_current=1; out->decode_tok_s=observed.decode_tok_s;
+        out->ttft_seconds=observed.ttft_seconds; out->observation_source=observed.source;
         out->measured_at=observed.measured_at; out->prompt_tokens=observed.prompt_tokens;
         out->generated_tokens=observed.generated_tokens;
     }
@@ -67,11 +68,22 @@ static void api_route_order(const char *tracker, const LmbModelRoute *route,
     char model[65]; lmb_hex(model,route->id,32);
     fprintf(stderr,"[model-policy] model=%s policy=%s evidence=%s first_replica=%u\n",
         model,lmb_route_policy_name(route->policy),reason,order[0]+1);
-    if (route->policy==LMB_ROUTE_LOAD_AWARE) {
+    if (route->policy==LMB_ROUTE_LOAD_AWARE || route->policy==LMB_ROUTE_LATENCY_AWARE) {
         const LmbReplicaLoad *load=&facts[order[0]].load;
         fprintf(stderr,"[model-load] model=%s replica=%u known=%u nodes=%u max_pending=%u total_pending=%u age_ms=%u\n",
             model,order[0]+1,(unsigned)lmb_replica_load_valid(load),load->nodes,load->max_pending,
             load->total_pending,load->max_age_ms);
     }
+    if (route->policy==LMB_ROUTE_LATENCY_AWARE) {
+        const LmbReplicaEvidence *chosen=&facts[order[0]];
+        int known=!strcmp(reason,"recent_workload_and_ttft_observations");
+        /* A zero in this diagnostic is explicitly unknown. No fabricated
+         * latency estimate is added to the catalogue or client response. */
+        fprintf(stderr,"[model-latency] model=%s replica=%u known=%d observed_ttft_seconds=%.6f source=%s prompt_tokens=%u generated_tokens=%u\n",
+            model,order[0]+1,known,known ? chosen->ttft_seconds : 0.,
+            known ? lmb_cal_source_name(chosen->observation_source) : "unknown",
+            known ? chosen->prompt_tokens : 0,known ? chosen->generated_tokens : 0);
+    }
+
 }
 #endif
