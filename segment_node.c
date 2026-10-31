@@ -28,9 +28,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
 #include <sys/resource.h>
-#include <sys/stat.h>
 #include <sys/un.h>
+#endif
+#include <sys/stat.h>
 #ifdef __APPLE__
 #include <mach/mach.h>
 #endif
@@ -44,6 +46,31 @@
 
 static uint64_t directory_bytes(const char *path, unsigned depth) {
     if (!path || depth > 8) return 0;
+#ifdef _WIN32
+    wchar_t wide[4096],pattern[4100];
+    if (!MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,path,-1,wide,4096) ||
+        swprintf(pattern,4100,L"%ls\\*",wide)<0) return UINT64_MAX;
+    WIN32_FIND_DATAW entry; HANDLE search=FindFirstFileW(pattern,&entry);
+    if (search==INVALID_HANDLE_VALUE) return 0;
+    uint64_t total=0;
+    do {
+        if (!wcscmp(entry.cFileName,L".") || !wcscmp(entry.cFileName,L"..") ||
+            (entry.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT)) continue;
+        uint64_t add=((uint64_t)entry.nFileSizeHigh<<32)|entry.nFileSizeLow;
+        if (entry.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY) {
+            char name[1024],child[4096];
+            if (!WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,entry.cFileName,-1,name,sizeof name,NULL,NULL)) {
+                total=UINT64_MAX; break;
+            }
+            int n=snprintf(child,sizeof child,"%s/%s",path,name);
+            if (n<0 || (size_t)n>=sizeof child) { total=UINT64_MAX; break; }
+            add=directory_bytes(child,depth+1);
+        }
+        if (UINT64_MAX-total<add) { total=UINT64_MAX; break; }
+        total+=add;
+    } while (FindNextFileW(search,&entry));
+    FindClose(search); return total;
+#else
     DIR *dir = opendir(path);
     if (!dir) return 0;
     uint64_t total = 0;
@@ -63,6 +90,7 @@ static uint64_t directory_bytes(const char *path, unsigned depth) {
     }
     closedir(dir);
     return total;
+#endif
 }
 
 typedef struct {
@@ -114,7 +142,7 @@ typedef struct {
     uint32_t run_wait_ms;
     pthread_mutex_t connections_lock;
     pthread_cond_t connections_drained;
-    int connection_fds[NODE_CONNECTIONS_MAX];
+    LmbSocket connection_fds[NODE_CONNECTIONS_MAX];
     unsigned active_connections;
     uint64_t ram_reserve_bytes;
     uint64_t process_memory_limit_bytes;
@@ -131,7 +159,7 @@ typedef struct {
 } Node;
 
 static volatile sig_atomic_t g_stop;
-static int g_listen_fd = -1;
+static LmbSocket g_listen_fd = LMB_INVALID_SOCKET;
 
 static uint64_t now_ms(void) {
     struct timespec ts;
@@ -151,7 +179,10 @@ static uint64_t available_memory_bytes(void) {
 }
 
 static uint64_t resident_memory_bytes(void) {
-#ifdef __APPLE__
+#ifdef _WIN32
+    LmbProcessMemory memory={0};
+    return !lmb_process_memory_probe(&memory,0) && (memory.known&LMB_PM_RSS) ? memory.rss : 0;
+#elif defined(__APPLE__)
     struct mach_task_basic_info info;
     mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
     if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
@@ -249,14 +280,50 @@ static void *governor_worker(void *opaque) {
     return NULL;
 }
 
+/* Environment values remain UTF-8 in Lumabri, UTF-16 at the native OS API. */
+static int node_setenv(const char *name, const char *value) {
+#ifdef _WIN32
+    wchar_t key[128], text[4096];
+    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, name, -1, key, 128) ||
+        !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1, text, 4096)) {
+        errno = EINVAL; return -1;
+    }
+    return _wputenv_s(key, text) ? -1 : 0;
+#else
+    return setenv(name, value, 1);
+#endif
+}
+
+static void node_low_priority(void) {
+#ifdef _WIN32
+    (void)SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS);
+#else
+    (void)setpriority(PRIO_PROCESS, 0, 10);
+#endif
+}
+
+static void node_socket_shutdown(LmbSocket fd) {
+#ifdef _WIN32
+    (void)shutdown(fd, SD_BOTH);
+#else
+    (void)shutdown(fd, SHUT_RDWR);
+#endif
+}
+
 static void stop_handler(int sig) {
     (void)sig;
     g_stop = 1;
     /* Bypass the optional secure close macro: libc close is async-signal-safe
      * and listening sockets never enter the encrypted-fd registry. */
-    int fd = g_listen_fd;
-    g_listen_fd = -1;
-    if (fd >= 0) (close)(fd);
+    LmbSocket fd = g_listen_fd;
+    g_listen_fd = LMB_INVALID_SOCKET;
+    if (fd != LMB_INVALID_SOCKET) {
+#ifdef _WIN32
+        (void)closesocket(fd);
+#else
+        (void)(close)(fd);
+#endif
+    }
 }
 
 /* This descriptor is inherited from the allocation keeper, not opened from
@@ -335,7 +402,7 @@ static int registration_owner(TrackerRegistration *r,
     return ok;
 }
 
-static int tracker_register_send(int fd, const uint8_t nonce[32],
+static int tracker_register_send(LmbSocket fd, const uint8_t nonce[32],
                                  TrackerRegistration *r) {
     LmbSegAdvert advert;
     pthread_mutex_lock(&r->lock);
@@ -383,7 +450,7 @@ static int tracker_compute_supported(const char *tracker) {
     return lmb_seg_compute_probe(tracker);
 }
 
-static int tracker_compute_send(int fd, TrackerRegistration *r) {
+static int tracker_compute_send(LmbSocket fd, TrackerRegistration *r) {
     LmbSegCompute value;
     pthread_mutex_lock(&r->lock);
     value = r->compute;
@@ -404,7 +471,7 @@ static int segment_request_op(uint32_t op) {
            op == LMB_SEG_CLOSE || op == LMB_SEG_HEALTH;
 }
 
-static int handle_rseg_fwd(TrackerRegistration *r, int tracker_fd,
+static int handle_rseg_fwd(TrackerRegistration *r, LmbSocket tracker_fd,
                            const LmbMsg *forward) {
     LmbCur cursor = { forward->body, forward->body_len, 0 };
     uint32_t relay_id = 0, inner_op = 0, inner_body_len = 0;
@@ -417,15 +484,15 @@ static int handle_rseg_fwd(TrackerRegistration *r, int tracker_fd,
         return -1;
 
     LmbMsg response = {0};
-    int local_fd = lmb_connect(r->local_addr);
-    int ok = local_fd >= 0 &&
+    LmbSocket local_fd = lmb_connect(r->local_addr);
+    int ok = local_fd != LMB_INVALID_SOCKET &&
              !lmb_send(local_fd, inner_op, cursor.p + cursor.off,
                        inner_body_len, forward->pay, forward->pay_len) &&
              !lmb_recv(local_fd, &response) &&
              response.op == inner_op + 1u &&
              lmb_frame_shape_ok(response.op, response.body_len,
                                 response.pay_len);
-    if (local_fd >= 0) lmb_close(local_fd);
+    if (local_fd != LMB_INVALID_SOCKET) lmb_close(local_fd);
     LmbBuf body = {0};
     int bad = lmb_buf_u32(&body, relay_id) ||
               lmb_buf_u32(&body, ok ? 1u : 0u) ||
@@ -444,10 +511,10 @@ static int handle_rseg_fwd(TrackerRegistration *r, int tracker_fd,
 static void *registration_worker(void *opaque) {
     TrackerRegistration *r = (TrackerRegistration *)opaque;
     while (!r->stop) {
-        int fd = lmb_connect(r->tracker);
+        LmbSocket fd = lmb_connect(r->tracker);
         uint8_t nonce[32];
-        if (fd < 0 || lmb_auth(fd) || lmb_request_challenge(fd, nonce)) {
-            if (fd >= 0) lmb_close(fd);
+        if (fd == LMB_INVALID_SOCKET || lmb_auth(fd) || lmb_request_challenge(fd, nonce)) {
+            if (fd != LMB_INVALID_SOCKET) lmb_close(fd);
             sleep(1);
             continue;
         }
@@ -457,8 +524,14 @@ static void *registration_worker(void *opaque) {
          * allow a slow WAN relay enough time to receive the complete bounded
          * activation/snapshot instead of treating a 200 ms partial read as a
          * broken control tunnel. */
+#ifdef _WIN32
+        DWORD timeout = 60000;
+#else
         struct timeval timeout = {60, 0};
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof timeout);
+#endif
+        if (lmb_socket_option(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof timeout)) {
+            lmb_close(fd); sleep(1); continue;
+        }
         uint64_t last_heartbeat = now_ms();
         if (tracker_register_send(fd, nonce, r)) {
             lmb_close(fd); sleep(1); continue;
@@ -471,8 +544,7 @@ static void *registration_worker(void *opaque) {
                 if (tracker_register_send(fd,nonce,r)) break;
                 last_heartbeat=now_ms();
             }
-            struct pollfd input = { .fd = fd, .events = POLLIN };
-            int ready = poll(&input, 1, 200);
+            int ready = lmb_socket_wait(fd, 0, 200);
             if (ready < 0) {
                 if (errno == EINTR) continue;
                 break;
@@ -484,7 +556,6 @@ static void *registration_worker(void *opaque) {
                 }
                 continue;
             }
-            if (input.revents & (POLLERR | POLLHUP | POLLNVAL)) break;
             LmbMsg message = {0};
             if (lmb_recv(fd, &message)) {
                 break;
@@ -635,11 +706,11 @@ static void *session_reaper(void *opaque) {
     return NULL;
 }
 
-static int connection_add(Node *node, int fd) {
+static int connection_add(Node *node, LmbSocket fd) {
     int added = 0;
     pthread_mutex_lock(&node->connections_lock);
     for (size_t i = 0; i < NODE_CONNECTIONS_MAX; i++) {
-        if (node->connection_fds[i] >= 0) continue;
+        if (node->connection_fds[i] != LMB_INVALID_SOCKET) continue;
         node->connection_fds[i] = fd;
         node->active_connections++;
         added = 1;
@@ -649,11 +720,11 @@ static int connection_add(Node *node, int fd) {
     return added ? 0 : -1;
 }
 
-static void connection_remove(Node *node, int fd) {
+static void connection_remove(Node *node, LmbSocket fd) {
     pthread_mutex_lock(&node->connections_lock);
     for (size_t i = 0; i < NODE_CONNECTIONS_MAX; i++) {
         if (node->connection_fds[i] != fd) continue;
-        node->connection_fds[i] = -1;
+        node->connection_fds[i] = LMB_INVALID_SOCKET;
         if (node->active_connections) node->active_connections--;
         break;
     }
@@ -684,7 +755,7 @@ static void reply_state(Node *node, LmbSegReply *reply) {
                               &needs_restore);
 }
 
-static int send_reply(int fd, uint32_t op, LmbSegReply *reply,
+static int send_reply(LmbSocket fd, uint32_t op, LmbSegReply *reply,
                       const void *pay, size_t pay_len) {
     uint8_t *body = NULL;
     uint32_t body_len = 0;
@@ -695,7 +766,7 @@ static int send_reply(int fd, uint32_t op, LmbSegReply *reply,
     return rc;
 }
 
-static int send_transfer_reply(int fd, uint32_t op,
+static int send_transfer_reply(LmbSocket fd, uint32_t op,
                                LmbSegTransferReply *reply,
                                const void *pay, size_t pay_len) {
     uint8_t *body = NULL;
@@ -747,7 +818,7 @@ static int snapshot_read(void *opaque, void *data, size_t size) {
     return 0;
 }
 
-static int handle_open(Node *node, int fd, const LmbMsg *msg) {
+static int handle_open(Node *node, LmbSocket fd, const LmbMsg *msg) {
     LmbSegOpen open;
     if (msg->pay_len || lmb_seg_open_decode(msg->body, msg->body_len, &open))
         return -1;
@@ -824,7 +895,7 @@ static int handle_open(Node *node, int fd, const LmbMsg *msg) {
     return send_reply(fd, LMB_SEG_OPEN_R, &reply, NULL, 0);
 }
 
-static int handle_run(Node *node, int fd, const LmbMsg *msg) {
+static int handle_run(Node *node, LmbSocket fd, const LmbMsg *msg) {
     int32_t *tokens = calloc(node->cap.max_batch_rows, sizeof *tokens);
     if (!tokens) return -1;
     LmbSegRun run;
@@ -994,7 +1065,7 @@ static int handle_run(Node *node, int fd, const LmbMsg *msg) {
     return send_reply(fd, LMB_SEG_RUN_R, &reply, NULL, 0);
 }
 
-static int handle_snapshot(Node *node, int fd, const LmbMsg *msg) {
+static int handle_snapshot(Node *node, LmbSocket fd, const LmbMsg *msg) {
     LmbSegTransfer transfer;
     if (msg->pay_len ||
         lmb_seg_transfer_decode(msg->body, msg->body_len, &transfer)) return -1;
@@ -1078,7 +1149,7 @@ static int handle_snapshot(Node *node, int fd, const LmbMsg *msg) {
     return rc;
 }
 
-static int handle_restore(Node *node, int fd, const LmbMsg *msg) {
+static int handle_restore(Node *node, LmbSocket fd, const LmbMsg *msg) {
     LmbSegTransfer transfer;
     if (lmb_seg_transfer_decode(msg->body, msg->body_len, &transfer) ||
         msg->pay_len != transfer.chunk_len) return -1;
@@ -1179,7 +1250,7 @@ static int handle_restore(Node *node, int fd, const LmbMsg *msg) {
     return send_reply(fd, LMB_SEG_RESTORE_R, &reply, NULL, 0);
 }
 
-static int handle_control(Node *node, int fd, const LmbMsg *msg) {
+static int handle_control(Node *node, LmbSocket fd, const LmbMsg *msg) {
     LmbSegControl control;
     if (msg->pay_len ||
         lmb_seg_control_decode(msg->body, msg->body_len, &control)) return -1;
@@ -1216,9 +1287,9 @@ static int handle_control(Node *node, int fd, const LmbMsg *msg) {
     return send_reply(fd, response_op, &reply, NULL, 0);
 }
 
-typedef struct { Node *node; int fd; } Connection;
+typedef struct { Node *node; LmbSocket fd; } Connection;
 
-static int handle_home_expert(Node *node, int fd, const LmbMsg *msg) {
+static int handle_home_expert(Node *node, LmbSocket fd, const LmbMsg *msg) {
     int probe = msg->op == LMB_HOME_FEATURES;
     if (!node->home_accelerator || msg->body_len != (probe ? 128u : 80u) ||
         memcmp(msg->body, node->home_allocation, 32) ||
@@ -1272,7 +1343,7 @@ static int handle_home_expert(Node *node, int fd, const LmbMsg *msg) {
 static void *connection_worker(void *opaque) {
     Connection *connection = (Connection *)opaque;
     Node *node = connection->node;
-    int fd = connection->fd;
+    LmbSocket fd = connection->fd;
     free(connection);
     unsigned link_probes = 0;
     for (;;) {
@@ -1398,14 +1469,51 @@ static int auto_range_release(const char *tracker, const char *model,
     return bad ? -1 : 0;
 }
 
-static void preflight_signal(int *fd, char status) {
-    if (!fd || *fd < 0) return;
+#ifdef _WIN32
+typedef HANDLE NodePreflight;
+#define NODE_PREFLIGHT_INVALID INVALID_HANDLE_VALUE
+#else
+typedef int NodePreflight;
+#define NODE_PREFLIGHT_INVALID (-1)
+#endif
+static void preflight_signal(NodePreflight *fd, char status) {
+    if (!fd || *fd == NODE_PREFLIGHT_INVALID) return;
+#ifdef _WIN32
+    (void)lmb_pipe_io(*fd, &status, 1, 1, GetTickCount64()+2000);
+    CloseHandle(*fd);
+#else
     while (write(*fd, &status, 1) < 0 && errno == EINTR) { }
     close(*fd);
-    *fd = -1;
+#endif
+    *fd = NODE_PREFLIGHT_INVALID;
 }
 
+#ifdef _WIN32
+static int node_working_set(uint32_t memory_limit_mb) {
+    uint64_t requested=(uint64_t)memory_limit_mb<<20, allowed=0;
+    const char *reserve_name=getenv("LUMABRI_SEGMENT_RAM_RESERVE_MB") ?
+        "LUMABRI_SEGMENT_RAM_RESERVE_MB" : "LUMABRI_RAM_RESERVE_MB";
+    uint64_t reserve=(uint64_t)lmb_env_int(reserve_name,
+        (int)lmb_machine_default_reserve_mb(lmb_machine_total_ram()),256,262144)<<20;
+    /* VirtualLock's quota follows the process minimum working set. Changing
+     * it is not itself a residence guarantee: owned page locks and the
+     * process guard below remain mandatory. Never raise a system-wide limit.
+     * https://learn.microsoft.com/windows/win32/api/memoryapi/nf-memoryapi-virtuallock */
+    if (!requested || requested>SIZE_MAX ||
+        lmb_process_budget(requested,available_memory_bytes(),reserve,&allowed) ||
+        allowed<requested ||
+        !SetProcessWorkingSetSize(GetCurrentProcess(),(SIZE_T)requested,(SIZE_T)requested)) {
+        fprintf(stderr,"[resident-memory] Windows cannot admit the explicit %llu-byte process working set; "
+            "check the approved memory limit and available RAM (OS error %lu)\n",
+            (unsigned long long)requested,(unsigned long)GetLastError());
+        return -1;
+    }
+    return 0;
+}
+static int segment_node_main(int argc, char **argv) {
+#else
 int main(int argc, char **argv) {
+#endif
     if (argc == 2 && !strcmp(argv[1], "--thread-capacity")) {
         printf("%u\n", lmb_engine_thread_capacity());
         return 0;
@@ -1454,7 +1562,7 @@ int main(int argc, char **argv) {
     uint32_t run_queue = 32, run_wait_ms = 30000;
     uint32_t memory_limit_mb = 0, model_layers = 0, preflight_fd_u32 = 0;
     uint64_t model_bytes = 0;
-    int preflight_fd = -1;
+    NodePreflight preflight_fd = NODE_PREFLIGHT_INVALID;
     const char *value;
     if (((value = arg_value(argc, argv, "--context")) &&
          lmb_parse_u32(value, 1, LMB_SEG_MAX_CONTEXT, &context)) ||
@@ -1479,8 +1587,18 @@ int main(int argc, char **argv) {
         (range && model_bytes && !model_layers)) {
         usage(argv[0]); return 2;
     }
+#ifdef _WIN32
+    if (arg_value(argc, argv, "--preflight-fd") ||
+        lmb_pipe_inherit(L"LUMABRI_PREFLIGHT_HANDLE", &preflight_fd)) {
+        fprintf(stderr,"Windows Segment requires an inherited native preflight channel\n"); return 2;
+    }
+    if (node_working_set(memory_limit_mb)) {
+        preflight_signal(&preflight_fd, 'F'); return LMB_MEMLOCK_EXIT;
+    }
+#else
     if (arg_value(argc, argv, "--preflight-fd"))
         preflight_fd = (int)preflight_fd_u32;
+#endif
     if (backend_mask==LMB_SEG_CAP_CPU && lmb_memlock_startup()) {
         preflight_signal(&preflight_fd,'F');
         return LMB_MEMLOCK_EXIT;
@@ -1500,23 +1618,29 @@ int main(int argc, char **argv) {
         fprintf(stderr, "invalid accepted Segment client identity\n"); return 2;
     }
     signal(SIGINT, stop_handler); signal(SIGTERM, stop_handler);
+#ifndef _WIN32
     signal(SIGPIPE, SIG_IGN);
+#endif
     /* The hybrid engine is a Lumabri-only build copy. Its transport client
      * discovers resident Expert peers from this node's own control-plane
      * identity; Colibri sources and ordinary Colibri binaries stay untouched. */
-    setenv("LUMABRI_TRACKER", tracker, 1);
-    setenv("LUMABRI_MODEL", model, 1);
-    setenv("LUMABRI_EXEC_FALLBACK_LOCAL", "1", 1);
+    if (node_setenv("LUMABRI_TRACKER", tracker) ||
+        node_setenv("LUMABRI_MODEL", model) ||
+        node_setenv("LUMABRI_EXEC_FALLBACK_LOCAL", "1")) {
+        fprintf(stderr, "Cannot configure the accepted Segment environment\n"); return 1;
+    }
     /* The GLM Segment adapter is named "glm" while its long-standing Expert
      * wire family is "colibri". Every other adapter shares the same name.
      * Bits describe expert storage, not the activation/state representation. */
     const char *expert_engine_id = !strcmp(engine_id, "glm") ?
                                    "colibri" : engine_id;
-    setenv("LUMABRI_ENGINE_ID", expert_engine_id, 1);
-    setenv("LUMABRI_EXPERT_BITS",
+    if (node_setenv("LUMABRI_ENGINE_ID", expert_engine_id) ||
+        node_setenv("LUMABRI_EXPERT_BITS",
            (!strcmp(expert_engine_id, "colibri") ||
-            !strcmp(expert_engine_id, "inkling")) ? "8" : "0", 1);
-    if (fallback) (void)setpriority(PRIO_PROCESS, 0, 10);
+            !strcmp(expert_engine_id, "inkling")) ? "8" : "0")) {
+        fprintf(stderr, "Cannot configure the accepted expert environment\n"); return 1;
+    }
+    if (fallback) node_low_priority();
     if (threads)
         fprintf(stderr, "[segment-node] governor: %u compute thread%s · "
                         "%u session%s max%s\n", threads,
@@ -1529,7 +1653,7 @@ int main(int argc, char **argv) {
      * own environment and their normal code path. Retrying after a failed
      * RUN is unsafe because recurrent/attention state may already have moved. */
     if (!strcmp(engine_id, "deepseek_v4") && !getenv("V4_EXPERT_UNION")) {
-        setenv("V4_EXPERT_UNION", "0", 0);
+        if (node_setenv("V4_EXPERT_UNION", "0")) return 1;
         fprintf(stderr, "[segment-node] DeepSeek V4 batched expert union "
                         "disabled for Segment safety\n");
     }
@@ -1596,7 +1720,7 @@ int main(int argc, char **argv) {
         /* A desktop compute donation must lose scheduling contests to the
          * user's own applications. Server origins use --fallback, which
          * applies the same priority; explicit low-level nodes remain neutral. */
-        (void)setpriority(PRIO_PROCESS, 0, 10);
+        node_low_priority();
     }
     uint64_t process_limit = (uint64_t)memory_limit_mb << 20;
     uint64_t available = available_memory_bytes();
@@ -1670,7 +1794,7 @@ int main(int argc, char **argv) {
     atomic_init(&node.manual_draining,0);
     atomic_init(&node.committed_runs, 0);
     atomic_init(&node.expert_runs, 0);
-    for (size_t i = 0; i < NODE_CONNECTIONS_MAX; i++) node.connection_fds[i] = -1;
+    for (size_t i = 0; i < NODE_CONNECTIONS_MAX; i++) node.connection_fds[i] = LMB_INVALID_SOCKET;
     pthread_mutex_init(&node.sessions_lock, NULL);
     if (lmb_run_gate_init(&node.run_gate, 1, run_queue)) {
         fprintf(stderr, "cannot initialize Segment admission gate\n");
@@ -1832,7 +1956,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     g_listen_fd = lmb_home_take_listener((int)port);
-    if (g_listen_fd < 0) { perror("segment listen"); return 1; }
+    if (g_listen_fd == LMB_INVALID_SOCKET) { perror("segment listen"); return 1; }
     pthread_t registration_thread, reaper_thread, governor_thread, control_thread;
     if (pthread_create(&registration_thread, NULL, registration_worker,
                        registration)) {
@@ -1861,10 +1985,10 @@ int main(int argc, char **argv) {
     printf("[segment-node] %s %s layers %u:%u at %s (tracker %s)\n",
            engine_id, model, begin, end, advertise, tracker);
     fflush(stdout);
-    if (lmb_ready_notify()) { g_stop = 1; shutdown(g_listen_fd, SHUT_RDWR); }
+    if (lmb_ready_notify()) { g_stop = 1; node_socket_shutdown(g_listen_fd); }
     while (!g_stop) {
-        int fd = accept(g_listen_fd, NULL, NULL);
-        if (fd < 0) { if (g_stop) break; continue; }
+        LmbSocket fd = lmb_socket_accept(g_listen_fd, NULL, NULL);
+        if (fd == LMB_INVALID_SOCKET) { if (g_stop) break; continue; }
         if (lmb_secure_server(fd)) { lmb_close(fd); continue; }
         if (home_client_key && !lmb_secure_peer_matches(fd, home_client)) {
             lmb_close(fd); continue;
@@ -1872,7 +1996,7 @@ int main(int argc, char **argv) {
         lmb_set_io_timeout(fd, node.home_accelerator ? 1000 : lmb_env_int("LUMABRI_IO_TIMEOUT_MS",
                            LMB_DEFAULT_IO_TIMEOUT_MS, 100, 3600000));
         Connection *connection = malloc(sizeof *connection);
-        if (!connection) { close(fd); continue; }
+        if (!connection) { lmb_close(fd); continue; }
         connection->node = &node; connection->fd = fd;
         if (connection_add(&node, fd)) {
             free(connection); lmb_close(fd); continue;
@@ -1893,8 +2017,8 @@ int main(int argc, char **argv) {
     pthread_join(registration_thread, NULL);
     pthread_mutex_lock(&node.connections_lock);
     for (size_t i = 0; i < NODE_CONNECTIONS_MAX; i++)
-        if (node.connection_fds[i] >= 0)
-            shutdown(node.connection_fds[i], SHUT_RDWR);
+        if (node.connection_fds[i] != LMB_INVALID_SOCKET)
+            node_socket_shutdown(node.connection_fds[i]);
     while (node.active_connections)
         pthread_cond_wait(&node.connections_drained, &node.connections_lock);
     pthread_mutex_unlock(&node.connections_lock);
@@ -1920,3 +2044,20 @@ int main(int argc, char **argv) {
     pthread_mutex_destroy(&registration->lock);
     return 0;
 }
+
+#ifdef _WIN32
+int wmain(int argc, wchar_t **wide) {
+    char **argv=calloc((size_t)argc+1,sizeof *argv);
+    if (!argv) return 1;
+    int rc=1;
+    for (int i=0;i<argc;i++) {
+        int n=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,wide[i],-1,NULL,0,NULL,NULL);
+        if (!n || !(argv[i]=malloc((size_t)n)) ||
+            !WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,wide[i],-1,argv[i],n,NULL,NULL)) goto done;
+    }
+    rc=segment_node_main(argc,argv);
+done:
+    for (int i=0;i<argc;i++) free(argv[i]);
+    free(argv); return rc;
+}
+#endif

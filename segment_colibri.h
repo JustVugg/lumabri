@@ -35,6 +35,11 @@ _Static_assert(COLI_SEGMENT_CAP_BACKEND_MASK == LMB_EXEC_BACKEND_MASK &&
  * the other half, and tests/integration/model_family_test.sh keeps the two halves in step with
  * whatever Colibri exposes next. */
 static int lmb_colibri_register_all(void) {
+#ifdef LMB_SEGMENT_OLMOE_ONLY
+    /* Explicit native bring-up build: probing reports only the adapter
+     * actually linked. Ordinary household builds retain the full registry. */
+    return coli_olmoe_segment_adapter_register() || coli_olmoe_edge_adapter_register();
+#else
     return coli_glm_segment_adapter_register() ||
            coli_glm53_segment_adapter_register() ||
            coli_inkling_segment_adapter_register() ||
@@ -52,6 +57,7 @@ static int lmb_colibri_register_all(void) {
            coli_qwen38_edge_adapter_register() ||
            coli_deepseek_v4_edge_adapter_register() ||
            lmb_v41_adapter_register();
+#endif
 }
 
 /* Colibri's ABI is allowed to return a failure without writing the caller's

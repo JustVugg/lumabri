@@ -557,8 +557,11 @@ static void disc_compute_mark_legacy(const char *tracker) {
  * optional sideband must never hold a placement refresh for that long. */
 static int disc_compute_query(const char *tracker, const void *body,
                               uint32_t body_len, LmbMsg *reply) {
-    int fd = lmb_connect_ms_io(tracker, 2000, 2000);
-    if (fd < 0) return -1;
+    /* This translation unit owns its transport hooks. A standalone worker
+     * probes telemetry before routes_fetch has initialized them. */
+    if (lmb_secure_init()) return -1;
+    LmbSocket fd = lmb_connect_ms_io(tracker, 2000, 2000);
+    if (fd == LMB_INVALID_SOCKET) return -1;
     int rc = lmb_auth(fd);
     if (!rc) rc = lmb_send(fd, LMB_SEG_COMPUTE_GET, body, body_len, NULL, 0);
     if (!rc) rc = lmb_recv(fd, reply);
@@ -647,8 +650,8 @@ static int disc_same_route(const LmbSegRouteEntry *a,
 
 static uint64_t disc_probe_us(const char *addr) {
     uint64_t before = disc_now_ms();
-    int fd = lmb_connect_ms_io(addr, 250, 250);
-    if (fd < 0) return 0;
+    LmbSocket fd = lmb_connect_ms_io(addr, 250, 250);
+    if (fd == LMB_INVALID_SOCKET) return 0;
     LmbMsg reply = {0};
     int bad = lmb_send(fd, LMB_PING, NULL, 0, NULL, 0) ||
               lmb_recv(fd, &reply) || reply.op != LMB_OK;

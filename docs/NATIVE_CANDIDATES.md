@@ -81,8 +81,16 @@ The latest measured speed is historical, not a guarantee for the next turn.
   TCP listener handoff also have native process tests, including incomplete
   replies, stale mutations and a mismatched port. Listener handoff uses
   Winsock duplication for the owned child; it never rebinds a released port.
-  The production worker and donor startup still need to be connected before
-  these components constitute a native household deployment.
+  The production `segment_node.exe` now uses these controls and the same
+  encrypted Segment protocol. Its developer build explicitly links OLMoE
+  only; capability queries do not advertise unlinked adapters. An approved
+  process budget sets its Windows working-set allowance, while owned page
+  locks, input sealing and the process guard enforce residence. No system-wide
+  memory limit is changed. A native test compares 72 generated tokens with a
+  local Colibri oracle across separate conversations and drain/resume/retire.
+  That test uses a signed lease fixture; a separate Windows/Linux loopback
+  test also exercises the production tracker and Linux Edge. Donor approvals,
+  household TUI startup and packaging still need to connect this worker.
 - The native `lumabri.exe` control entrypoint can now start, inspect, restart
   and stop the private background manager with `service`, and report the
   Windows machine inventory with `machine --json`. The shared manager loop
@@ -129,6 +137,21 @@ The latest measured speed is historical, not a guarantee for the next turn.
   Failure does not justify assuming a disconnected donor's RAM was released.
 
 ## Building and testing a candidate
+
+The native Windows worker developer gate requires MinGW-w64/UCRT and the
+same pinned Colibri sources. It downloads no checkpoint and does not install
+services. From a native build shell, with an existing four-layer tiny OLMoE
+checkpoint:
+
+```sh
+python tools/build_windows_segment.py --engine /path/to/colibri/c --only inference
+build/windows-segment/test_segment_worker_windows.exe C:/absolute/path/to/segment_node.exe C:/absolute/path/to/tiny-olmoe selftest
+```
+
+The worker executable is also in `build/windows-segment`. The test launches
+it in an owned process job, uses disposable local identities and ports, and
+releases its resources on exit. This is a worker acceptance gate, not a
+Windows household installer or a speed benchmark.
 
 Build Colibri from the pinned checkout used by CI, without editing it. Build
 `make household swarm_probe ENGINE=/path/to/colibri/c`. For a macOS candidate,
