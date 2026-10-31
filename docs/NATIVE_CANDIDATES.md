@@ -88,6 +88,19 @@ The latest measured speed is historical, not a guarantee for the next turn.
   locks, input sealing and the process guard enforce residence. No system-wide
   memory limit is changed. A native test compares 72 generated tokens with a
   local Colibri oracle across separate conversations and drain/resume/retire.
+- Native Windows worker preparation can receive a signed checkpoint from the
+  approved LAN source without preinstalling its weight files. Bounded metadata
+  and safetensors headers are materialized in private sparse files; engine
+  weight reads use verified chunks directly from the source. The input bridge
+  rejects Windows path aliases, wrong signing keys, altered chunks and unknown
+  file handles, then closes network input after resident preparation. Its
+  eight-chunk cache is temporary and is released before readiness. This is a
+  worker developer gate, not yet the donor approval/TUI integration or a Windows
+  household package; the gate compares 72 tokens against the local oracle and
+  checks that generation makes no further source reads. Native engine builds
+  embed a [process-local UTF-8 code-page manifest](https://learn.microsoft.com/en-us/windows/win32/sbscs/application-manifests#activecodepage)
+  (Windows 10 version 1903 or newer); preparation is exercised in a path with
+  spaces and non-ASCII text.
   That test uses a signed lease fixture; a separate Windows/Linux loopback
   test also exercises the production tracker and Linux Edge. Donor approvals,
   household TUI startup and packaging still need to connect this worker.

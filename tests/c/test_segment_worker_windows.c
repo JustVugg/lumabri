@@ -13,10 +13,11 @@ int wmain(int argc,wchar_t **wide) {
     assert(WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,wide[1],-1,binary,sizeof binary,NULL,NULL));
     assert(WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,wide[2],-1,model,sizeof model,NULL,NULL));
     assert(WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,wide[3],-1,tracker,sizeof tracker,NULL,NULL));
-    int selftest=!strcmp(tracker,"selftest");
+    int remote=!strcmp(tracker,"remote-selftest");
+    int selftest=remote || !strcmp(tracker,"selftest");
     wchar_t temp[2048],folder[2304];
     assert(GetTempPathW(2048,temp));
-    assert(swprintf(folder,2304,L"%lslumabri-worker-%lu-%llu",temp,
+    assert(swprintf(folder,2304,L"%lslumabri worker \x00e8\x03a9-%lu-%llu",temp,
         (unsigned long)GetCurrentProcessId(),(unsigned long long)GetTickCount64())>0);
     assert(CreateDirectoryW(folder,NULL));
     char directory[6144],key[6400],known[6400];
@@ -36,7 +37,7 @@ int wmain(int argc,wchar_t **wide) {
         assert(!_putenv_s("LUMABRI_ENCRYPT","1") && !_putenv_s("LUMABRI_TOKEN","native-worker-test"));
         assert(!lmb_secure_init() && lmb_secure_enabled());
         assert(!coli_olmoe_edge_adapter_register() && !coli_olmoe_segment_adapter_register());
-        fixture_start(&fixture,tracker,sizeof tracker);
+        fixture_start(&fixture,tracker,sizeof tracker,remote ? model : NULL);
     }
     LmbSocket listener=lmb_listen(0);
     assert(listener!=LMB_INVALID_SOCKET);
@@ -51,12 +52,19 @@ int wmain(int argc,wchar_t **wide) {
         {"LUMABRI_NODE_CONTROL_HANDLE",control[1]}, {"LUMABRI_READY_HANDLE",ready}};
     char port_text[16],address[64];
     snprintf(port_text,sizeof port_text,"%d",port);snprintf(address,sizeof address,"127.0.0.1:%d",port);
-    const char *args[]={"--engine","olmoe","--model-dir",model,"--model","native-worker-olmoe",
+    char placeholder[6400],signer[65],root[65],size_text[32];
+    if (remote) {
+        snprintf(placeholder,sizeof placeholder,"%s\\checkpoint",directory);
+        lmb_hex(signer,fixture.checkpoint.key,32);lmb_hex(root,fixture.checkpoint.root,32);
+        snprintf(size_text,sizeof size_text,"%llu",(unsigned long long)fixture.checkpoint.bytes);
+    }
+    const char *args[]={"--engine","olmoe","--model-dir",remote ? placeholder : model,"--model","native-worker-olmoe",
         "--range","0:4","--port",port_text,"--tracker",tracker,"--advertise",address,
-        "--name","windows-worker","--model-root","1111111111111111111111111111111111111111111111111111111111111111",
+        "--name","windows-worker","--model-root",remote ? root : "1111111111111111111111111111111111111111111111111111111111111111",
         "--tokenizer-root","2222222222222222222222222222222222222222222222222222222222222222",
-        "--context","64","--max-rows","16","--sessions","1","--threads","1","--memory-limit-mb","128"};
-    LmbProcessLaunch launch={.binary=binary,.args=args,.nargs=sizeof args/sizeof *args,
+        "--context","64","--max-rows","16","--sessions","1","--threads","1","--memory-limit-mb","128",
+        "--checkpoint-signer",signer,"--model-bytes",size_text,"--model-layers","4"};
+    LmbProcessLaunch launch={.binary=binary,.args=args,.nargs=sizeof args/sizeof *args-(remote ? 0 : 6),
         .environment=environment,.nenvironment=sizeof environment/sizeof *environment,
         .handles=handles,.nhandles=sizeof handles/sizeof *handles,
         .output=GetStdHandle(STD_ERROR_HANDLE),.error=GetStdHandle(STD_ERROR_HANDLE)};
@@ -73,6 +81,7 @@ int wmain(int argc,wchar_t **wide) {
         lmb_owned_process_stop(&child,0,3000);lmb_owned_process_close(&child);return 1;
     }
     lmb_socket_close(listener);CloseHandle(listener_pipe[0]);CloseHandle(ready);
+    uint64_t preparation_reads=remote ? atomic_load(&fixture.checkpoint.reads) : 0;
     uint8_t request[LMB_NODE_CONTROL_REQUEST_BYTES],reply[LMB_NODE_CONTROL_REPLY_BYTES];
     LmbNodeControl current;
     lmb_node_control_request(request,LMB_NODE_CONTROL_QUERY,NULL);
@@ -108,6 +117,17 @@ int wmain(int argc,wchar_t **wide) {
     if (selftest) {
         atomic_store(&fixture.stop,1);pthread_join(fixture.thread,NULL);
         lmb_close(fixture.listener);CloseHandle(fixture.registered);pthread_mutex_destroy(&fixture.lock);
+        if (remote) {
+            assert(preparation_reads && atomic_load(&fixture.checkpoint.reads)==preparation_reads);
+            for (uint32_t i=0;i<fixture.checkpoint.count;i++) {
+                char file[8192];wchar_t wide_file[8192];
+                assert(snprintf(file,sizeof file,"%s/%s",placeholder,fixture.checkpoint.items[i].path)<(int)sizeof file);
+                assert(MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,file,-1,wide_file,8192));
+                (void)DeleteFileW(wide_file);
+            }
+            wchar_t wide_folder[8192];assert(MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,placeholder,-1,wide_folder,8192));
+            (void)RemoveDirectoryW(wide_folder);checkpoint_fixture_free(&fixture.checkpoint);
+        }
     }
     wchar_t path[2400];
     swprintf(path,2400,L"%ls\\worker.key",folder);DeleteFileW(path);

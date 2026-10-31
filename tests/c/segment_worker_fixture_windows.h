@@ -9,6 +9,7 @@
 #include "segment_runtime.h"
 #include "segment_adapters.h"
 #include <math.h>
+#include "checkpoint_fixture_windows.h"
 
 typedef struct {
     LmbSocket listener;
@@ -18,6 +19,7 @@ typedef struct {
     atomic_int stop;
     LmbSegAdvert advert;
     LmbSegOwner owner;
+    CheckpointFixture checkpoint;
 } WorkerFixture;
 
 static void *fixture_tracker(void *opaque) {
@@ -44,7 +46,9 @@ static void *fixture_tracker(void *opaque) {
                 assert(!lmb_send(fd,LMB_OK,NULL,0,NULL,0));
             } else {
                 assert(authed[i]);
-                if (m.op==LMB_CHALLENGE) {
+                if (f->checkpoint.count && checkpoint_fixture_reply(&f->checkpoint,fd,&m)) {
+                    /* Manifest and bytes come from this test-only source. */
+                } else if (m.op==LMB_CHALLENGE) {
                     lmb_random(nonce[i],32);challenged[i]=1;
                     assert(!lmb_send(fd,LMB_CHALLENGE_R,nonce[i],32,NULL,0));
                 } else if (m.op==LMB_SEG_REGISTER) {
@@ -75,7 +79,7 @@ static void *fixture_tracker(void *opaque) {
     return NULL;
 }
 
-static void fixture_start(WorkerFixture *f,char *address,size_t cap) {
+static void fixture_start(WorkerFixture *f,char *address,size_t cap,const char *checkpoint) {
     memset(f,0,sizeof *f);atomic_init(&f->stop,0);pthread_mutex_init(&f->lock,NULL);
     f->registered=CreateEventW(NULL,TRUE,FALSE,NULL);assert(f->registered);
     f->owner.lease_id.bytes[0]=7;f->owner.fencing_epoch=3;f->owner.route_generation=5;
@@ -83,6 +87,10 @@ static void fixture_start(WorkerFixture *f,char *address,size_t cap) {
     struct sockaddr_in bound;LmbSocketLength size=sizeof bound;
     assert(!getsockname(f->listener,(struct sockaddr *)&bound,&size));
     snprintf(address,cap,"127.0.0.1:%u",ntohs(bound.sin_port));
+    if (checkpoint) {
+        checkpoint_fixture_init(&f->checkpoint,"native-worker-olmoe");
+        strcpy(f->checkpoint.address,address);checkpoint_fixture_load(&f->checkpoint,checkpoint);
+    }
     assert(!pthread_create(&f->thread,NULL,fixture_tracker,f));
 }
 

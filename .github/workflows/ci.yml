@@ -104,6 +104,12 @@ jobs:
         run: |
           set -o pipefail
           ./build/windows-segment/test_segment_worker_windows.exe "$(cygpath -w "$PWD/build/windows-segment/segment_node.exe")" "$(cygpath -w "$PWD/build/fixture")" selftest 2>&1 | tee -a build/windows-segment-evidence.log
+      - name: Receive verified checkpoint input and run with resident weights
+        run: |
+          set -o pipefail
+          ./build/windows-segment/test_checkpoint_windows.exe 2>&1 | tee -a build/windows-segment-evidence.log
+          ./build/windows-segment/test_checkpoint_windows.exe --invalid-handle 2>&1 | tee -a build/windows-segment-evidence.log
+          ./build/windows-segment/test_segment_worker_windows.exe "$(cygpath -w "$PWD/build/windows-segment/segment_node.exe")" "$(cygpath -w "$PWD/build/fixture")" remote-selftest 2>&1 | tee -a build/windows-segment-evidence.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
