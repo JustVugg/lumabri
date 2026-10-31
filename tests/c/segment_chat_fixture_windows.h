@@ -53,7 +53,7 @@ static void native_chat_start(NativeChatFixture *c,const char *binary,const char
     const char *args[]={"--engine","olmoe","--model-dir",checkpoint,"--model","native-worker-olmoe",
         "--tracker",tracker,"--model-root",root,"--tokenizer-root",
         "2222222222222222222222222222222222222222222222222222222222222222",
-        "--context","64","--max-rows","1","--direct-only",
+        "--context","512","--max-rows","1","--direct-only",
         "--checkpoint-signer",signer,"--model-bytes",bytes,
         "--prompt-ids","1","--tokens","24","--expect-ids",expected,"--json"};
     size_t nargs=sizeof args/sizeof *args;
@@ -67,7 +67,7 @@ static void native_chat_start(NativeChatFixture *c,const char *binary,const char
 }
 static void native_chat_turn(NativeChatFixture *c,unsigned id,unsigned slot,char *out,size_t *size,int cancel) {
     /* Embedded LF and control-Z are bytes, not a CRT line or EOF marker. */
-    char command[128];int n=snprintf(command,sizeof command,"SUBMIT %u %u 5 %u 0 1\nhi\n\x1a?\n",id,slot,cancel ? 4096 : 8);
+    char command[128];int n=snprintf(command,sizeof command,"SUBMIT %u %u 5 %u 0 1\nhi\n\x1a?\n",id,slot,cancel ? 256 : 8);
     native_chat_write(c,command,(size_t)n);*size=0;
     char line[2048];native_chat_line(c,line,sizeof line);
     snprintf(command,sizeof command,"ACCEPT %u",id);assert(!strcmp(line,command));

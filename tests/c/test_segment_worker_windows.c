@@ -63,7 +63,7 @@ int wmain(int argc,wchar_t **wide) {
         "--range","0:4","--port",port_text,"--tracker",tracker,"--advertise",address,
         "--name","windows-worker","--model-root",remote ? root : "1111111111111111111111111111111111111111111111111111111111111111",
         "--tokenizer-root","2222222222222222222222222222222222222222222222222222222222222222",
-        "--context","64","--max-rows","16","--sessions",argc==5 ? "2" : "1","--threads","1","--memory-limit-mb","128",
+        "--context",argc==5 ? "512" : "64","--max-rows","16","--sessions",argc==5 ? "2" : "1","--threads","1","--memory-limit-mb","128",
         "--checkpoint-signer",signer,"--model-bytes",size_text,"--model-layers","4"};
     LmbProcessLaunch launch={.binary=binary,.args=args,.nargs=sizeof args/sizeof *args-(remote ? 0 : 6),
         .environment=environment,.nenvironment=sizeof environment/sizeof *environment,
