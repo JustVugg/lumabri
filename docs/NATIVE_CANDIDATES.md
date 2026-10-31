@@ -109,8 +109,8 @@ The latest measured speed is historical, not a guarantee for the next turn.
   observes existing keepers without replaying approvals. Its native acceptance
   test starts eight clients concurrently, closes the launchers, restarts and
   crashes the manager, and verifies that a separate keeper retains its state.
-  This is a developer control entrypoint, not a connected Windows household
-  TUI or a complete Windows package. Build it with
+  This is a developer control entrypoint, not a complete Windows household
+  package. Build it with
   `python tools/build_windows_segment.py --only contracts`; the executable is
   in `build/windows-segment`. Unsupported commands fail explicitly.
 - The native donor keeper now accepts encrypted household offers and waits
@@ -125,11 +125,10 @@ The latest measured speed is historical, not a guarantee for the next turn.
   one without interrupting the other, and checks that inference makes no further
   checkpoint-source reads. Separate tests check inherited lifetime fences,
   missing/corrupt evidence and receipt replay.
-  This developer entry currently accepts `donor --join HOST:PORT --ram-gb N
-  --headless`, with the household key in `LUMABRI_TOKEN`. It requires a reachable
-  authenticated tracker and approval through private service IPC. Discovery,
-  the household TUI, repeat policies, native Edge hosting and a complete Windows
-  package are not delivered by this gate. Unsupported Edge/Hybrid or model
+  This developer entry requires a reachable authenticated tracker and owner
+  approval. The native screen and signed inventory are described below.
+  Repeat policies, native Edge hosting and a complete Windows package are
+  not delivered by this gate. Unsupported Edge/Hybrid or model
   allocations are explicitly refused; registering adapters is not sufficient
   to claim their native execution.
 - Native engine ownership requires Windows 10 version 1607 or later. The
@@ -144,7 +143,7 @@ The latest measured speed is historical, not a guarantee for the next turn.
   model review, resize and Ctrl-C, and checks restoration of console modes and
   code pages. Checkpoint inspection accepts UTF-8 paths and 64-bit file extents;
   its Windows gate verifies bounded reads of a sparse shard larger than 4 GiB.
-  These gates do not replace the pending complete donor/service integration.
+  These gates do not replace native chat hosting and final package validation.
 - Native Windows inventory uses physical/available RAM bounded by commit and
   visible Job Object limits, processor affinity, physical cores, NUMA, DXGI
   hardware detection and free disk space. A shared job memory ceiling uses the
@@ -238,3 +237,28 @@ fresh approvals. `service restart` alone leaves old keepers and engines alive.
 `make install-household PREFIX=/your/prefix` is the strict install target:
 all required services must build, not just the TUI. The older general install
 target remains available for existing Expert/public-network deployments.
+
+### Native donor screen and signed inventory
+
+In the developer build, `lumabri donor --join HOST:PORT --ram-gb N` starts
+sharing and opens the same C approval screen used on Unix. Set the household
+key in `LUMABRI_TOKEN` before starting. `--headless` starts just the keeper;
+`lumabri share` reopens its approval screen. Arrow keys select Accept or
+Decline; Enter confirms. Esc detaches without unloading, `x` releases the
+selected model and `s` stops sharing. Repeat-load policies are not offered
+in this native build.
+
+The keeper publishes authenticated, signed machine observations independently
+of the view, including available budget, runtime identity, thread capacity,
+reserved memory and compute queue. Inventory wire version 6 adds exact adapter
+roles. Update the tracker and requester together: older trackers reject the
+new report. Updated readers still accept version 3–5 observations with unknown
+roles. Native Windows advertises only OLMoE Segment on CPU; it cannot be selected
+as Edge or Hybrid, and unavailable roles never become available just because
+there is spare RAM. This is not a GPU execution claim.
+
+The Windows gate drives the real `lumabri.exe` through ConPTY, approves a
+resident allocation, checks resize handling, detaches and reopens with the same
+worker still alive. Signed inventory, independent model release and 72 oracle
+matches are checked in that same isolated deployment. This covers the donor
+workflow; native household setup, chat hosting and final packaging are separate.

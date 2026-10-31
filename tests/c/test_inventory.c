@@ -73,14 +73,28 @@ int main(int argc, char **argv) {
     LmbCur cur = {b.p, b.len, 0}; LmbMachineReport got;
     assert(!lmb_inventory_unpack(&cur, &got) && got.runtime_threads == 2 &&
            !strcmp(got.runtime_id, r.runtime_id));
+    r.roles.known=1;strcpy(r.roles.segment,"olmoe,qwen38");
+    LmbBuf roles={0};assert(!lmb_inventory_pack(&roles,&r) && !decode(&roles));
+    LmbCur roles_cur={roles.p,roles.len,0};LmbMachineReport supported;
+    assert(!lmb_inventory_unpack(&roles_cur,&supported));
+    assert(lmb_runtime_role_allows(&supported.roles,"olmoe",0,0));
+    assert(!lmb_runtime_role_allows(&supported.roles,"olmoe",1,0));
+    assert(!lmb_runtime_role_allows(&supported.roles,"qwen3",0,0));
+    assert(!lmb_runtime_role_allows(&supported.roles,"olmoe",0,1));free(roles.p);
+    strcpy(r.roles.segment,"olmoe,,qwen38");roles=(LmbBuf){0};
+    assert(!lmb_inventory_pack(&roles,&r) && decode(&roles));free(roles.p);
+    r.roles=(LmbRuntimeRoles){0};
     /* V4 has no workload observations; V3 has no optional facts either. */
+    b.p[0] = 5; b.len -= 10; /* V6 empty role extension. */
+    cur = (LmbCur){b.p, b.len, 0};
+    assert(!lmb_inventory_unpack(&cur, &got) && !got.roles.known && cur.off == cur.len);
     b.p[0] = 4; b.len -= 60;
     cur = (LmbCur){b.p, b.len, 0};
     assert(!lmb_inventory_unpack(&cur, &got) && !got.workload.known && cur.off == cur.len);
     b.p[0] = 3; b.len -= 24;
     cur = (LmbCur){b.p, b.len, 0};
     assert(!lmb_inventory_unpack(&cur, &got) && !got.facts.known && got.machine.load_one < 0 && cur.off == cur.len);
-    b.p[0] = 5; b.len += 84;
+    b.p[0] = 6; b.len += 94;
     for (size_t i = 0; i < b.len; i++) {
         LmbBuf cut = b; cut.len = i; assert(decode(&cut));
     }

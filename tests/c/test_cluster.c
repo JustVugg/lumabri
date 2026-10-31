@@ -46,6 +46,19 @@ int main(void) {
     CHECK(lmb_plan_cluster(NULL, overflow_nodes, 1, 4096, 1, LMB_GOAL_ONE_SESSION, &p),
           "NULL shape accepted");
 
+    /* A Segment-only runtime must never win Edge simply because it has
+     * the largest RAM pool. A different family cannot consume its memory. */
+    strcpy(m.segment_id,"deepseek_v4");
+    LmbClusterNode roles[2]={node("host",80,0),node("segment-only",100,0)};
+    roles[1].roles.known=1;strcpy(roles[1].roles.segment,"deepseek_v4");
+    CHECK(!lmb_plan_cluster(&m,roles,2,512,1,LMB_GOAL_ONE_SESSION,&p) && p.edge_node==0,
+        "Segment-only donor selected for Edge");
+    strcpy(roles[1].roles.segment,"olmoe");
+    CHECK(!lmb_plan_cluster(&m,roles,2,512,1,LMB_GOAL_ONE_SESSION,&p) && p.nslices==1 && p.state==LMB_PLAN_UNRUNNABLE,
+        "unsupported family borrowed native donor RAM");
+    roles[0].roles.known=1;strcpy(roles[0].roles.segment,"deepseek_v4");
+    CHECK(lmb_plan_cluster(&m,roles,2,512,1,LMB_GOAL_ONE_SESSION,&p),"no Edge runtime still yielded a plan");
+
     /* A realistic house: four computers, 96 GB between them, against a model
      * that needs about 150. It does not fit, and the plan has to SAY it does
      * not fit rather than produce a split that would fail on first use. */
