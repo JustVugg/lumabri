@@ -18,6 +18,7 @@ def main():
     parser.add_argument('--cc',default='gcc')
     parser.add_argument('--ar',default='ar')
     parser.add_argument('--nm',default='nm')
+    parser.add_argument('--windres',help='defaults to the windres matching --cc')
     args=parser.parse_args()
     if args.only != 'contracts' and not args.engine:
         parser.error('--engine is required for inference builds')
@@ -29,6 +30,9 @@ def main():
         subprocess.run([str(v) for v in command],cwd=root,check=True)
     flags=['-I'+str(root),'-I'+str(source),'-O2','-Wall','-Wextra',
            '-D_FILE_OFFSET_BITS=64','-D_WIN32_WINNT=0x0A00']
+    resource=output/'windows_manifest.o'
+    windres=args.windres or (args.cc[:-3]+'windres' if args.cc.endswith('gcc') else 'windres')
+    run([windres,'-I',root,root/'src/platform/lumabri_windows.rc','-O','coff','-o',resource])
     run([args.cc,*flags,'-Werror','-municode',root/'tests/c/test_owned_process_windows.c',
          '-static','-o',output/'test_owned_process_windows.exe'])
     if args.only != 'contracts':
@@ -55,22 +59,28 @@ def main():
         archive=output/'liblumabri_windows_olmoe.a'
         run([args.ar,'rcs',archive,*objects])
         run([sys.executable,'tools/check_engine_memory.py',archive,'--nm',args.nm,'--windows-input'])
-        run([args.cc,*flags,'-Werror',root/'tests/c/test_segment_windows.c',archive,
+        run([args.cc,*flags,'-Werror',root/'tests/c/test_segment_windows.c',resource,archive,
              '-static','-lwinpthread','-lpsapi','-lm','-o',output/'test_segment_windows.exe'])
         print('Native inference gate:',output/'test_segment_windows.exe')
         libraries=['-static','-lwinpthread','-lws2_32','-lbcrypt','-liphlpapi',
                    '-lpsapi','-ladvapi32','-ldxgi','-ldxguid','-lm']
         protocol=[root/'lumabri_segment.c',root/'lumabri_segment_discovery.c']
+        native_input=output/'checkpoint_windows.o'
+        run([args.cc,*flags,'-Werror','-Wno-unused-function',
+             '-c',root/'src/runtime/lumabri_checkpoint_windows.c','-o',native_input])
         run([args.cc,*flags,'-Werror','-DLMB_SEGMENT_OLMOE_ONLY','-include',memory,'-municode',
              root/'segment_node.c',*protocol,root/'lumabri_machine.c',root/'lumabri_run_gate.c',
-             archive,*libraries,'-o',output/'segment_node.exe'])
+             native_input,resource,archive,*libraries,'-o',output/'segment_node.exe'])
         run([args.cc,*flags,'-Werror','-Wno-unused-function','-municode',
-             root/'tests/c/test_segment_worker_windows.c',*protocol,archive,*libraries,
+             root/'tests/c/test_segment_worker_windows.c',*protocol,resource,archive,*libraries,
              '-o',output/'test_segment_worker_windows.exe'])
+        run([args.cc,*flags,'-Werror','-Wno-unused-function',
+             root/'tests/c/test_checkpoint_windows.c',native_input,resource,archive,*libraries,
+             '-o',output/'test_checkpoint_windows.exe'])
     if args.only == 'inference':
         return
     run([args.cc,*flags,'-Werror','-Wno-unused-function','-Wno-unused-variable','-municode',
-         root/'lumabri.c',root/'lumabri_machine.c','-static','-lwinpthread','-lws2_32',
+         root/'lumabri.c',root/'lumabri_machine.c',resource,'-static','-lwinpthread','-lws2_32',
          '-lbcrypt','-liphlpapi','-lpsapi','-ladvapi32','-ldxgi','-ldxguid',
          '-o',output/'lumabri.exe'])
     run([args.cc,*flags,'-Werror','-Wno-unused-function','-municode',

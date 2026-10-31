@@ -20,6 +20,9 @@
 #include "src/runtime/lumabri_compute_broker.h"
 #include "src/runtime/lumabri_node_control.h"
 #include "src/runtime/lumabri_thread_capacity.h"
+#ifdef _WIN32
+#include "src/runtime/lumabri_checkpoint_windows.h"
+#endif
 
 #include <pthread.h>
 #include <dirent.h>
@@ -1391,7 +1394,8 @@ static void usage(const char *program) {
         "[--fallback] [--relay-only] [--context N] [--max-rows N] "
         "[--sessions N] [--threads N] [--run-queue N] [--run-wait-ms N] "
         "[--memory-limit-mb N] "
-        "[--model-bytes N --model-layers N] [--preflight-fd N]\n",
+        "[--model-bytes N --model-layers N] [--preflight-fd N] "
+        "[--checkpoint-signer HEX64 (native Windows)]\n",
         program);
 }
 
@@ -1745,6 +1749,23 @@ int main(int argc, char **argv) {
                 "to %.1f GB (available RAM %.1f GB minus system reserve %.1f GB)\n",
                 (double)requested_limit / 1e9, (double)process_limit / 1e9,
                 (double)available / 1e9, (double)reserve / 1e9);
+    const char *checkpoint_signer=arg_value(argc,argv,"--checkpoint-signer");
+    if (checkpoint_signer) {
+#ifdef _WIN32
+        uint8_t signer[32];
+        if (auto_identity || auto_range || !model_bytes || !memory_limit_mb ||
+            !lmb_resident_required() || strlen(checkpoint_signer)!=64 ||
+            lmb_unhex(signer,checkpoint_signer,32) ||
+            lmb_checkpoint_windows_prepare(model_dir,tracker,model,signer,
+                                           resolved_model_root,model_bytes)) {
+            fprintf(stderr,"[segment-node] cannot prepare the approved signed checkpoint\n");
+            preflight_signal(&preflight_fd,'F');return 3;
+        }
+#else
+        fprintf(stderr,"--checkpoint-signer is only supported by the native Windows input bridge\n");
+        preflight_signal(&preflight_fd,'F');return 2;
+#endif
+    }
     /* The runtime preflight must be conservative. The generic catalogue
      * arithmetic is not an adapter contract and cannot authorize a smaller
      * allocation; in particular setting a "disk" environment flag did not
@@ -2047,6 +2068,10 @@ int main(int argc, char **argv) {
 
 #ifdef _WIN32
 int wmain(int argc, wchar_t **wide) {
+    if (GetACP()!=CP_UTF8) {
+        fprintf(stderr,"Native Segment requires the UTF-8 runtime manifest and Windows 10 version 1903 or newer\n");
+        return 2;
+    }
     char **argv=calloc((size_t)argc+1,sizeof *argv);
     if (!argv) return 1;
     int rc=1;

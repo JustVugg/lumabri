@@ -1,0 +1,2 @@
+/* Embedded process-local UTF-8 file API policy, not a machine setting. */
+1 24 "src/platform/lumabri_windows.manifest"
