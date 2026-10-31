@@ -420,7 +420,7 @@ async def exercise(port, alice, bob, artifacts, env):
                     "gpu_detected": 1, "vram_inventory_bytes": 8 * 2**30,
                     "workload": {"allocations": 2, "reserved_bytes": 10 * 2**30, "active": 1, "queued": 2},
                     "machine_cost": None, "power": None}],
-                "models": [{"name": "OLMoE", "adapter": "olmoe", "replicas": 2,
+                "models": [{"id": MODEL, "name": "OLMoE", "adapter": "olmoe", "replicas": 2,
                     "context": 4096, "max_tokens": 256, "revision": 3}],
                 "allocations": [{"id": MODEL, "name": "OLMoE · approved allocation", "adapter": "olmoe",
                     "context": 4096, "session_limit": 4, "preparation_seconds": 12.5,
@@ -428,6 +428,21 @@ async def exercise(port, alice, bob, artifacts, env):
                     "ranges": [{"node": "node-a", "begin": 0, "end": 16, "edge": True,
                         "reserved_bytes": 10 * 2**30, "report_present": True}]}]})
         await page.route("**/api/v1/workspace", workspace_fixture)
+        routing_online = True
+        async def routing_fixture(route):
+            if not routing_online:
+                await route.fulfill(status=503, json={"error": "routing_observation_unavailable"})
+                return
+            await route.fulfill(json={"schema": 1, "model": MODEL, "revision": 3,
+                "captured_at": int(time.time()), "policy": "latency-aware",
+                "reason": "recent_workload_observations", "inventory_ok": True,
+                "scope": "preference_snapshot_not_admission", "replicas": [
+                    {"allocation": MODEL, "rank": 1, "operator_position": 2, "plan_matches": True,
+                     "load": {"nodes": 1, "max_pending_turns": 2, "total_pending_turns": 2, "oldest_report_ms": 100},
+                     "timing": {"observed_ttft_seconds": .125, "source": "real_session", "prompt_tokens": 4, "generated_tokens": 8}},
+                    {"allocation": "02" * 32, "rank": 2, "operator_position": 1, "plan_matches": None,
+                     "load": None, "timing": None}]})
+        await page.route("**/api/v1/routing/" + MODEL, routing_fixture)
         await page.locator("#workspace-open").click()
         await expect(page.locator("#workspace")).to_be_visible()
         await expect(page.locator("#workspace-nodes")).to_contain_text("2 queued")
@@ -437,6 +452,14 @@ async def exercise(port, alice, bob, artifacts, env):
         await expect(page.locator("#workspace-allocations")).to_contain_text("120 ms / 900 ms")
         assert await page.locator("#workspace script").count() == 0
         assert await page.locator(".allocation-actions button:visible").count() == 0, "read-only operator got mutation controls"
+        await page.get_by_role("button", name="Inspect routing", exact=True).click()
+        await expect(page.locator(".routing-observation")).to_contain_text("Preference 1 · replica 2")
+        await expect(page.locator(".routing-observation")).to_contain_text("0.125s")
+        await expect(page.locator(".routing-observation")).to_contain_text("Unknown or expired")
+        routing_online = False
+        await page.get_by_role("button", name="Inspect routing", exact=True).click()
+        await expect(page.locator(".routing-observation")).to_contain_text("Routing observations unavailable")
+        assert "0.125s" not in await page.locator(".routing-observation").inner_text()
         await page.screenshot(path=str(artifacts / "web-workspace.png"))
         # Real credential-bound management grant; explicit transport fixture
         # below exercises browser confirmation and exact uint64 fences. The

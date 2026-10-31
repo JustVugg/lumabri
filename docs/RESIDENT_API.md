@@ -383,6 +383,28 @@ resident and their computers still incur costs. It has no performance SLO.
 Missing/mixed-currency prices restore the operator's order. Gateway logs state
 which preference and evidence were used; normal users cannot change policy.
 
+An operator can inspect the same routing evidence without opening a chat:
+
+```sh
+./lumabri api model-routing MODEL_ID
+```
+
+The command emits JSON. `GET /api/v1/routing/MODEL_ID` exposes the same snapshot
+to a bearer token with an operator grant. In **Computers & models**, choose
+**Inspect routing** on a managed model. No management or inference grant is
+added by this read-only operation.
+
+The snapshot includes the model revision, policy, preference order, reason,
+matched saved plans, pending compute turns and report ages, recent matching
+TTFT/decode observations, and declared whole-machine costs when supplied.
+Missing or expired measurements are `null`. Individually valid timings can
+still be incomparable across replicas; `reason` explains which evidence
+actually determined the ordering. Costs are declared prices, not measured
+savings. The scope is `preference_snapshot_not_admission`: it does not reserve
+capacity, connect to an engine or prove that the first replica is healthy.
+The next request rechecks permissions and live admission. Web snapshots show
+their capture time and are cleared on workspace refresh or a failed inspection.
+
 Completed turns retain up to sixteen exact-configuration observations per
 checkpoint in private fixed-size slots, at most 512 KiB plus a 32 KiB temporary
 record. New configurations replace the oldest slot; an older delayed writer

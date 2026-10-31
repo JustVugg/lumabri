@@ -409,6 +409,34 @@ function workspaceCard(parent, title, facts) {
   }
   card.append(list); parent.append(card); return card;
 }
+async function inspectRouting(model, card, button, detail) {
+  if (!operator || !workspaceOpen || !/^[0-9a-f]{64}$/.test(model.id)) return;
+  const epoch = workspaceEpoch, credential = token;
+  button.disabled = true; detail.replaceChildren(); detail.textContent = "Reading routing observations…";
+  try {
+    const data = await request(`/api/v1/routing/${model.id}`);
+    if (epoch !== workspaceEpoch || credential !== token || !workspaceOpen || !card.isConnected) return;
+    detail.replaceChildren();
+    const note = document.createElement("p");
+    note.textContent = `${data.policy} · ${data.reason.replaceAll("_", " ")} · captured at ${new Date(data.captured_at * 1000).toLocaleTimeString()}. Preference only; availability is checked when a request arrives.`;
+    detail.append(note);
+    for (const replica of data.replicas) {
+      const load = replica.load, timing = replica.timing, cost = replica.declared_machine_cost;
+      workspaceCard(detail, `Preference ${replica.rank} · replica ${replica.operator_position}`, [
+        ["Allocation", replica.allocation],
+        ["Saved plan", replica.plan_matches === null ? "Not checked" : replica.plan_matches ? "Matches the model" : "Missing or changed"],
+        ["Compute work", load ? `${load.max_pending_turns} turns at the busiest node · ${load.total_pending_turns} across ${load.nodes} computers` : "Unknown or expired"],
+        ["Oldest load report", load ? `${(load.oldest_report_ms / 1000).toFixed(1)}s at capture` : "Unknown"],
+        ["First text observation", timing && Number.isFinite(timing.observed_ttft_seconds) ? `${timing.observed_ttft_seconds.toFixed(3)}s · ${timing.prompt_tokens}-token prompt, ${timing.generated_tokens}-token reply · ${timing.source}` : "No recent matching measurement"],
+        ["Decode observation", timing && Number.isFinite(timing.decode_tok_s) ? `${timing.decode_tok_s.toFixed(2)} tok/s · last matching turn` : "No recent matching measurement"],
+        ["Declared machine cost", cost ? `${cost.currency} ${(Number(cost.micro_units_per_hour) / 1000000).toFixed(4)}/h · whole machines, not savings` : "Not supplied"]]);
+    }
+    if (!data.replicas.length) detail.append(document.createTextNode("No prepared replica references."));
+  } catch (error) {
+    if (epoch === workspaceEpoch && credential === token && workspaceOpen && card.isConnected)
+      detail.textContent = `Routing observations unavailable: ${error.message}`;
+  } finally { button.disabled = false; }
+}
 async function controlAllocation(allocation, action) {
   if (!management || managementBusy || !workspaceOpen) return;
   const epoch = workspaceEpoch, credential = token;
@@ -492,6 +520,13 @@ function renderWorkspace(data) {
       ["Adapter", model.adapter], ["Approved replica references", String(model.replicas)],
       ["Context / output limit", `${model.context} / ${model.max_tokens} tokens`],
       ["Revision", String(model.revision)], ["Readiness", model.state === "dormant" ? "Dormant — preparation needed" : "Saved route; actual hosts checked on request"], ...traffic(model.id)]);
+    if (/^[0-9a-f]{64}$/.test(model.id)) {
+      const button = document.createElement("button"), detail = document.createElement("div");
+      button.className = "text-button"; button.textContent = "Inspect routing";
+      detail.className = "routing-observation";
+      button.onclick = () => inspectRouting(model, card, button, detail);
+      card.append(button, detail);
+    }
     if (management) {
       const button = document.createElement("button"); button.className = "text-button"; button.textContent = "Manage replicas";
       button.onclick = () => openElasticEditor(model.id); card.append(button);
