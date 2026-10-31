@@ -85,11 +85,70 @@ static void rank_tests(void) {
     assert(!strcmp(lmb_replica_rank(1,e,3,1000,order),"recent_matching_decode_observations") && order[0]==2);
     e[0].usable=e[1].usable=e[2].usable=0;
     assert(!strcmp(lmb_replica_rank(1,e,3,1000,order),"no_approved_plan"));
-    assert(!strcmp(lmb_replica_rank(3,e,3,1000,order),"invalid_policy"));
+    assert(!strcmp(lmb_replica_rank(LMB_ROUTE_POLICY_LAST+1,e,3,1000,order),"invalid_policy"));
+}
+static void load_tests(void) {
+    LmbWorkloadFacts work={.known=1,.allocations=2,.compute_policy=LMB_COMPUTE_LOCAL_FIFO,
+        .active=1,.queued=3,.reserved_bytes=4096,.allocation_set={1}};
+    LmbReplicaLoad load={0};
+    assert(!lmb_replica_load_add(&load,&work,8192,2048,1000));
+    assert(load.nodes==1 && load.max_pending==4 && load.total_pending==4);
+    work.queued=1;
+    assert(!lmb_replica_load_add(&load,&work,8192,2048,9000));
+    assert(load.nodes==2 && load.max_pending==4 && load.total_pending==6 && load.max_age_ms==9000);
+    assert(lmb_replica_load_valid(&load));
+    LmbReplicaLoad saved=load;
+    assert(lmb_replica_load_add(&load,&work,8192,2048,LMB_REPLICA_LOAD_MAX_AGE_MS+1));
+    assert(!memcmp(&load,&saved,sizeof load));
+    assert(lmb_replica_load_add(&load,&work,8192,4097,1));
+    assert(lmb_replica_load_add(&load,&work,2048,2048,1));
+    work.known=0; assert(lmb_replica_load_add(&load,&work,8192,2048,1)); work.known=1;
+    work.compute_policy=LMB_COMPUTE_UNKNOWN;
+    assert(lmb_replica_load_add(&load,&work,8192,2048,1));
+    work.compute_policy=LMB_COMPUTE_LOCAL_FIFO; work.queued=UINT32_MAX;
+    assert(lmb_replica_load_add(&load,&work,8192,2048,1));
+
+    LmbReplicaEvidence e[3]={0}; uint32_t order[LMB_ROUTE_REPLICAS];
+    for (unsigned i=0;i<3;i++) e[i]=(LmbReplicaEvidence){.usable=1,.observation_current=1,
+        .decode_tok_s=10-i*2,.measured_at=1000,.prompt_tokens=4,.generated_tokens=8,
+        .load={.nodes=2,.max_pending=2,.total_pending=3,.max_age_ms=1000}};
+    /* A fast replica contending with another model must not outrank an idle
+     * approved chain. A shared machine is scored at its whole FIFO load. */
+    e[2].load.max_pending=e[2].load.total_pending=0;
+    assert(!strcmp(lmb_replica_rank(LMB_ROUTE_LOAD_AWARE,e,3,1000,order),
+        "recent_workload_and_decode_observations") && order[0]==2 && order[1]==0);
+    e[2].observation_current=0;
+    assert(!strcmp(lmb_replica_rank(LMB_ROUTE_LOAD_AWARE,e,3,1000,order),
+        "recent_workload_observations") && order[0]==2);
+    /* Unknown load never wins by pretending zero; leave the explicit order. */
+    e[1].load.nodes=0;
+    assert(!strcmp(lmb_replica_rank(LMB_ROUTE_LOAD_AWARE,e,3,1000,order),
+        "workload_missing_or_expired") && order[0]==0);
+    e[1].load=e[0].load; e[1].load.max_age_ms=LMB_REPLICA_LOAD_MAX_AGE_MS+1;
+    assert(!strcmp(lmb_replica_rank(LMB_ROUTE_LOAD_AWARE,e,3,1000,order),"workload_missing_or_expired"));
+    e[1].load=e[0].load; e[1].load.total_pending=UINT32_MAX;
+    assert(!strcmp(lmb_replica_rank(LMB_ROUTE_LOAD_AWARE,e,3,1000,order),"workload_missing_or_expired"));
+    /* Equal peak pressure: prefer less work along the whole chain. */
+    e[1].load=e[0].load; e[2].load=e[0].load; e[1].load.total_pending=2;
+    assert(!strcmp(lmb_replica_rank(LMB_ROUTE_LOAD_AWARE,e,3,1000,order),
+        "recent_workload_observations") && order[0]==1);
+    /* Decode is only a comparable-observation tie breaker, with the same
+     * noise band as observed-decode. It cannot bypass a lower-load tier. */
+    e[2].observation_current=1; e[2].decode_tok_s=100;
+    assert(!strcmp(lmb_replica_rank(LMB_ROUTE_LOAD_AWARE,e,3,1000,order),
+        "recent_workload_and_decode_observations") && order[0]==1 && order[1]==2);
+    e[0].load=e[1].load=e[2].load; e[0].decode_tok_s=96;
+    assert(!strcmp(lmb_replica_rank(LMB_ROUTE_LOAD_AWARE,e,3,1000,order),
+        "recent_workload_and_decode_observations") && order[0]==0);
+    e[0].usable=0; e[0].load.nodes=0;
+    assert(!strcmp(lmb_replica_rank(LMB_ROUTE_LOAD_AWARE,e,3,1000,order),
+        "recent_workload_and_decode_observations") && order[0]==2 && order[2]==0);
+    e[1].usable=e[2].usable=0;
+    assert(!strcmp(lmb_replica_rank(LMB_ROUTE_LOAD_AWARE,e,3,1000,order),"no_approved_plan"));
 }
 int main(void) {
     (void)lmb_sign;
-    profile_tests(); rank_tests();
+    profile_tests(); rank_tests(); load_tests();
     puts("REPLICA PREFERENCES: PASS (bounded private observations, exact provenance, expiry, missing prices, stable rank)");
     return 0;
 }

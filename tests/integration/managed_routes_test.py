@@ -153,7 +153,18 @@ def verify_managed_routes(runtime, env, tracker, first_plan, third_plan, first_n
         expected_price_evidence = ("evidence=declared_machine_footprint" if env.get("LUMABRI_COST_PER_HOUR")
                                    else "evidence=prices_missing_or_mixed_currency")
         assert expected_price_evidence in policy_log.read_text()
-        assert json.loads(command("model-policy", route["id"], "ordered"))["revision"] == 5
+        policy = json.loads(command("model-policy", route["id"], "load-aware"))
+        assert policy["revision"] == 5 and policy["policy"] == "load-aware"
+        before_load = len(policy_log.read_text())
+        status, data = chat(route["id"])
+        assert status == 200 and b"event: done\n" in data and b"event: error\n" not in data, (status, data)
+        load_log = policy_log.read_text()[before_load:]
+        assert "policy=load-aware evidence=recent_workload" in load_log, load_log
+        assert "[model-load]" in load_log and "known=1" in load_log, load_log
+        # The preferred first replica is still held above. Real admission
+        # must choose the alternate even if a sampled load says it is idle.
+        assert "allocation=" + third["id"] in load_log, load_log
+        assert json.loads(command("model-policy", route["id"], "ordered"))["revision"] == 6
         third_busy = hold(third["id"])
         status, data = chat(route["id"])
         assert status == 429 and json.loads(data)["error"] == "replicas_busy", (status, data)
@@ -226,7 +237,7 @@ def verify_managed_routes(runtime, env, tracker, first_plan, third_plan, first_n
         status, data = chat(route["id"])
         assert status == 200 and b"event: done\n" in data and b"event: error\n" not in data, (status, data)
         reduced = json.loads(command("model-set", route["id"], third["id"]))
-        assert reduced["revision"] == 6 and reduced["replicas"] == 1 and reduced["policy"] == "ordered"
+        assert reduced["revision"] == 7 and reduced["replicas"] == 1 and reduced["policy"] == "ordered"
         # Only the coordinated path may claim a non-interrupting release.
         # It seals the host, retires its retained KV, seals both real nodes,
         # and persists acknowledgements before freeing the Edge keeper last.

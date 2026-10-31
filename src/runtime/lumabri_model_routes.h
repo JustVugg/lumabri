@@ -9,10 +9,12 @@
 #define LMB_ROUTE_MAX 32u
 #define LMB_ROUTE_REPLICAS 8u
 #define LMB_ROUTE_BYTES 4096u
-enum { LMB_ROUTE_ORDERED=0, LMB_ROUTE_OBSERVED_DECODE=1, LMB_ROUTE_DECLARED_COST=2 };
+enum { LMB_ROUTE_ORDERED=0, LMB_ROUTE_OBSERVED_DECODE=1, LMB_ROUTE_DECLARED_COST=2,
+       LMB_ROUTE_LOAD_AWARE=3, LMB_ROUTE_POLICY_LAST=LMB_ROUTE_LOAD_AWARE };
 static inline const char *lmb_route_policy_name(uint32_t policy) {
     return policy==LMB_ROUTE_ORDERED ? "ordered" : policy==LMB_ROUTE_OBSERVED_DECODE ? "observed-decode" :
-        policy==LMB_ROUTE_DECLARED_COST ? "declared-cost" : "invalid";
+        policy==LMB_ROUTE_DECLARED_COST ? "declared-cost" :
+        policy==LMB_ROUTE_LOAD_AWARE ? "load-aware" : "invalid";
 }
 typedef struct {
     uint8_t allocation[32], root[32], host_key[32];
@@ -40,7 +42,7 @@ static inline int lmb_route_valid(const LmbModelRoute *r) {
         !lmb_route_text(r->adapter,sizeof r->adapter) || !lmb_route_text(r->numeric_class,sizeof r->numeric_class) ||
         !r->revision || !r->numeric_abi || !r->context || r->context>(1u<<20) ||
         !r->max_new || r->max_new>(1u<<20) || r->greedy_only>1 || r->count>LMB_ROUTE_REPLICAS ||
-        r->policy>LMB_ROUTE_DECLARED_COST) return 0;
+        r->policy>LMB_ROUTE_POLICY_LAST) return 0;
     for (uint32_t i=0; i<r->count; i++) {
         const LmbModelReplica *p=&r->replicas[i];
         if (!lmb_route_nonzero(p->allocation) || !lmb_route_nonzero(p->root) || !lmb_route_nonzero(p->host_key)) return 0;
