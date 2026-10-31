@@ -9,6 +9,35 @@ typedef struct {
     uint32_t nodes, max_pending, total_pending, max_age_ms;
 } LmbReplicaLoad;
 
+/* In-flight requests through this operator's gateway are a separate signal
+ * from the workers' FIFO compute turns. Never add the two or call this a
+ * cluster-wide count: other gateways and direct clients are not observed. */
+typedef struct {
+    uint32_t known, max_active, total_active;
+} LmbReplicaGatewayLoad;
+
+static inline int lmb_replica_gateway_overlap(uint32_t *counts,const uint8_t *nodes,uint32_t count,
+    const uint8_t *active_nodes,uint32_t active_count) {
+    if (!counts || !nodes || !active_nodes || !count || !active_count ||
+        count>LMB_INVENTORY_MAX || active_count>LMB_INVENTORY_MAX) return -1;
+    for (uint32_t i=0;i<count;i++) {
+        int duplicate=0;
+        for (uint32_t k=0;k<i;k++) if (!memcmp(nodes+i*32,nodes+k*32,32)) duplicate=1;
+        if (duplicate) continue;
+        for (uint32_t j=0;j<active_count;j++) if (!memcmp(nodes+i*32,active_nodes+j*32,32)) {
+            if (counts[i]==UINT32_MAX) return -1;
+            counts[i]++;break;
+        }
+    }
+    return 0;
+}
+
+static inline int lmb_replica_gateway_compare(const LmbReplicaGatewayLoad *a,const LmbReplicaGatewayLoad *b) {
+    if (a->max_active!=b->max_active) return a->max_active<b->max_active ? -1 : 1;
+    if (a->total_active!=b->total_active) return a->total_active<b->total_active ? -1 : 1;
+    return 0;
+}
+
 /* The caller supplies each distinct machine once, after matching its runtime
  * and approved allocation. Any failed participant invalidates the whole load
  * observation; a missing report must never look like an idle computer. */

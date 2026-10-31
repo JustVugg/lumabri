@@ -439,6 +439,7 @@ async def exercise(port, alice, bob, artifacts, env):
                 "scope": "preference_snapshot_not_admission", "replicas": [
                     {"allocation": MODEL, "rank": 1, "operator_position": 2, "plan_matches": True,
                      "load": {"nodes": 1, "max_pending_turns": 2, "total_pending_turns": 2, "oldest_report_ms": 100},
+                     "gateway": {"scope": "same_operator_gateway", "max_active_requests": 2, "total_node_requests": 3},
                      "timing": {"observed_ttft_seconds": .125, "source": "real_session", "prompt_tokens": 4, "generated_tokens": 8}},
                     {"allocation": "02" * 32, "rank": 2, "operator_position": 1, "plan_matches": None,
                      "load": None, "timing": None}]})
@@ -456,6 +457,7 @@ async def exercise(port, alice, bob, artifacts, env):
         await expect(page.locator(".routing-observation")).to_contain_text("Preference 1 · replica 2")
         await expect(page.locator(".routing-observation")).to_contain_text("0.125s")
         await expect(page.locator(".routing-observation")).to_contain_text("Unknown or expired")
+        await expect(page.locator(".routing-observation")).to_contain_text("2 at the busiest computer · 3 request/computer pairs · this operator only")
         routing_online = False
         await page.get_by_role("button", name="Inspect routing", exact=True).click()
         await expect(page.locator(".routing-observation")).to_contain_text("Routing observations unavailable")

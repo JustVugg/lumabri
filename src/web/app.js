@@ -421,12 +421,13 @@ async function inspectRouting(model, card, button, detail) {
     note.textContent = `${data.policy} · ${data.reason.replaceAll("_", " ")} · captured at ${new Date(data.captured_at * 1000).toLocaleTimeString()}. Preference only; availability is checked when a request arrives.`;
     detail.append(note);
     for (const replica of data.replicas) {
-      const load = replica.load, timing = replica.timing, cost = replica.declared_machine_cost;
+      const load = replica.load, timing = replica.timing, cost = replica.declared_machine_cost, gateway = replica.gateway;
       workspaceCard(detail, `Preference ${replica.rank} · replica ${replica.operator_position}`, [
         ["Allocation", replica.allocation],
         ["Saved plan", replica.plan_matches === null ? "Not checked" : replica.plan_matches ? "Matches the model" : "Missing or changed"],
         ["Compute work", load ? `${load.max_pending_turns} turns at the busiest node · ${load.total_pending_turns} across ${load.nodes} computers` : "Unknown or expired"],
         ["Oldest load report", load ? `${(load.oldest_report_ms / 1000).toFixed(1)}s at capture` : "Unknown"],
+        ["Active gateway requests", gateway ? `${gateway.max_active_requests} at the busiest computer · ${gateway.total_node_requests} request/computer pairs · this operator only` : "Unknown"],
         ["First text observation", timing && Number.isFinite(timing.observed_ttft_seconds) ? `${timing.observed_ttft_seconds.toFixed(3)}s · ${timing.prompt_tokens}-token prompt, ${timing.generated_tokens}-token reply · ${timing.source}` : "No recent matching measurement"],
         ["Decode observation", timing && Number.isFinite(timing.decode_tok_s) ? `${timing.decode_tok_s.toFixed(2)} tok/s · last matching turn` : "No recent matching measurement"],
         ["Declared machine cost", cost ? `${cost.currency} ${(Number(cost.micro_units_per_hour) / 1000000).toFixed(4)}/h · whole machines, not savings` : "Not supplied"]]);

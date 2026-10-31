@@ -8,6 +8,50 @@
 
 #define LMB_REPLICA_CELLS 32u
 enum { LMB_REPLICA_OK=0, LMB_REPLICA_BUSY=1, LMB_REPLICA_UNSAFE=-1 };
+typedef struct {
+    uint32_t count;
+    uint8_t allocation[LMB_REPLICA_CELLS][32];
+} LmbReplicaDispatch;
+
+/* Read only the leases still owned by kernel locks. Saved bytes in an
+ * unlocked cell are not live work. The shared directory guard prevents a
+ * writer from changing cell identities while we inspect them; owners may
+ * finish at any time, so this remains a preference, never admission. */
+static inline int lmb_replica_dispatch_snapshot(int access, LmbReplicaDispatch *out) {
+    memset(out,0,sizeof *out);
+    int dir=openat(access,"dispatch",O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+    if (dir<0) return errno==ENOENT ? LMB_REPLICA_OK : LMB_REPLICA_UNSAFE;
+    int guard=-1,rc=LMB_REPLICA_UNSAFE;
+    if (lmb_api_private_fd(dir,1)) goto done;
+    guard=openat(dir,"access.lock",O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK);
+    if (guard<0 || lmb_api_private_fd(guard,0)) goto done;
+    if (flock(guard,LOCK_SH|LOCK_NB)) {
+        rc=errno==EWOULDBLOCK || errno==EAGAIN ? LMB_REPLICA_BUSY : LMB_REPLICA_UNSAFE;
+        goto done;
+    }
+    for (unsigned i=0;i<LMB_REPLICA_CELLS;i++) {
+        char name[16];snprintf(name,sizeof name,"%u.lease",i);
+        int fd=openat(dir,name,O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK);
+        if (fd<0) { if (errno==ENOENT) continue; goto done; }
+        struct stat st;
+        if (lmb_api_private_fd(fd,0) || fstat(fd,&st)) {close(fd);goto done;}
+        if (!flock(fd,LOCK_EX|LOCK_NB)) {close(fd);continue;}
+        int busy=errno==EWOULDBLOCK || errno==EAGAIN;
+        uint8_t id[32];
+        if (!busy || st.st_size!=32 || lmb_read_full(fd,id,sizeof id)) {close(fd);goto done;}
+        close(fd);
+        unsigned nonzero=0;for (unsigned k=0;k<32;k++) nonzero|=id[k];
+        if (!nonzero) goto done;
+        for (uint32_t k=0;k<out->count;k++) if (!memcmp(id,out->allocation[k],32)) goto done;
+        memcpy(out->allocation[out->count++],id,32);
+    }
+    rc=LMB_REPLICA_OK;
+done:
+    if (guard>=0) close(guard);
+    close(dir);
+    if (rc) memset(out,0,sizeof *out);
+    return rc;
+}
 static inline int lmb_replica_unavailable(const char *stage) {
     int saved=errno;
     fprintf(stderr,"[replica-admission] stage=%s errno=%d\n",stage,saved);

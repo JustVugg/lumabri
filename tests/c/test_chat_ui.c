@@ -490,19 +490,23 @@ int main(int argc, char **argv) {
         decision.facts[1]=(LmbReplicaEvidence){.usable=1,.observation_current=1,.ttft_seconds=.125,
             .measured_at=999,.prompt_tokens=4,.generated_tokens=8,.observation_source=LMB_CAL_SOURCE_SESSION,
             .load={.nodes=1,.max_pending=2,.total_pending=2,.max_age_ms=100}};
+        decision.facts[1].gateway=(LmbReplicaGatewayLoad){.known=1,.max_active=1,.total_active=2};
         Cap inspection={0};LmbJson inspected;LmbJsonToken inspection_tokens[128];
         assert(!api_route_decision_json(&inspection,&inspect_route,&decision));
         assert(!lmb_json_parse(&inspected,inspection.p,inspection.len,inspection_tokens,128));
         assert(strstr(inspection.p,"\"observed_ttft_seconds\":0.125000") && strstr(inspection.p,"\"load\":null"));
         assert(strstr(inspection.p,"\"operator_position\":2") && strstr(inspection.p,"preference_snapshot_not_admission"));
+        assert(strstr(inspection.p,"\"max_active_requests\":1") && strstr(inspection.p,"\"gateway\":null"));
         free(inspection.p);inspection=(Cap){0};
         decision.facts[1].measured_at=699;decision.facts[1].load.max_age_ms=LMB_REPLICA_LOAD_MAX_AGE_MS+1;
         assert(!api_route_decision_json(&inspection,&inspect_route,&decision));
         assert(!strstr(inspection.p,"observed_ttft_seconds") && !strstr(inspection.p,"max_pending_turns"));
+        assert(strstr(inspection.p,"\"max_active_requests\":1")); /* independent fresh gateway observation */
         free(inspection.p);inspection=(Cap){0};decision.inventory_ok=0;
         decision.facts[1].measured_at=999;decision.facts[1].load.max_age_ms=0;
         assert(!api_route_decision_json(&inspection,&inspect_route,&decision) && strstr(inspection.p,"\"plan_matches\":null"));
         assert(!strstr(inspection.p,"observed_ttft_seconds") && !strstr(inspection.p,"max_pending_turns"));
+        assert(!strstr(inspection.p,"max_active_requests"));
         free(inspection.p);
         LmbHostControl fence; uint32_t action=0; uint8_t allocation[32]={1}; char id[65],path[128],body[512];
         lmb_hex(id,allocation,32); snprintf(path,sizeof path,"/api/v1/allocations/%s/control",id);

@@ -191,6 +191,23 @@ def verify_managed_routes(runtime, env, tracker, first_plan, third_plan, first_n
         assert all(r["timing"]["source"] == "real_session" for r in inspected["replicas"])
         local_inspection = json.loads(command("model-routing", route["id"]))
         assert local_inspection["model"] == route["id"] and local_inspection["revision"] == 6
+        # first_busy is a real kernel-owned admission lease. A different
+        # model on these SAME donors must contribute immediately, without
+        # waiting for heartbeat metrics or changing the model route.
+        assert all(r["gateway"] and r["gateway"]["max_active_requests"] == 1
+                   for r in inspected["replicas"]), inspected
+        other_busy = hold(other["id"])
+        status, data = request(routing_path, bob)
+        overlap = json.loads(data)
+        assert status == 200 and all(r["gateway"]["max_active_requests"] == 2
+                                    for r in overlap["replicas"]), overlap
+        unhold(other_busy)
+        # Unknown allocation topology suppresses the entire local signal.
+        # It does not fabricate an idle score or affect existing permits.
+        unknown_busy = hold("ee" * 32)
+        status, data = request(routing_path, bob)
+        assert status == 200 and all(r["gateway"] is None for r in json.loads(data)["replicas"]), data
+        unhold(unknown_busy)
         assert json.loads(command("model-policy", route["id"], "ordered"))["revision"] == 7
         third_busy = hold(third["id"])
         status, data = chat(route["id"])
