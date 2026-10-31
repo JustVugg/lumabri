@@ -6,8 +6,9 @@
 #include "lumabri_machine.h"
 #include "src/planner/lumabri_resource_facts.h"
 #include "src/planner/lumabri_workload_facts.h"
+#include "src/planner/lumabri_runtime_roles.h"
 
-#define LMB_INVENTORY_VERSION 5u
+#define LMB_INVENTORY_VERSION 6u
 #define LMB_INVENTORY_MAX 32u
 #define LMB_INVENTORY_TTL_MS 15000u
 #define LMB_INVENTORY_HEARTBEAT_MS 5000u
@@ -22,6 +23,7 @@ typedef struct {
     uint32_t runtime_threads;   /* queried installed engine, not detected CPU cores */
     LmbResourceFacts facts;
     LmbWorkloadFacts workload;
+    LmbRuntimeRoles roles;
 } LmbMachineReport;
 
 /* Lengths and control characters are checked before any field reaches a
@@ -66,7 +68,9 @@ static LMB_MAYBE_UNUSED int lmb_inventory_pack(LmbBuf *b,
            lmb_buf_u32(b, r->workload.known) || lmb_buf_u32(b, r->workload.allocations) ||
            lmb_buf_u32(b, r->workload.compute_policy) || lmb_buf_u32(b, r->workload.active) ||
            lmb_buf_u32(b, r->workload.queued) || lmb_buf_u64(b, r->workload.reserved_bytes) ||
-           lmb_buf_bytes(b, r->workload.allocation_set, 32);
+           lmb_buf_bytes(b, r->workload.allocation_set, 32) ||
+           lmb_buf_u32(b,r->roles.known) || lmb_buf_str(b,r->roles.segment) ||
+           lmb_buf_str(b,r->roles.edge) || lmb_buf_str(b,r->roles.hybrid);
 }
 
 static LMB_MAYBE_UNUSED int lmb_inventory_unpack(LmbCur *c,
@@ -111,6 +115,11 @@ static LMB_MAYBE_UNUSED int lmb_inventory_unpack(LmbCur *c,
         memcpy(w->allocation_set, c->p+c->off, 32); c->off += 32;
         if (!lmb_workload_valid(w, m->ram_total_bytes)) return -1;
     }
+    if (version>=6 && (lmb_cur_u32(c,&r->roles.known) ||
+        lmb_inventory_string(c,r->roles.segment,sizeof r->roles.segment) ||
+        lmb_inventory_string(c,r->roles.edge,sizeof r->roles.edge) ||
+        lmb_inventory_string(c,r->roles.hybrid,sizeof r->roles.hybrid) ||
+        !lmb_runtime_roles_valid(&r->roles) || (r->roles.known && !r->runtime_id[0]))) return -1;
     m->load_one = r->facts.known & LMB_FACT_LOAD ? r->facts.load_milli / 1000.0 : -1;
     if (r->runtime_threads > 256 || (!!r->runtime_threads != !!r->runtime_id[0])) return -1;
     if (r->runtime_id[0]) {
@@ -135,8 +144,8 @@ static LMB_MAYBE_UNUSED int lmb_inventory_fetch(const char *tracker,
                                                 uint32_t *count) {
     *count = 0;
     LmbMsg m = {0};
-    int fd = lmb_connect_ms_io(tracker, 1500, 2000);
-    if (fd < 0) return -1;
+    LmbSocket fd = lmb_connect_ms_io(tracker, 1500, 2000);
+    if (fd == LMB_INVALID_SOCKET) return -1;
     int rc = lmb_auth(fd) || lmb_send(fd, LMB_MACHINE_LIST, NULL, 0, NULL, 0) ||
              lmb_recv(fd, &m);
     lmb_close(fd);
@@ -144,7 +153,7 @@ static LMB_MAYBE_UNUSED int lmb_inventory_fetch(const char *tracker,
     LmbCur c = {m.body, m.body_len, 0};
     uint32_t version = 0, n = 0;
     int bad = m.op != LMB_MACHINE_LIST_R || m.pay_len ||
-              lmb_cur_u32(&c, &version) || (version != 3 && version != LMB_INVENTORY_VERSION) ||
+              lmb_cur_u32(&c, &version) || version<3 || version>LMB_INVENTORY_VERSION ||
               lmb_cur_u32(&c, &n) || n > LMB_INVENTORY_MAX;
     for (uint32_t i = 0; !bad && i < n; i++) {
         uint32_t age = 0;

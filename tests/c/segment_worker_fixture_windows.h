@@ -2,6 +2,7 @@
  * encrypted data plane are the production executable, in a separate process.
  * Full tracker interoperability is also exercised by the PC/Linux lab gate. */
 #include "lumabri_sign.h"
+#include "lumabri_inventory.h"
 #include "lumabri_secure.h"
 #include "lumabri_segment_discovery.h"
 #include "edge_runtime.h"
@@ -18,7 +19,8 @@ typedef struct {
     pthread_mutex_t lock;
     atomic_int stop;
     LmbSegAdvert advert,adverts[4];
-    unsigned nadverts;
+    unsigned nadverts,machine_reports;
+    LmbMachineReport machine_report;
     LmbSegOwner owner;
     CheckpointFixture checkpoint;
 } WorkerFixture;
@@ -52,6 +54,15 @@ static void *fixture_tracker(void *opaque) {
                 } else if (m.op==LMB_CHALLENGE) {
                     lmb_random(nonce[i],32);challenged[i]=1;
                     assert(!lmb_send(fd,LMB_CHALLENGE_R,nonce[i],32,NULL,0));
+                } else if (m.op==LMB_MACHINE_REPORT) {
+                    assert(challenged[i] && m.body_len>64);
+                    LmbCur c={m.body,m.body_len-64,0};LmbMachineReport report;
+                    assert(!lmb_inventory_unpack(&c,&report) && c.off==c.len && lmb_secure_peer_matches(fd,report.identity));
+                    LmbBuf transcript={0};assert(!lmb_buf_str(&transcript,"lumabri.machine.v1") &&
+                        !lmb_buf_bytes(&transcript,nonce[i],32) && !lmb_buf_bytes(&transcript,m.body,c.len));
+                    assert(!lmb_sign_verify(m.body+c.len,transcript.p,transcript.len,report.identity));free(transcript.p);
+                    pthread_mutex_lock(&f->lock);f->machine_report=report;f->machine_reports++;pthread_mutex_unlock(&f->lock);
+                    assert(!lmb_send(fd,LMB_OK,NULL,0,NULL,0));
                 } else if (m.op==LMB_SEG_REGISTER) {
                     assert(challenged[i] && m.body_len>100);
                     size_t n=m.body_len-100;LmbSegAdvert advert;

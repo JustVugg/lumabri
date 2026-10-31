@@ -23,6 +23,7 @@
 #include "lumabri_machine.h"   /* LMB_GPU_* : the backends an engine can use */
 #include "lumabri_planner.h"
 #include "lumabri_memory_budget.h"
+#include "src/planner/lumabri_runtime_roles.h"
 
 #define LMB_CLUSTER_MAX_NODES 32
 
@@ -37,6 +38,7 @@ typedef struct {
     uint32_t gpu_backends;       /* inventory; adapter-specific use comes later */
     uint32_t threads;
     int has_checkpoint;          /* the weights are already on this machine */
+    LmbRuntimeRoles roles;
 } LmbClusterNode;
 
 typedef struct {
@@ -96,6 +98,7 @@ static LMB_UNUSED int lmb_plan_cluster_source(const LmbModelShape *m,
     uint32_t best_edge = UINT32_MAX;
     uint64_t best_edge_room = 0;
     for (uint32_t i = 0; i < n; i++) {
+        if (!lmb_runtime_role_allows(&nodes[i].roles,m->segment_id,1,0)) continue;
         uint64_t room = nodes[i].ram_budget_bytes;
         if (room < edge_need) continue;
         if (best_edge == UINT32_MAX || room > best_edge_room) {
@@ -106,10 +109,12 @@ static LMB_UNUSED int lmb_plan_cluster_source(const LmbModelShape *m,
     out->edge_node = best_edge;
 
     uint64_t effective[LMB_CLUSTER_MAX_NODES];
-    uint64_t total_budget = 0;
+    uint64_t total_budget = 0;uint32_t last_usable=0;
     for (uint32_t i = 0; i < n; i++) {
         effective[i] = nodes[i].ram_budget_bytes;
+        if (!lmb_runtime_role_allows(&nodes[i].roles,m->segment_id,0,0)) effective[i]=0;
         if (i == best_edge) effective[i] -= edge_need;
+        if (effective[i]) last_usable=i;
         total_budget = lmb_size_add(total_budget, effective[i]);
         if (nodes[i].has_checkpoint) out->data_available = 1;
     }
@@ -121,10 +126,11 @@ static LMB_UNUSED int lmb_plan_cluster_source(const LmbModelShape *m,
     uint64_t whole_resident = 0;
     for (uint32_t i = 0; i < n && assigned < m->layers; i++) {
         uint64_t budget = effective[i];
+        if (!budget) continue;
         uint64_t scaled = lmb_size_mul(m->layers, budget);
         if (scaled == UINT64_MAX) return -1;
         uint32_t take = (uint32_t)(scaled / total_budget);
-        if (i + 1 == n) take = m->layers - assigned;
+        if (i == last_usable) take = m->layers - assigned;
         if (!take) continue;
         if (take > m->layers - assigned) take = m->layers - assigned;
 
@@ -249,6 +255,7 @@ static LMB_UNUSED int lmb_home_plan_budgets(const LmbModelShape *shape,
             if (plan->slices[j].node == s->node) return -1;
         LmbHomeReservation r;
         int edge = s->node == plan->edge_node;
+        if (!lmb_runtime_role_allows(&nodes[s->node].roles,shape->segment_id,edge,plan->hybrid)) return -1;
         if (lmb_home_reservation_sessions(shape, checkpoint_bytes, s->layer_begin,
                                 s->layer_end, context, plan->sessions, edge, &r)) return -1;
         if (plan->hybrid) r.total_bytes = lmb_budget_add(r.total_bytes, lmb_home_hybrid_extra(shape));
@@ -303,6 +310,7 @@ static LMB_UNUSED int lmb_home_plan_source(const LmbModelShape *shape,
     if (!available || !shape->layers || !shape->sizing_verified) return -1;
 
     for (uint32_t owner = 0; owner < count; owner++) {
+        if (!lmb_runtime_role_allows(&nodes[owner].roles,shape->segment_id,1,0)) continue;
         for (int ascending = 0; ascending < 2; ascending++) {
             uint32_t order[LMB_CLUSTER_MAX_NODES], used = 1;
             order[0] = owner;
@@ -321,6 +329,7 @@ static LMB_UNUSED int lmb_home_plan_source(const LmbModelShape *shape,
             uint32_t next = 0;
             for (uint32_t j = 0; j < count && next < shape->layers; j++) {
                 uint32_t nd = order[j], lo = next, hi = shape->layers;
+                if (!lmb_runtime_role_allows(&nodes[nd].roles,shape->segment_id,nd==owner,0)) continue;
                 /* All current resident contracts have nonnegative layer
                  * costs and fixed scratch. Their cost for [next,end) is
                  * monotone; an overflow is not a fit. The final shared

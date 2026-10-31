@@ -11,6 +11,7 @@
 #include "lumabri_machine.h"
 #include "lumabri_sha.h"
 #include "lumabri_runtime_probe.h"
+#include "src/runtime/lumabri_inventory_windows.h"
 #define LMB_COMPUTE_BROKER_SERVER
 #include "src/runtime/lumabri_compute_broker.h"
 
@@ -27,6 +28,9 @@ typedef struct {
 
 typedef struct {
     HomeService service;
+    LmbWindowsInventory inventory;
+    int inventory_started;uint64_t next_inventory;
+    char runtime_id[65];
     LmbWindowsDonorSlot slots[4];
     LmbMachineProfile machine;
     LmbComputeBroker compute;
@@ -35,7 +39,7 @@ typedef struct {
     int lease,opened,stopping;
     unsigned selected,thread_capacity;
     uint64_t budget,reserve;
-    char worker[1600],tracker[256],ip[64],control[96],compute_path[1400];
+    char worker[1600],tracker[256],ip[64],control[64],compute_path[1400];
 } LmbWindowsDonor;
 
 static void lmb_donor_handle_close(HANDLE *h) {
@@ -89,6 +93,33 @@ static void lmb_donor_snapshot_windows(LmbWindowsDonor *d) {
     LmbSha hash;lmb_sha_init(&hash);
     lmb_sha_update(&hash,"lumabri-allocation-set-v1",sizeof "lumabri-allocation-set-v1");
     lmb_sha_update(&hash,ids,s->model_count*32);lmb_sha_final(&hash,s->allocation_set);
+}
+static void lmb_donor_inventory_windows(LmbWindowsDonor *d,LmbMachineReport *r) {
+    memset(r,0,sizeof *r);
+    r->ram_budget_bytes=lmb_donor_room_windows(d);r->machine=d->machine;
+    snprintf(r->control_addr,sizeof r->control_addr,"%s",d->control);
+    snprintf(r->runtime_id,sizeof r->runtime_id,"%s",d->runtime_id);
+    r->runtime_threads=d->thread_capacity;r->roles.known=1;
+    /* These are the keeper's accepted roles, not every adapter in Colibri.
+     * Edge and Hybrid are explicitly unavailable in this native build. */
+    strcpy(r->roles.segment,"olmoe");r->facts=lmb_resource_facts_local(d->machine.load_one);
+    HomeServiceSnapshot *s=&d->service.snapshot;
+    r->workload=(LmbWorkloadFacts){.known=1,.allocations=s->model_count,.reserved_bytes=s->reserved_total,
+        .compute_policy=s->compute_enabled ? LMB_COMPUTE_LOCAL_FIFO : LMB_COMPUTE_UNKNOWN,
+        .active=s->compute_active,.queued=s->compute_queued};
+    memcpy(r->workload.allocation_set,s->allocation_set,32);
+}
+static int lmb_donor_runtime_id_windows(LmbWindowsDonor *d) {
+    LmbSha hash;lmb_sha_init(&hash);uint8_t block[65536],digest[32];DWORD n;
+    LARGE_INTEGER zero={0};if (!SetFilePointerEx(d->executable,zero,NULL,FILE_BEGIN)) return -1;
+    lmb_sha_update(&hash,"lumabri-native-donor-cpu-olmoe-v1",sizeof "lumabri-native-donor-cpu-olmoe-v1");
+    lmb_sha_update(&hash,d->service.snapshot.instance,32);
+    for (;;) {
+        if (!ReadFile(d->executable,block,sizeof block,&n,NULL)) return -1;
+        if (!n) break;
+        lmb_sha_update(&hash,block,n);
+    }
+    lmb_sha_final(&hash,digest);lmb_hex(d->runtime_id,digest,32);return 0;
 }
 static int lmb_donor_release_windows(LmbWindowsDonor *d,LmbWindowsDonorSlot *s,
         LmbHomePhase phase,const char *reason) {
@@ -251,7 +282,7 @@ static void lmb_donor_incoming_windows(LmbWindowsDonor *d,LmbSocket fd) {
     LmbMsg m={0};LmbHomeOffer offer={0};LmbWindowsDonorSlot *target=NULL;
     if (lmb_donor_authorize_windows(fd,&m) || m.pay_len) goto done;
     if (m.op==LMB_HOME_FEATURES && !m.body_len) {
-        uint8_t version[4];lmb_put32(version,2);(void)lmb_send(fd,LMB_OK,version,4,NULL,0);goto done;
+        uint8_t version[4];lmb_put32(version,1);(void)lmb_send(fd,LMB_OK,version,4,NULL,0);goto done;
     }
     if (m.op==LMB_HOME_EXIT_PROOF && m.body_len==64) {lmb_donor_exit_proof_windows(d,fd,m.body);goto done;}
     if (m.op==LMB_HOME_QUERY || m.op==LMB_HOME_RELEASE || m.op==LMB_HOME_NODE_CONTROL || m.op==LMB_HOME_RETIRED_RELEASE) {
@@ -331,7 +362,15 @@ static void lmb_donor_operation_windows(LmbWindowsDonor *d,int op) {
     if (op==HOME_SVC_STOP) d->stopping=1;
     else if (op==HOME_SVC_ALLOW_REPEAT || op==HOME_SVC_REVOKE_REPEAT)
         home_service_disconnect(&d->service); /* native bounded policies are not available yet */
-    else if (op==HOME_SVC_NEXT_MODEL) {d->selected=(d->selected+1)%4;d->service.snapshot.revision++;}
+    else if (op==HOME_SVC_NEXT_MODEL) {
+        for (unsigned i=1;i<=4;i++) {
+            unsigned next=(d->selected+i)%4;
+            if (d->slots[next].transaction.reservation_held || d->slots[next].transaction.phase==LMB_HOME_PENDING) {
+                d->selected=next;break;
+            }
+        }
+        d->service.snapshot.revision++;
+    }
     else if (op==HOME_SVC_UNLOAD || op==HOME_SVC_CANCEL)
         (void)lmb_donor_release_windows(d,s,LMB_HOME_CLOSED,"Stopped by this computer's owner.");
     else if ((op==HOME_SVC_ACCEPT || op==HOME_SVC_DECLINE) && s->transaction.phase==LMB_HOME_PENDING) {
@@ -374,6 +413,12 @@ static int lmb_donor_step_windows(LmbWindowsDonor *d) {
     if (home_service_save(&d->service)) d->stopping=1;
     home_service_answer(&d->service);
     if (d->stopping || atomic_load(&d->compute.stop)) return 1;
+    if (d->inventory_started && GetTickCount64()>=d->next_inventory) {
+        LmbMachineReport report;lmb_donor_inventory_windows(d,&report);
+        EnterCriticalSection(&d->inventory.lock);
+        memcpy(report.identity,d->inventory.report.identity,32);d->inventory.report=report;
+        LeaveCriticalSection(&d->inventory.lock);d->next_inventory=GetTickCount64()+500;
+    }
     if (lmb_socket_wait(d->listener,0,0)==1) {
         LmbSocket incoming=lmb_socket_accept(d->listener,NULL,NULL);
         if (incoming!=LMB_INVALID_SOCKET) lmb_donor_incoming_windows(d,incoming);
@@ -381,6 +426,9 @@ static int lmb_donor_step_windows(LmbWindowsDonor *d) {
     return 0;
 }
 static void lmb_donor_close_windows(LmbWindowsDonor *d) {
+    if (d->inventory_started) {
+        lmb_inventory_stop_windows(&d->inventory);DeleteCriticalSection(&d->inventory.lock);d->inventory_started=0;
+    }
     if (d->listener!=LMB_INVALID_SOCKET) lmb_socket_close(d->listener);
     d->listener=LMB_INVALID_SOCKET;
     for (unsigned i=0;i<4;i++) {
@@ -438,7 +486,10 @@ static int lmb_donor_open_windows(LmbWindowsDonor *d,const char *worker,const ch
     if (d->listener==LMB_INVALID_SOCKET || snprintf(d->control,sizeof d->control,"%s:%d",d->ip,port)>=(int)sizeof d->control) goto bad;
     snprintf(d->service.snapshot.name,sizeof d->service.snapshot.name,"%s",d->machine.hostname);
     d->service.snapshot.revision=1;lmb_donor_snapshot_windows(d);
-    if (home_service_save(&d->service)) goto bad;
+    if (home_service_save(&d->service) || lmb_donor_runtime_id_windows(d)) goto bad;
+    LmbMachineReport report;lmb_donor_inventory_windows(d,&report);
+    if (lmb_inventory_start_windows(&d->inventory,tracker,&report)) goto bad;
+    d->inventory_started=1;d->next_inventory=GetTickCount64()+500;
     return 0;
  bad:
     lmb_donor_close_windows(d);return -1;

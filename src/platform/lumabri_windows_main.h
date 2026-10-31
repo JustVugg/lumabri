@@ -21,6 +21,7 @@ static void doctor_json_string(const char *value) {
 }
 #include "src/runtime/lumabri_service_manager.h"
 #include "src/runtime/lumabri_donor_windows.h"
+#include "src/ui/lumabri_donor_windows.h"
 #include <math.h>
 
 static int home_donor_entry_windows(int argc,char **argv,int internal) {
@@ -34,8 +35,8 @@ static int home_donor_entry_windows(int argc,char **argv,int internal) {
         } else if (!strcmp(argv[i],"--headless")) headless=1;
         else return 2;
     }
-    if (!tracker || !limit || (!internal && !headless))
-        return home_fail("Native donor: use donor --join HOST:PORT --ram-gb N --headless. Approval requires the private service API.");
+    if (!tracker || !limit)
+        return home_fail("Use donor --join HOST:PORT --ram-gb N. Add --headless only to start without the approval screen.");
     if (internal) {
         if (!getenv("LUMABRI_READY_HANDLE")) return 2;
         wchar_t exe[1024];char worker[1600];DWORD n=GetModuleFileNameW(NULL,exe,1024);
@@ -54,15 +55,18 @@ static int home_donor_entry_windows(int argc,char **argv,int internal) {
     }
     HomeServiceSnapshot old;
     if (!home_service_query("donor",HOME_SVC_STATUS,NULL,&old))
-        return strcmp(old.tracker,tracker) ? home_fail("Stop the sharing service before joining another household.") : 0;
+        return strcmp(old.tracker,tracker) ? home_fail("Stop the sharing service before joining another household.") :
+            headless ? 0 : lmb_donor_ui_windows(tracker);
     if (home_service_ensure()) return home_fail("Cannot start the household manager.");
     const char *args[32];if (argc>30) return 2;args[0]="--internal-donor";
     for (int i=0;i<argc;i++) args[i+1]=argv[i];
-    return home_service_keeper_start_windows("donor",args,(size_t)argc+1) ? 1 : 0;
+    if (home_service_keeper_start_windows("donor",args,(size_t)argc+1)) return 1;
+    return headless ? 0 : lmb_donor_ui_windows(tracker);
 }
 
 
 static int lmb_windows_main(int argc, char **argv) {
+    if (argc==1 || (argc==2 && !strcmp(argv[1],"share"))) return lmb_donor_ui_windows(NULL);
     if (argc>=2 && (!strcmp(argv[1],"donor") || !strcmp(argv[1],"--internal-donor")))
         return home_donor_entry_windows(argc-2,argv+2,!strcmp(argv[1],"--internal-donor"));
     if (argc == 2 && !strcmp(argv[1], "--internal-manager"))
@@ -83,7 +87,9 @@ static int lmb_windows_main(int argc, char **argv) {
           "  lumabri service [start|status|restart|stop] [--json]\n"
           "  lumabri service live ROLE\n"
           "  lumabri machine --json\n\n"
-          "Household TUI and automatic donor discovery are not connected in this native build yet.\n", stderr);
+          "  lumabri donor --join HOST:PORT --ram-gb N [--headless]\n"
+          "  lumabri share  (reopen the sharing service's approval screen)\n\n"
+          "Native chat hosting and household setup are not connected in this build yet.\n", stderr);
     return argc == 2 && !strcmp(argv[1], "--help") ? 0 : 2;
 }
 

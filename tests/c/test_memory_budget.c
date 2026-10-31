@@ -20,6 +20,14 @@ static void timed_plans(void) {
     assert(seed.state == LMB_PLAN_RESIDENT && seed.nslices == 2);
     strcpy(shape.segment_id, "olmoe"); shape.experts_per_tok = 2;
     shape.moe_intermediate = 32;
+    nodes[1].roles.known=1;strcpy(nodes[1].roles.segment,"olmoe");
+    assert(lmb_home_plan_hybrid(&shape,1,nodes,2,128,&seed,&got));
+    assert(!lmb_home_plan_source(&shape,1,nodes,2,128,1,LMB_GOAL_ONE_SESSION,1,&got) && got.edge_node==0);
+    before=got;got.edge_node=1;
+    assert(lmb_home_plan_budgets(&shape,1,nodes,2,128,&got));
+    strcpy(nodes[1].roles.segment,"qwen38");
+    assert(lmb_home_plan_selected(&shape,1,nodes,2,128,&before,NULL,&got));
+    nodes[1].roles=(LmbRuntimeRoles){0};
     assert(!lmb_home_plan_hybrid(&shape, 1, nodes, 2, 128, &seed, &got));
     assert(got.hybrid && got.nslices == 2 && got.slices[0].layer_begin == 0 && got.slices[0].layer_end == 16);
     assert(got.slices[1].layer_begin == seed.slices[1].layer_begin);

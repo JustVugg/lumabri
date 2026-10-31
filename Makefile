@@ -150,6 +150,8 @@ MACHINE_SRC = lumabri_machine.c
 MACHINE_DEPS = lumabri_machine.h $(MACHINE_SRC) src/runtime/lumabri_container_limits.h
 lumabri test_chat_ui test_host_session_pool test-home-monitor test_calibration: src/planner/lumabri_turn_observation.h
 lumabri tracker test_chat_ui test_inventory test_home: src/planner/lumabri_resource_facts.h src/planner/lumabri_workload_facts.h
+lumabri tracker test_chat_ui test_inventory test_home test_cluster test_memory_budget test_portfolio: src/planner/lumabri_runtime_roles.h
+lumabri test_chat_ui: src/ui/lumabri_donor_view.h
 PLANNER_ADAPTER_DEPS = $(wildcard planner_adapters/*.h)
 
 # Adapter contracts are included transitively by the planner. Rebuild every

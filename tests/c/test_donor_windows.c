@@ -1,11 +1,13 @@
 /* Exercise actual native lumabri.exe, same-user service IPC and resident
  * Segment child. The checkpoint source/oracle is deliberately reduced. */
+#define NTDDI_VERSION 0x0A000006
 #include "src/runtime/lumabri_service.h"
 #include "src/runtime/lumabri_owned_process_windows.h"
 #include "lumabri_home_net.h"
 #include "src/runtime/lumabri_allocation_windows.h"
 #include <assert.h>
 #include "segment_worker_fixture_windows.h"
+#include "console_fixture_windows.h"
 
 static LmbOwnedProcess owners[16];static unsigned nowners;
 static char binary[4096],profile[4096],endpoint[100],keyenv[4200],knownenv[4200];
@@ -37,13 +39,21 @@ static LmbSocket offer(const LmbHomeOffer *o,unsigned phase) {
     LmbBuf b={0};assert(!lmb_home_offer_pack(&b,o) && !lmb_send(fd,LMB_HOME_OFFER,b.p,(uint32_t)b.len,NULL,0));free(b.p);
     assert(receive(fd,o)==phase);return fd;
 }
-static void approved(LmbSocket fd,const LmbHomeOffer *o) {
+static void approved(LmbSocket fd,const LmbHomeOffer *o,int use_ui) {
     HomeServiceSnapshot before=status(),after;
     assert(before.phase==LMB_HOME_PENDING && !before.segment_pid);
     uint64_t previously_reserved=before.reserved_total;
     HomeServiceSnapshot stale=before;stale.revision++;
     assert(home_service_query("donor",HOME_SVC_ACCEPT,&stale,&after));
-    assert(!home_service_query("donor",HOME_SVC_ACCEPT,&before,&after));
+    if (use_ui) {
+        WinUi ui;winui_open(&ui,binary);winui_expect(ui.capture,"Accept this request");
+        assert(SUCCEEDED(ResizePseudoConsole(ui.console,(COORD){50,20})));
+        winui_expect(ui.capture,"Resize to at least");winui_send_keys(ui.input,"\r");Sleep(150);
+        assert(status().phase==LMB_HOME_PENDING);
+        assert(SUCCEEDED(ResizePseudoConsole(ui.console,(COORD){104,38})));Sleep(200);
+        winui_send_keys(ui.input,"\x1b[A\r");winui_expect(ui.capture,"Accepted; waiting for other computers");
+        winui_close(&ui);after=status();
+    } else assert(!home_service_query("donor",HOME_SVC_ACCEPT,&before,&after));
     assert(after.phase==LMB_HOME_ACCEPTED && after.reserved_total==previously_reserved+o->ram_bytes && !after.segment_pid);
     assert(receive(fd,o)==LMB_HOME_ACCEPTED);
     assert(home_service_query("donor",HOME_SVC_ACCEPT,&before,&after));
@@ -123,6 +133,10 @@ int wmain(int argc,wchar_t **wide) {
     assert(!coli_olmoe_edge_adapter_register() && !coli_olmoe_segment_adapter_register());
     const char *start[]={"donor","--join",tracker,"--ram-gb","0.268435456","--headless"};
     assert(!command(start,6));HomeServiceSnapshot initial=status();assert(!initial.has_offer && !initial.reserved_total);
+    pthread_mutex_lock(&fixture.lock);LmbMachineReport reported=fixture.machine_report;
+    assert(fixture.machine_reports>0);pthread_mutex_unlock(&fixture.lock);
+    assert(reported.roles.known && !strcmp(reported.roles.segment,"olmoe") && !reported.roles.edge[0] && !reported.roles.hybrid[0]);
+    assert(reported.runtime_threads==1 && reported.ram_budget_bytes==initial.ram && !strcmp(reported.control_addr,endpoint));
     LmbHomeOffer o={.begin=0,.end=4,.layers=4,.context=64,.threads=1,.max_new=24,.ram_bytes=128u<<20,.disk_bytes=128u<<20,.sessions=1};
     lmb_random(o.id,32);memcpy(o.requester,pk,32);memcpy(o.edge_peer,pk,32);memcpy(o.model_root,fixture.checkpoint.root,32);
     strcpy(o.model,fixture.checkpoint.model);strcpy(o.model_type,"olmoe");strcpy(o.tracker,tracker);o.model_bytes=fixture.checkpoint.bytes;
@@ -142,17 +156,27 @@ int wmain(int argc,wchar_t **wide) {
     Sleep(30);
     fd=offer(&o,LMB_HOME_PENDING);assert(!atomic_load(&fixture.checkpoint.reads));
     LmbSocket duplicate=offer(&o,LMB_HOME_REJECTED);lmb_close(duplicate);
-    approved(fd,&o);uint64_t reads=atomic_load(&fixture.checkpoint.reads);assert(reads);
+    approved(fd,&o,1);uint64_t reads=atomic_load(&fixture.checkpoint.reads);assert(reads);
     fixture_chat(&fixture,model,0);
     lmb_close(fd);Sleep(100);HomeServiceSnapshot retained=status();assert(retained.retained && retained.reserved_total==o.ram_bytes);
+    WinUi reopened;winui_open(&reopened,binary);winui_expect(reopened.capture,"Weights retained in RAM");winui_close(&reopened);
+    HomeServiceSnapshot detached=status();assert(detached.segment_pid==retained.segment_pid && detached.reserved_total==retained.reserved_total);
     const char *restart[]={"service","restart"};assert(!command(restart,2));
     HomeServiceSnapshot after=status();assert(after.pid==retained.pid && after.segment_pid==retained.segment_pid && !memcmp(after.instance,retained.instance,32));
     fixture_chat(&fixture,model,0);assert(atomic_load(&fixture.checkpoint.reads)==reads);
     LmbSegAdvert first=advert_for(&fixture,&o);
     LmbHomeOffer second=o;lmb_random(second.id,32);
-    fd=offer(&second,LMB_HOME_PENDING);approved(fd,&second);lmb_close(fd);
+    fd=offer(&second,LMB_HOME_PENDING);approved(fd,&second,0);lmb_close(fd);
     HomeServiceSnapshot two=status();assert(two.model_count==2 && two.reserved_total==2*o.ram_bytes);
     LmbSegAdvert other=advert_for(&fixture,&second);
+    uint64_t report_deadline=GetTickCount64()+8000;
+    do {
+        pthread_mutex_lock(&fixture.lock);reported=fixture.machine_report;pthread_mutex_unlock(&fixture.lock);
+        if (reported.workload.allocations==2 && reported.workload.reserved_bytes==two.reserved_total) break;
+        assert(GetTickCount64()<report_deadline);Sleep(20);
+    } while (1);
+    assert(!reported.ram_budget_bytes);
+
     LmbNodeControl current=control(&o,LMB_NODE_CONTROL_QUERY,NULL);
     current=control(&o,LMB_NODE_CONTROL_DRAIN,&current);fixture_chat_with_advert(&fixture,model,1,&first);
     current=control(&o,LMB_NODE_CONTROL_RETIRE,&current);retire(&o,&current);retire(&o,&current);
@@ -174,6 +198,6 @@ int wmain(int argc,wchar_t **wide) {
     for (unsigned i=0;i<nowners;i++) {assert(!lmb_owned_process_stop(&owners[i],0,5000));assert(!lmb_owned_process_close(&owners[i]));}
     atomic_store(&fixture.stop,1);pthread_join(fixture.thread,NULL);lmb_close(fixture.listener);
     CloseHandle(fixture.registered);pthread_mutex_destroy(&fixture.lock);checkpoint_fixture_free(&fixture.checkpoint);
-    puts("NATIVE DONOR PASS: approval fences, duplicate refusal, actual resident worker, 72 oracle tokens, two allocations with independent release, manager restart, retained RAM, terminal receipt and exit proof");
+    puts("NATIVE DONOR PASS: signed inventory, native TUI approval and reattach, approval fences, duplicate refusal, actual resident worker, 72 oracle tokens, two allocations with independent release, manager restart, retained RAM, terminal receipt and exit proof");
     return 0;
 }
