@@ -55,7 +55,7 @@ int lmb_run_gate_init(LmbRunGate *gate, uint32_t capacity,
         pthread_mutex_destroy(&gate->lock); return -1;
     }
     int failed = 0;
-#ifndef __APPLE__
+#if !defined(__APPLE__) && !defined(_WIN32)
     failed = pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
 #endif
     if (!failed) failed = pthread_cond_init(&gate->changed, &attr);
@@ -119,9 +119,9 @@ int lmb_run_gate_enter(LmbRunGate *gate, uint32_t wait_ms,
         uint64_t now = monotonic_ms();
         if (now >= deadline) break;
         uint64_t tick = deadline - now < 100u ? deadline - now : 100u;
-#ifdef __APPLE__
-        /* Darwin lacks pthread_condattr_setclock; the relative wait also
-         * stays independent of wall-clock/NTP adjustments. */
+#if defined(__APPLE__) || defined(_WIN32)
+        /* Darwin and winpthreads provide a relative wait. Keep admission
+         * independent of unsupported clock attributes and wall-clock jumps. */
         struct timespec relative = {0, (long)tick * 1000000L};
         int rc = pthread_cond_timedwait_relative_np(&gate->changed, &gate->lock, &relative);
 #else

@@ -40,6 +40,7 @@ jobs:
         run: |
           set -o pipefail
           ./build/windows-control/test_segment_v2.exe 2>&1 | tee -a build/windows-control-evidence.log
+          ./build/windows-control/test_run_gate.exe 2>&1 | tee -a build/windows-control-evidence.log
           ./build/windows-control/test_socket_transport.exe 2>&1 | tee -a build/windows-control-evidence.log
           ./build/windows-control/test_secure_transport.exe 2>&1 | tee -a build/windows-control-evidence.log
           ./build/windows-control/test_crypto_vectors.exe 2>&1 | tee -a build/windows-control-evidence.log
@@ -99,6 +100,10 @@ jobs:
         run: |
           set -o pipefail
           ./build/windows-segment/test_owned_process_windows.exe --engine "$(cygpath -w "$PWD/build/windows-segment/test_segment_windows.exe")" "$(cygpath -w "$PWD/build/fixture")" 2>&1 | tee build/windows-segment-evidence.log
+      - name: Run the real native worker over encrypted TCP and private lifecycle controls
+        run: |
+          set -o pipefail
+          ./build/windows-segment/test_segment_worker_windows.exe "$(cygpath -w "$PWD/build/windows-segment/segment_node.exe")" "$(cygpath -w "$PWD/build/fixture")" selftest 2>&1 | tee -a build/windows-segment-evidence.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:

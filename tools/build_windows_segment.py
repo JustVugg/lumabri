@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the native OLMoE Edge/Segment acceptance runtime, never the upstream tree.
+"""Build the native OLMoE Edge/Segment worker and gates, never the upstream tree.
 
 This is an inference and residency gate. It does not package or claim a
 complete native Windows Lumabri service. No checkpoint is downloaded here.
@@ -58,6 +58,15 @@ def main():
         run([args.cc,*flags,'-Werror',root/'tests/c/test_segment_windows.c',archive,
              '-static','-lwinpthread','-lpsapi','-lm','-o',output/'test_segment_windows.exe'])
         print('Native inference gate:',output/'test_segment_windows.exe')
+        libraries=['-static','-lwinpthread','-lws2_32','-lbcrypt','-liphlpapi',
+                   '-lpsapi','-ladvapi32','-ldxgi','-ldxguid','-lm']
+        protocol=[root/'lumabri_segment.c',root/'lumabri_segment_discovery.c']
+        run([args.cc,*flags,'-Werror','-DLMB_SEGMENT_OLMOE_ONLY','-include',memory,'-municode',
+             root/'segment_node.c',*protocol,root/'lumabri_machine.c',root/'lumabri_run_gate.c',
+             archive,*libraries,'-o',output/'segment_node.exe'])
+        run([args.cc,*flags,'-Werror','-Wno-unused-function','-municode',
+             root/'tests/c/test_segment_worker_windows.c',*protocol,archive,*libraries,
+             '-o',output/'test_segment_worker_windows.exe'])
     if args.only == 'inference':
         return
     run([args.cc,*flags,'-Werror','-Wno-unused-function','-Wno-unused-variable','-municode',
@@ -78,6 +87,8 @@ def main():
     run([args.cc,*flags,'-Werror',root/'tests/c/test_segment_v2.c',
          root/'lumabri_segment.c','-static','-lwinpthread',
          '-o',output/'test_segment_v2.exe'])
+    run([args.cc,*flags,'-Werror',root/'tests/c/test_run_gate.c',root/'lumabri_run_gate.c',
+         '-static','-lwinpthread','-o',output/'test_run_gate.exe'])
     run([args.cc,*flags,'-Werror','-Wno-unused-function',
          root/'tests/c/test_socket_transport.c','-static','-lwinpthread','-lws2_32',
          '-o',output/'test_socket_transport.exe'])

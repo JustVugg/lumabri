@@ -8,6 +8,20 @@ static volatile LONG64 input_calls,input_bytes,input_denied;
 static int input_sealed;
 static volatile LONG prepared;
 
+#ifndef LUMABRI_P2P
+#define LUMABRI_P2P
+#endif
+#include "lumi_v4_ext.h"
+static void *home_expert_context;
+static LmbHomeExpertFn home_expert_function;
+void lmb_home_expert_provider(void *context, LmbHomeExpertFn function) {
+    home_expert_context=context; home_expert_function=function;
+}
+int lmb_home_expert_available(void) { return home_expert_function!=NULL; }
+int lmb_home_expert_apply(int layer,int expert,const float *input,int width,float *output) {
+    return home_expert_function ? home_expert_function(home_expert_context,layer,expert,input,width,output) : -1;
+}
+
 /* These are the same preparation hooks used by the POSIX bridge. Each model
  * process has its own input lifetime; there is deliberately no unseal API. */
 void lmb_resident_adapter_prepared(void) { InterlockedExchange(&prepared,1); }
