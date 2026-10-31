@@ -50,6 +50,7 @@ jobs:
           ./build/windows-control/test_owned_process_windows.exe 2>&1 | tee -a build/windows-control-evidence.log
           ./build/windows-control/test_service_windows.exe 2>&1 | tee -a build/windows-control-evidence.log
           ./build/windows-control/test_compute_windows.exe 2>&1 | tee -a build/windows-control-evidence.log
+          ./build/windows-control/test_allocation_windows.exe 2>&1 | tee -a build/windows-control-evidence.log
           ./build/windows-control/test_node_control_windows.exe 2>&1 | tee -a build/windows-control-evidence.log
           ./build/windows-control/test_home_network_windows.exe 2>&1 | tee -a build/windows-control-evidence.log
           ./build/windows-control/test_manager_windows.exe "$(cygpath -w "$PWD/build/windows-control/lumabri.exe")" 2>&1 | tee -a build/windows-control-evidence.log
@@ -110,6 +111,10 @@ jobs:
           ./build/windows-segment/test_checkpoint_windows.exe 2>&1 | tee -a build/windows-segment-evidence.log
           ./build/windows-segment/test_checkpoint_windows.exe --invalid-handle 2>&1 | tee -a build/windows-segment-evidence.log
           ./build/windows-segment/test_segment_worker_windows.exe "$(cygpath -w "$PWD/build/windows-segment/segment_node.exe")" "$(cygpath -w "$PWD/build/fixture")" remote-selftest 2>&1 | tee -a build/windows-segment-evidence.log
+      - name: Approve allocations through the native keeper and retain resident workers
+        run: |
+          set -o pipefail
+          ./build/windows-segment/test_donor_windows.exe "$(cygpath -w "$PWD/build/windows-segment/lumabri.exe")" "$(cygpath -w "$PWD/build/fixture")" 2>&1 | tee -a build/windows-segment-evidence.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -74,8 +74,8 @@ The latest measured speed is historical, not a guarantee for the next turn.
   cancellation. The connected process owns its permit; exit releases it.
   Native tests cover overload, invalid requests, Unicode profile paths,
   separate-process crashes and repeated restart without leaked handles.
-  This supplies compute admission for the worker integration; it does not
-  by itself connect the native household donor.
+  The keeper passes this broker to approved workers; a compute permit alone
+  never authorizes loading a model.
 - The shared residency guard now checks native Windows engine locks and input
   sealing during real OLMoE generation. Inherited worker control and reserved
   TCP listener handoff also have native process tests, including incomplete
@@ -95,25 +95,43 @@ The latest measured speed is historical, not a guarantee for the next turn.
   rejects Windows path aliases, wrong signing keys, altered chunks and unknown
   file handles, then closes network input after resident preparation. Its
   eight-chunk cache is temporary and is released before readiness. This is a
-  worker developer gate, not yet the donor approval/TUI integration or a Windows
-  household package; the gate compares 72 tokens against the local oracle and
+  worker developer gate, not a Windows household package; the gate compares
+  72 tokens against the local oracle and
   checks that generation makes no further source reads. Native engine builds
   embed a [process-local UTF-8 code-page manifest](https://learn.microsoft.com/en-us/windows/win32/sbscs/application-manifests#activecodepage)
   (Windows 10 version 1903 or newer); preparation is exercised in a path with
   spaces and non-ASCII text.
   That test uses a signed lease fixture; a separate Windows/Linux loopback
-  test also exercises the production tracker and Linux Edge. Donor approvals,
-  household TUI startup and packaging still need to connect this worker.
+  test also exercises the production tracker and Linux Edge.
 - The native `lumabri.exe` control entrypoint can now start, inspect, restart
   and stop the private background manager with `service`, and report the
   Windows machine inventory with `machine --json`. The shared manager loop
   observes existing keepers without replaying approvals. Its native acceptance
   test starts eight clients concurrently, closes the launchers, restarts and
   crashes the manager, and verifies that a separate keeper retains its state.
-  This is the control entrypoint, not a connected Windows household TUI/donor
-  or a complete Windows package. Build it with
+  This is a developer control entrypoint, not a connected Windows household
+  TUI or a complete Windows package. Build it with
   `python tools/build_windows_segment.py --only contracts`; the executable is
   in `build/windows-segment`. Unsupported commands fail explicitly.
+- The native donor keeper now accepts encrypted household offers and waits
+  for approval through the same private, revision-fenced service API as Unix.
+  Each approved allocation owns a resident OLMoE worker, reserved listener,
+  memory reservation and immutable lifetime record. Up to four allocations
+  share one bounded compute FIFO; closing the requester or restarting the
+  manager preserves prepared workers. Release waits for process and inherited
+  handle exit. Terminal receipts can be reconciled after an interrupted reply;
+  old allocation IDs and approvals are never replayed.
+  The native gate prepares two allocations, compares 72 oracle tokens, retires
+  one without interrupting the other, and checks that inference makes no further
+  checkpoint-source reads. Separate tests check inherited lifetime fences,
+  missing/corrupt evidence and receipt replay.
+  This developer entry currently accepts `donor --join HOST:PORT --ram-gb N
+  --headless`, with the household key in `LUMABRI_TOKEN`. It requires a reachable
+  authenticated tracker and approval through private service IPC. Discovery,
+  the household TUI, repeat policies, native Edge hosting and a complete Windows
+  package are not delivered by this gate. Unsupported Edge/Hybrid or model
+  allocations are explicitly refused; registering adapters is not sufficient
+  to claim their native execution.
 - Native engine ownership requires Windows 10 version 1607 or later. The
   supervisor assigns the process tree to its private Job Object atomically at
   creation, passes only explicitly selected handles and signals readiness with
