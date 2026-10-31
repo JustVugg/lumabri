@@ -173,7 +173,7 @@ lumabri test_chat_ui test_host_session_pool test-home-monitor test_api_access: s
 lumabri test_chat_ui test_host_session_pool test-home-monitor: src/runtime/lumabri_management.h
 lumabri test_chat_ui test_host_session_pool test-home-monitor: src/runtime/lumabri_model_routes.h src/runtime/lumabri_managed_models.h src/runtime/lumabri_replica_admission.h
 lumabri test_chat_ui test_host_session_pool test_host_drain test-home-monitor test_model_routes test_replica_rank: src/runtime/lumabri_route_registry.h lumabri_sha.h
-lumabri test_chat_ui test_host_session_pool test-home-monitor: src/runtime/lumabri_route_evidence.h src/planner/lumabri_replica_rank.h src/planner/lumabri_calibration_profiles.h
+lumabri test_chat_ui test_host_session_pool test-home-monitor: src/runtime/lumabri_route_evidence.h src/planner/lumabri_replica_rank.h src/planner/lumabri_replica_load.h src/planner/lumabri_calibration_profiles.h
 lumabri test_chat_ui test_host_session_pool test-home-monitor: src/runtime/lumabri_host_control.h
 lumabri test_chat_ui test_host_session_pool test_host_drain test-home-monitor: src/runtime/lumabri_retirement.h
 lumabri test_chat_ui test_host_session_pool test_host_drain test-home-monitor: src/runtime/lumabri_retired_receipts.h
@@ -687,7 +687,7 @@ test_model_routes: tests/c/test_model_routes.c src/runtime/lumabri_model_routes.
 test_replica_admission: tests/c/test_replica_admission.c src/runtime/lumabri_replica_admission.h src/runtime/lumabri_api_access.h $(SECURE_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_replica_admission.c -o $@
 
-test_replica_rank: tests/c/test_replica_rank.c src/planner/lumabri_replica_rank.h src/planner/lumabri_calibration_profiles.h lumabri_calibration.h lumabri_calibration_store.h src/runtime/lumabri_model_routes.h $(SECURE_DEPS)
+test_replica_rank: tests/c/test_replica_rank.c src/planner/lumabri_replica_rank.h src/planner/lumabri_replica_load.h lumabri_inventory.h src/planner/lumabri_workload_facts.h src/planner/lumabri_calibration_profiles.h lumabri_calibration.h lumabri_calibration_store.h src/runtime/lumabri_model_routes.h $(SECURE_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_replica_rank.c -o $@ -lm
 
 test: test-api

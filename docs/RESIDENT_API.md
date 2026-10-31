@@ -331,6 +331,7 @@ order. It can be changed without loading, moving or unloading any weights:
 ./lumabri api model-policy MODEL_ID ordered
 ./lumabri api model-policy MODEL_ID observed-decode
 ./lumabri api model-policy MODEL_ID declared-cost
+./lumabri api model-policy MODEL_ID load-aware
 ```
 
 `observed-decode` prefers the faster **last observed decode**, only when all
@@ -341,6 +342,23 @@ five minutes. A five-percent preference band retains the requested order for
 near-equal rates. It does not predict TTFT for a different prompt or certify
 concurrent capacity. Missing, changed or incomparable observations restore
 the operator's order, rather than manufacturing an estimate.
+
+`load-aware` first prefers the replica with the lowest observed compute
+contention. It compares the largest `active + queued` count on any participating
+machine, then the sum across distinct participating machines. These are shared
+FIFO compute turns, including work for other models, **not a predicted waiting
+time or token rate**. Every participating machine must have a matching runtime,
+an approved resident plan and a valid workload report no older than ten seconds.
+Missing or expired reports restore the operator's order; unknown never means idle.
+Equal-load replicas use comparable decode observations and the same five-percent
+band described above, or operator order if those observations are missing.
+The inventory is sampled, so the host's live admission and per-allocation permits
+still decide whether a request can actually run. This policy neither evicts
+weights nor shares conversation state. Gateway logs include the chosen replica's
+observed peak/total pending compute turns and report age.
+Before rolling back to a gateway version without this policy, switch affected
+models back to `ordered`. Older readers reject an unknown policy instead of
+silently changing its meaning.
 
 `declared-cost` prefers the lower sum of declared whole-machine hourly prices
 for the replica's participating computers (each counted once). Every candidate

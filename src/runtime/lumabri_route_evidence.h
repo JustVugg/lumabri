@@ -12,6 +12,7 @@ static int api_replica_evidence(const LmbModelRoute *route, const LmbResidentPla
     if (home_resident_observation_seed(plan,&seed,records) ||
         catalog_runtime_match(&seed.key,reports,count,why,sizeof why)) return -1;
     out->price_known=1;
+    int load_valid=1;
     for (uint32_t i=0;i<seed.key.nodes;i++) {
         const LmbMachineReport *found=NULL;
         for (uint32_t j=0;j<count;j++) if (!memcmp(plan->peer_keys[i],reports[j].identity,32)) { found=&reports[j]; break; }
@@ -22,6 +23,8 @@ static int api_replica_evidence(const LmbModelRoute *route, const LmbResidentPla
         int duplicate=0;
         for (uint32_t k=0;k<i;k++) if (!memcmp(plan->peer_keys[k],plan->peer_keys[i],32)) duplicate=1;
         if (duplicate) continue;
+        if (lmb_replica_load_add(&out->load,&found->workload,found->machine.ram_total_bytes,
+                plan->execution.nodes[i].reserved_bytes,found->age_ms)) load_valid=0;
         const LmbResourceFacts *facts=&found->facts;
         if (!(facts->known&LMB_FACT_PRICE) || !lmb_resource_facts_valid(facts)) out->price_known=0;
         else {
@@ -31,6 +34,7 @@ static int api_replica_evidence(const LmbModelRoute *route, const LmbResidentPla
             else out->micro_per_hour+=facts->price_micro_per_hour;
         }
     }
+    if (!load_valid) memset(&out->load,0,sizeof out->load);
     seed.key.adapter_abi=route->numeric_abi;
     snprintf(seed.key.numeric_class,sizeof seed.key.numeric_class,"%s",route->numeric_class);
     LmbCalibration observed;
@@ -63,5 +67,11 @@ static void api_route_order(const char *tracker, const LmbModelRoute *route,
     char model[65]; lmb_hex(model,route->id,32);
     fprintf(stderr,"[model-policy] model=%s policy=%s evidence=%s first_replica=%u\n",
         model,lmb_route_policy_name(route->policy),reason,order[0]+1);
+    if (route->policy==LMB_ROUTE_LOAD_AWARE) {
+        const LmbReplicaLoad *load=&facts[order[0]].load;
+        fprintf(stderr,"[model-load] model=%s replica=%u known=%u nodes=%u max_pending=%u total_pending=%u age_ms=%u\n",
+            model,order[0]+1,(unsigned)lmb_replica_load_valid(load),load->nodes,load->max_pending,
+            load->total_pending,load->max_age_ms);
+    }
 }
 #endif

@@ -145,9 +145,9 @@ static int api_model_open(int access, const char *tracker, const uint8_t id[32],
 static int api_route_policy(int access, const char *tracker, char *const *args, unsigned count) {
     if (count!=2 || !*tracker) return 1;
     uint8_t id[32]; uint32_t policy;
-    for (policy=0;policy<=LMB_ROUTE_DECLARED_COST;policy++)
+    for (policy=0;policy<=LMB_ROUTE_POLICY_LAST;policy++)
         if (!strcmp(args[1],lmb_route_policy_name(policy))) break;
-    if (policy>LMB_ROUTE_DECLARED_COST || strlen(args[0])!=64 || lmb_unhex(id,args[0],32)) return 1;
+    if (policy>LMB_ROUTE_POLICY_LAST || strlen(args[0])!=64 || lmb_unhex(id,args[0],32)) return 1;
     int dir=lmb_route_dir(access,0); if (dir<0) return 1;
     LmbModelRoute route; int rc=lmb_route_load(dir,id,&route);
     if (!rc && (strcmp(route.tracker,tracker) || route.revision==UINT32_MAX)) rc=LMB_ROUTE_UNSAFE;
