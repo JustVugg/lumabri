@@ -499,7 +499,7 @@ int main(int argc, char **argv) {
         snprintf(body,sizeof body,"{\"action\":\"retire\",\"instance\":\"%s\",\"revision\":\"1\",\"endpoint\":\"attacker\"}",id);
         assert(lmb_management_request(body,strlen(body),&action,&fence));
         memset(body,' ',sizeof body); assert(lmb_management_request(body,sizeof body,&action,&fence));
-        Engine seeded={.request_seed_supported=1};
+        LmbHostEngine seeded={.request_seed_supported=1};
         HostState host={.engine=&seeded,.slots=4,.routed_slot=2,.max_frame=4096,.max_new=64};
         const char *headers[]={"SUBMIT 1 0 3 8 0.7 0.95 18446744073709551615\n",
             "SUBMIT 1 0 3 8 0.7 0.95\n", "SUBMIT 1 0 3 8 0.7 0.95 -1\n",
@@ -920,7 +920,7 @@ int main(int argc, char **argv) {
     HostOutput host_out = {0};
     assert(host_expired(&host_in, &host_limits, 0, 2) == 1);
     FILE *codec_sink = tmpfile(); assert(codec_sink);
-    Engine codec_engine = {.to = fileno(codec_sink)};
+    LmbHostEngine codec_engine = {.to = fileno(codec_sink)};
     const char *submit = "SUBMIT 7 0 2 4 0 1\nhi";
     for (size_t i = 0; submit[i]; ++i)
         assert(!host_input(&host_in, &codec_engine, &host_limits,

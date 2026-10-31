@@ -81,7 +81,7 @@ int main(void) {
         pid_t engine = fork(); assert(engine >= 0);
         if (!engine) { close(to[1]); close(from[0]); close(listener); fake_codec(to[0], from[1]); }
         close(to[0]); close(from[1]);
-        Engine e = {.pid=engine, .to=to[1], .from=from[0], .segment=1, .reset_supported=1, .session_slots=3};
+        LmbHostEngine e = {.to=to[1], .from=from[0], .segment=1, .reset_supported=1, .session_slots=3};
         HostState h = {.engine=&e, .slots=3, .max_frame=1024, .max_new=8, .idle_seconds=10, .request_seconds=10};
         int rc = host_sessions_run(listener, &h, 400);
         close(listener); close(e.to); close(e.from); kill(engine, SIGTERM); waitpid(engine, NULL, 0);

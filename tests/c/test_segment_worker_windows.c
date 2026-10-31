@@ -6,6 +6,7 @@
 #include <assert.h>
 #include "segment_worker_fixture_windows.h"
 #include "segment_chat_fixture_windows.h"
+#include "host_gateway_fixture_windows.h"
 
 int wmain(int argc,wchar_t **wide) {
     assert(argc==4 || argc==5); /* worker.exe, checkpoint, tracker:port, optional chat.exe */
@@ -63,7 +64,7 @@ int wmain(int argc,wchar_t **wide) {
         "--range","0:4","--port",port_text,"--tracker",tracker,"--advertise",address,
         "--name","windows-worker","--model-root",remote ? root : "1111111111111111111111111111111111111111111111111111111111111111",
         "--tokenizer-root","2222222222222222222222222222222222222222222222222222222222222222",
-        "--context","64","--max-rows","16","--sessions",argc==5 ? "2" : "1","--threads","1","--memory-limit-mb","128",
+        "--context",argc==5 ? "512" : "64","--max-rows","16","--sessions",argc==5 ? "2" : "1","--threads","1","--memory-limit-mb","128",
         "--checkpoint-signer",signer,"--model-bytes",size_text,"--model-layers","4"};
     LmbProcessLaunch launch={.binary=binary,.args=args,.nargs=sizeof args/sizeof *args-(remote ? 0 : 6),
         .environment=environment,.nenvironment=sizeof environment/sizeof *environment,
@@ -95,6 +96,7 @@ int wmain(int argc,wchar_t **wide) {
         char chat_binary[6144];assert(remote);
         assert(WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,wide[4],-1,chat_binary,sizeof chat_binary,NULL,NULL));
         fixture_native_chat(&fixture,chat_binary,directory,tracker);
+        fixture_native_host(&fixture,chat_binary,directory,tracker);
         preparation_reads=atomic_load(&fixture.checkpoint.reads);
     }
     char command[32];

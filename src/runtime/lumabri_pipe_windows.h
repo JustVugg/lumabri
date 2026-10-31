@@ -96,10 +96,10 @@ done:
     CloseHandle(operation.hEvent); return rc;
 }
 
-/* An overlapped duplex pair for explicitly inherited capabilities. Both ends
+/* A private duplex pair for explicitly inherited capabilities. Both ends
  * are created here under the same private ACL; neither is inheritable until
  * the owned-process launcher duplicates its selected child end. */
-static inline int lmb_pipe_pair(HANDLE pair[2]) {
+static inline int lmb_pipe_pair_mode(HANDLE pair[2],int synchronous_client) {
     pair[0]=pair[1]=INVALID_HANDLE_VALUE;
     uint8_t random[16]; char hex[33],name[80];
     if (BCryptGenRandom(NULL,random,sizeof random,BCRYPT_USE_SYSTEM_PREFERRED_RNG)) return -1;
@@ -118,7 +118,7 @@ static inline int lmb_pipe_pair(HANDLE pair[2]) {
     if (ok || GetLastError()!=ERROR_IO_PENDING) goto done;
     pending=1;
     client=CreateFileA(name,GENERIC_READ|GENERIC_WRITE,0,NULL,OPEN_EXISTING,
-        FILE_FLAG_OVERLAPPED|SECURITY_SQOS_PRESENT|SECURITY_IDENTIFICATION,NULL);
+        (synchronous_client ? 0 : FILE_FLAG_OVERLAPPED)|SECURITY_SQOS_PRESENT|SECURITY_IDENTIFICATION,NULL);
     if (client==INVALID_HANDLE_VALUE || WaitForSingleObject(connect.hEvent,2000)!=WAIT_OBJECT_0) goto done;
     ok=GetOverlappedResult(server,&connect,&ignored,FALSE); pending=0;
     ULONG owner=0;
@@ -133,6 +133,12 @@ done:
     if (rc) { if (client!=INVALID_HANDLE_VALUE) CloseHandle(client); CloseHandle(server); }
     return rc;
 }
+
+static inline int lmb_pipe_pair(HANDLE pair[2]) { return lmb_pipe_pair_mode(pair,0); }
+/* The parent retains bounded overlapped I/O. The explicitly inherited child
+ * end is synchronous so the native CRT can use stdin/stdout without relying
+ * on undefined ReadFile(NULL OVERLAPPED) behaviour. */
+static inline int lmb_pipe_process_pair(HANDLE pair[2]) { return lmb_pipe_pair_mode(pair,1); }
 
 static inline int lmb_pipe_inherit(const wchar_t *name,HANDLE *out) {
     *out=INVALID_HANDLE_VALUE;
