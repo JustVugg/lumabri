@@ -137,8 +137,25 @@ int wmain(int argc,wchar_t **wide) {
     char path[1024];uint8_t sk[64],pk[32];assert(!lmb_peer_identity(lmb_peer_key_path(path,sizeof path),sk,pk));
     memcpy(fixture.checkpoint.key,pk,32);memcpy(fixture.checkpoint.secret,sk,64);
     assert(!coli_olmoe_edge_adapter_register() && !coli_olmoe_segment_adapter_register());
-    const char *start[]={"donor","--join",tracker,"--ram-gb","0.402653184","--headless"};
-    assert(!command(start,6));HomeServiceSnapshot initial=status();assert(!initial.has_offer && !initial.reserved_total);
+    /* Join and configure via the real launcher, with no donor command or
+     * inherited household key. The background keeper must inherit the saved
+     * credential activated by the UI, not this test requester's environment. */
+    assert(!_putenv_s("LUMABRI_PEER_KEY",strchr(keyenv,'=')+1) &&
+        !_putenv_s("LUMABRI_KNOWN_HOSTS",strchr(knownenv,'=')+1) && !_putenv_s("LUMABRI_TOKEN",""));
+    WinUi setup;winui_open_args(&setup,binary,L"","Join a household");
+    winui_send_keys(setup.input,"j\r");winui_expect(setup.capture,"Household address (host:port)");
+    winui_send_keys(setup.input,tracker);winui_send_keys(setup.input,"\r");
+    winui_expect(setup.capture,"Household key from its owner");winui_send_keys(setup.input,"native-worker-test\r");
+    winui_expect(setup.capture,tracker);Sleep(100);
+    winui_send_keys(setup.input,"j\r");winui_expect(setup.capture,"Folder containing your models");
+    winui_send_keys(setup.input,"\r");winui_expect(setup.capture,"Maximum RAM to share, in GB");
+    winui_send_keys(setup.input,"\x15" "0.402653184\r");Sleep(200);
+    winui_send_keys(setup.input,"kk\r");winui_expect(setup.capture,"share resources");
+    HomeServiceSnapshot initial=status();assert(!initial.has_offer && !initial.reserved_total);
+    winui_send_keys(setup.input,"\x1b");Sleep(200);winui_close(&setup);
+    snprintf(p,sizeof p,"%s/parent.key",profile);assert(!_putenv_s("LUMABRI_PEER_KEY",p));
+    snprintf(p,sizeof p,"%s/parent.known",profile);assert(!_putenv_s("LUMABRI_KNOWN_HOSTS",p));
+    assert(!_putenv_s("LUMABRI_TOKEN","native-worker-test"));
     pthread_mutex_lock(&fixture.lock);LmbMachineReport reported=fixture.machine_report;
     assert(fixture.machine_reports>0);pthread_mutex_unlock(&fixture.lock);
     assert(reported.roles.known && !strcmp(reported.roles.segment,"olmoe") && !strcmp(reported.roles.edge,"olmoe") && !reported.roles.hybrid[0]);

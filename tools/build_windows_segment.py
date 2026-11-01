@@ -91,6 +91,9 @@ def main():
     if args.only == 'inference':
         return
     run([args.cc,*flags,'-Werror','-Wno-unused-function','-municode',
+         root/'tests/c/test_home_settings_windows.c',resource,'-static','-lwinpthread','-lws2_32',
+         '-lbcrypt','-ladvapi32','-o',output/'test_home_settings_windows.exe'])
+    run([args.cc,*flags,'-Werror','-Wno-unused-function','-municode',
          root/'tests/c/test_allocation_windows.c',resource,'-static','-lwinpthread','-lws2_32',
          '-lbcrypt','-ladvapi32','-o',output/'test_allocation_windows.exe'])
     run([args.cc,*flags,'-Werror','-Wno-unused-function','-municode',

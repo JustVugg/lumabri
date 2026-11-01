@@ -64,9 +64,9 @@ static int home_donor_entry_windows(int argc,char **argv,int internal) {
     return headless ? 0 : lmb_donor_ui_windows(tracker);
 }
 
-
+#include "src/ui/lumabri_home_windows.h"
 static int lmb_windows_main(int argc, char **argv) {
-    if (argc==1 || (argc==2 && !strcmp(argv[1],"share"))) return lmb_donor_ui_windows(NULL);
+    if (argc==1 || (argc==2 && !strcmp(argv[1],"share"))) return home_windows_run(argc==2);
     if (argc>=2 && (!strcmp(argv[1],"donor") || !strcmp(argv[1],"--internal-donor")))
         return home_donor_entry_windows(argc-2,argv+2,!strcmp(argv[1],"--internal-donor"));
     if (argc == 2 && !strcmp(argv[1], "--internal-manager"))
@@ -88,8 +88,9 @@ static int lmb_windows_main(int argc, char **argv) {
           "  lumabri service live ROLE\n"
           "  lumabri machine --json\n\n"
           "  lumabri donor --join HOST:PORT --ram-gb N [--headless]\n"
-          "  lumabri share  (reopen the sharing service's approval screen)\n\n"
-          "Approved OLMoE chat hosting is available on donors. Native household setup and the chat client are not connected yet.\n", stderr);
+          "  lumabri share  (start or reopen sharing using saved household settings)\n\n"
+          "Without arguments: household workspace, authenticated join, settings and sharing.\n"
+          "Approved OLMoE chat hosting is available on donors. Native household creation and the chat client are not connected yet.\n", stderr);
     return argc == 2 && !strcmp(argv[1], "--help") ? 0 : 2;
 }
 

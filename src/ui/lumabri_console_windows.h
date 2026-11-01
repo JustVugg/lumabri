@@ -21,6 +21,7 @@ typedef struct {
     int rebound, saved_fd[2];
     HANDLE saved_handle[2];
     int std_was_crt[2];
+    WCHAR pending_high;
 } LmbConsole;
 
 static inline void lmb_console_restore_stdio(LmbConsole *c) {
@@ -95,7 +96,7 @@ static inline int lmb_console_open(LmbConsole *c) {
         lmb_console_restore_stdio(c);
         return -1;
     }
-    c->repeated = 0; c->active = 1;
+    c->repeated = 0; c->pending_high = 0; c->active = 1;
     return 0;
 }
 
@@ -119,10 +120,9 @@ static inline void lmb_console_size(int *width, int *height) {
     }
 }
 
-/* The catalogue's shortcuts are ASCII. Unicode model names are rendered as
- * UTF-8; future text editors must consume Unicode input separately rather
- * than truncate UTF-16 characters into shortcut bytes. */
-static inline int lmb_console_key(LmbConsole *c, int timeout_ms, int *resized) {
+/* Shortcuts stay ASCII. Text fields receive Unicode scalars, including a
+ * paired UTF-16 surrogate, without truncating characters into key bytes. */
+static inline int lmb_console_input(LmbConsole *c, int timeout_ms, int *resized, int text) {
     if (c->repeated) { c->repeated--; return c->repeated_key; }
     ULONGLONG end = GetTickCount64() + (unsigned)(timeout_ms > 0 ? timeout_ms : 0);
     for (;;) {
@@ -133,13 +133,26 @@ static inline int lmb_console_key(LmbConsole *c, int timeout_ms, int *resized) {
         INPUT_RECORD event; DWORD count = 0;
         if (!ReadConsoleInputW(c->input, &event, 1, &count) || count != 1) return 3;
         if (event.EventType == WINDOW_BUFFER_SIZE_EVENT) *resized = 1;
-        if (event.EventType == KEY_EVENT && event.Event.KeyEvent.bKeyDown) {
+        /* Alt-code text (also synthesized by ConPTY for supplementary
+         * characters) arrives on the Alt key release, not a key-down. */
+        if (event.EventType == KEY_EVENT && (event.Event.KeyEvent.bKeyDown ||
+            (text && event.Event.KeyEvent.wVirtualKeyCode==VK_MENU && event.Event.KeyEvent.uChar.UnicodeChar))) {
             KEY_EVENT_RECORD *key = &event.Event.KeyEvent;
             int value = 0;
-            if (key->wVirtualKeyCode == VK_UP) value = 'k';
-            else if (key->wVirtualKeyCode == VK_DOWN) value = 'j';
-            else if (key->uChar.UnicodeChar > 0 && key->uChar.UnicodeChar < 128)
-                value = key->uChar.UnicodeChar;
+            WCHAR ch=key->uChar.UnicodeChar;
+            /* ConPTY can insert modifier-only records between the two
+             * UTF-16 halves of a supplementary character. */
+            if (text && !ch) continue;
+            if (!text && key->wVirtualKeyCode == VK_UP) value = 'k';
+            else if (!text && key->wVirtualKeyCode == VK_DOWN) value = 'j';
+            else if (text && ch>=0xd800 && ch<=0xdbff) {c->pending_high=ch;continue;}
+            else if (text && ch>=0xdc00 && ch<=0xdfff) {
+                if (c->pending_high) value=0x10000+((c->pending_high-0xd800)<<10)+(ch-0xdc00);
+                c->pending_high=0;
+            } else {
+                c->pending_high=0;
+                if (ch>0 && (text || ch<128)) value=ch;
+            }
             if (value) {
                 c->repeated_key = value;
                 c->repeated = key->wRepeatCount ? key->wRepeatCount-1 : 0;
@@ -148,6 +161,9 @@ static inline int lmb_console_key(LmbConsole *c, int timeout_ms, int *resized) {
         }
         if (GetTickCount64() >= end) return 0;
     }
+}
+static inline int lmb_console_key(LmbConsole *c,int timeout_ms,int *resized) {
+    return lmb_console_input(c,timeout_ms,resized,0);
 }
 
 /* Windows wchar_t is UTF-16; mbrtowc/%lc depend on the CRT locale and cannot

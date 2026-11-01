@@ -4,10 +4,7 @@
 #define LUMABRI_HOME_UI_H
 #include "lumabri_home_discovery.h"
 #include "src/ui/lumabri_resident_ui.h"
-typedef struct {
-    char tracker[256], token[LMB_TOKEN_MAX + 1], models[512], ram[32], sessions[12], context[12];
-    int owner;
-} HomeSettings;
+#include "lumabri_home_settings.h"
 
 static int home_settings_path(char *path, size_t cap) {
     char directory[1100];
@@ -18,31 +15,14 @@ static int home_settings_path(char *path, size_t cap) {
 }
 
 static void home_settings_load(HomeSettings *s) {
-    memset(s, 0, sizeof *s);
-    snprintf(s->models, sizeof s->models, "%s/.lumabri/models", getenv("HOME") ? getenv("HOME") : ".");
-    snprintf(s->ram, sizeof s->ram, "4");
-    snprintf(s->sessions, sizeof s->sessions, "1");
-    snprintf(s->context, sizeof s->context, "%u", LMB_HOME_DEFAULT_CONTEXT);
+    char models[512];snprintf(models,sizeof models,"%s/.lumabri/models",getenv("HOME") ? getenv("HOME") : ".");
+    home_settings_defaults(s,models);
     char path[1200], line[1500];
     if (home_settings_path(path, sizeof path)) return;
     FILE *f = fopen(path, "r");
     if (!f) return;
     while (fgets(line, sizeof line, f)) {
-        char *eq = strchr(line, '=');
-        if (!eq) continue;
-        *eq++ = 0; eq[strcspn(eq, "\r\n")] = 0;
-        if (!strcmp(line, "tracker")) (void)checked_printf(s->tracker, sizeof s->tracker, "%s", eq);
-        else if (!strcmp(line, "token")) (void)checked_printf(s->token, sizeof s->token, "%s", eq);
-        else if (!strcmp(line, "models")) (void)checked_printf(s->models, sizeof s->models, "%s", eq);
-        else if (!strcmp(line, "ram")) (void)checked_printf(s->ram, sizeof s->ram, "%s", eq);
-        else if (!strcmp(line, "owner")) s->owner = !strcmp(eq, "1");
-        else if (!strcmp(line, "sessions") && strlen(eq) == 1 && eq[0] >= '1' && eq[0] <= '8')
-            snprintf(s->sessions, sizeof s->sessions, "%s", eq);
-        else if (!strcmp(line, "context")) {
-            uint32_t context;
-            if (!lmb_context_limit_parse(eq, &context))
-                snprintf(s->context, sizeof s->context, "%u", context);
-        }
+        (void)home_settings_line(s,line);
     }
     fclose(f);
 }
@@ -54,8 +34,8 @@ static int home_settings_activate(const HomeSettings *s) {
 }
 
 static int home_settings_save(const HomeSettings *s) {
-    uint32_t context;
-    if (lmb_context_limit_parse(s->context, &context)) { errno = EINVAL; return -1; }
+    char text[4096];int length=home_settings_format(s,text,sizeof text);
+    if (length<0) {errno=EINVAL;return -1;}
     char path[1200], temporary[1232];
     if (home_settings_path(path, sizeof path) ||
         checked_printf(temporary, sizeof temporary, "%s.XXXXXX", path)) return -1;
@@ -63,9 +43,7 @@ static int home_settings_save(const HomeSettings *s) {
     if (fd < 0) return -1;
     FILE *f = fdopen(fd, "w");
     if (!f) { close(fd); unlink(temporary); return -1; }
-    int bad = fprintf(f, "tracker=%s\ntoken=%s\nmodels=%s\nram=%s\nowner=%d\nsessions=%s\ncontext=%u\n",
-                      s->tracker, s->token, s->models, s->ram, s->owner,
-                      s->sessions[0] ? s->sessions : "1", context) < 0;
+    int bad = fwrite(text,1,(size_t)length,f)!=(size_t)length;
     if (fflush(f) || fsync(fd)) bad = 1;
     if (fclose(f)) bad = 1;
     if (!bad && !rename(temporary, path)) return 0;
