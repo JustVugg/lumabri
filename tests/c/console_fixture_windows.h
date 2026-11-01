@@ -39,7 +39,7 @@ typedef struct {
     HANDLE input,output,reader,job,process;
     WinUiCapture *capture;
 } WinUi;
-static void winui_open(WinUi *ui,const char *binary) {
+static void winui_open_args(WinUi *ui,const char *binary,const wchar_t *arguments,const char *expected) {
     memset(ui,0,sizeof *ui);HANDLE in,out;
     assert(CreatePipe(&in,&ui->input,NULL,0) && CreatePipe(&ui->output,&out,NULL,0));
     assert(SUCCEEDED(CreatePseudoConsole((COORD){104,38},in,out,0,&ui->console)));
@@ -49,7 +49,9 @@ static void winui_open(WinUi *ui,const char *binary) {
     ui->reader=CreateThread(NULL,0,winui_capture,ui->capture,0,NULL);assert(ui->reader);
     ui->job=CreateJobObjectW(NULL,NULL);assert(ui->job);
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits={0};
-    limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    /* Own the console process only. A real launcher may create independent
+     * keepers, whose startup/worker ownership is enforced by product jobs. */
+    limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE|JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
     assert(SetInformationJobObject(ui->job,JobObjectExtendedLimitInformation,&limits,sizeof limits));
     SIZE_T size=0;InitializeProcThreadAttributeList(NULL,2,0,&size);
     STARTUPINFOEXW start={0};start.StartupInfo.cb=sizeof start;
@@ -58,10 +60,13 @@ static void winui_open(WinUi *ui,const char *binary) {
     assert(UpdateProcThreadAttribute(start.lpAttributeList,0,PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,ui->console,sizeof ui->console,NULL,NULL));
     assert(UpdateProcThreadAttribute(start.lpAttributeList,0,PROC_THREAD_ATTRIBUTE_JOB_LIST,&ui->job,sizeof ui->job,NULL,NULL));
     wchar_t *exe=lmb_process_wide(binary),args[32768];assert(exe);
-    assert(swprintf(args,32768,L"\"%ls\" share",exe)>0);PROCESS_INFORMATION pi;
+    assert(swprintf(args,32768,L"\"%ls\" %ls",exe,arguments)>0);PROCESS_INFORMATION pi;
     assert(CreateProcessW(exe,args,NULL,NULL,FALSE,EXTENDED_STARTUPINFO_PRESENT,NULL,NULL,&start.StartupInfo,&pi));
     free(exe);DeleteProcThreadAttributeList(start.lpAttributeList);free(start.lpAttributeList);
-    CloseHandle(pi.hThread);ui->process=pi.hProcess;winui_expect(ui->capture,"share resources");
+    CloseHandle(pi.hThread);ui->process=pi.hProcess;winui_expect(ui->capture,expected);
+}
+static void winui_open(WinUi *ui,const char *binary) {
+    winui_open_args(ui,binary,L"share","share resources");
 }
 static void winui_close(WinUi *ui) {
     winui_send_keys(ui->input,"\x1b");
