@@ -4,6 +4,7 @@
 #define LMB_HOST_ENGINE_H
 #include "src/runtime/lumabri_request_seed.h"
 #include "src/protocol/lumabri_socket.h"
+#include <stdatomic.h>
 #ifdef _WIN32
 #include "src/runtime/lumabri_pipe_windows.h"
 typedef HANDLE LmbHostPipe;
@@ -20,7 +21,12 @@ typedef struct {
     int greedy_only,request_seed_supported,vision_supported;
     uint32_t numeric_abi;
     char numeric_class[97];
+    const _Atomic int *stop; /* Optional allocation-local cancellation. */
 } LmbHostEngine;
+
+static inline int host_engine_stopping(const LmbHostEngine *e) {
+    return g_stopping || (e->stop && atomic_load(e->stop));
+}
 
 static inline void host_socket_shutdown(LmbSocket socket) {
 #ifdef _WIN32
@@ -43,12 +49,12 @@ static inline int host_engine_prepare(LmbHostEngine *e) {
  * indefinitely. Native handles are overlapped, private and explicitly owned. */
 static inline int host_engine_write(LmbHostEngine *e,const void *data,size_t bytes) {
 #ifdef _WIN32
-    if (g_stopping) return -1;
+    if (host_engine_stopping(e)) return -1;
     return lmb_pipe_io(e->to,(void *)data,bytes,1,GetTickCount64()+5000);
 #else
     const uint8_t *p=data;double deadline=nowd()+5;
     while (bytes) {
-        if (g_stopping || nowd()>=deadline) {errno=ETIMEDOUT;return -1;}
+        if (host_engine_stopping(e) || nowd()>=deadline) {errno=ETIMEDOUT;return -1;}
         ssize_t n=write(e->to,p,bytes);
         if (n>0) {p+=n;bytes-=(size_t)n;continue;}
         if (n<0 && errno==EINTR) continue;
@@ -77,7 +83,7 @@ static inline int host_engine_wait(LmbSocket socket,LmbHostEngine *e,int timeout
         if (!PeekNamedPipe(e->from,NULL,0,NULL,&bytes,NULL)) ready|=HOST_ENGINE_CLOSED;
         else if (bytes) ready|=HOST_ENGINE_READ;
         uint64_t now=GetTickCount64();
-        if (ready || g_stopping || now>=deadline) return ready;
+        if (ready || host_engine_stopping(e) || now>=deadline) return ready;
         Sleep((DWORD)(deadline-now<2 ? deadline-now : 2));
     }
 #else

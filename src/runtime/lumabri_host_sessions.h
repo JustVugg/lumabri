@@ -68,6 +68,7 @@ static void host_session_control(LmbSocket fd, HostSessionPool *pool, const LmbM
             pool->slots[i].reset_needed=0;
         }
     }
+    if (snapshot.draining==LMB_HOST_CONTROL_RETIRED && h->sealed) h->sealed(h->lifecycle);
     if (action) {
         char instance_text[65]; lmb_hex(instance_text,snapshot.instance,32);
         fprintf(stderr,"[host-control] action=%s instance=%s revision=%llu conflict=%u connections=%u admitted=%u\n",
@@ -82,7 +83,7 @@ static void host_session_control(LmbSocket fd, HostSessionPool *pool, const LmbM
 
 static int host_session_cancelled(void *opaque) {
     HostSessionSlot *slot = opaque;
-    if (g_stopping || atomic_load(&slot->pool->stop)) return 1;
+    if (host_engine_stopping(slot->pool->host.engine) || atomic_load(&slot->pool->stop)) return 1;
     /* No pipelined requests while queued. Any incoming frame is either a
      * cancellation or a protocol violation; close just this conversation.
      * Do not block the FIFO gate mutex reading an incomplete network frame. */
@@ -91,7 +92,7 @@ static int host_session_cancelled(void *opaque) {
 
 static int host_session_receive(HostSessionSlot *slot, HostState *h, HostInput *in) {
     double deadline = nowd() + h->idle_seconds;
-    while (!g_stopping && !atomic_load(&slot->pool->stop) && nowd() < deadline) {
+    while (!host_engine_stopping(h->engine) && !atomic_load(&slot->pool->stop) && nowd() < deadline) {
         if (host_session_draining(slot->pool)) return -1;
         int ready=lmb_socket_wait(slot->fd,0,100);
         if (ready < 0 && errno == EINTR) continue;
@@ -119,7 +120,7 @@ static void *host_session_worker(void *opaque) {
     HostSessionSlot *slot = opaque;
     HostSessionPool *pool = slot->pool;
     HostState h = pool->host; h.routed_slot = slot->index;
-    while (!g_stopping && !atomic_load(&pool->stop)) {
+    while (!host_engine_stopping(h.engine) && !atomic_load(&pool->stop)) {
         LmbBuf pending = {0};
         HostInput input = {.capture=&pending}; HostOutput output = {0};
         if (host_session_receive(slot, &h, &input)) { free(pending.p); break; }
@@ -144,7 +145,7 @@ static void *host_session_worker(void *opaque) {
             if (!admitted) host_session_error(slot->fd, input.request_id, "host queue deadline exceeded");
             free(pending.p); break;
         }
-        if (g_stopping || atomic_load(&pool->stop)) {
+        if (host_engine_stopping(h.engine) || atomic_load(&pool->stop)) {
             lmb_run_gate_leave(&pool->turns); free(pending.p); break;
         }
         int broken = 0;
@@ -176,7 +177,7 @@ static void *host_session_worker(void *opaque) {
         /* Disconnect/timeout cancels only the active slot. Drain its terminal
          * response before RESET_SLOT; never donate leftover bytes to another
          * conversation. A damaged shared codec stops the host explicitly. */
-        if (!broken && !g_stopping && !atomic_load(&pool->stop)) {
+        if (!broken && !host_engine_stopping(h.engine) && !atomic_load(&pool->stop)) {
             char cancel[96];
             n = snprintf(cancel, sizeof cancel, "CANCEL %s\n", input.request_id);
             if (h.engine->session_slots && (n <= 0 || (size_t)n >= sizeof cancel ||
@@ -192,13 +193,13 @@ static void *host_session_worker(void *opaque) {
      * retires its KV now, not when another client happens to arrive. This
      * slot remains occupied, so no other worker can write the one-slot engine.
      * Multi-slot cleanup still resets under the shared turn gate on reuse. */
-    if (h.slots==1 && !g_stopping && !atomic_load(&pool->stop)) {
+    if (h.slots==1 && !host_engine_stopping(h.engine) && !atomic_load(&pool->stop)) {
         HostInput empty={0}; HostOutput ack={0};
         int reset=host_reset_conversation(h.engine,&h,&empty,&ack);
         if (!reset) {
             reset_needed=0;
             fprintf(stderr,"[host] conversation reset; resident weights retained\n");
-        } else if (reset<0 && !g_stopping && !atomic_load(&pool->stop)) {
+        } else if (reset<0 && !host_engine_stopping(h.engine) && !atomic_load(&pool->stop)) {
             atomic_store(&pool->failed,1); atomic_store(&pool->stop,1);
         } else if (reset>0) {
             fprintf(stderr,"[host] remote session retirement pending; slot quarantined, resident weights retained\n");
@@ -224,11 +225,11 @@ static int host_sessions_run(LmbSocket listener, const HostState *h, uint32_t qu
     for (uint32_t i = 0; i < h->slots; i++) {
         pool.slots[i].pool = &pool; pool.slots[i].index = i; pool.slots[i].fd = LMB_INVALID_SOCKET;
     }
-    if (host_engine_prepare(h->engine) || lmb_ready_notify()) {
+    if (host_engine_prepare(h->engine) || (h->ready ? h->ready(h->lifecycle) : lmb_ready_notify())) {
         lmb_run_gate_destroy(&pool.turns); pthread_cond_destroy(&pool.empty); pthread_mutex_destroy(&pool.lock);
         return 1;
     }
-    while (!g_stopping && !atomic_load(&pool.stop)) {
+    while (!host_engine_stopping(h->engine) && !atomic_load(&pool.stop)) {
         int ready=lmb_socket_wait(listener,0,100);
         if (ready < 0 && errno == EINTR) continue;
         if (ready < 0) break;

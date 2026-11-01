@@ -3364,10 +3364,10 @@ static int cmd_host(int argc, char **argv) {
     const char *host_engine = engine_for(mtype);
     if (!host_engine) { close(lfd); engine_stop(&eng); return 1; }
     LmbHostEngine gateway=host_engine_view(&eng);
-    HostState h = { &gateway, mtype, host_engine, 0, max_frame,
-                    (uint32_t)max_new, idle_seconds, request_seconds,
-                    client_key ? allowed_client : NULL,
-                    getenv("LUMABRI_EXPECT_MODEL_ROOT"), session_slots, 0, session_slots, 0 };
+    HostState h = {.engine=&gateway, .model_type=mtype, .engine_kind=host_engine, .max_frame=max_frame,
+        .max_new=(uint32_t)max_new, .idle_seconds=idle_seconds, .request_seconds=request_seconds,
+        .client_key=client_key ? allowed_client : NULL, .model_root=getenv("LUMABRI_EXPECT_MODEL_ROOT"),
+        .slots=session_slots, .sessions_free=session_slots};
     /* Older one-slot codecs omit LUMABRI_SLOTS; zero is the legacy single
      * conversation dialect, not lack of capacity. RESET still gates reuse. */
     int slots_match=eng.session_slots==session_slots || (session_slots==1 && !eng.session_slots);

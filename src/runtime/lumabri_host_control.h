@@ -60,8 +60,8 @@ static int lmb_host_control_rpc(const char *address, const char *key_text, const
     if (!now) return -1;
     uint32_t timeout=action==LMB_HOST_CONTROL_RETIRE ? 30000*LMB_HOST_MAX_SESSIONS+2000 : 6000;
     lmb_read_deadline_ms=prior && prior<now+timeout ? prior : now+timeout;
-    int fd=lmb_connect_ms_io(address,2000,(int)timeout);
-    if (fd<0) { lmb_read_deadline_ms=prior; return -1; }
+    LmbSocket fd=lmb_connect_ms_io(address,2000,(int)timeout);
+    if (fd==LMB_INVALID_SOCKET) { lmb_read_deadline_ms=prior; return -1; }
     LmbBuf body={0}; LmbMsg reply={0}; LmbHostControl state={0}; uint32_t version=0,status=0;
     int bad=!lmb_secure_peer_matches(fd,key) || lmb_auth(fd) ||
         lmb_host_control_request(&body,action,root,expected) ||
