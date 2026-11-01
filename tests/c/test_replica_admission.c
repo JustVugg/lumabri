@@ -71,6 +71,9 @@ int main(void) {
     (void)lmb_sign;
     char temporary[]="/tmp/lmb-replica-admission-XXXXXX"; assert(mkdtemp(temporary));
     int access=lmb_api_access_dir(temporary,0); assert(access>=0);
+    LmbReplicaDispatch snapshot;
+    assert(!lmb_replica_dispatch_snapshot(access,&snapshot) && !snapshot.count);
+    struct stat absent;assert(fstatat(access,"dispatch",&absent,AT_SYMLINK_NOFOLLOW) && errno==ENOENT);
     inject_create_race=1;
     int guard=lmb_api_access_lock(access); assert(guard>=0);
     assert(!inject_create_race && !combined_lock_opens);
@@ -90,8 +93,12 @@ int main(void) {
     concurrent_admission(access);
     uint8_t first[32]={1}, second[32]={2}; int held=-1, another=-1;
     assert(!lmb_replica_admit(access,first,&held) && held>=0);
+    assert(!lmb_replica_dispatch_snapshot(access,&snapshot) && snapshot.count==1 &&
+        !memcmp(snapshot.allocation[0],first,32));
     assert(lmb_replica_admit(access,first,&another)==LMB_REPLICA_BUSY && another==-1);
-    assert(!lmb_replica_admit(access,second,&another)); close(another);
+    assert(!lmb_replica_admit(access,second,&another));
+    assert(!lmb_replica_dispatch_snapshot(access,&snapshot) && snapshot.count==2);
+    close(another);
     pid_t pid=fork(); assert(pid>=0);
     if (!pid) {
         close(held);
@@ -100,24 +107,37 @@ int main(void) {
         _exit(0); /* process death, without application cleanup */
     }
     int status; assert(waitpid(pid,&status,0)==pid && WIFEXITED(status) && !WEXITSTATUS(status));
+    assert(!lmb_replica_dispatch_snapshot(access,&snapshot) && snapshot.count==1 &&
+        !memcmp(snapshot.allocation[0],first,32)); /* dead child left no phantom request */
     assert(!lmb_replica_admit(access,second,&another)); close(another); close(held);
+    assert(!lmb_replica_dispatch_snapshot(access,&snapshot) && !snapshot.count);
     int cells[LMB_REPLICA_CELLS];
     for (unsigned i=0;i<LMB_REPLICA_CELLS;i++) {
         uint8_t id[32]={(uint8_t)(i+1)}; assert(!lmb_replica_admit(access,id,&cells[i]));
     }
     uint8_t extra[32]={99};
     assert(lmb_replica_admit(access,extra,&another)==LMB_REPLICA_BUSY);
+    assert(!lmb_replica_dispatch_snapshot(access,&snapshot) && snapshot.count==LMB_REPLICA_CELLS);
     close(cells[3]); assert(!lmb_replica_admit(access,extra,&cells[3]));
     for (unsigned i=0;i<LMB_REPLICA_CELLS;i++) close(cells[i]);
     int dir=openat(access,"dispatch",O_RDONLY|O_DIRECTORY|O_CLOEXEC); assert(dir>=0);
+    int writer=lmb_api_access_lock(dir);assert(writer>=0);
+    assert(lmb_replica_dispatch_snapshot(access,&snapshot)==LMB_REPLICA_BUSY && !snapshot.count);
+    close(writer);
     int partial=openat(dir,"0.lease",O_WRONLY|O_TRUNC|O_CLOEXEC); assert(partial>=0);
-    assert(write(partial,"partial",7)==7); close(partial);
+    assert(write(partial,"partial",7)==7);
+    assert(!flock(partial,LOCK_EX|LOCK_NB));
+    assert(lmb_replica_dispatch_snapshot(access,&snapshot)==LMB_REPLICA_UNSAFE && !snapshot.count);
+    close(partial);
+    assert(!lmb_replica_dispatch_snapshot(access,&snapshot) && !snapshot.count);
     assert(!lmb_replica_admit(access,first,&held)); close(held);
     assert(!fchmodat(dir,"0.lease",0644,0));
     assert(lmb_replica_admit(access,first,&held)==LMB_REPLICA_UNSAFE);
+    assert(lmb_replica_dispatch_snapshot(access,&snapshot)==LMB_REPLICA_UNSAFE && !snapshot.count);
     assert(!fchmodat(dir,"0.lease",0600,0));
     assert(!unlinkat(dir,"0.lease",0)); assert(!symlinkat("1.lease",dir,"0.lease"));
     assert(lmb_replica_admit(access,first,&held)==LMB_REPLICA_UNSAFE);
+    assert(lmb_replica_dispatch_snapshot(access,&snapshot)==LMB_REPLICA_UNSAFE && !snapshot.count);
     for (unsigned i=0;i<LMB_REPLICA_CELLS;i++) {
         char name[16]; snprintf(name,sizeof name,"%u.lease",i); assert(!unlinkat(dir,name,0));
     }

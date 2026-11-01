@@ -203,9 +203,48 @@ static void latency_tests(void) {
 #undef LATENCY
 }
 
+static void gateway_tests(void) {
+    uint8_t nodes[3][32]={{1},{1},{2}},active[3][32]={{2},{2},{3}};
+    uint32_t counts[3]={0};
+    assert(!lmb_replica_gateway_overlap(counts,&nodes[0][0],3,&active[0][0],3));
+    assert(counts[0]==0 && counts[1]==0 && counts[2]==1);
+    assert(!lmb_replica_gateway_overlap(counts,&nodes[0][0],3,&active[0][0],3));
+    assert(counts[2]==2); /* another model on the same machine counts too */
+    assert(lmb_replica_gateway_overlap(counts,&nodes[0][0],LMB_INVENTORY_MAX+1,&active[0][0],3));
+    counts[2]=UINT32_MAX;
+    assert(lmb_replica_gateway_overlap(counts,&nodes[0][0],3,&active[0][0],3));
+
+    LmbReplicaEvidence e[3]={0};uint32_t order[LMB_ROUTE_REPLICAS];
+    for (unsigned i=0;i<3;i++) e[i]=(LmbReplicaEvidence){.usable=1,.observation_current=1,
+        .decode_tok_s=10-i,.ttft_seconds=1+i,.measured_at=1000,
+        .prompt_tokens=4,.generated_tokens=8,.observation_source=LMB_CAL_SOURCE_SESSION,
+        .load={.nodes=2,.max_pending=0,.total_pending=0,.max_age_ms=1000},
+        .gateway={.known=1,.max_active=1,.total_active=2}};
+    /* Reports still say idle. Requests already admitted for another model
+     * occupy two shared machines. Prefer the disjoint replica immediately. */
+    e[2].gateway.max_active=e[2].gateway.total_active=0;
+    for (unsigned policy=LMB_ROUTE_LOAD_AWARE;policy<=LMB_ROUTE_LATENCY_AWARE;policy++) {
+        lmb_replica_rank(policy,e,3,1000,order);assert(order[0]==2 && order[1]==0);
+        e[2].load.max_pending=e[2].load.total_pending=1;
+        lmb_replica_rank(policy,e,3,1000,order);assert(order[0]==0); /* compute reports take precedence */
+        e[2].load.max_pending=e[2].load.total_pending=0;
+        e[1].gateway.known=0;
+        lmb_replica_rank(policy,e,3,1000,order);assert(order[0]==0); /* missing != idle */
+        e[1].gateway.known=1;
+        e[2].gateway.max_active=1;e[2].gateway.total_active=1;
+        lmb_replica_rank(policy,e,3,1000,order);assert(order[0]==2); /* fewer shared nodes */
+        e[2].gateway.max_active=e[2].gateway.total_active=0;
+    }
+    lmb_replica_rank(LMB_ROUTE_ORDERED,e,3,1000,order);assert(order[0]==0);
+    lmb_replica_rank(LMB_ROUTE_OBSERVED_DECODE,e,3,1000,order);assert(order[0]==0);
+    /* The timing noise band must not override a lower-contention tier. */
+    e[0].ttft_seconds=3.01;e[1].ttft_seconds=3.02;
+    lmb_replica_rank(LMB_ROUTE_LATENCY_AWARE,e,3,1000,order);assert(order[0]==2);
+}
+
 int main(void) {
     (void)lmb_sign;
-    profile_tests(); rank_tests(); load_tests(); latency_tests();
+    profile_tests(); rank_tests(); load_tests(); latency_tests(); gateway_tests();
     puts("REPLICA PREFERENCES: PASS (bounded private observations, exact provenance, expiry, missing prices, stable rank)");
     return 0;
 }

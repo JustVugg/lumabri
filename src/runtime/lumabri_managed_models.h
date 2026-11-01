@@ -107,7 +107,7 @@ static int api_model_open_ex(int access, const char *tracker, const uint8_t id[3
     } else if (max_new>route.max_new) { status=400; *error="max_tokens_exceeds_plan"; }
     else if (!route.count) { status=503; *error="model_dormant_preparation_required"; }
     else {
-      uint32_t order[LMB_ROUTE_REPLICAS]; api_route_order(tracker,&route,order);
+      uint32_t order[LMB_ROUTE_REPLICAS]; api_route_order(access,tracker,&route,order);
       for (uint32_t attempt=0; attempt<route.count; attempt++) {
         uint32_t i=order[attempt];
         int skipped=0;

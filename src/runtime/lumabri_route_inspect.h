@@ -17,6 +17,10 @@ static int api_route_decision_json(Cap *body,const LmbModelRoute *route,const Lm
         int load=usable && lmb_replica_load_valid(&e->load);
         if (!bad) bad=load ? api_addf(body,"{\"nodes\":%u,\"max_pending_turns\":%u,\"total_pending_turns\":%u,"
             "\"oldest_report_ms\":%u}",e->load.nodes,e->load.max_pending,e->load.total_pending,e->load.max_age_ms) : cap_str(body,"null");
+        if (!bad) bad=cap_str(body,",\"gateway\":");
+        if (!bad) bad=usable && e->gateway.known ? api_addf(body,
+            "{\"scope\":\"same_operator_gateway\",\"max_active_requests\":%u,\"total_node_requests\":%u}",
+            e->gateway.max_active,e->gateway.total_active) : cap_str(body,"null");
         int timing=usable && !lmb_replica_timing_evidence(e,1,d->captured_at,1);
         int decode=usable && !lmb_replica_timing_evidence(e,1,d->captured_at,0);
         if (!bad) bad=cap_str(body,",\"timing\":");
@@ -42,7 +46,7 @@ static int api_route_inspect(int fd,int access,const char *tracker,const char *t
     else {
         int rc=api_route_read(access,id,tracker,&route);
         if (rc==LMB_ROUTE_MISSING) {status=404;error="managed_model_not_found";}
-        else if (rc || api_route_capture(tracker,&route,&decision) || api_route_decision_json(&body,&route,&decision)) status=503;
+        else if (rc || api_route_capture(access,tracker,&route,&decision) || api_route_decision_json(&body,&route,&decision)) status=503;
     }
     if (status!=200) {
         if (fd>=0) api_error(fd,status,error);else fprintf(stderr,"%s\n",error);

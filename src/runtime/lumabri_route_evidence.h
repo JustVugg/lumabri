@@ -56,7 +56,35 @@ typedef struct {
     int inventory_ok;
 } LmbRouteDecision;
 
-static int api_route_capture(const char *tracker,const LmbModelRoute *route,LmbRouteDecision *decision) {
+typedef struct {
+    uint32_t count, active[LMB_CLUSTER_MAX_NODES];
+    uint8_t keys[LMB_CLUSTER_MAX_NODES][32];
+} LmbRouteNodes;
+
+static void api_route_gateway_load(int access,const char *tracker,const LmbModelRoute *route,
+    LmbRouteNodes nodes[LMB_ROUTE_REPLICAS],LmbResidentPlan *scratch,LmbRouteDecision *decision) {
+    LmbReplicaDispatch dispatch;
+    if (lmb_replica_dispatch_snapshot(access,&dispatch)) return;
+    for (uint32_t k=0;k<dispatch.count;k++) {
+        /* A held allocation from another model still competes on shared
+         * machines. Missing ownership/topology makes this signal unknown. */
+        if (api_find_plan(tracker,dispatch.allocation[k],scratch) || !scratch->execution.count ||
+            scratch->execution.count>LMB_CLUSTER_MAX_NODES) return;
+        for (uint32_t i=0;i<route->count;i++) if (nodes[i].count &&
+            lmb_replica_gateway_overlap(nodes[i].active,&nodes[i].keys[0][0],nodes[i].count,
+                &scratch->peer_keys[0][0],scratch->execution.count)) return;
+    }
+    for (uint32_t i=0;i<route->count;i++) if (nodes[i].count) {
+        LmbReplicaGatewayLoad *load=&decision->facts[i].gateway;
+        load->known=1;
+        for (uint32_t n=0;n<nodes[i].count;n++) {
+            if (nodes[i].active[n]>load->max_active) load->max_active=nodes[i].active[n];
+            load->total_active+=nodes[i].active[n];
+        }
+    }
+}
+
+static int api_route_capture(int access,const char *tracker,const LmbModelRoute *route,LmbRouteDecision *decision) {
     memset(decision,0,sizeof *decision);decision->captured_at=(double)time(NULL);
     decision->reason=!route->count ? "model_dormant" : !route->policy ? "operator_order" : "inventory_unavailable";
     for (uint32_t i=0;i<route->count;i++) decision->order[i]=i;
@@ -66,24 +94,29 @@ static int api_route_capture(const char *tracker,const LmbModelRoute *route,LmbR
     decision->inventory_ok=1;
     LmbResidentPlan *plan=calloc(1,sizeof *plan);
     if (!plan) {decision->reason="observation_unavailable";return -1;}
-    for (uint32_t i=0;i<route->count;i++)
-        if (!api_find_plan(tracker,route->replicas[i].allocation,plan) && api_route_plan_matches(route,i,plan) &&
-            api_replica_evidence(route,plan,reports,count,&decision->facts[i])) {
+    LmbRouteNodes nodes[LMB_ROUTE_REPLICAS]={0};
+    for (uint32_t i=0;i<route->count;i++) {
+        if (api_find_plan(tracker,route->replicas[i].allocation,plan) || !api_route_plan_matches(route,i,plan)) continue;
+        nodes[i].count=plan->execution.count;
+        memcpy(nodes[i].keys,plan->peer_keys,plan->execution.count*32u);
+        if (api_replica_evidence(route,plan,reports,count,&decision->facts[i])) {
             /* Keep a matching saved plan eligible even when its measurements
              * are missing. Unknown must not look idle or inexpensive. */
             decision->facts[i]=(LmbReplicaEvidence){.usable=1};
         }
+    }
+    api_route_gateway_load(access,tracker,route,nodes,plan,decision);
     free(plan);
     decision->captured_at=(double)time(NULL);
     decision->reason=lmb_replica_rank(route->policy,decision->facts,route->count,decision->captured_at,decision->order);
     return 0;
 }
-static void api_route_order(const char *tracker,const LmbModelRoute *route,
+static void api_route_order(int access,const char *tracker,const LmbModelRoute *route,
     uint32_t order[LMB_ROUTE_REPLICAS]) {
     for (uint32_t i=0;i<route->count;i++) order[i]=i;
     if (!route->policy || !route->count) return;
     LmbRouteDecision decision;
-    (void)api_route_capture(tracker,route,&decision);
+    (void)api_route_capture(access,tracker,route,&decision);
     memcpy(order,decision.order,route->count*sizeof *order);
     const char *reason=decision.reason;const LmbReplicaEvidence *facts=decision.facts;
     char model[65]; lmb_hex(model,route->id,32);
@@ -94,6 +127,9 @@ static void api_route_order(const char *tracker,const LmbModelRoute *route,
         fprintf(stderr,"[model-load] model=%s replica=%u known=%u nodes=%u max_pending=%u total_pending=%u age_ms=%u\n",
             model,order[0]+1,(unsigned)lmb_replica_load_valid(load),load->nodes,load->max_pending,
             load->total_pending,load->max_age_ms);
+        const LmbReplicaGatewayLoad *gateway=&facts[order[0]].gateway;
+        fprintf(stderr,"[model-dispatch] model=%s replica=%u scope=same_operator_gateway known=%u max_active=%u total_active=%u\n",
+            model,order[0]+1,gateway->known,gateway->max_active,gateway->total_active);
     }
     if (route->policy==LMB_ROUTE_LATENCY_AWARE) {
         const LmbReplicaEvidence *chosen=&facts[order[0]];

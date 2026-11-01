@@ -351,7 +351,16 @@ FIFO compute turns, including work for other models, **not a predicted waiting
 time or token rate**. Every participating machine must have a matching runtime,
 an approved resident plan and a valid workload report no older than ten seconds.
 Missing or expired reports restore the operator's order; unknown never means idle.
-Equal-load replicas use comparable decode observations and the same five-percent
+Equal-load replicas first compare requests already held by this operator's
+gateway on their participating computers, including requests for other models.
+The busiest computer is compared first, then the sum across distinct computers.
+This reacts to new requests before the next worker heartbeat. It counts live
+kernel-owned admission leases, not stale records or saved PIDs; process exit
+releases the lease automatically. Missing or unreadable lease/plan information
+disables this tie-break for the whole decision. Other gateways and direct clients
+are outside this observation, so zero does not certify an idle cluster.
+Gateway requests and worker compute turns remain separate; they are never added.
+Remaining ties use comparable decode observations and the same five-percent
 band described above, or operator order if those observations are missing.
 The inventory is sampled, so the host's live admission and per-allocation permits
 still decide whether a request can actually run. This policy neither evicts
@@ -361,8 +370,8 @@ Before rolling back to a gateway version without this policy, switch affected
 models back to `ordered`. Older readers reject an unknown policy instead of
 silently changing its meaning.
 
-`latency-aware` uses the same fresh compute-load ordering, but breaks equal-load
-ties by **lower observed time to first token**, instead of decode rate. All
+`latency-aware` uses the same compute-load and gateway-request ordering, but
+breaks remaining ties by **lower observed time to first token**, instead of decode rate. All
 available plans must have a valid positive first-token measurement within five
 minutes, exact configuration provenance, matching prompt/output lengths, and the
 same measurement source (short probe or real session). Differences within five
@@ -395,13 +404,18 @@ to a bearer token with an operator grant. In **Computers & models**, choose
 added by this read-only operation.
 
 The snapshot includes the model revision, policy, preference order, reason,
-matched saved plans, pending compute turns and report ages, recent matching
+matched saved plans, pending compute turns and report ages, active gateway
+requests on shared machines, recent matching
 TTFT/decode observations, and declared whole-machine costs when supplied.
 Missing or expired measurements are `null`. Individually valid timings can
 still be incomparable across replicas; `reason` explains which evidence
 actually determined the ordering. Costs are declared prices, not measured
 savings. The scope is `preference_snapshot_not_admission`: it does not reserve
 capacity, connect to an engine or prove that the first replica is healthy.
+The `gateway` object is scoped to `same_operator_gateway`. Its total counts
+request/computer pairs: a request spanning two computers contributes two, not
+two independent requests. Observation may become outdated as requests finish;
+it never changes or grants an admission permit.
 The next request rechecks permissions and live admission. Web snapshots show
 their capture time and are cleared on workspace refresh or a failed inspection.
 

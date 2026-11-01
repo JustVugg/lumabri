@@ -14,6 +14,7 @@ typedef struct {
     uint64_t micro_per_hour;
     char currency[4];
     LmbReplicaLoad load;
+    LmbReplicaGatewayLoad gateway;
 } LmbReplicaEvidence;
 
 /* Timing is a preference over comparable completed observations, never a
@@ -52,9 +53,11 @@ static inline const char *lmb_replica_rank(uint32_t policy, const LmbReplicaEvid
     if (policy==LMB_ROUTE_OBSERVED_DECODE && decode_problem) return decode_problem;
     int decode=policy==LMB_ROUTE_OBSERVED_DECODE || (policy==LMB_ROUTE_LOAD_AWARE && !decode_problem);
     uint32_t first=count;
+    int gateway=load_aware;
     for (uint32_t i=0;i<count;i++) if (e[i].usable) {
         if (first==count) first=i;
         if (load_aware && !lmb_replica_load_valid(&e[i].load)) return "workload_missing_or_expired";
+        if (!e[i].gateway.known) gateway=0;
         if (policy==LMB_ROUTE_DECLARED_COST && (!e[i].price_known || !e[i].currency[0] || e[i].currency[3] ||
             memcmp(e[i].currency,e[first].currency,4))) return "prices_missing_or_mixed_currency";
     }
@@ -68,6 +71,7 @@ static inline const char *lmb_replica_rank(uint32_t policy, const LmbReplicaEvid
         for (uint32_t i=0;i<count;i++) if (!(used&(1u<<i)) && e[i].usable) {
             if (best==count) { best=i; continue; }
             int load_order=load_aware ? lmb_replica_load_compare(&e[i].load,&e[best].load) : 0;
+            if (!load_order && gateway) load_order=lmb_replica_gateway_compare(&e[i].gateway,&e[best].gateway);
             if (load_order<0 || (!load_order &&
                 (first_token ? e[i].ttft_seconds<e[best].ttft_seconds :
                  decode ? e[i].decode_tok_s>e[best].decode_tok_s :
@@ -78,6 +82,7 @@ static inline const char *lmb_replica_rank(uint32_t policy, const LmbReplicaEvid
              * a chain of 4% differences must not hide a 30% improvement. */
             for (uint32_t i=0;i<best;i++) if (!(used&(1u<<i)) && e[i].usable &&
                 (!load_aware || !lmb_replica_load_compare(&e[i].load,&e[best].load)) &&
+                (!gateway || !lmb_replica_gateway_compare(&e[i].gateway,&e[best].gateway)) &&
                 (first_token ? e[i].ttft_seconds<=e[best].ttft_seconds*1.05 :
                  e[i].decode_tok_s>=e[best].decode_tok_s/1.05)) { best=i; break; }
         }
