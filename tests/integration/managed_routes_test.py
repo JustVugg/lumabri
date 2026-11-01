@@ -117,6 +117,15 @@ def verify_managed_routes(runtime, env, tracker, first_plan, third_plan, first_n
         assert request(control_path)[0] == 403
         assert request(control_path, body={"action": "retire"})[0] == 403
         cli("operator-grant", "route-bob")
+        routing_path = "/api/v1/routing/" + route["id"]
+        assert request(routing_path, "wrong")[0] == 401
+        assert request(routing_path, alice)[0] == 403
+        status, data = request(routing_path, bob)
+        initial_routing = json.loads(data)
+        assert status == 200 and initial_routing["reason"] == "operator_order", initial_routing
+        assert [r["allocation"] for r in initial_routing["replicas"]] == [first["id"], third["id"]]
+        assert request("/api/v1/routing/not-a-model", bob)[0] == 400
+        assert request("/api/v1/routing/" + "ff" * 32, bob)[0] == 404
         assert request(control_path, bob)[0] == 200
         assert request(control_path, bob, {"action": "retire"})[0] == 403, "read-only operator gained control"
         cli("manage-grant", "route-bob")
@@ -173,6 +182,15 @@ def verify_managed_routes(runtime, env, tracker, first_plan, third_plan, first_n
         assert "policy=latency-aware evidence=recent_workload_and_ttft_observations" in latency_log, latency_log
         assert "[model-latency]" in latency_log and "known=1" in latency_log, latency_log
         assert "source=real_session" in latency_log and "allocation=" + third["id"] in latency_log, latency_log
+        status, data = request(routing_path, bob)
+        inspected = json.loads(data)
+        assert status == 200 and inspected["scope"] == "preference_snapshot_not_admission", inspected
+        assert inspected["policy"] == "latency-aware" and inspected["revision"] == 6
+        assert inspected["reason"] == "recent_workload_and_ttft_observations", inspected
+        assert all(r["plan_matches"] and r["load"] and r["timing"] for r in inspected["replicas"]), inspected
+        assert all(r["timing"]["source"] == "real_session" for r in inspected["replicas"])
+        local_inspection = json.loads(command("model-routing", route["id"]))
+        assert local_inspection["model"] == route["id"] and local_inspection["revision"] == 6
         assert json.loads(command("model-policy", route["id"], "ordered"))["revision"] == 7
         third_busy = hold(third["id"])
         status, data = chat(route["id"])

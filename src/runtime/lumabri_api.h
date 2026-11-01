@@ -128,6 +128,7 @@ static int api_find_plan(const char *tracker, const uint8_t allocation[32], LmbR
     return home_resident_library_find(tracker,allocation,out);
 }
 #include "lumabri_managed_models.h"
+#include "lumabri_route_inspect.h"
 #include "lumabri_retirement.h"
 #include "lumabri_workspace.h"
 #include "lumabri_management.h"
@@ -561,6 +562,9 @@ static void api_connection_dispatch(int fd, int access_dir, unsigned port, const
     else if (!strcmp(request.method,"GET") && !strcmp(request.path,"/api/v1/workspace") && !request.length) {
         if (lmb_operator_allows(access_dir,&user)) (void)api_workspace(fd,access_dir,tracker);
         else api_error(fd,403,"operator_permission_required");
+    } else if (!strcmp(request.method,"GET") && !strncmp(request.path,"/api/v1/routing/",16) && !request.length) {
+        if (lmb_operator_allows(access_dir,&user)) (void)api_route_inspect(fd,access_dir,tracker,request.path+16);
+        else api_error(fd,403,"operator_permission_required");
     } else if (!strcmp(request.method,"GET") && (!strcmp(request.path,"/api/v1/models") || !strcmp(request.path,"/v1/models")) && !request.length)
         api_models(fd,access_dir,tracker,&user);
     else if (history && !strcmp(request.method,"GET") && !request.length)
@@ -892,6 +896,9 @@ static int cmd_api(int argc, char **argv) {
     if (!strcmp(argv[0],"model-policy")) {
         int rc=api_route_policy(dir,tracker,args,count); close(dir); return rc;
     }
+    if (!strcmp(argv[0],"model-routing") && count==1 && *tracker) {
+        int rc=api_route_inspect(-1,dir,tracker,args[0]);close(dir);return rc;
+    }
     if (!strcmp(argv[0],"replica")) {
         int rc=api_replica_control(tracker,args,count); close(dir); return rc;
     }
@@ -938,6 +945,7 @@ usage:
         "lumabri api model-set MODEL_ID APPROVED_ALLOCATION... [--tracker HOST:PORT]\n"
         "lumabri api model-remove MODEL_ID [--tracker HOST:PORT]\n"
         "lumabri api model-policy MODEL_ID ordered|observed-decode|declared-cost|load-aware|latency-aware [--tracker HOST:PORT]\n"
+        "lumabri api model-routing MODEL_ID [--tracker HOST:PORT]  read-only routing evidence as JSON\n"
         "lumabri api retire ALLOCATION_ID [--tracker HOST:PORT]\n"
         "lumabri api replica ALLOCATION_ID [status|drain|resume] [--tracker HOST:PORT]\n"
         "lumabri api segments ALLOCATION_ID [status|drain|resume] [--tracker HOST:PORT]\n"

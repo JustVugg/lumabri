@@ -46,25 +46,46 @@ static int api_replica_evidence(const LmbModelRoute *route, const LmbResidentPla
     }
     return 0;
 }
-static void api_route_order(const char *tracker, const LmbModelRoute *route,
+/* The inspector and live routing consume the same bounded evidence. This
+ * snapshot never reserves a slot or proves that a host will admit a request. */
+typedef struct {
+    LmbReplicaEvidence facts[LMB_ROUTE_REPLICAS];
+    uint32_t order[LMB_ROUTE_REPLICAS];
+    const char *reason;
+    double captured_at;
+    int inventory_ok;
+} LmbRouteDecision;
+
+static int api_route_capture(const char *tracker,const LmbModelRoute *route,LmbRouteDecision *decision) {
+    memset(decision,0,sizeof *decision);decision->captured_at=(double)time(NULL);
+    decision->reason=!route->count ? "model_dormant" : !route->policy ? "operator_order" : "inventory_unavailable";
+    for (uint32_t i=0;i<route->count;i++) decision->order[i]=i;
+    if (!route->count) return 0;
+    LmbMachineReport reports[LMB_INVENTORY_MAX];uint32_t count=0;
+    if (lmb_inventory_fetch(tracker,reports,&count)) return 0;
+    decision->inventory_ok=1;
+    LmbResidentPlan *plan=calloc(1,sizeof *plan);
+    if (!plan) {decision->reason="observation_unavailable";return -1;}
+    for (uint32_t i=0;i<route->count;i++)
+        if (!api_find_plan(tracker,route->replicas[i].allocation,plan) && api_route_plan_matches(route,i,plan) &&
+            api_replica_evidence(route,plan,reports,count,&decision->facts[i])) {
+            /* Keep a matching saved plan eligible even when its measurements
+             * are missing. Unknown must not look idle or inexpensive. */
+            decision->facts[i]=(LmbReplicaEvidence){.usable=1};
+        }
+    free(plan);
+    decision->captured_at=(double)time(NULL);
+    decision->reason=lmb_replica_rank(route->policy,decision->facts,route->count,decision->captured_at,decision->order);
+    return 0;
+}
+static void api_route_order(const char *tracker,const LmbModelRoute *route,
     uint32_t order[LMB_ROUTE_REPLICAS]) {
     for (uint32_t i=0;i<route->count;i++) order[i]=i;
-    if (!route->policy) return;
-    LmbMachineReport reports[LMB_INVENTORY_MAX]; uint32_t count=0;
-    const char *reason="inventory_unavailable"; LmbReplicaEvidence facts[LMB_ROUTE_REPLICAS]={0};
-    if (!lmb_inventory_fetch(tracker,reports,&count)) {
-        LmbResidentPlan *plan=calloc(1,sizeof *plan);
-        if (!plan) return;
-        for (uint32_t i=0;i<route->count;i++)
-            if (!api_find_plan(tracker,route->replicas[i].allocation,plan) && api_route_plan_matches(route,i,plan) &&
-                api_replica_evidence(route,plan,reports,count,&facts[i])) {
-                /* Partial facts cannot drive either objective. Keep usable
-                 * so unknown is not accidentally filtered as a cheap node. */
-                facts[i]=(LmbReplicaEvidence){.usable=1};
-            }
-        free(plan);
-        reason=lmb_replica_rank(route->policy,facts,route->count,(double)time(NULL),order);
-    }
+    if (!route->policy || !route->count) return;
+    LmbRouteDecision decision;
+    (void)api_route_capture(tracker,route,&decision);
+    memcpy(order,decision.order,route->count*sizeof *order);
+    const char *reason=decision.reason;const LmbReplicaEvidence *facts=decision.facts;
     char model[65]; lmb_hex(model,route->id,32);
     fprintf(stderr,"[model-policy] model=%s policy=%s evidence=%s first_replica=%u\n",
         model,lmb_route_policy_name(route->policy),reason,order[0]+1);

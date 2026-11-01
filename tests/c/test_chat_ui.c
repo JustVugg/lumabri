@@ -483,6 +483,27 @@ int main(int argc, char **argv) {
         (void)getchar(); close(permit); close(access); return 0;
     }
     if (argc == 2 && !strcmp(argv[1], "api-codec")) {
+        /* Inspector output must suppress expired or unknown evidence, not
+         * turn a missing load into zero or stale timing into a prediction. */
+        LmbModelRoute inspect_route={.count=2,.revision=UINT32_MAX,.policy=LMB_ROUTE_LATENCY_AWARE};
+        LmbRouteDecision decision={.inventory_ok=1,.captured_at=1000,.order={1,0},.reason="recent_workload_observations"};
+        decision.facts[1]=(LmbReplicaEvidence){.usable=1,.observation_current=1,.ttft_seconds=.125,
+            .measured_at=999,.prompt_tokens=4,.generated_tokens=8,.observation_source=LMB_CAL_SOURCE_SESSION,
+            .load={.nodes=1,.max_pending=2,.total_pending=2,.max_age_ms=100}};
+        Cap inspection={0};LmbJson inspected;LmbJsonToken inspection_tokens[128];
+        assert(!api_route_decision_json(&inspection,&inspect_route,&decision));
+        assert(!lmb_json_parse(&inspected,inspection.p,inspection.len,inspection_tokens,128));
+        assert(strstr(inspection.p,"\"observed_ttft_seconds\":0.125000") && strstr(inspection.p,"\"load\":null"));
+        assert(strstr(inspection.p,"\"operator_position\":2") && strstr(inspection.p,"preference_snapshot_not_admission"));
+        free(inspection.p);inspection=(Cap){0};
+        decision.facts[1].measured_at=699;decision.facts[1].load.max_age_ms=LMB_REPLICA_LOAD_MAX_AGE_MS+1;
+        assert(!api_route_decision_json(&inspection,&inspect_route,&decision));
+        assert(!strstr(inspection.p,"observed_ttft_seconds") && !strstr(inspection.p,"max_pending_turns"));
+        free(inspection.p);inspection=(Cap){0};decision.inventory_ok=0;
+        decision.facts[1].measured_at=999;decision.facts[1].load.max_age_ms=0;
+        assert(!api_route_decision_json(&inspection,&inspect_route,&decision) && strstr(inspection.p,"\"plan_matches\":null"));
+        assert(!strstr(inspection.p,"observed_ttft_seconds") && !strstr(inspection.p,"max_pending_turns"));
+        free(inspection.p);
         LmbHostControl fence; uint32_t action=0; uint8_t allocation[32]={1}; char id[65],path[128],body[512];
         lmb_hex(id,allocation,32); snprintf(path,sizeof path,"/api/v1/allocations/%s/control",id);
         assert(!lmb_management_path(path,allocation) && allocation[0]==1);
