@@ -12,6 +12,7 @@ static int api_replica_evidence(const LmbModelRoute *route, const LmbResidentPla
     if (home_resident_observation_seed(plan,&seed,records) ||
         catalog_runtime_match(&seed.key,reports,count,why,sizeof why)) return -1;
     out->price_known=1;
+    int load_valid=1;
     for (uint32_t i=0;i<seed.key.nodes;i++) {
         const LmbMachineReport *found=NULL;
         for (uint32_t j=0;j<count;j++) if (!memcmp(plan->peer_keys[i],reports[j].identity,32)) { found=&reports[j]; break; }
@@ -22,6 +23,8 @@ static int api_replica_evidence(const LmbModelRoute *route, const LmbResidentPla
         int duplicate=0;
         for (uint32_t k=0;k<i;k++) if (!memcmp(plan->peer_keys[k],plan->peer_keys[i],32)) duplicate=1;
         if (duplicate) continue;
+        if (lmb_replica_load_add(&out->load,&found->workload,found->machine.ram_total_bytes,
+                plan->execution.nodes[i].reserved_bytes,found->age_ms)) load_valid=0;
         const LmbResourceFacts *facts=&found->facts;
         if (!(facts->known&LMB_FACT_PRICE) || !lmb_resource_facts_valid(facts)) out->price_known=0;
         else {
@@ -31,37 +34,112 @@ static int api_replica_evidence(const LmbModelRoute *route, const LmbResidentPla
             else out->micro_per_hour+=facts->price_micro_per_hour;
         }
     }
+    if (!load_valid) memset(&out->load,0,sizeof out->load);
     seed.key.adapter_abi=route->numeric_abi;
     snprintf(seed.key.numeric_class,sizeof seed.key.numeric_class,"%s",route->numeric_class);
     LmbCalibration observed;
     if (!lmb_cal_profile_load(records,&seed.key,&observed)) {
         out->observation_current=1; out->decode_tok_s=observed.decode_tok_s;
+        out->ttft_seconds=observed.ttft_seconds; out->observation_source=observed.source;
         out->measured_at=observed.measured_at; out->prompt_tokens=observed.prompt_tokens;
         out->generated_tokens=observed.generated_tokens;
     }
     return 0;
 }
-static void api_route_order(const char *tracker, const LmbModelRoute *route,
+/* The inspector and live routing consume the same bounded evidence. This
+ * snapshot never reserves a slot or proves that a host will admit a request. */
+typedef struct {
+    LmbReplicaEvidence facts[LMB_ROUTE_REPLICAS];
+    uint32_t order[LMB_ROUTE_REPLICAS];
+    const char *reason;
+    double captured_at;
+    int inventory_ok;
+} LmbRouteDecision;
+
+typedef struct {
+    uint32_t count, active[LMB_CLUSTER_MAX_NODES];
+    uint8_t keys[LMB_CLUSTER_MAX_NODES][32];
+} LmbRouteNodes;
+
+static void api_route_gateway_load(int access,const char *tracker,const LmbModelRoute *route,
+    LmbRouteNodes nodes[LMB_ROUTE_REPLICAS],LmbResidentPlan *scratch,LmbRouteDecision *decision) {
+    LmbReplicaDispatch dispatch;
+    if (lmb_replica_dispatch_snapshot(access,&dispatch)) return;
+    for (uint32_t k=0;k<dispatch.count;k++) {
+        /* A held allocation from another model still competes on shared
+         * machines. Missing ownership/topology makes this signal unknown. */
+        if (api_find_plan(tracker,dispatch.allocation[k],scratch) || !scratch->execution.count ||
+            scratch->execution.count>LMB_CLUSTER_MAX_NODES) return;
+        for (uint32_t i=0;i<route->count;i++) if (nodes[i].count &&
+            lmb_replica_gateway_overlap(nodes[i].active,&nodes[i].keys[0][0],nodes[i].count,
+                &scratch->peer_keys[0][0],scratch->execution.count)) return;
+    }
+    for (uint32_t i=0;i<route->count;i++) if (nodes[i].count) {
+        LmbReplicaGatewayLoad *load=&decision->facts[i].gateway;
+        load->known=1;
+        for (uint32_t n=0;n<nodes[i].count;n++) {
+            if (nodes[i].active[n]>load->max_active) load->max_active=nodes[i].active[n];
+            load->total_active+=nodes[i].active[n];
+        }
+    }
+}
+
+static int api_route_capture(int access,const char *tracker,const LmbModelRoute *route,LmbRouteDecision *decision) {
+    memset(decision,0,sizeof *decision);decision->captured_at=(double)time(NULL);
+    decision->reason=!route->count ? "model_dormant" : !route->policy ? "operator_order" : "inventory_unavailable";
+    for (uint32_t i=0;i<route->count;i++) decision->order[i]=i;
+    if (!route->count) return 0;
+    LmbMachineReport reports[LMB_INVENTORY_MAX];uint32_t count=0;
+    if (lmb_inventory_fetch(tracker,reports,&count)) return 0;
+    decision->inventory_ok=1;
+    LmbResidentPlan *plan=calloc(1,sizeof *plan);
+    if (!plan) {decision->reason="observation_unavailable";return -1;}
+    LmbRouteNodes nodes[LMB_ROUTE_REPLICAS]={0};
+    for (uint32_t i=0;i<route->count;i++) {
+        if (api_find_plan(tracker,route->replicas[i].allocation,plan) || !api_route_plan_matches(route,i,plan)) continue;
+        nodes[i].count=plan->execution.count;
+        memcpy(nodes[i].keys,plan->peer_keys,plan->execution.count*32u);
+        if (api_replica_evidence(route,plan,reports,count,&decision->facts[i])) {
+            /* Keep a matching saved plan eligible even when its measurements
+             * are missing. Unknown must not look idle or inexpensive. */
+            decision->facts[i]=(LmbReplicaEvidence){.usable=1};
+        }
+    }
+    api_route_gateway_load(access,tracker,route,nodes,plan,decision);
+    free(plan);
+    decision->captured_at=(double)time(NULL);
+    decision->reason=lmb_replica_rank(route->policy,decision->facts,route->count,decision->captured_at,decision->order);
+    return 0;
+}
+static void api_route_order(int access,const char *tracker,const LmbModelRoute *route,
     uint32_t order[LMB_ROUTE_REPLICAS]) {
     for (uint32_t i=0;i<route->count;i++) order[i]=i;
-    if (!route->policy) return;
-    LmbMachineReport reports[LMB_INVENTORY_MAX]; uint32_t count=0;
-    const char *reason="inventory_unavailable"; LmbReplicaEvidence facts[LMB_ROUTE_REPLICAS]={0};
-    if (!lmb_inventory_fetch(tracker,reports,&count)) {
-        LmbResidentPlan *plan=calloc(1,sizeof *plan);
-        if (!plan) return;
-        for (uint32_t i=0;i<route->count;i++)
-            if (!api_find_plan(tracker,route->replicas[i].allocation,plan) && api_route_plan_matches(route,i,plan) &&
-                api_replica_evidence(route,plan,reports,count,&facts[i])) {
-                /* Partial facts cannot drive either objective. Keep usable
-                 * so unknown is not accidentally filtered as a cheap node. */
-                facts[i]=(LmbReplicaEvidence){.usable=1};
-            }
-        free(plan);
-        reason=lmb_replica_rank(route->policy,facts,route->count,(double)time(NULL),order);
-    }
+    if (!route->policy || !route->count) return;
+    LmbRouteDecision decision;
+    (void)api_route_capture(access,tracker,route,&decision);
+    memcpy(order,decision.order,route->count*sizeof *order);
+    const char *reason=decision.reason;const LmbReplicaEvidence *facts=decision.facts;
     char model[65]; lmb_hex(model,route->id,32);
     fprintf(stderr,"[model-policy] model=%s policy=%s evidence=%s first_replica=%u\n",
         model,lmb_route_policy_name(route->policy),reason,order[0]+1);
+    if (route->policy==LMB_ROUTE_LOAD_AWARE || route->policy==LMB_ROUTE_LATENCY_AWARE) {
+        const LmbReplicaLoad *load=&facts[order[0]].load;
+        fprintf(stderr,"[model-load] model=%s replica=%u known=%u nodes=%u max_pending=%u total_pending=%u age_ms=%u\n",
+            model,order[0]+1,(unsigned)lmb_replica_load_valid(load),load->nodes,load->max_pending,
+            load->total_pending,load->max_age_ms);
+        const LmbReplicaGatewayLoad *gateway=&facts[order[0]].gateway;
+        fprintf(stderr,"[model-dispatch] model=%s replica=%u scope=same_operator_gateway known=%u max_active=%u total_active=%u\n",
+            model,order[0]+1,gateway->known,gateway->max_active,gateway->total_active);
+    }
+    if (route->policy==LMB_ROUTE_LATENCY_AWARE) {
+        const LmbReplicaEvidence *chosen=&facts[order[0]];
+        int known=!strcmp(reason,"recent_workload_and_ttft_observations");
+        /* A zero in this diagnostic is explicitly unknown. No fabricated
+         * latency estimate is added to the catalogue or client response. */
+        fprintf(stderr,"[model-latency] model=%s replica=%u known=%d observed_ttft_seconds=%.6f source=%s prompt_tokens=%u generated_tokens=%u\n",
+            model,order[0]+1,known,known ? chosen->ttft_seconds : 0.,
+            known ? lmb_cal_source_name(chosen->observation_source) : "unknown",
+            known ? chosen->prompt_tokens : 0,known ? chosen->generated_tokens : 0);
+    }
 }
 #endif

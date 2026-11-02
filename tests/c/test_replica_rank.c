@@ -85,11 +85,166 @@ static void rank_tests(void) {
     assert(!strcmp(lmb_replica_rank(1,e,3,1000,order),"recent_matching_decode_observations") && order[0]==2);
     e[0].usable=e[1].usable=e[2].usable=0;
     assert(!strcmp(lmb_replica_rank(1,e,3,1000,order),"no_approved_plan"));
-    assert(!strcmp(lmb_replica_rank(3,e,3,1000,order),"invalid_policy"));
+    assert(!strcmp(lmb_replica_rank(LMB_ROUTE_POLICY_LAST+1,e,3,1000,order),"invalid_policy"));
 }
+static void load_tests(void) {
+    LmbWorkloadFacts work={.known=1,.allocations=2,.compute_policy=LMB_COMPUTE_LOCAL_FIFO,
+        .active=1,.queued=3,.reserved_bytes=4096,.allocation_set={1}};
+    LmbReplicaLoad load={0};
+    assert(!lmb_replica_load_add(&load,&work,8192,2048,1000));
+    assert(load.nodes==1 && load.max_pending==4 && load.total_pending==4);
+    work.queued=1;
+    assert(!lmb_replica_load_add(&load,&work,8192,2048,9000));
+    assert(load.nodes==2 && load.max_pending==4 && load.total_pending==6 && load.max_age_ms==9000);
+    assert(lmb_replica_load_valid(&load));
+    LmbReplicaLoad saved=load;
+    assert(lmb_replica_load_add(&load,&work,8192,2048,LMB_REPLICA_LOAD_MAX_AGE_MS+1));
+    assert(!memcmp(&load,&saved,sizeof load));
+    assert(lmb_replica_load_add(&load,&work,8192,4097,1));
+    assert(lmb_replica_load_add(&load,&work,2048,2048,1));
+    work.known=0; assert(lmb_replica_load_add(&load,&work,8192,2048,1)); work.known=1;
+    work.compute_policy=LMB_COMPUTE_UNKNOWN;
+    assert(lmb_replica_load_add(&load,&work,8192,2048,1));
+    work.compute_policy=LMB_COMPUTE_LOCAL_FIFO; work.queued=UINT32_MAX;
+    assert(lmb_replica_load_add(&load,&work,8192,2048,1));
+
+    LmbReplicaEvidence e[3]={0}; uint32_t order[LMB_ROUTE_REPLICAS];
+    for (unsigned i=0;i<3;i++) e[i]=(LmbReplicaEvidence){.usable=1,.observation_current=1,
+        .decode_tok_s=10-i*2,.measured_at=1000,.prompt_tokens=4,.generated_tokens=8,
+        .load={.nodes=2,.max_pending=2,.total_pending=3,.max_age_ms=1000}};
+    /* A fast replica contending with another model must not outrank an idle
+     * approved chain. A shared machine is scored at its whole FIFO load. */
+    e[2].load.max_pending=e[2].load.total_pending=0;
+    assert(!strcmp(lmb_replica_rank(LMB_ROUTE_LOAD_AWARE,e,3,1000,order),
+        "recent_workload_and_decode_observations") && order[0]==2 && order[1]==0);
+    e[2].observation_current=0;
+    assert(!strcmp(lmb_replica_rank(LMB_ROUTE_LOAD_AWARE,e,3,1000,order),
+        "recent_workload_observations") && order[0]==2);
+    /* Unknown load never wins by pretending zero; leave the explicit order. */
+    e[1].load.nodes=0;
+    assert(!strcmp(lmb_replica_rank(LMB_ROUTE_LOAD_AWARE,e,3,1000,order),
+        "workload_missing_or_expired") && order[0]==0);
+    e[1].load=e[0].load; e[1].load.max_age_ms=LMB_REPLICA_LOAD_MAX_AGE_MS+1;
+    assert(!strcmp(lmb_replica_rank(LMB_ROUTE_LOAD_AWARE,e,3,1000,order),"workload_missing_or_expired"));
+    e[1].load=e[0].load; e[1].load.total_pending=UINT32_MAX;
+    assert(!strcmp(lmb_replica_rank(LMB_ROUTE_LOAD_AWARE,e,3,1000,order),"workload_missing_or_expired"));
+    /* Equal peak pressure: prefer less work along the whole chain. */
+    e[1].load=e[0].load; e[2].load=e[0].load; e[1].load.total_pending=2;
+    assert(!strcmp(lmb_replica_rank(LMB_ROUTE_LOAD_AWARE,e,3,1000,order),
+        "recent_workload_observations") && order[0]==1);
+    /* Decode is only a comparable-observation tie breaker, with the same
+     * noise band as observed-decode. It cannot bypass a lower-load tier. */
+    e[2].observation_current=1; e[2].decode_tok_s=100;
+    assert(!strcmp(lmb_replica_rank(LMB_ROUTE_LOAD_AWARE,e,3,1000,order),
+        "recent_workload_and_decode_observations") && order[0]==1 && order[1]==2);
+    e[0].load=e[1].load=e[2].load; e[0].decode_tok_s=96;
+    assert(!strcmp(lmb_replica_rank(LMB_ROUTE_LOAD_AWARE,e,3,1000,order),
+        "recent_workload_and_decode_observations") && order[0]==0);
+    e[0].usable=0; e[0].load.nodes=0;
+    assert(!strcmp(lmb_replica_rank(LMB_ROUTE_LOAD_AWARE,e,3,1000,order),
+        "recent_workload_and_decode_observations") && order[0]==2 && order[2]==0);
+    e[1].usable=e[2].usable=0;
+    assert(!strcmp(lmb_replica_rank(LMB_ROUTE_LOAD_AWARE,e,3,1000,order),"no_approved_plan"));
+}
+static void latency_tests(void) {
+    LmbReplicaEvidence e[3]={0}; uint32_t order[LMB_ROUTE_REPLICAS];
+    const char *ranked="recent_workload_and_ttft_observations",*load_only="recent_workload_observations";
+    for (unsigned i=0;i<3;i++) e[i]=(LmbReplicaEvidence){.usable=1,.observation_current=1,
+        .decode_tok_s=100-i*20,.ttft_seconds=3-i,.measured_at=1000,
+        .prompt_tokens=4,.generated_tokens=8,.observation_source=LMB_CAL_SOURCE_SESSION,
+        .load={.nodes=2,.max_pending=1,.total_pending=2,.max_age_ms=1000}};
+#define LATENCY() lmb_replica_rank(LMB_ROUTE_LATENCY_AWARE,e,3,1000,order)
+    /* Interactive preference chooses the first token, not a faster decode
+     * that only starts after a longer prefill. Nothing is moved or admitted. */
+    assert(!strcmp(LATENCY(),ranked) && order[0]==2 && order[1]==1);
+    e[0].load.max_pending=e[0].load.total_pending=0;
+    assert(!strcmp(LATENCY(),ranked) && order[0]==0 && order[1]==2);
+    e[0].load=e[1].load;
+    e[0].ttft_seconds=1.04;
+    assert(!strcmp(LATENCY(),ranked) && order[0]==0); /* stable 5% band */
+    e[0].ttft_seconds=1.08; e[1].ttft_seconds=1.04;
+    assert(!strcmp(LATENCY(),ranked) && order[0]==1); /* no transitive tie */
+    e[0].ttft_seconds=3; e[1].ttft_seconds=2;
+    double invalid[]={0,-1,NAN,INFINITY};
+    for (unsigned i=0;i<sizeof invalid/sizeof *invalid;i++) {
+        e[2].ttft_seconds=invalid[i];
+        assert(!strcmp(LATENCY(),load_only) && order[0]==0);
+    }
+    e[2].ttft_seconds=1;
+    e[2].observation_source=LMB_CAL_SOURCE_PROBE;
+    assert(!strcmp(LATENCY(),load_only) && order[0]==0);
+    e[2].observation_source=LMB_CAL_SOURCE_UNKNOWN;
+    assert(!strcmp(LATENCY(),load_only) && order[0]==0);
+    e[2].observation_source=LMB_CAL_SOURCE_SESSION;
+    e[2].prompt_tokens++;
+    assert(!strcmp(LATENCY(),load_only) && order[0]==0);
+    e[2].prompt_tokens--; e[2].generated_tokens++;
+    assert(!strcmp(LATENCY(),load_only) && order[0]==0);
+    e[2].generated_tokens--;
+    e[2].observation_current=0;
+    assert(!strcmp(LATENCY(),load_only) && order[0]==0);
+    e[2].observation_current=1; e[2].measured_at=699;
+    assert(!strcmp(LATENCY(),load_only) && order[0]==0);
+    e[2].measured_at=1001;
+    assert(!strcmp(LATENCY(),load_only) && order[0]==0);
+    e[2].measured_at=1000;
+    /* First-token observations don't need eight tokens of decode. Conversely
+     * a known decode rate cannot fill in a missing first-token measurement. */
+    for (unsigned i=0;i<3;i++) {e[i].generated_tokens=1;e[i].decode_tok_s=NAN;}
+    assert(!strcmp(LATENCY(),ranked) && order[0]==2);
+    e[2].load.max_age_ms=LMB_REPLICA_LOAD_MAX_AGE_MS+1;
+    assert(!strcmp(LATENCY(),"workload_missing_or_expired") && order[0]==0);
+    e[2].load=e[1].load; e[1].load.nodes=0;
+    assert(!strcmp(LATENCY(),"workload_missing_or_expired") && order[0]==0);
+    e[1].usable=0;
+    assert(!strcmp(LATENCY(),ranked) && order[0]==2 && order[2]==1);
+    e[0].usable=e[2].usable=0;
+    assert(!strcmp(LATENCY(),"no_approved_plan"));
+#undef LATENCY
+}
+
+static void gateway_tests(void) {
+    uint8_t nodes[3][32]={{1},{1},{2}},active[3][32]={{2},{2},{3}};
+    uint32_t counts[3]={0};
+    assert(!lmb_replica_gateway_overlap(counts,&nodes[0][0],3,&active[0][0],3));
+    assert(counts[0]==0 && counts[1]==0 && counts[2]==1);
+    assert(!lmb_replica_gateway_overlap(counts,&nodes[0][0],3,&active[0][0],3));
+    assert(counts[2]==2); /* another model on the same machine counts too */
+    assert(lmb_replica_gateway_overlap(counts,&nodes[0][0],LMB_INVENTORY_MAX+1,&active[0][0],3));
+    counts[2]=UINT32_MAX;
+    assert(lmb_replica_gateway_overlap(counts,&nodes[0][0],3,&active[0][0],3));
+
+    LmbReplicaEvidence e[3]={0};uint32_t order[LMB_ROUTE_REPLICAS];
+    for (unsigned i=0;i<3;i++) e[i]=(LmbReplicaEvidence){.usable=1,.observation_current=1,
+        .decode_tok_s=10-i,.ttft_seconds=1+i,.measured_at=1000,
+        .prompt_tokens=4,.generated_tokens=8,.observation_source=LMB_CAL_SOURCE_SESSION,
+        .load={.nodes=2,.max_pending=0,.total_pending=0,.max_age_ms=1000},
+        .gateway={.known=1,.max_active=1,.total_active=2}};
+    /* Reports still say idle. Requests already admitted for another model
+     * occupy two shared machines. Prefer the disjoint replica immediately. */
+    e[2].gateway.max_active=e[2].gateway.total_active=0;
+    for (unsigned policy=LMB_ROUTE_LOAD_AWARE;policy<=LMB_ROUTE_LATENCY_AWARE;policy++) {
+        lmb_replica_rank(policy,e,3,1000,order);assert(order[0]==2 && order[1]==0);
+        e[2].load.max_pending=e[2].load.total_pending=1;
+        lmb_replica_rank(policy,e,3,1000,order);assert(order[0]==0); /* compute reports take precedence */
+        e[2].load.max_pending=e[2].load.total_pending=0;
+        e[1].gateway.known=0;
+        lmb_replica_rank(policy,e,3,1000,order);assert(order[0]==0); /* missing != idle */
+        e[1].gateway.known=1;
+        e[2].gateway.max_active=1;e[2].gateway.total_active=1;
+        lmb_replica_rank(policy,e,3,1000,order);assert(order[0]==2); /* fewer shared nodes */
+        e[2].gateway.max_active=e[2].gateway.total_active=0;
+    }
+    lmb_replica_rank(LMB_ROUTE_ORDERED,e,3,1000,order);assert(order[0]==0);
+    lmb_replica_rank(LMB_ROUTE_OBSERVED_DECODE,e,3,1000,order);assert(order[0]==0);
+    /* The timing noise band must not override a lower-contention tier. */
+    e[0].ttft_seconds=3.01;e[1].ttft_seconds=3.02;
+    lmb_replica_rank(LMB_ROUTE_LATENCY_AWARE,e,3,1000,order);assert(order[0]==2);
+}
+
 int main(void) {
     (void)lmb_sign;
-    profile_tests(); rank_tests();
+    profile_tests(); rank_tests(); load_tests(); latency_tests(); gateway_tests();
     puts("REPLICA PREFERENCES: PASS (bounded private observations, exact provenance, expiry, missing prices, stable rank)");
     return 0;
 }

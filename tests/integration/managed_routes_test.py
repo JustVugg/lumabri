@@ -117,6 +117,15 @@ def verify_managed_routes(runtime, env, tracker, first_plan, third_plan, first_n
         assert request(control_path)[0] == 403
         assert request(control_path, body={"action": "retire"})[0] == 403
         cli("operator-grant", "route-bob")
+        routing_path = "/api/v1/routing/" + route["id"]
+        assert request(routing_path, "wrong")[0] == 401
+        assert request(routing_path, alice)[0] == 403
+        status, data = request(routing_path, bob)
+        initial_routing = json.loads(data)
+        assert status == 200 and initial_routing["reason"] == "operator_order", initial_routing
+        assert [r["allocation"] for r in initial_routing["replicas"]] == [first["id"], third["id"]]
+        assert request("/api/v1/routing/not-a-model", bob)[0] == 400
+        assert request("/api/v1/routing/" + "ff" * 32, bob)[0] == 404
         assert request(control_path, bob)[0] == 200
         assert request(control_path, bob, {"action": "retire"})[0] == 403, "read-only operator gained control"
         cli("manage-grant", "route-bob")
@@ -153,7 +162,53 @@ def verify_managed_routes(runtime, env, tracker, first_plan, third_plan, first_n
         expected_price_evidence = ("evidence=declared_machine_footprint" if env.get("LUMABRI_COST_PER_HOUR")
                                    else "evidence=prices_missing_or_mixed_currency")
         assert expected_price_evidence in policy_log.read_text()
-        assert json.loads(command("model-policy", route["id"], "ordered"))["revision"] == 5
+        policy = json.loads(command("model-policy", route["id"], "load-aware"))
+        assert policy["revision"] == 5 and policy["policy"] == "load-aware"
+        before_load = len(policy_log.read_text())
+        status, data = chat(route["id"])
+        assert status == 200 and b"event: done\n" in data and b"event: error\n" not in data, (status, data)
+        load_log = policy_log.read_text()[before_load:]
+        assert "policy=load-aware evidence=recent_workload" in load_log, load_log
+        assert "[model-load]" in load_log and "known=1" in load_log, load_log
+        # The preferred first replica is still held above. Real admission
+        # must choose the alternate even if a sampled load says it is idle.
+        assert "allocation=" + third["id"] in load_log, load_log
+        policy = json.loads(command("model-policy", route["id"], "latency-aware"))
+        assert policy["revision"] == 6 and policy["policy"] == "latency-aware"
+        before_latency = len(policy_log.read_text())
+        status, data = chat(route["id"])
+        assert status == 200 and b"event: done\n" in data and b"event: error\n" not in data, (status, data)
+        latency_log = policy_log.read_text()[before_latency:]
+        assert "policy=latency-aware evidence=recent_workload_and_ttft_observations" in latency_log, latency_log
+        assert "[model-latency]" in latency_log and "known=1" in latency_log, latency_log
+        assert "source=real_session" in latency_log and "allocation=" + third["id"] in latency_log, latency_log
+        status, data = request(routing_path, bob)
+        inspected = json.loads(data)
+        assert status == 200 and inspected["scope"] == "preference_snapshot_not_admission", inspected
+        assert inspected["policy"] == "latency-aware" and inspected["revision"] == 6
+        assert inspected["reason"] == "recent_workload_and_ttft_observations", inspected
+        assert all(r["plan_matches"] and r["load"] and r["timing"] for r in inspected["replicas"]), inspected
+        assert all(r["timing"]["source"] == "real_session" for r in inspected["replicas"])
+        local_inspection = json.loads(command("model-routing", route["id"]))
+        assert local_inspection["model"] == route["id"] and local_inspection["revision"] == 6
+        # first_busy is a real kernel-owned admission lease. A different
+        # model on these SAME donors must contribute immediately, without
+        # waiting for heartbeat metrics or changing the model route.
+        assert all(r["gateway"] and r["gateway"]["max_active_requests"] == 1
+                   for r in inspected["replicas"]), inspected
+        other_busy = hold(other["id"])
+        status, data = request(routing_path, bob)
+        overlap = json.loads(data)
+        assert status == 200 and all(r["gateway"]["max_active_requests"] == 2
+                                    for r in overlap["replicas"]), overlap
+        unhold(other_busy)
+        # Unknown allocation topology suppresses the entire local signal.
+        # It does not fabricate an idle score or affect existing permits.
+        unknown_busy = hold("ee" * 32)
+        status, data = request(routing_path, bob)
+        assert status == 200 and all(r["gateway"] is None for r in json.loads(data)["replicas"]), data
+        unhold(unknown_busy)
+        assert json.loads(command("model-policy", route["id"], "ordered"))["revision"] == 7
         third_busy = hold(third["id"])
         status, data = chat(route["id"])
         assert status == 429 and json.loads(data)["error"] == "replicas_busy", (status, data)
@@ -226,7 +281,7 @@ def verify_managed_routes(runtime, env, tracker, first_plan, third_plan, first_n
         status, data = chat(route["id"])
         assert status == 200 and b"event: done\n" in data and b"event: error\n" not in data, (status, data)
         reduced = json.loads(command("model-set", route["id"], third["id"]))
-        assert reduced["revision"] == 6 and reduced["replicas"] == 1 and reduced["policy"] == "ordered"
+        assert reduced["revision"] == 8 and reduced["replicas"] == 1 and reduced["policy"] == "ordered"
         # Only the coordinated path may claim a non-interrupting release.
         # It seals the host, retires its retained KV, seals both real nodes,
         # and persists acknowledgements before freeing the Edge keeper last.

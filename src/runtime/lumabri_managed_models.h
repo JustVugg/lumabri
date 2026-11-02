@@ -107,7 +107,7 @@ static int api_model_open_ex(int access, const char *tracker, const uint8_t id[3
     } else if (max_new>route.max_new) { status=400; *error="max_tokens_exceeds_plan"; }
     else if (!route.count) { status=503; *error="model_dormant_preparation_required"; }
     else {
-      uint32_t order[LMB_ROUTE_REPLICAS]; api_route_order(tracker,&route,order);
+      uint32_t order[LMB_ROUTE_REPLICAS]; api_route_order(access,tracker,&route,order);
       for (uint32_t attempt=0; attempt<route.count; attempt++) {
         uint32_t i=order[attempt];
         int skipped=0;
@@ -145,9 +145,9 @@ static int api_model_open(int access, const char *tracker, const uint8_t id[32],
 static int api_route_policy(int access, const char *tracker, char *const *args, unsigned count) {
     if (count!=2 || !*tracker) return 1;
     uint8_t id[32]; uint32_t policy;
-    for (policy=0;policy<=LMB_ROUTE_DECLARED_COST;policy++)
+    for (policy=0;policy<=LMB_ROUTE_POLICY_LAST;policy++)
         if (!strcmp(args[1],lmb_route_policy_name(policy))) break;
-    if (policy>LMB_ROUTE_DECLARED_COST || strlen(args[0])!=64 || lmb_unhex(id,args[0],32)) return 1;
+    if (policy>LMB_ROUTE_POLICY_LAST || strlen(args[0])!=64 || lmb_unhex(id,args[0],32)) return 1;
     int dir=lmb_route_dir(access,0); if (dir<0) return 1;
     LmbModelRoute route; int rc=lmb_route_load(dir,id,&route);
     if (!rc && (strcmp(route.tracker,tracker) || route.revision==UINT32_MAX)) rc=LMB_ROUTE_UNSAFE;

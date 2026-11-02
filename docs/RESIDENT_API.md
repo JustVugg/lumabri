@@ -331,6 +331,8 @@ order. It can be changed without loading, moving or unloading any weights:
 ./lumabri api model-policy MODEL_ID ordered
 ./lumabri api model-policy MODEL_ID observed-decode
 ./lumabri api model-policy MODEL_ID declared-cost
+./lumabri api model-policy MODEL_ID load-aware
+./lumabri api model-policy MODEL_ID latency-aware
 ```
 
 `observed-decode` prefers the faster **last observed decode**, only when all
@@ -342,6 +344,46 @@ near-equal rates. It does not predict TTFT for a different prompt or certify
 concurrent capacity. Missing, changed or incomparable observations restore
 the operator's order, rather than manufacturing an estimate.
 
+`load-aware` first prefers the replica with the lowest observed compute
+contention. It compares the largest `active + queued` count on any participating
+machine, then the sum across distinct participating machines. These are shared
+FIFO compute turns, including work for other models, **not a predicted waiting
+time or token rate**. Every participating machine must have a matching runtime,
+an approved resident plan and a valid workload report no older than ten seconds.
+Missing or expired reports restore the operator's order; unknown never means idle.
+Equal-load replicas first compare requests already held by this operator's
+gateway on their participating computers, including requests for other models.
+The busiest computer is compared first, then the sum across distinct computers.
+This reacts to new requests before the next worker heartbeat. It counts live
+kernel-owned admission leases, not stale records or saved PIDs; process exit
+releases the lease automatically. Missing or unreadable lease/plan information
+disables this tie-break for the whole decision. Other gateways and direct clients
+are outside this observation, so zero does not certify an idle cluster.
+Gateway requests and worker compute turns remain separate; they are never added.
+Remaining ties use comparable decode observations and the same five-percent
+band described above, or operator order if those observations are missing.
+The inventory is sampled, so the host's live admission and per-allocation permits
+still decide whether a request can actually run. This policy neither evicts
+weights nor shares conversation state. Gateway logs include the chosen replica's
+observed peak/total pending compute turns and report age.
+Before rolling back to a gateway version without this policy, switch affected
+models back to `ordered`. Older readers reject an unknown policy instead of
+silently changing its meaning.
+
+`latency-aware` uses the same compute-load and gateway-request ordering, but
+breaks remaining ties by **lower observed time to first token**, instead of decode rate. All
+available plans must have a valid positive first-token measurement within five
+minutes, exact configuration provenance, matching prompt/output lengths, and the
+same measurement source (short probe or real session). Differences within five
+percent retain the operator's order. Missing or incomparable timing leaves the
+load ordering in place; missing load restores operator order. A zero or unknown
+first-token time never wins. The policy uses the last completed observation,
+not a prediction for a new prompt or a latency guarantee. It neither transfers
+KV nor assumes that a replica has a cached prefix. Logs report the observation,
+source and token counts used; no estimated speed is added to the catalogue.
+Before rolling back to a gateway that lacks `latency-aware`, switch the model
+back to `ordered`.
+
 `declared-cost` prefers the lower sum of declared whole-machine hourly prices
 for the replica's participating computers (each counted once). Every candidate
 must have known prices in the same currency. This is a resource-footprint
@@ -349,6 +391,33 @@ preference, **not incremental cost or a saving**: the other replicas are still
 resident and their computers still incur costs. It has no performance SLO.
 Missing/mixed-currency prices restore the operator's order. Gateway logs state
 which preference and evidence were used; normal users cannot change policy.
+
+An operator can inspect the same routing evidence without opening a chat:
+
+```sh
+./lumabri api model-routing MODEL_ID
+```
+
+The command emits JSON. `GET /api/v1/routing/MODEL_ID` exposes the same snapshot
+to a bearer token with an operator grant. In **Computers & models**, choose
+**Inspect routing** on a managed model. No management or inference grant is
+added by this read-only operation.
+
+The snapshot includes the model revision, policy, preference order, reason,
+matched saved plans, pending compute turns and report ages, active gateway
+requests on shared machines, recent matching
+TTFT/decode observations, and declared whole-machine costs when supplied.
+Missing or expired measurements are `null`. Individually valid timings can
+still be incomparable across replicas; `reason` explains which evidence
+actually determined the ordering. Costs are declared prices, not measured
+savings. The scope is `preference_snapshot_not_admission`: it does not reserve
+capacity, connect to an engine or prove that the first replica is healthy.
+The `gateway` object is scoped to `same_operator_gateway`. Its total counts
+request/computer pairs: a request spanning two computers contributes two, not
+two independent requests. Observation may become outdated as requests finish;
+it never changes or grants an admission permit.
+The next request rechecks permissions and live admission. Web snapshots show
+their capture time and are cleared on workspace refresh or a failed inspection.
 
 Completed turns retain up to sixteen exact-configuration observations per
 checkpoint in private fixed-size slots, at most 512 KiB plus a 32 KiB temporary
