@@ -52,6 +52,8 @@ static void *fixture_tracker(void *opaque) {
                 assert(authed[i]);
                 if (f->checkpoint.count && checkpoint_fixture_reply(&f->checkpoint,fd,&m)) {
                     /* Manifest and bytes come from this test-only source. */
+                } else if (m.op==LMB_PING) {
+                    assert(!m.body_len && !lmb_send(fd,LMB_OK,NULL,0,NULL,0));
                 } else if (m.op==LMB_CHALLENGE) {
                     lmb_random(nonce[i],32);challenged[i]=1;
                     assert(!lmb_send(fd,LMB_CHALLENGE_R,nonce[i],32,NULL,0));

@@ -1,5 +1,6 @@
 """Real preparation API gate, driven by the household donor-consent fixture."""
 import hashlib
+import fcntl
 import http.client
 import json
 import os
@@ -95,6 +96,23 @@ class PreparationAPI:
         assert started["operation"] == self.operation
         status, repeated = self.http("/api/v1/preparation", request)
         assert status == 200 and repeated["operation"] == self.operation, repeated
+        # The startup guard may remain inherited briefly during detachment.
+        # An immutable existing intent is read-only even while another start
+        # owns that guard; a changed or new operation must still be refused.
+        guard_path = Path(env["HOME"]) / ".lumabri/api-access/preparations/access.lock"
+        with guard_path.open("r+b") as guard:
+            deadline = time.monotonic() + 10
+            while True:
+                try:
+                    fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    assert time.monotonic() < deadline, "preparation startup lock was not released"
+                    time.sleep(.02)
+            status, repeated = self.http("/api/v1/preparation", request)
+            assert status == 200 and repeated["operation"] == self.operation, repeated
+            assert self.http("/api/v1/preparation", {**request, "max_new": 7})[0] == 409
+            assert self.http("/api/v1/preparation", {**request, "operation": secrets.token_hex(32)})[0] == 409
         assert self.http("/api/v1/preparation", {**request, "max_new": 7})[0] == 409
         self.cli("stop")
         self.cli("start", "--tracker", tracker, "--port", str(self.port))

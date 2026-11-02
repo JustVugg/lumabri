@@ -181,6 +181,17 @@ static void api_preparation_list(int fd,int access,const char *tracker,const cha
     if (dir>=0) close(dir);
     free(body.p);
 }
+/* An accepted intent is immutable. Repeating it observes the existing keeper
+ * and must not contend with a new start (or an inherited startup lock while
+ * the detached keeper is closing descriptors). Zero means no intent exists;
+ * uncertain/corrupt evidence is never permission to start again. */
+static int preparation_repeat(int dir,const char *tracker,const LmbPreparationRequest *r,Cap *result) {
+    uint8_t digest[32],old[32]; size_t n=0; char name[80];
+    preparation_request_hash(tracker,r,digest); snprintf(name,sizeof name,"%s.intent",r->operation);
+    int found=preparation_read(dir,name,old,sizeof old,&n);
+    if (!found) return n==32 && !memcmp(digest,old,32) ? preparation_status(dir,tracker,r->operation,0,result) : 409;
+    return found<0 ? 409 : 0;
+}
 /* The authenticated HTTP handler and service controllers share one typed
  * operation. The caller supplies a validated request; neither transport is
  * allowed to bypass the review, intent or keeper admission path. */
@@ -191,15 +202,11 @@ static int preparation_execute(int access,const char *tracker,const LmbPreparati
     if (!preview) {
         dir=preparation_dir(access); if (dir<0) { status=503; goto done; }
         if (!start) { status=preparation_status(dir,tracker,r.operation,!strcmp(r.action,"cancel"),&result); goto done; }
+        status=preparation_repeat(dir,tracker,&r,&result); if (status) goto done;
         lock=lmb_api_access_lock(dir); if (lock<0) { status=409; goto done; }
-        uint8_t digest[32],old[32]; size_t n=0; char name[80];
-        preparation_request_hash(tracker,&r,digest); snprintf(name,sizeof name,"%s.intent",r.operation);
-        int found=preparation_read(dir,name,old,sizeof old,&n);
-        if (!found) {
-            status=n==32 && !memcmp(digest,old,32) ? preparation_status(dir,tracker,r.operation,0,&result) : 409;
-            goto done;
-        }
-        if (found<0) { status=409; goto done; }
+        /* A concurrent starter may have committed while we acquired the
+         * guard. Only the missing-intent path can create a new keeper. */
+        status=preparation_repeat(dir,tracker,&r,&result); if (status) goto done;
     }
     st=preparation_catalogue(tracker,&r); if (!st) { status=503; goto done; }
     status=preparation_review(st,&r,&plan,review); if (status!=200) goto done;

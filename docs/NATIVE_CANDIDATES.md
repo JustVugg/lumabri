@@ -151,7 +151,7 @@ The latest measured speed is historical, not a guarantee for the next turn.
   missing/corrupt evidence and receipt replay.
   This developer entry requires a reachable authenticated tracker and owner
   approval. The native screen and signed inventory are described below.
-  Repeat policies, native household setup/chat client and a complete Windows
+  Repeat policies, native household creation/chat client and a complete Windows
   package are not delivered by this gate. Unsupported Hybrid or model
   allocations are explicitly refused; registering adapters is not sufficient
   to claim their native execution.
@@ -265,10 +265,18 @@ target remains available for existing Expert/public-network deployments.
 
 ### Native donor screen and signed inventory
 
-In the developer build, `lumabri donor --join HOST:PORT --ram-gb N` starts
-sharing and opens the same C approval screen used on Unix. Set the household
-key in `LUMABRI_TOKEN` before starting. `--headless` starts just the keeper;
-`lumabri share` reopens its approval screen. Arrow keys select Accept or
+In the developer build, start `lumabri.exe` without arguments. Choose **Join a
+household**, enter its address and key, then use **Settings** to set the model
+folder and maximum RAM contribution. The key is hidden while typing. Joining
+checks encrypted authentication before saving; a failed connection or wrong
+key leaves the previous household unchanged. Settings live in a private,
+atomically replaced `%LOCALAPPDATA%\Lumabri\home.conf`; Unicode paths are
+supported. Use **Share resources** to start the background donor and review
+incoming requests. An active donor must stop before joining another household.
+
+For scripted use, `lumabri donor --join HOST:PORT --ram-gb N` still starts
+sharing with `LUMABRI_TOKEN` set. `--headless` starts just the keeper;
+`lumabri share` starts or reopens sharing using saved settings. Arrow keys select Accept or
 Decline; Enter confirms. Esc detaches without unloading, `x` releases the
 selected model and `s` stops sharing. Repeat-load policies are not offered
 in this native build.
@@ -278,12 +286,15 @@ of the view, including available budget, runtime identity, thread capacity,
 reserved memory and compute queue. Inventory wire version 6 adds exact adapter
 roles. Update the tracker and requester together: older trackers reject the
 new report. Updated readers still accept version 3–5 observations with unknown
-roles. Native Windows advertises only OLMoE Segment on CPU; it cannot be selected
-as Edge or Hybrid, and unavailable roles never become available just because
+roles. Native Windows advertises OLMoE Edge and Segment on CPU; it cannot be selected
+as Hybrid, and unavailable roles never become available just because
 there is spare RAM. This is not a GPU execution claim.
 
-The Windows gate drives the real `lumabri.exe` through ConPTY, approves a
+The Windows gate drives the real `lumabri.exe` through ConPTY: joins the
+authenticated household, edits the RAM limit, starts sharing, approves a
 resident allocation, checks resize handling, detaches and reopens with the same
-worker still alive. Signed inventory, independent model release and 72 oracle
-matches are checked in that same isolated deployment. This covers the donor
-workflow; native household setup, chat hosting and final packaging are separate.
+worker still alive. Signed inventory, independent model release, hosted chat
+and 72 oracle matches are checked in that same isolated deployment. Separate
+launcher tests cover wrong keys, masked credentials, Unicode input, cancellation,
+reopening and invalid settings. Native household creation, the interactive
+chat client and final packaging remain separate work.
