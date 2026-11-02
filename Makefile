@@ -93,7 +93,7 @@ segment_chat: lumabri_planner.h $(wildcard planner_adapters/*.h)
 test check-warnings: test_compute_broker
 test check-warnings: test_portfolio
 test check-warnings: test_reply_stream
-lumabri test_chat_ui: src/runtime/lumabri_reply_stream.h
+lumabri test_chat_ui: src/runtime/lumabri_reply_stream.h src/runtime/lumabri_chat_format.h src/runtime/lumabri_host_client.h
 
 test_reply_stream: tests/c/test_reply_stream.c src/runtime/lumabri_reply_stream.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_reply_stream.c -o $@

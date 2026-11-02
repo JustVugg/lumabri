@@ -66,8 +66,38 @@ static int home_donor_entry_windows(int argc,char **argv,int internal) {
 }
 
 #include "src/ui/lumabri_home_windows.h"
+#include "src/ui/lumabri_chat_windows.h"
+static int cmd_chat_windows(int argc,char **argv) {
+    const char *address=NULL,*key=NULL,*root=NULL,*model=NULL;unsigned max_new=256;
+    for(int i=0;i<argc;i++) {
+        if(!strcmp(argv[i],"--host") && i+1<argc) address=argv[++i];
+        else if(!strcmp(argv[i],"--host-key") && i+1<argc) key=argv[++i];
+        else if(!strcmp(argv[i],"--host-root") && i+1<argc) root=argv[++i];
+        else if(!strcmp(argv[i],"--model-type") && i+1<argc) model=argv[++i];
+        else if(!strcmp(argv[i],"--max-new") && i+1<argc) {
+            char *end;unsigned long n=strtoul(argv[++i],&end,10);
+            if(!*argv[i] || *end || !n || n>1048576) return 2;
+            max_new=(unsigned)n;
+        } else return 2;
+    }
+    uint8_t bytes[32];
+    if(!address || !key || !root || strlen(key)!=64 || lmb_unhex(bytes,key,32) ||
+        strlen(root)!=64 || lmb_unhex(bytes,root,32))
+        return home_fail("Chat requires --host HOST:PORT --host-key PUBLIC_KEY --host-root CHECKPOINT_ROOT from an approved resident plan.");
+    HomeSettings settings;
+    const char *token=getenv("LUMABRI_TOKEN");
+    if(!token || !*token) {
+        if(home_settings_load_windows(&settings)) return home_fail("Cannot load private household settings.");
+        int bad=home_settings_activate_windows(&settings);SecureZeroMemory(&settings,sizeof settings);
+        if(bad) return 1;
+    }
+    if(_putenv_s("LUMABRI_ENCRYPT","1") || lmb_secure_init() || !lmb_secure_enabled()) return 1;
+    return chat_windows_run(address,key,root,model,max_new);
+}
+
 static int lmb_windows_main(int argc, char **argv) {
     if (argc==1 || (argc==2 && !strcmp(argv[1],"share"))) return home_windows_run(argc==2);
+    if (argc>=2 && !strcmp(argv[1],"chat")) return cmd_chat_windows(argc-2,argv+2);
     if (argc>=2 && !strcmp(argv[1],"--internal-tracker")) return home_tracker_entry_windows(argc-2,argv+2);
     if (argc>=2 && (!strcmp(argv[1],"donor") || !strcmp(argv[1],"--internal-donor")))
         return home_donor_entry_windows(argc-2,argv+2,!strcmp(argv[1],"--internal-donor"));
@@ -92,7 +122,8 @@ static int lmb_windows_main(int argc, char **argv) {
           "  lumabri donor --join HOST:PORT --ram-gb N [--headless]\n"
           "  lumabri share  (start or reopen sharing using saved household settings)\n\n"
           "Without arguments: create/join a household, settings and sharing.\n"
-          "Approved OLMoE chat hosting is available on donors. The native interactive chat client is not connected yet.\n", stderr);
+          "  lumabri chat --host HOST:PORT --host-key KEY --host-root ROOT [--model-type TYPE]\n"
+          "Native chat attaches to an approved resident host; it downloads no weights.\n", stderr);
     return argc == 2 && !strcmp(argv[1], "--help") ? 0 : 2;
 }
 

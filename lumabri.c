@@ -2396,17 +2396,7 @@ typedef enum { PROTO_UNKNOWN = 0, PROTO_LINE, PROTO_FRAMED, PROTO_SERVE2 } Proto
  * and its siblings run only on the CLI path — so lumabri, standing in for the
  * gateway, must apply each engine's own chat template. GLM (EK_GLM) templates
  * inside its serve and speaks the older framed dialect, so it needs neither. */
-typedef enum {
-    EK_INVALID = -1,
-    EK_GLM = 0,        /* colibri monolith: framed, templates internally */
-    EK_GLM53,          /* glm53:         GLM-5.3 template, serve codec        */
-    EK_DEEPSEEK,       /* deepseek_v4:  <｜User｜>…<｜Assistant｜></think>       */
-    EK_OLMOE,          /* olmoe:        |||IP_ADDRESS|||<|user|>…<|assistant|> */
-    EK_QWEN36,         /* qwen36:       ChatML <|im_start|>…                   */
-    EK_QWEN38,         /* qwen38:       system reasoning prompt + ChatML     */
-    EK_INKLING,        /* inkling:      <|message_user|><|content_text|>…      */
-    EK_KIMI            /* kimi_k3:      K3CHAT1 byte-counted wire              */
-} EngKind;
+#include "src/runtime/lumabri_chat_format.h"
 /* Where the engine actually is.
  *
  * Every shutdown path in this file was written for a child process: stop
@@ -2439,41 +2429,6 @@ typedef struct {
     uint32_t request_sequence;
 } Engine;
 
-static int artifact_is(const char *value, const char *name) {
-    if (!value || !name) return 0;
-    const char *base = strrchr(value, '/');
-    base = base ? base + 1 : value;
-    if (!strcmp(base, name)) return 1;
-    size_t n = strlen(name);
-    return !strncmp(base, name, n) && !strcmp(base + n, "_p2p");
-}
-
-/* Protocol and prompt-template dispatch is exact for the same reason model
- * family dispatch is exact. Unknown is not GLM: it is an error. */
-static EngKind engine_kind_of(const char *engine) {
-    if (artifact_is(engine, "colibri") || !strcmp(engine ? engine : "", "glm") ||
-        !strcmp(engine ? engine : "", "glm_moe_dsa") ||
-        !strcmp(engine ? engine : "", "glm5_moe")) return EK_GLM;
-    if (artifact_is(engine, "glm53") ||
-        !strcmp(engine ? engine : "", "glm5_next") ||
-        !strcmp(engine ? engine : "", "glm5_next_text")) return EK_GLM53;
-    if (artifact_is(engine, "deepseek_v4") || artifact_is(engine, "deepseek") ||
-        artifact_is(engine, "deepseek_v41") || !strcmp(engine ? engine : "", "deepseek_v41_text"))
-        return EK_DEEPSEEK;
-    if (artifact_is(engine, "olmoe")) return EK_OLMOE;
-    if (artifact_is(engine, "qwen36") ||
-        !strcmp(engine ? engine : "", "qwen3_5_moe") ||
-        !strcmp(engine ? engine : "", "qwen3_5_moe_text")) return EK_QWEN36;
-    if (artifact_is(engine, "qwen38") ||
-        !strcmp(engine ? engine : "", "qwen4_exp") ||
-        !strcmp(engine ? engine : "", "qwen4_exp_text")) return EK_QWEN38;
-    if (artifact_is(engine, "inkling") ||
-        !strcmp(engine ? engine : "", "inkling_mm_model")) return EK_INKLING;
-    if (artifact_is(engine, "kimi_k3") ||
-        !strcmp(engine ? engine : "", "kimi") ||
-        !strcmp(engine ? engine : "", "kimi_linear")) return EK_KIMI;
-    return EK_INVALID;
-}
 /* The serve-codec engines: framed READY at boot, but SUBMIT/DATA/DONE turns and
  * a raw (un-templated) payload. Everything but GLM. */
 static int kind_is_serve2(EngKind k) { return k != EK_INVALID && k != EK_GLM; }
@@ -2654,34 +2609,6 @@ static int stream_until_end(Engine *e, char *statline, size_t scap) {
 
 /* ---- serve codec client: UI is only a consumer of the shared reader ------ */
 #include "src/runtime/lumabri_reply_stream.h"
-/* A growable capture of the assistant's reply, to feed back as history. */
-typedef struct { char *p; size_t len, cap; } Cap;
-static int cap_add(Cap *c, const char *d, size_t n) {
-    if (c->len == SIZE_MAX || n > SIZE_MAX - c->len - 1) return -1;
-    if (c->len + n + 1 > c->cap) {
-        size_t nc = c->cap ? c->cap : 4096;
-        while (nc < c->len + n + 1) {
-            if (nc > SIZE_MAX / 2) { nc = c->len + n + 1; break; }
-            nc *= 2;
-        }
-        char *np = realloc(c->p, nc);
-        if (!np) return -1;
-        c->p = np; c->cap = nc;
-    }
-    memcpy(c->p + c->len, d, n); c->len += n; c->p[c->len] = 0;
-    return 0;
-}
-static int cap_str(Cap *c, const char *s) { return cap_add(c, s, strlen(s)); }
-/* Append a printf-formatted fragment (used for kimi's `M <role> <len>\n` heads). */
-static int cap_addf(Cap *c, const char *fmt, ...) {
-    char tmp[64];
-    va_list ap; va_start(ap, fmt);
-    int n = vsnprintf(tmp, sizeof tmp, fmt, ap);
-    va_end(ap);
-    if (n < 0 || (size_t)n >= sizeof tmp) return -1;
-    return cap_add(c, tmp, (size_t)n);
-}
-
 /* Read a serve-codec reply: DATA frames (the generated text) until DONE. Bare
  * dashboard lines (EMAP/TIERS/…) and ACCEPT are skipped. On success returns 0
  * with the STAT tail in statline and, if captured != NULL, the assistant text
@@ -2752,103 +2679,6 @@ static int stream_serve2(Engine *e, char *statline, size_t scap, char **captured
     if (statline && scap && strlen(stream.stat) >= scap) { free(view.capture.p); return -1; }
     if (statline && scap) snprintf(statline, scap, "%s", stream.stat);
     if (captured) *captured = view.capture.p; else free(view.capture.p);
-    return 0;
-}
-
-/* The serve-codec engines tokenize the SUBMIT payload as-is: coli_v4_prompt_build
- * and its per-engine siblings run only on the CLI path, so lumabri — standing in
- * for openai_server.py — applies each engine's own chat template. The whole
- * conversation is resent every turn (prefix + prior user/assistant turns + this
- * user turn ending at the assistant-generation marker); the serve reuses the KV
- * prefix, so it stays a real multi-turn chat without reprocessing the history.
- *
- * Each marker set mirrors its engine's serve/CLI source. The six-family tiny
- * release gate exercises GLM, Inkling, Kimi, OLMoE, Qwen and DeepSeek through
- * this exact codec and compares their generated token IDs with Colibri oracles.
- *
- * DeepSeek: ｜ is U+FF5C, ▁ is U+2581 — each its own literal so the next letter
- * is not eaten by the \x escape. </think> is the non-thinking "answer now" form. */
-#define DS_PIPE "\xef\xbd\x9c"
-#define DS_USCR "\xe2\x96\x81"
-#define DS_BOS  "<" DS_PIPE "begin" DS_USCR "of" DS_USCR "sentence" DS_PIPE ">"
-#define DS_USER "<" DS_PIPE "User" DS_PIPE ">"
-#define DS_ASST "<" DS_PIPE "Assistant" DS_PIPE "></think>"
-/* olmoe (olmoe.c fmt_user_turn): bos/eos is |||IP_ADDRESS|||; the first turn glues
- * <|user|> to it, later turns put a newline between. The reply is stored raw — the
- * next turn's leading |||IP_ADDRESS||| is the eos that closes it. */
-#define OLMO_U0   "|||IP_ADDRESS|||<|user|>\n"
-#define OLMO_UL   "|||IP_ADDRESS|||\n<|user|>\n"
-#define OLMO_ASST "\n<|assistant|>\n"
-/* GLM-5.2 (colibri.c's official chat_template.jinja path).  The monolithic
- * engine applies this internally; Segment Edge deliberately accepts exact
- * bytes, so only the Segment Serve2 path reaches this case. */
-#define GLM_BOS  "[gMASK]<sop>"
-#define GLM_U    "<|user|>"
-#define GLM_ASST "<|assistant|><think></think>"
-#define GLM53_ASST "<|assistant|><think>"
-/* qwen36 (qwen36.c: ChatML, no BOS). */
-#define QW_U    "<|im_start|>user\n"
-#define QW_ASST "<|im_end|>\n<|im_start|>assistant\n<think>\n"
-#define QW_AEND "<|im_end|>\n"
-#define QW38_SYS "<|im_start|>system\nReasoning effort is set to xhigh. Please " \
-    "think carefully through the task, validate key assumptions, consider " \
-    "plausible alternatives, and prioritize correctness, consistency, and " \
-    "clarity in the final answer.<|im_end|>\n"
-/* inkling (inkling.c chat template, thinking-effort system line dropped). */
-#define INK_U    "<|message_user|><|content_text|>"
-#define INK_ASST "<|end_message|><|message_model|>"
-#define INK_AEND "<|end_message|>"
-
-/* Append one turn for engine kind k. `first` = the conversation is empty so far
- * (matters only where the leading marker differs by position). reply==NULL builds
- * the *pending* turn — user text ending at the assistant-generation marker, for
- * the SUBMIT payload; reply!=NULL builds a *completed* turn — user text plus the
- * assistant's reply, for the running history. 0, or -1 on OOM. */
-static int serve2_turn(Cap *c, EngKind k, int first, const char *u, const char *reply) {
-    (void)first;
-    switch (k) {
-    case EK_GLM:
-        if (cap_str(c, GLM_U) || cap_str(c, u) || cap_str(c, GLM_ASST)) return -1;
-        return reply ? cap_str(c, reply) : 0;
-    case EK_GLM53:
-        if (cap_str(c, GLM_U) || cap_str(c, u) || cap_str(c, GLM53_ASST)) return -1;
-        return reply ? cap_str(c, reply) : 0;
-    case EK_DEEPSEEK:
-        if (cap_str(c, DS_USER) || cap_str(c, u) || cap_str(c, DS_ASST)) return -1;
-        return reply ? cap_str(c, reply) : 0;
-    case EK_OLMOE:
-        if (cap_str(c, first ? OLMO_U0 : OLMO_UL) || cap_str(c, u) ||
-            cap_str(c, OLMO_ASST)) return -1;
-        return reply ? cap_str(c, reply) : 0;
-    case EK_QWEN36:
-        if (cap_str(c, QW_U) || cap_str(c, u) || cap_str(c, QW_ASST)) return -1;
-        return reply ? (cap_str(c, reply) || cap_str(c, QW_AEND)) : 0;
-    case EK_QWEN38:
-        if (cap_str(c, QW_U) || cap_str(c, u) || cap_str(c, QW_ASST)) return -1;
-        return reply ? (cap_str(c, reply) || cap_str(c, QW_AEND)) : 0;
-    case EK_INKLING:
-        if (cap_str(c, INK_U) || cap_str(c, u) || cap_str(c, INK_ASST)) return -1;
-        return reply ? (cap_str(c, reply) || cap_str(c, INK_AEND)) : 0;
-    case EK_KIMI:
-        /* K3CHAT1 wire (kimi_k3.c chat_build_wire): `M <role> <bytes>\n<text>`,
-         * byte-counted so the text may hold newlines. The engine appends the
-         * assistant-generation open after the wire, so a pending user turn needs
-         * no trailing marker. */
-        if (cap_addf(c, "M user %zu\n", strlen(u)) || cap_str(c, u)) return -1;
-        return reply ? (cap_addf(c, "M assistant %zu\n", strlen(reply)) ||
-                        cap_str(c, reply)) : 0;
-    default:
-        return -1;
-    }
-}
-
-/* The once-at-front SUBMIT prefix (kept out of the stored history). */
-static int serve2_prefix(Cap *c, EngKind k) {
-    if (k == EK_GLM)      return cap_str(c, GLM_BOS);
-    if (k == EK_GLM53)    return cap_str(c, GLM_BOS);
-    if (k == EK_DEEPSEEK) return cap_str(c, DS_BOS);
-    if (k == EK_QWEN38)   return cap_str(c, QW38_SYS);
-    if (k == EK_KIMI)     return cap_str(c, "K3CHAT1\n");
     return 0;
 }
 
@@ -3499,7 +3329,7 @@ static void *host_client_pump(void *arg) {
 }
 
 /* Preserve authenticated BUSY separately from transport/contract failures. */
-#define HOST_CONNECT_BUSY 1
+#include "src/runtime/lumabri_host_client.h"
 static int host_connect(const char *addr, const char *model_type, const char *expected_key,
                         const char *expected_root, Engine *e,
                         int *requested_max_new, int announce) {
@@ -3507,101 +3337,20 @@ static int host_connect(const char *addr, const char *model_type, const char *ex
     e->to = e->from = -1;
     e->pid = 0;
     e->transport = ENGINE_SOCKET;
-    int fd = lmb_connect(addr);
-    if (fd < 0) {
-        fprintf(stderr, "[lumabri] no host at %s\n", addr);
-        return -1;
+    LmbHostGreeting greeting;
+    LmbSocket fd;
+    int connected=lmb_host_client_open(addr,model_type,expected_key,expected_root,&fd,&greeting);
+    if (connected) {
+        fprintf(stderr, connected==HOST_CONNECT_BUSY ? "[lumabri] host is busy\n" :
+            "[lumabri] host connection, identity or checkpoint verification failed; no text sent\n");
+        return connected;
     }
-    if (expected_key) {
-        uint8_t key[32];
-        if (strlen(expected_key) != 64 || lmb_unhex(key, expected_key, 32) ||
-            !lmb_secure_enabled() || !lmb_secure_peer_matches(fd, key)) {
-            fprintf(stderr, "[lumabri] host identity differs from the accepted plan\n");
-            lmb_close(fd); return -1;
-        }
-    }
-    /* The host answers with the engine kind, because the client applies the
-     * chat template and cannot guess it from an address. A host that will
-     * not say is one whose replies we would format wrongly. */
-    LmbMsg m = {0};
-    if (lmb_auth(fd) || lmb_send(fd, LMB_HOST_HELLO, NULL, 0, NULL, 0) ||
-        lmb_recv(fd, &m) || m.op != LMB_HOST_HELLO_R) {
-        fprintf(stderr, "[lumabri] %s did not answer as an inference host\n",
-                addr);
-        lmb_msg_free(&m);
-        lmb_close(fd);
-        return -1;
-    }
-    LmbCur c = { m.body, m.body_len, 0 };
-    char kind[64] = "", mtype[64] = "", backend[32] = "";
-    uint32_t sessions_free = 0, speed_milli = 0;
-    uint32_t host_max_new = 0, host_max_frame = 0, codec = 0;
-    if (lmb_cur_str(&c, mtype, sizeof mtype) ||
-        lmb_cur_str(&c, kind, sizeof kind) ||
-        lmb_cur_str(&c, backend, sizeof backend) ||
-        lmb_cur_u32(&c, &sessions_free) || lmb_cur_u32(&c, &speed_milli)) {
-        fprintf(stderr, "[lumabri] %s sent a greeting this build cannot read\n",
-                addr);
-        lmb_msg_free(&m); lmb_close(fd); return -1;
-    }
-    if (c.off < c.len &&
-        (lmb_cur_u32(&c, &host_max_new) || lmb_cur_u32(&c, &host_max_frame))) {
-        fprintf(stderr, "[lumabri] %s sent invalid host limits\n", addr);
-        lmb_msg_free(&m); lmb_close(fd); return -1;
-    }
-    if (c.off < c.len && (lmb_cur_u32(&c, &codec) || codec != 2)) {
-        fprintf(stderr, "[lumabri] unsupported hosted codec\n");
-        lmb_msg_free(&m); lmb_close(fd); return -1;
-    }
-    uint32_t sampling_flags = 0;
-    if (c.off < c.len && (lmb_cur_u32(&c, &sampling_flags) || (sampling_flags & ~7u))) {
-        fprintf(stderr, "[lumabri] unsupported host sampling capabilities\n");
-        lmb_msg_free(&m); lmb_close(fd); return -1;
-    }
-    uint32_t numeric_tag = 0, numeric_abi = 0;
-    char numeric_class[97] = "";
-    if (c.off < c.len && (lmb_cur_u32(&c, &numeric_tag) || numeric_tag != 0x314d554e ||
-        lmb_cur_u32(&c, &numeric_abi) || !numeric_abi ||
-        lmb_inventory_string(&c, numeric_class, sizeof numeric_class) || !numeric_class[0])) {
-        fprintf(stderr, "[lumabri] unsupported host numeric metadata\n");
-        lmb_msg_free(&m); lmb_close(fd); return -1;
-    }
-    uint32_t root_tag = 0;
-    char model_root[65] = ""; uint8_t root_bytes[32];
-    if (c.off < c.len && (lmb_cur_u32(&c, &root_tag) || root_tag != 0x31544f52 ||
-        lmb_inventory_string(&c, model_root, sizeof model_root) ||
-        strlen(model_root) != 64 || lmb_unhex(root_bytes, model_root, 32))) {
-        fprintf(stderr, "[lumabri] invalid host checkpoint identity\n");
-        lmb_msg_free(&m); lmb_close(fd); return -1;
-    }
-    if (c.off != c.len || m.pay_len) { lmb_msg_free(&m); lmb_close(fd); return -1; }
-    lmb_msg_free(&m);
-    if (expected_root && (!expected_key || strlen(expected_root) != 64 ||
-        lmb_unhex(root_bytes, expected_root, 32) || strcmp(expected_root, model_root))) {
-        fprintf(stderr, "[lumabri] host checkpoint differs from the accepted resident plan; no text sent\n");
-        lmb_close(fd); return -1;
-    }
-    if (model_type && model_type[0] && strcmp(model_type, mtype)) {
-        fprintf(stderr, "[lumabri] %s serves %s, not %s\n", addr, mtype,
-                model_type);
-        lmb_close(fd); return -1;
-    }
-    if (!sessions_free) {
-        fprintf(stderr, "[lumabri] host %s is busy (0 sessions free)\n", addr);
-        lmb_close(fd); return HOST_CONNECT_BUSY;
-    }
-    if (host_max_new && requested_max_new && *requested_max_new > (int)host_max_new) {
-        if (announce) printf("  %shost limit: max-new reduced from %d to %u%s\n", C_DIM,
-                             *requested_max_new, host_max_new, C_R);
-        *requested_max_new = (int)host_max_new;
-    }
-    (void)host_max_frame;
-    EngKind kind_id = engine_kind_of(kind);
-    if (kind_id == EK_INVALID) {
-        fprintf(stderr, "[lumabri] host %s announced unknown engine %s\n",
-                addr, kind);
-        lmb_close(fd); return -1;
-    }
+    uint32_t sessions_free=greeting.sessions,speed_milli=greeting.speed_milli;
+    uint32_t sampling_flags=greeting.sampling,numeric_abi=greeting.numeric_abi,codec=greeting.codec;
+    const char *numeric_class=greeting.numeric_class,*backend=greeting.backend,*mtype=greeting.model_type;
+    EngKind kind_id=greeting.kind;
+    if (greeting.max_new && requested_max_new && *requested_max_new>(int)greeting.max_new)
+        *requested_max_new=(int)greeting.max_new;
     int pair[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair)) {
         lmb_close(fd); return -1;

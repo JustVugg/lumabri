@@ -206,6 +206,24 @@ int wmain(int argc,wchar_t **wide) {
     snprintf(host_address,sizeof host_address,"127.0.0.1:%u",host_port);
     lmb_hex(host_key,reported.identity,32);lmb_hex(host_root,second.model_root,32);
     uint64_t prepared_reads=atomic_load(&fixture.checkpoint.reads);
+    /* The shipped native client talks to the approved real host, not a test
+     * tokenizer. Its completed transcript survives a second turn and resize. */
+    wchar_t chat_args[1024];
+    assert(swprintf(chat_args,1024,L"chat --host %hs --host-key %hs --host-root %hs --model-type olmoe --max-new 8",
+        host_address,host_key,host_root)>0);
+    WinUi chat;winui_open_args(&chat,binary,chat_args,"conversation");
+    winui_send_keys(chat.input,"hello\r");winui_expect(chat.capture,"Reply 1 ·");
+    assert(winui_contains(chat.capture,"You") && winui_contains(chat.capture,"hello") && winui_contains(chat.capture,"Assistant"));
+    EnterCriticalSection(&chat.capture->mutex);chat.capture->used=0;chat.capture->text[0]=0;LeaveCriticalSection(&chat.capture->mutex);
+    winui_send_keys(chat.input,"second question\r");winui_expect(chat.capture,"second question");winui_expect(chat.capture,"Reply 2 ·");
+    assert(winui_contains(chat.capture,"hello") && winui_contains(chat.capture,"second question"));
+    winui_send_keys(chat.input,"/ne\t\r");winui_expect(chat.capture,"New private conversation.");
+    winui_close(&chat);
+    uint64_t chat_closed=GetTickCount64()+5000;
+    LmbHostControl chat_state;
+    do {assert(!lmb_host_control_rpc(host_address,host_key,host_root,LMB_HOST_CONTROL_QUERY,NULL,&chat_state));
+        assert(GetTickCount64()<chat_closed);Sleep(20);} while(chat_state.connections);
+    assert(atomic_load(&fixture.checkpoint.reads)==prepared_reads && status().host_pid);
     LmbSocket host_a=native_host_connect(host_address,0),host_b=native_host_connect(host_address,0);
     LmbSocket host_c=native_host_connect(host_address,1);lmb_close(host_c);
     native_host_send(host_a,"SUBMIT 1 0 2 8 0 1\nhi\n");native_host_completed(host_a,"1",0);

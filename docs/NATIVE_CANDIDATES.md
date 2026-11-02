@@ -311,3 +311,28 @@ after a tracker restart. The shared durable-history gate also runs as a real
 Windows process: cache overflow, legacy records, competing publishers, key
 rotation and corrupted evidence. The interactive chat client and final Windows
 packaging remain separate work.
+
+## Native Windows resident chat client
+
+The developer build now includes a thin interactive client for an already
+approved host. It uses the same prompt templates, greeting validation and
+Serve2 reply parser as the Unix client. It does not start or download a model.
+Pass the endpoint, public identity and checkpoint root from the approved plan:
+
+```text
+lumabri.exe chat --host HOST:PORT --host-key PUBLIC_KEY --host-root CHECKPOINT_ROOT
+```
+
+The client uses the saved household credential (or an explicitly configured
+`LUMABRI_TOKEN`). An identity or checkpoint mismatch refuses the connection
+before sending conversation text. A full host reports BUSY. The text transcript
+stays in this client session; completed turns are replayed on reconnection.
+Esc or Ctrl-C during a reply closes that connection and excludes its partial
+reply from subsequent prompts. `/new` starts a fresh conversation, `/quit`
+returns, Tab completes commands, and Ctrl-P/Ctrl-N scroll the transcript.
+Measured speed appears only when the host returns generation timing.
+
+Native tests cover the actual console, encrypted cancellation and interrupted
+streams, and two turns against a real reduced OLMoE host with no further weight
+reads. Automatic model preparation from the native Windows catalogue and the
+complete Windows package are not delivered by this client command.
