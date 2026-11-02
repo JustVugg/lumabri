@@ -32,7 +32,13 @@ static int home_settings_load_windows(HomeSettings *out) {
     return bad ? -1 : 0;
 }
 
-static int home_settings_save_windows(const HomeSettings *settings) {
+static int home_settings_equal_windows(const HomeSettings *a,const HomeSettings *b) {
+    return a->owner==b->owner && !strcmp(a->tracker,b->tracker) && !strcmp(a->token,b->token) &&
+        !strcmp(a->models,b->models) && !strcmp(a->ram,b->ram) &&
+        !strcmp(a->sessions,b->sessions) && !strcmp(a->context,b->context);
+}
+
+static int home_settings_save_if_current_windows(const HomeSettings *settings,const HomeSettings *expected) {
     char path[1200],lock_path[1200],text[4096];
     int length=home_settings_format(settings,text,sizeof text);
     if (length<0 || home_settings_path_windows(path,sizeof path) ||
@@ -41,6 +47,12 @@ static int home_settings_save_windows(const HomeSettings *settings) {
     if (guard==INVALID_HANDLE_VALUE) {SecureZeroMemory(text,sizeof text);return -1;}
     int rc=-1;
     if (lmb_private_lock(guard,1)) goto done;
+    if (expected) {
+        HomeSettings latest;
+        int changed=home_settings_load_windows(&latest) || !home_settings_equal_windows(&latest,expected);
+        SecureZeroMemory(&latest,sizeof latest);
+        if (changed) {errno=EBUSY;goto unlocked;}
+    }
     LmbPrivatePath target;LmbPrivateSecurity security;
     if (lmb_private_path(path,&target)) goto unlocked;
     if (lmb_private_security(&security)) {lmb_private_path_close(&target);goto unlocked;}
@@ -68,6 +80,9 @@ unlocked:
 done:
     CloseHandle(guard);SecureZeroMemory(text,sizeof text);return rc ? -1 : 0;
 }
+static int home_settings_save_windows(const HomeSettings *settings) {
+    return home_settings_save_if_current_windows(settings,NULL);
+}
 
 static int home_settings_activate_windows(const HomeSettings *s) {
     /* _putenv_s updates both the CRT view used by authentication and the
@@ -93,7 +108,7 @@ static int home_settings_join_windows(HomeSettings *current,const HomeSettings *
     for (unsigned i=0;i<3;i++) if (!home_service_query(roles[i],HOME_SVC_STATUS,NULL,&running)) return -4;
     if (!next->tracker[0] || !next->token[0] || next->owner || home_settings_activate_windows(next)) return -2;
     int rc=home_connection_check_windows(next->tracker);
-    if (!rc && home_settings_save_windows(next)) rc=-3;
+    if (!rc && home_settings_save_if_current_windows(next,current)) rc=-3;
     if (rc) (void)home_settings_activate_windows(current);
     else *current=*next;
     return rc;

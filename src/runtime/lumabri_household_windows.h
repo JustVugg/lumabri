@@ -2,11 +2,6 @@
  * only after READY and an authenticated round trip to this machine's key. */
 #ifndef LMB_HOUSEHOLD_WINDOWS_H
 #define LMB_HOUSEHOLD_WINDOWS_H
-static int home_settings_equal_windows(const HomeSettings *a,const HomeSettings *b) {
-    return a->owner==b->owner && !strcmp(a->tracker,b->tracker) && !strcmp(a->token,b->token) &&
-        !strcmp(a->models,b->models) && !strcmp(a->ram,b->ram) &&
-        !strcmp(a->sessions,b->sessions) && !strcmp(a->context,b->context);
-}
 static int home_create_windows(HomeSettings *current) {
     char path[1200];
     if (lmb_private_default_path(path,sizeof path,"household-create.lock")) return -1;
@@ -36,7 +31,7 @@ static int home_create_windows(HomeSettings *current) {
     const char *args[]={"--internal-tracker","--port",port_text,"--address",next.tracker};
     if (home_service_keeper_start_owned_windows("tracker",args,5,&created)) {rc=-5;goto done;}
     rc=home_connection_check_identity_windows(next.tracker,g_sec_pk);
-    if (!rc && home_settings_save_windows(&next)) rc=-3;
+    if (!rc && home_settings_save_if_current_windows(&next,current)) rc=-3;
     if (!rc) *current=next;
 done:
     if (rc) {

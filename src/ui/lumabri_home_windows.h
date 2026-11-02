@@ -73,7 +73,7 @@ static int home_windows_join(HomeSettings *settings) {
     rc=home_settings_join_windows(settings,&next);
     if (rc) home_windows_message("Could not join the household",rc==-4 ?
         "Stop local sharing before joining another household. Your saved settings are unchanged." : rc==-3 ?
-        "The connection succeeded, but private settings could not be saved. Your previous household is unchanged." : rc==-2 ?
+        "Settings changed in another workspace or could not be saved. Reopen this workspace; no saved household was overwritten." : rc==-2 ?
         "Household authentication failed. Check the key and tracker address; no resources were shared." :
         "Connection or secure handshake failed. Check the household address and LAN access; no resources were shared.");
 done:
@@ -110,7 +110,7 @@ static void home_windows_create(HomeSettings *settings) {
     if (rc) {
         home_windows_message("Could not create the household",rc==-4 ?
             "Local services or settings changed. Stop sharing before creating another household, then reopen the workspace." : rc==-3 ?
-            "The household started, but private settings could not be saved. The new index was stopped." : rc==-6 ?
+            "Settings changed in another workspace or could not be saved. The new index was stopped. Reopen the workspace." : rc==-6 ?
             "Startup was not confirmed and shutdown could not be verified. Check service status before retrying." :
             "Check the installed tracker runtime, LAN address and household port. Your saved settings are unchanged.");
         return;
