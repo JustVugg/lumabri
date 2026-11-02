@@ -39,6 +39,15 @@ def main():
          root/'lumabri.c',root/'lumabri_machine.c',root/'lumabri_run_gate.c',resource,'-static','-lwinpthread','-lws2_32',
          '-lbcrypt','-liphlpapi','-lpsapi','-ladvapi32','-ldxgi','-ldxguid',
          '-o',output/'lumabri.exe'])
+    for name,file in (('tracker','tracker.c'),('test_tracker_history','tests/c/test_tracker_history.c')):
+        run([args.cc,*flags,'-Werror','-Wno-unused-function','-municode',root/file,
+             root/'lumabri_segment_discovery.c',root/'lumabri_segment.c',resource,
+             '-static','-lwinpthread','-lws2_32','-lbcrypt','-liphlpapi','-ladvapi32',
+             '-o',output/(name+'.exe')])
+    run([args.cc,*flags,'-Werror','-Wno-unused-function','-municode',
+         root/'tests/c/test_household_tracker_windows.c',root/'lumabri_segment_discovery.c',root/'lumabri_segment.c',resource,
+         '-static','-lwinpthread','-lws2_32','-lbcrypt','-liphlpapi','-ladvapi32',
+         '-o',output/'test_household_tracker_windows.exe'])
     if args.only != 'contracts':
         run([sys.executable,'-X','utf8','tools/prepare_engine_source.py','--source',
              Path(args.engine).resolve(),'--output',source])

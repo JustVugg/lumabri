@@ -1,6 +1,7 @@
 #include "lumabri_home_net.h"
 #include "src/runtime/lumabri_owned_process_windows.h"
 #include "lumabri_ready.h"
+#include "lumabri_wakeup.h"
 #include <assert.h>
 
 int wmain(int argc,wchar_t **argv) {
@@ -19,6 +20,18 @@ int wmain(int argc,wchar_t **argv) {
     }
     assert(argc==1);
     assert(!lmb_socket_init());
+    /* Windows control connections multiplex network readiness and a private
+     * wake socket. A wake must arrive without data on the network socket. */
+    LmbWakeup writer,reader=lmb_wakeup_open(&writer);
+    assert(reader!=LMB_INVALID_WAKEUP && writer!=LMB_INVALID_WAKEUP);
+    DWORD inherited=0;
+    assert(GetHandleInformation((HANDLE)reader,&inherited) && !(inherited&HANDLE_FLAG_INHERIT));
+    assert(GetHandleInformation((HANDLE)writer,&inherited) && !(inherited&HANDLE_FLAG_INHERIT));
+    LmbSocket idle=lmb_listen(0);assert(idle!=LMB_INVALID_SOCKET);
+    lmb_wakeup_notify(writer);int notified=0;
+    assert(lmb_wakeup_wait(idle,reader,&notified)==0 && notified);
+    lmb_wakeup_drain(reader);assert(lmb_socket_wait(reader,0,20)==0);
+    lmb_wakeup_close(reader);lmb_wakeup_close(writer);lmb_socket_close(idle);
     char address[INET_ADDRSTRLEN];
     assert(!_putenv_s("LUMABRI_ADVERTISE","100.101.102.103"));
     assert(!lmb_home_advertise_ip(address,sizeof address) && !strcmp(address,"100.101.102.103"));

@@ -3,6 +3,7 @@
 #ifndef LMB_HOME_WINDOWS_H
 #define LMB_HOME_WINDOWS_H
 #include "src/runtime/lumabri_home_settings_windows.h"
+#include "src/runtime/lumabri_household_windows.h"
 
 static void home_windows_close(LmbConsole *console) {
     fputs("\033[?25h\033[?1049l",stdout);fflush(stdout);lmb_console_close(console);
@@ -104,6 +105,34 @@ static int home_windows_share(HomeSettings *settings) {
     return rc;
 }
 
+static void home_windows_create(HomeSettings *settings) {
+    int rc=home_create_windows(settings);
+    if (rc) {
+        home_windows_message("Could not create the household",rc==-4 ?
+            "Local services or settings changed. Stop sharing before creating another household, then reopen the workspace." : rc==-3 ?
+            "The household started, but private settings could not be saved. The new index was stopped." : rc==-6 ?
+            "Startup was not confirmed and shutdown could not be verified. Check service status before retrying." :
+            "Check the installed tracker runtime, LAN address and household port. Your saved settings are unchanged.");
+        return;
+    }
+    LmbConsole console={0};if (home_windows_open(&console)) return;
+    int reveal=0;
+    for (;;) {
+        ui_begin("household ready");ui_text(5,4,UI_TEXT,"Connect your other computers");
+        ui_text(8,4,UI_MUTED,"Household address");ui_text(9,4,UI_SAND,settings->tracker);
+        ui_text(12,4,UI_MUTED,"Household key");ui_text(13,4,UI_TEXT,reveal ? settings->token : "Hidden — press r to reveal");
+        ui_text(17,4,UI_TEXT,"On each computer choose Join a household, then Share resources.");
+        ui_text(19,4,UI_MUTED,"Each donor still approves its own model allocations.");
+        ui_footer("The household keeps running when you close this workspace.","r show/hide key   Enter continue   Esc back");
+        if (ui_w<76 || ui_h<25) {ui_begin("household ready");ui_text(5,4,UI_SAND,"Resize to 76 × 25 to view complete pairing details. Esc returns.");}
+        ui_present();
+        int resized=0,key=lmb_console_key(&console,100,&resized);
+        if (key=='r') reveal=!reveal;
+        if (key=='\r' || key=='\n' || key==27 || key==3) break;
+    }
+    home_windows_close(&console);
+}
+
 static int home_windows_run(int share) {
     HomeServiceSnapshot live;
     if (share && !home_service_query("donor",HOME_SVC_STATUS,NULL,&live)) return lmb_donor_ui_windows(live.tracker);
@@ -122,24 +151,26 @@ static int home_windows_run(int share) {
         for (;;) {
             ui_begin("your workspace");
             ui_text(5,5,UI_TEXT,"Your computers. One private household.");
-            static const char *titles[]={"Share resources","Join a household","Settings","Stop local services","Exit workspace"};
+            static const char *titles[]={"Share resources","Join a household","Settings","Stop local services","Create a household","Exit workspace"};
             static const char *details[]={"Review requests; keep approved models in RAM.","Connect using the address and key from its owner.",
-                "Model folder and maximum RAM to share.","Review before stopping sharing and releasing local models.","Background services keep running."};
-            for (int i=0;i<5;i++) ui_item(8+i*3,i==choice,titles[i],details[i]);
-            ui_footer(settings.tracker[0] ? settings.tracker : "Join your household to get started.","↑ ↓ move   Enter select   Esc exit");
+                "Model folder and maximum RAM to share.","Review before stopping sharing and releasing local models.",
+                "Start a private household here, or view its pairing details.","Background services keep running."};
+            for (int i=0;i<6;i++) ui_item(7+i*3,i==choice,titles[i],details[i]);
+            ui_footer(settings.tracker[0] ? settings.tracker : "Create or join your household to get started.","↑ ↓ move   Enter select   Esc exit");
             int compact=ui_w<60 || ui_h<28;
             if (compact) {ui_begin("your workspace");ui_text(5,4,UI_SAND,"Resize to at least 60 × 28. Esc exits.");}
             ui_present();int resized=0,key=lmb_console_key(&console,100,&resized);
-            if (key==27 || key==3) {action=4;break;}
-            if (key=='k') choice=(choice+4)%5;
-            if (key=='j') choice=(choice+1)%5;
+            if (key==27 || key==3) {action=5;break;}
+            if (key=='k') choice=(choice+5)%6;
+            if (key=='j') choice=(choice+1)%6;
             if (!compact && (key=='\r' || key=='\n')) {action=choice;break;}
         }
         home_windows_close(&console);
-        if (action==4) break;
+        if (action==5) break;
         if (!action) (void)home_windows_share(&settings);
         else if (action==1) (void)home_windows_join(&settings);
         else if (action==2) home_windows_settings(&settings);
+        else if (action==4) home_windows_create(&settings);
         else if (action==3) {
             char confirm[32]="";
             if (!home_windows_field("Type stop to release all local models",confirm,sizeof confirm,0) && !strcmp(confirm,"stop")) {

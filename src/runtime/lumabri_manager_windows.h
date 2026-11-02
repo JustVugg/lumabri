@@ -19,7 +19,9 @@ static int home_service_manager_entry_windows(void) {
     return home_service_manager_run(&manager);
 }
 
-static int home_service_keeper_start_windows(const char *role,const char *const *args,size_t nargs) {
+static int home_service_keeper_start_owned_windows(const char *role,const char *const *args,size_t nargs,
+        HomeServiceSnapshot *created) {
+    if (created) memset(created,0,sizeof *created);
     wchar_t executable[2048]; char binary[6144], log_path[1200];
     DWORD n = GetModuleFileNameW(NULL, executable, 2048);
     if (!n || n >= 2048 || !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
@@ -39,7 +41,7 @@ static int home_service_keeper_start_windows(const char *role,const char *const 
     CloseHandle(log);
     if (rc) { CloseHandle(ready); return -1; }
     HANDLE waits[] = {ready, child.process};
-    DWORD wait = WaitForMultipleObjects(2, waits, FALSE, 5000);
+    DWORD wait = WaitForMultipleObjects(2, waits, FALSE, !strcmp(role,"tracker") ? 30000 : 5000);
     CloseHandle(ready);
     HomeServiceSnapshot snapshot;
     int observed = 0;
@@ -66,6 +68,7 @@ static int home_service_keeper_start_windows(const char *role,const char *const 
             if (SetInformationJobObject(child.job, JobObjectExtendedLimitInformation,
                     &limits, sizeof limits)) {
                 CloseHandle(child.process); CloseHandle(child.job);
+                if (created) *created=snapshot;
                 return 0;
             }
         }
@@ -79,12 +82,18 @@ static int home_service_keeper_start_windows(const char *role,const char *const 
         CloseHandle(child.process); CloseHandle(child.job);
     }
     if (raced) {
+        /* A transactional creator may roll back only the keeper it actually
+         * started, never a concurrent winner's household. */
+        if (created) {errno=EBUSY;return -1;}
         for (unsigned i = 0; i < 40; i++) {
             if (!home_service_query(role, HOME_SVC_STATUS, NULL, &snapshot)) return 0;
             home_service_wait_ms(50);
         }
     }
     return -1;
+}
+static int home_service_keeper_start_windows(const char *role,const char *const *args,size_t nargs) {
+    return home_service_keeper_start_owned_windows(role,args,nargs,NULL);
 }
 static int home_service_manager_start_windows(void) {
     const char *args[]={"--internal-manager"};

@@ -2,8 +2,23 @@
  * records are identity/integrity evidence, never weights or KV state. */
 #ifndef LMB_TRACKER_HISTORY_H
 #define LMB_TRACKER_HISTORY_H
-#include "lumabri_journal_index.h"
+#include "lumabri_proto.h"
 #include "lumabri_sha.h"
+static void tracker_history_key(const char *kind,const char *model,const char *path,char name[80]) {
+    LmbSha sha; uint8_t digest[32]; lmb_sha_init(&sha);
+    const char *parts[]={kind,model,path};
+    for (unsigned i=0;i<3;i++) lmb_sha_update(&sha,parts[i],strlen(parts[i])+1);
+    lmb_sha_final(&sha,digest); lmb_hex(name,digest,32); strcat(name,".entry");
+}
+static void tracker_history_digest(const char *name,const void *bytes,size_t size,uint8_t out[32]) {
+    LmbSha sha; lmb_sha_init(&sha); lmb_sha_update(&sha,name,strlen(name)+1);
+    lmb_sha_update(&sha,bytes,size); lmb_sha_final(&sha,out);
+}
+
+#ifdef _WIN32
+#include "lumabri_tracker_history_windows.h"
+#else
+#include "lumabri_journal_index.h"
 
 typedef struct { int dir, lock; } TrackerHistory;
 
@@ -33,16 +48,6 @@ static int tracker_history_begin(const char *bindings,TrackerHistory *h) {
     return 0;
 fail:
     tracker_history_end(h); return -1;
-}
-static void tracker_history_key(const char *kind,const char *model,const char *path,char name[80]) {
-    LmbSha sha; uint8_t digest[32]; lmb_sha_init(&sha);
-    const char *parts[]={kind,model,path};
-    for (unsigned i=0;i<3;i++) lmb_sha_update(&sha,parts[i],strlen(parts[i])+1);
-    lmb_sha_final(&sha,digest); lmb_hex(name,digest,32); strcat(name,".entry");
-}
-static void tracker_history_digest(const char *name,const void *bytes,size_t size,uint8_t out[32]) {
-    LmbSha sha; lmb_sha_init(&sha); lmb_sha_update(&sha,name,strlen(name)+1);
-    lmb_sha_update(&sha,bytes,size); lmb_sha_final(&sha,out);
 }
 /* 1 means absent. Malformed/unsafe evidence is never treated as a new key. */
 static int tracker_history_read(TrackerHistory *h,const char *name,LmbBuf *out) {
@@ -91,4 +96,5 @@ static int tracker_history_write(TrackerHistory *h,const char *name,const LmbBuf
     }
     free(b.p); close(at); return bad ? -1 : 0;
 }
+#endif /* platform */
 #endif

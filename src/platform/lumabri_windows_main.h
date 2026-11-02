@@ -20,6 +20,7 @@ static void doctor_json_string(const char *value) {
     fputc('"', stdout);
 }
 #include "src/runtime/lumabri_service_manager.h"
+#include "src/runtime/lumabri_tracker_windows.h"
 #include "src/runtime/lumabri_donor_windows.h"
 #include "src/ui/lumabri_donor_windows.h"
 #include <math.h>
@@ -67,6 +68,7 @@ static int home_donor_entry_windows(int argc,char **argv,int internal) {
 #include "src/ui/lumabri_home_windows.h"
 static int lmb_windows_main(int argc, char **argv) {
     if (argc==1 || (argc==2 && !strcmp(argv[1],"share"))) return home_windows_run(argc==2);
+    if (argc>=2 && !strcmp(argv[1],"--internal-tracker")) return home_tracker_entry_windows(argc-2,argv+2);
     if (argc>=2 && (!strcmp(argv[1],"donor") || !strcmp(argv[1],"--internal-donor")))
         return home_donor_entry_windows(argc-2,argv+2,!strcmp(argv[1],"--internal-donor"));
     if (argc == 2 && !strcmp(argv[1], "--internal-manager"))
@@ -89,8 +91,8 @@ static int lmb_windows_main(int argc, char **argv) {
           "  lumabri machine --json\n\n"
           "  lumabri donor --join HOST:PORT --ram-gb N [--headless]\n"
           "  lumabri share  (start or reopen sharing using saved household settings)\n\n"
-          "Without arguments: household workspace, authenticated join, settings and sharing.\n"
-          "Approved OLMoE chat hosting is available on donors. Native household creation and the chat client are not connected yet.\n", stderr);
+          "Without arguments: create/join a household, settings and sharing.\n"
+          "Approved OLMoE chat hosting is available on donors. The native interactive chat client is not connected yet.\n", stderr);
     return argc == 2 && !strcmp(argv[1], "--help") ? 0 : 2;
 }
 

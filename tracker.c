@@ -16,8 +16,10 @@
  *
  *   ./tracker [--port 7300]
  */
+#ifndef _WIN32
 #include <arpa/inet.h>
 #include <poll.h>
+#endif
 #include <pthread.h>
 #include "lumabri_wakeup.h"
 #include <time.h>
@@ -30,6 +32,8 @@
 #include "lumabri_inventory.h"
 #include "lumabri_home_discovery.h"
 #include "src/runtime/lumabri_tracker_history.h"
+#include "src/runtime/lumabri_tracker_state.h"
+#include "lumabri_ready.h"
 
 #define MAX_PEERS  64
 #define MAX_FILES  4096
@@ -101,9 +105,9 @@ typedef struct {
     /* relay mailbox: one in-flight request per peer, serialized. The
      * chatter thread queues it and waits; the peer's control thread
      * forwards it and completes it. evfd wakes the control thread. */
-    int ctrl_fd;                /* the live control connection, -1 if none */
-    int evfd;
-    int evwrite;
+    LmbSocket ctrl_fd;                /* the live control connection, -1 if none */
+    LmbWakeup evfd;
+    LmbWakeup evwrite;
     pthread_mutex_t rq_lk;
     pthread_cond_t rq_cv;
     int rq_busy, rq_sent, rq_done, rq_ok;
@@ -165,39 +169,23 @@ static int segment_generation_init(void) {
         snprintf(path, sizeof path, "%s.segment-generation", g_bindings_path) >=
             (int)sizeof path)
         return -1;
-    int flags = O_RDWR | O_CREAT;
-#ifdef O_NOFOLLOW
-    flags |= O_NOFOLLOW;
-#endif
-    int fd = open(path, flags, 0600);
-    if (fd < 0 || flock(fd, LOCK_EX)) { if (fd >= 0) close(fd); return -1; }
-    struct stat st;
-    if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_uid != geteuid() ||
-        (st.st_mode & 022)) {
-        flock(fd, LOCK_UN); close(fd); errno = EACCES; return -1;
+    FILE *stream=tracker_state_open(path,1,1);
+    if (!stream) return -1;
+    char buf[64]={0};size_t n=fread(buf,1,sizeof buf-1,stream);
+    char *end=NULL;unsigned long long previous=0;
+    int bad=ferror(stream) || n==sizeof buf-1;
+    if (!bad && n) {
+        errno=0;previous=strtoull(buf,&end,10);
+        bad=errno || end==buf || (*end && *end!='\n') || previous>=UINT32_MAX;
     }
-    char buf[64] = {0};
-    ssize_t n = pread(fd, buf, sizeof buf - 1, 0);
-    char *end = NULL;
-    unsigned long long previous = 0;
-    if (n < 0) { flock(fd, LOCK_UN); close(fd); return -1; }
-    if (n) {
-        errno = 0;
-        previous = strtoull(buf, &end, 10);
-        if (errno || end == buf || (*end && *end != '\n') ||
-            previous >= UINT32_MAX) {
-            flock(fd, LOCK_UN); close(fd); errno = EINVAL; return -1;
-        }
-    }
-    uint32_t epoch = (uint32_t)previous + 1u;
-    int out_len = snprintf(buf, sizeof buf, "%u\n", epoch);
-    /* The decimal counter never shrinks when incremented, so overwrite first
-     * and fsync without truncating the last valid epoch before the new one is
-     * durable. */
-    int bad = out_len <= 0 ||
-              pwrite(fd, buf, (size_t)out_len, 0) != out_len || fsync(fd);
-    flock(fd, LOCK_UN); close(fd);
-    if (bad) return -1;
+    if (bad) {tracker_state_close(stream);errno=EINVAL;return -1;}
+    uint32_t epoch=(uint32_t)previous+1u;
+    int out_len=snprintf(buf,sizeof buf,"%u\n",epoch);
+    /* Overwrite and flush before publishing the new epoch. The decimal
+     * counter never shrinks; do not truncate the last durable value first. */
+    bad=out_len<=0 || fseek(stream,0,SEEK_SET) ||
+        fwrite(buf,1,(size_t)out_len,stream)!=(size_t)out_len || tracker_state_flush(stream);
+    tracker_state_close(stream);if (bad) return -1;
     g_segment_route_generation = (uint64_t)epoch << 32 | 1u;
     return 0;
 }
@@ -258,6 +246,9 @@ static int binding_path_default(void) {
     const char *e = getenv("LUMABRI_PEER_BINDINGS");
     if (e && *e) return snprintf(g_bindings_path, sizeof g_bindings_path, "%s", e)
                          < (int)sizeof g_bindings_path ? 0 : -1;
+#ifdef _WIN32
+    return lmb_private_default_path(g_bindings_path,sizeof g_bindings_path,"tracker_peer_bindings");
+#else
     const char *home = getenv("HOME");
     if (!home || !*home) return -1;
     char dir[448];
@@ -265,24 +256,15 @@ static int binding_path_default(void) {
     if (mkdir(dir, 0700) && errno != EEXIST) return -1;
     return snprintf(g_bindings_path, sizeof g_bindings_path,
                     "%s/tracker_peer_bindings", dir) < (int)sizeof g_bindings_path ? 0 : -1;
+#endif
 }
 
 static int bindings_load(void) {
     if (binding_path_default()) return -1;
-    int flags = O_RDONLY;
-#ifdef O_NOFOLLOW
-    flags |= O_NOFOLLOW;
-#endif
-    int fd = open(g_bindings_path, flags);
-    if (fd < 0) return errno == ENOENT ? 0 : -1;
-    struct stat st;
-    if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_uid != geteuid() ||
-        (st.st_mode & 022)) { close(fd); errno = EACCES; return -1; }
-    if (flock(fd,LOCK_SH)) { close(fd); return -1; }
+    FILE *fp=tracker_state_open(g_bindings_path,0,0);
+    if (!fp) return errno==ENOENT ? 0 : -1;
     TrackerHistory history;
-    if (tracker_history_begin(g_bindings_path,&history)) { close(fd); return -1; }
-    FILE *fp = fdopen(fd, "r");
-    if (!fp) { tracker_history_end(&history); close(fd); return -1; }
+    if (tracker_history_begin(g_bindings_path,&history)) {tracker_state_close(fp);return -1;}
     char line[768]; int rc = 0;
     while (fgets(line, sizeof line, fp)) {
         size_t n = strlen(line);
@@ -299,7 +281,7 @@ static int bindings_load(void) {
         binding_remember(x.name,x.is_expert,x.pubkey);
     }
     if (ferror(fp)) rc = -1;
-    fclose(fp);
+    tracker_state_close(fp);
     tracker_history_end(&history);
     return rc;
 }
@@ -311,71 +293,41 @@ static int binding_check_or_add(const char *name, int is_expert,
     int old = binding_find(name, is_expert);
     if (old >= 0) return memcmp(g_bindings[old].pubkey, pk, 32) ? -1 : 0;
     if (!binding_name_ok(name)) return -1;
-    int flags = O_RDWR | O_CREAT;
-#ifdef O_NOFOLLOW
-    flags |= O_NOFOLLOW;
-#endif
-    int fd = open(g_bindings_path, flags, 0600);
-    if (fd < 0 || flock(fd, LOCK_EX)) { if (fd >= 0) close(fd); return -1; }
-    struct stat st;
-    if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_uid != geteuid() ||
-        (st.st_mode & 022)) {
-        flock(fd, LOCK_UN); close(fd); errno = EACCES; return -1;
-    }
-    /* A second tracker may share the durable state during a rolling restart.
-     * Re-read it while holding the file lock, so two processes cannot append
-     * conflicting owners from stale in-memory snapshots. */
-    int dfd = dup(fd), disk_found = 0, disk_bad = dfd < 0;
-    FILE *rf = dfd >= 0 ? fdopen(dfd, "r") : NULL;
-    if (!rf && dfd >= 0) { close(dfd); disk_bad = 1; }
-    if (rf) {
-        char line[768];
-        while (fgets(line, sizeof line, rf)) {
-            size_t n = strlen(line);
-            if (n && line[n - 1] == '\n') line[--n] = 0;
-            if (!n || line[0] == '#') continue;
-            char kind = line[0], *a = strchr(line, '\t');
-            char *b = a ? strchr(a + 1, '\t') : NULL;
-            if (!a || !b || a != line + 1 || (kind != 'M' && kind != 'E')) {
-                disk_bad = 1; break;
-            }
-            *a++ = 0; *b++ = 0;
-            uint8_t saved[32];
-            if (strlen(a) != 64 || !binding_name_ok(b) ||
-                lmb_unhex(saved, a, sizeof saved)) { disk_bad = 1; break; }
-            if ((kind == 'E') == is_expert && !strcmp(b, name)) {
-                if (memcmp(saved, pk, sizeof saved)) { disk_bad = 1; break; }
-                disk_found = 1;
-            }
+    FILE *stream=tracker_state_open(g_bindings_path,1,1);
+    if (!stream) return -1;
+    /* Re-read under the cross-process lock: a rolling tracker must not
+     * claim a different owner using only its stale in-memory cache. */
+    int disk_found=0,disk_bad=0;char line[768];
+    while (fgets(line,sizeof line,stream)) {
+        size_t n=strlen(line);
+        if (n && line[n-1]=='\n') line[--n]=0;
+        if (!n || line[0]=='#') continue;
+        char kind=line[0],*a=strchr(line,'\t');char *b=a ? strchr(a+1,'\t') : NULL;
+        if (!a || !b || a!=line+1 || (kind!='M' && kind!='E')) {disk_bad=1;break;}
+        *a++=0;*b++=0;uint8_t saved[32];
+        if (strlen(a)!=64 || !binding_name_ok(b) || lmb_unhex(saved,a,sizeof saved)) {disk_bad=1;break;}
+        if ((kind=='E')==is_expert && !strcmp(b,name)) {
+            if (memcmp(saved,pk,sizeof saved)) {disk_bad=1;break;}
+            disk_found=1;
         }
-        if (ferror(rf)) disk_bad = 1;
-        fclose(rf);
     }
-    if (disk_bad) { flock(fd, LOCK_UN); close(fd); return -1; }
+    if (ferror(stream)) disk_bad=1;
+    if (disk_bad) {tracker_state_close(stream);return -1;}
     TrackerHistory history;
-    if (tracker_history_begin(g_bindings_path,&history)) { close(fd); return -1; }
+    if (tracker_history_begin(g_bindings_path,&history)) { tracker_state_close(stream); return -1; }
     int history_bad=binding_history_accept(&history,name,is_expert,pk);
     tracker_history_end(&history);
-    if (history_bad) { close(fd); return -1; }
+    if (history_bad) { tracker_state_close(stream); return -1; }
     if (disk_found) {
-        flock(fd, LOCK_UN); close(fd);
+        tracker_state_close(stream);
         binding_remember(name,is_expert,pk);
         return 0;
     }
     char hex[65], row[768]; lmb_hex(hex, pk, 32);
     int rn = snprintf(row, sizeof row, "%c\t%s\t%s\n", is_expert ? 'E' : 'M', hex, name);
     int ok = rn > 0 && rn < (int)sizeof row;
-    off_t end = lseek(fd, 0, SEEK_END);
-    size_t off = 0;
-    if (end < 0) ok = 0;
-    while (ok && off < (size_t)rn) {
-        ssize_t w = write(fd, row + off, (size_t)rn - off);
-        if (w < 0 && errno == EINTR) continue;
-        if (w <= 0) { ok = 0; break; }
-        off += (size_t)w;
-    }
-    if (ok && fsync(fd)) ok = 0;
-    flock(fd, LOCK_UN); close(fd);
+    if (ok) ok=!fseek(stream,0,SEEK_END) && fwrite(row,1,(size_t)rn,stream)==(size_t)rn && !tracker_state_flush(stream);
+    tracker_state_close(stream);
     if (!ok) return -1;
     binding_remember(name,is_expert,pk);
     return 0;
@@ -626,7 +578,7 @@ static Peer *peer_slot_new(int is_expert, int *idx) {
         double now = now_s();
         for (int i = 0; i < MAX_PEERS; i++) {
             Peer *p = &g_peers[i];
-            if (now - p->ts <= g_stale_s || p->ctrl_fd >= 0 || p->refs) continue;
+            if (now - p->ts <= g_stale_s || p->ctrl_fd != LMB_INVALID_SOCKET || p->refs) continue;
             pick = i;
             break;
         }
@@ -641,13 +593,13 @@ static Peer *peer_slot_new(int is_expert, int *idx) {
             free(f->body); free(f->pay); free(f);
         }
         for (int r = 0; r < REXEC_INFLIGHT; r++) free(p->rex[r].resp);
-        if (p->evfd >= 0) close(p->evfd);
-        if (p->evwrite >= 0) close(p->evwrite);
+        if (p->evfd != LMB_INVALID_WAKEUP) lmb_wakeup_close(p->evfd);
+        if (p->evwrite != LMB_INVALID_WAKEUP) lmb_wakeup_close(p->evwrite);
         pthread_mutex_destroy(&p->rq_lk);
         pthread_cond_destroy(&p->rq_cv);
     }
     memset(p, 0, sizeof *p);
-    p->ctrl_fd = -1;
+    p->ctrl_fd = LMB_INVALID_SOCKET;
     p->evfd = lmb_wakeup_open(&p->evwrite);
     pthread_mutex_init(&p->rq_lk, NULL);
     pthread_cond_init(&p->rq_cv, NULL);
@@ -656,7 +608,7 @@ static Peer *peer_slot_new(int is_expert, int *idx) {
     return p;
 }
 
-static void send_err(int fd, const char *msg) {
+static void send_err(LmbSocket fd, const char *msg) {
     LmbBuf b = {0};
     lmb_buf_str(&b, msg);
     lmb_send(fd, LMB_ERR, b.p, (uint32_t)b.len, NULL, 0);
@@ -710,7 +662,7 @@ static int identity_has_room(const uint8_t pk[32], const char *name, int is_expe
         if (!g_peers[i].used || !g_peers[i].has_key) continue;
         if (g_peers[i].is_expert == is_expert && !strcmp(g_peers[i].name, name))
             return 1;                      /* reclaiming a name it already holds */
-        int live = now - g_peers[i].ts <= g_stale_s || g_peers[i].ctrl_fd >= 0;
+        int live = now - g_peers[i].ts <= g_stale_s || g_peers[i].ctrl_fd != LMB_INVALID_SOCKET;
         if (!live) continue;
         if (!memcmp(g_peers[i].pubkey, pk, 32)) held++;
         if (source && *source && !strcmp(g_peers[i].source, source)) from_source++;
@@ -718,9 +670,9 @@ static int identity_has_room(const uint8_t pk[32], const char *name, int is_expe
     return held < MAX_NAMES_PER_KEY && from_source < g_max_names_per_source;
 }
 
-static void connection_source(int fd, char out[64]) {
+static void connection_source(LmbSocket fd, char out[64]) {
     out[0] = 0;
-    struct sockaddr_storage ss; socklen_t sl = sizeof ss;
+    struct sockaddr_storage ss; LmbSocketLength sl = sizeof ss;
     if (getpeername(fd, (struct sockaddr *)&ss, &sl)) return;
     if (getnameinfo((struct sockaddr *)&ss, sl, out, 64, NULL, 0,
                     NI_NUMERICHOST)) out[0] = 0;
@@ -730,7 +682,7 @@ static void connection_source(int fd, char out[64]) {
  * rate and blocked relay threads by observed source address; private swarms
  * additionally retain their existing tracker token. The bucket charges large
  * activation/restore frames more than a control frame. */
-static int rseg_rate_enter(int fd, uint32_t pay_len, char source[64]) {
+static int rseg_rate_enter(LmbSocket fd, uint32_t pay_len, char source[64]) {
     connection_source(fd, source);
     if (!source[0]) snprintf(source, 64, "unknown");
     double now = now_s();
@@ -782,7 +734,7 @@ static void rseg_rate_leave(const char source[64]) {
     pthread_mutex_unlock(&g_rseg_rate_lk);
 }
 
-static Peer *handle_register(int fd, LmbMsg *m, const uint8_t *nonce) {
+static Peer *handle_register(LmbSocket fd, LmbMsg *m, const uint8_t *nonce) {
     uint8_t peer_pk[32], peer_sig[64];
     int have_auth = 0;
     size_t blen = peer_auth_strip(m, peer_pk, peer_sig, &have_auth);
@@ -953,7 +905,7 @@ static Peer *handle_register(int fd, LmbMsg *m, const uint8_t *nonce) {
     const char *use_addr = addr;
     char fixed[64];
     struct sockaddr_in sin;
-    socklen_t sl = sizeof sin;
+    LmbSocketLength sl = sizeof sin;
     if (!strncmp(addr, "127.0.0.1:", 10) &&
         getpeername(fd, (struct sockaddr *)&sin, &sl) == 0 &&
         sin.sin_family == AF_INET &&
@@ -1041,7 +993,7 @@ static void promise_store(const char *model, const char *name,
  * Expert peers never enter placements (they hold no files); EPEERS is how a
  * chatter learns who can EXECUTE for a model, server included. */
 
-static Peer *handle_ereg(int fd, LmbMsg *m, const uint8_t *nonce) {
+static Peer *handle_ereg(LmbSocket fd, LmbMsg *m, const uint8_t *nonce) {
     uint8_t peer_pk[32], peer_sig[64];
     int have_auth = 0;
     size_t blen = peer_auth_strip(m, peer_pk, peer_sig, &have_auth);
@@ -1162,7 +1114,7 @@ static Peer *handle_ereg(int fd, LmbMsg *m, const uint8_t *nonce) {
     const char *use_addr = addr;
     char fixed[64];
     struct sockaddr_in sin;
-    socklen_t sl = sizeof sin;
+    LmbSocketLength sl = sizeof sin;
     if (!strncmp(addr, "127.0.0.1:", 10) &&
         getpeername(fd, (struct sockaddr *)&sin, &sl) == 0 &&
         sin.sin_family == AF_INET &&
@@ -1213,7 +1165,7 @@ static Peer *handle_ereg(int fd, LmbMsg *m, const uint8_t *nonce) {
     if (lmb_send(fd, LMB_OK, ack.p, (uint32_t)ack.len, NULL, 0)) {
         free(ack.p);
         pthread_mutex_lock(&g_lk);
-        if (slot->ctrl_fd == fd) slot->ctrl_fd = -1;
+        if (slot->ctrl_fd == fd) slot->ctrl_fd = LMB_INVALID_SOCKET;
         pthread_mutex_unlock(&g_lk);
         return NULL;
     }
@@ -1221,7 +1173,7 @@ static Peer *handle_ereg(int fd, LmbMsg *m, const uint8_t *nonce) {
     return slot;
 }
 
-static int handle_epeers(int fd, LmbMsg *m) {
+static int handle_epeers(LmbSocket fd, LmbMsg *m) {
     char want[64] = "";
     if (m->body_len) {
         LmbCur c = { m->body, m->body_len, 0 };
@@ -1284,7 +1236,7 @@ static int segment_route_shape_equal(const LmbSegAdvert *a,
            !strcmp(a->numeric_class, b->numeric_class);
 }
 
-static Peer *handle_segment_register(int fd, LmbMsg *m, const uint8_t *nonce) {
+static Peer *handle_segment_register(LmbSocket fd, LmbMsg *m, const uint8_t *nonce) {
     if (!g_segment_generation_ready) {
         send_err(fd, "segment discovery is unavailable: no durable generation");
         return NULL;
@@ -1311,7 +1263,7 @@ static Peer *handle_segment_register(int fd, LmbMsg *m, const uint8_t *nonce) {
     }
     char source[64]; connection_source(fd, source);
     char fixed[64];
-    struct sockaddr_in sin; socklen_t sl = sizeof sin;
+    struct sockaddr_in sin; LmbSocketLength sl = sizeof sin;
     if (!strncmp(advert.addr, "127.0.0.1:", 10) &&
         getpeername(fd, (struct sockaddr *)&sin, &sl) == 0 &&
         sin.sin_family == AF_INET && ntohl(sin.sin_addr.s_addr) != INADDR_LOOPBACK) {
@@ -1411,7 +1363,7 @@ static Peer *handle_segment_register(int fd, LmbMsg *m, const uint8_t *nonce) {
     return rc ? NULL : slot;
 }
 
-static int handle_segment_routes(int fd, LmbMsg *m) {
+static int handle_segment_routes(LmbSocket fd, LmbMsg *m) {
     if (!g_segment_generation_ready) {
         send_err(fd, "segment discovery is unavailable: no durable generation");
         return 0;
@@ -1447,7 +1399,7 @@ static int handle_segment_routes(int fd, LmbMsg *m) {
         if (entry->advert.addr[0] &&
             !(entry->advert.flags & LMB_SEG_ADVERT_RELAY_ONLY))
             entry->transport |= LMB_SEG_TRANSPORT_DIRECT;
-        if (p->ctrl_fd >= 0 && p->evfd >= 0)
+        if (p->ctrl_fd != LMB_INVALID_SOCKET && p->evfd != LMB_INVALID_WAKEUP)
             entry->transport |= LMB_SEG_TRANSPORT_RELAY;
     }
     snapshot.complete = (uint32_t)lmb_seg_route_complete(&snapshot, &query);
@@ -1462,7 +1414,7 @@ static int handle_segment_routes(int fd, LmbMsg *m) {
     return rc;
 }
 
-static int handle_segment_compute_get(int fd, const LmbMsg *m) {
+static int handle_segment_compute_get(LmbSocket fd, const LmbMsg *m) {
     LmbSegCompute requested[LMB_SEG_ROUTE_MAX], values[LMB_SEG_ROUTE_MAX];
     uint32_t count = 0, found = 0;
     if (m->pay_len || lmb_seg_compute_get_request_decode(
@@ -1496,7 +1448,7 @@ static int handle_segment_compute_get(int fd, const LmbMsg *m) {
     return rc;
 }
 
-static int handle_segment_compute_put(int fd, const LmbMsg *m, Peer *ctrl) {
+static int handle_segment_compute_put(LmbSocket fd, const LmbMsg *m, Peer *ctrl) {
     LmbSegCompute value;
     if (m->pay_len || lmb_seg_compute_put_decode(m->body, m->body_len, &value)) {
         send_err(fd, "bad segment compute telemetry"); return -1;
@@ -1520,7 +1472,7 @@ static int handle_segment_compute_put(int fd, const LmbMsg *m, Peer *ctrl) {
  * exact fallback slice, then opens that range through the same Colibri ABI
  * and registers normally. Exact origin boundaries guarantee that replacing
  * one donor never makes the full chain unrouteable. */
-static int handle_segment_assign(int fd, LmbMsg *m) {
+static int handle_segment_assign(LmbSocket fd, LmbMsg *m) {
     LmbCur c = { m->body, m->body_len, 0 };
     uint32_t magic = 0, version = 0;
     char model[LMB_SEG_MODEL_MAX], name[LMB_SEG_PEER_NAME_MAX];
@@ -1695,7 +1647,7 @@ static int handle_segment_assign(int fd, LmbMsg *m) {
     return rc;
 }
 
-static int handle_segment_assign_release(int fd, LmbMsg *m) {
+static int handle_segment_assign_release(LmbSocket fd, LmbMsg *m) {
     LmbCur c = { m->body, m->body_len, 0 };
     uint32_t magic = 0, version = 0;
     char model[LMB_SEG_MODEL_MAX], name[LMB_SEG_PEER_NAME_MAX];
@@ -1728,7 +1680,7 @@ static int handle_segment_assign_release(int fd, LmbMsg *m) {
     return lmb_send(fd, LMB_OK, NULL, 0, NULL, 0);
 }
 
-static int handle_ecover(int fd, LmbMsg *m) {
+static int handle_ecover(LmbSocket fd, LmbMsg *m) {
     LmbCur c = { m->body, m->body_len, 0 };
     char model[64], engine[64], profile[LMB_BUILD_PROFILE_MAX];
     uint32_t bits, hidden, slots, nexp;
@@ -1755,7 +1707,7 @@ static int handle_ecover(int fd, LmbMsg *m) {
          * own admission gate (lmb_profile_compat, hard fields only) still
          * refuses shape-incompatible peers it talks to directly. */
         if (!q->used || !q->is_expert || !q->has_expert ||
-            q->ctrl_fd < 0 || q->evfd < 0 ||
+            q->ctrl_fd == LMB_INVALID_SOCKET || q->evfd == LMB_INVALID_WAKEUP ||
             now - q->expert_ts > g_stale_s || strcmp(q->model, model) ||
             strcmp(q->engine, engine) ||
             q->bits != bits || q->hidden != hidden || q->slots != slots ||
@@ -1776,7 +1728,7 @@ static int handle_ecover(int fd, LmbMsg *m) {
 
 /* ---- HASHES: hand the ground truth to whoever verifies ------------------ */
 
-static int handle_hashes(int fd, LmbMsg *m) {
+static int handle_hashes(LmbSocket fd, LmbMsg *m) {
     LmbCur c = { m->body, m->body_len, 0 };
     char model[64], path[LMB_PATH_MAX];
     if (lmb_cur_str(&c, model, sizeof model) || lmb_cur_str(&c, path, sizeof path)) {
@@ -1817,7 +1769,7 @@ static int handle_hashes(int fd, LmbMsg *m) {
 
 /* ---- MODEL_ID: signed identity of the complete checkpoint --------------- */
 
-static int handle_model_id(int fd, LmbMsg *m) {
+static int handle_model_id(LmbSocket fd, LmbMsg *m) {
     LmbCur c = { m->body, m->body_len, 0 };
     char model[64];
     if (lmb_cur_str(&c, model, sizeof model) || c.off != c.len) {
@@ -1845,7 +1797,7 @@ static int handle_model_id(int fd, LmbMsg *m) {
 
 /* ---- PLACEMENT ---------------------------------------------------------- */
 
-static int handle_placement(int fd, LmbMsg *m) {
+static int handle_placement(LmbSocket fd, LmbMsg *m) {
     char want[64] = "";
     if (m->body_len) {
         LmbCur c = { m->body, m->body_len, 0 };
@@ -1889,7 +1841,7 @@ static int handle_placement(int fd, LmbMsg *m) {
 
 /* ---- SWARM: anonymous by construction ----------------------------------- */
 
-static int handle_swarm(int fd) {
+static int handle_swarm(LmbSocket fd) {
     LmbBuf b = {0}, exec = {0};
     double now = now_s();
     pthread_mutex_lock(&g_lk);
@@ -1941,7 +1893,7 @@ static int handle_swarm(int fd) {
  * anonymous and byte-compatible for scripts; this view is intentionally a
  * separate opcode so adding a field can never make an old client misparse
  * the storage prefix.  Addresses and keys are never included. */
-static int handle_swarm_detail(int fd) {
+static int handle_swarm_detail(LmbSocket fd) {
     LmbBuf body = {0};
     double now = now_s();
     pthread_mutex_lock(&g_lk);
@@ -2020,7 +1972,7 @@ static int handle_swarm_detail(int fd) {
  * must not re-download), and the count for each expert excludes the asker, so
  * "rare" means rare among the OTHERS — otherwise a node would drop exactly
  * what it is the only holder of. */
-static int handle_eassign(int fd, LmbMsg *m) {
+static int handle_eassign(LmbSocket fd, LmbMsg *m) {
     LmbCur c = { m->body, m->body_len, 0 };
     char model[64], name[64];
     uint32_t slots, nexp, capacity, rlen;
@@ -2208,20 +2160,20 @@ static int handle_eassign(int fd, LmbMsg *m) {
  * connects to the requester's observed source address at the port it names:
  * TCP means the caller provably owns that address, the port floor and the
  * two-second bound keep this from being anyone's port scanner. */
-static int handle_reach(int fd, LmbMsg *m) {
+static int handle_reach(LmbSocket fd, LmbMsg *m) {
     LmbCur c = { m->body, m->body_len, 0 };
     uint32_t port = 0;
     if (m->pay_len || lmb_cur_u32(&c, &port) || c.off != c.len ||
         port < 1024 || port > 65535) {
         send_err(fd, "bad reach probe"); return -1;
     }
-    struct sockaddr_in sin; socklen_t sl = sizeof sin;
+    struct sockaddr_in sin; LmbSocketLength sl = sizeof sin;
     char addr[80] = ""; uint32_t reachable = 0;
     if (getpeername(fd, (struct sockaddr *)&sin, &sl) == 0 &&
         sin.sin_family == AF_INET) {
         snprintf(addr, sizeof addr, "%s:%u", inet_ntoa(sin.sin_addr), port);
-        int probe = lmb_connect_ms(addr, 2000);
-        if (probe >= 0) { reachable = 1; close(probe); }
+        LmbSocket probe = lmb_connect_ms(addr, 2000);
+        if (probe != LMB_INVALID_SOCKET) { reachable = 1; lmb_close(probe); }
     }
     LmbBuf b = {0};
     lmb_buf_u32(&b, reachable);
@@ -2233,7 +2185,7 @@ static int handle_reach(int fd, LmbMsg *m) {
 
 /* ---- RREAD: the relay --------------------------------------------------- */
 
-static int handle_rread(int fd, LmbMsg *m) {
+static int handle_rread(LmbSocket fd, LmbMsg *m) {
     LmbCur c = { m->body, m->body_len, 0 };
     char model[64], path[LMB_PATH_MAX];
     uint64_t off; uint32_t len;
@@ -2247,7 +2199,7 @@ static int handle_rread(int fd, LmbMsg *m) {
     pthread_mutex_lock(&g_lk);
     for (int i = 0; i < MAX_PEERS && !p; i++) {
         Peer *q = &g_peers[i];
-        if (!q->used || now - q->ts > g_stale_s || q->ctrl_fd < 0 || q->evfd < 0) continue;
+        if (!q->used || now - q->ts > g_stale_s || q->ctrl_fd == LMB_INVALID_SOCKET || q->evfd == LMB_INVALID_WAKEUP) continue;
         if (model[0] && strcmp(q->model, model)) continue;
         for (uint32_t j = 0; j < q->nfiles; j++)
             if (!strcmp(q->files[j].path, path)) { p = q; p->refs++; break; }
@@ -2267,8 +2219,7 @@ static int handle_rread(int fd, LmbMsg *m) {
     free(p->rq_resp_pay); p->rq_resp_pay = NULL; p->rq_resp_pay_len = 0;
     pthread_mutex_unlock(&p->rq_lk);
 
-    uint64_t one = 1;
-    if (write(p->evwrite, &one, 8) != 8) { /* control thread also polls the socket */ }
+    lmb_wakeup_notify(p->evwrite);
 
     struct timespec dl;
     clock_gettime(CLOCK_REALTIME, &dl);
@@ -2340,7 +2291,7 @@ static int relay_forward(Peer *p, uint32_t fwd_op,
     if (p->outq_tail) p->outq_tail->next = f; else p->outq_head = f;
     p->outq_tail = f;
     pthread_mutex_unlock(&p->rq_lk);
-    uint64_t one = 1; if (write(p->evwrite, &one, 8) != 8) {}
+    lmb_wakeup_notify(p->evwrite);
 
     pthread_mutex_lock(&p->rq_lk);
     while (!p->rex[slot].done && p->rex[slot].id == id)
@@ -2368,12 +2319,12 @@ static Peer *expert_by_addr(const char *addr) {
     for (int i = 0; i < MAX_PEERS && !p; i++) {
         Peer *q = &g_peers[i];
         if (getenv("LUMABRI_RELAY_TRACE") && q->used)
-            fprintf(stderr, "[tracker] by_addr? used=%d is_e=%d has_e=%d stale=%.1f ctrl=%d ev=%d addr='%s' want='%s'\n",
+            fprintf(stderr, "[tracker] by_addr? used=%d is_e=%d has_e=%d stale=%.1f ctrl=%llu ev=%llu addr='%s' want='%s'\n",
                     q->used, q->is_expert, q->has_expert, now - q->expert_ts,
-                    q->ctrl_fd, q->evfd, q->addr, addr);
+                    (unsigned long long)q->ctrl_fd, (unsigned long long)q->evfd, q->addr, addr);
         if (!q->used || !q->is_expert || !q->has_expert ||
             now - q->expert_ts > g_stale_s ||
-            q->ctrl_fd < 0 || q->evfd < 0 || strcmp(q->addr, addr)) continue;
+            q->ctrl_fd == LMB_INVALID_SOCKET || q->evfd == LMB_INVALID_WAKEUP || strcmp(q->addr, addr)) continue;
         p = q; p->refs++;
     }
     pthread_mutex_unlock(&g_lk);
@@ -2395,7 +2346,7 @@ static void peer_unref(Peer *p) {
  * through the tunnel could not be told apart from a tunnel that dropped. */
 static unsigned long long g_relay_exec_ok, g_relay_exec_failed;
 
-static int handle_texec(int fd, LmbMsg *m) {
+static int handle_texec(LmbSocket fd, LmbMsg *m) {
     LmbCur c = { m->body, m->body_len, 0 };
     char target[64];
     uint32_t layer = 0, eid = 0, dim = 0, nrows = 0;
@@ -2443,7 +2394,7 @@ static int handle_texec(int fd, LmbMsg *m) {
 /* Targeted manifest through the tunnel: what makes a NAT-only donor a
  * first-class replica in the chatter's table instead of an anonymous
  * coverage bit of last resort. */
-static int handle_tman(int fd, LmbMsg *m) {
+static int handle_tman(LmbSocket fd, LmbMsg *m) {
     LmbCur c = { m->body, m->body_len, 0 };
     char target[64];
     if (m->pay_len || lmb_cur_str(&c, target, sizeof target) || c.off != c.len) {
@@ -2468,7 +2419,7 @@ static int handle_tman(int fd, LmbMsg *m) {
  * EREG connection is the outbound tunnel.  The tracker validates enough of
  * the shape to select a real holder and bound memory; the expert validates
  * the complete engine-specific request before executing it. */
-static int handle_rexec(int fd, LmbMsg *m) {
+static int handle_rexec(LmbSocket fd, LmbMsg *m) {
     if (getenv("LUMABRI_RELAY_TRACE"))
         fprintf(stderr, "[tracker] rexec request body=%u pay=%u\n",
                 m->body_len, m->pay_len);
@@ -2507,7 +2458,7 @@ static int handle_rexec(int fd, LmbMsg *m) {
         uint32_t gid = (uint32_t)gid64;
         if (!q->used || !q->is_expert || !q->has_expert ||
             now - q->expert_ts > g_stale_s ||
-            q->ctrl_fd < 0 || q->evfd < 0 || strcmp(q->model, model) || gid >= q->enbits ||
+            q->ctrl_fd == LMB_INVALID_SOCKET || q->evfd == LMB_INVALID_WAKEUP || strcmp(q->model, model) || gid >= q->enbits ||
             !(q->ebits[gid >> 3] & (uint8_t)(1u << (gid & 7)))) continue;
         q->refs++;
         cand[ncand++] = q;
@@ -2586,7 +2537,7 @@ static int segment_request_op(uint32_t op) {
 /* Relay one ordinary Segment frame to one exact signed Segment registrant.
  * Selection is by peer identity, never "any peer with this range": stateful
  * placement belongs to the session and failover is an explicit client act. */
-static int handle_rseg(int fd, LmbMsg *m) {
+static int handle_rseg(LmbSocket fd, LmbMsg *m) {
     LmbCur c = { m->body, m->body_len, 0 };
     char peer_name[LMB_SEG_PEER_NAME_MAX];
     uint32_t inner_op = 0, inner_body_len = 0;
@@ -2611,7 +2562,7 @@ static int handle_rseg(int fd, LmbMsg *m) {
         Peer *q = &g_peers[i];
         if (!q->used || !q->is_expert || !q->has_segment ||
             !q->segment_live || now - q->segment_ts > g_stale_s ||
-            q->ctrl_fd < 0 || q->evfd < 0 ||
+            q->ctrl_fd == LMB_INVALID_SOCKET || q->evfd == LMB_INVALID_WAKEUP ||
             strcmp(q->segment.peer_name, peer_name)) continue;
         p = q; p->refs++; break;
     }
@@ -2661,7 +2612,7 @@ static int handle_rseg(int fd, LmbMsg *m) {
     free(p->rq_resp_pay); p->rq_resp_pay = NULL; p->rq_resp_pay_len = 0;
     p->rq_resp_op = 0;
     pthread_mutex_unlock(&p->rq_lk);
-    uint64_t one = 1; if (write(p->evwrite, &one, sizeof one) != sizeof one) {}
+    lmb_wakeup_notify(p->evwrite);
 
     struct timespec deadline;
     clock_gettime(CLOCK_REALTIME, &deadline); deadline.tv_sec += RELAY_WAIT_S;
@@ -2707,7 +2658,7 @@ static int handle_rseg(int fd, LmbMsg *m) {
  * of the model with the fewest live replicas come first, so every new donor
  * thickens the swarm exactly where it is thinnest. (MeshLLM hands out static
  * layer ranges; replication driven by measured scarcity heals churn too.) */
-static int handle_assign(int fd, LmbMsg *m) {
+static int handle_assign(LmbSocket fd, LmbMsg *m) {
     LmbCur c = { m->body, m->body_len, 0 };
     char model[64];
     uint64_t budget;
@@ -2834,9 +2785,9 @@ static void relay_complete(Peer *p, LmbMsg *m) {
     pthread_mutex_unlock(&p->rq_lk);
 }
 
-static void ctrl_teardown(Peer *p, int fd) {
+static void ctrl_teardown(Peer *p, LmbSocket fd) {
     pthread_mutex_lock(&g_lk);
-    if (p->ctrl_fd == fd) p->ctrl_fd = -1;
+    if (p->ctrl_fd == fd) p->ctrl_fd = LMB_INVALID_SOCKET;
     pthread_mutex_unlock(&g_lk);
     pthread_mutex_lock(&p->rq_lk);
     if (p->rq_busy && !p->rq_done) { p->rq_done = 1; p->rq_ok = 0; }
@@ -2859,7 +2810,7 @@ static void ctrl_teardown(Peer *p, int fd) {
 /* ---- connections -------------------------------------------------------- */
 
 typedef struct {
-    int active, fd;
+    int active; LmbSocket fd;
     double updated;
     LmbMachineReport report;
 } InventorySlot;
@@ -2872,7 +2823,7 @@ static double inventory_clock(void) {
     return t.tv_sec + t.tv_nsec / 1e9;
 }
 
-static int handle_machine_report(int fd, const LmbMsg *m,
+static int handle_machine_report(LmbSocket fd, const LmbMsg *m,
                                   const uint8_t *nonce) {
     if (!nonce || m->pay_len || m->body_len < 96) return -1;
     size_t bytes = m->body_len - 64;
@@ -2915,7 +2866,7 @@ static int handle_machine_report(int fd, const LmbMsg *m,
     return lmb_send(fd, LMB_OK, NULL, 0, NULL, 0);
 }
 
-static int handle_machine_list(int fd, const LmbMsg *m) {
+static int handle_machine_list(LmbSocket fd, const LmbMsg *m) {
     if (m->body_len || m->pay_len) return -1;
     double now = inventory_clock();
     LmbBuf b = {0};
@@ -2941,7 +2892,7 @@ static int handle_machine_list(int fd, const LmbMsg *m) {
     return rc;
 }
 
-static void inventory_disconnect(int fd) {
+static void inventory_disconnect(LmbSocket fd) {
     pthread_mutex_lock(&g_inventory_lock);
     for (unsigned i = 0; i < LMB_INVENTORY_MAX; i++)
         if (g_inventory[i].active && g_inventory[i].fd == fd)
@@ -2950,19 +2901,17 @@ static void inventory_disconnect(int fd) {
 }
 
 static void *conn_thread(void *arg) {
-    int fd = (int)(intptr_t)arg;
-    if (lmb_secure_server(fd)) { close(fd); lmb_conn_gate_leave(&g_conn_gate); return NULL; }
+    LmbSocket fd = (LmbSocket)(uintptr_t)arg;
+    if (lmb_secure_server(fd)) { lmb_close(fd); lmb_conn_gate_leave(&g_conn_gate); return NULL; }
     Peer *ctrl = NULL;    /* set once this connection REGISTERs */
     int authed = g_token[0] ? 0 : 1;
     uint8_t nonce[32]; int have_nonce = 0;   /* per-connection identity challenge */
     for (;;) {
         if (ctrl) {
-            struct pollfd pf[2] = { { fd, POLLIN, 0 }, { ctrl->evfd, POLLIN, 0 } };
-            int pr = poll(pf, 2, -1);
-            if (pr < 0) { if (errno == EINTR) continue; break; }
-            if (pf[1].revents & POLLIN) {
-                uint64_t junk;
-                while (read(ctrl->evfd, &junk, 8) == 8) { }
+            int notified=0;int readable=lmb_wakeup_wait(fd,ctrl->evfd,&notified);
+            if (readable<0) {if (errno==EINTR) continue;break;}
+            if (notified) {
+                lmb_wakeup_drain(ctrl->evfd);
                 LmbBuf b = {0};
                 uint8_t *pay = NULL; uint32_t pay_len = 0, op = 0;
                 int have = 0;
@@ -3028,7 +2977,7 @@ static void *conn_thread(void *arg) {
                 }
                 if (send_bad) break;
             }
-            if (!(pf[0].revents & POLLIN)) continue;
+            if (!readable) continue;
         }
         LmbMsg m;
         if (lmb_recv(fd, &m) != 0) break;
@@ -3065,7 +3014,7 @@ static void *conn_thread(void *arg) {
                     ctrl = p;
                 } else if (ctrl != p) {
                     pthread_mutex_lock(&g_lk);
-                    if (p->ctrl_fd == fd) p->ctrl_fd = -1;
+                    if (p->ctrl_fd == fd) p->ctrl_fd = LMB_INVALID_SOCKET;
                     pthread_mutex_unlock(&g_lk);
                     send_err(fd, "one maintainer identity per control connection");
                     rc = -1;
@@ -3085,7 +3034,7 @@ static void *conn_thread(void *arg) {
                     ctrl = p;
                 } else if (ctrl != p) {
                     pthread_mutex_lock(&g_lk);
-                    if (p->ctrl_fd == fd) p->ctrl_fd = -1;
+                    if (p->ctrl_fd == fd) p->ctrl_fd = LMB_INVALID_SOCKET;
                     pthread_mutex_unlock(&g_lk);
                     send_err(fd, "one expert identity per control connection");
                     rc = -1;
@@ -3105,7 +3054,7 @@ static void *conn_thread(void *arg) {
                     ctrl = p;
                 } else if (ctrl != p) {
                     pthread_mutex_lock(&g_lk);
-                    if (p->ctrl_fd == fd) p->ctrl_fd = -1;
+                    if (p->ctrl_fd == fd) p->ctrl_fd = LMB_INVALID_SOCKET;
                     pthread_mutex_unlock(&g_lk);
                     send_err(fd, "one compute identity per control connection");
                     rc = -1;
@@ -3142,12 +3091,12 @@ static void *conn_thread(void *arg) {
     }
     if (ctrl) ctrl_teardown(ctrl, fd);
     inventory_disconnect(fd);
-    close(fd);
+    lmb_close(fd);
     lmb_conn_gate_leave(&g_conn_gate);
     return NULL;
 }
 
-int main(int argc, char **argv) {
+static LMB_MAYBE_UNUSED int tracker_main(int argc, char **argv) {
     int port = 7300, household_discovery = 0;
     for (int i = 1; i < argc; i++)
         if (!strcmp(argv[i], "--port") && i + 1 < argc) port = atoi(argv[++i]);
@@ -3187,7 +3136,9 @@ int main(int argc, char **argv) {
         }
         snprintf(g_token, sizeof g_token, "%s", token);
     }
+#ifndef _WIN32
     signal(SIGPIPE, SIG_IGN);   /* a vanished peer must not kill the tracker */
+#endif
     g_stale_s = (double)lmb_env_int("LUMABRI_STALE_MS", (int)(STALE_S * 1000),
                                     100, 3600000) / 1000.0;
     g_max_names_per_source = lmb_env_int("LUMABRI_MAX_NAMES_PER_SOURCE", 16, 1, MAX_PEERS);
@@ -3201,16 +3152,17 @@ int main(int argc, char **argv) {
                 g_bindings_path[0] ? g_bindings_path : "the state directory");
         return 1;
     }
-    if (segment_generation_init())
-        fprintf(stderr, "[tracker] warning: cannot reserve a durable Segment "
-                        "route generation next to %s; legacy services remain "
-                        "available but Segment discovery is disabled\n",
-                g_bindings_path);
+    if (segment_generation_init()) {
+        fprintf(stderr, "[tracker] cannot reserve a durable Segment route generation next to %s; %s\n",
+                g_bindings_path,household_discovery ? "household startup refused" :
+                "legacy services remain available but Segment discovery is disabled");
+        if (household_discovery) return 1;
+    }
     else g_segment_generation_ready = 1;
     lmb_conn_gate_init(&g_conn_gate);
     if (lmb_secure_init() || (household_discovery && !lmb_secure_enabled())) return 1;
-    int lfd = lmb_home_take_listener(port);
-    if (lfd < 0) { perror("[tracker] listen"); return 1; }
+    LmbSocket lfd = lmb_home_take_listener(port);
+    if (lfd == LMB_INVALID_SOCKET) { perror("[tracker] listen"); return 1; }
     if (household_discovery && (!lmb_secure_enabled() || lmb_home_beacon_start(port, g_sec_pk))) {
         fprintf(stderr, "[tracker] household discovery unavailable; manual LAN joining remains available\n");
     }
@@ -3219,16 +3171,38 @@ int main(int argc, char **argv) {
         printf("[tracker] signed swarm: truth accepted from %zu trusted "
                "operator key%s\n", g_trust.n, g_trust.n == 1 ? "" : "s");
     fflush(stdout);
+    if (lmb_ready_notify()) {lmb_close(lfd);return 1;}
     for (;;) {
-        int fd = accept(lfd, NULL, NULL);
-        if (fd < 0) { if (errno == EINTR) continue; perror("[tracker] accept"); break; }
+        LmbSocket fd = lmb_socket_accept(lfd, NULL, NULL);
+        if (fd == LMB_INVALID_SOCKET) { if (errno == EINTR) continue; perror("[tracker] accept"); break; }
         lmb_set_io_timeout(fd, lmb_env_int("LUMABRI_IO_TIMEOUT_MS",
                                            LMB_DEFAULT_IO_TIMEOUT_MS, 100, 3600000));
-        if (!lmb_conn_gate_enter(&g_conn_gate)) { close(fd); continue; }
+        if (!lmb_conn_gate_enter(&g_conn_gate)) { lmb_close(fd); continue; }
         pthread_t t;
-        if (pthread_create(&t, NULL, conn_thread, (void *)(intptr_t)fd) == 0)
+        if (pthread_create(&t, NULL, conn_thread, (void *)(uintptr_t)fd) == 0)
             pthread_detach(t);
-        else { lmb_conn_gate_leave(&g_conn_gate); close(fd); }
+        else { lmb_conn_gate_leave(&g_conn_gate); lmb_close(fd); }
     }
     return 0;
 }
+
+#ifndef LMB_TRACKER_NO_ENTRY
+#ifdef _WIN32
+int wmain(int argc,wchar_t **wide) {
+    if (argc<1 || argc>256) return 2;
+    char **argv=calloc((size_t)argc+1,sizeof *argv);if (!argv) return 1;
+    int rc=1;
+    for (int i=0;i<argc;i++) {
+        int n=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,wide[i],-1,NULL,0,NULL,NULL);
+        if (!n || !(argv[i]=malloc((size_t)n)) ||
+            !WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,wide[i],-1,argv[i],n,NULL,NULL)) goto done;
+    }
+    rc=tracker_main(argc,argv);
+done:
+    for (int i=0;i<argc;i++) free(argv[i]);
+    free(argv);return rc;
+}
+#else
+int main(int argc,char **argv) {return tracker_main(argc,argv);}
+#endif
+#endif

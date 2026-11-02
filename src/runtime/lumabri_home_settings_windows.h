@@ -75,13 +75,16 @@ static int home_settings_activate_windows(const HomeSettings *s) {
     return _putenv_s("LUMABRI_TOKEN",s->token) ? -1 : 0;
 }
 
-static int home_connection_check_windows(const char *address) {
+static int home_connection_check_identity_windows(const char *address,const uint8_t *identity) {
     LmbSocket fd=lmb_connect_ms_io(address,1500,1500);
     if (fd==LMB_INVALID_SOCKET) return -1;
     LmbMsg reply={0};
-    int bad=lmb_auth(fd) || lmb_send(fd,LMB_PING,NULL,0,NULL,0) ||
+    int bad=(identity && !lmb_secure_peer_matches(fd,identity)) || lmb_auth(fd) || lmb_send(fd,LMB_PING,NULL,0,NULL,0) ||
         lmb_recv_bounded(fd,&reply,256,1500) || reply.op!=LMB_OK || reply.body_len || reply.pay_len;
     lmb_msg_free(&reply);lmb_close(fd);return bad ? -2 : 0;
+}
+static int home_connection_check_windows(const char *address) {
+    return home_connection_check_identity_windows(address,NULL);
 }
 
 static int home_settings_join_windows(HomeSettings *current,const HomeSettings *next) {
