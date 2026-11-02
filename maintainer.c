@@ -14,25 +14,17 @@
  * --include patterns are fnmatch(3) without FNM_PATHNAME, so '*' crosses '/'
  * and one pattern can pick files in subdirectories too.
  */
-#include <dirent.h>
-#include <fcntl.h>
-#include <fnmatch.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdatomic.h>
-#include <sys/stat.h>
-#ifdef __APPLE__
-/* Darwin retains nanosecond timestamps under the BSD member names. */
-#define st_mtim st_mtimespec
-#define st_ctim st_ctimespec
-#endif
-
 #include "lumabri_proto.h"
 #include "lumabri_content.h"
 #include "lumabri_sha.h"
 #include "lumabri_sign.h"
 #include "lumabri_secure.h"
 #include "lumabri_home_net.h"
+#include "src/runtime/lumabri_source_file.h"
+#include "src/runtime/lumabri_source_match.h"
 
 #define MAX_FILES          LMB_CONTENT_MAX_FILES
 #define MAX_INCLUDES       64
@@ -65,37 +57,29 @@ static LmbConnGate g_conn_gate = LMB_CONN_GATE_INIT;
 static int want(const char *rel) {
     if (!g.nincl) return 1;
     for (int i = 0; i < g.nincl; i++)
-        if (fnmatch(g.includes[i], rel, 0) == 0) return 1;
+        if (lmb_source_match(g.includes[i], rel)) return 1;
     return 0;
 }
 
-static void scan_dir(const char *dir) {
-    char full[LMB_PATH_MAX * 2];
-    DIR *d = opendir(dir);
-    if (!d) return;
-    struct dirent *e;
-    while ((e = readdir(d))) {
-        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-        if (lmb_content_runtime_local_name(e->d_name)) continue;
-        snprintf(full, sizeof full, "%s/%s", dir, e->d_name);
-        struct stat st;
-        if (stat(full, &st)) continue;
-        if (S_ISDIR(st.st_mode)) { scan_dir(full); continue; }
-        if (!S_ISREG(st.st_mode)) continue;
-        const char *rel = full + strlen(g.root) + 1;
-        if (strlen(rel) >= LMB_PATH_MAX || !want(rel)) continue;
-        if (g.nfiles == MAX_FILES) { fprintf(stderr, "[maintainer] file table full\n"); return; }
-        MFile *f = &g.files[g.nfiles++];
-        snprintf(f->rel, sizeof f->rel, "%s", rel);
-        f->size = (uint64_t)st.st_size;
-        f->mtime_ns = (uint64_t)st.st_mtim.tv_sec * 1000000000ull +
-                      (uint64_t)st.st_mtim.tv_nsec;
-        f->ctime_ns = (uint64_t)st.st_ctim.tv_sec * 1000000000ull +
-                      (uint64_t)st.st_ctim.tv_nsec;
-        f->fd = -1;
-    }
-    closedir(d);
+static int scan_dir(const char *dir);
+static int scan_entry(const char *name,void *context) {
+    const char *dir=context;char full[LMB_PATH_MAX*2];
+    if (!strcmp(name,".") || !strcmp(name,"..") || lmb_content_runtime_local_name(name)) return 0;
+    int n=snprintf(full,sizeof full,"%s/%s",dir,name);
+    if (n<0 || (size_t)n>=sizeof full) {errno=ENAMETOOLONG;return -1;}
+    LmbSourceStat st;if (lmb_source_stat(full,&st)) return -1;
+    if (st.directory) return scan_dir(full);
+    if (!st.regular) return 0;
+    const char *rel=full+strlen(g.root)+1;
+    if (strlen(rel)>=LMB_PATH_MAX) {errno=ENAMETOOLONG;return -1;}
+    if (!want(rel)) return 0;
+    if (g.nfiles==MAX_FILES) {fprintf(stderr,"[maintainer] file table full\n");return -1;}
+    MFile *f=&g.files[g.nfiles++];
+    snprintf(f->rel,sizeof f->rel,"%s",rel);f->size=st.size;
+    f->mtime_ns=st.mtime_ns;f->ctime_ns=st.ctime_ns;f->fd=-1;
+    return 0;
 }
+static int scan_dir(const char *dir) {return lmb_source_list(dir,scan_entry,(void *)dir);}
 
 static MFile *find_file(const char *rel) {
     for (int i = 0; i < g.nfiles; i++)
@@ -108,14 +92,19 @@ static int file_fd(MFile *f) {
     if (f->fd < 0) {
         char full[LMB_PATH_MAX * 2];
         snprintf(full, sizeof full, "%s/%s", g.root, f->rel);
-        f->fd = open(full, O_RDONLY);
+        f->fd = lmb_source_open(full, O_RDONLY);
+        LmbSourceStat st;
+        if (f->fd>=0 && (lmb_source_fstat(f->fd,&st) || !st.regular ||
+            st.size!=f->size || st.mtime_ns!=f->mtime_ns || st.ctime_ns!=f->ctime_ns)) {
+            lmb_source_close(f->fd);f->fd=-1;
+        }
     }
     int fd = f->fd;
     pthread_mutex_unlock(&g.fd_lk);
     return fd;
 }
 
-static void send_err(int fd, const char *msg) {
+static void send_err(LmbSocket fd, const char *msg) {
     LmbBuf b = {0};
     lmb_buf_str(&b, msg);
     lmb_send(fd, LMB_ERR, b.p, (uint32_t)b.len, NULL, 0);
@@ -134,10 +123,7 @@ static void send_err(int fd, const char *msg) {
 static uint64_t g_hash_total, g_hash_done;
 static double g_hash_t0, g_hash_last;
 
-static double hash_now(void) {
-    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
-}
+static double hash_now(void) {return (double)lmb_socket_now_ms()/1000.0;}
 
 static void prepare_progress(const char *phase, uint64_t done, uint64_t total) {
     printf("LMB_PREPARE_V1 %s %llu %llu %llu\n", phase,
@@ -185,30 +171,45 @@ static int sidecar_path(const MFile *f, const char *ext, char *out, size_t cap) 
 }
 
 /* Stage in the destination directory under a kernel-created unique name.
- * mkstemp gives concurrent threads/processes separate files and O_EXCL
+ * A random name gives concurrent threads/processes separate files and O_EXCL
  * prevents a stale predictable name or local symlink from being followed.
  * rename then publishes the complete, durable sidecar atomically. */
 static int sidecar_write(const char *path, const void *a, size_t na,
                          const void *b, size_t nb) {
     char tmp[LMB_LOCAL_PATH_MAX + 48], dir[LMB_LOCAL_PATH_MAX];
-    if (path_printf(tmp, sizeof tmp, "%s.tmp.%ld.XXXXXX", path, (long)getpid()) ||
-        path_printf(dir, sizeof dir, "%s", path)) return -1;
+    if (path_printf(dir, sizeof dir, "%s", path)) return -1;
     char *slash = strrchr(dir, '/');
     if (slash) { *slash = 0;
         for (char *p = strchr(dir + 1, '/'); p; p = strchr(p + 1, '/'))
-            { *p = 0; mkdir(dir, 0755); *p = '/'; }
-        mkdir(dir, 0755);
+            { *p = 0; lmb_source_mkdir(dir); *p = '/'; }
+        lmb_source_mkdir(dir);
     }
-    int tfd = mkstemp(tmp);
-    if (tfd < 0) return -1;
-    FILE *fp = fdopen(tfd, "wb");
-    if (!fp) { close(tfd); unlink(tmp); return -1; }
-    int ok = (!na || fwrite(a, 1, na, fp) == na) &&
-             (!nb || fwrite(b, 1, nb, fp) == nb) &&
-             fflush(fp) == 0 && fsync(fileno(fp)) == 0;
-    if (fclose(fp)) ok = 0;
-    if (!ok) { unlink(tmp); return -1; }
-    return rename(tmp, path);
+    int tfd=-1;
+    for (unsigned attempt=0;attempt<16;attempt++) {
+        uint8_t random[12];char hex[25];
+        lmb_random(random,sizeof random);
+        lmb_hex(hex,random,sizeof random);
+        if (path_printf(tmp,sizeof tmp,"%s.tmp.%s",path,hex)) return -1;
+        tfd=lmb_source_open(tmp,O_WRONLY|O_CREAT|O_EXCL);
+        if (tfd>=0 || errno!=EEXIST) break;
+    }
+    if (tfd<0) return -1;
+    const void *parts[]={a,b};size_t lengths[]={na,nb};uint64_t offset=0;int ok=1;
+    for (unsigned i=0;i<2 && ok;i++) {
+        const uint8_t *data=parts[i];size_t left=lengths[i];
+        while (left) {
+            ptrdiff_t written=lmb_source_pwrite(tfd,data,left,offset);
+            if (written<0 && errno==EINTR) continue;
+            if (written<=0) {ok=0;break;}
+            data+=written;left-=(size_t)written;offset+=(uint64_t)written;
+        }
+    }
+    if (ok && lmb_source_sync(tfd)) ok=0;
+    if (lmb_source_close(tfd)) ok=0;
+    if (!ok) {lmb_source_unlink(tmp);return -1;}
+    int rc=lmb_source_rename(tmp,path);
+    if (rc) lmb_source_unlink(tmp);
+    return rc;
 }
 
 static int save_truth(const MFile *f) {
@@ -234,7 +235,7 @@ static int save_truth(const MFile *f) {
 static int load_sig(MFile *f) {
     char p[LMB_LOCAL_PATH_MAX];
     if (sidecar_path(f, "sig", p, sizeof p)) return -1;
-    FILE *fp = fopen(p, "rb");
+    FILE *fp = lmb_source_fopen(p, "rb");
     if (!fp) return 0;
     if (fread(f->sig, 1, 64, fp) == 64) f->signed_ = 1;
     fclose(fp);
@@ -247,20 +248,20 @@ static int hash_file(MFile *f) {
     if (path_printf(full, sizeof full, "%s/%s", g.root, f->rel) ||
         sidecar_path(f, "sha", sc, sizeof sc) ||
         sidecar_path(f, "sig", sigp, sizeof sigp)) return -1;
-    int fd = open(full, O_RDONLY);
+    int fd = lmb_source_open(full, O_RDONLY);
     if (fd < 0) return -1;
-    struct stat st;
-    if (fstat(fd, &st)) { close(fd); return -1; }
-    f->size = (uint64_t)st.st_size;
-    f->mtime_ns = (uint64_t)st.st_mtim.tv_sec * 1000000000ull +
-                  (uint64_t)st.st_mtim.tv_nsec;
-    f->ctime_ns = (uint64_t)st.st_ctim.tv_sec * 1000000000ull +
-                  (uint64_t)st.st_ctim.tv_nsec;
-    f->nh = (uint32_t)((f->size + LMB_HASH_CHUNK - 1) / LMB_HASH_CHUNK);
+    LmbSourceStat st;
+    if (lmb_source_fstat(fd, &st)) { lmb_source_close(fd); return -1; }
+    f->size = st.size;
+    f->mtime_ns = st.mtime_ns;
+    f->ctime_ns = st.ctime_ns;
+    uint64_t chunks=f->size/LMB_HASH_CHUNK+(f->size%LMB_HASH_CHUNK!=0);
+    if (chunks>UINT32_MAX || chunks>(SIZE_MAX-1)/32) {lmb_source_close(fd);return -1;}
+    f->nh = (uint32_t)chunks;
     free(f->hash);
     f->hash = malloc((size_t)f->nh * 32 + 1);
-    if (!f->hash) { close(fd); return -1; }
-    FILE *fp = fopen(sc, "rb");
+    if (!f->hash) { lmb_source_close(fd); return -1; }
+    FILE *fp = lmb_source_fopen(sc, "rb");
     if (fp) {
         struct {
             uint32_t magic, version;
@@ -272,14 +273,12 @@ static int hash_file(MFile *f) {
             hdr.size == f->size && hdr.mtime_ns == f->mtime_ns &&
             hdr.ctime_ns == f->ctime_ns && hdr.nh == f->nh &&
             fread(f->hash, 32, f->nh, fp) == f->nh) {
-            struct stat after;
-            int stable = fstat(fd, &after) == 0 &&
-                (uint64_t)after.st_size == f->size &&
-                (uint64_t)after.st_mtim.tv_sec * 1000000000ull +
-                    (uint64_t)after.st_mtim.tv_nsec == f->mtime_ns &&
-                (uint64_t)after.st_ctim.tv_sec * 1000000000ull +
-                    (uint64_t)after.st_ctim.tv_nsec == f->ctime_ns;
-            fclose(fp); close(fd);
+            LmbSourceStat after;
+            int stable = lmb_source_fstat(fd, &after) == 0 &&
+                after.size == f->size &&
+                after.mtime_ns == f->mtime_ns &&
+                after.ctime_ns == f->ctime_ns;
+            fclose(fp); lmb_source_close(fd);
             if (stable) { g_hash_done += f->size; return 0; }
             free(f->hash); f->hash = NULL;
             return -1;
@@ -289,41 +288,39 @@ static int hash_file(MFile *f) {
     /* A rehash invalidates any signature stored beside the old vector.  An
      * origin with the secret key will create a new one after this returns; a
      * donor must obtain the new proof from the swarm, never reuse the old. */
-    unlink(sigp);
+    lmb_source_unlink(sigp);
     f->signed_ = 0;
     uint8_t *buf = malloc(LMB_HASH_CHUNK);
-    if (!buf) { free(f->hash); f->hash = NULL; close(fd); return -1; }
+    if (!buf) { free(f->hash); f->hash = NULL; lmb_source_close(fd); return -1; }
     for (uint32_t c = 0; c < f->nh; c++) {
         uint64_t off = (uint64_t)c * LMB_HASH_CHUNK;
         uint32_t len = (uint32_t)(f->size - off < LMB_HASH_CHUNK ? f->size - off
                                                                  : LMB_HASH_CHUNK);
         uint32_t got = 0;
         while (got < len) {
-            ssize_t r = pread(fd, buf + got, len - got, (off_t)(off + got));
+            ptrdiff_t r = lmb_source_pread(fd, buf + got, len - got, off + got);
             if (r <= 0) { if (r < 0 && errno == EINTR) continue; break; }
             got += (uint32_t)r;
         }
         if (got != len) {
-            free(buf); free(f->hash); f->hash = NULL; close(fd); return -1;
+            free(buf); free(f->hash); f->hash = NULL; lmb_source_close(fd); return -1;
         }
         lmb_sha256(buf, len, f->hash + (size_t)c * 32);
         hash_tick(len, f->rel);
     }
     free(buf);
-    struct stat after;
+    LmbSourceStat after;
     uint64_t after_mtime = 0, after_ctime = 0;
-    int after_ok = fstat(fd, &after) == 0;
+    int after_ok = lmb_source_fstat(fd, &after) == 0;
     if (after_ok) {
-        after_mtime = (uint64_t)after.st_mtim.tv_sec * 1000000000ull +
-                      (uint64_t)after.st_mtim.tv_nsec;
-        after_ctime = (uint64_t)after.st_ctim.tv_sec * 1000000000ull +
-                      (uint64_t)after.st_ctim.tv_nsec;
+        after_mtime = after.mtime_ns;
+        after_ctime = after.ctime_ns;
     }
     if (!after_ok || after_mtime != f->mtime_ns || after_ctime != f->ctime_ns ||
-        (uint64_t)after.st_size != f->size) {
-        free(f->hash); f->hash = NULL; close(fd); return -1;
+        after.size != f->size) {
+        free(f->hash); f->hash = NULL; lmb_source_close(fd); return -1;
     }
-    close(fd);
+    lmb_source_close(fd);
     /* The sidecar is only a cache that avoids re-hashing next start: the
      * hashes are already in memory, which is what serves and registers. A
      * failure to persist it (a too-long path, or two maintainers racing on
@@ -357,19 +354,22 @@ static uint8_t *read_range(const char *rel, uint64_t off, uint32_t *len_io) {
     uint32_t len = *len_io;
     if (len > MAX_READ_LEN) return NULL;
     if (off >= f->size) { *len_io = 0; return (uint8_t *)malloc(1); }
-    if (off + len > f->size) len = (uint32_t)(f->size - off);
+    if (len > f->size - off) len = (uint32_t)(f->size - off);
     int ffd = file_fd(f);
     if (ffd < 0) return NULL;
     uint8_t *buf = (uint8_t *)malloc(len ? len : 1);
     if (!buf) return NULL;
     uint32_t got = 0;
     while (got < len) {
-        ssize_t r = pread(ffd, buf + got, len - got, (off_t)(off + got));
+        ptrdiff_t r = lmb_source_pread(ffd, buf + got, len - got, off + got);
         if (r < 0) { if (errno == EINTR) continue; free(buf); return NULL; }
         if (r == 0) break;
         got += (uint32_t)r;
     }
     if (got != len) { free(buf); return NULL; }
+    LmbSourceStat after;
+    if (lmb_source_fstat(ffd,&after) || after.size!=f->size ||
+        after.mtime_ns!=f->mtime_ns || after.ctime_ns!=f->ctime_ns) {free(buf);return NULL;}
     maybe_corrupt(buf, len);
     atomic_fetch_add(&g.served_bytes, len);
     atomic_fetch_add(&g.served_reads, 1);
@@ -461,11 +461,11 @@ static int model_identity_load(LmbModelIdentity *id) {
     } rec;
     char path[LMB_PATH_MAX * 2];
     model_identity_path(path, sizeof path);
-    FILE *fp = fopen(path, "rb");
+    FILE *fp = lmb_source_fopen(path, "rb");
     if (!fp) return -1;
     int ok = fread(&rec, sizeof rec, 1, fp) == 1 &&
              rec.magic == LMB_MODEL_ID_MAGIC && rec.version == 1 &&
-             rec.has_sig <= 1 && !strcmp(rec.model, g.model);
+             rec.has_sig <= 1 && memchr(rec.model,0,sizeof rec.model) && !strcmp(rec.model, g.model);
     fclose(fp);
     if (!ok) return -1;
     memset(id, 0, sizeof *id);
@@ -535,12 +535,12 @@ static int model_identity_prepare(int disk_donor) {
     return 0; /* unsigned legacy/partial origins may have no complete root */
 }
 
-static int handle_read(int fd, LmbMsg *m) {
+static int handle_read(LmbSocket fd, LmbMsg *m) {
     LmbCur c = { m->body, m->body_len, 0 };
     char rel[LMB_PATH_MAX];
     uint64_t off; uint32_t len;
     if (lmb_cur_str(&c, rel, sizeof rel) || lmb_cur_u64(&c, &off) ||
-        lmb_cur_u32(&c, &len)) {
+        lmb_cur_u32(&c, &len) || c.off!=c.len || m->pay_len) {
         send_err(fd, "bad read request"); return -1;
     }
     uint8_t *buf = read_range(rel, off, &len);
@@ -555,8 +555,8 @@ static int handle_read(int fd, LmbMsg *m) {
  * reach this port could pull the whole model, and the token would guard
  * only the index while the bytes stayed public. */
 static void *conn_thread(void *arg) {
-    int fd = (int)(intptr_t)arg;
-    if (lmb_secure_server(fd)) { close(fd); lmb_conn_gate_leave(&g_conn_gate); return NULL; }
+    LmbSocket fd = (LmbSocket)(uintptr_t)arg;
+    if (lmb_secure_server(fd)) { lmb_close(fd); lmb_conn_gate_leave(&g_conn_gate); return NULL; }
     int authed = g.token[0] ? 0 : 1;
     LmbMsg m;
     while (lmb_recv(fd, &m) == 0) {
@@ -592,7 +592,7 @@ static void *conn_thread(void *arg) {
         lmb_msg_free(&m);
         if (rc) break;
     }
-    close(fd);
+    lmb_close(fd);
     lmb_conn_gate_leave(&g_conn_gate);
     return NULL;
 }
@@ -607,7 +607,7 @@ static int mkdir_parents(const char *path) {
     char tmp[LMB_LOCAL_PATH_MAX];
     if (path_printf(tmp, sizeof tmp, "%s", path)) return -1;
     for (char *p = strchr(tmp + 1, '/'); p; p = strchr(p + 1, '/')) {
-        *p = 0; mkdir(tmp, 0755); *p = '/';
+        *p = 0; lmb_source_mkdir(tmp); *p = '/';
     }
     return 0;
 }
@@ -773,21 +773,21 @@ static int pull_file(const char *rel, uint64_t size, Truth *tr) {
         truth_free(tr);
         return -1;
     }
-    int out = open(part, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    int out = lmb_source_open(part, O_WRONLY | O_CREAT | O_TRUNC);
     if (out < 0) { truth_free(tr); return -1; }
 
-    int src = -1, ai = 0;
+    LmbSocket src = LMB_INVALID_SOCKET; int ai = 0;
     for (uint64_t off = 0; off < size; ) {
         uint32_t want = (uint32_t)(size - off < PULL_CHUNK ? size - off : PULL_CHUNK);
         uint8_t *data = NULL;
         uint32_t got = 0;
         /* direct, resuming across peers on failure */
         while (!data && ai < naddr) {
-            if (src < 0) {
+            if (src == LMB_INVALID_SOCKET) {
                 src = lmb_connect_ms(addrs[ai], 2500);
-                if (src >= 0 && lmb_auth(src)) { close(src); src = -1; }
+                if (src != LMB_INVALID_SOCKET && lmb_auth(src)) { lmb_close(src); src = LMB_INVALID_SOCKET; }
             }
-            if (src < 0) { ai++; continue; }
+            if (src == LMB_INVALID_SOCKET) { ai++; continue; }
             LmbBuf rb = {0};
             lmb_buf_str(&rb, rel); lmb_buf_u64(&rb, off); lmb_buf_u32(&rb, want);
             LmbMsg rm = {0};
@@ -800,9 +800,9 @@ static int pull_file(const char *rel, uint64_t size, Truth *tr) {
                 } else {
                     fprintf(stderr, "[maintainer %s] %s served corrupt bytes of "
                             "%s — rejected\n", g.name, addrs[ai], rel);
-                    close(src); src = -1; ai++;
+                    lmb_close(src); src = LMB_INVALID_SOCKET; ai++;
                 }
-            } else { close(src); src = -1; ai++; }
+            } else { lmb_close(src); src = LMB_INVALID_SOCKET; ai++; }
             lmb_msg_free(&rm);
         }
         if (!data) {                                   /* relay floor */
@@ -817,19 +817,26 @@ static int pull_file(const char *rel, uint64_t size, Truth *tr) {
             }
             free(rb.p); lmb_msg_free(&rm);
         }
-        if (!data && want) { truth_free(tr); close(out); if (src >= 0) close(src); return -1; }
+        if (!data && want) { truth_free(tr); lmb_source_close(out); if (src != LMB_INVALID_SOCKET) lmb_close(src); return -1; }
         uint32_t put = 0;
         while (put < got) {
-            ssize_t w = pwrite(out, data + put, got - put, (off_t)(off + put));
-            if (w < 0) { if (errno == EINTR) continue; free(data); close(out); return -1; }
+            ptrdiff_t w = lmb_source_pwrite(out, data + put, got - put, off + put);
+            if (w <= 0) {
+                if (w<0 && errno == EINTR) continue;
+                free(data);truth_free(tr);lmb_source_close(out);
+                if (src!=LMB_INVALID_SOCKET) lmb_close(src);
+                return -1;
+            }
             put += (uint32_t)w;
         }
         free(data);
         off += want;
     }
-    if (src >= 0) close(src);
-    close(out);
-    if (rename(part, final)) { truth_free(tr); return -1; }
+    if (src != LMB_INVALID_SOCKET) lmb_close(src);
+    int durable=lmb_source_sync(out);
+    if (lmb_source_close(out)) durable=-1;
+    if (durable) {truth_free(tr);return -1;}
+    if (lmb_source_rename(part, final)) { truth_free(tr); return -1; }
     return 0;                        /* the caller now owns tr */
 }
 
@@ -884,12 +891,10 @@ static void pull_slice(uint64_t budget) {
             f->hash = t.hash; f->nh = t.nh;
             f->signed_ = t.has_sig;
             if (t.has_sig) memcpy(f->sig, t.sig, 64);
-            struct stat st;
-            if (!stat(full, &st)) {
-                f->mtime_ns = (uint64_t)st.st_mtim.tv_sec * 1000000000ull +
-                              (uint64_t)st.st_mtim.tv_nsec;
-                f->ctime_ns = (uint64_t)st.st_ctim.tv_sec * 1000000000ull +
-                              (uint64_t)st.st_ctim.tv_nsec;
+            LmbSourceStat st;
+            if (!lmb_source_stat(full, &st)) {
+                f->mtime_ns = st.mtime_ns;
+                f->ctime_ns = st.ctime_ns;
             }
             if (save_truth(f))
                 fprintf(stderr, "[maintainer %s] could not cache integrity data "
@@ -912,7 +917,7 @@ static void pull_slice(uint64_t budget) {
  * from behind any NAT with zero router configuration. The tracker uses the
  * same connection to push RREAD_FWD when a chatter could not reach us
  * directly: we answer with the bytes and the tracker relays them back. */
-static int register_body_send(int fd, uint64_t held, const uint8_t nonce[32]) {
+static int register_body_send(LmbSocket fd, uint64_t held, const uint8_t nonce[32]) {
     LmbBuf b = {0};
     lmb_buf_str(&b, g.name);
     lmb_buf_str(&b, g.advertise);
@@ -939,9 +944,9 @@ static void *control_thread(void *arg) {
     for (int i = 0; i < g.nfiles; i++) held += g.files[i].size;
     int warned = 0;
     for (;;) {
-        int fd = lmb_connect(g.tracker);
-        if (fd >= 0 && lmb_auth(fd)) { close(fd); fd = -1; }
-        if (fd < 0) {
+        LmbSocket fd = lmb_connect(g.tracker);
+        if (fd != LMB_INVALID_SOCKET && lmb_auth(fd)) { lmb_close(fd); fd = LMB_INVALID_SOCKET; }
+        if (fd == LMB_INVALID_SOCKET) {
             if (!warned)
                 fprintf(stderr, "[maintainer %s] tracker %s unreachable (will retry)\n",
                         g.name, g.tracker);
@@ -952,14 +957,13 @@ static void *control_thread(void *arg) {
         warned = 0;
         /* one identity nonce for this connection, reused by every heartbeat */
         uint8_t nonce[32];
-        if (lmb_request_challenge(fd, nonce)) { close(fd); sleep(HEARTBEAT_S); continue; }
-        struct timeval tv = { HEARTBEAT_S, 0 };   /* recv timeout = beat cadence */
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-        if (register_body_send(fd, held, nonce)) { close(fd); sleep(HEARTBEAT_S); continue; }
+        if (lmb_request_challenge(fd, nonce)) { lmb_close(fd); sleep(HEARTBEAT_S); continue; }
+        lmb_set_io_timeout(fd, HEARTBEAT_S*1000);
+        if (register_body_send(fd, held, nonce)) { lmb_close(fd); sleep(HEARTBEAT_S); continue; }
         for (;;) {
             LmbMsg m;
             if (lmb_recv(fd, &m) != 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) {   /* quiet: beat */
+                if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT) {   /* quiet: beat */
                     if (register_body_send(fd, held, nonce)) break;
                     continue;
                 }
@@ -989,7 +993,7 @@ static void *control_thread(void *arg) {
             lmb_msg_free(&m);
             if (rc) break;
         }
-        close(fd);
+        lmb_close(fd);
         sleep(1);
     }
     return NULL;
@@ -1012,7 +1016,7 @@ static void *stats_thread(void *arg) {
     return NULL;
 }
 
-int main(int argc, char **argv) {
+static int maintainer_main(int argc, char **argv) {
     int port = 7301;
     double donate_gb = 0;
     int model_explicit = 0;
@@ -1035,7 +1039,7 @@ int main(int argc, char **argv) {
             donate_gb = atof(argv[++i]);
         else if (!strcmp(argv[i], "--key") && i + 1 < argc) {
             char hex[200] = "";
-            FILE *kf = fopen(argv[++i], "r");
+            FILE *kf = lmb_source_fopen(argv[++i], "r");
             if (!kf || fscanf(kf, "%198s", hex) != 1 || strlen(hex) != 128 ||
                 lmb_unhex(g.sk, hex, 64)) {
                 fprintf(stderr, "[maintainer] cannot read a 64-byte secret key "
@@ -1071,9 +1075,14 @@ int main(int argc, char **argv) {
         return 2;
     }
     if (tok) snprintf(g.token, sizeof g.token, "%s", tok);
+#ifndef _WIN32
     signal(SIGPIPE, SIG_IGN);   /* a vanished chatter must not kill the peer */
+#endif
     lmb_conn_gate_init(&g_conn_gate);
     if (lmb_secure_init()) return 1;
+#ifdef _WIN32
+    for (char *p=g.root;*p;p++) if (*p=='\\') *p='/';
+#endif
     size_t rl = strlen(g.root);
     while (rl > 1 && g.root[rl - 1] == '/') g.root[--rl] = 0;
     if (!g.name[0]) snprintf(g.name, sizeof g.name, "peer-%d", port);
@@ -1083,7 +1092,11 @@ int main(int argc, char **argv) {
     }
     if (!g.advertise[0]) snprintf(g.advertise, sizeof g.advertise, "127.0.0.1:%d", port);
 
-    scan_dir(g.root);
+    if (donate_gb>0) {
+        char child[LMB_LOCAL_PATH_MAX];
+        if (path_printf(child,sizeof child,"%s/.prepare",g.root) || mkdir_parents(child)) return 1;
+    }
+    if (scan_dir(g.root)) {perror("[maintainer] checkpoint inventory");return 1;}
     if (donate_gb > 0) {
         if (!g.tracker[0]) { fprintf(stderr, "[maintainer] --donate needs --tracker\n"); return 2; }
         if (!model_explicit) {
@@ -1144,8 +1157,7 @@ int main(int argc, char **argv) {
         printf("[maintainer %s] ORIGIN: signed the truth of %d files with %s\n",
                g.name, g.nfiles, pub);
     }
-    { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
-      double dh = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9 - h0;
+    { double dh = hash_now()-h0;
       if (dh > 1.0)
           printf("[maintainer %s] integrity: hashed %.1f GB in %.1fs "
                  "(cached for next start)\n", g.name, (double)total / 1e9, dh); }
@@ -1164,20 +1176,41 @@ int main(int argc, char **argv) {
             return 1;
         }
     }
-    int lfd = lmb_home_take_listener(port);
-    if (lfd < 0) { perror("[maintainer] listen"); return 1; }
+    LmbSocket lfd = lmb_home_take_listener(port);
+    if (lfd == LMB_INVALID_SOCKET) { perror("[maintainer] listen"); return 1; }
     pthread_t t;
     if (g.tracker[0]) { pthread_create(&t, NULL, control_thread, NULL); pthread_detach(t); }
     pthread_create(&t, NULL, stats_thread, NULL); pthread_detach(t);
     for (;;) {
-        int fd = accept(lfd, NULL, NULL);
-        if (fd < 0) { if (errno == EINTR) continue; perror("[maintainer] accept"); break; }
+        LmbSocket fd = lmb_socket_accept(lfd,NULL,NULL);
+        if (fd == LMB_INVALID_SOCKET) { if (errno == EINTR) continue; perror("[maintainer] accept"); break; }
         lmb_set_io_timeout(fd, lmb_env_int("LUMABRI_IO_TIMEOUT_MS",
                                            LMB_DEFAULT_IO_TIMEOUT_MS, 100, 3600000));
-        if (!lmb_conn_gate_enter(&g_conn_gate)) { close(fd); continue; }
-        if (pthread_create(&t, NULL, conn_thread, (void *)(intptr_t)fd) == 0)
+        if (!lmb_conn_gate_enter(&g_conn_gate)) { lmb_close(fd); continue; }
+        if (pthread_create(&t, NULL, conn_thread, (void *)(uintptr_t)fd) == 0)
             pthread_detach(t);
-        else { lmb_conn_gate_leave(&g_conn_gate); close(fd); }
+        else { lmb_conn_gate_leave(&g_conn_gate); lmb_close(fd); }
     }
     return 0;
 }
+
+#ifndef LMB_MAINTAINER_NO_ENTRY
+#ifdef _WIN32
+int wmain(int argc,wchar_t **wide) {
+    if (argc<1 || argc>256) return 2;
+    char **argv=calloc((size_t)argc+1,sizeof *argv);if (!argv) return 1;
+    int rc=1;
+    for (int i=0;i<argc;i++) {
+        int n=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,wide[i],-1,NULL,0,NULL,NULL);
+        if (!n || !(argv[i]=malloc((size_t)n)) ||
+            !WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,wide[i],-1,argv[i],n,NULL,NULL)) goto done;
+    }
+    rc=maintainer_main(argc,argv);
+done:
+    for (int i=0;i<argc;i++) free(argv[i]);
+    free(argv);return rc;
+}
+#else
+int main(int argc,char **argv) {return maintainer_main(argc,argv);}
+#endif
+#endif

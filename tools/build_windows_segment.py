@@ -44,6 +44,12 @@ def main():
              root/'lumabri_segment_discovery.c',root/'lumabri_segment.c',resource,
              '-static','-lwinpthread','-lws2_32','-lbcrypt','-liphlpapi','-ladvapi32',
              '-o',output/(name+'.exe')])
+    run([args.cc,*flags,'-Werror','-Wno-unused-function','-municode',root/'maintainer.c',resource,
+         '-static','-lwinpthread','-lws2_32','-lbcrypt','-liphlpapi','-ladvapi32',
+         '-o',output/'maintainer.exe'])
+    run([args.cc,*flags,'-Werror','-Wno-unused-function','-municode',root/'tests/c/test_source_windows.c',resource,
+         '-static','-lwinpthread','-lws2_32','-lbcrypt','-liphlpapi','-ladvapi32',
+         '-o',output/'test_source_windows.exe'])
     run([args.cc,*flags,'-Werror','-Wno-unused-function','-municode',
          root/'tests/c/test_household_tracker_windows.c',root/'lumabri_segment_discovery.c',root/'lumabri_segment.c',resource,
          '-static','-lwinpthread','-lws2_32','-lbcrypt','-liphlpapi','-ladvapi32',

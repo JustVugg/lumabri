@@ -547,7 +547,7 @@ tracker: $(HOME_NET_DEPS) tracker.c lumabri_segment_discovery.c lumabri_segment_
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tracker.c lumabri_segment_discovery.c \
 		lumabri_segment.c -o $@
 
-maintainer: maintainer.c $(HOME_NET_DEPS) lumabri_content.h $(PROTO_DEPS) lumabri_sha.h \
+maintainer: maintainer.c src/runtime/lumabri_source_file.h src/runtime/lumabri_source_match.h $(HOME_NET_DEPS) lumabri_content.h $(PROTO_DEPS) lumabri_sha.h \
 		$(SIGN_DEPS) $(SECURE_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread maintainer.c -o $@
 
