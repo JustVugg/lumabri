@@ -120,10 +120,12 @@ jobs:
         run: |
           set -o pipefail
           ./build/windows-segment/test_segment_worker_windows.exe "$(cygpath -w "$PWD/build/windows-segment/segment_node.exe")" "$(cygpath -w "$PWD/build/fixture")" remote-selftest "$(cygpath -w "$PWD/build/windows-segment/segment_chat.exe")" 2>&1 | tee -a build/windows-segment-evidence.log
+      - name: Prepare the bounded text-protocol fixture for console chats
+        run: python3 tests/integration/client_api_fixture.py build/fixture build/native-text-fixture
       - name: Approve allocations through the native keeper and retain resident workers
         run: |
           set -o pipefail
-          ./build/windows-segment/test_donor_windows.exe "$(cygpath -w "$PWD/build/windows-segment/lumabri.exe")" "$(cygpath -w "$PWD/build/fixture")" 2>&1 | tee -a build/windows-segment-evidence.log
+          ./build/windows-segment/test_donor_windows.exe "$(cygpath -w "$PWD/build/windows-segment/lumabri.exe")" "$(cygpath -w "$PWD/build/native-text-fixture/olmoe-tiny")" 2>&1 | tee -a build/windows-segment-evidence.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
