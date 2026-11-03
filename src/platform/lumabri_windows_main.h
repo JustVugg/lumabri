@@ -73,6 +73,7 @@ static int home_donor_entry_windows(int argc,char **argv,int internal) {
 #include "src/ui/lumabri_chat_windows.h"
 #include "src/runtime/lumabri_requester_windows.h"
 #include "src/ui/lumabri_home_windows.h"
+#include "src/runtime/lumabri_doctor_windows.h"
 static int cmd_chat_windows(int argc,char **argv) {
     const char *address=NULL,*key=NULL,*root=NULL,*model=NULL;unsigned max_new=256;
     for(int i=0;i<argc;i++) {
@@ -102,6 +103,7 @@ static int cmd_chat_windows(int argc,char **argv) {
 }
 
 static int lmb_windows_main(int argc, char **argv) {
+    if (argc>=2 && !strcmp(argv[1],"doctor")) return cmd_doctor_windows(argc-2,argv+2);
     if (argc==1 || (argc==2 && !strcmp(argv[1],"share"))) return home_windows_run(argc==2);
     if (argc>=2 && !strcmp(argv[1],"chat")) return cmd_chat_windows(argc-2,argv+2);
     if (argc>=2 && !strcmp(argv[1],"--internal-prepare")) return home_prepare_entry_windows(argc-2,argv+2);
@@ -126,9 +128,10 @@ static int lmb_windows_main(int argc, char **argv) {
           "  lumabri service [start|status|restart|stop] [--json]\n"
           "  lumabri service live ROLE\n"
           "  lumabri machine --json\n\n"
+          "  lumabri doctor --household [--json]\n"
           "  lumabri donor --join HOST:PORT --ram-gb N [--headless]\n"
           "  lumabri share  (start or reopen sharing using saved household settings)\n\n"
-          "Without arguments: create/join a household, settings and sharing.\n"
+          "Without arguments: create/join, select computers and models, approve resources and chat.\n"
           "  lumabri chat --host HOST:PORT --host-key KEY --host-root ROOT [--model-type TYPE]\n"
           "Native chat attaches to an approved resident host; it downloads no weights.\n", stderr);
     return argc == 2 && !strcmp(argv[1], "--help") ? 0 : 2;

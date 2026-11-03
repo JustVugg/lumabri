@@ -47,8 +47,38 @@ static void open_catalogue(WinUi *ui) {
     winui_send_keys(ui->input,"\t");Sleep(700);winui_send_keys(ui->input," ");Sleep(1000);
     winui_send_keys(ui->input,"\t\r");winui_expect(ui->capture,"Enter requests this plan");
 }
+/* Installed packages are switched only after an explicit stop. Keep process
+ * handles, not reusable PID numbers, when verifying old workers have exited. */
+static void stopped_workers(void) {
+    HomeServiceSnapshot donor=status("donor");HANDLE workers[3];unsigned count=0;
+    DWORD pids[]={donor.pid,donor.segment_pid,donor.host_pid};
+    for (unsigned j=0;j<3;j++) if (pids[j]) {
+        workers[count]=OpenProcess(SYNCHRONIZE,FALSE,pids[j]);assert(workers[count]);count++;
+    }
+    command("stop");
+    for (unsigned i=0;i<count;i++) {assert(WaitForSingleObject(workers[i],5000)==WAIT_OBJECT_0);CloseHandle(workers[i]);}
+    HomeServiceSnapshot absent;assert(home_service_query("donor",HOME_SVC_STATUS,NULL,&absent));
+    assert(home_service_query("tracker",HOME_SVC_STATUS,NULL,&absent));
+}
+static void switch_package(const wchar_t *next,const HomeSettings *original,const uint8_t prior[32]) {
+    stopped_workers();
+    assert(WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,next,-1,binary,sizeof binary,NULL,NULL));
+    HomeSettings settings;assert(!home_settings_load_windows(&settings));
+    assert(!strcmp(settings.tracker,original->tracker) && !strcmp(settings.token,original->token) &&
+        !strcmp(settings.models,original->models) && settings.owner);
+    WinUi ui;winui_open_args(&ui,binary,L"","Create a household");winui_send_keys(ui.input,"jjjj\r");
+    winui_expect(ui.capture,"Connect your other computers");winui_send_keys(ui.input,"\r");Sleep(150);winui_close(&ui);
+    open_catalogue(&ui);winui_send_keys(ui.input,"\r");winui_expect(ui.capture,"This computer needs your approval too.");
+    HomeServiceSnapshot pending=status("donor");assert(!pending.reserved_total && pending.has_offer &&
+        memcmp(pending.offer.id,prior,32));
+    /* Changed packages never revive an old approval. */
+    winui_send_keys(ui.input,"a");winui_expect(ui.capture,"conversation");
+    winui_send_keys(ui.input,"Hello after the package switch.\r");winui_expect(ui.capture,"Reply 1");
+    winui_send_keys(ui.input,"/quit\r");Sleep(200);winui_send_keys(ui.input,"q");Sleep(200);winui_close(&ui);
+    assert(status("donor").reserved_total>0);
+}
 int wmain(int argc,wchar_t **argv) {
-    assert(argc==3);SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX);
+    assert(argc==3 || argc==4);SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX);
     wchar_t temp[512],directory[700],models[900],model[1000];assert(GetTempPathW(512,temp));
     assert(swprintf(directory,700,L"%lslumabri-requester-%lu-%llu-\x00e8",temp,GetCurrentProcessId(),GetTickCount64())>0);
     assert(CreateDirectoryW(directory,NULL) && SetEnvironmentVariableW(L"LOCALAPPDATA",directory));
@@ -143,7 +173,14 @@ int wmain(int argc,wchar_t **argv) {
     for (unsigned i=0;i<2;i++) assert(prepare.preparation_results[i].ready_observed);
     assert(home_resident_library_list(settings.tracker,saved,4)==3 && status("donor").reserved_total>loaded.reserved_total);
     winui_send_keys(ui.input,"\r");Sleep(200);winui_send_keys(ui.input,"q");Sleep(200);winui_close(&ui);
-    command("stop");
+    if (argc==4) {
+        uint8_t old_id[32];memcpy(old_id,pending.offer.id,32);
+        switch_package(argv[3],&settings,old_id);
+        HomeServiceSnapshot current=status("donor");memcpy(old_id,current.offer.id,32);
+        switch_package(argv[1],&settings,old_id);
+        puts("WINDOWS PACKAGE SWITCH: PASS (quiescent update and rollback, worker exit, persistent identity/settings, no approval replay, resident chat after each switch)");
+    }
+    stopped_workers();
     for (unsigned i=0;i<command_count;i++) assert(!lmb_owned_process_stop(&commands[i],0,5000) && !lmb_owned_process_close(&commands[i]));
     remove_fixture(directory);
     puts("WINDOWS REQUESTER: PASS (production catalogue, explicit selection, exact source, local approval, resident chat, detach/reopen, manager restart, private conversation, 8-token calibration, cancellation and two-model joint preparation)");return 0;

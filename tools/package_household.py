@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import platform
+import re
 import shutil
 import stat
 import subprocess
@@ -19,11 +20,13 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 CORE_BINARIES = ("lumabri", "tracker", "maintainer", "segment_node", "segment_chat", "swarm_probe")
 BINARIES = (*CORE_BINARIES, "lumabri-agent")
+WINDOWS_BINARIES = ("lumabri.exe", "tracker.exe", "maintainer.exe", "segment_node.exe", "segment_chat.exe")
 
 
 def regular(path, executable=False):
     info = path.lstat()
-    if not stat.S_ISREG(info.st_mode) or (executable and not os.access(path, os.X_OK)):
+    if (not stat.S_ISREG(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400 or
+            (executable and not os.access(path, os.X_OK))):
         raise ValueError(f"not a regular {'executable' if executable else 'file'}: {path}")
     return path
 
@@ -140,10 +143,65 @@ def macos_minimum(binary):
     return max(versions)
 
 
-def package(runtime, colibri, output, repository=ROOT, openmp_prefix=None):
+def windows_dependencies(binary, objdump="objdump"):
+    """Inspect our built PE, refusing dependencies on the build environment."""
+    header = subprocess.check_output([objdump, "-f", str(binary)], text=True)
+    if "file format pei-x86-64" not in header:
+        raise ValueError(f"Windows candidate requires native x86-64 PE binaries: {binary}")
+    report = subprocess.check_output([objdump, "-p", str(binary)], text=True)
+    names = re.findall(r"DLL Name:\s*(\S+)", report)
+    system = {"advapi32.dll", "bcrypt.dll", "dxgi.dll", "gdi32.dll", "iphlpapi.dll", "kernel32.dll",
+              "msvcrt.dll", "ntdll.dll", "ole32.dll", "psapi.dll", "secur32.dll", "shell32.dll",
+              "shlwapi.dll", "ucrtbase.dll", "user32.dll", "userenv.dll", "version.dll", "ws2_32.dll"}
+    if not names or any(name.lower() not in system and
+                        not re.fullmatch(r"api-ms-win-crt-[a-z0-9-]+\.dll", name.lower()) for name in names):
+        raise ValueError(f"non-system Windows dependency in {binary}: {names}")
+    return sorted(set(names), key=str.lower)
+
+
+def package_windows(runtime, colibri, output, repository=ROOT, objdump="objdump", runtime_repository=None):
+    runtime, colibri, repository = (p.resolve(strict=True) for p in (runtime, colibri, repository))
+    if output.exists() or output.is_symlink():
+        raise ValueError(f"output already exists: {output}")
+    files = [(regular(runtime / name, True), f"bin/{name}") for name in WINDOWS_BINARIES]
+    files += [(regular(repository / "deploy/household-launcher.cmd"), "Lumabri.cmd"),
+              (regular(repository / "deploy/verify-windows-package.ps1"), "Verify-Lumabri.ps1"),
+              (regular(repository / "docs/WINDOWS_PACKAGE.md"), "START_HERE.md"),
+              (regular(runtime / "WINDOWS-RUNTIME-NOTICES.txt"), "licenses/Windows-runtime-NOTICES.txt"),
+              (regular(repository / "LICENSE"), "licenses/Lumabri-LICENSE"),
+              (regular(colibri / "LICENSE"), "licenses/Colibri-LICENSE")]
+    for name in ("NOTICE", "THIRD_PARTY_NOTICES.md"):
+        if (colibri / name).exists():
+            files.append((regular(colibri / name), f"licenses/Colibri-{name}"))
+    report = {name: windows_dependencies(runtime / name, objdump) for name in WINDOWS_BINARIES}
+    manifest = {"schema": "LMB-NATIVE-CANDIDATE-1", "status": "requires-native-and-physical-acceptance",
+                "system": "Windows", "architecture": "x86_64", "build_os": platform.platform(),
+                "minimum_windows_build": 18362, "lumabri": revision(runtime_repository or repository),
+                "colibri_checkout": revision(colibri), "dependencies": report,
+                "capabilities": {"local_adapters": ["olmoe"], "backend": "cpu",
+                                 "household": True, "http_api_server": False},
+                "signature": "unsigned; manifest hashes are consistency checks", "files": {}}
+    output.mkdir(mode=0o755)
+    for source, relative in files:
+        target = output / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+        # POSIX mode bits do not describe Windows ACLs or executable trust.
+        manifest["files"][relative] = {"sha256": checksum(target), "bytes": target.stat().st_size}
+    (output / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return manifest
+
+
+def package(runtime, colibri, output, repository=ROOT, openmp_prefix=None, pe_objdump="objdump", runtime_repository=None):
     system = platform.system()
+    if system == "Windows":
+        if openmp_prefix is not None:
+            raise ValueError("bundled OpenMP is a native macOS packaging option")
+        return package_windows(runtime, colibri, output, repository, pe_objdump, runtime_repository)
+    if runtime_repository is not None:
+        raise ValueError("--runtime-repository applies only to independently built Windows runtime acceptance")
     if system not in ("Linux", "Darwin"):
-        raise ValueError("native Windows household packaging is not implemented; WSL is a Linux build")
+        raise ValueError(f"unsupported package system: {system}")
     if openmp_prefix is not None and system != "Darwin":
         raise ValueError("bundled OpenMP is a native macOS packaging option")
     runtime, colibri, repository = runtime.resolve(strict=True), colibri.resolve(strict=True), repository.resolve(strict=True)
@@ -233,22 +291,23 @@ def verify(directory):
     # Inspect entries before resolving declared paths; a symlinked directory
     # must not make the verifier read outside the candidate.
     for index, path in enumerate(directory.rglob("*")):
-        if index >= 64 or path.is_symlink():
+        if index >= 64 or path.is_symlink() or getattr(path.lstat(), "st_file_attributes", 0) & 0x400:
             raise ValueError("unexpected entry or symlink in candidate")
         if path.is_file():
-            actual.add(str(path.relative_to(directory)))
+            actual.add(path.relative_to(directory).as_posix())
         elif not path.is_dir():
             raise ValueError("non-regular entry in candidate")
     if actual != set(files) | {"manifest.json"}:
         raise ValueError("candidate has missing or extra files")
     for name, expected in files.items():
         relative = PurePosixPath(name)
-        if relative.is_absolute() or ".." in relative.parts or str(relative) != name:
+        if (relative.is_absolute() or ".." in relative.parts or str(relative) != name or
+                any(c in name for c in '\\:<>"|?*') or any(p.endswith((".", " ")) for p in relative.parts)):
             raise ValueError("unsafe manifest path")
         path = regular(directory / name)
         if (not isinstance(expected, dict) or expected.get("sha256") != checksum(path) or
                 expected.get("bytes") != path.stat().st_size or
-                expected.get("mode") != oct(path.stat().st_mode & 0o777)):
+                (manifest.get("system") != "Windows" and expected.get("mode") != oct(path.stat().st_mode & 0o777))):
             raise ValueError(f"candidate file changed: {name}")
     return manifest
 
@@ -260,6 +319,9 @@ def main():
                         help="read-only source checkout used for the native build, including LICENSE")
     parser.add_argument("--openmp-prefix", type=Path,
                         help="native LLVM OpenMP installation built by tools/build_macos_openmp.py")
+    parser.add_argument("--pe-objdump", default="objdump", help="PE dependency inspector for the Windows build")
+    parser.add_argument("--runtime-repository", type=Path,
+                        help="exact source checkout of a separately built previous Windows runtime")
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--output", type=Path, help="new, empty destination (must not exist)")
     action.add_argument("--verify", type=Path, help="check exact file hashes and contents after native tests")
@@ -271,7 +333,8 @@ def main():
             verify(args.verify)
             print("Native candidate contents and hashes: PASS")
             return 0
-        manifest = package(args.runtime_dir, args.colibri_root, args.output, openmp_prefix=args.openmp_prefix)
+        manifest = package(args.runtime_dir, args.colibri_root, args.output, openmp_prefix=args.openmp_prefix,
+                           pe_objdump=args.pe_objdump, runtime_repository=args.runtime_repository)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         print(f"Household candidate was not completed: {error}", file=sys.stderr)
         return 1
