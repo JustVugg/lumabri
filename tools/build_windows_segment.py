@@ -13,6 +13,18 @@ import subprocess
 import sys
 
 
+def mingw_notice_files(licences):
+    """MSYS2 split gcc-libs into individual runtime packages in newer builds."""
+    files = [licences / name for name in ('libwinpthread/COPYING', 'crt/COPYING',
+        'crt/COPYING.MinGW-w64.txt', 'crt/COPYING.MinGW-w64-runtime.txt')]
+    for directory in ('libgcc', 'gcc-libs'):
+        gcc = licences / directory
+        if all((gcc / name).is_file() for name in ('COPYING3', 'COPYING.RUNTIME')):
+            return files + [gcc / name for name in ('COPYING3', 'COPYING.RUNTIME', 'COPYING.LIB', 'README')
+                            if (gcc / name).is_file()]
+    raise ValueError(f"GCC runtime license and exception missing under {licences}")
+
+
 def runtime_notices(cc, output):
     """Retain the installed toolchain notices for statically linked runtimes."""
     if platform.system() == "Windows":
@@ -20,9 +32,7 @@ def runtime_notices(cc, output):
         if not executable:
             raise ValueError("native compiler not found")
         licences = Path(executable).resolve().parent.parent / 'share/licenses'
-        files = [licences / name for name in ('libwinpthread/COPYING', 'crt/COPYING',
-            'crt/COPYING.MinGW-w64.txt', 'crt/COPYING.MinGW-w64-runtime.txt',
-            'libgcc/COPYING3', 'libgcc/COPYING.RUNTIME')]
+        files = mingw_notice_files(licences)
     else:
         # Debian's cross-toolchain package carries the source notices together
         # with its bundled runtime terms. Native CI uses the MSYS2 files above.

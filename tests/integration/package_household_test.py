@@ -12,6 +12,9 @@ ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location("package_household", ROOT / "tools/package_household.py")
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+spec = importlib.util.spec_from_file_location("build_windows_segment", ROOT / "tools/build_windows_segment.py")
+windows_builder = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(windows_builder)
 
 
 class PackageTest(unittest.TestCase):
@@ -118,6 +121,36 @@ class PackageTest(unittest.TestCase):
         self.assertEqual(result["capabilities"]["local_adapters"], ["olmoe"])
         self.assertFalse(result["capabilities"]["http_api_server"])
         self.assertNotIn("mode", result["files"]["bin/lumabri.exe"])
+
+    def test_windows_runtime_notices_follow_installed_toolchain_layout(self):
+        compiler = self.root / "ucrt64/bin/gcc.exe"
+        compiler.parent.mkdir(parents=True)
+        compiler.touch()
+        licences = compiler.parent.parent / "share/licenses"
+        for name in ('libwinpthread/COPYING', 'crt/COPYING', 'crt/COPYING.MinGW-w64.txt',
+                     'crt/COPYING.MinGW-w64-runtime.txt'):
+            path = licences / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(name, encoding='utf-8')
+        with patch.object(windows_builder.platform, "system", return_value="Windows"), \
+                patch.object(windows_builder.shutil, "which", return_value=str(compiler)), \
+                patch.object(windows_builder.subprocess, "check_output", return_value="gcc installed-version\n"):
+            for layout in ("gcc-libs", "libgcc"):
+                directory = licences / layout
+                directory.mkdir()
+                for name in ("COPYING3", "COPYING.RUNTIME"):
+                    (directory / name).write_text(layout + '/' + name, encoding='utf-8')
+                windows_builder.runtime_notices('gcc', self.runtime)
+                notices = (self.runtime / 'WINDOWS-RUNTIME-NOTICES.txt').read_text(encoding='utf-8')
+                self.assertIn(layout + '/COPYING3', notices)
+                self.assertIn(layout + '/COPYING.RUNTIME', notices)
+                self.assertIn('libwinpthread/COPYING', notices)
+                self.assertIn('gcc installed-version', notices)
+                for path in directory.iterdir():
+                    path.unlink()
+                directory.rmdir()
+            with self.assertRaisesRegex(ValueError, 'license and exception missing'):
+                windows_builder.runtime_notices('gcc', self.runtime)
         self.assertFalse((self.output / "lib").exists())
 
     def test_windows_requires_complete_runtime(self):
