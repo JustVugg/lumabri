@@ -48,6 +48,9 @@ def main():
          root/'tests/c/test_household_tracker_windows.c',root/'lumabri_segment_discovery.c',root/'lumabri_segment.c',resource,
          '-static','-lwinpthread','-lws2_32','-lbcrypt','-liphlpapi','-ladvapi32',
          '-o',output/'test_household_tracker_windows.exe'])
+    run([args.cc,*flags,'-Werror','-Wno-unused-function','-municode',
+         root/'tests/c/test_chat_windows.c',resource,'-static','-lwinpthread','-lws2_32',
+         '-lbcrypt','-ladvapi32','-o',output/'test_chat_windows.exe'])
     if args.only != 'contracts':
         run([sys.executable,'-X','utf8','tools/prepare_engine_source.py','--source',
              Path(args.engine).resolve(),'--output',source])

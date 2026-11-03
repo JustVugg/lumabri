@@ -26,6 +26,14 @@ static void winui_expect(WinUiCapture *c, const char *text) {
     ULONGLONG until = GetTickCount64()+15000;
     while (!winui_contains(c, text) && GetTickCount64() < until) Sleep(10);
     if (!winui_contains(c, text)) {
+        /* Keep failed terminal evidence local; never dump a whole console
+         * (which can contain pairing keys) into CI logs. */
+        wchar_t directory[1200],path[1400];
+        if(GetEnvironmentVariableW(L"LOCALAPPDATA",directory,1200) &&
+            swprintf(path,1400,L"%ls\\failed-console.txt",directory)>0) {
+            FILE *log=_wfopen(path,L"wb");
+            if(log) {EnterCriticalSection(&c->mutex);fwrite(c->text,1,c->used,log);LeaveCriticalSection(&c->mutex);fclose(log);}
+        }
         fprintf(stderr, "Missing console output: %s\n", text); abort();
     }
 }
