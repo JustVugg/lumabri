@@ -88,6 +88,13 @@ The latest measured speed is historical, not a guarantee for the next turn.
   locks, input sealing and the process guard enforce residence. No system-wide
   memory limit is changed. A native test compares 72 generated tokens with a
   local Colibri oracle across separate conversations and drain/resume/retire.
+- Native `maintainer.exe` uses the common signed checkpoint publisher and
+  encrypted transfer protocol. It can serve a local checkpoint folder, including
+  Unicode paths and large files, and retain integrity metadata across restart.
+  The Windows gate runs the production tracker and source, concurrent range
+  reads, a signed replica surviving its origin, and changed-content rejection.
+  These transfers prepare resident workers; they are not inference from disk.
+  Native model selection and requester orchestration are still separate work.
 - Native Windows worker preparation can receive a signed checkpoint from the
   approved LAN source without preinstalling its weight files. Bounded metadata
   and safetensors headers are materialized in private sparse files; engine
