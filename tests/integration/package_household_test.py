@@ -72,6 +72,14 @@ class PackageTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "already exists"):
             self.build()
 
+    def test_missing_packaging_tools_are_identified_without_creating_output(self):
+        with patch.object(module.subprocess, "check_output", side_effect=FileNotFoundError):
+            with self.assertRaisesRegex(ValueError, "packaging tool not found: git"):
+                module.revision(self.colibri)
+            with self.assertRaisesRegex(ValueError, "packaging tool not found: objdump"):
+                module.windows_dependencies(self.runtime / "lumabri.exe")
+        self.assertFalse(self.output.exists())
+
     def test_verify_rejects_mutation_extra_file_and_symlink(self):
         self.build()
         binary = self.output / "bin/lumabri"
