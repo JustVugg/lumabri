@@ -37,7 +37,12 @@ how to expose an existing gateway through a Kubernetes Service.
 
 ## Start here
 
-Build from source with a compatible Colibri checkout:
+On native Windows, extract the complete Windows candidate and open
+**Lumabri.cmd**. No WSL or compiler is needed. Its local runtime supports
+**OLMoE on CPU**; see [installation, verification and updates](docs/WINDOWS_PACKAGE.md).
+The web/API gateway runs on a Linux or macOS computer in the household.
+
+On Linux or macOS, build from source with a compatible Colibri checkout:
 
 ```sh
 make household swarm_probe ENGINE=/path/to/colibri/c
@@ -245,9 +250,11 @@ they do not certify every LAN, model family, context length or concurrent load.
 The reduced-model tests establish runtime behavior, not large-model speed.
 See the [release evidence](docs/LAN_RELEASE_CHECKLIST.md) for the recorded scope.
 
-The native Windows household service and GPU household execution are not
-delivered by these CPU checks. Windows/WSL testing is not native Windows
-certification. ARM64 CI does not certify a physical Raspberry Pi cluster.
+Separate native Windows gates run the complete household path with resident
+CPU OLMoE, explicit approvals, private chat, background services and package
+update/rollback. Windows/WSL checks remain separate from native Windows checks.
+GPU household execution is not delivered by these CPU checks.
+ARM64 CI does not certify a physical Raspberry Pi cluster.
 Recovery can require visible interruption and replay; it is not instantaneous
 KV migration.
 
