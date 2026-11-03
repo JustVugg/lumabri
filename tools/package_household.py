@@ -31,10 +31,17 @@ def regular(path, executable=False):
     return path
 
 
+def build_tool_output(command):
+    try:
+        return subprocess.check_output(command, text=True)
+    except FileNotFoundError as error:
+        raise ValueError(f"required packaging tool not found: {command[0]}; install it in the build environment PATH") from error
+
+
 def revision(root):
-    commit = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
-    dirty = bool(subprocess.check_output(
-        ["git", "-C", str(root), "status", "--porcelain", "--untracked-files=no"], text=True).strip())
+    commit = build_tool_output(["git", "-C", str(root), "rev-parse", "HEAD"]).strip()
+    dirty = bool(build_tool_output(
+        ["git", "-C", str(root), "status", "--porcelain", "--untracked-files=no"]).strip())
     return {"commit": commit, "tracked_changes": dirty}
 
 
@@ -145,10 +152,10 @@ def macos_minimum(binary):
 
 def windows_dependencies(binary, objdump="objdump"):
     """Inspect our built PE, refusing dependencies on the build environment."""
-    header = subprocess.check_output([objdump, "-f", str(binary)], text=True)
+    header = build_tool_output([objdump, "-f", str(binary)])
     if "file format pei-x86-64" not in header:
         raise ValueError(f"Windows candidate requires native x86-64 PE binaries: {binary}")
-    report = subprocess.check_output([objdump, "-p", str(binary)], text=True)
+    report = build_tool_output([objdump, "-p", str(binary)])
     names = re.findall(r"DLL Name:\s*(\S+)", report)
     system = {"advapi32.dll", "bcrypt.dll", "dxgi.dll", "gdi32.dll", "iphlpapi.dll", "kernel32.dll",
               "msvcrt.dll", "ntdll.dll", "ole32.dll", "psapi.dll", "secur32.dll", "shell32.dll",

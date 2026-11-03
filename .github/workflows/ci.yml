@@ -97,9 +97,12 @@ jobs:
           msystem: UCRT64
           update: false
           install: >-
+            git
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-binutils
             mingw-w64-ucrt-x86_64-python
+      - name: Verify native packaging tools are available
+        run: python3 -c "import subprocess; subprocess.run(['git', '--version'], check=True); subprocess.run(['objdump', '--version'], check=True)"
       - name: Build and audit native engine memory and checkpoint input
         run: python3 tools/build_windows_segment.py --engine ../colibri/c --only inference
       - name: Compare resident full and split OLMoE inference on Windows
