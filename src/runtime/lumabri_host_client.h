@@ -7,7 +7,7 @@
 #include <limits.h>
 
 #define HOST_CONNECT_BUSY 1
-#define HOST_CONNECT_ROOT_MISMATCH 2
+#define HOST_CONNECT_ROOT_MISMATCH (-2)
 typedef struct {
     char model_type[64], engine[64], backend[32], numeric_class[97], root[65];
     uint32_t sessions, speed_milli, max_new, max_frame, codec, sampling, numeric_abi;
