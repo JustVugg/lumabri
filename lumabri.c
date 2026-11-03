@@ -3342,6 +3342,7 @@ static int host_connect(const char *addr, const char *model_type, const char *ex
     int connected=lmb_host_client_open(addr,model_type,expected_key,expected_root,&fd,&greeting);
     if (connected) {
         fprintf(stderr, connected==HOST_CONNECT_BUSY ? "[lumabri] host is busy (0 sessions free)\n" :
+            connected==HOST_CONNECT_ROOT_MISMATCH ? "[lumabri] host checkpoint differs from the approved plan; no text sent\n" :
             "[lumabri] host connection, identity or checkpoint verification failed; no text sent\n");
         return connected;
     }
