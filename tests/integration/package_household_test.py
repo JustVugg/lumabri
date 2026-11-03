@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -111,6 +112,20 @@ class PackageTest(unittest.TestCase):
         self.assertIn("Lumabri.command", result["files"])
         self.assertIn("lib/lumabri/liblumabri.dylib", result["files"])
         self.assertEqual((self.output / "licenses/Colibri-THIRD_PARTY_NOTICES.md").read_text(), "test upstream notices")
+
+    def test_macos_payload_verifies_without_running_packaged_code(self):
+        manifest = self.build("Darwin")
+        checksums = (self.output / 'SHA256SUMS').read_text(encoding='utf-8').splitlines()
+        self.assertEqual({line.split('  ', 1)[1] for line in checksums},
+                         set(manifest['files']) - {'SHA256SUMS'})
+        self.assertEqual(module.verify(self.output), manifest)
+        command = ['shasum', '-a', '256', '-c', 'SHA256SUMS']
+        result = subprocess.run(command, cwd=self.output, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        (self.output / 'lib/lumabri/liblumabri.dylib').write_bytes(b'changed library')
+        result = subprocess.run(command, cwd=self.output, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('lib/lumabri/liblumabri.dylib: FAILED', result.stdout)
 
     def test_windows_has_exact_native_runtime_and_launcher(self):
         result = self.build("Windows")

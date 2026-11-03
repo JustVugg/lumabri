@@ -1121,6 +1121,7 @@ jobs:
             python3 tools/package_household.py --colibri-root ../colibri --output 'build/native candidate'
             test "$('build/native candidate/bin/segment_node' --thread-capacity)" = 1
           fi
+          (cd 'build/native candidate' && shasum -a 256 -c SHA256SUMS)
           python3 tests/integration/household_doctor_test.py --runtime-dir 'build/native candidate/bin'
           python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --resident-default --expect-metrics
           LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --installed-package 'build/native candidate' --models-dir build/home-flow-models --joint complete --api-prepare --donor-ram-gb 1.5 --sessions 2
@@ -1140,10 +1141,13 @@ jobs:
           python3 tests/integration/installed_fleet_update_test.py --previous-package 'build/previous candidate' --candidate-package 'build/native candidate' --models-dir build/home-flow-models
           python3 tools/package_household.py --verify 'build/native candidate'
           tar -czf build/lumabri-macos-candidate.tar.gz -C 'build/native candidate' .
+          shasum -a 256 build/lumabri-macos-candidate.tar.gz > build/lumabri-macos-candidate.tar.gz.sha256
       - uses: actions/upload-artifact@v4
         with:
           name: household-candidate-${{ matrix.runner }}-${{ matrix.openmp }}
-          path: lumabri/build/lumabri-macos-candidate.tar.gz
+          path: |
+            lumabri/build/lumabri-macos-candidate.tar.gz
+            lumabri/build/lumabri-macos-candidate.tar.gz.sha256
           retention-days: 7
       - name: Keep the declared-cost comparison report (no credentials)
         if: always()

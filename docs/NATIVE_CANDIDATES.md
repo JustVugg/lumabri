@@ -48,6 +48,8 @@ The latest measured speed is historical, not a guarantee for the next turn.
   binaries are not modified. Actual performance still needs a LAN comparison.
   A Mac downloaded archive
   can require approval in macOS security settings; it is not notarized.
+  The [Mac package guide](MACOS_PACKAGE.md) explains payload verification with
+  the system's `shasum`, individual runtime approvals and whole-folder updates.
   Spaces in the install folder are tested; colons in macOS library paths are
   rejected because the loader treats them as a library-list separator.
 - Linux records its dynamic library dependencies in `manifest.json`; it is
