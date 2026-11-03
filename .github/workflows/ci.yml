@@ -120,10 +120,12 @@ jobs:
         run: |
           set -o pipefail
           ./build/windows-segment/test_segment_worker_windows.exe "$(cygpath -w "$PWD/build/windows-segment/segment_node.exe")" "$(cygpath -w "$PWD/build/fixture")" remote-selftest "$(cygpath -w "$PWD/build/windows-segment/segment_chat.exe")" 2>&1 | tee -a build/windows-segment-evidence.log
+      - name: Prepare the bounded text-protocol fixture for console chats
+        run: python3 tests/integration/client_api_fixture.py build/fixture build/native-text-fixture
       - name: Approve allocations through the native keeper and retain resident workers
         run: |
           set -o pipefail
-          ./build/windows-segment/test_donor_windows.exe "$(cygpath -w "$PWD/build/windows-segment/lumabri.exe")" "$(cygpath -w "$PWD/build/fixture")" 2>&1 | tee -a build/windows-segment-evidence.log
+          ./build/windows-segment/test_donor_windows.exe "$(cygpath -w "$PWD/build/windows-segment/lumabri.exe")" "$(cygpath -w "$PWD/build/native-text-fixture/olmoe-tiny")" 2>&1 | tee -a build/windows-segment-evidence.log
       - uses: actions/checkout@v4
         with:
           ref: dcc1a52454f6ced188ac1eb173397e8e36ac0d51
@@ -138,7 +140,7 @@ jobs:
           set -o pipefail
           python3 tools/package_household.py --runtime-dir build/windows-segment --colibri-root ../colibri --output 'build/windows candidate'
           python3 tools/package_household.py --runtime-dir build/previous-windows-segment --runtime-repository ../previous-lumabri --colibri-root ../colibri --output 'build/previous windows candidate'
-          python3 tests/integration/windows_package_test.py --candidate 'build/windows candidate' --previous 'build/previous windows candidate' --driver build/windows-segment/test_requester_windows.exe --fixture build/fixture 2>&1 | tee -a build/windows-segment-evidence.log
+          python3 tests/integration/windows_package_test.py --candidate 'build/windows candidate' --previous 'build/previous windows candidate' --driver build/windows-segment/test_requester_windows.exe --fixture build/native-text-fixture/olmoe-tiny 2>&1 | tee -a build/windows-segment-evidence.log
           python3 tools/package_household.py --verify 'build/windows candidate'
           python3 tools/package_household.py --verify 'build/previous windows candidate'
           python3 -m zipfile -c build/lumabri-windows-x86_64-candidate.zip 'build/windows candidate'
