@@ -4,10 +4,10 @@
 #ifndef LUMABRI_PROBE_DEADLINE_H
 #define LUMABRI_PROBE_DEADLINE_H
 #include <math.h>
-#include <poll.h>
+#include "src/protocol/lumabri_socket.h"
 #include <pthread.h>
 #include <stdatomic.h>
-#include <sys/socket.h>
+
 #include <time.h>
 
 #define LMB_QUICK_PROBE_TOKENS 8u
@@ -16,14 +16,19 @@
 typedef struct {
     pthread_t thread;
     atomic_int stop, expired;
-    int started, fd;
+    int started;
+    LmbSocket fd;
     double until;
 } LmbProbeDeadline;
 
 static inline double lmb_probe_now(void) {
+#ifdef _WIN32
+    return GetTickCount64()/1000.;
+#else
     struct timespec t;
     if (clock_gettime(CLOCK_MONOTONIC, &t)) return -1;
     return (double)t.tv_sec + (double)t.tv_nsec * 1e-9;
+#endif
 }
 static void *lmb_probe_watch(void *arg) {
     LmbProbeDeadline *p = arg;
@@ -31,15 +36,23 @@ static void *lmb_probe_watch(void *arg) {
         double now = lmb_probe_now();
         if (now < 0 || now >= p->until) {
             atomic_store(&p->expired, 1);
-            (void)shutdown(p->fd, SHUT_RDWR);
+#ifdef _WIN32
+            (void)shutdown(p->fd,SD_BOTH);
+#else
+            (void)shutdown(p->fd,SHUT_RDWR);
+#endif
             break;
         }
-        (void)poll(NULL, 0, 10);
+#ifdef _WIN32
+        Sleep(10);
+#else
+        (void)poll(NULL,0,10);
+#endif
     }
     return NULL;
 }
-static inline int lmb_probe_start(LmbProbeDeadline *p, int fd, double seconds) {
-    if (!p || p->started || fd < 0 || !isfinite(seconds) || seconds <= 0 || seconds > 60) return -1;
+static inline int lmb_probe_start(LmbProbeDeadline *p, LmbSocket fd, double seconds) {
+    if (!p || p->started || fd == LMB_INVALID_SOCKET || !isfinite(seconds) || seconds <= 0 || seconds > 60) return -1;
     double now = lmb_probe_now();
     if (now < 0) return -1;
     p->fd = fd; p->until = now + seconds;

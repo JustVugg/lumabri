@@ -2,11 +2,7 @@
  * inventory is still authoritative and is checked again before offers. */
 #ifndef LUMABRI_CHECKPOINT_INVENTORY_H
 #define LUMABRI_CHECKPOINT_INVENTORY_H
-#include <dirent.h>
-#include <errno.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <sys/stat.h>
+#include "src/runtime/lumabri_source_file.h"
 #include "lumabri_content.h"
 
 typedef struct {
@@ -15,51 +11,46 @@ typedef struct {
     int has_weights;
 } LmbCheckpointInventory;
 
-typedef int (*LmbCheckpointVisitor)(const char *, const char *, const struct stat *, void *);
-
-static int lmb_checkpoint_walk(const char *root, const char *rel, unsigned depth,
-                                LmbCheckpointInventory *out, LmbCheckpointVisitor visit, void *arg) {
-    if (depth > 32) return -1;
-    char directory[1024];
-    int len = snprintf(directory, sizeof directory, "%s%s%s", root, *rel ? "/" : "", rel);
-    if (len < 0 || (size_t)len >= sizeof directory) return -1;
-    DIR *dir = opendir(directory);
-    if (!dir) return -1;
-    int rc = 0;
-    for (;;) {
-        errno = 0;
-        struct dirent *entry = readdir(dir);
-        if (!entry) { if (errno) rc = -1; break; }
-        const char *name = entry->d_name;
-        if (!strcmp(name, ".") || !strcmp(name, "..") ||
-            lmb_content_runtime_local_name(name)) continue;
-        char child[512], path[1024];
-        len = snprintf(child, sizeof child, "%s%s%s", rel, *rel ? "/" : "", name);
-        if (len < 0 || (size_t)len >= sizeof child) { rc = -1; break; }
-        len = snprintf(path, sizeof path, "%s/%s", root, child);
-        if (len < 0 || (size_t)len >= sizeof path) { rc = -1; break; }
-        struct stat link, st;
-        if (lstat(path, &link) || stat(path, &st)) { rc = -1; break; }
-        if (S_ISDIR(st.st_mode)) {
-            /* Weight-file symlinks (HF caches) work; directory symlinks may
-             * form cycles and are not accepted by this bounded preview. */
-            if (S_ISLNK(link.st_mode) || lmb_checkpoint_walk(root, child, depth + 1, out, visit, arg)) {
-                rc = -1; break;
-            }
-        } else if (S_ISREG(st.st_mode)) {
-            if (st.st_size < 0 || out->files == LMB_CONTENT_MAX_FILES ||
-                UINT64_MAX - out->bytes < (uint64_t)st.st_size) { rc = -1; break; }
-            out->files++;
-            out->bytes += (uint64_t)st.st_size;
-            if (visit && visit(root, child, &st, arg)) { rc = -1; break; }
-            const char *dot = strrchr(name, '.');
-            if (st.st_size >= 4096 && dot && (!strcmp(dot, ".safetensors") ||
-                !strcmp(dot, ".bin") || !strcmp(dot, ".gguf") || !strcmp(dot, ".coli")))
-                out->has_weights = 1;
-        }
+typedef int (*LmbCheckpointVisitor)(const char *,const char *,const LmbSourceStat *,void *);
+typedef struct {
+    const char *root,*rel;
+    unsigned depth;
+    LmbCheckpointInventory *out;
+    LmbCheckpointVisitor visit;
+    void *arg;
+} LmbCheckpointWalk;
+static int lmb_checkpoint_walk(const char *,const char *,unsigned,LmbCheckpointInventory *,LmbCheckpointVisitor,void *);
+static int lmb_checkpoint_entry(const char *name,void *context) {
+    LmbCheckpointWalk *w=context;
+    if (!strcmp(name,".") || !strcmp(name,"..") || lmb_content_runtime_local_name(name)) return 0;
+    char child[512],path[1024];
+    int n=snprintf(child,sizeof child,"%s%s%s",w->rel,*w->rel?"/":"",name);
+    if (n<0 || (size_t)n>=sizeof child) return -1;
+    n=snprintf(path,sizeof path,"%s/%s",w->root,child);
+    if (n<0 || (size_t)n>=sizeof path) return -1;
+    LmbSourceStat st;if (lmb_source_stat(path,&st)) return -1;
+    if (st.directory) {
+        /* Weight-file symlinks in HF caches remain valid on POSIX; directory
+         * aliases cannot introduce cycles into this bounded preview. */
+        return st.symlink ? -1 : lmb_checkpoint_walk(w->root,child,w->depth+1,w->out,w->visit,w->arg);
     }
-    closedir(dir);
-    return rc;
+    if (st.regular) {
+        if (w->out->files==LMB_CONTENT_MAX_FILES || UINT64_MAX-w->out->bytes<st.size) return -1;
+        w->out->files++;w->out->bytes+=st.size;
+        if (w->visit && w->visit(w->root,child,&st,w->arg)) return -1;
+        const char *dot=strrchr(name,'.');
+        if (st.size>=4096 && dot && (!strcmp(dot,".safetensors") || !strcmp(dot,".bin") ||
+            !strcmp(dot,".gguf") || !strcmp(dot,".coli"))) w->out->has_weights=1;
+    }
+    return 0;
+}
+static int lmb_checkpoint_walk(const char *root,const char *rel,unsigned depth,
+    LmbCheckpointInventory *out,LmbCheckpointVisitor visit,void *arg) {
+    if (depth>32) return -1;
+    char directory[1024];int n=snprintf(directory,sizeof directory,"%s%s%s",root,*rel?"/":"",rel);
+    if (n<0 || (size_t)n>=sizeof directory) return -1;
+    LmbCheckpointWalk w={root,rel,depth,out,visit,arg};
+    return lmb_source_list(directory,lmb_checkpoint_entry,&w);
 }
 
 static inline int lmb_checkpoint_inventory(const char *root, LmbCheckpointInventory *out) {

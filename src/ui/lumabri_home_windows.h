@@ -133,6 +133,177 @@ static void home_windows_create(HomeSettings *settings) {
     home_windows_close(&console);
 }
 
+static int home_windows_resident_chat(const LmbResidentPlan *p) {
+    LmbWindowsObservation observation={.plan=p,.source=LMB_CAL_SOURCE_SESSION};
+    int rc=chat_windows_run_observed(p->host,p->host_key,p->root,NULL,p->max_new,&observation);
+    if (rc) home_windows_message("Chat could not complete","The saved host is unavailable or rejected the request. Keep its donors sharing, or prepare another plan. Resident weights were not released.");
+    return rc;
+}
+static void home_windows_calibrate(const LmbResidentPlan *plan) {
+    LmbConsole console={0};if (home_windows_open(&console)) return;
+    ui_begin("measure resident model");ui_text(5,4,UI_TEXT,"Checking the approved host…");ui_present();
+    LmbWindowsTurn *turn=calloc(1,sizeof *turn);LmbWindowsObservation observation={.plan=plan,.source=LMB_CAL_SOURCE_PROBE};
+    HANDLE worker=NULL;int ok=0;char failure[256]="";
+    if (!turn) goto done;
+    InitializeCriticalSection(&turn->lock);turn->fd=LMB_INVALID_SOCKET;
+    turn->observation=&observation;turn->deadline_ms=(uint32_t)(LMB_QUICK_PROBE_SECONDS*1000);
+    turn->max_new=LMB_QUICK_PROBE_TOKENS;strcpy(turn->id,"1");
+    if (lmb_host_client_open(plan->host,NULL,plan->host_key,plan->root,&turn->fd,&turn->greeting) ||
+        turn->greeting.max_new<LMB_QUICK_PROBE_TOKENS ||
+        lmb_host_turn_payload(&turn->payload,&turn->greeting,"","Write a short greeting.")) goto done;
+    worker=CreateThread(NULL,0,chat_windows_worker,turn,0,NULL);if (!worker) goto done;
+    while (WaitForSingleObject(worker,0)==WAIT_TIMEOUT) {
+        ui_begin("measure resident model");ui_text(5,4,UI_TEXT,"Measuring the approved resident plan");
+        ui_text(9,4,UI_SAND,"At most 8 output tokens; generation stops after 20 seconds.");
+        ui_text(12,4,UI_MUTED,"No reload. This observation applies only to these computers and this workload.");
+        ui_footer("The full checkpoint must already be prepared in RAM.","Esc cancel");ui_present();
+        int resized=0,key=lmb_console_key(&console,75,&resized);
+        if (key==27 || key==3) {InterlockedExchange(&turn->cancelled,1);shutdown(turn->fd,SD_BOTH);}
+    }
+    ok=!turn->result && observation.saved;
+done:
+    if (worker) {WaitForSingleObject(worker,INFINITE);CloseHandle(worker);}
+    if (turn) {
+        if (turn->error[0]) snprintf(failure,sizeof failure,"%s",turn->error);
+        if (turn->fd!=LMB_INVALID_SOCKET) lmb_close(turn->fd);
+        DeleteCriticalSection(&turn->lock);free(turn->reply.p);free(turn->payload.p);free(turn);
+    }
+    home_windows_close(&console);
+    char detail[256];
+    if (ok) snprintf(detail,sizeof detail,"%.2f tok/s observed from %u generated tokens. The catalogue invalidates this value when the plan or workload changes.",
+        observation.seed.decode_tok_s,observation.seed.generated_tokens);
+    else snprintf(detail,sizeof detail,"No valid speed saved. %.180s Approved weights remain in RAM.",failure[0] ? failure : "The host may be busy, timed out, or the execution inventory changed.");
+    home_windows_message(ok ? "Measurement saved" : "Measurement unavailable",detail);
+}
+
+/* Reuse an exact approved placement for a short probe. A live connection
+ * still has to authenticate its pinned model root before receiving text. */
+static int home_windows_matching_resident(const LmbTuiState *st,int index,LmbResidentPlan *out) {
+    if (index<0 || index>=st->nmodels) return -1;
+    LmbCalKey wanted;
+    if (catalog_calibration_key(st,&st->models[index],1,"comparison",&wanted)) return -1;
+    LmbResidentPlan *plans=calloc(64,sizeof *plans);if (!plans) return -1;
+    size_t count=home_resident_library_list(st->tracker,plans,64);int found=-1;
+    for (size_t i=0;i<count;i++) {
+        LmbCalKey actual;if (home_resident_observation_key(&plans[i],&actual)) continue;
+        actual.adapter_abi=1;strcpy(actual.numeric_class,"comparison");
+        memset(actual.workload,0,sizeof actual.workload);memset(wanted.workload,0,sizeof wanted.workload);
+        if (lmb_cal_matches(&actual,&wanted)) {*out=plans[i];found=0;break;}
+    }
+    free(plans);return found;
+}
+
+static void home_windows_residents(const HomeSettings *settings) {
+    LmbResidentPlan *plans=calloc(64,sizeof *plans);if (!plans) return;
+    size_t count=home_resident_library_list(settings->tracker,plans,64);
+    if (!count) {free(plans);home_windows_message("No saved resident models","Choose Explore models to prepare a checkpoint. Approved models appear here after the entire chain is ready.");return;}
+    LmbConsole console={0};if (home_windows_open(&console)) {free(plans);return;}
+    int choice=0,action=-1,calibrate=0;
+    for (;;) {
+        ui_begin("resident models");ui_text(5,4,UI_TEXT,"Continue with an approved model");
+        int rows=(ui_h-12)/3;if (rows<1) rows=1;
+        int first=choice>=rows ? choice-rows+1 : 0;
+        for (int i=first;i<(int)count && i<first+rows;i++) {
+            char detail[160];snprintf(detail,sizeof detail,"%u computer(s) · %u session slot(s) · host %.64s",
+                plans[i].execution.count,plans[i].sessions ? plans[i].sessions : 1,plans[i].host);
+            ui_item(7+(i-first)*3,i==choice,plans[i].model,detail);
+        }
+        ui_footer("The host's identity and checkpoint are checked again before sending text.","↑ ↓ move   Enter chat   C measure   Esc back");ui_present();
+        int resized=0,key=lmb_console_key(&console,100,&resized);
+        if (key==27 || key==3) break;
+        if (key=='j') choice=(choice+1)%(int)count;
+        if (key=='k') choice=(choice+(int)count-1)%(int)count;
+        if (key=='c') {action=choice;calibrate=1;break;}
+        if (key=='\r' || key=='\n') {action=choice;break;}
+    }
+    home_windows_close(&console);
+    if (action>=0) {if (calibrate) home_windows_calibrate(&plans[action]);else home_windows_resident_chat(&plans[action]);}
+    free(plans);
+}
+
+static void home_windows_prepare_wait(const HomeServiceSnapshot *expected,int calibrate) {
+    LmbConsole console={0};if (home_windows_open(&console)) return;
+    HomeServiceSnapshot status=*expected;int complete=0;
+    for (;;) {
+        HomeServiceSnapshot next;
+        int live=!home_service_query("prepare",HOME_SVC_STATUS,NULL,&next);
+        if (!live && home_service_record("prepare",&next)) break;
+        if (memcmp(next.instance,expected->instance,32)) break;
+        status=next;
+        if (status.state!=HOME_SVC_RUNNING) {complete=1;break;}
+        ui_begin("prepare model");ui_text(5,4,UI_TEXT,status.name);
+        int width=ui_w-8;if (width>150) width=150;if (width<10) width=10;
+        for (size_t at=0;at<strlen(status.detail) && at<(size_t)width*4;at+=(size_t)width) {
+            char line[160];snprintf(line,sizeof line,"%.*s",width,status.detail+at);ui_text(8+(int)(at/(size_t)width),4,UI_SAND,line);
+        }
+        HomeServiceSnapshot donor={0};int local_pending=!home_service_query("donor",HOME_SVC_STATUS,NULL,&donor) &&
+            donor.phase==LMB_HOME_PENDING && donor.has_offer;
+        int belongs=0;
+        for (uint32_t i=0;i<status.preparation_result_count;i++)
+            if (!memcmp(donor.offer.id,status.preparation_results[i].allocation,32)) belongs=1;
+        local_pending=local_pending && belongs;
+        if (local_pending) {
+            ui_text(15,4,UI_TEXT,"This computer needs your approval too.");
+            ui_printf(17,4,UI_SAND,"Layers %u–%u · %.2f GB RAM · %s",donor.offer.begin,donor.offer.end-1,
+                donor.offer.ram_bytes/1e9,donor.offer.runs_edge ? "hosts chat" : "runs a segment");
+            ui_text(19,4,UI_MUTED,"A accepts this allocation. D declines it.");
+        }
+        ui_footer("Chat opens after every donor approves and the entire chain is ready.","Esc detach   X cancel preparation");ui_present();
+        int resized=0,key=lmb_console_key(&console,100,&resized);
+        if (key==27 || key==3) break;
+        if (key=='x') {HomeServiceSnapshot reply;(void)home_service_query("prepare",HOME_SVC_CANCEL,&status,&reply);}
+        if (local_pending && (key=='a' || key=='d')) {HomeServiceSnapshot reply;(void)home_service_query("donor",key=='a' ? HOME_SVC_ACCEPT : HOME_SVC_DECLINE,&donor,&reply);}
+    }
+    home_windows_close(&console);
+    if (!complete) return;
+    if (status.state!=HOME_SVC_DONE || !status.preparation_result_count) {
+        home_windows_message("Preparation did not complete",status.detail);return;
+    }
+    if (status.preparation_result_count>1) {
+        home_windows_message("Selected models ready","Open Resident models to start private conversations. Every approved model has a separate reservation.");return;
+    }
+    LmbResidentPlan saved;
+    if (status.preparation_results[0].ready_observed &&
+        !home_resident_library_find(status.tracker,status.preparation_results[0].allocation,&saved)) {
+        if (calibrate) home_windows_calibrate(&saved);else home_windows_resident_chat(&saved);
+    } else home_windows_message("Model prepared","The model reached READY, but its saved plan could not be found. Open Resident models; do not repeat preparation blindly.");
+
+}
+
+static void home_windows_explore(HomeSettings *settings) {
+    HomeServiceSnapshot running;
+    int pending=home_prepare_idle_windows(&running);
+    if (pending>0) {home_windows_prepare_wait(&running,0);return;}
+    if (pending<0) {home_windows_message("Preparation status unavailable","The last operation has not closed yet. Try again shortly; no new plan was started.");return;}
+    if ((!settings->tracker[0] || !settings->token[0]) && home_windows_join(settings)) return;
+    if (home_settings_activate_windows(settings)) return;
+    /* Make local capacity available for selection, without approving a model. */
+    char *donor_args[]={"--join",settings->tracker,"--ram-gb",settings->ram,"--headless"};
+    if (home_donor_entry_windows(5,donor_args,0)) {
+        home_windows_message("Local sharing unavailable","Other donors may still be used. This computer will not load weights without a working donor and your approval.");
+    }
+    LmbTuiState *st=calloc(1,sizeof *st);if (!st) return;
+    snprintf(st->root,sizeof st->root,"%s",settings->models);snprintf(st->disk,sizeof st->disk,"%s",settings->models);
+    snprintf(st->tracker,sizeof st->tracker,"%s",settings->tracker);
+    st->context=(uint32_t)strtoul(settings->context,NULL,10);st->sessions=(uint32_t)strtoul(settings->sessions,NULL,10);st->max_new=256;
+    st->refresh=catalog_refresh_windows;catalog_refresh_windows(st,NULL);
+    for (;;) {
+        int action=lmb_tui_run(st,0,NULL);
+        if (action!=LMB_TUI_REQUEST_CHAT && action!=LMB_TUI_REQUEST_CALIBRATION && action!=LMB_TUI_REQUEST_JOINT) break;
+        int calibrate=action==LMB_TUI_REQUEST_CALIBRATION;
+        LmbResidentPlan existing;
+        if (calibrate && !home_windows_matching_resident(st,st->action_model,&existing)) {
+            home_windows_calibrate(&existing);catalog_refresh_windows(st,NULL);continue;
+        }
+        HomeServiceSnapshot created;
+        if (home_prepare_start_windows(st,action==LMB_TUI_REQUEST_JOINT ? -1 : st->action_model,&created))
+            home_windows_message("Plan could not start","Refresh the selected computers and checkpoint. Another preparation may already be running; no new approval was granted.");
+        else home_windows_prepare_wait(&created,calibrate);
+        catalog_refresh_windows(st,NULL);
+    }
+    free(st);
+}
+
 static int home_windows_run(int share) {
     HomeServiceSnapshot live;
     if (share && !home_service_query("donor",HOME_SVC_STATUS,NULL,&live)) return lmb_donor_ui_windows(live.tracker);
@@ -151,18 +322,20 @@ static int home_windows_run(int share) {
         for (;;) {
             ui_begin("your workspace");
             ui_text(5,5,UI_TEXT,"Your computers. One private household.");
-            static const char *titles[]={"Share resources","Join a household","Settings","Stop local services","Create a household","Exit workspace"};
+            static const char *titles[]={"Share resources","Join a household","Settings","Stop local services","Create a household","Exit workspace","Explore models","Resident models"};
             static const char *details[]={"Review requests; keep approved models in RAM.","Connect using the address and key from its owner.",
                 "Model folder and maximum RAM to share.","Review before stopping sharing and releasing local models.",
-                "Start a private household here, or view its pairing details.","Background services keep running."};
-            for (int i=0;i<6;i++) ui_item(7+i*3,i==choice,titles[i],details[i]);
+                "Start a private household here, or view its pairing details.","Background services keep running.","Choose a checkpoint and the computers that will run it.","Chat with models already prepared and approved."};
+            int rows=(ui_h-11)/3;if (rows<1) rows=1;
+            int first=choice>=rows ? choice-rows+1 : 0;
+            for (int i=first;i<8 && i<first+rows;i++) ui_item(7+(i-first)*3,i==choice,titles[i],details[i]);
             ui_footer(settings.tracker[0] ? settings.tracker : "Create or join your household to get started.","↑ ↓ move   Enter select   Esc exit");
             int compact=ui_w<60 || ui_h<28;
             if (compact) {ui_begin("your workspace");ui_text(5,4,UI_SAND,"Resize to at least 60 × 28. Esc exits.");}
             ui_present();int resized=0,key=lmb_console_key(&console,100,&resized);
             if (key==27 || key==3) {action=5;break;}
-            if (key=='k') choice=(choice+5)%6;
-            if (key=='j') choice=(choice+1)%6;
+            if (key=='k') choice=(choice+7)%8;
+            if (key=='j') choice=(choice+1)%8;
             if (!compact && (key=='\r' || key=='\n')) {action=choice;break;}
         }
         home_windows_close(&console);
@@ -171,6 +344,8 @@ static int home_windows_run(int share) {
         else if (action==1) (void)home_windows_join(&settings);
         else if (action==2) home_windows_settings(&settings);
         else if (action==4) home_windows_create(&settings);
+        else if (action==6) home_windows_explore(&settings);
+        else if (action==7) home_windows_residents(&settings);
         else if (action==3) {
             char confirm[32]="";
             if (!home_windows_field("Type stop to release all local models",confirm,sizeof confirm,0) && !strcmp(confirm,"stop")) {

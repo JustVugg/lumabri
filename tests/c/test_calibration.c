@@ -8,6 +8,7 @@
 #include <string.h>
 #include "lumabri_calibration_store.h"
 #include "lumabri_checkpoint_identity.h"
+#include "lumabri_runtime_identity.h"
 #include "src/planner/lumabri_stage_placement.h"
 #include "src/planner/lumabri_turn_observation.h"
 

@@ -147,6 +147,15 @@ check-warnings:
 
 SECURE_DEPS = lumabri_secure.h lumabri_crypto.h src/protocol/lumabri_secure_channel.h $(SIGN_DEPS) $(PROTO_DEPS)
 HOME_NET_DEPS = lumabri_home_net.h lumabri_home_discovery.h lumabri_platform.h lumabri_wakeup.h lumabri_runtime_probe.h src/runtime/lumabri_process_probe_windows.h src/runtime/lumabri_resident_plan.h
+# Shared preparation/catalogue code is included by both the frontend and
+# lifecycle gates. Header edits must invalidate every embedding build.
+REQUESTER_SHARED_DEPS = src/planner/lumabri_catalogue_data.h src/planner/lumabri_calibration_key.h \
+ src/planner/lumabri_portfolio_snapshot.h src/runtime/lumabri_joint_review.h \
+ src/runtime/lumabri_home_request_plan.h src/runtime/lumabri_home_session.h \
+ src/runtime/lumabri_source_inspect.h src/runtime/lumabri_source_file.h \
+ src/runtime/lumabri_calibration_codec.h src/runtime/lumabri_resident_plan_codec.h
+lumabri test_chat_ui test_host_session_pool test_host_drain test-home-monitor: $(REQUESTER_SHARED_DEPS)
+test_calibration test_content_filter test_planner_io: src/runtime/lumabri_source_file.h src/runtime/lumabri_calibration_codec.h
 MACHINE_SRC = lumabri_machine.c
 MACHINE_DEPS = lumabri_machine.h $(MACHINE_SRC) src/runtime/lumabri_container_limits.h
 lumabri test_chat_ui test_host_session_pool test-home-monitor test_calibration: src/planner/lumabri_turn_observation.h

@@ -23,6 +23,7 @@
 #include "lumabri_sign.h"
 #include "lumabri_secure.h"
 #include "lumabri_home_net.h"
+#include "lumabri_ready.h"
 #include "src/runtime/lumabri_source_file.h"
 #include "src/runtime/lumabri_source_match.h"
 
@@ -1083,6 +1084,12 @@ static int maintainer_main(int argc, char **argv) {
 #ifdef _WIN32
     for (char *p=g.root;*p;p++) if (*p=='\\') *p='/';
 #endif
+    /* Import the reserved socket before potentially long checkpoint hashing.
+     * This readiness acknowledges process/listener ownership only; the signed
+     * inventory still gates every allocation and model readiness. */
+    LmbSocket lfd=lmb_home_take_listener(port);
+    if (lfd==LMB_INVALID_SOCKET) {perror("[maintainer] listen");return 1;}
+    if (lmb_ready_notify()) {lmb_close(lfd);return 1;}
     size_t rl = strlen(g.root);
     while (rl > 1 && g.root[rl - 1] == '/') g.root[--rl] = 0;
     if (!g.name[0]) snprintf(g.name, sizeof g.name, "peer-%d", port);
@@ -1176,8 +1183,6 @@ static int maintainer_main(int argc, char **argv) {
             return 1;
         }
     }
-    LmbSocket lfd = lmb_home_take_listener(port);
-    if (lfd == LMB_INVALID_SOCKET) { perror("[maintainer] listen"); return 1; }
     pthread_t t;
     if (g.tracker[0]) { pthread_create(&t, NULL, control_thread, NULL); pthread_detach(t); }
     pthread_create(&t, NULL, stats_thread, NULL); pthread_detach(t);

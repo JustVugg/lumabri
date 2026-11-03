@@ -343,3 +343,31 @@ Native tests cover the actual console, encrypted cancellation and interrupted
 streams, and two turns against a real reduced OLMoE host with no further weight
 reads. Automatic model preparation from the native Windows catalogue and the
 complete Windows package are not delivered by this client command.
+
+### Native Windows catalogue preparation
+
+The native workspace can select computers, review a resident model plan, and
+start a persistent preparation keeper. Every participating donor must approve;
+local approval is available in the preparation screen. Closing the workspace
+leaves a pending preparation or READY model under service ownership. Reopening
+Explore models reconnects to the operation instead of starting a duplicate.
+
+The catalogue also reviews a joint plan for selected models. Each model gets
+its own approval and reservation; this is a sequence, not an atomic transaction.
+If a later model is refused or cancelled, models already READY remain in Resident
+models. Cancelling preparation does not unload an earlier completed allocation.
+
+Resident models opens a new private conversation without downloading or loading
+weights again. Completed turns update the common provenance-bound calibration
+record. **C measure** runs at most eight output tokens with a 20-second generation
+deadline on that same resident plan. Model, executable, hardware, runtime,
+interval, context, session and managed-workload changes invalidate the saved
+number. A short observation does not certify concurrent serving capacity.
+
+`test_requester_windows.exe` drives the production native console, tracker,
+signed source, donor and Edge through this path using a reduced OLMoE checkpoint.
+It covers pending-operation detach/reopen, explicit approval, retained workers,
+manager restart, conversation isolation, calibration, cancellation and joint
+preparation. It requires complete inference binaries from
+`tools/build_windows_segment.py`, not `--only contracts` alone. The final Windows
+package and physical-cluster acceptance are separate from this developer gate.

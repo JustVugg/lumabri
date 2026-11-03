@@ -4,7 +4,7 @@
 #ifndef LUMABRI_CHECKPOINT_IDENTITY_H
 #define LUMABRI_CHECKPOINT_IDENTITY_H
 #include "lumabri_checkpoint_inventory.h"
-#include "lumabri_runtime_identity.h"
+#include "lumabri_sha.h"
 
 typedef struct {
     LmbModelItem items[LMB_CONTENT_MAX_FILES];
@@ -12,22 +12,26 @@ typedef struct {
 } LmbCheckpointHashes;
 
 static LMB_MAYBE_UNUSED int lmb_checkpoint_cached_hash(const char *root, const char *rel,
-    const struct stat *observed, void *arg) {
+    const LmbSourceStat *observed, void *arg) {
     LmbCheckpointHashes *h = arg;
     char path[1600];
     int n = snprintf(path, sizeof path, "%s/%s", root, rel);
     if (n < 0 || (size_t)n >= sizeof path || h->count >= LMB_CONTENT_MAX_FILES) return -1;
-    int weight = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    int weight = lmb_source_open(path,O_RDONLY);
     if (weight < 0) return -1;
-    struct stat before, after;
-    if (fstat(weight, &before) || !S_ISREG(before.st_mode) || before.st_size < 0 ||
-        !lmb_stat_same(observed, &before)) { close(weight); return -1; }
-    uint64_t chunks = ((uint64_t)before.st_size + (1u << 20) - 1) >> 20;
-    if (chunks > ((64u << 20) - h->hash_bytes) / 32) { close(weight); return -1; }
+    LmbSourceStat before, after;
+    if (lmb_source_fstat(weight, &before) || !before.regular ||
+        !lmb_source_same(observed, &before)) { lmb_source_close(weight); return -1; }
+    uint64_t chunks = ((uint64_t)before.size + (1u << 20) - 1) >> 20;
+    if (chunks > ((64u << 20) - h->hash_bytes) / 32) { lmb_source_close(weight); return -1; }
     n = snprintf(path, sizeof path, "%s/.lumabri_hashes/%s.sha", root, rel);
-    if (n < 0 || (size_t)n >= sizeof path) { close(weight); return -1; }
-    int fd = open(path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
-    if (fd < 0) { close(weight); return -1; }
+    if (n < 0 || (size_t)n >= sizeof path) { lmb_source_close(weight); return -1; }
+    #ifdef _WIN32
+    int fd=lmb_source_open(path,O_RDONLY);
+#else
+    int fd=lmb_source_open(path,O_RDONLY|O_NOFOLLOW|O_NONBLOCK);
+#endif
+    if (fd < 0) { lmb_source_close(weight); return -1; }
     /* This is the local LSH1 sidecar written by maintainer.c, not a new wire
      * format. All supported source platforms use its same fixed layout. */
     struct {
@@ -36,25 +40,25 @@ static LMB_MAYBE_UNUSED int lmb_checkpoint_cached_hash(const char *root, const c
         uint32_t nh, reserved;
     } hdr;
     _Static_assert(sizeof hdr == 40, "unexpected LSH1 sidecar layout");
-    struct stat sidecar;
-    int valid = !fstat(fd, &sidecar) && S_ISREG(sidecar.st_mode) &&
-        sidecar.st_size == (off_t)(sizeof hdr + chunks * 32);
+    LmbSourceStat sidecar;
+    int valid = !lmb_source_fstat(fd, &sidecar) && sidecar.regular &&
+        sidecar.size == sizeof hdr + chunks * 32;
     size_t bytes = sizeof hdr + (size_t)chunks * 32, at = 0;
     uint8_t *data = valid ? malloc(bytes) : NULL;
     if (data) while (at < bytes) {
-        ssize_t got = read(fd, data + at, bytes - at);
+        ptrdiff_t got = lmb_source_pread(fd, data + at, bytes - at,at);
         if (got < 0 && errno == EINTR) continue;
         if (got <= 0) break;
         at += (size_t)got;
     }
-    close(fd);
-    valid = data && at == bytes && !fstat(weight, &after) && lmb_stat_same(&before, &after);
-    close(weight);
+    lmb_source_close(fd);
+    valid = data && at == bytes && !lmb_source_fstat(weight, &after) && lmb_source_same(&before, &after);
+    lmb_source_close(weight);
     if (!valid) { free(data); return -1; }
     memcpy(&hdr, data, sizeof hdr);
     if (hdr.magic != 0x3148534Cu || hdr.version != 1 || hdr.reserved ||
-        hdr.size != (uint64_t)before.st_size || hdr.nh != chunks ||
-        hdr.mtime_ns != lmb_stat_mtime_ns(&before) || hdr.ctime_ns != lmb_stat_ctime_ns(&before)) {
+        hdr.size != (uint64_t)before.size || hdr.nh != chunks ||
+        hdr.mtime_ns != before.mtime_ns || hdr.ctime_ns != before.ctime_ns) {
         free(data); return -1;
     }
     char *name = strdup(rel);

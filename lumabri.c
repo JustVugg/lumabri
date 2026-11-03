@@ -1148,85 +1148,7 @@ static int cmd_serve(int argc, char **argv) {
 
 /* ---- swarm inspection --------------------------------------------------- */
 
-typedef struct {
-    char peers[8][64]; int npeers;
-    uint64_t total_bytes, metadata_bytes; int nfiles;
-    char config_peer[64];
-    char model_type[64];
-} Swarm;
-
-static int swarm_inspect(const char *tracker, const char *model, Swarm *s) {
-    memset(s, 0, sizeof *s);
-    LmbMsg m = {0};
-    LmbBuf fb = {0};
-    if (model && model[0]) lmb_buf_str(&fb, model);
-    int rc = lmb_request(tracker, LMB_PLACEMENT, fb.p, (uint32_t)fb.len, &m);
-    free(fb.p);
-    if (rc || m.op != LMB_PLACEMENT_R) return -1;
-    LmbCur c = { m.body, m.body_len, 0 };
-    uint32_t n = 0;
-    if (lmb_cur_u32(&c, &n)) { lmb_msg_free(&m); return -1; }
-    for (uint32_t i = 0; i < n; i++) {
-        char rel[LMB_PATH_MAX], addr[64];
-        uint64_t size; uint16_t np;
-        if (lmb_cur_str(&c, rel, sizeof rel) || lmb_cur_u64(&c, &size) ||
-            lmb_cur_u16(&c, &np)) { lmb_msg_free(&m); return -1; }
-        if (UINT64_MAX - s->total_bytes < size) { lmb_msg_free(&m); return -1; }
-        s->nfiles++; s->total_bytes += size;
-        size_t rel_len = strlen(rel);
-        if (rel_len < 12 || strcmp(rel + rel_len - 12, ".safetensors"))
-            s->metadata_bytes += size;
-        int is_cfg = !strcmp(rel, "config.json");
-        for (uint16_t p = 0; p < np; p++) {
-            if (lmb_cur_str(&c, addr, sizeof addr)) { lmb_msg_free(&m); return -1; }
-            if (is_cfg && !s->config_peer[0])
-                snprintf(s->config_peer, sizeof s->config_peer, "%s", addr);
-            int seen = 0;
-            for (int k = 0; k < s->npeers; k++) if (!strcmp(s->peers[k], addr)) seen = 1;
-            if (!seen && s->npeers < 8)
-                snprintf(s->peers[s->npeers++], 64, "%s", addr);
-        }
-    }
-    lmb_msg_free(&m);
-    if (!s->nfiles || !s->config_peer[0]) return -1;
-
-    /* config.json: direct from the peer, else relayed through the tracker
-     * (the peer may be behind a NAT and reachable only outbound) */
-    LmbMsg r = {0};
-    int fd = lmb_connect_ms(s->config_peer, 3000);
-    if (fd >= 0 && lmb_auth(fd)) { close(fd); fd = -1; }
-    if (fd >= 0) {
-        LmbBuf b = {0};
-        lmb_buf_str(&b, "config.json"); lmb_buf_u64(&b, 0); lmb_buf_u32(&b, 1 << 20);
-        rc = lmb_send(fd, LMB_READ, b.p, (uint32_t)b.len, NULL, 0);
-        free(b.p);
-        if (rc == 0) rc = lmb_recv(fd, &r);
-        close(fd);
-    } else rc = -1;
-    if (rc || r.op != LMB_READ_R || !r.pay_len) {
-        lmb_msg_free(&r);
-        memset(&r, 0, sizeof r);
-        LmbBuf b = {0};
-        lmb_buf_str(&b, model ? model : "");
-        lmb_buf_str(&b, "config.json");
-        lmb_buf_u64(&b, 0); lmb_buf_u32(&b, 1 << 20);
-        rc = lmb_request(tracker, LMB_RREAD, b.p, (uint32_t)b.len, &r);
-        free(b.p);
-        if (rc || r.op != LMB_RREAD_R || !r.pay_len) { lmb_msg_free(&r); return -1; }
-    }
-    /* the payload is not NUL-terminated: parse a terminated copy, so a
-     * truncated config can never send strchr past the allocation */
-    char *cfg = malloc((size_t)r.pay_len + 1);
-    if (cfg) {
-        memcpy(cfg, r.pay, r.pay_len);
-        cfg[r.pay_len] = 0;
-        (void)lmb_json_string(cfg, "model_type", s->model_type,
-                              sizeof s->model_type);
-        free(cfg);
-    }
-    lmb_msg_free(&r);
-    return 0;
-}
+#include "src/runtime/lumabri_source_inspect.h"
 
 typedef struct {
     char model[64];
@@ -4794,122 +4716,7 @@ static int cmd_peer_key(int argc, char **argv) {
 
 #include "lumabri_checkpoint_inventory.h"
 
-typedef struct {
-    char dir[512];
-    char name[64];
-    LmbModelShape shape;
-    int has_weights;
-    uint64_t checkpoint_bytes;
-    int inventory_ok;
-} CatalogEntry;
-
-static int catalog_scan(const char *root, CatalogEntry *out, int cap) {
-    DIR *d = opendir(root);
-    if (!d) return 0;
-    int n = 0;
-    struct dirent *e;
-    while ((e = readdir(d)) && n < cap) {
-        if (e->d_name[0] == '.') continue;
-        char path[832];
-        snprintf(path, sizeof path, "%s/%s", root, e->d_name);
-        char cfg[960];
-        snprintf(cfg, sizeof cfg, "%s/config.json", path);
-        if (access(cfg, R_OK)) continue;
-        if (lmb_shape_from_config(path, &out[n].shape)) continue;
-        snprintf(out[n].dir, sizeof out[n].dir, "%.511s", path);
-        snprintf(out[n].name, sizeof out[n].name, "%.63s", e->d_name);
-        LmbCheckpointInventory inventory;
-        out[n].inventory_ok = !lmb_checkpoint_inventory(path, &inventory);
-        out[n].has_weights = inventory.has_weights;
-        out[n].checkpoint_bytes = inventory.bytes;
-        n++;
-    }
-    closedir(d);
-    return n;
-}
-
-/* This machine as a planner node. The reserve is the governor's, so the
- * catalogue never plans into memory the governor would refuse to give. */
-static void catalog_self(LmbClusterNode *n, LmbMachineProfile *profile,
-                          const char *disk) {
-    LmbMachineProfile p;
-    memset(n, 0, sizeof *n);
-    if (profile->logical_cpus) {
-        p = *profile;
-        lmb_machine_refresh_resources(&p, disk);
-    } else if (lmb_machine_probe(&p, disk, NULL)) return;
-    *profile = p;
-    snprintf(n->name, sizeof n->name, "%s", p.hostname);
-    uint64_t reserve = lmb_machine_ram_reserve();
-    n->ram_budget_bytes = p.ram_available_bytes > reserve
-                        ? p.ram_available_bytes - reserve : 0;
-    n->vram_budget_bytes = p.vram_available_bytes;
-    n->disk_read_bps = p.disk_read_bps;
-    /* TUI compile flags and a detected device are not an adapter execution
-     * test. The resident household contract is currently CPU-only. */
-    n->gpu_backends = 0;
-    n->threads = p.logical_cpus;
-    n->has_checkpoint = 0;      /* set per catalogue entry, never globally */
-}
-
-static void inventory_id_text(const uint8_t id[32], char out[65]) {
-    for (size_t i = 0; i < 32; i++) snprintf(out + i * 2, 3, "%02x", id[i]);
-}
-
-static int catalog_inventory(LmbTuiState *st) {
-    memset(st->nodes, 0, sizeof st->nodes);
-    memset(st->identities, 0, sizeof st->identities);
-    memset(st->runtime_ids, 0, sizeof st->runtime_ids);
-    memset(st->ages_ms, 0, sizeof st->ages_ms);
-    memset(st->facts, 0, sizeof st->facts);
-    memset(st->workloads, 0, sizeof st->workloads);
-    catalog_self(&st->nodes[0], &st->profiles[0], st->disk[0] ? st->disk : ".");
-    st->facts[0] = lmb_resource_facts_local(st->profiles[0].logical_cpus ? st->profiles[0].load_one : -1);
-    st->nnodes = 1;
-    st->inventory_ok = 1;
-    if (!st->tracker[0]) return 0;
-    char path[1024]; uint8_t sk[64], pk[32];
-    if (lmb_peer_identity(lmb_peer_key_path(path, sizeof path), sk, pk)) {
-        st->inventory_ok = 0; return -1;
-    }
-    memset(sk, 0, sizeof sk);
-    inventory_id_text(pk, st->identities[0]);
-    LmbMachineReport reports[LMB_INVENTORY_MAX];
-    uint32_t n = 0;
-    if (lmb_inventory_fetch(st->tracker, reports, &n)) {
-        st->inventory_ok = 0; return -1;
-    }
-    for (uint32_t i = 0; i < n; i++) {
-        LmbMachineReport *r = &reports[i];
-        uint32_t at;
-        if (!memcmp(pk, r->identity, 32)) at = 0;
-        else {
-            if (st->nnodes == LMB_CLUSTER_MAX_NODES) {
-                st->nnodes = 1; st->inventory_ok = 0; return -1;
-            }
-            at = st->nnodes++;
-        }
-        LmbClusterNode *node = &st->nodes[at];
-        snprintf(node->name, sizeof node->name, "%s", r->machine.hostname);
-        snprintf(node->addr, sizeof node->addr, "%s", r->control_addr);
-        node->ram_budget_bytes = r->ram_budget_bytes;
-        node->roles = r->roles;
-        node->vram_budget_bytes = r->machine.vram_available_bytes;
-        node->threads = r->machine.logical_cpus;
-        if (r->runtime_threads && node->threads > r->runtime_threads) node->threads = r->runtime_threads;
-        snprintf(st->runtime_ids[at], sizeof st->runtime_ids[at], "%s", r->runtime_id);
-        /* Resource reporting is not executable Segment capability. No remote
-         * card is promoted to a supported backend by an inventory advert. */
-        node->gpu_backends = 0;
-        node->disk_read_bps = r->machine.disk_read_bps;
-        st->profiles[at] = r->machine;
-        st->facts[at] = r->facts;
-        st->workloads[at] = r->workload;
-        st->ages_ms[at] = r->age_ms;
-        inventory_id_text(r->identity, st->identities[at]);
-    }
-    return 0;
-}
+#include "src/planner/lumabri_catalogue_data.h"
 
 static int catalog_calibration_dir(char out[1200]) {
     const char *home = getenv("HOME");
@@ -4918,80 +4725,7 @@ static int catalog_calibration_dir(char out[1200]) {
 
 #include "src/planner/lumabri_stage_placement.h"
 
-static void catalog_hardware_id(const LmbMachineProfile *p, const char *address, char out[65]) {
-    LmbSha sha; uint8_t digest[32]; lmb_sha_init(&sha);
-    const char *fields[] = {p->os, p->arch, p->cpu_model, p->isa, address};
-    for (unsigned i = 0; i < sizeof fields / sizeof *fields; i++)
-        lmb_sha_update(&sha, fields[i], strlen(fields[i]) + 1);
-    lmb_sha_le32(&sha, p->logical_cpus); lmb_sha_le32(&sha, p->physical_cores);
-    lmb_sha_le32(&sha, p->numa_nodes); lmb_sha_le64(&sha, p->ram_total_bytes);
-    lmb_sha_le32(&sha, p->gpu_count); lmb_sha_le64(&sha, p->vram_total_bytes);
-    lmb_sha_final(&sha, digest); lmb_hex(out, digest, sizeof digest);
-}
-
-static int catalog_calibration_key(const LmbTuiState *st, const LmbTuiModel *m,
-    uint32_t abi, const char *numeric, LmbCalKey *key) {
-    memset(key, 0, sizeof *key);
-    if (!m->planned || m->plan.state != LMB_PLAN_RESIDENT || !m->content_id[0] ||
-        !st->build_id[0] || !m->plan.nslices || m->plan.nslices > LMB_CAL_NODES_MAX) return -1;
-    snprintf(key->model_root, sizeof key->model_root, "%s", m->content_id);
-    snprintf(key->adapter, sizeof key->adapter, "%s", m->shape.segment_id);
-    snprintf(key->build_id, sizeof key->build_id, "%s", st->build_id);
-    snprintf(key->plan_kind, sizeof key->plan_kind, "%s", m->plan.hybrid ? "hybrid" : "segment");
-    snprintf(key->numeric_class, sizeof key->numeric_class, "%s", numeric ? numeric : "");
-    key->adapter_abi = abi; key->goal = m->plan.goal;
-    key->context = st->context; key->sessions = st->sessions; key->nodes = m->plan.nslices;
-    int edge = 0;
-    for (uint32_t i = 0; i < key->nodes; i++) {
-        const LmbSlice *slice = &m->plan.slices[i]; uint32_t n = slice->node;
-        if (n >= st->nnodes || !st->identities[n][0] || !st->runtime_ids[n][0]) return -1;
-        if (n == m->plan.edge_node) { key->edge_node = i; edge = 1; }
-        snprintf(key->node_id[i], sizeof key->node_id[i], "%s", st->identities[n]);
-        snprintf(key->node_build_id[i], sizeof key->node_build_id[i], "%s", st->runtime_ids[n]);
-        snprintf(key->node_backend[i], sizeof key->node_backend[i], "cpu");
-        catalog_hardware_id(&st->profiles[n], st->nodes[n].addr, key->node_hardware_id[i]);
-        key->layer_begin[i] = slice->layer_begin; key->layer_end[i] = slice->layer_end;
-        key->threads[i] = st->nodes[n].threads > 256 ? 256 : st->nodes[n].threads;
-        key->workload[i] = st->workloads[n];
-        key->workload[i].active = key->workload[i].queued = 0;
-    }
-    /* ABI/numeric may be unknown until the real Edge greeting. All other
-     * fields must already be bound; the writer validates the completed key. */
-    return edge ? 0 : -1;
-}
-
-/* Missing leased inventory is not evidence of a changed executable. A loaded
- * donor can briefly disappear while its worker reconnects. Never substitute a
- * new identity: retry absence, but reject an observed mismatch immediately. */
-static int catalog_runtime_match(const LmbCalKey *key, const LmbMachineReport *reports,
-    uint32_t count, char *why, size_t cap) {
-    int missing = 0;
-    for (uint32_t j = 0; j < key->nodes; j++) {
-        const LmbMachineReport *found = NULL;
-        for (uint32_t k = 0; k < count; k++) {
-            char peer[65]; lmb_hex(peer, reports[k].identity, 32);
-            if (!strcmp(peer, key->node_id[j])) { found = &reports[k]; break; }
-        }
-        if (!found) {
-            if (!missing) snprintf(why, cap, "Donor %u inventory temporarily unavailable", j + 1);
-            missing = 1; continue;
-        }
-        char hardware[65];
-        catalog_hardware_id(&found->machine, found->control_addr, hardware);
-        unsigned threads = found->machine.logical_cpus;
-        if (found->runtime_threads && threads > found->runtime_threads) threads = found->runtime_threads;
-        if (threads > 256) threads = 256;
-        const char *changed = strcmp(hardware, key->node_hardware_id[j]) ? "hardware or endpoint" :
-            !found->runtime_id[0] ? "runtime identity unavailable" :
-            strcmp(found->runtime_id, key->node_build_id[j]) ? "runtime identity" :
-            threads != key->threads[j] ? "thread capacity" : NULL;
-        if (changed) {
-            snprintf(why, cap, "Donor %u: %s differs from the approved snapshot", j + 1, changed);
-            return -1;
-        }
-    }
-    return missing;
-}
+#include "src/planner/lumabri_calibration_key.h"
 
 static int catalog_runtime_revalidate_tracker(const char *tracker, const LmbCalKey *key,
     char *why, size_t cap) {
@@ -5053,29 +4787,6 @@ static int catalog_workload_capture_once(const char *tracker, LmbCalKey *key, ch
     return catalog_workload_capture_mode(tracker,key,why,cap,0);
 }
 
-static void catalog_advice_refresh(LmbTuiState *st) {
-    LmbAdviceCandidate candidates[LMB_TUI_MAX_MODELS] = {0};
-    uint32_t advice[LMB_TUI_MAX_MODELS];
-    for (int i = 0; i < st->nmodels; i++) {
-        const LmbTuiModel *m = &st->models[i];
-        LmbAdviceCandidate *c = &candidates[i];
-        c->eligible = st->inventory_ok && m->planned && m->shape.sizing_verified &&
-            m->weights_present && m->checkpoint_inventory_ok &&
-            m->plan.state == LMB_PLAN_RESIDENT && m->plan.nslices;
-        for (uint32_t j = 0; c->eligible && j < m->plan.nslices; j++) {
-            uint32_t node = m->plan.slices[j].node;
-            if (node >= st->nnodes || !lmb_tui_node_enabled(st, node)) c->eligible = 0;
-            c->reserved_bytes = lmb_budget_add(c->reserved_bytes, m->plan.slices[j].bytes_resident);
-        }
-        c->checkpoint_bytes = m->checkpoint_bytes;
-        if (m->has_calibration && m->calibration_key_valid && lmb_cal_valid(&m->calibration) &&
-            lmb_cal_matches(&m->calibration.key, &m->calibration_key))
-            c->measured_tok_s = m->calibration.decode_tok_s;
-    }
-    lmb_catalogue_advice(candidates, (size_t)st->nmodels, advice);
-    for (int i = 0; i < st->nmodels; i++) st->models[i].advice_flags = advice[i];
-}
-
 static void catalog_joint_refresh(LmbTuiState *st);
 static int catalog_state_refresh(LmbTuiState *st, void *unused) {
     (void)unused;
@@ -5098,76 +4809,13 @@ static int catalog_state_refresh(LmbTuiState *st, void *unused) {
     int have_cal_dir = !catalog_calibration_dir(calibration_dir);
     for (int i = 0; i < n; i++) {
         LmbTuiModel *m = &st->models[st->nmodels];
-        memset(m, 0, sizeof *m);
-        snprintf(m->name, sizeof m->name, "%.63s", found[i].name);
-        snprintf(m->dir, sizeof m->dir, "%.511s", found[i].dir);
-        m->shape = found[i].shape;
-        m->weights_present = found[i].has_weights;
-        m->checkpoint_bytes = found[i].checkpoint_bytes;
-        m->checkpoint_inventory_ok = found[i].inventory_ok;
-        st->nodes[0].has_checkpoint = found[i].has_weights;
         LmbClusterNode selected[LMB_CLUSTER_MAX_NODES];
-        uint32_t mapping[LMB_CLUSTER_MAX_NODES], nselected = 0;
-        int household = 0;
-        for (uint32_t j = 0; j < st->nnodes; j++)
-            if (st->nodes[j].addr[0]) household = 1;
-        for (uint32_t j = 0; j < st->nnodes; j++) {
-            if (household && !lmb_tui_node_enabled(st, j)) continue;
-            selected[nselected] = st->nodes[j];
-            mapping[nselected++] = j;
-        }
-        if (household && m->weights_present) {
-            m->planned = st->inventory_ok && m->checkpoint_inventory_ok &&
-                !lmb_home_plan_source(&m->shape, m->checkpoint_bytes, selected,
-                    nselected, st->context, st->sessions, LMB_GOAL_ONE_SESSION, 1, &m->plan);
-            if (m->planned && lmb_home_plan_selected(&m->shape, m->checkpoint_bytes,
-                selected, nselected, st->context, &m->plan, NULL, &m->plan)) {
-                m->plan.state = LMB_PLAN_UNRUNNABLE;
-                m->plan.nslices = 0;
-            }
-            const char *hybrid = getenv("LUMABRI_HOME_HYBRID");
-            const char *resident = getenv("LUMABRI_RESIDENT_REQUIRED");
-            if (m->planned && st->sessions == 1 && (!resident || !strcmp(resident, "1")) &&
-                (!hybrid || strcmp(hybrid, "0"))) {
-                LmbClusterPlan candidate;
-                if (!lmb_home_plan_hybrid(&m->shape, m->checkpoint_bytes, selected,
-                    nselected, st->context, &m->plan, &candidate)) m->plan = candidate;
-            }
-        } else
-            m->planned = st->inventory_ok && !lmb_plan_cluster_source(&m->shape, selected,
-                nselected, st->context, st->sessions, LMB_GOAL_ONE_SESSION, 0, &m->plan);
-        if (m->planned) {
-            m->plan.edge_node = mapping[m->plan.edge_node];
-            for (uint32_t j = 0; j < m->plan.nslices; j++)
-                m->plan.slices[j].node = mapping[m->plan.slices[j].node];
-        }
+        uint32_t mapping[LMB_CLUSTER_MAX_NODES],nselected=0;
+        int household=catalog_plan_entry(st,m,&found[i],selected,mapping,&nselected);
         if (have_cal_dir && !lmb_checkpoint_identity(m->dir, m->content_id, NULL, NULL) &&
             !lmb_cal_load(calibration_dir, m->content_id, &m->calibration)) {
             m->has_calibration = 1;
-            m->calibration_key_valid = !catalog_calibration_key(st, m, m->calibration.key.adapter_abi,
-                m->calibration.key.numeric_class, &m->calibration_key) && lmb_cal_key_valid(&m->calibration_key);
-            double stage_costs[LMB_CAL_NODES_MAX], node_costs[LMB_CLUSTER_MAX_NODES] = {0};
-            if (household && !m->plan.hybrid && m->calibration_key_valid &&
-                !lmb_cal_stage_costs(&m->calibration, &m->calibration_key, stage_costs)) {
-                LmbClusterPlan local = m->plan, candidate;
-                for (uint32_t a = 0; a < nselected; a++) {
-                    if (mapping[a] == m->plan.edge_node) local.edge_node = a;
-                    for (uint32_t b = 0; b < local.nslices; b++)
-                        if (mapping[a] == m->plan.slices[b].node) {
-                            local.slices[b].node = a; node_costs[a] = stage_costs[b];
-                        }
-                }
-                if (!lmb_home_plan_selected(&m->shape, m->checkpoint_bytes, selected,
-                    nselected, st->context, &local, node_costs, &candidate)) {
-                    candidate.edge_node = mapping[candidate.edge_node];
-                    for (uint32_t j = 0; j < candidate.nslices; j++)
-                        candidate.slices[j].node = mapping[candidate.slices[j].node];
-                    m->plan = candidate; m->stage_cost_placement = 1;
-                    m->calibration_key_valid = !catalog_calibration_key(st, m,
-                        m->calibration.key.adapter_abi, m->calibration.key.numeric_class,
-                        &m->calibration_key) && lmb_cal_key_valid(&m->calibration_key);
-                }
-            }
+            catalog_calibration_apply(st,m,household,selected,mapping,nselected);
         }
         st->nmodels++;
     }

@@ -8,7 +8,7 @@
 #include <string.h>
 #include <math.h>
 #include <fcntl.h>
-#include <unistd.h>
+#include "src/runtime/lumabri_source_file.h"
 #include <sys/stat.h>
 
 typedef struct {
@@ -19,9 +19,7 @@ typedef struct {
 
 typedef struct {
     LmbPrepareCounter index, transfer;
-    off_t offset;
-    dev_t device;
-    ino_t inode;
+    uint64_t offset,device,inode;
     char line[192];
     size_t used;
     int overflow, opened;
@@ -75,19 +73,26 @@ static void lmb_prepare_record(LmbPrepareProgress *p, const char *line, double n
 }
 
 static void lmb_prepare_read(LmbPrepareProgress *p, const char *path, double now) {
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0) return;
-    struct stat st;
-    if (fstat(fd, &st) || !S_ISREG(st.st_mode)) { close(fd); return; }
-    if (p->opened && (st.st_dev != p->device || st.st_ino != p->inode || st.st_size < p->offset))
-        memset(p, 0, sizeof *p);
-    p->device = st.st_dev; p->inode = st.st_ino; p->opened = 1;
-    char buf[8192]; /* one bounded read per UI tick, even for a noisy engine */
-    ssize_t n = pread(fd, buf, sizeof buf, p->offset);
-    close(fd);
+#ifdef _WIN32
+    LmbPrivatePath checked;if (lmb_private_path(path,&checked)) return;
+    HANDLE h=CreateFileW(checked.path,GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+        NULL,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT|FILE_FLAG_OVERLAPPED,NULL);
+    lmb_private_path_close(&checked);
+    if (h==INVALID_HANDLE_VALUE) return;
+    int fd=_open_osfhandle((intptr_t)h,_O_RDONLY|_O_BINARY|_O_NOINHERIT);
+    if (fd<0) {CloseHandle(h);return;}
+#else
+    int fd=open(path,O_RDONLY|O_CLOEXEC|O_NOFOLLOW);if (fd<0) return;
+#endif
+    LmbSourceStat st;
+    if (lmb_source_fstat(fd,&st) || !st.regular) {lmb_source_close(fd);return;}
+    if (p->opened && (st.device!=p->device || st.inode!=p->inode || st.size<p->offset)) memset(p,0,sizeof *p);
+    p->device=st.device;p->inode=st.inode;p->opened=1;
+    char buf[8192];
+    ptrdiff_t n=lmb_source_pread(fd,buf,sizeof buf,p->offset);lmb_source_close(fd);
     if (n <= 0) return;
     p->offset += n;
-    for (ssize_t i = 0; i < n; i++) {
+    for (ptrdiff_t i = 0; i < n; i++) {
         if (buf[i] == '\n') {
             p->line[p->used] = 0;
             if (!p->overflow) lmb_prepare_record(p, p->line, now);

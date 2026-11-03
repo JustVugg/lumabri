@@ -33,11 +33,11 @@ static void api_preparation_catalogue(int fd,const char *tracker) {
 }
 /* Cheap source-change fence, not a signed checkpoint identity. Weight bytes
  * are hashed by the existing source indexer before any donor approves them. */
-static int preparation_file_stamp(const char *root,const char *rel,const struct stat *st,void *opaque) {
+static int preparation_file_stamp(const char *root,const char *rel,const LmbSourceStat *st,void *opaque) {
     (void)root; LmbBuf item={0},*all=opaque; uint8_t hash[32];
-    int bad=lmb_buf_str(&item,rel) || lmb_buf_u64(&item,(uint64_t)st->st_dev) ||
-        lmb_buf_u64(&item,(uint64_t)st->st_ino) || lmb_buf_u64(&item,(uint64_t)st->st_size) ||
-        lmb_buf_u64(&item,lmb_stat_mtime_ns(st)) || lmb_buf_u64(&item,lmb_stat_ctime_ns(st));
+    int bad=lmb_buf_str(&item,rel) || lmb_buf_u64(&item,st->device) ||
+        lmb_buf_u64(&item,st->inode) || lmb_buf_u64(&item,st->size) ||
+        lmb_buf_u64(&item,st->mtime_ns) || lmb_buf_u64(&item,st->ctime_ns);
     if (!bad) { preparation_digest(item.p,item.len,hash); bad=lmb_buf_bytes(all,hash,32); }
     free(item.p); return bad;
 }
