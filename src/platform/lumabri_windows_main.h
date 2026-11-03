@@ -5,10 +5,15 @@
 #include "src/runtime/lumabri_service.h"
 #include "lumabri_machine.h"
 #include <signal.h>
+#include <stdarg.h>
 
 static volatile sig_atomic_t g_stopping;
 static double nowd(void) { return (double)GetTickCount64() / 1000.; }
-static int home_fail(const char *message) { fprintf(stderr, "%s\n", message); return 1; }
+static char home_error[512];
+static int home_fail(const char *format,...) {
+    va_list args;va_start(args,format);vsnprintf(home_error,sizeof home_error,format,args);va_end(args);
+    fprintf(stderr,"%s\n",home_error);return 1;
+}
 static void doctor_json_string(const char *value) {
     fputc('"', stdout);
     for (; value && *value; value++) {
@@ -65,8 +70,9 @@ static int home_donor_entry_windows(int argc,char **argv,int internal) {
     return headless ? 0 : lmb_donor_ui_windows(tracker);
 }
 
-#include "src/ui/lumabri_home_windows.h"
 #include "src/ui/lumabri_chat_windows.h"
+#include "src/runtime/lumabri_requester_windows.h"
+#include "src/ui/lumabri_home_windows.h"
 static int cmd_chat_windows(int argc,char **argv) {
     const char *address=NULL,*key=NULL,*root=NULL,*model=NULL;unsigned max_new=256;
     for(int i=0;i<argc;i++) {
@@ -98,6 +104,7 @@ static int cmd_chat_windows(int argc,char **argv) {
 static int lmb_windows_main(int argc, char **argv) {
     if (argc==1 || (argc==2 && !strcmp(argv[1],"share"))) return home_windows_run(argc==2);
     if (argc>=2 && !strcmp(argv[1],"chat")) return cmd_chat_windows(argc-2,argv+2);
+    if (argc>=2 && !strcmp(argv[1],"--internal-prepare")) return home_prepare_entry_windows(argc-2,argv+2);
     if (argc>=2 && !strcmp(argv[1],"--internal-tracker")) return home_tracker_entry_windows(argc-2,argv+2);
     if (argc>=2 && (!strcmp(argv[1],"donor") || !strcmp(argv[1],"--internal-donor")))
         return home_donor_entry_windows(argc-2,argv+2,!strcmp(argv[1],"--internal-donor"));

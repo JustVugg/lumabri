@@ -5,6 +5,8 @@
 #include "src/runtime/lumabri_host_turn.h"
 #include "src/ui/lumabri_visual.h"
 #include "lumabri_metrics.h"
+#include "src/runtime/lumabri_calibration_windows.h"
+#include "src/runtime/lumabri_probe_deadline.h"
 
 typedef struct {
     LmbSocket fd;
@@ -15,10 +17,14 @@ typedef struct {
     CRITICAL_SECTION lock;
     volatile LONG cancelled;
     int result;
+    uint32_t deadline_ms;
+    double started,ttft;
+    LmbWindowsObservation *observation;
 } LmbWindowsTurn;
 static int chat_windows_data(void *arg,const unsigned char *text,size_t n) {
     LmbWindowsTurn *t=arg;
     if (memchr(text,0,n)) return -1;
+    if (n && !t->ttft) t->ttft=nowd()-t->started;
     EnterCriticalSection(&t->lock);
     int rc=t->reply.len>LMB_CLIENT_TEXT_LIMIT || n>LMB_CLIENT_TEXT_LIMIT-t->reply.len ||
         cap_add(&t->reply,(const char *)text,n);
@@ -30,11 +36,13 @@ static int chat_windows_error(void *arg,const char *error) {
 static DWORD WINAPI chat_windows_worker(void *arg) {
     LmbWindowsTurn *t=arg;LmbReplyStream stream;
     LmbReplySink sink={chat_windows_data,NULL,chat_windows_error,t};t->result=-1;
+    if (t->observation) (void)catalog_observe_begin_windows(t->observation,&t->greeting);
+    t->started=nowd();t->ttft=0;
     if (lmb_reply_init(&stream,t->id,LMB_CLIENT_TEXT_LIMIT,sink) ||
         lmb_host_turn_send(t->fd,&t->greeting,t->id,&t->payload,t->max_new)) {
         snprintf(t->error,sizeof t->error,"Could not submit this request (transport error %d).",errno);return 0;
     }
-    uint64_t until=GetTickCount64()+300000;
+    uint64_t until=GetTickCount64()+(t->deadline_ms ? t->deadline_ms : 300000);
     while (!InterlockedCompareExchange(&t->cancelled,0,0) && stream.status==LMB_REPLY_MORE) {
         uint64_t now=GetTickCount64();if(now>=until) break;
         int ready=lmb_socket_wait(t->fd,0,100);
@@ -47,6 +55,7 @@ static DWORD WINAPI chat_windows_worker(void *arg) {
     }
     if (stream.status==LMB_REPLY_DONE && !InterlockedCompareExchange(&t->cancelled,0,0)) {
         memcpy(t->stat,stream.stat,strlen(stream.stat)+1);t->result=0;
+        if (t->observation) (void)catalog_observe_end_windows(t->observation,&t->greeting,t->stat,t->ttft);
     }
     return 0;
 }
@@ -90,14 +99,14 @@ static void chat_windows_transcript(const char *text,unsigned *scroll) {
     (void)chat_windows_lines(text,first,height,1);
 }
 
-static int chat_windows_run(const char *address,const char *key,const char *root,const char *model,unsigned max_new) {
+static int chat_windows_run_observed(const char *address,const char *key,const char *root,const char *model,unsigned max_new,LmbWindowsObservation *observation) {
     LmbConsole console={0};if(lmb_console_open(&console)) return home_fail("Chat needs an interactive Windows console.");
     fputs("\033[?1049h\033[?25l",stdout);
     LmbSocket fd=LMB_INVALID_SOCKET;LmbHostGreeting greeting={0};
     Cap history={0},transcript={0};char input[4096]="",status[256]="Connects only to the selected host; no checkpoint download.";
     size_t used=0;unsigned sequence=0,scroll=0;int rc=0,needs_new=0;
     LmbWindowsTurn *turn=calloc(1,sizeof *turn);HANDLE thread=NULL;
-    if(!turn) {rc=1;goto done;}InitializeCriticalSection(&turn->lock);
+    if(!turn) {rc=1;goto done;}InitializeCriticalSection(&turn->lock);turn->observation=observation;
     for (;;) {
         if(thread && WaitForSingleObject(thread,0)==WAIT_OBJECT_0) {
             CloseHandle(thread);thread=NULL;
@@ -111,7 +120,7 @@ static int chat_windows_run(const char *address,const char *key,const char *root
                 } else {free(history.p);history=next;
                     LmbGenerationMetrics m;
                     if(!lmb_metrics_parse(turn->stat,&m) && lmb_metrics_decode_rate(&m)>0)
-                        snprintf(status,sizeof status,"Reply %u · %.2f tok/s · first token %.2fs · %u tokens · measured on host",sequence,lmb_metrics_decode_rate(&m),m.prefill_seconds,m.generated_tokens);
+                        snprintf(status,sizeof status,"Reply %u · %.2f tok/s · first token %.2fs · %u tokens · measured on host",sequence,lmb_metrics_decode_rate(&m),turn->ttft,m.generated_tokens);
                     else snprintf(status,sizeof status,"Reply %u complete · speed not measured by this host",sequence);
                 }
             } else {
@@ -186,5 +195,8 @@ done:
     if(turn) {DeleteCriticalSection(&turn->lock);free(turn->payload.p);free(turn->reply.p);free(turn);}
     free(history.p);free(transcript.p);
     fputs("\033[?25h\033[?1049l",stdout);fflush(stdout);lmb_console_close(&console);return rc;
+}
+static int chat_windows_run(const char *address,const char *key,const char *root,const char *model,unsigned max_new) {
+    return chat_windows_run_observed(address,key,root,model,max_new,NULL);
 }
 #endif

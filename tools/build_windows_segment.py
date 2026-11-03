@@ -36,7 +36,7 @@ def main():
     run([args.cc,*flags,'-Werror','-municode',root/'tests/c/test_owned_process_windows.c',
          '-static','-o',output/'test_owned_process_windows.exe'])
     run([args.cc,*flags,'-Werror','-Wno-unused-function','-Wno-unused-variable','-municode',
-         root/'lumabri.c',root/'lumabri_machine.c',root/'lumabri_run_gate.c',resource,'-static','-lwinpthread','-lws2_32',
+         root/'lumabri.c',root/'src/ui/lumabri_tui.c',root/'lumabri_machine.c',root/'lumabri_run_gate.c',resource,'-static','-lwinpthread','-lws2_32',
          '-lbcrypt','-liphlpapi','-lpsapi','-ladvapi32','-ldxgi','-ldxguid',
          '-o',output/'lumabri.exe'])
     for name,file in (('tracker','tracker.c'),('test_tracker_history','tests/c/test_tracker_history.c')):
@@ -57,6 +57,9 @@ def main():
     run([args.cc,*flags,'-Werror','-Wno-unused-function','-municode',
          root/'tests/c/test_chat_windows.c',resource,'-static','-lwinpthread','-lws2_32',
          '-lbcrypt','-ladvapi32','-o',output/'test_chat_windows.exe'])
+    run([args.cc,*flags,'-Werror','-Wno-unused-function','-municode',
+         root/'tests/c/test_requester_windows.c',resource,'-static','-lwinpthread','-lws2_32',
+         '-lbcrypt','-ladvapi32','-o',output/'test_requester_windows.exe'])
     if args.only != 'contracts':
         run([sys.executable,'-X','utf8','tools/prepare_engine_source.py','--source',
              Path(args.engine).resolve(),'--output',source])

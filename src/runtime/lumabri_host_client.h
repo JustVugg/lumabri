@@ -7,6 +7,7 @@
 #include <limits.h>
 
 #define HOST_CONNECT_BUSY 1
+#define HOST_CONNECT_ROOT_MISMATCH (-2)
 typedef struct {
     char model_type[64], engine[64], backend[32], numeric_class[97], root[65];
     uint32_t sessions, speed_milli, max_new, max_frame, codec, sampling, numeric_abi;
@@ -50,9 +51,9 @@ static int lmb_host_client_open(const char *address,const char *model_type,
     int bad=(expected_key && (!lmb_secure_enabled() || !lmb_secure_peer_matches(fd,key))) ||
         lmb_auth(fd) || lmb_send(fd,LMB_HOST_HELLO,NULL,0,NULL,0) ||
         lmb_recv_bounded(fd,&m,4096,3000) || lmb_host_greeting(&m,g) ||
-        (expected_root && strcmp(expected_root,g->root)) ||
         (model_type && *model_type && strcmp(model_type,g->model_type));
     lmb_msg_free(&m);
+    if (!bad && expected_root && strcmp(expected_root,g->root)) {lmb_close(fd);return HOST_CONNECT_ROOT_MISMATCH;}
     if (bad || !g->sessions) {lmb_close(fd);return bad ? -1 : HOST_CONNECT_BUSY;}
     if(lmb_socket_timeout(fd,lmb_env_int("LUMABRI_IO_TIMEOUT_MS",LMB_DEFAULT_IO_TIMEOUT_MS,100,3600000))) {
         lmb_close(fd);return -1;

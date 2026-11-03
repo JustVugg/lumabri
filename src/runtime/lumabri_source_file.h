@@ -11,29 +11,33 @@
 #include <sys/stat.h>
 
 typedef struct {
-    uint64_t size, mtime_ns, ctime_ns;
-    int regular, directory;
+    uint64_t size, mtime_ns, ctime_ns, device, inode, mode;
+    int regular, directory, symlink;
 } LmbSourceStat;
 typedef int (*LmbSourceVisit)(const char *, void *);
 
 #ifdef _WIN32
 #include "lumabri_private_file_windows.h"
 
-static int lmb_source_info(HANDLE h,LmbSourceStat *s) {
-    FILE_BASIC_INFO basic;FILE_STANDARD_INFO standard;
+static inline int lmb_source_info(HANDLE h,LmbSourceStat *s) {
+    FILE_BASIC_INFO basic;FILE_STANDARD_INFO standard;BY_HANDLE_FILE_INFORMATION identity;
     if (GetFileType(h)!=FILE_TYPE_DISK ||
         !GetFileInformationByHandleEx(h,FileBasicInfo,&basic,sizeof basic) ||
         !GetFileInformationByHandleEx(h,FileStandardInfo,&standard,sizeof standard) ||
+        !GetFileInformationByHandle(h,&identity) ||
         (basic.FileAttributes&FILE_ATTRIBUTE_REPARSE_POINT)) {errno=EACCES;return -1;}
     memset(s,0,sizeof *s);s->size=(uint64_t)standard.EndOfFile.QuadPart;
     /* Epoch is deliberately unchanged: sidecars are local caches, not wire data. */
     s->mtime_ns=(uint64_t)basic.LastWriteTime.QuadPart*100;
     s->ctime_ns=(uint64_t)basic.ChangeTime.QuadPart*100;
     s->directory=standard.Directory!=0;s->regular=!s->directory;
+    s->device=identity.dwVolumeSerialNumber;
+    s->inode=((uint64_t)identity.nFileIndexHigh<<32)|identity.nFileIndexLow;
+    s->mode=basic.FileAttributes;
     return 0;
 }
 
-static int lmb_source_open(const char *path,int flags) {
+static inline int lmb_source_open(const char *path,int flags) {
     LmbPrivatePath p;if (lmb_private_path(path,&p)) return -1;
     int write=(flags&O_WRONLY)||(flags&O_RDWR);
     HANDLE h=CreateFileW(p.path,GENERIC_READ|(write?GENERIC_WRITE:0),FILE_SHARE_READ,
@@ -54,10 +58,11 @@ static int lmb_source_open(const char *path,int flags) {
     if (fd<0) CloseHandle(h);
     return fd;
 }
-static int lmb_source_fstat(int fd,LmbSourceStat *s) {
+static inline int lmb_source_fstat(int fd,LmbSourceStat *s) {
     return lmb_source_info((HANDLE)_get_osfhandle(fd),s);
 }
-static int lmb_source_stat(const char *path,LmbSourceStat *s) {
+static inline int lmb_source_stat(const char *path,LmbSourceStat *s) {
+    memset(s,0,sizeof *s);
     LmbPrivatePath p;if (lmb_private_path(path,&p)) return -1;
     HANDLE h=CreateFileW(p.path,FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE,
         NULL,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,NULL);
@@ -66,7 +71,7 @@ static int lmb_source_stat(const char *path,LmbSourceStat *s) {
     if (h==INVALID_HANDLE_VALUE) return lmb_private_error(error);
     int rc=lmb_source_info(h,s);CloseHandle(h);return rc;
 }
-static ptrdiff_t lmb_source_io(int fd,void *data,size_t size,uint64_t at,int write) {
+static inline ptrdiff_t lmb_source_io(int fd,void *data,size_t size,uint64_t at,int write) {
     if (size>MAXDWORD || at>INT64_MAX || size>(uint64_t)INT64_MAX-at) {errno=EINVAL;return -1;}
     HANDLE h=(HANDLE)_get_osfhandle(fd);OVERLAPPED io={0};DWORD done=0;
     io.Offset=(DWORD)at;io.OffsetHigh=(DWORD)(at>>32);
@@ -81,36 +86,36 @@ static ptrdiff_t lmb_source_io(int fd,void *data,size_t size,uint64_t at,int wri
     if (!write && error==ERROR_HANDLE_EOF) return 0;
     return ok?(ptrdiff_t)done:lmb_private_error(error);
 }
-static ptrdiff_t lmb_source_pread(int fd,void *data,size_t size,uint64_t at) {
+static inline ptrdiff_t lmb_source_pread(int fd,void *data,size_t size,uint64_t at) {
     return lmb_source_io(fd,data,size,at,0);
 }
-static ptrdiff_t lmb_source_pwrite(int fd,const void *data,size_t size,uint64_t at) {
+static inline ptrdiff_t lmb_source_pwrite(int fd,const void *data,size_t size,uint64_t at) {
     return lmb_source_io(fd,(void *)data,size,at,1);
 }
-static int lmb_source_close(int fd) {return _close(fd);}
-static int lmb_source_sync(int fd) {
+static inline int lmb_source_close(int fd) {return _close(fd);}
+static inline int lmb_source_sync(int fd) {
     return FlushFileBuffers((HANDLE)_get_osfhandle(fd))?0:lmb_private_error(GetLastError());
 }
-static int lmb_source_unlink(const char *path) {
+static inline int lmb_source_unlink(const char *path) {
     LmbPrivatePath p;if (lmb_private_path(path,&p)) return -1;
     int rc=DeleteFileW(p.path)?0:lmb_private_error(GetLastError());
     lmb_private_path_close(&p);return rc;
 }
-static int lmb_source_rename(const char *from,const char *to) {
+static inline int lmb_source_rename(const char *from,const char *to) {
     LmbPrivatePath a,b;if (lmb_private_path(from,&a)) return -1;
     if (lmb_private_path(to,&b)) {lmb_private_path_close(&a);return -1;}
     int rc=MoveFileExW(a.path,b.path,MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)?0:
         lmb_private_error(GetLastError());
     lmb_private_path_close(&b);lmb_private_path_close(&a);return rc;
 }
-static int lmb_source_mkdir(const char *path) {
+static inline int lmb_source_mkdir(const char *path) {
     LmbPrivatePath p;if (lmb_private_path(path,&p)) return -1;
     int rc=CreateDirectoryW(p.path,NULL)?0:lmb_private_error(GetLastError());
     lmb_private_path_close(&p);return rc;
 }
 /* Metadata streams are synchronous; positioned checkpoint handles above are
  * overlapped, so concurrent READ requests never share a seek cursor. */
-static FILE *lmb_source_fopen(const char *path,const char *mode) {
+static inline FILE *lmb_source_fopen(const char *path,const char *mode) {
     if (strcmp(mode,"rb") && strcmp(mode,"r")) {errno=EINVAL;return NULL;}
     LmbPrivatePath p;if (lmb_private_path(path,&p)) return NULL;
     HANDLE h=CreateFileW(p.path,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,
@@ -124,7 +129,7 @@ static FILE *lmb_source_fopen(const char *path,const char *mode) {
     if (fd<0) {CloseHandle(h);return NULL;}
     FILE *fp=_fdopen(fd,"rb");if (!fp) _close(fd);return fp;
 }
-static int lmb_source_list(const char *path,LmbSourceVisit visit,void *context) {
+static inline int lmb_source_list(const char *path,LmbSourceVisit visit,void *context) {
     LmbPrivatePath p;if (lmb_private_path(path,&p)) return -1;
     HANDLE directory=CreateFileW(p.path,FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE,
         NULL,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,NULL);
@@ -150,7 +155,7 @@ done:
 #else
 #include <dirent.h>
 #include <unistd.h>
-static void lmb_source_stat_copy(LmbSourceStat *out,const struct stat *st) {
+static inline void lmb_source_stat_copy(LmbSourceStat *out,const struct stat *st) {
     memset(out,0,sizeof *out);out->size=(uint64_t)st->st_size;
 #ifdef __APPLE__
     out->mtime_ns=(uint64_t)st->st_mtimespec.tv_sec*1000000000ull+st->st_mtimespec.tv_nsec;
@@ -160,23 +165,25 @@ static void lmb_source_stat_copy(LmbSourceStat *out,const struct stat *st) {
     out->ctime_ns=(uint64_t)st->st_ctim.tv_sec*1000000000ull+st->st_ctim.tv_nsec;
 #endif
     out->regular=S_ISREG(st->st_mode);out->directory=S_ISDIR(st->st_mode);
+    out->device=st->st_dev;out->inode=st->st_ino;out->mode=st->st_mode;
 }
-static int lmb_source_stat(const char *path,LmbSourceStat *s) {
-    struct stat st;if (stat(path,&st)) return -1;lmb_source_stat_copy(s,&st);return 0;
+static inline int lmb_source_stat(const char *path,LmbSourceStat *s) {
+    struct stat st,link;if (lstat(path,&link) || stat(path,&st)) return -1;
+    lmb_source_stat_copy(s,&st);s->symlink=S_ISLNK(link.st_mode);return 0;
 }
-static int lmb_source_fstat(int fd,LmbSourceStat *s) {
+static inline int lmb_source_fstat(int fd,LmbSourceStat *s) {
     struct stat st;if (fstat(fd,&st)) return -1;lmb_source_stat_copy(s,&st);return 0;
 }
-static int lmb_source_open(const char *path,int flags) {return open(path,flags|O_CLOEXEC,0644);}
-static ptrdiff_t lmb_source_pread(int fd,void *data,size_t size,uint64_t at) {return pread(fd,data,size,(off_t)at);}
-static ptrdiff_t lmb_source_pwrite(int fd,const void *data,size_t size,uint64_t at) {return pwrite(fd,data,size,(off_t)at);}
-static int lmb_source_close(int fd) {return close(fd);}
-static int lmb_source_sync(int fd) {return fsync(fd);}
-static int lmb_source_unlink(const char *path) {return unlink(path);}
-static int lmb_source_rename(const char *a,const char *b) {return rename(a,b);}
-static int lmb_source_mkdir(const char *path) {return mkdir(path,0755);}
-static FILE *lmb_source_fopen(const char *path,const char *mode) {return fopen(path,mode);}
-static int lmb_source_list(const char *path,LmbSourceVisit visit,void *context) {
+static inline int lmb_source_open(const char *path,int flags) {return open(path,flags|O_CLOEXEC,0644);}
+static inline ptrdiff_t lmb_source_pread(int fd,void *data,size_t size,uint64_t at) {return pread(fd,data,size,(off_t)at);}
+static inline ptrdiff_t lmb_source_pwrite(int fd,const void *data,size_t size,uint64_t at) {return pwrite(fd,data,size,(off_t)at);}
+static inline int lmb_source_close(int fd) {return close(fd);}
+static inline int lmb_source_sync(int fd) {return fsync(fd);}
+static inline int lmb_source_unlink(const char *path) {return unlink(path);}
+static inline int lmb_source_rename(const char *a,const char *b) {return rename(a,b);}
+static inline int lmb_source_mkdir(const char *path) {return mkdir(path,0755);}
+static inline FILE *lmb_source_fopen(const char *path,const char *mode) {return fopen(path,mode);}
+static inline int lmb_source_list(const char *path,LmbSourceVisit visit,void *context) {
     DIR *d=opendir(path);if (!d) return -1;struct dirent *entry;int rc=0;
     for (;;) {
         errno=0;entry=readdir(d);
@@ -186,4 +193,9 @@ static int lmb_source_list(const char *path,LmbSourceVisit visit,void *context) 
     closedir(d);return rc;
 }
 #endif
+static inline int lmb_source_same(const LmbSourceStat *a,const LmbSourceStat *b) {
+    return a->size==b->size && a->mtime_ns==b->mtime_ns && a->ctime_ns==b->ctime_ns &&
+        a->device==b->device && a->inode==b->inode && a->mode==b->mode &&
+        a->regular==b->regular && a->directory==b->directory;
+}
 #endif

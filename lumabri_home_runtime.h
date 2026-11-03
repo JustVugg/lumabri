@@ -1258,150 +1258,10 @@ static int cmd_donor(int argc, char **argv) {
     if (home_donor_keeper) _exit(rc);
     return rc;
 }
-typedef struct {
-    int fd[LMB_CLUSTER_MAX_NODES];
-    LmbHomeOffer offers[LMB_CLUSTER_MAX_NODES];
-    LmbHomePhase phase[LMB_CLUSTER_MAX_NODES];
-    uint32_t host_port[LMB_CLUSTER_MAX_NODES];
-    uint32_t segment_port[LMB_CLUSTER_MAX_NODES];
-    uint8_t peer_keys[LMB_CLUSTER_MAX_NODES][32];
-    char names[LMB_CLUSTER_MAX_NODES][64], addresses[LMB_CLUSTER_MAX_NODES][64];
-    char reason[LMB_CLUSTER_MAX_NODES][160];
-    uint32_t count, edge;
-    pid_t source;
-    _Atomic int stop, failed;
-    pthread_mutex_t status_lock, send_lock;
-} HomeSession;
-
-#define HOME_SESSION_INIT { .status_lock = PTHREAD_MUTEX_INITIALIZER, \
-                            .send_lock = PTHREAD_MUTEX_INITIALIZER }
-
-static int home_session_error(HomeSession *s, uint32_t i, const char *operation, int error) {
-    char detail[160] = {0};
-    /* The transport reports EOF as ECONNRESET rather than leaving errno
-     * unset. Preserve the actionable, platform-independent UI category
-     * while retaining the actual error number for diagnostics. */
-    const char *reason = !error ? "connection closed" :
-        (error == ECONNRESET || error == EPIPE) ? "connection closed or reset" : strerror(error);
-    snprintf(detail, sizeof detail, "%s at %.64s: %s (errno %d).",
-             operation, s->addresses[i], reason, error);
-    pthread_mutex_lock(&s->status_lock);
-    if (!s->reason[i][0])
-        memcpy(s->reason[i], detail, sizeof detail);
-    pthread_mutex_unlock(&s->status_lock);
-    return -1;
-}
-
-/* One complete frame at a time, including plaintext diagnostic fixtures.
- * The preparation UI may send COMMIT while the monitor sends a heartbeat. */
-static int home_session_send(HomeSession *s, uint32_t i, uint32_t op) {
-    pthread_mutex_lock(&s->send_lock);
-    int rc = lmb_send(s->fd[i], op, s->offers[i].id, 32, NULL, 0);
-    int error = errno;
-    pthread_mutex_unlock(&s->send_lock);
-    return rc ? home_session_error(s, i, "Cannot send control message", error) : 0;
-}
-
-static void home_session_snapshot(HomeSession *s, LmbHomePhase *phases, uint32_t *ports) {
-    pthread_mutex_lock(&s->status_lock);
-    memcpy(phases, s->phase, s->count * sizeof *phases);
-    memcpy(ports, s->host_port, s->count * sizeof *ports);
-    pthread_mutex_unlock(&s->status_lock);
-}
-
-static int home_session_receive(HomeSession *s, uint32_t i) {
-    LmbMsg m = {0};
-    errno = 0;
-    if (lmb_recv(s->fd[i], &m)) {
-        int error = errno; lmb_msg_free(&m);
-        return home_session_error(s, i, "Cannot receive donor status", error);
-    }
-    LmbCur c = {m.body, m.body_len, 0};
-    uint32_t version = 0, phase = 0, segment_port = 0, host_port = 0;
-    int bad = m.op != LMB_HOME_STATUS || m.pay_len ||
-        lmb_cur_u32(&c, &version) || version != LMB_HOME_VERSION || c.len - c.off < 32;
-    if (!bad) { bad = memcmp(c.p + c.off, s->offers[i].id, 32); c.off += 32; }
-    char reason[160] = {0};
-    if (!bad) bad = lmb_cur_u32(&c, &phase) || phase > LMB_HOME_CLOSED ||
-        lmb_cur_u32(&c, &segment_port) || segment_port > 65535 ||
-        lmb_cur_u32(&c, &host_port) || host_port > 65535 ||
-        lmb_inventory_string(&c, reason, sizeof reason) || c.off != c.len;
-    lmb_msg_free(&m);
-    if (bad) return home_session_error(s, i, "Invalid donor status", EPROTO);
-    pthread_mutex_lock(&s->status_lock);
-    s->phase[i] = (LmbHomePhase)phase; s->host_port[i] = host_port;
-    s->segment_port[i] = segment_port;
-    snprintf(s->reason[i], sizeof s->reason[i], "%s", reason);
-    pthread_mutex_unlock(&s->status_lock);
-    return phase >= LMB_HOME_REJECTED ? -1 : 0;
-}
-
-static int home_session_poll(HomeSession *s, int pulse) {
-    struct pollfd fds[LMB_CLUSTER_MAX_NODES];
-    for (uint32_t i = 0; i < s->count; i++) {
-        fds[i] = (struct pollfd){s->fd[i], POLLIN, 0};
-        if (pulse && home_session_send(s, i, LMB_HOME_PULSE)) return -1;
-    }
-    int n = poll(fds, s->count, 50);
-    if (n < 0 && errno != EINTR) return -1;
-    for (uint32_t i = 0; i < s->count; i++)
-        if (fds[i].revents && home_session_receive(s, i)) return -1;
-    return 0;
-}
-
-static void *home_session_keepalive(void *arg) {
-    HomeSession *s = arg;
-    double pulse = 0;
-    while (!atomic_load(&s->stop)) {
-        int send_pulse = nowd() - pulse >= 1;
-        if (send_pulse) pulse = nowd();
-        if (home_session_poll(s, send_pulse)) {
-            atomic_store(&s->failed, 1);
-            g_stopping = 1;
-            if (g_signal_engine_fd >= 0) shutdown(g_signal_engine_fd, SHUT_RDWR);
-            break;
-        }
-    }
-    return NULL;
-}
-
-static void home_session_close(HomeSession *s, int retain_weights) {
-    for (uint32_t i = 0; i < s->count; i++) {
-        if (s->fd[i] < 0) continue;
-        if (retain_weights) {
-            if (lmb_send(s->fd[i], LMB_HOME_DETACH, s->offers[i].id, 32, NULL, 0) ||
-                home_session_receive(s, i))
-                fprintf(stderr, "[resident] Could not confirm retained allocation on %s. Check its donor screen.\n", s->names[i]);
-        } else (void)lmb_send(s->fd[i], LMB_HOME_CANCEL, s->offers[i].id, 32, NULL, 0);
-        shutdown(s->fd[i], SHUT_RDWR); lmb_close(s->fd[i]); s->fd[i] = -1;
-    }
-    home_stop_child(&s->source);
-}
-
-static int home_session_hybrid_routes(HomeSession *s) {
-    LmbHybridRoutes routes = s->offers[s->edge].hybrid;
-    int bad = 0;
-    pthread_mutex_lock(&s->status_lock);
-    for (uint32_t i = 0; i < routes.count; i++) {
-        int found = 0;
-        for (uint32_t j = 0; j < s->count; j++) {
-            if (memcmp(routes.peers[i].key, s->peer_keys[j], 32)) continue;
-            char ip[64]; snprintf(ip, sizeof ip, "%s", s->addresses[j]);
-            char *colon = strrchr(ip, ':');
-            if (!colon || !s->segment_port[j] || s->phase[j] != LMB_HOME_SEGMENT_READY) { bad = 1; break; }
-            *colon = 0;
-            int n = snprintf(routes.peers[i].addr, sizeof routes.peers[i].addr, "%s:%u", ip, s->segment_port[j]);
-            if (n < 0 || (size_t)n >= sizeof routes.peers[i].addr) bad = 1;
-            found = 1; break;
-        }
-        if (!found) bad = 1;
-    }
-    pthread_mutex_unlock(&s->status_lock);
-    LmbBuf b = {0};
-    if (bad || lmb_hybrid_routes_pack(&b, &routes, 1)) { free(b.p); return -1; }
-    pthread_mutex_lock(&s->send_lock);
-    int rc = lmb_send(s->fd[s->edge], LMB_HOME_HYBRID_ROUTES, b.p, (uint32_t)b.len, NULL, 0);
-    pthread_mutex_unlock(&s->send_lock); free(b.p); return rc;
+#include "src/runtime/lumabri_home_request_plan.h"
+static void home_session_interrupt_chat(void *unused) {
+    (void)unused;g_stopping=1;
+    if (g_signal_engine_fd>=0) shutdown(g_signal_engine_fd,SHUT_RDWR);
 }
 
 static int home_request_chat_direct(LmbTuiState *st, int selected) {
@@ -1416,61 +1276,11 @@ static int home_request_chat_direct(LmbTuiState *st, int selected) {
         return home_fail("This checkpoint needs verified sizing, local source weights and 1-8 session slots.");
     }
     LmbClusterNode nodes[LMB_CLUSTER_MAX_NODES];
-    uint32_t indices[LMB_CLUSTER_MAX_NODES], count = 0;
-    for (uint32_t i = 0; i < st->nnodes; i++) {
-        if (!st->nodes[i].addr[0] || !st->identities[i][0] || !lmb_tui_node_enabled(st, i)) continue;
-        indices[count] = i; nodes[count] = st->nodes[i];
-        count++;
-    }
-    /* Apply the reviewed snapshot, not a second independently chosen split.
-     * Revalidate all reservations before any network side effect. */
-    LmbClusterPlan plan = m->plan;
-    if (plan.sessions != st->sessions || (plan.hybrid && st->sessions != 1))
-        return home_fail("The plan's session limit changed. Refresh the model catalogue before approval.");
-    if (!m->planned || !count || plan.nslices != count)
-        return home_fail("No resident assignment for every selected computer. Refresh the plan and check each donor's offered RAM.");
-    plan.edge_node = UINT32_MAX;
-    for (uint32_t j = 0; j < plan.nslices; j++) {
-        plan.slices[j].node = UINT32_MAX;
-        for (uint32_t i = 0; i < count; i++) {
-            if (m->plan.edge_node == indices[i]) plan.edge_node = i;
-            if (m->plan.slices[j].node == indices[i]) plan.slices[j].node = i;
-        }
-    }
-    if (lmb_home_plan_budgets(&m->shape, m->checkpoint_bytes, nodes, count,
-        st->context, &plan) ||
-        plan.state != LMB_PLAN_RESIDENT) {
-        return home_fail("No complete resident plan found for the selected computers. Keep Share resources open and check their offered RAM.");
-    }
-    /* Discovery is not proof that inbound connections work. Authenticate the
-     * planned donors before indexing/starting a source, without any OFFER,
-     * reservation or engine launch. Recheck again when actually sending. */
-    for (uint32_t j = 0; j < plan.nslices; j++) {
-        uint32_t i = plan.slices[j].node;
-        uint8_t expected[32];
-        if (lmb_unhex(expected, st->identities[indices[i]], 32))
-            return home_fail("Invalid identity for %.64s. Refresh the computer list.", nodes[i].name);
-        int fd = lmb_connect_ms_io(nodes[i].addr, 2000, home_control_io_ms(2000));
-        if (fd < 0) return home_fail("Cannot reach %.64s at %.64s: %s. Check inbound permissions on that computer; no model was loaded.",
-                                    nodes[i].name, nodes[i].addr, lmb_connect_why());
-        int matched = lmb_secure_peer_matches(fd, expected);
-        int authenticated = matched && !lmb_auth(fd);
-        if (authenticated && plan.hybrid) {
-            LmbMsg reply = {0};
-            authenticated = !lmb_send(fd, LMB_HOME_FEATURES, NULL, 0, NULL, 0) &&
-                !lmb_recv(fd, &reply) && reply.op == LMB_OK && reply.body_len == 4 &&
-                !reply.pay_len && lmb_get32(reply.body) == 2;
-            lmb_msg_free(&reply);
-            if (!authenticated) {
-                lmb_close(fd);
-                return home_fail("Update Lumabri on %.64s: this plan needs approved resident Hybrid support. No resources were shared.", nodes[i].name);
-            }
-        }
-        lmb_close(fd);
-        if (!authenticated) return home_fail("Cannot authenticate %.64s at %.64s. %s No model was loaded.",
-            nodes[i].name, nodes[i].addr, matched ? "Check the household key and whether the donor is responding in time." : "The donor identity changed; refresh the computer list.");
-    }
+    uint32_t indices[LMB_CLUSTER_MAX_NODES],count=0;LmbClusterPlan plan;
+    if (home_review_plan(st,m,nodes,indices,&count,&plan)) return -1;
     HomeSession s = HOME_SESSION_INIT;
+    s.interrupted=home_session_interrupt_chat;
+    pid_t source_pid=0;
     for (uint32_t i = 0; i < LMB_CLUSTER_MAX_NODES; i++) s.fd[i] = -1;
     char kp[1024], pkhex[65], idhex[65];
     uint8_t sk[64], pk[32], id[32];
@@ -1504,11 +1314,11 @@ static int home_request_chat_direct(LmbTuiState *st, int selected) {
         "--advertise", addr, "--key", kp, NULL};
     HomeTerminal term; home_terminal_begin(&term);
     g_stopping = 0; install_chat_signal_handlers(); signal(SIGPIPE, SIG_IGN);
-    s.source = home_spawn(source_argv, NULL, logfile, NULL, source_listener, -1);
+    source_pid = home_spawn(source_argv, NULL, logfile, NULL, source_listener, -1);
     int result = -1, prepared = 0, heartbeat_started = 0;
     pthread_t heartbeat;
     const char *stage = "starting the checkpoint source";
-    if (s.source <= 0) goto done;
+    if (source_pid <= 0) goto done;
     LmbModelIdentity identity;
     Swarm swarm = {0};
     double started = nowd();
@@ -1533,7 +1343,7 @@ static int home_request_chat_direct(LmbTuiState *st, int selected) {
         fflush(stdout);
         if (!lmb_model_identity_get(st->tracker, model, &identity) &&
             !swarm_inspect(st->tracker, model, &swarm) && swarm.total_bytes) { found = 1; break; }
-        if (waitpid(s.source, NULL, WNOHANG) == s.source) break;
+        if (waitpid(source_pid, NULL, WNOHANG) == source_pid) break;
         int key = home_key(); if (key == 'q' || key == 27 || key == 3) break;
         (void)poll(NULL, 0, 200);
     }
@@ -1548,101 +1358,8 @@ static int home_request_chat_direct(LmbTuiState *st, int selected) {
         goto done;
     }
     uint8_t edge_pk[32];
-    if (lmb_unhex(edge_pk, st->identities[indices[plan.edge_node]], 32)) goto done;
-    /* Each recipient gets one exact range, and only the selected Edge owner
-     * gets permission to host text. Edge must also own a Segment slice in v1. */
-    int have_edge = 0;
-    for (uint32_t j = 0; j < plan.nslices; j++) {
-        const LmbSlice *slice = &plan.slices[j]; uint32_t n = slice->node;
-        LmbHomeOffer *o = &s.offers[s.count];
-        memcpy(o->id, id, 32); memcpy(o->requester, pk, 32);
-        memcpy(o->edge_peer, edge_pk, 32); memcpy(o->model_root, identity.root, 32);
-        snprintf(o->model, sizeof o->model, "%s", model);
-        snprintf(o->model_type, sizeof o->model_type, "%s", m->shape.model_type);
-        snprintf(o->tracker, sizeof o->tracker, "%s", st->tracker);
-        o->begin = slice->layer_begin; o->end = slice->layer_end; o->layers = m->shape.layers;
-        o->context = st->context; o->threads = nodes[n].threads ? nodes[n].threads : 1;
-        o->sessions = st->sessions > 1 ? st->sessions : 0;
-        if (o->threads > 256) o->threads = 256;
-        o->max_new = st->quick_calibration ? LMB_QUICK_PROBE_TOKENS : (st->max_new ? st->max_new : 256);
-        o->model_bytes = swarm.total_bytes;
-        o->runs_edge = n == plan.edge_node;
-        if (plan.hybrid) {
-            o->hybrid_role = o->runs_edge ? LMB_HYBRID_COORDINATOR : LMB_HYBRID_ACCELERATOR;
-            if (o->runs_edge) {
-                memcpy(o->hybrid.allocation, id, 32); memcpy(o->hybrid.root, identity.root, 32);
-                for (uint32_t k = 0; k < plan.nslices; k++) {
-                    const LmbSlice *a = &plan.slices[k];
-                    if (a->node == plan.edge_node) continue;
-                    LmbHybridPeer *p = &o->hybrid.peers[o->hybrid.count++];
-                    p->begin = a->layer_begin; p->end = a->layer_end;
-                    if (lmb_unhex(p->key, st->identities[indices[a->node]], 32)) goto done;
-                }
-            }
-        }
-        LmbHomeReservation reservation;
-        if (lmb_home_reservation_sessions(&m->shape, swarm.total_bytes, o->begin, o->end,
-                                o->context, st->sessions, o->runs_edge, &reservation)) {
-            home_fail("The model's memory requirements cannot be represented safely.");
-            goto done;
-        }
-        o->ram_bytes = reservation.total_bytes;
-        if (plan.hybrid) o->ram_bytes = lmb_budget_add(o->ram_bytes, lmb_home_hybrid_extra(&m->shape));
-        o->edge_ram_bytes = reservation.edge_bytes;
-        /* Resident weights never occupy the file mirror. Keep a bounded
-         * allowance for metadata, signed block hashes, sparse-file maps and
-         * logs; do not reserve two complete checkpoints on each donor. */
-        uint64_t disk_input = home_resident_required() ? swarm.metadata_bytes : swarm.total_bytes;
-        o->disk_bytes = lmb_budget_add(lmb_budget_add(disk_input, disk_input), UINT64_C(256) << 20);
-        if (home_resident_required())
-            o->disk_bytes = lmb_budget_add(o->disk_bytes, swarm.total_bytes / 1024);
-        if (o->disk_bytes == UINT64_MAX) {
-            home_fail("The model's disk requirements exceed the supported size.");
-            goto done;
-        }
-        if (o->ram_bytes > nodes[n].ram_budget_bytes) {
-            home_fail("%.64s needs %.2f GB for this plan, but offers %.2f GB. No allocation was committed.",
-                      nodes[n].name, o->ram_bytes / 1e9, nodes[n].ram_budget_bytes / 1e9);
-            goto done;
-        }
-        if (!lmb_home_offer_valid(o)) { home_fail("The proposed allocation failed validation. No allocation was committed."); goto done; }
-        snprintf(s.names[s.count], sizeof s.names[0], "%s", nodes[n].name);
-        snprintf(s.addresses[s.count], sizeof s.addresses[0], "%s", nodes[n].addr);
-        uint8_t recipient[32];
-        if (lmb_unhex(recipient, st->identities[indices[n]], 32)) goto done;
-        memcpy(s.peer_keys[s.count], recipient, 32);
-        int fd = lmb_connect_ms_io(nodes[n].addr, 1500, home_control_io_ms(1000));
-        if (fd < 0) {
-            home_fail("Cannot reach %.64s at %.64s while sending the request: %s.", nodes[n].name, nodes[n].addr, lmb_connect_why());
-            goto done;
-        }
-        lmb_set_io_timeout(fd, home_control_io_ms(1000));
-        (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
-        if (!lmb_secure_peer_matches(fd, recipient) || lmb_auth(fd)) {
-            home_fail("Authentication failed while requesting %.64s. Refresh the household identity and key.", nodes[n].name);
-            lmb_close(fd); goto done;
-        }
-        LmbBuf b = {0};
-        int bad = lmb_home_offer_pack(&b, o) || lmb_send(fd, LMB_HOME_OFFER, b.p, (uint32_t)b.len, NULL, 0);
-        free(b.p);
-        if (bad) { home_fail("Cannot send the request to %.64s. Check its connection.", nodes[n].name); lmb_close(fd); goto done; }
-        s.fd[s.count] = fd; s.phase[s.count] = LMB_HOME_PENDING;
-        if (o->runs_edge) { s.edge = s.count; have_edge = 1; }
-        s.count++;
-        /* Drain the initial acknowledgement before starting heartbeats. A
-         * busy donor replies then closes; sending PULSE first can replace its
-         * queued rejection with a write error and hide the actual reason. */
-        if (home_session_receive(&s, s.count - 1)) {
-            if (!s.reason[s.count - 1][0])
-                home_fail("No valid allocation acknowledgement from %.64s. Check its connection; no plan was committed.", nodes[n].name);
-            goto done;
-        }
-        if (s.phase[s.count - 1] != LMB_HOME_PENDING) {
-            home_fail("Unexpected initial allocation status from %.64s. No plan was committed.", nodes[n].name);
-            goto done;
-        }
-    }
-    if (!have_edge || !s.count) goto done;
+    if (home_offer_plan(&s,st,m,nodes,indices,&plan,pk,id,identity.root,model,
+        swarm.total_bytes,swarm.metadata_bytes,home_resident_required(),edge_pk)) goto done;
     /* Preparation must keep leases alive even if terminal output blocks or
      * progress rendering is slow. The monitor is the sole status reader
      * from approval through chat; the UI consumes mutex-protected snapshots. */
@@ -1840,6 +1557,7 @@ done:
     if (atomic_load(&s.failed)) result = -1;
     home_terminal_end(&term);
     home_session_close(&s, prepared && home_resident_required());
+    home_stop_child(&source_pid);
     if (!result && prepared && home_background_job && home_service_preparation_ready(home_background_job,id))
         result=home_fail("Model reached READY, but its operation result could not be persisted. Inspect the recorded allocation before retrying.");
     if (result) {
