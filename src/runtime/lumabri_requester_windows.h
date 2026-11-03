@@ -299,7 +299,11 @@ static int home_prepare_entry_windows(int argc,char **argv) {
             for (int i=0;i<st->nmodels;i++) if (!strcmp(st->models[i].dir,models[m])) {found=i;break;}
             if (found<0) {selected=-1;break;}
             selected=found;
-            if (joint) snprintf(st->selected_models[m],sizeof st->selected_models[m],"%s",models[m]);
+            if (joint) {
+                _Static_assert(sizeof st->selected_models[0]==sizeof models[0],"reviewed model path size");
+                /* Each row was length-checked and zero-initialized above. */
+                memcpy(st->selected_models[m],models[m],sizeof models[m]);
+            }
         }
         if (joint) catalog_joint_refresh(st);
     }
