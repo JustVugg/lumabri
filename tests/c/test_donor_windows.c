@@ -235,13 +235,17 @@ int wmain(int argc,wchar_t **wide) {
     assert(atomic_load(&fixture.checkpoint.reads)==prepared_reads);
     LmbHostControl hc;
     assert(!lmb_host_control_rpc(host_address,host_key,host_root,LMB_HOST_CONTROL_QUERY,NULL,&hc));
-    assert(lmb_host_control_rpc(host_address,host_key,host_root,LMB_HOST_CONTROL_RETIRE,&hc,&hc)>0);
+    assert(hc.connections==2);
+    assert(lmb_host_control_rpc(host_address,host_key,host_root,LMB_HOST_CONTROL_RETIRE,&hc,&hc)==LMB_HOST_CONTROL_CONFLICT);
     assert(!lmb_host_control_rpc(host_address,host_key,host_root,LMB_HOST_CONTROL_DRAIN,&hc,&hc));
-    assert(lmb_host_control_rpc(host_address,host_key,host_root,LMB_HOST_CONTROL_RETIRE,&hc,&hc)>0);
+    assert(hc.draining==1);
+    /* Draining closes idle conversations asynchronously. The host may already
+     * be empty by the next control RPC, so RETIRE is then correctly accepted.
+     * Observe completed cleanup instead of requiring a timing-dependent conflict. */
     lmb_close(host_a);lmb_close(host_b);
     uint64_t idle_deadline=GetTickCount64()+5000;
     do {assert(!lmb_host_control_rpc(host_address,host_key,host_root,LMB_HOST_CONTROL_QUERY,NULL,&hc));
-        assert(GetTickCount64()<idle_deadline);Sleep(20);} while (hc.connections);
+        assert(GetTickCount64()<idle_deadline);Sleep(20);} while (hc.connections || hc.requests);
     assert(!lmb_host_control_rpc(host_address,host_key,host_root,LMB_HOST_CONTROL_RETIRE,&hc,&hc));
     assert(hc.draining==LMB_HOST_CONTROL_RETIRED);
     host_c=native_host_connect(host_address,1);lmb_close(host_c);

@@ -39,9 +39,13 @@ def build_tool_output(command):
 
 
 def revision(root):
-    commit = build_tool_output(["git", "-C", str(root), "rev-parse", "HEAD"]).strip()
+    # A native Windows build shell can contain a different Git/configuration
+    # from the checkout action (notably CRLF policy). Keep its provenance query
+    # on the same implementation that materialized the source tree.
+    git = os.environ.get("LUMABRI_BUILD_GIT") or "git"
+    commit = build_tool_output([git, "-C", str(root), "rev-parse", "HEAD"]).strip()
     dirty = bool(build_tool_output(
-        ["git", "-C", str(root), "status", "--porcelain", "--untracked-files=no"]).strip())
+        [git, "-C", str(root), "status", "--porcelain", "--untracked-files=no"]).strip())
     return {"commit": commit, "tracked_changes": dirty}
 
 
