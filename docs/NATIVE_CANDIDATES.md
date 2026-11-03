@@ -52,136 +52,24 @@ The latest measured speed is historical, not a guarantee for the next turn.
   rejected because the loader treats them as a library-list separator.
 - Linux records its dynamic library dependencies in `manifest.json`; it is
   not a universal static binary. Use the recorded compatible OS/runtime.
-  Windows/WSL runs this Linux candidate. Native Windows inference is not
-  included and is not certified by the firewall helper.
-- Separate native Windows developer gates exercise resident OLMoE, the Segment
-  protocol, encrypted TCP and persistent peer identities. These are not a
-  packaged Windows household service. The native identity store defaults to
-  `%LOCALAPPDATA%\Lumabri`, using protected owner/System ACLs and bounded file
-  locks. Explicit credential paths must also be private local files; shared
-  drives, hard links and reparse paths are refused. Existing corrupt or unsafe
-  keys are never silently replaced. The gate uses disposable files and does
-  not change installed identities or firewall settings.
-- Native Windows local service control uses the same versioned snapshots,
-  preparation records and mutation fences as Unix. Its acceptance test uses
-  separate Windows processes: private local named pipes, duplicate-keeper
-  refusal, bounded malformed input, independent client exit, manager restart,
-  atomic journal replacement and crash recovery. A journal never grants
-  permission to replay an approval. This gate does not yet deliver the full
-  native Windows household service or package.
-- The per-donor compute permit also has a native Windows implementation:
-  private same-user named pipes, a bounded FIFO, queue deadlines and
-  cancellation. The connected process owns its permit; exit releases it.
-  Native tests cover overload, invalid requests, Unicode profile paths,
-  separate-process crashes and repeated restart without leaked handles.
-  The keeper passes this broker to approved workers; a compute permit alone
-  never authorizes loading a model.
-- The shared residency guard now checks native Windows engine locks and input
-  sealing during real OLMoE generation. Inherited worker control and reserved
-  TCP listener handoff also have native process tests, including incomplete
-  replies, stale mutations and a mismatched port. Listener handoff uses
-  Winsock duplication for the owned child; it never rebinds a released port.
-  The production `segment_node.exe` now uses these controls and the same
-  encrypted Segment protocol. Its developer build explicitly links OLMoE
-  only; capability queries do not advertise unlinked adapters. An approved
-  process budget sets its Windows working-set allowance, while owned page
-  locks, input sealing and the process guard enforce residence. No system-wide
-  memory limit is changed. A native test compares 72 generated tokens with a
-  local Colibri oracle across separate conversations and drain/resume/retire.
-- Native `maintainer.exe` uses the common signed checkpoint publisher and
-  encrypted transfer protocol. It can serve a local checkpoint folder, including
-  Unicode paths and large files, and retain integrity metadata across restart.
-  The Windows gate runs the production tracker and source, concurrent range
-  reads, a signed replica surviving its origin, and changed-content rejection.
-  These transfers prepare resident workers; they are not inference from disk.
-  Native model selection and requester orchestration are still separate work.
-- Native Windows worker preparation can receive a signed checkpoint from the
-  approved LAN source without preinstalling its weight files. Bounded metadata
-  and safetensors headers are materialized in private sparse files; engine
-  weight reads use verified chunks directly from the source. The input bridge
-  rejects Windows path aliases, wrong signing keys, altered chunks and unknown
-  file handles, then closes network input after resident preparation. Its
-  eight-chunk cache is temporary and is released before readiness. This is a
-  worker developer gate, not a Windows household package; the gate compares
-  72 tokens against the local oracle and
-  checks that generation makes no further source reads. Native engine builds
-  embed a [process-local UTF-8 code-page manifest](https://learn.microsoft.com/en-us/windows/win32/sbscs/application-manifests#activecodepage)
-  (Windows 10 version 1903 or newer); preparation is exercised in a path with
-  spaces and non-ASCII text.
-  That test uses a signed lease fixture; a separate Windows/Linux loopback
-  test also exercises the production tracker and Linux Edge.
-- Native `segment_chat.exe` uses the same Edge, discovery and SUBMIT/DATA/DONE
-  implementation as Unix. Its Windows input bridge verifies the approved
-  checkpoint, admits the explicit `LUMABRI_EDGE_RAM_BYTES` working-set budget,
-  and seals weight input before readiness. Binary pipes preserve embedded LF
-  and control-Z bytes. The native gate compares 24 generated token IDs with a
-  local oracle and exercises two conversation slots, reset, cancellation and
-  reuse, malformed control, EOF, and no further checkpoint-source reads after
-  readiness. The native donor connects this engine to approved hosted
-  allocations, as described below.
-- Hosted authentication, framing and the bounded session pool now share one
-  implementation across Unix and native Windows pipe transports. The native
-  gate runs that pool with encrypted clients and real Edge/Segment processes:
-  two slots, BUSY at capacity, cancellation/reuse, and oversized-frame refusal
-  without interrupting another conversation. The donor starts Edge only after
-  the approved Segment is ready and the requester sends START_HOST. It waits
-  for the actual engine capabilities and readiness before publishing the host.
-  The approved RAM reservation is split between Segment, Edge and gateway
-  buffers; each process cannot independently spend the entire reservation.
-- The native `lumabri.exe` control entrypoint can now start, inspect, restart
-  and stop the private background manager with `service`, and report the
-  Windows machine inventory with `machine --json`. The shared manager loop
-  observes existing keepers without replaying approvals. Its native acceptance
-  test starts eight clients concurrently, closes the launchers, restarts and
-  crashes the manager, and verifies that a separate keeper retains its state.
-  This is a developer control entrypoint, not a complete Windows household
-  package. Build it with
-  `python tools/build_windows_segment.py --only contracts`; the executable is
-  in `build/windows-segment`. Unsupported commands fail explicitly.
-- The native donor keeper now accepts encrypted household offers and waits
-  for approval through the same private, revision-fenced service API as Unix.
-  Each approved allocation owns a resident OLMoE worker and, when requested,
-  an Edge host, reserved listeners, memory reservation and immutable lifetime
-  record. Up to four allocations
-  share one bounded compute FIFO; closing the requester or restarting the
-  manager preserves prepared workers. Release waits for process and inherited
-  handle exit. Terminal receipts can be reconciled after an interrupted reply;
-  old allocation IDs and approvals are never replayed.
-  The native gate prepares two allocations, compares 72 oracle tokens, runs
-  two hosted chat slots, restarts the manager without replacing the engines,
-  retires the host allocation without interrupting the other worker, and
-  checks that inference makes no further checkpoint-source reads. The host
-  must drain and acknowledge every retained conversation's remote CLOSE
-  before coordinated retirement. Allocation memory stays reserved until the
-  gateway thread, owned processes and inherited lifetime handles have exited.
-  Separate tests check inherited lifetime fences,
-  missing/corrupt evidence and receipt replay.
-  This developer entry requires a reachable authenticated tracker and owner
-  approval. The native screen and signed inventory are described below.
-  Repeat policies, native household creation/chat client and a complete Windows
-  package are not delivered by this gate. Unsupported Hybrid or model
-  allocations are explicitly refused; registering adapters is not sufficient
-  to claim their native execution.
-- Native engine ownership requires Windows 10 version 1607 or later. The
-  supervisor assigns the process tree to its private Job Object atomically at
-  creation, passes only explicitly selected handles and signals readiness with
-  an inherited event. Stop confirms the entire tree has exited; a saved PID
-  never authorizes termination. Native tests cover owner crashes, descendants,
-  cooperative stop, Unicode paths and arguments, and resident OLMoE inference
-  under this supervisor. Capability probes use the same bounded ownership path.
-- The shared C catalogue also has a native Windows console backend. A ConPTY
-  test (Windows 10 1809 or later) drives actual navigation, donor selection,
-  model review, resize and Ctrl-C, and checks restoration of console modes and
-  code pages. Checkpoint inspection accepts UTF-8 paths and 64-bit file extents;
-  its Windows gate verifies bounded reads of a sparse shard larger than 4 GiB.
-  These gates do not replace native chat hosting and final package validation.
-- Native Windows inventory uses physical/available RAM bounded by commit and
-  visible Job Object limits, processor affinity, physical cores, NUMA, DXGI
-  hardware detection and free disk space. A shared job memory ceiling uses the
-  reported peak as a conservative bound; it can understate released capacity.
-  Detection does not enable a GPU backend or add shared system RAM as VRAM.
-  The native governor test checks bounded memory, single-CPU affinity, exclusive
-  donor leases, private pause state and recovery without changing user settings.
+  WSL runs this Linux candidate. The separate native Windows package has its
+  own executables, launcher and capability limits.
+- For native Windows installation and update instructions, use
+  [Windows package](WINDOWS_PACKAGE.md). Its shared C catalogue supports
+  explicit donor selection, separate approvals, resident chat, a persistent
+  service and multiple model reservations. The local engine currently executes
+  CPU OLMoE; other adapters and GPUs are not advertised as local capabilities.
+  It does not yet host the HTTP/web API. A Linux/macOS gateway can serve a
+  mixed household through the existing authenticated protocol.
+- Windows acceptance uses real PE executables and private disposable profiles:
+  ConPTY navigation, encrypted tracker/source/donor, identity-pinned chat,
+  separate conversations, eight-token calibration, cancellation, co-resident
+  models, manager restart, installed update and rollback. Reduced checkpoints
+  exercise execution and lifecycle; they do not establish large-model speed.
+  Checkpoint paths must be local; private credentials refuse shared drives,
+  hard links and reparse paths. Owned Job Objects and engine page locks enforce
+  process lifetime and resident memory. No system-wide memory limit, firewall
+  or execution policy is changed by these tests.
 - Neither a GPU detector nor a manifest entry proves accelerated execution.
   These candidates use the verified CPU path. Each participating machine
   must permit the household's fixed LAN ports in its own firewall.
@@ -316,8 +204,8 @@ The native tracker gate checks that complete lifecycle, LAN discovery hints,
 authenticated signed Segment registration and route-generation advancement
 after a tracker restart. The shared durable-history gate also runs as a real
 Windows process: cache overflow, legacy records, competing publishers, key
-rotation and corrupted evidence. The interactive chat client and final Windows
-packaging remain separate work.
+rotation and corrupted evidence. Installed Windows candidates also run the
+catalogue-to-chat flow and quiescent package update/rollback gate.
 
 ## Native Windows resident chat client
 
@@ -341,8 +229,8 @@ Measured speed appears only when the host returns generation timing.
 
 Native tests cover the actual console, encrypted cancellation and interrupted
 streams, and two turns against a real reduced OLMoE host with no further weight
-reads. Automatic model preparation from the native Windows catalogue and the
-complete Windows package are not delivered by this client command.
+reads. The workspace catalogue handles model preparation; this command only
+attaches to an already approved host.
 
 ### Native Windows catalogue preparation
 
@@ -369,5 +257,7 @@ signed source, donor and Edge through this path using a reduced OLMoE checkpoint
 It covers pending-operation detach/reopen, explicit approval, retained workers,
 manager restart, conversation isolation, calibration, cancellation and joint
 preparation. It requires complete inference binaries from
-`tools/build_windows_segment.py`, not `--only contracts` alone. The final Windows
-package and physical-cluster acceptance are separate from this developer gate.
+`tools/build_windows_segment.py`, not `--only contracts` alone. The installed
+package gate reuses this flow, then switches to a separately built version and
+back with fresh approvals and chat after each switch. Physical mixed-machine
+acceptance is still a separate release check.

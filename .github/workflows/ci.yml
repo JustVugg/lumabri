@@ -68,11 +68,11 @@ jobs:
           name: windows-control-evidence
           path: build/windows-control-evidence.log
   windows-segment:
-    # Native PE/COFF + Win32 execution. This tests the inference boundary;
-    # the complete household service is not certified for Windows yet.
+    # Native PE/COFF execution and installed household lifecycle. Physical
+    # mixed-machine acceptance remains a separate release gate.
     needs: linux
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     defaults:
       run:
         shell: msys2 {0}
@@ -97,9 +97,12 @@ jobs:
           msystem: UCRT64
           update: false
           install: >-
+            git
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-binutils
             mingw-w64-ucrt-x86_64-python
+      - name: Verify native packaging tools are available
+        run: python3 -c "import subprocess; subprocess.run(['git', '--version'], check=True); subprocess.run(['objdump', '--version'], check=True)"
       - name: Build and audit native engine memory and checkpoint input
         run: python3 tools/build_windows_segment.py --engine ../colibri/c --only inference
       - name: Compare resident full and split OLMoE inference on Windows
@@ -126,10 +129,31 @@ jobs:
         run: |
           set -o pipefail
           ./build/windows-segment/test_donor_windows.exe "$(cygpath -w "$PWD/build/windows-segment/lumabri.exe")" "$(cygpath -w "$PWD/build/native-text-fixture/olmoe-tiny")" 2>&1 | tee -a build/windows-segment-evidence.log
-      - name: Prepare reviewed models through the native catalogue and chat
+      - uses: actions/checkout@v4
+        with:
+          ref: dcc1a52454f6ced188ac1eb173397e8e36ac0d51
+          path: previous-lumabri
+      - name: Build the previous complete native runtime independently
+        run: |
+          python3 ../previous-lumabri/tools/build_windows_segment.py --engine ../colibri/c --only inference --output build/previous-windows-segment
+          # Both versions above use this same installed compiler/runtime.
+          cp build/windows-segment/WINDOWS-RUNTIME-NOTICES.txt build/previous-windows-segment/WINDOWS-RUNTIME-NOTICES.txt
+      - name: Assemble and validate installed Windows packages
         run: |
           set -o pipefail
-          ./build/windows-segment/test_requester_windows.exe "$(cygpath -w "$PWD/build/windows-segment/lumabri.exe")" "$(cygpath -w "$PWD/build/native-text-fixture/olmoe-tiny")" 2>&1 | tee -a build/windows-segment-evidence.log
+          python3 tools/package_household.py --runtime-dir build/windows-segment --colibri-root ../colibri --output 'build/windows candidate'
+          python3 tools/package_household.py --runtime-dir build/previous-windows-segment --runtime-repository ../previous-lumabri --colibri-root ../colibri --output 'build/previous windows candidate'
+          python3 tests/integration/windows_package_test.py --candidate 'build/windows candidate' --previous 'build/previous windows candidate' --driver build/windows-segment/test_requester_windows.exe --fixture build/native-text-fixture/olmoe-tiny 2>&1 | tee -a build/windows-segment-evidence.log
+          python3 tools/package_household.py --verify 'build/windows candidate'
+          python3 tools/package_household.py --verify 'build/previous windows candidate'
+          python3 -m zipfile -c build/lumabri-windows-x86_64-candidate.zip 'build/windows candidate'
+          sha256sum build/lumabri-windows-x86_64-candidate.zip > build/lumabri-windows-x86_64-candidate.zip.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lumabri-windows-x86_64-candidate
+          path: |
+            lumabri/build/lumabri-windows-x86_64-candidate.zip
+            lumabri/build/lumabri-windows-x86_64-candidate.zip.sha256
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -12,6 +12,9 @@ ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location("package_household", ROOT / "tools/package_household.py")
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+spec = importlib.util.spec_from_file_location("build_windows_segment", ROOT / "tools/build_windows_segment.py")
+windows_builder = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(windows_builder)
 
 
 class PackageTest(unittest.TestCase):
@@ -24,7 +27,12 @@ class PackageTest(unittest.TestCase):
             path = self.runtime / name
             path.write_bytes(b"test packaging bytes, not a model runtime\n")
             path.chmod(0o755)
+        for name in module.WINDOWS_BINARIES:
+            path = self.runtime / name
+            path.write_bytes(b"test PE packaging bytes\n")
+            path.chmod(0o755)
         (self.runtime / "private.key").write_text("must never ship")
+        (self.runtime / "WINDOWS-RUNTIME-NOTICES.txt").write_text("test installed runtime notices")
         (self.runtime / "weights.safetensors").write_text("must never ship")
         self.colibri = self.root / "colibri"
         self.colibri.mkdir()
@@ -39,6 +47,7 @@ class PackageTest(unittest.TestCase):
         with patch.object(module.platform, "system", return_value=system), \
                 patch.object(module, "dependencies", return_value="test dependencies"), \
                 patch.object(module, "macos_minimum", return_value=(12, 0, 0)), \
+                patch.object(module, "windows_dependencies", return_value=["KERNEL32.dll"]), \
                 patch.object(module, "revision", return_value={"commit": "a" * 40, "tracked_changes": False}):
             return module.package(self.runtime, self.colibri, self.output)
 
@@ -61,6 +70,14 @@ class PackageTest(unittest.TestCase):
         self.build()
         with self.assertRaisesRegex(ValueError, "already exists"):
             self.build()
+
+    def test_missing_packaging_tools_are_identified_without_creating_output(self):
+        with patch.object(module.subprocess, "check_output", side_effect=FileNotFoundError):
+            with self.assertRaisesRegex(ValueError, "packaging tool not found: git"):
+                module.revision(self.colibri)
+            with self.assertRaisesRegex(ValueError, "packaging tool not found: objdump"):
+                module.windows_dependencies(self.runtime / "lumabri.exe")
+        self.assertFalse(self.output.exists())
 
     def test_verify_rejects_mutation_extra_file_and_symlink(self):
         self.build()
@@ -103,9 +120,63 @@ class PackageTest(unittest.TestCase):
         self.assertIn("lib/lumabri/liblumabri.dylib", result["files"])
         self.assertEqual((self.output / "licenses/Colibri-THIRD_PARTY_NOTICES.md").read_text(), "test upstream notices")
 
-    def test_windows_is_not_silently_linux(self):
-        with self.assertRaisesRegex(ValueError, "Windows household packaging is not implemented"):
+    def test_windows_has_exact_native_runtime_and_launcher(self):
+        result = self.build("Windows")
+        self.assertEqual(result, module.verify(self.output))
+        self.assertEqual(set(p.name for p in (self.output / "bin").iterdir()), set(module.WINDOWS_BINARIES))
+        self.assertIn("Lumabri.cmd", result["files"])
+        self.assertIn("Verify-Lumabri.ps1", result["files"])
+        self.assertEqual(result["capabilities"]["local_adapters"], ["olmoe"])
+        self.assertFalse(result["capabilities"]["http_api_server"])
+        self.assertNotIn("mode", result["files"]["bin/lumabri.exe"])
+
+    def test_windows_runtime_notices_follow_installed_toolchain_layout(self):
+        compiler = self.root / "ucrt64/bin/gcc.exe"
+        compiler.parent.mkdir(parents=True)
+        compiler.touch()
+        licences = compiler.parent.parent / "share/licenses"
+        for name in ('libwinpthread/COPYING', 'crt/COPYING', 'crt/COPYING.MinGW-w64.txt',
+                     'crt/COPYING.MinGW-w64-runtime.txt'):
+            path = licences / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(name, encoding='utf-8')
+        with patch.object(windows_builder.platform, "system", return_value="Windows"), \
+                patch.object(windows_builder.shutil, "which", return_value=str(compiler)), \
+                patch.object(windows_builder.subprocess, "check_output", return_value="gcc installed-version\n"):
+            for layout in ("gcc-libs", "libgcc"):
+                directory = licences / layout
+                directory.mkdir()
+                for name in ("COPYING3", "COPYING.RUNTIME"):
+                    (directory / name).write_text(layout + '/' + name, encoding='utf-8')
+                windows_builder.runtime_notices('gcc', self.runtime)
+                notices = (self.runtime / 'WINDOWS-RUNTIME-NOTICES.txt').read_text(encoding='utf-8')
+                self.assertIn(layout + '/COPYING3', notices)
+                self.assertIn(layout + '/COPYING.RUNTIME', notices)
+                self.assertIn('libwinpthread/COPYING', notices)
+                self.assertIn('gcc installed-version', notices)
+                for path in directory.iterdir():
+                    path.unlink()
+                directory.rmdir()
+            with self.assertRaisesRegex(ValueError, 'license and exception missing'):
+                windows_builder.runtime_notices('gcc', self.runtime)
+        self.assertFalse((self.output / "lib").exists())
+
+    def test_windows_requires_complete_runtime(self):
+        (self.runtime / "segment_chat.exe").unlink()
+        with self.assertRaises(FileNotFoundError):
             self.build("Windows")
+        self.assertFalse(self.output.exists())
+
+    def test_windows_rejects_non_native_and_developer_dependencies(self):
+        with patch.object(module.subprocess, "check_output", return_value="file format elf64-x86-64"):
+            with self.assertRaisesRegex(ValueError, "PE binaries"):
+                module.windows_dependencies(self.runtime / "lumabri.exe")
+        for dependency in ("libwinpthread-1.dll", "libgcc_s_seh-1.dll", "libomp.dll", "C:/build/private.dll"):
+            with patch.object(module.subprocess, "check_output", side_effect=["file format pei-x86-64", f"DLL Name: {dependency}"]):
+                with self.assertRaisesRegex(ValueError, "non-system Windows"):
+                    module.windows_dependencies(self.runtime / "lumabri.exe")
+        with patch.object(module.subprocess, "check_output", side_effect=["file format pei-x86-64", "DLL Name: KERNEL32.dll\nDLL Name: api-ms-win-crt-runtime-l1-1-0.dll\n"]):
+            self.assertEqual(len(module.windows_dependencies(self.runtime / "lumabri.exe")), 2)
 
     def test_non_system_macos_dependency_refused(self):
         bad = "segment_node:\n\t/opt/homebrew/opt/libomp/lib/libomp.dylib (compatibility version 5.0.0)\n"

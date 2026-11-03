@@ -1,13 +1,49 @@
 #!/usr/bin/env python3
 """Build the native OLMoE Edge/Segment worker and gates, never the upstream tree.
 
-This is an inference and residency gate. It does not package or claim a
-complete native Windows Lumabri service. No checkpoint is downloaded here.
+Build the native household runtime and its inference/lifecycle gates. Package
+assembly is a separate step in tools/package_household.py. No checkpoint is
+downloaded here.
 """
 import argparse
 from pathlib import Path
+import platform
+import shutil
 import subprocess
 import sys
+
+
+def mingw_notice_files(licences):
+    """MSYS2 split gcc-libs into individual runtime packages in newer builds."""
+    files = [licences / name for name in ('libwinpthread/COPYING', 'crt/COPYING',
+        'crt/COPYING.MinGW-w64.txt', 'crt/COPYING.MinGW-w64-runtime.txt')]
+    for directory in ('libgcc', 'gcc-libs'):
+        gcc = licences / directory
+        if all((gcc / name).is_file() for name in ('COPYING3', 'COPYING.RUNTIME')):
+            return files + [gcc / name for name in ('COPYING3', 'COPYING.RUNTIME', 'COPYING.LIB', 'README')
+                            if (gcc / name).is_file()]
+    raise ValueError(f"GCC runtime license and exception missing under {licences}")
+
+
+def runtime_notices(cc, output):
+    """Retain the installed toolchain notices for statically linked runtimes."""
+    if platform.system() == "Windows":
+        executable = shutil.which(cc)
+        if not executable:
+            raise ValueError("native compiler not found")
+        licences = Path(executable).resolve().parent.parent / 'share/licenses'
+        files = mingw_notice_files(licences)
+    else:
+        # Debian's cross-toolchain package carries the source notices together
+        # with its bundled runtime terms. Native CI uses the MSYS2 files above.
+        files = [Path('/usr/share/doc/mingw-w64-common/copyright'),
+                 Path('/usr/share/doc/gcc-mingw-w64-x86-64-posix-runtime/copyright')]
+    version = subprocess.check_output([cc, '--version'], text=True).splitlines()[0]
+    text = ['Statically linked Windows runtime notices\n', version + '\n']
+    for path in files:
+        text.append('\n===== ' + path.parent.name + '/' + path.name + ' =====\n')
+        text.append(path.read_text(encoding='utf-8'))
+    (output / 'WINDOWS-RUNTIME-NOTICES.txt').write_text(''.join(text), encoding='utf-8')
 
 
 def main():
@@ -25,6 +61,7 @@ def main():
     root=Path(__file__).resolve().parents[1]
     output=Path(args.output).resolve()
     output.mkdir(parents=True,exist_ok=True)
+    runtime_notices(args.cc, output)
     source=output/'colibri-source'
     def run(command):
         subprocess.run([str(v) for v in command],cwd=root,check=True)
