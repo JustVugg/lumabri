@@ -296,5 +296,18 @@ resident allocation, checks resize handling, detaches and reopens with the same
 worker still alive. Signed inventory, independent model release, hosted chat
 and 72 oracle matches are checked in that same isolated deployment. Separate
 launcher tests cover wrong keys, masked credentials, Unicode input, cancellation,
-reopening and invalid settings. Native household creation, the interactive
-chat client and final packaging remain separate work.
+reopening and invalid settings.
+
+**Create a household** starts the common tracker under a private native keeper.
+The workspace saves its address and key only after readiness and an encrypted
+identity check. The key is hidden until explicitly revealed. A port conflict
+leaves existing settings intact. Closing the workspace keeps the tracker alive;
+reopening shows the same pairing details, and restarting the manager preserves
+it. **Stop local services** releases this computer's keepers.
+
+The native tracker gate checks that complete lifecycle, LAN discovery hints,
+authenticated signed Segment registration and route-generation advancement
+after a tracker restart. The shared durable-history gate also runs as a real
+Windows process: cache overflow, legacy records, competing publishers, key
+rotation and corrupted evidence. The interactive chat client and final Windows
+packaging remain separate work.

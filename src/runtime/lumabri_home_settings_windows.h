@@ -32,7 +32,13 @@ static int home_settings_load_windows(HomeSettings *out) {
     return bad ? -1 : 0;
 }
 
-static int home_settings_save_windows(const HomeSettings *settings) {
+static int home_settings_equal_windows(const HomeSettings *a,const HomeSettings *b) {
+    return a->owner==b->owner && !strcmp(a->tracker,b->tracker) && !strcmp(a->token,b->token) &&
+        !strcmp(a->models,b->models) && !strcmp(a->ram,b->ram) &&
+        !strcmp(a->sessions,b->sessions) && !strcmp(a->context,b->context);
+}
+
+static int home_settings_save_if_current_windows(const HomeSettings *settings,const HomeSettings *expected) {
     char path[1200],lock_path[1200],text[4096];
     int length=home_settings_format(settings,text,sizeof text);
     if (length<0 || home_settings_path_windows(path,sizeof path) ||
@@ -41,6 +47,12 @@ static int home_settings_save_windows(const HomeSettings *settings) {
     if (guard==INVALID_HANDLE_VALUE) {SecureZeroMemory(text,sizeof text);return -1;}
     int rc=-1;
     if (lmb_private_lock(guard,1)) goto done;
+    if (expected) {
+        HomeSettings latest;
+        int changed=home_settings_load_windows(&latest) || !home_settings_equal_windows(&latest,expected);
+        SecureZeroMemory(&latest,sizeof latest);
+        if (changed) {errno=EBUSY;goto unlocked;}
+    }
     LmbPrivatePath target;LmbPrivateSecurity security;
     if (lmb_private_path(path,&target)) goto unlocked;
     if (lmb_private_security(&security)) {lmb_private_path_close(&target);goto unlocked;}
@@ -68,6 +80,9 @@ unlocked:
 done:
     CloseHandle(guard);SecureZeroMemory(text,sizeof text);return rc ? -1 : 0;
 }
+static int home_settings_save_windows(const HomeSettings *settings) {
+    return home_settings_save_if_current_windows(settings,NULL);
+}
 
 static int home_settings_activate_windows(const HomeSettings *s) {
     /* _putenv_s updates both the CRT view used by authentication and the
@@ -75,13 +90,16 @@ static int home_settings_activate_windows(const HomeSettings *s) {
     return _putenv_s("LUMABRI_TOKEN",s->token) ? -1 : 0;
 }
 
-static int home_connection_check_windows(const char *address) {
+static int home_connection_check_identity_windows(const char *address,const uint8_t *identity) {
     LmbSocket fd=lmb_connect_ms_io(address,1500,1500);
     if (fd==LMB_INVALID_SOCKET) return -1;
     LmbMsg reply={0};
-    int bad=lmb_auth(fd) || lmb_send(fd,LMB_PING,NULL,0,NULL,0) ||
+    int bad=(identity && !lmb_secure_peer_matches(fd,identity)) || lmb_auth(fd) || lmb_send(fd,LMB_PING,NULL,0,NULL,0) ||
         lmb_recv_bounded(fd,&reply,256,1500) || reply.op!=LMB_OK || reply.body_len || reply.pay_len;
     lmb_msg_free(&reply);lmb_close(fd);return bad ? -2 : 0;
+}
+static int home_connection_check_windows(const char *address) {
+    return home_connection_check_identity_windows(address,NULL);
 }
 
 static int home_settings_join_windows(HomeSettings *current,const HomeSettings *next) {
@@ -90,7 +108,7 @@ static int home_settings_join_windows(HomeSettings *current,const HomeSettings *
     for (unsigned i=0;i<3;i++) if (!home_service_query(roles[i],HOME_SVC_STATUS,NULL,&running)) return -4;
     if (!next->tracker[0] || !next->token[0] || next->owner || home_settings_activate_windows(next)) return -2;
     int rc=home_connection_check_windows(next->tracker);
-    if (!rc && home_settings_save_windows(next)) rc=-3;
+    if (!rc && home_settings_save_if_current_windows(next,current)) rc=-3;
     if (rc) (void)home_settings_activate_windows(current);
     else *current=*next;
     return rc;

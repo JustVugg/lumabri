@@ -12,12 +12,25 @@
 typedef struct { char address[64], name[64]; uint8_t identity[32]; } LmbHomeFound;
 
 static inline uint64_t lmb_home_disc_ms(void) {
-    struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
-    return (uint64_t)t.tv_sec * 1000 + (uint64_t)t.tv_nsec / 1000000;
+    return lmb_socket_now_ms();
 }
 
 static inline int lmb_home_on_link(struct in_addr peer) {
     if ((ntohl(peer.s_addr) >> 24) == 127) return 1;
+#ifdef _WIN32
+    IP_ADAPTER_ADDRESSES *all=lmb_home_adapters();int found=0;
+    for (IP_ADAPTER_ADDRESSES *p=all;p;p=p->Next) {
+        if (p->OperStatus!=IfOperStatusUp || p->IfType==IF_TYPE_SOFTWARE_LOOPBACK || p->IfType==IF_TYPE_PPP) continue;
+        for (IP_ADAPTER_UNICAST_ADDRESS *u=p->FirstUnicastAddress;u;u=u->Next) {
+            if (!u->Address.lpSockaddr || u->Address.iSockaddrLength<(int)sizeof(struct sockaddr_in) ||
+                u->Address.lpSockaddr->sa_family!=AF_INET || !u->OnLinkPrefixLength || u->OnLinkPrefixLength>32) continue;
+            uint32_t mask=htonl(UINT32_MAX<<(32-u->OnLinkPrefixLength));
+            uint32_t local=((struct sockaddr_in *)u->Address.lpSockaddr)->sin_addr.s_addr;
+            if ((local&mask)==(peer.s_addr&mask)) found=1;
+        }
+    }
+    free(all);return found;
+#else
     struct ifaddrs *all = NULL; int found = 0;
     if (getifaddrs(&all)) return 0;
     for (struct ifaddrs *p = all; p; p = p->ifa_next) {
@@ -28,6 +41,7 @@ static inline int lmb_home_on_link(struct in_addr peer) {
         if (mask && (peer.s_addr & mask) == (local.s_addr & mask)) found = 1;
     }
     freeifaddrs(all); return found;
+#endif
 }
 
 static inline int lmb_home_disc_parse(const uint8_t *p, size_t len,
@@ -48,7 +62,7 @@ static inline int lmb_home_disc_parse(const uint8_t *p, size_t len,
     return 0;
 }
 
-typedef struct { int fd, port; uint8_t identity[32]; } LmbHomeBeacon;
+typedef struct { LmbSocket fd; int port; uint8_t identity[32]; } LmbHomeBeacon;
 static inline void *lmb_home_beacon_loop(void *arg) {
     LmbHomeBeacon b = *(LmbHomeBeacon *)arg; free(arg);
     char hostname[64] = "household";
@@ -57,9 +71,9 @@ static inline void *lmb_home_beacon_loop(void *arg) {
     uint64_t previous = 0;
     for (;;) {
         uint8_t query[LMB_HOME_DISC_QUERY + 1]; struct sockaddr_in peer;
-        socklen_t size = sizeof peer;
-        ssize_t n = recvfrom(b.fd, query, sizeof query, 0, (struct sockaddr *)&peer, &size);
-        if (n < 0) { if (errno == EINTR) continue; break; }
+        LmbSocketLength size = sizeof peer;
+        int n = (int)recvfrom(b.fd, (char *)query, sizeof query, 0, (struct sockaddr *)&peer, &size);
+        if (n < 0) { (void)lmb_socket_error();if (errno == EINTR) continue; break; }
         uint64_t now = lmb_home_disc_ms();
         if (n != LMB_HOME_DISC_QUERY || memcmp(query, "LMBFIND1", 8) ||
             peer.sin_family != AF_INET || now - previous < 100 || !lmb_home_on_link(peer.sin_addr)) continue;
@@ -69,44 +83,43 @@ static inline void *lmb_home_beacon_loop(void *arg) {
         memcpy(reply + 24, b.identity, 32);
         reply[56] = (uint8_t)b.port; reply[57] = (uint8_t)(b.port >> 8);
         memcpy(reply + 58, hostname, strlen(hostname));
-        (void)sendto(b.fd, reply, sizeof reply, 0, (struct sockaddr *)&peer, size);
+        (void)sendto(b.fd, (const char *)reply, sizeof reply, 0, (struct sockaddr *)&peer, size);
     }
-    close(b.fd); return NULL;
+    lmb_socket_close(b.fd); return NULL;
 }
 
 static inline int lmb_home_beacon_start(int port, const uint8_t identity[32]) {
-    int fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0) return -1;
+    LmbSocket fd = lmb_socket_open(AF_INET, SOCK_DGRAM, 0);
+    if (fd == LMB_INVALID_SOCKET) return -1;
     struct sockaddr_in addr = {0}; addr.sin_family = AF_INET;
     addr.sin_port = htons((uint16_t)port); addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    if (fcntl(fd, F_SETFD, FD_CLOEXEC) || bind(fd, (struct sockaddr *)&addr, sizeof addr)) { close(fd); return -1; }
+    if (bind(fd, (struct sockaddr *)&addr, sizeof addr)) { lmb_socket_close(fd); return -1; }
     LmbHomeBeacon *b = malloc(sizeof *b);
-    if (!b) { close(fd); return -1; }
+    if (!b) { lmb_socket_close(fd); return -1; }
     b->fd = fd; b->port = port; memcpy(b->identity, identity, 32);
     pthread_t thread;
-    if (pthread_create(&thread, NULL, lmb_home_beacon_loop, b)) { free(b); close(fd); return -1; }
+    if (pthread_create(&thread, NULL, lmb_home_beacon_loop, b)) { free(b); lmb_socket_close(fd); return -1; }
     pthread_detach(thread); return 0;
 }
 
 static inline int lmb_home_find(LmbHomeFound found[LMB_HOME_DISC_MAX], const uint8_t nonce[16]) {
     int base = lmb_home_port_base(), count = 0;
     if (base < 0) return 0;
-    int fd = socket(AF_INET, SOCK_DGRAM, 0), one = 1;
-    if (fd < 0) return 0;
-    if (fcntl(fd, F_SETFD, FD_CLOEXEC) || setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &one, sizeof one)) { close(fd); return 0; }
+    LmbSocket fd = lmb_socket_open(AF_INET, SOCK_DGRAM, 0);int one = 1;
+    if (fd == LMB_INVALID_SOCKET) return 0;
+    if (setsockopt(fd, SOL_SOCKET, SO_BROADCAST, (const char *)&one, sizeof one)) { lmb_socket_close(fd); return 0; }
     uint8_t query[LMB_HOME_DISC_QUERY]; memcpy(query, "LMBFIND1", 8); memcpy(query + 8, nonce, 16);
     struct sockaddr_in dst = {0}; dst.sin_family = AF_INET; dst.sin_port = htons((uint16_t)base);
     dst.sin_addr.s_addr = htonl(INADDR_BROADCAST);
-    (void)sendto(fd, query, sizeof query, 0, (struct sockaddr *)&dst, sizeof dst);
+    (void)sendto(fd, (const char *)query, sizeof query, 0, (struct sockaddr *)&dst, sizeof dst);
     /* Same-machine test/development households are also discoverable. */
     dst.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    (void)sendto(fd, query, sizeof query, 0, (struct sockaddr *)&dst, sizeof dst);
+    (void)sendto(fd, (const char *)query, sizeof query, 0, (struct sockaddr *)&dst, sizeof dst);
     uint64_t deadline = lmb_home_disc_ms() + 1200;
     while (count < LMB_HOME_DISC_MAX && lmb_home_disc_ms() < deadline) {
-        struct pollfd pollfd = {fd, POLLIN, 0};
-        if (poll(&pollfd, 1, 100) <= 0) continue;
-        uint8_t reply[LMB_HOME_DISC_REPLY + 1]; struct sockaddr_in peer; socklen_t len = sizeof peer;
-        ssize_t n = recvfrom(fd, reply, sizeof reply, 0, (struct sockaddr *)&peer, &len);
+        if (lmb_socket_wait(fd,0,100)<=0) continue;
+        uint8_t reply[LMB_HOME_DISC_REPLY + 1]; struct sockaddr_in peer; LmbSocketLength len = sizeof peer;
+        int n = (int)recvfrom(fd, (char *)reply, sizeof reply, 0, (struct sockaddr *)&peer, &len);
         LmbHomeFound entry;
         if (n < 0 || !lmb_home_on_link(peer.sin_addr) ||
             lmb_home_disc_parse(reply, (size_t)n, query + 8, &peer, &entry)) continue;
@@ -114,6 +127,6 @@ static inline int lmb_home_find(LmbHomeFound found[LMB_HOME_DISC_MAX], const uin
         for (int i = 0; i < count; i++) if (!memcmp(found[i].identity, entry.identity, 32)) duplicate = 1;
         if (!duplicate) found[count++] = entry;
     }
-    close(fd); return count;
+    lmb_socket_close(fd); return count;
 }
 #endif

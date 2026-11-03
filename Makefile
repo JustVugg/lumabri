@@ -183,7 +183,7 @@ lumabri test_chat_ui test_host_session_pool test_host_drain test-home-monitor: s
 lumabri test_chat_ui test_host_session_pool test_host_drain test-home-monitor: src/runtime/lumabri_retired_receipts.h
 lumabri test_chat_ui test_host_session_pool test_host_drain test-home-monitor: src/runtime/lumabri_allocation_lifetime.h
 lumabri test_chat_ui test_host_session_pool test_host_drain test-home-monitor test_retired_receipts test_allocation_lifetime test_journal_index: src/runtime/lumabri_journal_index.h
-tracker tracker_tsan test_tracker_history: src/runtime/lumabri_tracker_history.h src/runtime/lumabri_journal_index.h
+tracker tracker_tsan test_tracker_history: src/runtime/lumabri_tracker_history.h src/runtime/lumabri_tracker_state.h src/runtime/lumabri_journal_index.h
 test check-warnings: test_tracker_history
 lumabri segment_node test_chat_ui test_home_expert test_host_session_pool test-home-monitor: src/runtime/lumabri_node_control.h
 lumabri test_chat_ui test_host_session_pool test-home-monitor segment_chat test_segment_close: src/runtime/lumabri_request_seed.h src/runtime/lumabri_replay_prefix.h

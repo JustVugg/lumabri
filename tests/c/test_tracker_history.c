@@ -1,10 +1,11 @@
 #define _GNU_SOURCE
-#define main tracker_program_main
+#define LMB_TRACKER_NO_ENTRY
 #include "tracker.c"
-#undef main
 #include <assert.h>
+#ifndef _WIN32
 #include <ftw.h>
 #include <sys/wait.h>
+#endif
 
 static void forget_caches(void) {
     for (int i=0;i<g_ntruth;i++) free(g_truth[i].hash);
@@ -35,13 +36,35 @@ static void sign_identity(LmbModelIdentity *id,const uint8_t secret[64]) {
     size_t n=0; uint8_t *msg=lmb_model_id_msg(id->model,id->root,&n); assert(msg);
     lmb_sign(id->sig,msg,n,secret); id->has_sig=1; free(msg);
 }
+#ifdef _WIN32
+#include "tracker_history_fixture_windows.h"
+#else
 static int remove_test_file(const char *path,const struct stat *st,int kind,struct FTW *walk) {
     (void)st; (void)walk; return kind==FTW_DP ? rmdir(path) : unlink(path);
 }
+#endif
+#ifdef _WIN32
+int wmain(int argc,wchar_t **argv) {
+    SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX);
+    char directory[512];wchar_t wide_directory[512],temp[400];
+    if (argc==4 && !wcscmp(argv[1],L"--race")) {
+        assert(WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,argv[2],-1,directory,sizeof directory,NULL,NULL));
+        assert(snprintf(g_bindings_path,sizeof g_bindings_path,"%s/bindings",directory)<(int)sizeof g_bindings_path);
+        unsigned value=(unsigned)wcstoul(argv[3],NULL,10);
+        LmbModelIdentity id=identity("racing-root",value);return claim_model(&id,value,1) ? 0 : 1;
+    }
+    assert(argc==1 && GetTempPathW(400,temp));
+    assert(swprintf(wide_directory,512,L"%lstracker-history-%lu-%llu-\x00e8",temp,GetCurrentProcessId(),GetTickCount64())>0);
+    assert(CreateDirectoryW(wide_directory,NULL));
+    assert(WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,wide_directory,-1,directory,sizeof directory,NULL,NULL));
+#else
 int main(void) {
     char directory[]="/tmp/lmb-tracker-history.XXXXXX"; assert(mkdtemp(directory));
-    snprintf(g_bindings_path,sizeof g_bindings_path,"%s/bindings",directory);
+#endif
+    assert(snprintf(g_bindings_path,sizeof g_bindings_path,"%s/bindings",directory)<(int)sizeof g_bindings_path);
     assert(!bindings_load());
+    assert(!segment_generation_init());uint64_t generation=g_segment_route_generation;
+    assert(!segment_generation_init() && g_segment_route_generation>generation);
     LmbModelIdentity first=identity("checkpoint-000",3);
     assert(!claim_model(&first,3,0)); /* unknown full root cannot start from a partial inventory */
     for (unsigned i=0;i<MAX_MODELS+12;i++) {
@@ -70,10 +93,10 @@ int main(void) {
 
     /* Bootstrap a legacy flat file larger than the cache, then admit another
      * identity. Neither a restart nor eviction reopens the first name. */
-    FILE *fp=fopen(g_bindings_path,"w"); assert(fp); assert(!fchmod(fileno(fp),0600));
+    FILE *fp=tracker_state_open(g_bindings_path,1,1);assert(fp);
     uint8_t pk[32]={9},other[32]={10}; char hex[65]; lmb_hex(hex,pk,32);
     for (unsigned i=0;i<MAX_BINDINGS+4;i++) fprintf(fp,"E\t%s\tpeer-%04u\n",hex,i);
-    assert(!fclose(fp));
+    assert(!tracker_state_flush(fp));tracker_state_close(fp);
     assert(!bindings_load() && g_nbindings==MAX_BINDINGS);
     assert(!binding_check_or_add("peer-new",1,pk));
     assert(binding_check_or_add("peer-0000",1,other));
@@ -99,6 +122,9 @@ int main(void) {
     signed_model.has_sig=0; assert(!claim_model(&signed_model,11,0));
 
     /* Two first registrants cannot publish different roots under one name. */
+#ifdef _WIN32
+    history_fixture_race(directory);
+#else
     pid_t children[2];
     for (unsigned i=0;i<2;i++) {
         children[i]=fork(); assert(children[i]>=0);
@@ -108,21 +134,37 @@ int main(void) {
     for (unsigned i=0;i<2;i++) { int status; assert(waitpid(children[i],&status,0)==children[i]);
         assert(WIFEXITED(status)); accepted+=WEXITSTATUS(status)==0; }
     assert(accepted==1);
+#endif
 
     /* Corruption must not become an absent record/new first claim. */
     TrackerHistory history; assert(!tracker_history_begin(g_bindings_path,&history));
     char key[80]; tracker_history_key("model",first.model,"",key);
+#ifdef _WIN32
+    history_fixture_corrupt(&history,key,0);
+#else
     int fd=lmb_journal_open(history.dir,key,O_WRONLY); assert(fd>=0);
-    assert(pwrite(fd,"X",1,8)==1); close(fd); tracker_history_end(&history);
+    assert(pwrite(fd,"X",1,8)==1); close(fd);
+#endif
+    tracker_history_end(&history);
     forget_caches(); assert(model_lookup(first.model,&model)<0); assert(!claim_model(&first,3,1));
     assert(!segment_model_root_ok(&advert));
     assert(!tracker_history_begin(g_bindings_path,&history));
     tracker_history_key("truth","truth-many","weight-0000",key);
+#ifdef _WIN32
+    history_fixture_corrupt(&history,key,1);
+#else
     fd=lmb_journal_open(history.dir,key,O_WRONLY); assert(fd>=0);
-    assert(ftruncate(fd,12)==0); close(fd); tracker_history_end(&history);
+    assert(ftruncate(fd,12)==0); close(fd);
+#endif
+    tracker_history_end(&history);
     assert(truth_lookup("truth-many","weight-0000",&truth)<0);
     assert(!claim_truth("truth-many","weight-0000",7,NULL));
-    forget_caches(); assert(!nftw(directory,remove_test_file,16,FTW_DEPTH|FTW_PHYS));
+    forget_caches();
+#ifdef _WIN32
+    history_fixture_remove(wide_directory);
+#else
+    assert(!nftw(directory,remove_test_file,16,FTW_DEPTH|FTW_PHYS));
+#endif
     puts("TRACKER HISTORY: PASS (cache overflow, legacy bindings, restart, exact roots/hashes, signature rotation, racing publication, corruption refusal)");
     return 0;
 }

@@ -94,6 +94,13 @@ int wmain(int argc,wchar_t **argv) {
     saved=settings;strcpy(settings.models,"bad\ntracker=other");
     assert(home_settings_save_windows(&settings));assert(!home_settings_load_windows(&settings));
     assert(!memcmp(&settings,&saved,sizeof settings));
+    /* A connection can take time. Committing its old screen must not undo
+     * settings saved by another workspace in the meantime. */
+    HomeSettings changed=saved;strcpy(changed.ram,"3");
+    assert(!home_settings_save_windows(&changed));
+    assert(home_settings_save_if_current_windows(&saved,&saved));
+    assert(!home_settings_load_windows(&settings) && home_settings_equal_windows(&settings,&changed));
+    assert(!home_settings_save_if_current_windows(&saved,&changed));settings=saved;
     file=lmb_private_open(path,1,0,NULL);assert(file!=INVALID_HANDLE_VALUE);
     DWORD written;assert(WriteFile(file,"invalid",7,&written,NULL) && written==7 && SetEndOfFile(file));CloseHandle(file);
     assert(home_settings_load_windows(&settings));
