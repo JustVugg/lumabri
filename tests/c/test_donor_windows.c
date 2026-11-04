@@ -279,6 +279,7 @@ int wmain(int argc,wchar_t **wide) {
     do {unloaded=status();assert(GetTickCount64()<until);Sleep(10);} while (unloaded.reserved_total);
     const char *stop[]={"service","stop"};assert(!command(stop,2));
     for (unsigned i=0;i<nowners;i++) {assert(!lmb_owned_process_stop(&owners[i],0,5000));assert(!lmb_owned_process_close(&owners[i]));}
+    fixture_registration_disconnect(&fixture,tracker);
     atomic_store(&fixture.stop,1);pthread_join(fixture.thread,NULL);lmb_close(fixture.listener);
     CloseHandle(fixture.registered);pthread_mutex_destroy(&fixture.lock);checkpoint_fixture_free(&fixture.checkpoint);
     puts("NATIVE DONOR PASS: signed inventory, native TUI approval and reattach, approval fences, duplicate refusal, actual resident Edge and Segment, hosted slots/BUSY, 72 oracle tokens, two allocations with independent release, manager restart, retained RAM, terminal receipt and exit proof");

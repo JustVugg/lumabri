@@ -18,6 +18,9 @@ typedef struct {
     pthread_t thread;
     pthread_mutex_t lock;
     atomic_int stop;
+    atomic_int pause_registration;
+    atomic_uint lost_registration_replies;
+    HANDLE before_reply,release_reply,after_reply;
     LmbSegAdvert advert,adverts[4];
     unsigned nadverts,machine_reports;
     LmbMachineReport machine_report;
@@ -82,8 +85,25 @@ static void *fixture_tracker(void *opaque) {
                     pthread_mutex_unlock(&f->lock);
                     uint8_t *body=NULL;uint32_t size=0;
                     assert(!lmb_seg_registration_reply_encode(&f->owner,&body,&size));
-                    assert(!lmb_send(fd,LMB_SEG_REGISTER_R,body,size,NULL,0));free(body);
-                    SetEvent(f->registered);
+                    int paused=atomic_exchange(&f->pause_registration,0);
+                    if (paused) {
+                        SetEvent(f->before_reply);
+                        assert(WaitForSingleObject(f->release_reply,5000)==WAIT_OBJECT_0);
+                        /* The regression client resets this connection only
+                         * after its signed registration has been validated. */
+                        assert(lmb_socket_wait(fd,0,2000)==1);
+                        char byte;int got=recv(fd,&byte,1,MSG_PEEK);
+                        assert(got==0 || (got==SOCKET_ERROR && WSAGetLastError()==WSAECONNRESET));
+                    }
+                    int failed=lmb_send(fd,LMB_SEG_REGISTER_R,body,size,NULL,0);free(body);
+                    if (failed) {
+                        /* Retirement can close a worker after its last signed
+                         * heartbeat. Lose that connection, not the tracker;
+                         * protocol, signature and inference assertions stay strict. */
+                        atomic_fetch_add(&f->lost_registration_replies,1);
+                        lmb_close(fd);clients[i]=LMB_INVALID_SOCKET;
+                    } else SetEvent(f->registered);
+                    if (paused) SetEvent(f->after_reply);
                 } else if (m.op==LMB_SEG_ROUTES) {
                     LmbSegQuery query;assert(!lmb_seg_query_decode(m.body,m.body_len,&query));
                     LmbSegRouteSnapshot *routes=calloc(1,sizeof *routes);assert(routes);
@@ -113,6 +133,7 @@ static void *fixture_tracker(void *opaque) {
 
 static void fixture_start(WorkerFixture *f,char *address,size_t cap,const char *checkpoint) {
     memset(f,0,sizeof *f);atomic_init(&f->stop,0);pthread_mutex_init(&f->lock,NULL);
+    atomic_init(&f->pause_registration,0);atomic_init(&f->lost_registration_replies,0);
     f->registered=CreateEventW(NULL,TRUE,FALSE,NULL);assert(f->registered);
     f->owner.lease_id.bytes[0]=7;f->owner.fencing_epoch=3;f->owner.route_generation=5;
     f->listener=lmb_listen(0);assert(f->listener!=LMB_INVALID_SOCKET);
@@ -124,6 +145,48 @@ static void fixture_start(WorkerFixture *f,char *address,size_t cap,const char *
         strcpy(f->checkpoint.address,address);checkpoint_fixture_load(&f->checkpoint,checkpoint);
     }
     assert(!pthread_create(&f->thread,NULL,fixture_tracker,f));
+}
+
+/* A worker can close with a heartbeat already queued (for example on retire).
+ * Exercise that boundary, then prove that a new signed registration succeeds.
+ * Run after stopping the test workers, so their heartbeats cannot take the gate. */
+static LmbSocket fixture_register_client(const char *address,const LmbSegAdvert *advert) {
+    LmbSocket fd=lmb_connect_ms_io(address,2000,2000);uint8_t nonce[32];
+    assert(fd!=LMB_INVALID_SOCKET && !lmb_auth(fd) && !lmb_request_challenge(fd,nonce));
+    uint8_t *encoded=NULL,transcript[512],sig[64];uint32_t size=0;
+    assert(!lmb_seg_advert_encode(advert,&encoded,&size));
+    size_t length=lmb_peer_auth_msg(nonce,advert->peer_name,advert->model,advert->addr,transcript,sizeof transcript);
+    assert(length);lmb_sign(sig,transcript,length,g_sec_sk);
+    LmbBuf body={0};assert(!lmb_buf_bytes(&body,encoded,size) && !lmb_buf_peer_auth(&body,g_sec_pk,sig));
+    assert(!lmb_send(fd,LMB_SEG_REGISTER,body.p,(uint32_t)body.len,NULL,0));
+    free(encoded);free(body.p);return fd;
+}
+static void fixture_registration_disconnect(WorkerFixture *f,const char *address) {
+    LmbSegAdvert advert;pthread_mutex_lock(&f->lock);advert=f->advert;pthread_mutex_unlock(&f->lock);
+    strcpy(advert.peer_name,"fixture-disconnect");
+    f->before_reply=CreateEventW(NULL,TRUE,FALSE,NULL);
+    f->release_reply=CreateEventW(NULL,TRUE,FALSE,NULL);
+    f->after_reply=CreateEventW(NULL,TRUE,FALSE,NULL);
+    assert(f->before_reply && f->release_reply && f->after_reply);
+    ResetEvent(f->registered);
+    unsigned before=atomic_load(&f->lost_registration_replies);
+    atomic_store(&f->pause_registration,1);
+    LmbSocket fd=fixture_register_client(address,&advert);
+    assert(WaitForSingleObject(f->before_reply,5000)==WAIT_OBJECT_0);
+    struct linger reset={1,0};assert(!lmb_socket_option(fd,SOL_SOCKET,SO_LINGER,&reset,sizeof reset));
+    lmb_close(fd);SetEvent(f->release_reply);
+    assert(WaitForSingleObject(f->after_reply,5000)==WAIT_OBJECT_0);
+    assert(atomic_load(&f->lost_registration_replies)==before+1);
+    assert(WaitForSingleObject(f->registered,0)==WAIT_TIMEOUT);
+    fd=fixture_register_client(address,&advert);
+    LmbMsg reply={0};LmbSegOwner owner;
+    assert(!lmb_recv(fd,&reply) && reply.op==LMB_SEG_REGISTER_R && !reply.pay_len &&
+        !lmb_seg_registration_reply_decode(reply.body,reply.body_len,&owner));
+    assert(lmb_seg_id_equal(&owner.lease_id,&f->owner.lease_id) && owner.fencing_epoch==f->owner.fencing_epoch);
+    assert(WaitForSingleObject(f->registered,2000)==WAIT_OBJECT_0);
+    lmb_msg_free(&reply);lmb_close(fd);
+    CloseHandle(f->before_reply);CloseHandle(f->release_reply);CloseHandle(f->after_reply);
+    puts("FIXTURE REGISTRATION: PASS (disconnect before ACK, no false READY, signed reconnect)");
 }
 
 static LmbSegReply fixture_exchange(LmbSocket fd,uint32_t op,const void *body,uint32_t size,
