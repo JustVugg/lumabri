@@ -29,7 +29,11 @@ jobs:
       - name: Preserve checkout Git for package provenance
         shell: pwsh
         run: |
-          "LUMABRI_BUILD_GIT=$((Get-Command git -CommandType Application).Source)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $checkoutGit = Get-Command git -CommandType Application | Select-Object -First 1 -ExpandProperty Source
+          if (-not $checkoutGit) { throw 'Checkout Git was not found' }
+          & $checkoutGit --version
+          if ($LASTEXITCODE -ne 0) { throw 'Checkout Git cannot run' }
+          "LUMABRI_BUILD_GIT=$checkoutGit" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884
         with:
           msystem: UCRT64
@@ -108,7 +112,11 @@ jobs:
       - name: Preserve checkout Git for package provenance
         shell: pwsh
         run: |
-          "LUMABRI_BUILD_GIT=$((Get-Command git -CommandType Application).Source)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $checkoutGit = Get-Command git -CommandType Application | Select-Object -First 1 -ExpandProperty Source
+          if (-not $checkoutGit) { throw 'Checkout Git was not found' }
+          & $checkoutGit --version
+          if ($LASTEXITCODE -ne 0) { throw 'Checkout Git cannot run' }
+          "LUMABRI_BUILD_GIT=$checkoutGit" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884
         with:
           msystem: UCRT64
