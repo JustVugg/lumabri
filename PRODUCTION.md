@@ -7,9 +7,12 @@ Do not turn a historical test into a claim about a different installed build.
 
 The release target is a resident inference service on **owned or authorized
 machines**: approved model allocations, isolated conversations, bounded
-admission, visible recovery and explicit resource limits. Public strangers,
-cloud provisioning and Kubernetes integration are not delivered by the
-household transport or the replica controller.
+admission, visible recovery and explicit resource limits. Public strangers and
+cloud provisioning are outside this scope. Optional
+[Kubernetes workers](docs/KUBERNETES_WORKERS.md) and a
+[policy controller](docs/KUBERNETES_CONTROL.md) reuse this inference service;
+Kubernetes supplies and supervises Pods. The controller does not create
+servers, grant donor permission or certify model readiness.
 
 ## Scope of a supported configuration
 
