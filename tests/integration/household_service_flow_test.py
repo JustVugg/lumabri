@@ -70,8 +70,8 @@ def parse_args(argv=None):
                 args.https_nginx or args.multi_model or args.keep_requester or args.api or args.replicas or
                 args.recovery or args.portfolio_policy or args.measure_sessions):
             parser.error("--installed-package requires --joint complete --api-prepare --donor-ram-gb >=1.5 --sessions 2, without other lifecycle/runtime overrides")
-        if os.environ.get("LUMABRI_RESIDENCY_POLICY") != "engine-locked":
-            parser.error("installed acceptance requires LUMABRI_RESIDENCY_POLICY=engine-locked")
+        if os.environ.get("LUMABRI_RESIDENCY_POLICY", "engine-locked") != "engine-locked":
+            parser.error("installed acceptance requires the default or explicit engine-locked policy")
         from installed_managed_test import checked_package
         args.installed_package, installed_manifest = checked_package(args.installed_package)
         args.runtime_dir = args.installed_package / "bin"
@@ -143,7 +143,7 @@ def main():
             settings.write_text(f"tracker={tracker}\ntoken=service-test\nmodels={args.models_dir.resolve()}\nram={max(1.0, args.donor_ram_gb) if args.multi_model else args.donor_ram_gb}\nowner={int(name == 'owner')}\n")
             settings.chmod(0o600)
         e = {**os.environ, "HOME": str(home), "LUMABRI_TOKEN": "service-test",
-             "LUMABRI_ENCRYPT": "1", "LUMABRI_RESIDENT_REQUIRED": "1", "LUMABRI_HOME_HYBRID": "0",
+             "LUMABRI_ENCRYPT": "1", "LUMABRI_HOME_HYBRID": "0",
              "LUMABRI_ADVERTISE": "127.0.0.1", "LUMABRI_HOME_PORT_BASE": str(base + 16 * slots[name]),
              "LUMABRI_RAM_RESERVE_MB": "256", "LUMABRI_NO_DISK_PROBE": "1",
              "LUMABRI_PEER_KEY": str(home / "peer.key"), "LUMABRI_KNOWN_HOSTS": str(home / "known.hosts"),
@@ -152,6 +152,8 @@ def main():
              # between reports and changed the plan during key navigation.
              "LUMABRI_IO_TIMEOUT_MS": "15000", "COLI_NO_OMP_TUNE": "1", "OMP_NUM_THREADS": "2", "PIN": "off"}
         e.pop("LUMABRI_HOME_FOREGROUND", None)
+        # Exercise normal household defaults, including daemon inheritance.
+        e.pop("LUMABRI_RESIDENT_REQUIRED", None)
         if args.portfolio_policy:
             e["LUMABRI_COST_PER_HOUR"] = "0.10"
             e["LUMABRI_COST_CURRENCY"] = "EUR"
@@ -163,7 +165,7 @@ def main():
         return e
 
     def assert_locked_evidence(minimum_per_donor, minimum_total):
-        if os.environ.get("LUMABRI_RESIDENCY_POLICY") != "engine-locked":
+        if os.environ.get("LUMABRI_RESIDENCY_POLICY", "engine-locked") != "engine-locked":
             return
         # Verify effective child behavior, including replicas prepared after
         # restart/wake. A launch environment alone is not residency evidence.

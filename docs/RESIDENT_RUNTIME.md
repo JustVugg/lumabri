@@ -121,7 +121,16 @@ of exact physical use. An allocation moved out of RSS does not create another
 reservation slot. Pending preparations remain reserved at the keeper level.
 Session creation checks the process budget again after allocating its state.
 
-`LUMABRI_RESIDENCY_POLICY=observe` (default) samples residency. Detected swap,
+Household sharing uses `LUMABRI_RESIDENCY_POLICY=engine-locked` by default,
+including direct TUI, headless donors and background services. No launcher
+variable is needed. Configure the OS locked-memory allowance before starting
+the service; an insufficient allowance refuses preparation instead of
+falling back to pageable weights. Restart existing sharing services after
+updating so they use the new default. Explicit diagnostic policies remain
+available, but do not acquire the guarantees of `engine-locked`.
+
+`LUMABRI_RESIDENCY_POLICY=observe` (the low-level engine default outside
+household sharing) samples residency. Detected swap,
 compression or unavailable evidence latches a fault: no new inference is
 accepted, outputs from the affected run are discarded, and the allocation
 requires renewed preparation. A later zero counter does not silently clear it.
@@ -144,10 +153,10 @@ GPU device-memory residence is a separate backend contract; these counters
 describe host memory only. See the [Linux proc documentation](https://www.kernel.org/doc/html/latest/filesystems/proc.html)
 and Apple's [TASK_VM_INFO fields](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/mach/task_info.h).
 
-### Opt-in owned-allocation locking
+### Owned-allocation locking
 
-`LUMABRI_RESIDENCY_POLICY=engine-locked` is a separate, opt-in CPU contract.
-The default remains `observe`. Apple exposes `mlockall` in headers but its
+`LUMABRI_RESIDENCY_POLICY=engine-locked` is the household CPU contract. Direct
+low-level engine invocations can opt into the same policy. Apple exposes `mlockall` in headers but its
 implementation returns `ENOSYS`; `mlock` can instead wire explicit ranges.
 Lumabri compiles its disposable engine copies and Segment runtime with
 namespaced allocation entry points. Small heap objects share reference-counted

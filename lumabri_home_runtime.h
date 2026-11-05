@@ -12,8 +12,7 @@ static int home_resident_required(void) {
     const char *value = getenv("LUMABRI_RESIDENT_REQUIRED");
     /* Household is resident by default. Explicit zero remains available to
      * the legacy cache regression harness, not as an automatic fallback. */
-    if (!value) { setenv("LUMABRI_RESIDENT_REQUIRED", "1", 0); return 1; }
-    return value && !strcmp(value, "1");
+    return !value || !strcmp(value, "1");
 }
 static int home_fail(const char *fmt, ...) {
     va_list args; va_start(args, fmt);
@@ -21,6 +20,19 @@ static int home_fail(const char *fmt, ...) {
     va_end(args);
     fprintf(stderr, "%s\n", home_error);
     return 1;
+}
+static int home_resident_environment(void) {
+    if (!home_resident_required()) return 0;
+    /* Set this in the worker as well as the requester: existing services
+     * have independent environments. A resident household must wire its
+     * owned allocations even when opened directly from the TUI. Explicit
+     * diagnostic policies remain available; none is an automatic fallback. */
+    if ((!getenv("LUMABRI_RESIDENT_REQUIRED") &&
+         setenv("LUMABRI_RESIDENT_REQUIRED", "1", 0)) ||
+        (!getenv("LUMABRI_RESIDENCY_POLICY") &&
+         setenv("LUMABRI_RESIDENCY_POLICY", "engine-locked", 0)))
+        return home_fail("Cannot configure resident memory protection. No model was started.");
+    return 0;
 }
 #include "src/runtime/lumabri_resident_plan.h"
 #include "src/runtime/lumabri_service.h"
@@ -979,8 +991,8 @@ static int home_service_donor_ui(const char *tracker) {
 
 static int home_donor_keeper;
 static int cmd_donor_inner(int argc, char **argv) {
-    (void)home_resident_required();
     home_error[0] = 0;
+    if (home_resident_environment()) return 1;
     const char *tracker = NULL, *name = NULL, *disk = NULL;
     int headless = 0;
     uint64_t limit = UINT64_MAX;
@@ -1266,6 +1278,7 @@ static void home_session_interrupt_chat(void *unused) {
 
 static int home_request_chat_direct(LmbTuiState *st, int selected) {
     home_error[0] = 0;
+    if (home_resident_environment()) return 1;
     if (selected < 0 || selected >= st->nmodels || !st->tracker[0] ||
         !st->inventory_ok || home_private_network())
         return home_fail("Cannot prepare chat: refresh the household inventory and select a model.");
@@ -1634,6 +1647,7 @@ static int home_prepare_wait(const HomeServiceSnapshot *expected, const char *la
 
 static int home_prepare_begin(LmbTuiState *st, int selected,
     const HomePreparationObserver *observer, HomeServiceSnapshot *started) {
+    if (home_resident_environment()) return 1;
     if (!home_resident_required()) return home_fail("Background preparation requires resident weights. Disk-cache diagnostics require LUMABRI_HOME_FOREGROUND=1.");
     g_stopping = 0; install_chat_signal_handlers();
     if (selected < 0 || selected >= st->nmodels || home_service_ensure())
