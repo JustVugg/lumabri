@@ -12,6 +12,15 @@ were merged normally as `35df1cf2d1b378e31d7ad55076eb3da275e0f67e` after all
 source tree matches the tree tested by CI. This is integration evidence for
 that version, not final acceptance of every deployment or a later package.
 
+[PR #295](https://github.com/JustVugg/lumabri/pull/295) subsequently made
+owned-allocation locking the default for household sharing, including normal
+background services. All 14 checks passed on
+`c7a92682f1e97e474ec49a586721a65c600e5e06` before its normal merge as
+`140bf2d92b854c4e6fa9f5a61b3847b324f732e2`. Installed Linux and Mac gates
+verify effective locks without a residency-policy override. An insufficient
+OS locked-memory allowance still refuses preparation; the application does
+not raise system limits or fall back to pageable weights.
+
 - **Native Windows:** the x86-64 candidate includes the donor, requester,
   background service and resident CPU OLMoE runtime. Native gates exercise
   approvals, inference, independent resident allocations, service/TUI lifetimes
