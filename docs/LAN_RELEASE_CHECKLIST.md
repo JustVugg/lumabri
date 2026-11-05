@@ -4,62 +4,64 @@ This is a verification ledger, not a declaration that the full roadmap is
 finished. Tests against tiny checkpoints do not certify large models, GPU
 execution, cross-platform numerical compatibility, or concurrent capacity.
 
-## Current release work
+## Current verified scope — November 5, 2026
 
-The managed-inference roadmap supersedes the older single-chat LAN checklist
-below. Historical observations remain here as evidence, not current promises.
+The package verification changes in [PR #294](https://github.com/JustVugg/lumabri/pull/294)
+were merged normally as `35df1cf2d1b378e31d7ad55076eb3da275e0f67e` after all
+14 checks passed on `45c5e4a30f4d28da4f1358b8f7636c491edee0e7`. The merge's
+source tree matches the tree tested by CI. This is integration evidence for
+that version, not final acceptance of every deployment or a later package.
 
-### After the current release: native policies and optional Kubernetes integration
+[PR #295](https://github.com/JustVugg/lumabri/pull/295) subsequently made
+owned-allocation locking the default for household sharing, including normal
+background services. All 14 checks passed on
+`c7a92682f1e97e474ec49a586721a65c600e5e06` before its normal merge as
+`140bf2d92b854c4e6fa9f5a61b3847b324f732e2`. Installed Linux and Mac gates
+verify effective locks without a residency-policy override. An insufficient
+OS locked-memory allowance still refuses preparation; the application does
+not raise system limits or fall back to pageable weights.
 
-Status: **planned, not implemented or a prerequisite for the current release**.
-Finish the roadmap and acceptance work below before starting this follow-up.
-Household deployments remain autonomous and use the same inference core.
+- **Native Windows:** the x86-64 candidate includes the donor, requester,
+  background service and resident CPU OLMoE runtime. Native gates exercise
+  approvals, inference, independent resident allocations, service/TUI lifetimes
+  and installed update/rollback. This is distinct from WSL execution. The
+  Windows package does not include a local HTTP/web gateway or GPU backend;
+  see [its delivered scope](WINDOWS_PACKAGE.md).
+- **Linux and macOS:** installed lifecycle gates use real Colibri engines with
+  reduced checkpoints, including two co-resident identities, isolated users,
+  bounded overload, cancellation, restart and selective retirement. Native
+  targets include Linux x86-64/ARM64 and macOS Intel/Apple Silicon, with and
+  without OpenMP on macOS. ARM64 CI is not a physical Raspberry Pi test.
+- **Kubernetes workers:** real resident engines run in separate Pods in a
+  disposable kind cluster. The gate checks two reduced OLMoE identities,
+  owner approvals, effective locks, selective retirement and a split model
+  whose observed reservation exceeds each worker's individual offered RAM.
+  This does not establish performance across physical datacenter hosts.
+  See [worker deployment and evidence](KUBERNETES_WORKERS.md).
+- **Optional Kubernetes controller:** `lumabri-kube` reconciles existing,
+  authorized replica policies through the same management API. Native cluster
+  admission/RBAC/status/finalizer checks complement isolated transport tests.
+  It does not create servers or Pods. `Applied` reports observed policy
+  configuration, not inference readiness; see [controller scope](KUBERNETES_CONTROL.md).
+- **Distribution:** allowlisted payloads, native provenance, checksums and
+  version-pair update/rollback gates are present. The Mac candidate is not
+  Developer ID signed or notarized, and the Windows candidate is not
+  Authenticode-signed. Hash verification is not publisher authentication.
+  See [Mac setup](MACOS_PACKAGE.md) and [Windows setup](WINDOWS_PACKAGE.md).
 
-Implement the mechanisms in Lumabri's own C code, extending the existing API,
-planner and reconciliation service. Keep Kubernetes integration optional and
-reuse its existing control plane.
+Historical trained OLMoE PC+Mac trials and earlier sustained local tests below
+retain their original build and hardware scope. They do not replace the final
+installed-package PC+Mac background-service check or deployment workload
+acceptance. GPU household execution, physical Raspberry Pi validation and a
+large-model datacenter capacity guarantee are not established by these CPU gates.
 
-1. **Grouped permissions and quotas.** Extend current per-user grants and
-   admission with explicit group limits for shared inference resources. Account
-   for the aggregate across users and models; keep conversation state private.
-   A group assignment must not implicitly grant a model, donor approval or
-   administrative access. Verify contention between groups, revocation and
-   restart without leaking capacity or crossing permission boundaries.
-2. **Explicit workload requirements.** Extend the existing joint planner and
-   measured cost policies with a single reviewed request for models, authorized
-   machines, memory limits, performance requirements and declared-cost ceilings.
-   Report unmet constraints and missing observations; unknown speed or price
-   must not satisfy a requirement. Reuse durable operation IDs, review fences
-   and reconciliation instead of introducing a second allocation engine.
-3. **A Lumabri Kubernetes controller.** Add a thin, optional integration over the
-   same authenticated service API, with installable manifests, narrowly scoped
-   permissions and declarative model/pool resources. Kubernetes owns pod
-   placement, process restart and infrastructure node scaling through a
-   configured autoscaler/provider. Lumabri owns model partitioning, weight
-   preparation/residency, session/KV accounting, admission and inference
-   replica readiness. Define one authority for each replica decision so two
-   independent autoscalers cannot fight over it.
+## Historical status and evidence
 
-The integration must report READY only after every required segment is prepared
-and admitted. Shutdown first stops new admissions, drains active work and
-reconciles allocation release before normal pod removal; timeout or unreachable
-state is not proof of release. Forced pod/node loss follows the existing visible
-recovery/replay policy, without claiming uninterrupted KV migration. The
-controller must resume from persisted desired/observed generations after its
-own restart, with no duplicate allocations or replayed approvals.
+### October 27, 2026 snapshot — superseded
 
-Acceptance: deploy the packaged integration on a real Kubernetes cluster;
-prepare two OLMoE-derived model identities; exercise separate users, declared
-quotas and contention; change desired replicas; drain and forcibly lose a
-worker; restart the controller; verify readiness, private histories, release
-accounting and refusal when capacity is insufficient. Record cluster/runtime
-versions and artifacts. Fixture checks alone do not certify a datacenter SLO.
-The household path must still work without Kubernetes installed.
-
-### Roadmap status, October 27, 2026
-
-This table separates implementation from release acceptance. The detailed PR
-entries below record the exact evidence; an open PR is not an integrated release.
+This table records the October 27 state. Its Windows and Kubernetes status is
+superseded by the verified scope above. The dated entries below preserve the
+evidence for their original builds; an open PR is not an integrated release.
 
 | Step | Delivered or implemented | Remaining acceptance boundary |
 | --- | --- | --- |

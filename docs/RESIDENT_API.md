@@ -673,7 +673,8 @@ rejected. Idle connections are closed during drain; admitted turns finish.
 The resident-library TUI retains its local owner authority and uses that same
 typed coordinator and journal, not a second release algorithm. This does not
 yet route every TUI operation through HTTP. Reviewed model preparation now has
-a shared keeper and management API; automatic capacity creation remains separate.
+a shared keeper and management API. The separate [elastic controller](ELASTIC_REPLICAS.md)
+uses that preparation path for explicitly authorized replica changes.
 Share-resources service stop remains
 an explicit owner operation which can interrupt its allocations.
 
