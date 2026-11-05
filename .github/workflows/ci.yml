@@ -26,6 +26,14 @@ jobs:
       PYTHONUTF8: '1'
     steps:
       - uses: actions/checkout@v4
+      - name: Preserve checkout Git for package provenance
+        shell: pwsh
+        run: |
+          $checkoutGit = Get-Command git -CommandType Application | Select-Object -First 1 -ExpandProperty Source
+          if (-not $checkoutGit) { throw 'Checkout Git was not found' }
+          & $checkoutGit --version
+          if ($LASTEXITCODE -ne 0) { throw 'Checkout Git cannot run' }
+          "LUMABRI_BUILD_GIT=$checkoutGit" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884
         with:
           msystem: UCRT64
@@ -34,6 +42,15 @@ jobs:
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-binutils
             mingw-w64-ucrt-x86_64-python
+      - name: Check source provenance from the native build shell
+        run: |
+          python3 - <<'PYCODE'
+          import runpy
+          source = runpy.run_path('tools/package_household.py')['revision']('.')
+          if source['tracked_changes']:
+              raise SystemExit('Native packaging must use a clean source checkout and the checkout Git configuration')
+          print('Native checkout provenance:', source)
+          PYCODE
       - name: Build native protocol, identity and service controls
         run: python3 tools/build_windows_segment.py --only contracts --output build/windows-control
       - name: Exercise real Windows processes and transports
@@ -92,17 +109,35 @@ jobs:
         with:
           name: tiny-olmoe-checkpoint
           path: lumabri/build/fixture
+      - name: Preserve checkout Git for package provenance
+        shell: pwsh
+        run: |
+          $checkoutGit = Get-Command git -CommandType Application | Select-Object -First 1 -ExpandProperty Source
+          if (-not $checkoutGit) { throw 'Checkout Git was not found' }
+          & $checkoutGit --version
+          if ($LASTEXITCODE -ne 0) { throw 'Checkout Git cannot run' }
+          "LUMABRI_BUILD_GIT=$checkoutGit" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884
         with:
           msystem: UCRT64
           update: false
           install: >-
-            git
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-binutils
             mingw-w64-ucrt-x86_64-python
-      - name: Verify native packaging tools are available
-        run: python3 -c "import subprocess; subprocess.run(['git', '--version'], check=True); subprocess.run(['objdump', '--version'], check=True)"
+      - name: Verify native packaging tools and clean checkout provenance
+        run: |
+          python3 - <<'PYCODE'
+          import os, subprocess
+          git = os.environ['LUMABRI_BUILD_GIT']
+          print('Checkout Git:', git, flush=True)
+          subprocess.run([git, '--version'], check=True)
+          subprocess.run(['objdump', '--version'], check=True)
+          for checkout in ('.', '../colibri'):
+              changed = subprocess.check_output([git, '-C', checkout, 'status', '--porcelain', '--untracked-files=no'], text=True).strip()
+              if changed:
+                  raise SystemExit(f'Checkout is not clean: {checkout}\n{changed[:4096]}')
+          PYCODE
       - name: Build and audit native engine memory and checkpoint input
         run: python3 tools/build_windows_segment.py --engine ../colibri/c --only inference
       - name: Compare resident full and split OLMoE inference on Windows
@@ -1124,6 +1159,7 @@ jobs:
             python3 tools/package_household.py --colibri-root ../colibri --output 'build/native candidate'
             test "$('build/native candidate/bin/segment_node' --thread-capacity)" = 1
           fi
+          (cd 'build/native candidate' && shasum -a 256 -c SHA256SUMS)
           python3 tests/integration/household_doctor_test.py --runtime-dir 'build/native candidate/bin'
           python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --resident-default --expect-metrics
           LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --installed-package 'build/native candidate' --models-dir build/home-flow-models --joint complete --api-prepare --donor-ram-gb 1.5 --sessions 2
@@ -1143,10 +1179,13 @@ jobs:
           python3 tests/integration/installed_fleet_update_test.py --previous-package 'build/previous candidate' --candidate-package 'build/native candidate' --models-dir build/home-flow-models
           python3 tools/package_household.py --verify 'build/native candidate'
           tar -czf build/lumabri-macos-candidate.tar.gz -C 'build/native candidate' .
+          shasum -a 256 build/lumabri-macos-candidate.tar.gz > build/lumabri-macos-candidate.tar.gz.sha256
       - uses: actions/upload-artifact@v4
         with:
           name: household-candidate-${{ matrix.runner }}-${{ matrix.openmp }}
-          path: lumabri/build/lumabri-macos-candidate.tar.gz
+          path: |
+            lumabri/build/lumabri-macos-candidate.tar.gz
+            lumabri/build/lumabri-macos-candidate.tar.gz.sha256
           retention-days: 7
       - name: Keep the declared-cost comparison report (no credentials)
         if: always()

@@ -39,9 +39,13 @@ def build_tool_output(command):
 
 
 def revision(root):
-    commit = build_tool_output(["git", "-C", str(root), "rev-parse", "HEAD"]).strip()
+    # A native Windows build shell can contain a different Git/configuration
+    # from the checkout action (notably CRLF policy). Keep its provenance query
+    # on the same implementation that materialized the source tree.
+    git = os.environ.get("LUMABRI_BUILD_GIT") or "git"
+    commit = build_tool_output([git, "-C", str(root), "rev-parse", "HEAD"]).strip()
     dirty = bool(build_tool_output(
-        ["git", "-C", str(root), "status", "--porcelain", "--untracked-files=no"]).strip())
+        [git, "-C", str(root), "status", "--porcelain", "--untracked-files=no"]).strip())
     return {"commit": commit, "tracked_changes": dirty}
 
 
@@ -222,7 +226,8 @@ def package(runtime, colibri, output, repository=ROOT, openmp_prefix=None, pe_ob
               (regular(repository / "tools/setup-household-firewall.ps1"), "lib/lumabri/setup-household-firewall.ps1", 0o644),
               (regular(repository / "LICENSE"), "licenses/Lumabri-LICENSE", 0o644),
               (regular(colibri / "LICENSE"), "licenses/Colibri-LICENSE", 0o644),
-              (regular(repository / "docs/NATIVE_CANDIDATES.md"), "START_HERE.md", 0o644),
+              (regular(repository / ("docs/MACOS_PACKAGE.md" if system == "Darwin"
+                                     else "docs/NATIVE_CANDIDATES.md")), "START_HERE.md", 0o644),
               (regular(repository / "deploy/household-launcher.sh"),
                "Lumabri.command" if system == "Darwin" else "start-lumabri", 0o755)]
     # Keep the upstream notices with the exact checkout used by this build.
@@ -274,6 +279,15 @@ def package(runtime, colibri, output, repository=ROOT, openmp_prefix=None, pe_ob
         manifest["dependencies"] = {name: dependencies(
             output / (f"lib/lumabri/{name}" if name.endswith(".dylib") else f"bin/{name}"),
             system, output / "lib/lumabri/libomp.dylib", packaged=True) for name in report}
+    if system == "Darwin":
+        # Verify payloads with macOS's shipped shasum before executing an
+        # unsigned candidate; Python remains build tooling only. This does
+        # not authenticate the publisher or replace Gatekeeper approval.
+        sums = output / "SHA256SUMS"
+        sums.write_text(''.join(f"{checksum(output / relative)}  {relative}\n"
+                                for _, relative, _ in files), encoding="utf-8")
+        sums.chmod(0o644)
+        files.append((sums, "SHA256SUMS", 0o644))
     for _, relative, mode in files:
         target = output / relative
         manifest["files"][relative] = {"sha256": checksum(target),

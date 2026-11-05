@@ -34,6 +34,10 @@ def main():
     candidate, previous, driver, fixture = (p.resolve(strict=True) for p in
                                            (args.candidate, args.previous, args.driver, args.fixture))
     for package in (candidate, previous):
+        manifest = json.loads((package / "manifest.json").read_text(encoding="utf-8"))
+        for source in ("lumabri", "colibri_checkout"):
+            if manifest[source]["tracked_changes"] is not False:
+                raise ValueError(f"Installed acceptance requires clean {source} sources: {package}; use the checkout's Git/configuration for packaging")
         print(verify(package), flush=True)
     launcher = candidate / "Lumabri.cmd"
     # cmd's /s /c expects an outer quote pair around a quoted executable path.
