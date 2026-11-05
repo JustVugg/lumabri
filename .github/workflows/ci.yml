@@ -733,6 +733,12 @@ jobs:
         env:
           LUMABRI_RESIDENT_REQUIRED: '1'
         run: |
+          # Household now wires owned allocations by default. Qwen's Edge
+          # preparation already exceeds the runner's 8 MiB memlock; Kimi
+          # needs the larger allowance used by the native ARM64 gate too.
+          # Change only this disposable shell and its descendants, not OS
+          # policy or the separate tests of denied/insufficient locking.
+          sudo prlimit --pid $$ --memlock=12884901888:12884901888
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --expect-metrics --crash-requester --resident-default
           python3 tests/integration/home_flow_test.py --models-dir build/home-flow-models --resident-default --kill-donor
           python3 tests/integration/home_flow_test.py --models-dir build/qwen-int4 --expect-metrics
