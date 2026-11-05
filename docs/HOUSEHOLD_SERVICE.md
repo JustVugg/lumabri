@@ -112,8 +112,9 @@ The [resident inference API](RESIDENT_API.md) can grant named local API users
 access to exact approved allocations, without repeating donor approvals or
 loading a new model. It currently binds only to loopback. Its bundled web chat
 stores private, per-user history separately from resident plans; management
-permission does not grant access to another user's conversations. It is not
-an OpenAI-compatible or public-network endpoint.
+permission does not grant access to another user's conversations. The same
+gateway also exposes the documented [OpenAI and Anthropic client API subsets](CLIENT_APIS.md).
+Remote clients require a configured [HTTPS endpoint](HTTPS_INGRESS.md).
 The background donor keeper can retain up to four independently approved models
 on the same machine, provided their summed reservations fit its sharing budget
 and current memory permits preparation. Pending loads remain reserved before
@@ -176,10 +177,12 @@ until that path can yield admission around remote waits.
 The API can visibly replay an interrupted turn on another already approved
 replica, with a stable request seed and byte-for-byte prefix validation; see
 [the recovery contract](RESIDENT_API.md#bounded-visible-response-recovery).
-This does not restart failed keepers, prepare alternate allocations or migrate
-KV state. Shared-donor batching, weighted/global compute scheduling, broader
-fault recovery, server-wide cost optimization and eviction policies remain
-separate work.
+This recovery path does not restart failed keepers or migrate KV state.
+The separate [elastic controller](ELASTIC_REPLICAS.md) can prepare replacement
+capacity on authorized machines; its bounded wait and replay contract still
+applies. [Portfolio policy](PORTFOLIO_POLICY.md) selects between measured,
+approved resident portfolios. Neither mechanism provides shared-donor batching,
+weighted global compute scheduling or guaranteed cost savings.
 
 The terminal now consumes a renderer-independent incremental reply reader.
 Each reply is bound to its submitted request ID; DATA payloads remain
@@ -189,7 +192,8 @@ truncation, invalid frames and consumer cancellation cannot publish success.
 The terminal limits a reply to 64 MiB and telemetry lines to 4 MiB; unsupported
 DATA sideband extensions are rejected. The [resident HTTP gateway and browser
 chat](RESIDENT_API.md) use this same reader, with their own smaller response
-limits. The gateway does not claim OpenAI compatibility.
+limits. The [client API adapters](CLIENT_APIS.md) document their supported
+OpenAI and Anthropic formats and reject unsupported features explicitly.
 
 ## Measurements and management
 
@@ -200,8 +204,12 @@ make them stale. The operator-only browser workspace reads those same reports,
 saved allocations and managed replica references without opening engines.
 See [the evidence contract](CALIBRATION_RECORDS.md#planner-resource-evidence)
 and [the workspace API](RESIDENT_API.md#cluster-workspace) for boundaries.
-Verified household GPU execution, requirement-aware global placement,
-automatic capacity changes and provider provisioning remain separate work.
+The [elastic controller](ELASTIC_REPLICAS.md) manages replicas within explicit
+machine, memory and donor-authorization limits. The [portfolio policy](PORTFOLIO_POLICY.md)
+compares measured resident alternatives; it is not a general requirements-aware
+placement optimizer. GPU execution is limited to the [backends actually
+exposed and verified](HOUSEHOLD_BACKENDS.md). Provider provisioning is not
+part of this service.
 Approved host drain/resume now gates both TUI and API admission without
 cancelling admitted turns; it retains weights and is not donor/server release.
 See [host drain](RESIDENT_API.md#drain-an-approved-host-without-interrupting-admitted-turns).
@@ -213,38 +221,25 @@ explicitly authorized browser management use the same durable coordinator;
 read-only operators and inference users cannot release resources. This is not
 an automatic scaling policy; no idle observation alone authorizes releasing RAM.
 
-### Planned extension: vendor-independent agentic orchestration (not implemented)
+### External agent management
 
-After the managed-service release baseline, an external, interchangeable agent
-may make capacity decisions from queue lengths, observed latency, resource
-pressure and costs. Codex, Claude Code or another decision system are possible
-clients, not built-in dependencies or integrations claimed to exist today.
-Colibri remains the inference engine; the controller agent need not run on it.
-Agents will use the same authenticated, typed management API/CLI; an MCP
-adapter may expose that contract without introducing separate permissions.
-Actual client/tool support must be verified before integration. This extension
-is not a new prerequisite for the current release.
+The shipped [lumabri-agent MCP bridge](AGENT_CONTROL.md) exposes the same
+management contracts to compatible external clients. Read-only tools are the
+default. Mutations require both a management-enabled API credential and the
+bridge's explicit `--allow-management` option. Colibri remains the inference
+engine; an external agent is not a runtime dependency or a per-token decision
+maker.
 
-The intended final mode is autonomous **within operator-authorized policy**,
-not unrestricted shell or cloud access. Typed tools will request an evaluated
-plan, prepare capacity on authorized machines, scale approved replicas, drain
-them and release idle resources. The deterministic service must validate every
-action against budgets, minimum/maximum capacity, permissions, live operation
-revisions, cooldowns and active sessions. Provider credentials stay in the
-executor, not in model prompts. Conversation text and untrusted worker labels
-cannot grant permissions or become executable instructions.
+The service checks donor permissions, memory budgets, reviewed plans,
+operation IDs and live revisions for agent requests just as it does for the
+web interface. The bridge cannot approve a donor, raise quotas, execute shell
+commands or create paid servers. Exiting the agent does not stop inference or
+cancel an already accepted preparation. A lost mutation response requires
+inspection of that operation; the bridge does not retry POSTs automatically.
 
-Start with recorded-load evaluation and shadow decisions, then explicit
-operator approval, then bounded automatic execution with an audit trail,
-idempotent operations and an immediate off switch. Agent timeout, malformed
-output, overload or unavailability must leave the normal controller running.
-Reserve resources for this control path; inference saturation must not starve
-the controller which would add capacity. It is never consulted per token.
-
-Fast decisions do not make server startup or model preparation instantaneous.
-Warm reserve, admission limits, measured preparation times, fault recovery and
-draining are still necessary. Targets are measurable latency/availability and
-cost objectives, not an unconditional promise of zero slowdown or outages.
+Protocol and resident-service tests cover the bridge, not the decision quality
+of a particular agent. Preparation still takes time, and neither an agent nor
+the built-in policies promise zero slowdown or uninterrupted availability.
 
 The [DeepSeek V4.1 integration](DEEPSEEK_V41.md) adds a Lumabri-owned text CPU
 adapter with resident Engram tables and per-conversation cross-layer feedback.
