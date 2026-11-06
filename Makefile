@@ -1210,6 +1210,7 @@ test: all test_weight_cache test_key_rotation test_hedge test_local_fallback tes
 	./test_residency_report
 	./test_model_family
 	bash ./tests/integration/model_family_test.sh
+	python3 tests/integration/capability_catalogue_test.py
 	bash ./tests/integration/catalog_test.sh
 	./test_inventory
 	./test_home
@@ -1341,3 +1342,7 @@ build/test_vision_segment: tests/c/test_vision_segment.c $(COLIBRI_SEGMENT_LIB)
 
 # Portable durable evidence formats shared by both keeper implementations.
 lumabri test_chat_ui test_host_session_pool test_host_drain test-home-monitor test_retired_receipts test_allocation_lifetime: src/protocol/lumabri_retired_receipt_wire.h src/protocol/lumabri_allocation_lifetime_wire.h
+
+# Build-time metadata is committed; installed catalogues require no Python.
+CAPABILITY_DEPS = src/planner/lumabri_capabilities.h src/planner/lumabri_colibri_capabilities_data.h
+lumabri segment_budget_probe segment_node segment_chat test_model_family test_planner test_planner_io test_chat_ui test_cluster test_memory_budget test_calibration: $(CAPABILITY_DEPS)

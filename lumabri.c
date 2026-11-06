@@ -4833,7 +4833,9 @@ static void catalog_row(const LmbTuiModel *m) {
     const char *mark = !ok || plan.state == LMB_PLAN_UNRUNNABLE ? "x"
                      : plan.state == LMB_PLAN_DISK ? "!" : "+";
     char detail[96] = "";
-    if (!m->checkpoint_inventory_ok)
+    if (!m->shape.segment_id[0] && lmb_capability_for(m->shape.model_type))
+        snprintf(detail, sizeof detail, "distributed runtime not integrated");
+    else if (!m->checkpoint_inventory_ok)
         snprintf(detail, sizeof detail, "checkpoint inventory unavailable");
     else if (!m->weights_present)
         snprintf(detail, sizeof detail, "checkpoint weights missing");
@@ -4997,6 +4999,25 @@ static void catalog_json(const LmbTuiState *st) {
         json_string(stdout, model->shape.model_type);
         fputs(",\"adapter\":", stdout);
         json_string(stdout, model->shape.segment_id);
+        const LmbFamilyCapabilities *capability=lmb_capability_for(model->shape.model_type);
+        fputs(",\"capabilities\":{\"family\":",stdout);
+        if (capability) json_string(stdout,capability->id); else fputs("null",stdout);
+        fputs(",\"format\":",stdout);json_string(stdout,lmb_weight_format_name(model->weight_formats));
+        fputs(",\"state\":",stdout);json_string(stdout,lmb_catalogue_support_state(model));
+        fputs(",\"reason\":",stdout);json_string(stdout,lmb_catalogue_capability_reason(model));
+        fputs(",\"modality\":",stdout);
+        if (capability) json_string(stdout,capability->modality); else fputs("null",stdout);
+        printf(",\"upstream_operations\":%u,\"upstream_max_context\":%u,\"distributed_adapter\":%s,"
+               "\"memory_contract\":%s,\"verification\":\"not_recorded\",\"execution_observation\":",
+            capability ? capability->upstream_operations : 0,
+            capability ? capability->upstream_max_context : 0,
+            model->shape.segment_id[0] ? "true" : "false",model->shape.sizing_verified ? "true" : "false");
+        int observed=model->has_calibration && model->calibration_key_valid &&
+            lmb_cal_valid(&model->calibration) && lmb_cal_matches(&model->calibration.key,&model->calibration_key);
+        json_string(stdout,observed ? "current" : model->has_calibration ? "stale" : "none");
+        printf(",\"checkpoint_operations\":%u,\"execution_backends\":%s,\"max_context\":%u}",
+            model->shape.sizing_verified ? model->shape.execution_ops : 0,
+            model->shape.sizing_verified ? "[\"cpu\"]" : "[]", model->shape.max_context);
         printf(",\"sizing_verified\":%s,\"weights_present\":%s,"
                "\"checkpoint_inventory_ok\":%s,\"checkpoint_bytes\":%llu,"
                "\"planned\":%s,\"state\":",

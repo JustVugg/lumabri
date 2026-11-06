@@ -294,3 +294,28 @@ visual rows with an independent Transformers model, then checks local/split
 greedy inference and full/streamed image requests. These generated checkpoints
 exercise arithmetic, transport and memory; they do not measure the visual
 answer quality or function-selection quality of a trained model.
+
+### Catalogue capability evidence
+
+`lumabri models --json` includes a `capabilities` object for each recognized
+checkpoint. Recognition covers all families in the pinned Colibri registry,
+including image and decision engines. It does not authorize execution.
+
+- `state`: `recognized` or `executable` (a complete resident candidate on the
+  selected computers). Donor approval and preparation remain required.
+- `format`: observed weight containers (`safetensors`, `gguf`, `mixed`, `other`,
+  or `unknown`). This is not a claim that every encoding in a container works.
+- `distributed_adapter`, `memory_contract`, `checkpoint_operations`, and
+  `execution_backends`: Lumabri's checkpoint-specific integration facts.
+- `upstream_operations` and `upstream_max_context`: discovery metadata, never
+  permission to run a modality, allocate a context or select a backend.
+- `verification`: `not_recorded` until a conformance record exists for the
+  combination. A sizing calculation or speed observation is not verification.
+- `execution_observation`: `current`, `stale`, or `none`, using the same exact
+  runtime/checkpoint/placement key as the performance measurement.
+
+Operation masks: chat `1`, image input `2`, audio input `4`, image generation
+`8`, decisions `16`, native tools `32`, logprobs `64`. Missing towers and
+unsupported encodings cannot gain operations from the upstream mask.
+The preparation catalogue exposes `support_state`, `support_reason`,
+`weight_format`, and `checkpoint_operations` from the same typed snapshot.
