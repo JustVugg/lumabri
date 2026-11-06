@@ -1219,6 +1219,59 @@ int main(int argc, char **argv) {
         assert(!strcmp(seed.model_root, plan.content_id) && !strcmp(seed.adapter, "olmoe"));
         assert(!seed.adapter_abi && !seed.numeric_class[0] && !lmb_cal_key_valid(&seed));
         assert(!seed.workload[0].known); /* a saved plan never fabricates a current workload */
+        /* A loaded replica must retain its reviewed identity even if a fresh
+         * inventory read cannot authorize recording a speed. This is the
+         * real preparation helper and the on-disk plan consumed by routing. */
+        LmbTuiState *prepared_state = calloc(1, sizeof *prepared_state);
+        assert(prepared_state);
+        prepared_state->nnodes = plan.execution.count;
+        prepared_state->context = plan.context; prepared_state->sessions = plan.sessions;
+        strcpy(prepared_state->tracker, "127.0.0.1:0"); /* no live inventory endpoint */
+        memset(prepared_state->build_id, 'd', 64);
+        LmbTuiModel *prepared_model = &prepared_state->models[0];
+        prepared_model->planned = 1; prepared_model->plan.state = LMB_PLAN_RESIDENT;
+        prepared_model->plan.nslices = plan.execution.count;
+        prepared_model->plan.hybrid = plan.execution.hybrid;
+        strcpy(prepared_model->content_id, plan.content_id);
+        strcpy(prepared_model->shape.segment_id, "olmoe");
+        for (uint32_t i = 0; i < plan.execution.count; i++) {
+            lmb_hex(prepared_state->identities[i], plan.peer_keys[i], 32);
+            memset(prepared_state->runtime_ids[i], 'f', 64);
+            strcpy(prepared_state->nodes[i].addr, plan.execution.nodes[i].address);
+            prepared_state->nodes[i].threads = i + 1;
+            prepared_model->plan.slices[i].node = i;
+            prepared_model->plan.slices[i].layer_begin = plan.execution.nodes[i].begin;
+            prepared_model->plan.slices[i].layer_end = plan.execution.nodes[i].end;
+        }
+        char observation_directory[1200]; LmbCalKey unmeasured;
+        loaded = plan; memset(&loaded.observation, 0, sizeof loaded.observation);
+        int previous_stopping = g_stopping; g_stopping = 1; /* one failed query, no retry delay */
+        assert(!home_prepared_observation(prepared_state, prepared_model, &loaded,
+                                          &unmeasured, observation_directory));
+        g_stopping = previous_stopping;
+        assert(!strcmp(loaded.observation.build_id, prepared_state->build_id));
+        assert(loaded.observation.threads[1] == 2 && !strcmp(loaded.observation.adapter, "olmoe"));
+        assert(!unmeasured.adapter_abi && !unmeasured.numeric_class[0] && !lmb_cal_key_valid(&unmeasured));
+        assert(!home_resident_plan_save(&loaded));
+        memset(&loaded, 0, sizeof loaded);
+        assert(!home_resident_plan_load(plan.tracker, &loaded) && loaded.observation.build_id[0]);
+        assert(!home_resident_observation_key(&loaded, &unmeasured));
+        assert(!unmeasured.workload[0].known && !lmb_cal_key_valid(&unmeasured));
+        /* Unavailable calibration storage also must not erase provenance. */
+        assert(!unsetenv("HOME"));
+        memset(&loaded.observation, 0, sizeof loaded.observation);
+        assert(!home_prepared_observation(prepared_state, prepared_model, &loaded,
+                                          &unmeasured, observation_directory));
+        assert(loaded.observation.build_id[0]);
+        assert(!setenv("HOME", test_dir, 1));
+        /* Incomplete reviewed identities are never invented to make a route work. */
+        prepared_state->build_id[0] = 0;
+        memset(&loaded.observation, 0, sizeof loaded.observation);
+        assert(!home_prepared_observation(prepared_state, prepared_model, &loaded,
+                                          &unmeasured, observation_directory));
+        assert(!loaded.observation.build_id[0]);
+        free(prepared_state);
+        loaded = plan;
         loaded.observation.threads[0] = 257; assert(!home_resident_plan_valid(&loaded));
         loaded = plan; loaded.observation.runtime[0][0] = 'z'; assert(!home_resident_plan_valid(&loaded));
         loaded = plan; loaded.observation.build_id[64] = 'd'; assert(!home_resident_plan_valid(&loaded));

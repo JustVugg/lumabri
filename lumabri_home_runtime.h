@@ -1276,6 +1276,32 @@ static void home_session_interrupt_chat(void *unused) {
     if (g_signal_engine_fd>=0) shutdown(g_signal_engine_fd,SHUT_RDWR);
 }
 
+/* The reviewed execution identity is preparation provenance. Keep it even
+ * when leased inventory or the calibration directory is unavailable: those
+ * conditions forbid a speed observation, not the identity of a loaded plan.
+ * Live donor/root and Edge numeric checks still gate every subsequent use. */
+static int home_prepared_observation(const LmbTuiState *st, const LmbTuiModel *model,
+    LmbResidentPlan *saved, LmbCalKey *key, char directory[1200]) {
+    if (catalog_calibration_key(st, model, 0, NULL, key)) return 0;
+    if (saved) {
+        snprintf(saved->observation.build_id, sizeof saved->observation.build_id, "%s", key->build_id);
+        snprintf(saved->observation.adapter, sizeof saved->observation.adapter, "%s", key->adapter);
+        saved->observation.goal = key->goal;
+        for (uint32_t j = 0; j < key->nodes; j++) {
+            snprintf(saved->observation.hardware[j], sizeof saved->observation.hardware[j], "%s", key->node_hardware_id[j]);
+            snprintf(saved->observation.runtime[j], sizeof saved->observation.runtime[j], "%s", key->node_build_id[j]);
+            saved->observation.threads[j] = key->threads[j];
+        }
+    }
+    if (catalog_calibration_dir(directory)) return 0;
+    char why[200] = "";
+    if (catalog_runtime_revalidate_tracker(st->tracker, key, why, sizeof why)) {
+        fprintf(stderr, "[calibration] %s.\n", why);
+        return 0;
+    }
+    return 1;
+}
+
 static int home_request_chat_direct(LmbTuiState *st, int selected) {
     home_error[0] = 0;
     if (home_resident_environment()) return 1;
@@ -1514,13 +1540,7 @@ static int home_request_chat_direct(LmbTuiState *st, int selected) {
             measured.plan.edge_node = indices[plan.edge_node];
             for (uint32_t j = 0; j < measured.plan.nslices; j++)
                 measured.plan.slices[j].node = indices[plan.slices[j].node];
-            int can_record = !catalog_calibration_dir(measurement_dir) &&
-                !catalog_calibration_key(st, &measured, 0, NULL, &measurement.key);
-            if (can_record) {
-                char why[200] = "";
-                can_record = !catalog_runtime_revalidate_tracker(st->tracker, &measurement.key, why, sizeof why);
-                if (!can_record) fprintf(stderr, "[calibration] %s.\n", why);
-            }
+            int can_record;
             if (home_resident_required()) {
                 LmbResidentPlan saved = {.context = st->context, .sessions = st->sessions, .max_new = s.offers[s.edge].max_new,
                     .execution = execution, .preparation_seconds = preparation_seconds, .prepared_at = prepared_at};
@@ -1532,22 +1552,12 @@ static int home_request_chat_direct(LmbTuiState *st, int selected) {
                 snprintf(saved.content_id, sizeof saved.content_id, "%s", m->content_id);
                 memcpy(saved.allocation, id, 32);
                 memcpy(saved.peer_keys, s.peer_keys, s.count * 32);
-                if (can_record) {
-                    const LmbCalKey *k = &measurement.key;
-                    snprintf(saved.observation.build_id, sizeof saved.observation.build_id, "%s", k->build_id);
-                    snprintf(saved.observation.adapter, sizeof saved.observation.adapter, "%s", k->adapter);
-                    saved.observation.goal = k->goal;
-                    for (uint32_t j = 0; j < s.count; j++) {
-                        snprintf(saved.observation.hardware[j], sizeof saved.observation.hardware[j], "%s", k->node_hardware_id[j]);
-                        snprintf(saved.observation.runtime[j], sizeof saved.observation.runtime[j], "%s", k->node_build_id[j]);
-                        saved.observation.threads[j] = k->threads[j];
-                    }
-                }
+                can_record = home_prepared_observation(st, &measured, &saved, &measurement.key, measurement_dir);
                 if (home_resident_plan_save(&saved) || home_resident_library_save(&saved)) {
                     home_fail("Cannot save the approved resident plan. Check home-directory permissions; no chat was started.");
                     goto done;
                 }
-            }
+            } else can_record = home_prepared_observation(st, &measured, NULL, &measurement.key, measurement_dir);
             if (home_background_job) { prepared = 1; result = 0; break; }
             g_execution_view = &execution;
             g_recording_calibration = can_record ? &measurement : NULL;
