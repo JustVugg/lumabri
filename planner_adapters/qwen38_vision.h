@@ -63,6 +63,7 @@ static int lmb_q38_vision_finish(LmbQ38Vision *v,LmbModelShape *m) {
     if (!v->weights) return 0; /* native Colibri permits text-only exports */
     if (v->globals!=511) return -1;
     for (unsigned i=0;i<v->depth;i++) if (v->blocks[i]!=4095) return -1;
+    m->execution_ops |= LMB_OP_IMAGE_INPUT;
     uint64_t N=LMB_IMAGE_TOKENS_MAX*v->merge*v->merge,H=v->h,W=H*v->merge*v->merge;
     uint64_t patches=N*3*v->temporal*v->patch*v->patch;
     uint64_t forward=N*(6*H+v->inter+2*H/v->heads+1)+LMB_IMAGE_TOKENS_MAX*(2*W+v->out);

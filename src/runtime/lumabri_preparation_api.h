@@ -23,6 +23,10 @@ static void api_preparation_catalogue(int fd,const char *tracker) {
         const LmbTuiModel *m=&st->models[i];
         bad=(i && cap_str(&body,",")) || cap_str(&body,"{\"name\":") || api_json_text(&body,m->name) ||
             cap_str(&body,",\"adapter\":") || api_json_text(&body,m->shape.segment_id) ||
+            cap_str(&body,",\"support_state\":") || api_json_text(&body,lmb_catalogue_support_state(m)) ||
+            cap_str(&body,",\"support_reason\":") || api_json_text(&body,lmb_catalogue_capability_reason(m)) ||
+            cap_str(&body,",\"weight_format\":") || api_json_text(&body,lmb_weight_format_name(m->weight_formats)) ||
+            api_addf(&body,",\"checkpoint_operations\":%u",m->shape.sizing_verified ? m->shape.execution_ops : 0) ||
             api_addf(&body,",\"layers\":%u,\"checkpoint_bytes\":%llu,\"source_ready\":%s,\"decode_tok_s\":null}",
                 m->shape.layers,(unsigned long long)m->checkpoint_bytes,
                 m->weights_present && m->checkpoint_inventory_ok && m->shape.sizing_verified ? "true" : "false");

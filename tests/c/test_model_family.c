@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "lumabri_families.h"
+#include "src/planner/lumabri_capabilities.h"
 
 static int bad;
 
@@ -26,6 +27,17 @@ static void want(const char *model_type, const char *expect_id) {
 }
 
 int main(void) {
+    const LmbFamilyCapabilities *mimo=lmb_capability_for("mimo_v2");
+    const LmbFamilyCapabilities *laya=lmb_capability_for("laya_modernbert");
+    const LmbFamilyCapabilities *image=lmb_capability_for("qwenimage21pipeline");
+    if (!mimo || strcmp(mimo->id,"mimo") || !(mimo->upstream_operations & LMB_OP_CHAT) ||
+        !laya || laya->upstream_operations!=LMB_OP_DECIDE ||
+        !image || image->upstream_operations!=LMB_OP_GENERATE_IMAGE ||
+        lmb_capability_for("mimo_v2_future") || lmb_capability_for("mimo") ||
+        lmb_capability_for("|mimo_v2") || lmb_capability_for("") || lmb_capability_for(NULL)) {
+        fprintf(stderr,"upstream recognition lost its exact modality/alias contract\n"); bad=1;
+    }
+
     want("olmoe", "olmoe");
     want("deepseek_v4", "deepseek_v4");
     want("kimi_k3", "kimi");

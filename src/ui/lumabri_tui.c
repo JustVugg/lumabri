@@ -156,6 +156,7 @@ static void state_mark(LmbPlanState s, int planned) {
 }
 
 static const char *state_word(const LmbTuiModel *m) {
+    if (!m->shape.segment_id[0] && lmb_capability_for(m->shape.model_type)) return "recognized";
     if (!m->planned) return "cannot plan";
     switch (m->plan.state) {
     case LMB_PLAN_RESIDENT: return "resident";
@@ -361,7 +362,7 @@ static void draw_detail(const LmbTuiState *st, Size sz, int sel) {
     printf("  %sWHAT IT NEEDS%s", c(DIM), c(OFF));
     if (!whole.ok || !edge.ok) {
         at(row++, 1);
-        printf("    adapter-specific sizing is unavailable; no fit decision");
+        printf("    %s", lmb_catalogue_capability_reason(m));
         at(sz.h, 1);
         printf("%s ↵ back   q quit%s", c(DIM), c(OFF));
         fflush(stdout);
@@ -581,6 +582,8 @@ static void draw_workspace(const LmbTuiState *st, int tab, int sel, int detail,
         ui_text(9, 5, UI_SAND, m->name);
         ui_printf(11, 5, UI_MUTED, "%s · %u layers · %u context · %u session(s)",
                   m->shape.model_type, m->shape.layers, st->context, st->sessions);
+        ui_printf(12, 5, UI_MUTED, "Support: %s · format: %s · verification: not recorded",
+            lmb_catalogue_support_state(m), lmb_weight_format_name(m->weight_formats));
         ui_printf(13, 5, UI_TEXT, "Plan: %s%s    Speed: %s", state_word(m), m->plan.hybrid ? " (Hybrid)" : "", speed);
         if (m->stage_cost_placement)
             ui_text(14, 5, UI_MUTED, "Placement guided by previous stage timings; changed ranges need calibration.");
@@ -614,9 +617,7 @@ static void draw_workspace(const LmbTuiState *st, int tab, int sel, int detail,
             ui_printf(16, 5, UI_TEXT, "Missing: %.2f GB · sizing %s · local source weights %s",
                 m->plan.missing_bytes / 1e9, m->planned ? "available" : "unavailable",
                 m->weights_present ? "present" : "missing");
-            ui_text(19, 5, UI_MUTED, m->checkpoint_inventory_ok ?
-                "Select computers in Share resources, then review the updated plan." :
-                "Checkpoint inventory unavailable. Check source files and refresh.");
+            ui_text(19, 5, UI_MUTED, lmb_catalogue_capability_reason(m));
         }
     } else if (tab) {
         int rows = (ui_h - 15) / 3; if (rows < 1) rows = 1;

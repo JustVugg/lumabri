@@ -17,6 +17,8 @@ fail() { echo "MODEL FAMILY TEST: FAIL — $*" >&2; exit 1; }
 [[ -f "$ENGINE/segment_adapters.h" ]] || { echo "MODEL FAMILY TEST: SKIP (no $ENGINE)"; exit 0; }
 [[ -f "$ENGINE/family_registry.py" ]] || fail "Colibri has no authoritative family_registry.py"
 
+python3 tools/sync_colibri_capabilities.py --engine "$ENGINE" --check || fail "full capability registry differs"
+
 adapters_of() {  # $1 = header, $2 = segment|edge
     grep -oE "coli_[a-z0-9_]+_$2_adapter_register" "$1" |
         sed -E "s/^coli_(.*)_$2_adapter_register$/\1/" | sort -u
