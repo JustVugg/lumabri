@@ -43,6 +43,12 @@ static const LmbMemoryContract LMB_MEMORY_CONTRACTS[] = {
 
 static int lmb_describe_memory(const char *id, const char *root, const char *whole,
                                const char *cfg, LmbModelShape *m) {
+    /* 2.1 routes more architectures through the same engine. Recognition is
+     * not a resident memory contract: these variants add dense, convolution,
+     * expert-normalization or attention layouts absent from our inspectors. */
+    if ((!strcmp(id,"qwen36") && strcmp(m->model_type,"qwen3_5_moe") &&
+         strcmp(m->model_type,"qwen3_5_moe_text")) ||
+        !strcmp(m->model_type,"mistral_large4")) return -1;
     for(size_t i=0;i<sizeof LMB_MEMORY_CONTRACTS/sizeof *LMB_MEMORY_CONTRACTS;i++) {
         const LmbMemoryContract *c=&LMB_MEMORY_CONTRACTS[i];
         if(!strcmp(id,c->adapter)) return c->describe ? c->describe(root,whole,cfg,m) : -1;

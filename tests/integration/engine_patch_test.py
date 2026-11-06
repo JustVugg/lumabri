@@ -23,16 +23,25 @@ LEGACY_CHECK = '    if (!result && selected != topk) result = -1;\n'
 
 
 class EnginePatchTests(unittest.TestCase):
+    def test_olmoe_prefill_and_decode_reach_approved_hybrid(self):
+        source = (ENGINE / "olmoe.c").read_text()
+        patched = PATCHES["apply_hooks"](source, PATCHES["OLMOE"], "olmoe.c")
+        self.assertLess(patched.index("typedef struct { Model *m; float *g, *u; } LmbOlmoeLocal;"),
+                        patched.index("static void moe_routed("))
+        self.assertTrue("S > 1\n#ifdef LUMIBRI_P2P\n        && !lumi_layer_on(layer)" in patched)
+        self.assertTrue("moe_expert_row(m, e, xs, g, u, hh);\n            expert_put(e);" in patched)
+        self.assertEqual((ENGINE / "olmoe.c").read_text(), source)
+
     def test_qwen_preserves_optimized_paths_and_shared_tail(self):
         source = (ENGINE / "qwen36.c").read_text()
         patched = PATCHES["apply_hooks"](source, PATCHES["QWEN36"], "qwen36.c")
-        self.assertIn('!use_xf && !use_qt && lumi_layer_on(layer)', patched)
-        self.assertIn('} else\n#endif\n        if (use_xf)', patched)
+        self.assertIn('!use_xf && !use_qt && !use_qq && !use_vk && !use_gq && !l->post_en && lumi_layer_on(layer)', patched)
+        self.assertIn('} else\n#endif\n        if (use_qq)', patched)
         self.assertIn('} else if (use_qt)', patched)
         for line in (
-            '    int use_xf = !use_qt && xf_mode(m);',
+            '    int use_xf = !use_gq && !use_qq && !use_qt && !use_vk && xf_mode(m);',
             '    if (use_xf) { moe_xf_run(m, layer, x, S, out, xidx, xval); free(xidx); free(xval); }',
-            '    if (!use_qt) qwen_shared_experts_cpu(m,l,x,S,out,sh,shu,shd);',
+            '    if (!use_qt && !use_vk && !routed_only) qwen_shared_experts_cpu(m,l,x,S,out,sh,shu,shd);',
         ):
             self.assertEqual(source.count(line), 1)
             self.assertEqual(patched.count(line), 1)
@@ -44,7 +53,7 @@ class EnginePatchTests(unittest.TestCase):
         patched = PATCHES["apply_hooks"](source, PATCHES["QWEN36"], "qwen36.c")
         self.assertIn('/* changed documentation */', patched)
         with self.assertRaises(SystemExit):
-            PATCHES["apply_hooks"](source.replace('        if (use_xf) {',
+            PATCHES["apply_hooks"](source.replace('        if (use_qq) {',
                 '        if (new_runner) {'), PATCHES["QWEN36"], "qwen36.c")
 
     def patch_deepseek(self, source, succeeds=True):
@@ -71,7 +80,7 @@ class EnginePatchTests(unittest.TestCase):
         loader = patched.index('profiled_expert_load_start(', start)
         self.assertLess(hook, preload)
         self.assertLess(hook, loader)
-        self.assertIn('malloc((size_t)(selected > 0 ? selected : 1) * sizeof(*views))', patched)
+        self.assertIn('calloc((size_t)(selected ? selected : 1), sizeof(*views))', patched)
         # The previously reviewed routing layout is still supported.
         legacy = self.patch_deepseek(source.replace(ROUTING_CHECK, LEGACY_CHECK))
         self.assertIn(LEGACY_CHECK + '#ifdef LUMABRI_P2P', legacy)

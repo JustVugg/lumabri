@@ -20,28 +20,53 @@ def replace_once(text, before, after):
 def prepare(text):
     # These hooks are audited against this source, not against similarly named
     # functions in a future release. Deliberate revalidation is required.
-    if hashlib.sha256(text.encode()).hexdigest() != '29957921abf6febf6c409b3aac22319065acddc6f9e303df1b4e02b30d10b141':
-        raise ValueError('V4.1 range engine requires pinned Colibri 1.12.1')
+    if hashlib.sha256(text.encode()).hexdigest() != '3dbc511047cc0fd40b09d8476d00bf6cdbef08f54ebd70cf4d10b24e10c833ff':
+        raise ValueError('V4.1 range engine requires pinned Colibri 2.1.0')
     text = replace_once(text, '    int fd_w, fd_s;\n    int64_t off_w, off_s, rows;',
-                        '    int fd_w, fd_s;\n    uint8_t *resident_w, *resident_s;\n    int64_t off_w, off_s, rows;')
-    text = replace_once(text, '    t->rows = w->nbytes / head_dim;', '''    t->rows = w->nbytes / head_dim;
-    if (head_dim <= 0 || head_dim % 32 || w->nbytes <= 0 ||
-        w->nbytes % head_dim || s->nbytes != t->rows * (head_dim / 32)) exit(1);
-    t->resident_w = xmalloc((size_t)w->nbytes, "resident Engram weights");
-    t->resident_s = xmalloc((size_t)s->nbytes, "resident Engram scales");
-    st_pread_full(t->fd_w, t->resident_w, w->nbytes, t->off_w, "prepare Engram weights");
-    st_pread_full(t->fd_s, t->resident_s, s->nbytes, t->off_s, "prepare Engram scales");''')
-    text = replace_once(text, '''        st_pread_full(t->fd_w, bytes, head_dim, t->off_w + id * head_dim, "engram row");
-        st_pread_full(t->fd_s, scales, groups, t->off_s + id * groups, "engram scale");''', '''        if (id < 0 || id >= t->rows || !t->resident_w || !t->resident_s) exit(1);
-        memcpy(bytes, t->resident_w + (size_t)id * head_dim, (size_t)head_dim);
-        memcpy(scales, t->resident_s + (size_t)id * groups, (size_t)groups);''')
+                        '    int fd_w, fd_s;\n    uint8_t *resident_w, *resident_s;\n    size_t resident_w_bytes, resident_s_bytes;\n    int64_t off_w, off_s, rows;')
+    # The released engine now also understands inline and ggml Engram rows.
+    # Retain their exact bytes and keep its decoder unchanged. Planner format
+    # admission remains separate; no format may fall back to disk at RUN.
+    text = replace_once(text, 'cache:;\n    int cap = 1;', '''cache:;
+    const st_tensor *weights = t->gt >= 0 ? g : w;
+    if (!weights || weights->nbytes <= 0 || (uint64_t)weights->nbytes > SIZE_MAX) exit(1);
+    t->resident_w_bytes = (size_t)weights->nbytes;
+    t->resident_w = xmalloc(t->resident_w_bytes, "resident Engram weights");
+    st_pread_full(t->fd_w, t->resident_w, t->resident_w_bytes, t->off_w, "prepare Engram weights");
+    if (t->gt < 0 && !t->inline_scales) {
+        if (!s || s->nbytes <= 0 || (uint64_t)s->nbytes > SIZE_MAX) exit(1);
+        t->resident_s_bytes = (size_t)s->nbytes;
+        t->resident_s = xmalloc(t->resident_s_bytes, "resident Engram scales");
+        st_pread_full(t->fd_s, t->resident_s, t->resident_s_bytes, t->off_s, "prepare Engram scales");
+    }
+    int cap = 1;''')
+    text = replace_once(text, '} EngramTable;', '''} EngramTable;
+static void lmb_v41_engram_read(const EngramTable *t, int scales, void *out,
+                                size_t bytes, int64_t offset, const char *what) {
+    const uint8_t *data = scales ? t->resident_s : t->resident_w;
+    size_t size = scales ? t->resident_s_bytes : t->resident_w_bytes;
+    int64_t base = scales ? t->off_s : t->off_w;
+    (void)what;
+    if (!data || offset < base || (uint64_t)(offset-base) > size ||
+        bytes > size-(size_t)(offset-base)) exit(1);
+    memcpy(out, data+(size_t)(offset-base), bytes);
+}''')
+    # Limit replacements to the row decoder; preparation still performs reads.
+    start = text.index('static const float *engram_row(')
+    end = text.index('\nstatic ', start + 1)
+    row = text[start:end]
+    if row.count('st_pread_full(t->fd_w,') != 3 or row.count('st_pread_full(t->fd_s,') != 1:
+        raise ValueError('V4.1 Engram row read contract changed')
+    row = row.replace('st_pread_full(t->fd_w,', 'lmb_v41_engram_read(t, 0,')
+    row = row.replace('st_pread_full(t->fd_s,', 'lmb_v41_engram_read(t, 1,')
+    text = text[:start] + row + text[end:]
     text = replace_once(text, "    Cfg c;\n    shards S;", """    Cfg c;
     int range_begin, range_end, range_enabled, context_limit;
     const float *boundary_input, *boundary_mix;
     float *boundary_output, *boundary_output_mix;
     shards S;""")
-    text = replace_once(text, '    cfg_load(c, snap);\n    attn_project_check(c);',
-                        '    cfg_load(c, snap);\n    if (m->context_limit >= 2 && m->context_limit < c->max_positions) c->max_positions = m->context_limit;\n    attn_project_check(c);')
+    text = replace_once(text, '    cfg_load(c, snap);\n',
+                        '    cfg_load(c, snap);\n    if (m->context_limit >= 2 && m->context_limit < c->max_positions) c->max_positions = m->context_limit;\n')
     # No global head/embedding and no unrelated layer weights on a donor.
     text = replace_once(text, '    wb_load(&m->S, &m->embed, "embed.weight", c->vocab, dim);',
                         '    if (!m->range_enabled) {\n    wb_load(&m->S, &m->embed, "embed.weight", c->vocab, dim);')
@@ -51,10 +76,13 @@ def prepare(text):
                         '    for (int i = 0; i < c->n_layers; i++) {\n        Layer *l = &m->L[i];\n        l->engram_index = -1;\n        if (m->range_enabled && (i < m->range_begin || i >= m->range_end)) continue;')
     text = replace_once(text, '            m->L[layer].engram_index = t;',
                         '            if (m->range_enabled && (layer < m->range_begin || layer >= m->range_end)) continue;\n            m->L[layer].engram_index = t;')
-    text = replace_once(text, '    for (int i = 0; i < c->n_layers; i++) cache_init(m, &m->cache[i], ecap);', """    memset(m->cache, 0, (size_t)c->n_layers * sizeof(LCache));
+    text = replace_once(text, '''    for (int i = 0; i < c->n_layers; i++) {
+        if (g_v41_dry) { memset(&m->cache[i], 0, sizeof(LCache)); continue; }   /* nothing is read */
+        cache_init(m, &m->cache[i], ecap, 0);
+    }''', """    memset(m->cache, 0, (size_t)c->n_layers * sizeof(LCache));
     for (int i = 0; i < c->n_layers; i++) {
         if (!m->range_enabled || (i >= m->range_begin && i < m->range_end))
-            cache_init(m, &m->cache[i], ecap);
+            cache_init(m, &m->cache[i], ecap, 0);
         /* Foreign KV owners are STATE replicas, never weight replicas. */
         else if (c->kv_source[i]) {
             int ratio = c->compress_ratio[i] > 0 ? c->compress_ratio[i] : 1;
@@ -79,14 +107,14 @@ def prepare(text):
     f = replace_once(f, '    /* V41_TRACE=2', '''    if (m->boundary_mix) memcpy(pre_mix, m->boundary_mix, (size_t)n * hc * sizeof(float));
 
     /* V41_TRACE=2''')
-    f = replace_once(f, '    for (int layer = 0; layer < c->n_layers; layer++) {',
+    f = replace_once(f, '    for (int layer = chained; layer < c->n_layers; layer++) {',
                     '    for (int layer = m->range_enabled ? m->range_begin : 0;\n         layer < (m->range_enabled ? m->range_end : c->n_layers); layer++) {')
     f = replace_once(f, "    /* the last block's FFN mix collapses the stream one final time */", """    if (m->boundary_output) {
         memcpy(m->boundary_output, h, (size_t)n * hc * dim * sizeof(float));
         memcpy(m->boundary_output_mix, pre_mix, (size_t)n * hc * sizeof(float));
     } else {
     /* the last block's FFN mix collapses the stream one final time */""")
-    f = replace_once(f, '    m->pos += n;', '    }\n    m->pos += n;')
+    f = replace_once(f, '    m->pos += n_all;', '    }\n    m->pos += n_all;')
     return text[:at] + f + text[end:]
 
 

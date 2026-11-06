@@ -81,18 +81,14 @@ def main():
         # `output = round(output + shared)` — identical to sites 1 and 3, with
         # the routed partial already written remotely.
         #
-        # The same `selected = 0` reaches colibri's own
-        #     ColiExpertView *views = malloc((size_t)selected * sizeof(*views));
-        #     if (!views) result = -1;
-        # and malloc(0) is allowed by the standard to return NULL, which would
-        # turn a correctly delegated layer into a failed forward. glibc happens
-        # to return a non-null pointer, so this never fired here; that is a
-        # property of one allocator, not of the code. Ask for one element when
-        # there is nothing to select — the loop below is skipped either way.
+        # 2.1 zero-initializes these leases and already keeps one element
+        # for selected=0. Preserve both guarantees on failed or delegated runs.
         ('    if (!result) memset(output, 0, (size_t)d * sizeof(*output));\n'
          '\n'
          '#ifdef COLI_V4_EXPERIMENTAL_DUAL_EXPERT_LOADER\n'
-         '    ColiExpertView *views = malloc((size_t)selected * sizeof(*views));',
+         '    /* Zeroed up front: every exit releases the views below, and one that\n'
+         '     * fails before the fetch pass fills them must find no lease there. */\n'
+         '    ColiExpertView *views = calloc((size_t)(selected ? selected : 1), sizeof(*views));',
          '    if (!result) memset(output, 0, (size_t)d * sizeof(*output));\n'
          '#ifdef LUMABRI_P2P\n'
          '    if (!result && lumi_partial) {\n'
@@ -102,8 +98,9 @@ def main():
          '#endif\n'
          '\n'
          '#ifdef COLI_V4_EXPERIMENTAL_DUAL_EXPERT_LOADER\n'
-         '    ColiExpertView *views =\n'
-         '        malloc((size_t)(selected > 0 ? selected : 1) * sizeof(*views));'),
+         '    /* Zeroed up front: every exit releases the views below, and one that\n'
+         '     * fails before the fetch pass fills them must find no lease there. */\n'
+         '    ColiExpertView *views = calloc((size_t)(selected ? selected : 1), sizeof(*views));'),
         # site 3 — v4_moe_batch_union: batch, reset n
         ('    if (!result)\n'
          '        memset(outputs, 0, (size_t)batch * d * sizeof(*outputs));\n'

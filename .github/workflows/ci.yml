@@ -103,7 +103,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: JustVugg/colibri
-          ref: ce370e87d7b623d7759b52ec2007d75fc5b0e87e
+          ref: 704a3f68184b78367a04cb5526e428dc2f90f05b
           path: colibri
       - uses: actions/download-artifact@v4
         with:
@@ -168,16 +168,22 @@ jobs:
         with:
           ref: dcc1a52454f6ced188ac1eb173397e8e36ac0d51
           path: previous-lumabri
+      - name: Checkout the previous runtime's Colibri pin for update and rollback
+        uses: actions/checkout@v4
+        with:
+          repository: JustVugg/colibri
+          ref: ce370e87d7b623d7759b52ec2007d75fc5b0e87e
+          path: previous-colibri
       - name: Build the previous complete native runtime independently
         run: |
-          python3 ../previous-lumabri/tools/build_windows_segment.py --engine ../colibri/c --only inference --output build/previous-windows-segment
+          python3 ../previous-lumabri/tools/build_windows_segment.py --engine ../previous-colibri/c --only inference --output build/previous-windows-segment
           # Both versions above use this same installed compiler/runtime.
           cp build/windows-segment/WINDOWS-RUNTIME-NOTICES.txt build/previous-windows-segment/WINDOWS-RUNTIME-NOTICES.txt
       - name: Assemble and validate installed Windows packages
         run: |
           set -o pipefail
           python3 tools/package_household.py --runtime-dir build/windows-segment --colibri-root ../colibri --output 'build/windows candidate'
-          python3 tools/package_household.py --runtime-dir build/previous-windows-segment --runtime-repository ../previous-lumabri --colibri-root ../colibri --output 'build/previous windows candidate'
+          python3 tools/package_household.py --runtime-dir build/previous-windows-segment --runtime-repository ../previous-lumabri --colibri-root ../previous-colibri --output 'build/previous windows candidate'
           python3 tests/integration/windows_package_test.py --candidate 'build/windows candidate' --previous 'build/previous windows candidate' --driver build/windows-segment/test_requester_windows.exe --fixture build/native-text-fixture/olmoe-tiny 2>&1 | tee -a build/windows-segment-evidence.log
           python3 tools/package_household.py --verify 'build/windows candidate'
           python3 tools/package_household.py --verify 'build/previous windows candidate'
@@ -223,7 +229,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: JustVugg/colibri
-          ref: ce370e87d7b623d7759b52ec2007d75fc5b0e87e
+          ref: 704a3f68184b78367a04cb5526e428dc2f90f05b
           path: colibri
       - uses: actions/setup-python@v5
         with:
@@ -404,11 +410,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: lumabri
-      - name: Checkout Colibri v1.12.1
+      - name: Checkout Colibri v2.1.0
         uses: actions/checkout@v4
         with:
           repository: JustVugg/colibri
-          ref: ce370e87d7b623d7759b52ec2007d75fc5b0e87e
+          ref: 704a3f68184b78367a04cb5526e428dc2f90f05b
           path: colibri
       - name: Checkout the explicit whole-service update baseline
         uses: actions/checkout@v4
@@ -416,6 +422,12 @@ jobs:
           repository: JustVugg/lumabri
           ref: 027b55b1371116b0a289922abb2b2e9bbd8474c7
           path: previous-lumabri
+      - name: Checkout the previous runtime's Colibri pin for update and rollback
+        uses: actions/checkout@v4
+        with:
+          repository: JustVugg/colibri
+          ref: ce370e87d7b623d7759b52ec2007d75fc5b0e87e
+          path: previous-colibri
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -763,8 +775,8 @@ jobs:
           python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --kill-donor
           python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --expect-disjoint-plans --context 256
           python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --expect-quick-calibration
-          make -C ../previous-lumabri household swarm_probe ENGINE="$GITHUB_WORKSPACE/colibri/c" -j2
-          python3 ../previous-lumabri/tools/package_household.py --colibri-root ../colibri --output 'build/previous candidate'
+          make -C ../previous-lumabri household swarm_probe ENGINE="$GITHUB_WORKSPACE/previous-colibri/c" -j2
+          python3 ../previous-lumabri/tools/package_household.py --colibri-root ../previous-colibri --output 'build/previous candidate'
           python3 tests/integration/installed_fleet_update_test.py --previous-package 'build/previous candidate' --candidate-package 'build/native candidate' --models-dir build/home-flow-models
           python3 tools/package_household.py --verify 'build/native candidate'
           tar -czf build/lumabri-linux-candidate.tar.gz -C 'build/native candidate' .
@@ -808,7 +820,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: JustVugg/colibri
-          ref: ce370e87d7b623d7759b52ec2007d75fc5b0e87e
+          ref: 704a3f68184b78367a04cb5526e428dc2f90f05b
           path: colibri
       - uses: actions/setup-python@v5
         with:
@@ -855,7 +867,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: JustVugg/colibri
-          ref: ce370e87d7b623d7759b52ec2007d75fc5b0e87e
+          ref: 704a3f68184b78367a04cb5526e428dc2f90f05b
           path: colibri
       - uses: actions/setup-python@v5
         with:
@@ -967,7 +979,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: JustVugg/colibri
-          ref: ce370e87d7b623d7759b52ec2007d75fc5b0e87e
+          ref: 704a3f68184b78367a04cb5526e428dc2f90f05b
           path: colibri
       - name: Checkout the explicit whole-service update baseline
         uses: actions/checkout@v4
@@ -975,6 +987,12 @@ jobs:
           repository: JustVugg/lumabri
           ref: 027b55b1371116b0a289922abb2b2e9bbd8474c7
           path: previous-lumabri
+      - name: Checkout the previous runtime's Colibri pin for update and rollback
+        uses: actions/checkout@v4
+        with:
+          repository: JustVugg/colibri
+          ref: ce370e87d7b623d7759b52ec2007d75fc5b0e87e
+          path: previous-colibri
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -1176,11 +1194,11 @@ jobs:
           python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --expect-disjoint-plans --context 256
           python3 tests/integration/home_flow_test.py --runtime-dir 'build/native candidate/bin' --models-dir build/home-flow-models --expect-quick-calibration
           if [ "$OPENMP_MODE" = enabled ]; then
-            make -C ../previous-lumabri household swarm_probe ENGINE="$GITHUB_WORKSPACE/colibri/c" CC=clang -j2
-            python3 ../previous-lumabri/tools/package_household.py --colibri-root ../colibri --openmp-prefix "$OMP_PREFIX" --output 'build/previous candidate'
+            make -C ../previous-lumabri household swarm_probe ENGINE="$GITHUB_WORKSPACE/previous-colibri/c" CC=clang -j2
+            python3 ../previous-lumabri/tools/package_household.py --colibri-root ../previous-colibri --openmp-prefix "$OMP_PREFIX" --output 'build/previous candidate'
           else
-            make -C ../previous-lumabri household swarm_probe ENGINE="$GITHUB_WORKSPACE/colibri/c" CC=clang OMP_FLAGS= OMP_LIBS= -j2
-            python3 ../previous-lumabri/tools/package_household.py --colibri-root ../colibri --output 'build/previous candidate'
+            make -C ../previous-lumabri household swarm_probe ENGINE="$GITHUB_WORKSPACE/previous-colibri/c" CC=clang OMP_FLAGS= OMP_LIBS= -j2
+            python3 ../previous-lumabri/tools/package_household.py --colibri-root ../previous-colibri --output 'build/previous candidate'
           fi
           python3 tests/integration/installed_fleet_update_test.py --previous-package 'build/previous candidate' --candidate-package 'build/native candidate' --models-dir build/home-flow-models
           python3 tools/package_household.py --verify 'build/native candidate'
