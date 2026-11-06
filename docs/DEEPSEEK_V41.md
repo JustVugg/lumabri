@@ -1,7 +1,7 @@
 # DeepSeek V4.1: resident household adapter
 
 Lumabri provides a **text-only CPU Edge/Segment adapter** for the pinned Colibri
-1.12.1 V4.1 engine. It is registered separately from DeepSeek V4 and participates
+2.1.0 V4.1 engine. It is registered separately from DeepSeek V4 and participates
 in the normal planner, donor approval, resident preparation and hosted chat flow.
 Colibri's source checkout is unchanged. The Lumabri-owned wrapper links a
 hash-checked build copy of the engine into the household binaries.

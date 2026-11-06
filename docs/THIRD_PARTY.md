@@ -13,8 +13,8 @@
 
 ## Colibri V4.1 resident adapter
 
-- Source: `JustVugg/colibri`, tag `v1.12.1`, commit
-  `ce370e87d7b623d7759b52ec2007d75fc5b0e87e`.
+- Source: `JustVugg/colibri`, tag `v2.1.0`, commit
+  `704a3f68184b78367a04cb5526e428dc2f90f05b`.
 - Upstream files: `c/deepseek_v41.c`, its C headers, and
   `c/tools/make_dsv41_tiny.py` / `c/tools/dsv41_ref.py`.
 - License: Apache-2.0, supplied by the upstream repository's `LICENSE`.

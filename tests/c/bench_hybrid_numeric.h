@@ -150,7 +150,7 @@ static int bench_numeric_reference_selftest(void) {
     Model m = {0}; m.c.hidden=2; m.c.inter=1; m.c.n_layers=1; m.c.n_experts=1;
     m.quant_bits=8; m.cache=&cache;
     LmbOlmoeLocal ctx = {.m=&m};
-    unsetenv("IDOT"); g_pilot=0; g_fused3=0;
+    unsetenv("IDOT"); g_pilot=0;
     assert(!lmb_olmoe_reference(&ctx, 0, 0, x, 2, out));
     long double a = 2.5L/(1+expl(-1));
     assert(out[0] == (float)(3*a) && out[1] == (float)(-4*a));
@@ -162,9 +162,9 @@ static int bench_numeric_reference_selftest(void) {
     assert(lmb_olmoe_reference(&ctx, 0, 0, x, 2, out));
     m.quant_bits=8; setenv("IDOT", "1", 1);
     assert(lmb_olmoe_reference(&ctx, 0, 0, x, 2, out));
-    unsetenv("IDOT"); g_fused3=1;
+    unsetenv("IDOT"); m.gx=1;
     assert(lmb_olmoe_reference(&ctx, 0, 0, x, 2, out));
-    g_fused3=0; g_pilot=1;
+    m.gx=0; g_pilot=1;
     assert(lmb_olmoe_reference(&ctx, 0, 0, x, 2, out));
     g_pilot=0;
     assert(lmb_olmoe_reference(&ctx, 1, 0, x, 2, out));

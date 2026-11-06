@@ -2,8 +2,8 @@
 
 ## Supported upstream baseline
 
-Household CI and candidate packages use Colibri **v1.12.1**, commit
-`ce370e87d7b623d7759b52ec2007d75fc5b0e87e`. Use this same revision for local
+Household CI and candidate packages use Colibri **v2.1.0**, commit
+`704a3f68184b78367a04cb5526e428dc2f90f05b`. Use this same revision for local
 builds. Lumabri never edits the source checkout; compatibility and resident
 preparation hooks are applied to its bounded build copy.
 
@@ -13,12 +13,22 @@ The parity gate checks the upstream headers, owned extension registry and exact
 aliases, not a hardcoded adapter count. A future upstream V4.1 adapter requires
 deliberate revalidation instead of duplicate registration.
 
-The v1.12.1 Qwen3.6 planar-int4 runner and CUDA tier retain upstream execution.
-The existing Expert hook is used only on its legacy CPU path: bypassing the
-new runner would change the numeric profile, and skipping individual rows
-would leave its batch inputs uninitialized. This does not certify a new GPU
-household backend. DeepSeek V4's updated routing diagnostic is preserved, and
-remote delegation is still inserted before prefetch and loader startup.
+The Qwen3.6 planar-int4, qpack, GGUF and device runners retain upstream execution.
+The Expert hook only delegates its compatible CPU path, excluding variants
+with post-expert normalization. OLMoE keeps batched local prefill; an approved
+Hybrid route still handles every delegated row through the checked hook.
+DeepSeek V4's routing diagnostic and zero-initialized expert leases are preserved;
+remote delegation stays before prefetch and loader startup.
+
+OLMoE and Qwen keep F32 KV in the generated Lumabri build. Upstream's new F16
+defaults must not silently change an existing numeric class, snapshot layout or
+memory contract. The new source/build identity invalidates prior calibrations.
+
+Exact aliases now include Mistral Large 4 and the expanded Qwen engine families.
+Recognition does not enable resident admission: the new architectures still
+need their own inspected memory/layout contracts. GGUF containers and standalone
+CUDA/Vulkan improvements do not automatically enable distributed execution.
+The shipped upstream Edge/Segment library remains CPU-only.
 
 `tests/integration/engine_patch_test.py --engine /path/to/colibri/c` checks
 these boundaries and rejects changed or ambiguous anchors. Compile and real
@@ -70,7 +80,7 @@ GLM5.3, Qwen3.8 and headers. Edits with a preserved mtime are still detected.
 An unchanged fingerprint preserves the stamp's mtime and does not force another
 copy or compilation. Build options still have their separate stamp. Weights,
 tokenizer JSON and generated outputs neither enter this hash nor trigger a
-rebuild. Computing it reads only the source inputs (about 9 MB at the pin),
+rebuild. Computing it reads only the source inputs (about 23 MB at the pin),
 never a model checkpoint. Invalid source inputs fail the build before the old
 stamp or prepared tree is replaced. This does not make the upstream checkout
 transactional: do not edit it concurrently with compilation.
