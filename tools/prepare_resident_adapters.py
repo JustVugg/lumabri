@@ -286,4 +286,7 @@ def prepare(root):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--copy", required=True, type=Path)
-    prepare(parser.parse_args().copy)
+    root=parser.parse_args().copy
+    prepare(root)
+    from prepare_qwen_variants import prepare as prepare_qwen
+    prepare_qwen(root)

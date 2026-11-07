@@ -180,6 +180,8 @@ int main(void) {
     }
 
     /* A directory with no config.json must fail rather than return zeros. */
+    const char *flag=lmb_json_member("{\"model_type\":\"lfm3\",\"lfm3\":true}","lfm3");
+    CHECK(flag && !strncmp(flag,"true",4), "a preceding string value hid an actual member");
     LmbModelShape none;
     CHECK(lmb_shape_from_config("/nonexistent", &none) != 0,
           "a missing checkpoint produced a shape");

@@ -308,7 +308,9 @@ static const char *LMB_UNUSED lmb_json_member(const char *object,
             !memcmp(start, key, (size_t)(q - start))) {
             const char *v = q + 1;
             while (*v == ' ' || *v == '\t' || *v == '\r' || *v == '\n') v++;
-            if (*v != ':') return NULL;
+            /* A string value may equal a later member's name (for example
+             * model_type:"lfm3", lfm3:true). It is not an absent member. */
+            if (*v != ':') { p=q; continue; }
             do { v++; } while (*v == ' ' || *v == '\t' || *v == '\r' || *v == '\n');
             return v;
         }

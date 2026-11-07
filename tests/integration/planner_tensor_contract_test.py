@@ -64,15 +64,15 @@ def main():
             assert (result.returncode == 0) == accepted, (label, result.returncode, result.stderr)
 
         check(original, True, "baseline header-only inventory")
-        # An exact alias added upstream must not inherit another architecture's
-        # memory proof merely because its engine id is the same.
+        # Changing only the config alias must not override incompatible
+        # qwen36_meta.json or another architecture's tensor contract.
         pending = {"glm": ["mistral_large4"], "qwen36": ["qwen3_5", "qwen3_5_text",
                    "qwen3", "qwen3_moe", "flint", "muse_spark", "lfm3", "lfm3_vl"]}
         for alias in pending.get(args.family, []):
             changed_config = copy.deepcopy(config)
             changed_config["model_type"] = alias
             (root / "config.json").write_text(json.dumps(changed_config))
-            check(original, False, f"recognized but unverified architecture {alias}")
+            check(original, False, f"inconsistent architecture metadata {alias}")
         (root / "config.json").write_text(json.dumps(config))
         suffix = {
             "deepseek_v4": ".ffn.experts.0.w1.scale",

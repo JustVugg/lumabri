@@ -7,6 +7,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include "lumabri_families.h"
 typedef enum {
     EK_INVALID = -1,
     EK_GLM = 0,        /* colibri monolith: framed, templates internally */
@@ -16,7 +17,8 @@ typedef enum {
     EK_QWEN36,         /* qwen36:       ChatML <|im_start|>…                   */
     EK_QWEN38,         /* qwen38:       system reasoning prompt + ChatML     */
     EK_INKLING,        /* inkling:      <|message_user|><|content_text|>…      */
-    EK_KIMI            /* kimi_k3:      K3CHAT1 byte-counted wire              */
+    EK_KIMI,           /* kimi_k3:      K3CHAT1 byte-counted wire              */
+    EK_FLINT, EK_LFM3, EK_QWEN_CODER
 } EngKind;
 /* A growable capture of the assistant's reply, to feed back as history. */
 typedef struct { char *p; size_t len, cap; } Cap;
@@ -58,6 +60,15 @@ static int artifact_is(const char *value, const char *name) {
 /* Protocol and prompt-template dispatch is exact for the same reason model
  * family dispatch is exact. Unknown is not GLM: it is an error. */
 static EngKind engine_kind_of(const char *engine) {
+    if (!engine) return EK_INVALID;
+    if (!strcmp(engine,"flint")) return EK_FLINT;
+    if (!strcmp(engine,"lfm3") || !strcmp(engine,"lfm3_vl")) return EK_LFM3;
+    if (!strcmp(engine,"qwen3_coder")) return EK_QWEN_CODER;
+    /* These need their own templates; recognition never implies that a
+     * related engine's chat format can be used. */
+    if (!strcmp(engine,"muse_spark") || !strcmp(engine,"mistral_large4")) return EK_INVALID;
+    const LmbModelFamily *family=lmb_family_for(engine);
+    if (family) engine=family->engine;
     if (artifact_is(engine, "colibri") || !strcmp(engine ? engine : "", "glm") ||
         !strcmp(engine ? engine : "", "glm_moe_dsa") ||
         !strcmp(engine ? engine : "", "glm5_moe")) return EK_GLM;
@@ -80,6 +91,20 @@ static EngKind engine_kind_of(const char *engine) {
         !strcmp(engine ? engine : "", "kimi") ||
         !strcmp(engine ? engine : "", "kimi_linear")) return EK_KIMI;
     return EK_INVALID;
+}
+
+static inline EngKind engine_family_kind(EngKind kind) {
+    return kind==EK_FLINT || kind==EK_LFM3 || kind==EK_QWEN_CODER ? EK_QWEN36 : kind;
+}
+static inline const char *engine_format_name(EngKind kind) {
+    switch (kind) {
+    case EK_GLM: return "colibri"; case EK_GLM53: return "glm53";
+    case EK_DEEPSEEK: return "deepseek_v4"; case EK_OLMOE: return "olmoe";
+    case EK_QWEN36: return "qwen36"; case EK_QWEN38: return "qwen38";
+    case EK_INKLING: return "inkling"; case EK_KIMI: return "kimi_k3";
+    case EK_FLINT: return "flint"; case EK_LFM3: return "lfm3";
+    case EK_QWEN_CODER: return "qwen3_coder"; default: return NULL;
+    }
 }
 /* The serve-codec engines tokenize the SUBMIT payload as-is: coli_v4_prompt_build
  * and its per-engine siblings run only on the CLI path, so lumabri — standing in
@@ -116,6 +141,7 @@ static EngKind engine_kind_of(const char *engine) {
 #define QW_U    "<|im_start|>user\n"
 #define QW_ASST "<|im_end|>\n<|im_start|>assistant\n<think>\n"
 #define QW_AEND "<|im_end|>\n"
+#define LFM3_BOS "<|startoftext|>"
 #define QW38_SYS "<|im_start|>system\nReasoning effort is set to xhigh. Please " \
     "think carefully through the task, validate key assumptions, consider " \
     "plausible alternatives, and prioritize correctness, consistency, and " \
@@ -125,12 +151,43 @@ static EngKind engine_kind_of(const char *engine) {
 #define INK_ASST "<|end_message|><|message_model|>"
 #define INK_AEND "<|end_message|>"
 
+/* Flint's checkpoint template removes thinking markers from user/system
+ * text, then escapes role markers. Apply replacements in template order. */
+static int flint_text(Cap *out,const char *text) {
+    const char *const old[]={"<think>","</think>","<|begin_of_text|>","<|end_of_text|>",
+        "<|system|>","<|developer|>","<|user|>","<|assistant|>","<|observation|>"};
+    const char *const replacement[]={"","","&lt;|begin_of_text|&gt;","&lt;|end_of_text|&gt;",
+        "&lt;|system|&gt;","&lt;|developer|&gt;","&lt;|user|&gt;","&lt;|assistant|&gt;","&lt;|observation|&gt;"};
+    Cap current={0}; if (cap_str(&current,text)) return -1;
+    for (size_t i=0;i<sizeof old/sizeof *old;i++) {
+        Cap next={0}; const char *p=current.p,*match; int bad=0;
+        while ((match=strstr(p,old[i]))) {
+            if (cap_add(&next,p,(size_t)(match-p)) || cap_str(&next,replacement[i])) { bad=1; break; }
+            p=match+strlen(old[i]);
+        }
+        if (!bad) bad=cap_str(&next,p);
+        free(current.p); current=next;
+        if (bad) { free(current.p); return -1; }
+    }
+    int bad=cap_str(out,current.p); free(current.p); return bad;
+}
+
+static int lfm3_history_text(Cap *out,const char *reply) {
+    const char *last=NULL,*p=reply;
+    while ((p=strstr(p,"</think>"))) { last=p+8; p=last; }
+    if (!last) return cap_str(out,reply);
+    size_t n=strlen(last);
+    while (*last && strchr(" \t\r\n\f\v",*last)) { last++; n--; }
+    while (n && strchr(" \t\r\n\f\v",last[n-1])) n--;
+    return cap_add(out,last,n);
+}
+
 /* Append one turn for engine kind k. `first` = the conversation is empty so far
  * (matters only where the leading marker differs by position). reply==NULL builds
  * the *pending* turn — user text ending at the assistant-generation marker, for
  * the SUBMIT payload; reply!=NULL builds a *completed* turn — user text plus the
  * assistant's reply, for the running history. 0, or -1 on OOM. */
-static int serve2_turn(Cap *c, EngKind k, int first, const char *u, const char *reply) {
+static inline int serve2_turn(Cap *c, EngKind k, int first, const char *u, const char *reply) {
     (void)first;
     switch (k) {
     case EK_GLM:
@@ -149,6 +206,17 @@ static int serve2_turn(Cap *c, EngKind k, int first, const char *u, const char *
     case EK_QWEN36:
         if (cap_str(c, QW_U) || cap_str(c, u) || cap_str(c, QW_ASST)) return -1;
         return reply ? (cap_str(c, reply) || cap_str(c, QW_AEND)) : 0;
+    case EK_QWEN_CODER:
+        if (cap_str(c,QW_U) || cap_str(c,u) ||
+            cap_str(c,"<|im_end|>\n<|im_start|>assistant\n")) return -1;
+        return reply ? (cap_str(c,reply) || cap_str(c,QW_AEND)) : 0;
+    case EK_FLINT:
+        if (cap_str(c,"<|user|>") || flint_text(c,u) || cap_str(c,"<|assistant|>")) return -1;
+        return reply ? cap_str(c,reply) : 0;
+    case EK_LFM3:
+        if (cap_str(c,QW_U) || cap_str(c,u) ||
+            cap_str(c,"<|im_end|>\n<|im_start|>assistant\n<think>")) return -1;
+        return reply ? (cap_str(c,"</think>") || lfm3_history_text(c,reply) || cap_str(c,QW_AEND)) : 0;
     case EK_QWEN38:
         if (cap_str(c, QW_U) || cap_str(c, u) || cap_str(c, QW_ASST)) return -1;
         return reply ? (cap_str(c, reply) || cap_str(c, QW_AEND)) : 0;
@@ -169,12 +237,13 @@ static int serve2_turn(Cap *c, EngKind k, int first, const char *u, const char *
 }
 
 /* The once-at-front SUBMIT prefix (kept out of the stored history). */
-static int serve2_prefix(Cap *c, EngKind k) {
+static inline int serve2_prefix(Cap *c, EngKind k) {
     if (k == EK_GLM)      return cap_str(c, GLM_BOS);
     if (k == EK_GLM53)    return cap_str(c, GLM_BOS);
     if (k == EK_DEEPSEEK) return cap_str(c, DS_BOS);
     if (k == EK_QWEN38)   return cap_str(c, QW38_SYS);
     if (k == EK_KIMI)     return cap_str(c, "K3CHAT1\n");
+    if (k == EK_LFM3)     return cap_str(c, LFM3_BOS);
     return 0;
 }
 
