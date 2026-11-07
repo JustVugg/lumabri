@@ -6,6 +6,7 @@
 #include "lumabri_checkpoint_inventory.h"
 #include "src/ui/lumabri_tui.h"
 #include "src/planner/lumabri_stage_placement.h"
+#include "src/planner/lumabri_gguf_import.h"
 
 typedef struct {
     char dir[512];
@@ -15,6 +16,7 @@ typedef struct {
     uint64_t checkpoint_bytes;
     int inventory_ok;
     uint32_t formats;
+    char preparation_error[160];
 } CatalogEntry;
 
 typedef struct {const char *root;CatalogEntry *out;int count,cap;} CatalogScan;
@@ -22,11 +24,35 @@ static int catalog_scan_entry(const char *name,void *context) {
     CatalogScan *scan=context;
     if (name[0]=='.' || scan->count>=scan->cap) return 0;
     char path[832];int n=snprintf(path,sizeof path,"%s/%s",scan->root,name);
-    if (n<0 || (size_t)n>=sizeof path || strlen(path)>=sizeof scan->out[0].dir ||
-        strlen(name)>=sizeof scan->out[0].name) return 0;
+    if (n<0 || (size_t)n>=sizeof path || strlen(path)>=sizeof scan->out[0].dir) return 0;
     CatalogEntry *entry=&scan->out[scan->count];
+    memset(entry,0,sizeof *entry);
+    if(lmb_weight_container(name)==LMB_WEIGHT_GGUF) {
+        char imported[512];
+        if(lmb_gguf_import_cached(scan->root,name,imported,sizeof imported)) {
+            /* Preserve a failed import as a visible, non-executable entry.
+             * Later split parts are not separate selectable checkpoints. */
+            size_t len=strlen(name);unsigned part;
+            if(len>=21 && !memcmp(name+len-14,"-of-",4) &&
+               !lmb_gguf_digits(name+len-19,5,&part) && part!=1)return 0;
+            LmbGguf header={0};int fd=lmb_plan_open(path);
+            if(fd>=0) {
+                if(!lmb_gguf_parse(fd,&header)) {
+                    const char *arch=lmb_gguf_text(lmb_gguf_get(&header,"general.architecture"));
+                    if(arch)snprintf(entry->shape.model_type,sizeof entry->shape.model_type,"%s",arch);
+                }
+                close(fd);
+            }
+            lmb_gguf_free(&header);
+            strcpy(entry->dir,path);snprintf(entry->name,sizeof entry->name,"%s",name);entry->formats=LMB_FORMAT_GGUF;
+            snprintf(entry->preparation_error,sizeof entry->preparation_error,
+                "GGUF import unavailable: check architecture, all split parts and folder write/hard-link permissions");
+            scan->count++;return 0;
+        }
+        strcpy(path,imported);
+    }
     if (lmb_shape_from_config(path,&entry->shape)) return 0;
-    strcpy(entry->dir,path);strcpy(entry->name,name);
+    strcpy(entry->dir,path);snprintf(entry->name,sizeof entry->name,"%s",name);
     LmbCheckpointInventory inventory;
     entry->inventory_ok=!lmb_checkpoint_inventory(path,&inventory);
     entry->has_weights=inventory.has_weights;entry->checkpoint_bytes=inventory.bytes;
@@ -35,6 +61,17 @@ static int catalog_scan_entry(const char *name,void *context) {
 }
 static int catalog_scan(const char *root,CatalogEntry *out,int cap) {
     if (!root || !*root || !out || cap<=0) return 0;
+    LmbSourceStat type;
+    if(!lmb_source_stat(root,&type) && type.regular && lmb_weight_container(root)==LMB_WEIGHT_GGUF) {
+        char parent[1024];if(strlen(root)>=sizeof parent)return 0;strcpy(parent,root);
+        char *name=strrchr(parent,'/');
+#ifdef _WIN32
+        char *backslash=strrchr(parent,'\\');if(backslash && (!name || backslash>name))name=backslash;
+#endif
+        if(!name){CatalogScan one={".",out,0,cap};return catalog_scan_entry(root,&one)?0:one.count;}
+        *name++=0;CatalogScan one={*parent?parent:"/",out,0,cap};
+        return catalog_scan_entry(name,&one) ? 0 : one.count;
+    }
     CatalogScan scan={root,out,0,cap};
     return lmb_source_list(root,catalog_scan_entry,&scan) ? 0 : scan.count;
 }
@@ -156,6 +193,7 @@ static int catalog_plan_entry(LmbTuiState *st,LmbTuiModel *m,const CatalogEntry 
     m->checkpoint_bytes = entry->checkpoint_bytes;
     m->checkpoint_inventory_ok = entry->inventory_ok;
     m->weight_formats = entry->formats;
+    snprintf(m->preparation_error,sizeof m->preparation_error,"%s",entry->preparation_error);
     st->nodes[0].has_checkpoint = entry->has_weights;
     uint32_t nselected=0;int household=0;
     for (uint32_t j = 0; j < st->nnodes; j++)

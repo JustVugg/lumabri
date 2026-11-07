@@ -116,7 +116,7 @@ def main():
         try:
             owner = start("owner")
             owner.action(2)
-            owner.expect("Folder containing your model directories")
+            owner.expect("Model folder or GGUF file")
             model_folder = str(Path(tmp) / "models with spaces")
             Path(model_folder).mkdir()
             owner.send(model_folder.encode() + b"\n")

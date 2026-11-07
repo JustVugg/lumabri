@@ -3,6 +3,7 @@
 #define LMB_SOURCE_INSPECT_H
 #include "lumabri_proto.h"
 #include "lumabri_planner.h"
+#include "lumabri_weight_container.h"
 typedef struct {
     char peers[8][64]; int npeers;
     uint64_t total_bytes, metadata_bytes; int nfiles;
@@ -28,8 +29,7 @@ static int swarm_inspect(const char *tracker, const char *model, Swarm *s) {
             lmb_cur_u16(&c, &np)) { lmb_msg_free(&m); return -1; }
         if (UINT64_MAX - s->total_bytes < size) { lmb_msg_free(&m); return -1; }
         s->nfiles++; s->total_bytes += size;
-        size_t rel_len = strlen(rel);
-        if (rel_len < 12 || strcmp(rel + rel_len - 12, ".safetensors"))
+        if (!lmb_weight_container(rel))
             s->metadata_bytes += size;
         int is_cfg = !strcmp(rel, "config.json");
         for (uint16_t p = 0; p < np; p++) {

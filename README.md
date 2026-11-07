@@ -275,9 +275,11 @@ GLM, GLM5.3, Inkling, Kimi, OLMoE, Qwen3.6, Qwen3.8 and DeepSeek V4.
 Lumabri also provides a [resident DeepSeek V4.1 text CPU adapter](docs/DEEPSEEK_V41.md),
 including Engram and cross-layer state. Other standalone engines added by
 Colibri are not automatically clusterable: each needs a verified adapter.
-The 2.1 update retains Lumabri’s F32 KV contract. GGUF containers and the new
-Mistral Large 4, Flint, Muse Spark and LFM3 variants do not yet have resident
-planner contracts. Standalone CUDA/Vulkan support does not enable a distributed
+The 2.1 update retains Lumabri’s F32 KV contract. [OLMoE GGUF files](docs/GGUF.md),
+including split containers, can be selected directly in the TUI and distributed
+as resident CPU segments. Other GGUF architectures and the Mistral Large 4,
+Flint, Muse Spark and LFM3 variants do not yet have resident planner contracts.
+Standalone CUDA/Vulkan support does not enable a distributed
 GPU backend; the shipped Edge/Segment adapters remain CPU-only.
 
 Discovery and outbound reporting do not prove inbound connectivity. Before

@@ -15,7 +15,7 @@ static LMB_UNUSED int lmb_home_plan_hybrid(const LmbModelShape *shape, uint64_t 
     const LmbClusterNode *nodes, uint32_t count, uint32_t context,
     const LmbClusterPlan *seed, LmbClusterPlan *out) {
     if (!shape || !nodes || !seed || !out || count < 2 || count > 32 || seed->nslices != count ||
-        seed->state != LMB_PLAN_RESIDENT || strcmp(shape->segment_id, "olmoe") ||
+        seed->state != LMB_PLAN_RESIDENT || strcmp(shape->segment_id, "olmoe") || !shape->hybrid_expert ||
         shape->experts_per_tok < 2 || seed->edge_node >= count || seed->hybrid || seed->sessions != 1) return -1;
     LmbClusterPlan candidate = *seed;
     candidate.hybrid = 1; candidate.nslices = 1; candidate.fetch_bytes = 0;

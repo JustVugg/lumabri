@@ -4833,7 +4833,9 @@ static void catalog_row(const LmbTuiModel *m) {
     const char *mark = !ok || plan.state == LMB_PLAN_UNRUNNABLE ? "x"
                      : plan.state == LMB_PLAN_DISK ? "!" : "+";
     char detail[96] = "";
-    if (!m->shape.segment_id[0] && lmb_capability_for(m->shape.model_type))
+    if (m->preparation_error[0])
+        snprintf(detail, sizeof detail, "GGUF import unavailable (see model details)");
+    else if (!m->shape.segment_id[0] && lmb_capability_for(m->shape.model_type))
         snprintf(detail, sizeof detail, "distributed runtime not integrated");
     else if (!m->checkpoint_inventory_ok)
         snprintf(detail, sizeof detail, "checkpoint inventory unavailable");

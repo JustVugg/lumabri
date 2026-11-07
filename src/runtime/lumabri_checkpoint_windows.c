@@ -5,6 +5,8 @@
 #include "lumabri_signed_checkpoint.h"
 #include "lumabri_private_file_windows.h"
 #include "lumabri_engine_io_windows.h"
+#include "lumabri_weight_container.h"
+#include "lumabri_planner.h"
 #include <winioctl.h>
 
 #define INPUT_CACHE 8u
@@ -180,15 +182,26 @@ static int input_create_file(NativeInput *s,uint32_t i) {
         !GetFileInformationByHandle(file->handle,&file->identity)) return -1;
     return 0;
 }
+typedef struct { NativeInput *input; uint32_t file; } InputGguf;
+static int input_gguf_read(void *opaque,void *data,size_t n,uint64_t at) {
+    InputGguf *g=opaque;
+    return input_read_at(g->input,g->file,data,n,at);
+}
 static int input_metadata(NativeInput *s,uint32_t i,uint64_t *total) {
-    const LmbModelItem *item=&s->manifest.items[i];size_t length=strlen(item->path);
-    int tensor=length>=12 && !strcmp(item->path+length-12,".safetensors");
+    const LmbModelItem *item=&s->manifest.items[i];
+    int tensor=lmb_weight_container(item->path);
     uint64_t size=item->size;
-    if (tensor) {
+    if (tensor==LMB_WEIGHT_SAFETENSORS) {
         uint8_t header[8];if (size<8 || input_read_at(s,i,header,8,0)) return -1;
         uint64_t n=0;for (unsigned b=0;b<8;b++) n|=(uint64_t)header[b]<<(b*8);
         if (!n || n>size-8 || n>INPUT_FILE_METADATA_BYTES-8) return -1;
         size=n+8;
+    } else if(tensor==LMB_WEIGHT_GGUF) {
+        InputGguf context={s,i};LmbGguf header={0};
+        LmbGgufReader reader={.size=size,.budget=LMB_GGUF_BUDGET,
+            .read_at=input_gguf_read,.context=&context};
+        if(lmb_gguf_parse_reader(reader,&header))return -1;
+        size=header.header_bytes;lmb_gguf_free(&header);
     }
     if (size>INPUT_FILE_METADATA_BYTES || size>INPUT_METADATA_BYTES-*total) return -1;
     *total+=size;
