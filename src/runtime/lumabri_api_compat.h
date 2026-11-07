@@ -166,7 +166,9 @@ static int api_compat_payload(ApiCompat *c,const LmbJson *j,unsigned messages,En
         case EK_OLMOE: bad=cap_str(out,"|||IP_ADDRESS|||<|system|>\n") || cap_str(out,sys) || cap_str(out,"\n"); break;
         case EK_GLM: case EK_GLM53: bad=cap_str(out,"<|system|>") || cap_str(out,sys); break;
         case EK_QWEN38: break;
-        case EK_QWEN36: bad=cap_str(out,"<|im_start|>system\n") || cap_str(out,sys) || cap_str(out,QW_AEND); break;
+        case EK_QWEN36: case EK_QWEN_CODER: case EK_LFM3:
+            bad=cap_str(out,"<|im_start|>system\n") || cap_str(out,sys) || cap_str(out,QW_AEND); break;
+        case EK_FLINT: bad=cap_str(out,"<|system|>") || flint_text(out,sys); break;
         case EK_INKLING: bad=cap_str(out,"<|message_system|><|content_text|>") || cap_str(out,sys) || cap_str(out,INK_AEND); break;
         case EK_KIMI: bad=cap_addf(out,"M system %zu\n",strlen(sys)) || cap_str(out,sys); break;
         case EK_DEEPSEEK: bad=cap_str(out,sys); break;

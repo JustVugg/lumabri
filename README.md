@@ -277,8 +277,11 @@ including Engram and cross-layer state. Other standalone engines added by
 Colibri are not automatically clusterable: each needs a verified adapter.
 The 2.1 update retains Lumabri’s F32 KV contract. [OLMoE GGUF files](docs/GGUF.md),
 including split containers, can be selected directly in the TUI and distributed
-as resident CPU segments. Other GGUF architectures and the Mistral Large 4,
-Flint, Muse Spark and LFM3 variants do not yet have resident planner contracts.
+as resident CPU segments. The converted Safetensors path also supports
+Qwen3 dense/MoE (including Qwen3-Coder), Qwen3.5 dense/MoE, Flint and LFM3
+text through the Qwen adapter. See [formats and validation](docs/QWEN_ARCHITECTURES.md).
+Other GGUF architectures, Mistral Large 4 and Muse Spark still require
+their resident integration.
 Standalone CUDA/Vulkan support does not enable a distributed
 GPU backend; the shipped Edge/Segment adapters remain CPU-only.
 

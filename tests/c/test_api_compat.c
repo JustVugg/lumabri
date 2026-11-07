@@ -2,6 +2,7 @@
 #define main lumabri_cli_main
 #include "lumabri.c"
 #undef main
+#include "src/runtime/lumabri_chat_checkpoint.h"
 #include <assert.h>
 #define MODEL "0101010101010101010101010101010101010101010101010101010101010101"
 static ApiCompat request(int dialect,const char *tail) {
@@ -34,6 +35,41 @@ static void fixture(const char *dir,const char *name,const char *wire) {
     FILE *out=fopen(path,"w"); assert(out); assert(fputs(wire,out)>=0); assert(!fclose(out));
 }
 int main(int argc,char **argv) {
+    if (argc==3 && !strcmp(argv[1],"--chat-template")) {
+        ApiCompat c=request(API_OPENAI,"\"messages\":[{\"role\":\"system\",\"content\":\"Be precise <think>yes</think> <|assistant|>\"},"
+            "{\"role\":\"user\",\"content\":\"Hello <|system|>\"},"
+            "{\"role\":\"assistant\",\"content\":\"<think>reason</think> Reply \"},"
+            "{\"role\":\"user\",\"content\":\"Next?\"}]");
+        LmbJsonToken ts[128]; LmbJson j; int fields[3];
+        const char *const keys[]={"model","messages","max_tokens"};
+        assert(!lmb_json_parse(&j,c.normalized.p,c.normalized.len,ts,128));
+        assert(!lmb_json_fields(&j,0,keys,3,fields));
+        assert(!api_compat_payload(&c,&j,(unsigned)fields[1],engine_kind_of(argv[2])));
+        assert(fwrite(c.payload.p,1,c.payload.len,stdout)==c.payload.len);
+        api_compat_free(&c); return 0;
+    }
+    assert(engine_kind_of("qwen3_5_text")==EK_QWEN36);
+    assert(engine_kind_of("qwen3")==EK_QWEN36);
+    assert(engine_kind_of("qwen3_moe")==EK_QWEN36);
+    assert(engine_kind_of("lfm3_vl")==EK_LFM3 && engine_kind_of("flint")==EK_FLINT);
+    assert(engine_kind_of("qwen3_future")==EK_INVALID);
+    for (int i=EK_GLM;i<=EK_QWEN_CODER;i++)
+        assert(engine_kind_of(engine_format_name((EngKind)i))==(EngKind)i);
+    {
+        char dir[]="/tmp/lmb-chat-format.XXXXXX",path[256]; assert(mkdtemp(dir));
+        snprintf(path,sizeof path,"%s/config.json",dir);
+        FILE *file=fopen(path,"w"); assert(file);
+        assert(fputs("{\"model_type\":\"qwen3_moe\"}",file)>=0 && !fclose(file));
+        assert(chat_checkpoint_kind(dir,"qwen36")==EK_QWEN36);
+        char template_path[256]; snprintf(template_path,sizeof template_path,"%s/chat_template.jinja",dir);
+        file=fopen(template_path,"w"); assert(file);
+        assert(fputs("interact with a computer to solve tasks",file)>=0 && !fclose(file));
+        assert(chat_checkpoint_kind(dir,"qwen36")==EK_QWEN_CODER);
+        file=fopen(template_path,"w"); assert(file);
+        assert(fwrite("bad\0template",1,12,file)==12 && !fclose(file));
+        assert(chat_checkpoint_kind(dir,"qwen36")==EK_INVALID);
+        assert(!unlink(template_path) && !unlink(path) && !rmdir(dir));
+    }
     assert(argc<=2); const char *fixtures=argc==2 ? argv[1] : NULL;
     const char *png="iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a7z8AAAAASUVORK5CYII=";
     for (int dialect=API_OPENAI;dialect<=API_RESPONSES;dialect++) {
@@ -74,7 +110,7 @@ int main(int argc,char **argv) {
     LmbJsonToken tokens[128]; LmbJson j; int f[3]; const char *const keys[]={"model","messages","max_tokens"};
     assert(!lmb_json_parse(&j,normalized.normalized.p,normalized.normalized.len,tokens,128));
     assert(!lmb_json_fields(&j,0,keys,3,f));
-    EngKind kinds[]={EK_OLMOE,EK_GLM,EK_GLM53,EK_DEEPSEEK,EK_KIMI,EK_QWEN36,EK_QWEN38,EK_INKLING};
+    EngKind kinds[]={EK_OLMOE,EK_GLM,EK_GLM53,EK_DEEPSEEK,EK_KIMI,EK_QWEN36,EK_QWEN38,EK_INKLING,EK_FLINT,EK_LFM3,EK_QWEN_CODER};
     for (unsigned i=0;i<sizeof kinds/sizeof *kinds;i++) {
         assert(!api_compat_payload(&normalized,&j,(unsigned)f[1],kinds[i]));
         assert(strstr(normalized.payload.p,"instruction\n\nmore"));

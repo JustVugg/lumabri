@@ -55,7 +55,7 @@ static int api_plan_open(const LmbResidentPlan *plan, Engine *engine, uint32_t m
 }
 static int api_route_engine_matches(const LmbModelRoute *route, const Engine *engine) {
     const LmbModelFamily *family=lmb_family_by_id(route->adapter);
-    return family && engine->kind==engine_kind_of(family->engine) && route->numeric_abi==engine->numeric_abi &&
+    return family && engine_family_kind(engine->kind)==engine_kind_of(family->engine) && route->numeric_abi==engine->numeric_abi &&
         !strcmp(route->numeric_class,engine->numeric_class) && route->greedy_only==(uint32_t)engine->greedy_only;
 }
 static int api_route_plan_matches(const LmbModelRoute *route, unsigned index, const LmbResidentPlan *plan) {
