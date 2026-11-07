@@ -34,6 +34,7 @@ typedef struct {
     uint64_t checkpoint_bytes;
     int checkpoint_inventory_ok;
     uint32_t weight_formats;
+    char preparation_error[160];
     LmbCalibration calibration;    /* owned by the snapshot, never a borrowed pointer */
     int has_calibration;
     char content_id[65];
@@ -45,6 +46,7 @@ typedef struct {
 /* Runtime observations never inherit upstream's potential modality flags.
  * Detailed backend/operation handshakes are attached after preparation. */
 static inline const char *lmb_catalogue_capability_reason(const LmbTuiModel *m) {
+    if (m->preparation_error[0]) return m->preparation_error;
     if (!lmb_capability_for(m->shape.model_type)) return "Architecture not recognized";
     if (!m->shape.segment_id[0]) return "Distributed runtime not integrated for this family";
     if (!m->checkpoint_inventory_ok) return "Checkpoint inventory unavailable";

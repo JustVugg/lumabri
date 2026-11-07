@@ -10,6 +10,26 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef LMB_ORACLE_GUARD_READS
+#include <unistd.h>
+#include <errno.h>
+static int weights_sealed, forbidden_reads;
+ssize_t __real_pread(int,void *,size_t,off_t);
+ssize_t __wrap_pread(int fd,void *p,size_t n,off_t off) {
+    if(weights_sealed){forbidden_reads++;errno=EIO;return -1;}
+    return __real_pread(fd,p,n,off);
+}
+ssize_t __real_read(int,void *,size_t);
+ssize_t __wrap_read(int fd,void *p,size_t n) {
+    if(weights_sealed){forbidden_reads++;errno=EIO;return -1;}
+    return __real_read(fd,p,n);
+}
+size_t __real_fread(void *,size_t,size_t,FILE *);
+size_t __wrap_fread(void *p,size_t n,size_t m,FILE *f) {
+    if(weights_sealed){forbidden_reads++;errno=EIO;return 0;}
+    return __real_fread(p,n,m,f);
+}
+#endif
 
 #define REQUIRE(x) do { if(!(x)) { fprintf(stderr,"oracle line %d: %s\n",__LINE__,error); goto done; } } while(0)
 
@@ -36,7 +56,8 @@ static int run_oracle(const char *family, const char *path, ColiEdgeEngine *edge
     for(int i=0;i<ranges;i++) {
         ColiSegmentEngineOptions eo={.struct_size=sizeof(eo),.model_dir=path,
             .layer_begin=(uint32_t)i*ec->num_layers/(uint32_t)ranges,
-            .layer_end=(uint32_t)(i+1)*ec->num_layers/(uint32_t)ranges,.context_tokens=(uint32_t)nf};
+            .layer_end=(uint32_t)(i+1)*ec->num_layers/(uint32_t)ranges,.context_tokens=(uint32_t)nf,
+            .memory_limit_bytes=1ull<<30};
         REQUIRE(!coli_segment_engine_open(family,&eo,&engines[i],error,sizeof error));
         ColiSegmentCapabilities sc={.struct_size=sizeof(sc)};
         REQUIRE(!coli_segment_engine_capabilities(engines[i],&sc,error,sizeof error));
@@ -45,6 +66,9 @@ static int run_oracle(const char *family, const char *path, ColiEdgeEngine *edge
         ColiSegmentSessionOptions so={.struct_size=sizeof(so),.context_tokens=(uint32_t)nf};
         REQUIRE(!coli_segment_session_create(engines[i],&so,&sessions[i],error,sizeof error));
     }
+#ifdef LMB_ORACLE_GUARD_READS
+    weights_sealed=1;
+#endif
     for(int token=np;token<nf;token++) {
         uint32_t rows=token==np ? (uint32_t)np : 1;
         const int32_t *input=token==np ? prompt : &full[token-1];
@@ -67,9 +91,15 @@ static int run_oracle(const char *family, const char *path, ColiEdgeEngine *edge
             REQUIRE(0);
         }
     }
+#ifdef LMB_ORACLE_GUARD_READS
+    REQUIRE(!forbidden_reads);
+#endif
     printf("%s: %d ranges, %d independent oracle tokens PASS\n",family,ranges,nf-np);
     rc=0;
 done:
+#ifdef LMB_ORACLE_GUARD_READS
+    weights_sealed=0;
+#endif
     for(int i=0;i<2;i++) {
         coli_segment_session_destroy(sessions[i]);
         if(engines[i]) (void)coli_segment_engine_close(engines[i],NULL,0);
@@ -96,7 +126,8 @@ int main(int argc, char **argv) {
     REQUIRE(np>0 && nf>np && !memcmp(prompt,full,(size_t)np*sizeof(*prompt)));
     REQUIRE(!coli_qwen38_segment_adapter_register() && !coli_qwen38_edge_adapter_register());
     REQUIRE(!coli_deepseek_v4_segment_adapter_register() && !coli_deepseek_v4_edge_adapter_register());
-    ColiEdgeEngineOptions eo={.struct_size=sizeof(eo),.model_dir=argv[2]};
+    REQUIRE(!coli_olmoe_segment_adapter_register() && !coli_olmoe_edge_adapter_register());
+    ColiEdgeEngineOptions eo={.struct_size=sizeof(eo),.model_dir=argv[2],.memory_limit_bytes=1ull<<30};
     REQUIRE(!coli_edge_engine_open(argv[1],&eo,&edge,error,sizeof error));
     ColiEdgeCapabilities ec={.struct_size=sizeof(ec)};
     REQUIRE(!coli_edge_engine_capabilities(edge,&ec,error,sizeof error));

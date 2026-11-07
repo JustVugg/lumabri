@@ -28,6 +28,8 @@ static void timed_plans(void) {
     strcpy(nodes[1].roles.segment,"qwen38");
     assert(lmb_home_plan_selected(&shape,1,nodes,2,128,&before,NULL,&got));
     nodes[1].roles=(LmbRuntimeRoles){0};
+    assert(lmb_home_plan_hybrid(&shape,1,nodes,2,128,&seed,&got)); /* unsupported encoding */
+    shape.hybrid_expert=1;
     assert(!lmb_home_plan_hybrid(&shape, 1, nodes, 2, 128, &seed, &got));
     assert(got.hybrid && got.nslices == 2 && got.slices[0].layer_begin == 0 && got.slices[0].layer_end == 16);
     assert(got.slices[1].layer_begin == seed.slices[1].layer_begin);

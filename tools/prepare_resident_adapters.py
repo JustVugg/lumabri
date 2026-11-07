@@ -194,6 +194,8 @@ def other_adapters(root):
     path.write_text(source[:at]+code+source[at:])
 
 def prepare(root):
+    from prepare_gguf_adapters import prepare as prepare_gguf
+    prepare_gguf(root)
     # The Segment numeric class and checkpoint snapshots still describe F32
     # KV. Keep that contract explicit despite 2.1's standalone F16 defaults.
     # A future F16 mode needs its own numeric class, budgets and conformance.

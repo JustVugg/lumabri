@@ -1,5 +1,6 @@
 #ifndef LUMABRI_PLAN_OLMOE_H
 #define LUMABRI_PLAN_OLMOE_H
+#include "olmoe_gguf.h"
 /* The pinned Segment runtime consumes merged int8 experts, not arbitrary HF
  * expert matrices. Dense tensors are expanded to f32 even from BF16/F16. */
 typedef struct {
@@ -82,6 +83,13 @@ static int lmb_olmoe_memory(const char *root,const char *cfg,LmbModelShape *m) {
     if(h!=m->hidden || layers!=m->layers || vocab!=m->vocab || h%heads || (h/heads)%2 ||
        kv!=heads || k>experts) return -1;
     m->experts=experts; m->experts_per_tok=k; m->moe_intermediate=inter;
+    LmbGguf gguf={0};
+    int container=lmb_gguf_model(root,&gguf);
+    if(container<=0) {
+        int rc=container ? -1 : lmb_olmoe_gguf_memory(&gguf,m);
+        lmb_gguf_free(&gguf);
+        return rc;
+    }
     LmbOlmoeInventory v={.m=m,.inter=inter};
     v.experts=calloc((size_t)layers*experts,1);
     if(!v.experts) return -1;
@@ -101,6 +109,7 @@ static int lmb_olmoe_memory(const char *root,const char *cfg,LmbModelShape *m) {
         lmb_size_mul((uint64_t)h*8+inter*3u+experts,128u*4u));
     m->scratch_token_bytes=256u*4u; /* bounded CPU attention worker team */
     m->max_context=4096; m->memory_contract=1;
+    m->hybrid_expert=1; /* merged int8; GGUF uses the Segment path until its provider exists */
     return m->scratch_fixed_bytes==UINT64_MAX ? -1 : 0;
 }
 #endif
