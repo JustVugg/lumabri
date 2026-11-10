@@ -27,9 +27,9 @@ class InstalledGatewayContractTest(unittest.TestCase):
         new["files"]["bin/lumabri"]["sha256"] = "2" * 64
         self.manifests = [old, new]
 
-    def validate(self):
+    def validate(self, **options):
         with patch("installed_gateway_update_test.native_package.verify", side_effect=self.manifests) as verify:
-            result = candidate_pair(self.paths)
+            result = candidate_pair(self.paths, **options)
             self.assertEqual(verify.call_count, 2)
             return result
 
@@ -68,6 +68,17 @@ class InstalledGatewayContractTest(unittest.TestCase):
         self.manifests[1]["files"].pop("bin/lumabri")
         with self.assertRaisesRegex(ValueError, "launcher and gateway"):
             self.validate()
+
+    def test_full_fleet_can_change_engine_without_weakening_package_checks(self):
+        self.manifests[1]["colibri_checkout"]["commit"] = "d" * 40
+        self.assertEqual([c[0] for c in self.validate(allow_engine_change=True)], self.paths)
+        self.manifests[1]["colibri_checkout"]["tracked_changes"] = True
+        with self.assertRaisesRegex(ValueError, "clean"):
+            self.validate(allow_engine_change=True)
+        self.manifests[1]["colibri_checkout"]["tracked_changes"] = False
+        self.manifests[1]["files"]["bin/lumabri"]["sha256"] = "1" * 64
+        with self.assertRaisesRegex(ValueError, "identical"):
+            self.validate(allow_engine_change=True)
 
     def test_manifest_verification_failure_prevents_execution(self):
         with patch("installed_gateway_update_test.native_package.verify", side_effect=ValueError("changed hash")), \
