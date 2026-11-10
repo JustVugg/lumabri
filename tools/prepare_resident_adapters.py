@@ -290,3 +290,5 @@ if __name__ == "__main__":
     prepare(root)
     from prepare_qwen_variants import prepare as prepare_qwen
     prepare_qwen(root)
+    from prepare_qwen_gguf import prepare as prepare_native_qwen
+    prepare_native_qwen(root)

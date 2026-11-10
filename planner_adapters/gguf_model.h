@@ -3,6 +3,14 @@
 #ifndef LMB_PLAN_GGUF_MODEL_H
 #define LMB_PLAN_GGUF_MODEL_H
 #include "gguf.h"
+static inline const LmbGgufTensor *lmb_gguf_tensor(const LmbGguf *g,const char *name) {
+    uint32_t begin=0,end=g->ntensors;
+    while(begin<end) {
+        uint32_t mid=begin+(end-begin)/2;int cmp=strcmp(g->tensors[mid].name,name);
+        if(cmp<0)begin=mid+1;else if(cmp>0)end=mid;else return &g->tensors[mid];
+    }
+    return NULL;
+}
 static inline int lmb_gguf_relative(const char *p) {
     if(!p || !*p || *p=='/' || strchr(p,'\\') || strchr(p,':'))return 0;
     for(const char *s=p;*s;) {

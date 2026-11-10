@@ -613,6 +613,8 @@ jobs:
       - name: Qwen, Flint and LFM3 resident architecture contracts
         working-directory: lumabri
         run: make test-qwen-architectures ENGINE=../colibri/c QWEN_TEST_OPTIONS=--household
+      - name: Native Qwen GGUF resident ranges
+        run: make test-qwen-gguf ENGINE=../colibri/c QWEN_GGUF_TEST_OPTIONS="--household --packed"
       - name: Qwen hybrid memory contract — real int8 and grouped int4
         working-directory: lumabri
         run: |
