@@ -32,14 +32,14 @@ from installed_managed_test import checked_package
 
 
 def packages(paths):
-    # The gateway check additionally requires different revisions AND real
-    # executable bytes, and the same engine revision. Both packages must be
-    # complete; a gateway-only bundle is not a whole-household upgrade.
+    # Unlike the gateway-only test, every engine stops between these stages.
+    # An engine upgrade is part of this gate; package integrity, native ABI,
+    # clean provenance and different real executable bytes remain mandatory.
     for index, path in enumerate(paths):
         # The explicit previous release predates the optional MCP executable.
         # The candidate must include it; core runtime completeness is unchanged.
         checked_package(path, require_agent=index != 0)
-    return candidate_pair(paths)
+    return candidate_pair(paths, allow_engine_change=True)
 
 
 class Terminal(TerminalText):
