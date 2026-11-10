@@ -21,6 +21,22 @@ static void write_file(const char *path,const void *bytes,size_t size) {
     assert(lmb_source_pwrite(fd,bytes,size,0)==(ptrdiff_t)size);
     assert(!lmb_source_sync(fd) && !lmb_source_close(fd));
 }
+static void delete_fixture_file(const wchar_t *path) {
+    /* Process handles are closed before cleanup, but Windows can retain a
+     * transient file lock during teardown or scanning. Retry only lock/access
+     * errors, with a deadline; permanent leaks still fail with the real error. */
+    uint64_t until=GetTickCount64()+5000;
+    for (;;) {
+        if(DeleteFileW(path))return;
+        DWORD error=GetLastError();
+        if((error!=ERROR_SHARING_VIOLATION && error!=ERROR_LOCK_VIOLATION && error!=ERROR_ACCESS_DENIED) ||
+            GetTickCount64()>=until) {
+            fwprintf(stderr,L"Cannot delete owned fixture %ls: Windows error %lu\n",path,(unsigned long)error);
+            abort();
+        }
+        Sleep(25);
+    }
+}
 static void remove_fixture(const wchar_t *directory) {
     wchar_t pattern[2000];assert(swprintf(pattern,2000,L"%ls\\*",directory)>0);
     WIN32_FIND_DATAW e;HANDLE scan=FindFirstFileW(pattern,&e);assert(scan!=INVALID_HANDLE_VALUE);
@@ -29,7 +45,7 @@ static void remove_fixture(const wchar_t *directory) {
         assert(!(e.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT));
         wchar_t child[2200];assert(swprintf(child,2200,L"%ls\\%ls",directory,e.cFileName)>0);
         if (e.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY) remove_fixture(child);
-        else assert(DeleteFileW(child));
+        else delete_fixture_file(child);
     } while (FindNextFileW(scan,&e));
     FindClose(scan);assert(RemoveDirectoryW(directory));
 }
