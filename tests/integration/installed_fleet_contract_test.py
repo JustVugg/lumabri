@@ -14,7 +14,7 @@ class FleetContractTest(unittest.TestCase):
                 patch("installed_fleet_update_test.candidate_pair", return_value=["verified"]) as pair:
             self.assertEqual(packages(paths), ["verified"])
             self.assertEqual([call.args[0] for call in complete.call_args_list], paths)
-            pair.assert_called_once_with(paths)
+            pair.assert_called_once_with(paths, allow_engine_change=True)
         with patch("installed_fleet_update_test.checked_package", side_effect=ValueError("incomplete")), \
                 patch("installed_fleet_update_test.candidate_pair") as pair:
             with self.assertRaisesRegex(ValueError, "incomplete"):
