@@ -184,6 +184,7 @@ def line():
     return value
 
 if (line() != b"\n" or line() != b"LUMABRI_RESET 1\n" or
+        line() != b"LUMABRI_CHAT_FORMAT 1 olmoe\n" or
         line() != b"LUMABRI_REQUEST_SEED 1\n" or line() != b"LUMABRI_SAMPLING LOGITS\n"):
     raise RuntimeError("missing OLMoE sampling capability")
 if not re.fullmatch(rb"LUMABRI_NUMERIC [1-9][0-9]* [\x20-\x7e]{1,96}\n", line()):

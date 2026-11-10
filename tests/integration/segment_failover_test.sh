@@ -6,6 +6,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 : "${OLMOE_EDGE_MODEL:?set OLMOE_EDGE_MODEL}"
+if [ ! -s "$OLMOE_EDGE_MODEL/config.json" ]; then
+    echo "OLMOE_EDGE_MODEL must point to a prepared checkpoint" >&2
+    exit 2
+fi
 SEGMENT_NODE_BIN=${SEGMENT_NODE_BIN:-./segment_node}
 SEGMENT_CHAT_BIN=${SEGMENT_CHAT_BIN:-./segment_chat}
 TRACKER_BIN=${TRACKER_BIN:-./tracker}
@@ -25,13 +29,16 @@ cleanup() {
 trap cleanup EXIT
 wait_port() {
     local port=$1
-    for _ in $(seq 1 200); do
-        if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
-            exec 3<&-; exec 3>&-; return 0
-        fi
-        sleep 0.025
-    done
-    return 1
+    python3 - "$port" <<'PY'
+import socket,sys,time
+deadline=time.monotonic()+10
+while time.monotonic()<deadline:
+    try:
+        with socket.create_connection(('127.0.0.1',int(sys.argv[1])),timeout=.1):pass
+        sys.exit(0)
+    except OSError:time.sleep(.025)
+sys.exit('Segment test listener did not become ready')
+PY
 }
 env LUMABRI_PEER_KEY="$TMP/tracker.key" LUMABRI_KNOWN_HOSTS="$TMP/known" \
     "$TRACKER_BIN" --port 8068 --peer-bindings "$TMP/bindings" \
@@ -98,6 +105,7 @@ def line():
                            p.stderr.read().decode("utf-8", "replace"))
     return value
 if (line() != b"\n" or line() != b"LUMABRI_RESET 1\n" or
+        line() != b"LUMABRI_CHAT_FORMAT 1 olmoe\n" or
         line() != b"LUMABRI_REQUEST_SEED 1\n" or line() != b"LUMABRI_SAMPLING LOGITS\n"):
     raise RuntimeError("missing OLMoE sampling capability")
 if not re.fullmatch(rb"LUMABRI_NUMERIC [1-9][0-9]* [\x20-\x7e]{1,96}\n", line()):
