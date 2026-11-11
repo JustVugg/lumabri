@@ -612,7 +612,11 @@ jobs:
             bash tests/integration/segment_split_test.sh
       - name: Qwen, Flint and LFM3 resident architecture contracts
         working-directory: lumabri
-        run: make test-qwen-architectures ENGINE=../colibri/c QWEN_TEST_OPTIONS=--household
+        run: |
+          # Bound the allowance to this step and its children. The native
+          # resident engines must lock their weights and independent KV.
+          sudo prlimit --pid $$ --memlock=134217728:134217728
+          make test-qwen-architectures ENGINE=../colibri/c QWEN_TEST_OPTIONS=--household
       - name: Qwen hybrid memory contract — real int8 and grouped int4
         working-directory: lumabri
         run: |
