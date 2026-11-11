@@ -48,10 +48,12 @@ static void lmb_v41_model_destroy(Model *m, int owns_weights) {
         if (m->L) for (int i = 0; i < m->c.n_layers; i++) {
             Layer *l = &m->L[i];
 #define DROP8(p) free(l->p.q); free(l->p.s);
+#define DROPB(p) free(l->p.w); free(l->p.g);
 #define DROPW(p) free(l->p.w);
             LMB_V41_W8_FIELDS(DROP8)
-            LMB_V41_WB_FIELDS(DROPW)
+            LMB_V41_WB_FIELDS(DROPB)
             LMB_V41_WF_FIELDS(DROPW)
+#undef DROPB
 #undef DROP8
 #undef DROPW
         }
@@ -62,7 +64,8 @@ static void lmb_v41_model_destroy(Model *m, int owns_weights) {
             free(m->engram.table[i].resident_w); free(m->engram.table[i].resident_s);
         }
         free(m->engram.token_map);
-        free(m->embed.w); free(m->head.w); free(m->norm.w);
+        free(m->embed.w); free(m->embed.g); free(m->head.w); free(m->head.g); free(m->norm.w);
+        free(m->gx_t); free(m->gx_h); free(m->gx_len);
         free(m->rope_window); free(m->rope_compress);
         shards *s = &m->S;
         for (int i = 0; i < s->n; i++) free(s->t[i].name);
@@ -109,6 +112,7 @@ static void lmb_v41_state_reset(Model *m) {
     m->published_index_k = m->pub_before = NULL;
     m->published_index_layer = m->pub_before_layer = m->pub_rows = 0;
     m->pos = m->last_start = m->last_rows = m->main_hidden_rows = m->rollback_save = 0;
+    m->last_from = m->ptail_rows = 0; m->ptail_after = -1; m->prefill_tail_rows = 0;
     m->boundary_input = m->boundary_mix = NULL;
     m->boundary_output = m->boundary_output_mix = NULL;
     m->clock = m->hits = m->miss = m->forwards = m->expert_bytes = 0;

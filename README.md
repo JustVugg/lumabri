@@ -268,13 +268,17 @@ Build the complete runtime with `make household ENGINE=/path/to/colibri/c`.
 Building only `lumabri` does not install the model services. macOS builds use
 Homebrew `libomp` when available and work single-threaded without it. Changing
 OpenMP flags invalidates the generated engine build automatically. CI pins
-Colibri to **v1.12.1**, commit
-`ce370e87d7b623d7759b52ec2007d75fc5b0e87e`, for reproducibility.
+Colibri to **v2.1.0**, commit
+`704a3f68184b78367a04cb5526e428dc2f90f05b`, for reproducibility.
 Use that revision for local builds too. The eight upstream distributed adapters are
 GLM, GLM5.3, Inkling, Kimi, OLMoE, Qwen3.6, Qwen3.8 and DeepSeek V4.
 Lumabri also provides a [resident DeepSeek V4.1 text CPU adapter](docs/DEEPSEEK_V41.md),
 including Engram and cross-layer state. Other standalone engines added by
 Colibri are not automatically clusterable: each needs a verified adapter.
+The 2.1 update retains Lumabri’s F32 KV contract. GGUF containers and the new
+Mistral Large 4, Flint, Muse Spark and LFM3 variants do not yet have resident
+planner contracts. Standalone CUDA/Vulkan support does not enable a distributed
+GPU backend; the shipped Edge/Segment adapters remain CPU-only.
 
 Discovery and outbound reporting do not prove inbound connectivity. Before
 indexing, Lumabri checks each selected donor's address and identity. The

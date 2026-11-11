@@ -18,7 +18,7 @@ native_package = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(native_package)
 
 
-def candidate_pair(directories):
+def candidate_pair(directories, *, allow_engine_change=False):
     """Validate both packages before executing either; never fetch a release."""
     if len(directories) != 2:
         raise ValueError("two independently built native packages are required")
@@ -39,7 +39,7 @@ def candidate_pair(directories):
     if (old["lumabri"]["commit"] == new["lumabri"]["commit"] or
             old["files"]["bin/lumabri"]["sha256"] == new["files"]["bin/lumabri"]["sha256"]):
         raise ValueError("identical gateway bytes or revisions are not an upgrade")
-    if old["colibri_checkout"]["commit"] != new["colibri_checkout"]["commit"]:
+    if not allow_engine_change and old["colibri_checkout"]["commit"] != new["colibri_checkout"]["commit"]:
         raise ValueError("this gateway-only test requires the same Colibri revision")
     return candidates
 

@@ -54,7 +54,16 @@ int main(void) {
     want("deepseek_v42", NULL);
     want("kimi_future", NULL);
     want("glm53_moe", NULL);
-    want("qwen3_moe", NULL);
+    want("qwen3_moe", "qwen36");
+    want("qwen3", "qwen36");
+    want("qwen3_5", "qwen36");
+    want("qwen3_5_text", "qwen36");
+    want("flint", "qwen36");
+    want("muse_spark", "qwen36");
+    want("lfm3", "qwen36");
+    want("lfm3_vl", "qwen36");
+    want("mistral_large4", "glm");
+    want("mimo_v2", NULL); /* no Edge/Segment adapter */
     want("qwen36_moe", NULL);
 
     const LmbModelFamily *deepseek = lmb_family_by_id("deepseek_v4");

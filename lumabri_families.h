@@ -36,13 +36,15 @@
 #define LMB_UNUSED
 #endif
 
+enum { LMB_FAMILY_MAX_ALIASES = 12 };
+
 typedef struct {
     const char *segment_id;   /* Colibri Segment and Edge adapter id */
     const char *engine;       /* monolithic engine binary basename */
     const char *p2p_engine;   /* Lumabri chatter basename, NULL when absent */
     const char *expert_node;  /* phase-2 executor basename, NULL when none */
     const char *config_section; /* "root" or "text_config" */
-    const char *aliases[6];     /* exact config.json model_type values */
+    const char *aliases[LMB_FAMILY_MAX_ALIASES];     /* exact config.json model_type values */
 } LmbModelFamily;
 
 /* Every adapter Colibri registers has a row here. The parity test fails when
@@ -59,9 +61,10 @@ static const LmbModelFamily LMB_FAMILIES[] = {
     { "inkling",     "inkling",  "inkling", "expert_node_inkling", "text_config",
       { "inkling_mm_model", "inkling", NULL } },
     { "qwen36",      "qwen36",   "qwen36", "expert_node_qwen36", "text_config",
-      { "qwen3_5_moe", "qwen3_5_moe_text", NULL } },
+      { "qwen3_5_moe", "qwen3_5_moe_text", "qwen3_5", "qwen3_5_text",
+        "qwen3_moe", "qwen3", "flint", "muse_spark", "lfm3", "lfm3_vl", NULL } },
     { "glm",         "colibri",  "colibri", "expert_node_glm", "root",
-      { "glm_moe_dsa", "glm5_moe", "glm", NULL } },
+      { "glm_moe_dsa", "glm5_moe", "glm", "mistral_large4", NULL } },
     { "glm53",       "glm53",    NULL, NULL, "text_config",
       { "glm5_next", "glm5_next_text", NULL } },
     { "qwen38",      "qwen38",   NULL, NULL, "text_config",
@@ -82,7 +85,7 @@ static LMB_UNUSED const LmbModelFamily *lmb_family_for(const char *model_type) {
     if (!model_type || !model_type[0]) return NULL;
     for (size_t i = 0; i < LMB_FAMILY_COUNT; i++) {
         const LmbModelFamily *f = &LMB_FAMILIES[i];
-        for (int a = 0; a < 6 && f->aliases[a]; a++)
+        for (int a = 0; a < LMB_FAMILY_MAX_ALIASES && f->aliases[a]; a++)
             if (!strcmp(model_type, f->aliases[a])) return f;
     }
     return NULL;

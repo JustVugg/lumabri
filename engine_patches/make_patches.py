@@ -177,7 +177,7 @@ KIMI = [
     }
 #endif
 """),
-    hook("""        experts_apply_union(m,li,nu,uid,pfirst,pcnt,poslist,wlist,z,LT,u,gate,up,hz);
+    hook("""        experts_apply_union(m,li,nu,uid,pfirst,pcnt,poslist,wlist,z,LT,u,gate,up,hz,NULL,NULL);
 """, """#ifdef LUMIBRI_P2P
         if(lumi_layer_on(li)){
             /* the union the engine just built, executed on peers; the router
@@ -264,8 +264,8 @@ QWEN36 = [
     atexit(lumi_report);
 #endif
 """),
-    hook("        if (use_xf) {\n", """#ifdef LUMIBRI_P2P
-        if (!use_xf && !use_qt && lumi_layer_on(layer) &&
+    hook("        if (use_qq) {\n", """#ifdef LUMIBRI_P2P
+        if (!use_xf && !use_qt && !use_qq && !use_vk && !use_gq && !l->post_en && lumi_layer_on(layer) &&
             lumi_moe_apply(layer, idx, val, K, xs, D, out + (int64_t)s*D)) {
         } else
 #endif
@@ -307,13 +307,24 @@ def olmoe_local_callback(src):
     """
     start = "            Slot *e; expert_get(m, layer, idx[kk], &e);\n"
     stop = "            float w = val[kk];\n"
-    anchor = "static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {"
+    anchor = "static void moe_routed(Model *m, int layer, float *x, int S, float *logits, float *out) {"
     if src.count(start) != 1 or src.count(stop) != 1 or src.count(anchor) != 1:
         raise SystemExit("olmoe.c: local expert kernel anchors changed")
     begin, end = src.index(start), src.index(stop)
     if end <= begin:
         raise SystemExit("olmoe.c: local expert kernel boundaries reversed")
     kernel = src[begin:end].replace("idx[kk]", "expert")
+    # 2.1 batches local prefill before the single-row loop. Keep that fast
+    # path when no approved route exists; otherwise every row must reach the
+    # Hybrid hook instead of silently reading the delegated experts locally.
+    prefill = "    if (S > 1) {   /* a prompt: expert by expert, the same bits as the loop below */"
+    if src.count(prefill) != 1:
+        raise SystemExit("olmoe.c: prefill delegation anchor changed")
+    src = src.replace(prefill, '''    if (S > 1
+#ifdef LUMIBRI_P2P
+        && !lumi_layer_on(layer)
+#endif
+    ) {   /* local prefill stays batched; approved Hybrid runs each routed row */''', 1)
     callback = """#ifdef LUMIBRI_P2P
 #include "src/runtime/lumabri_q8_reference.h"
 typedef struct { Model *m; float *g, *u; } LmbOlmoeLocal;
@@ -323,7 +334,6 @@ static int lmb_olmoe_local(void *opaque, int layer, int expert,
     Model *m = ctx->m;
     if (D != m->c.hidden || layer < 0 || layer >= m->c.n_layers ||
         expert < 0 || expert >= m->c.n_experts) return -1;
-    int I = m->c.inter;
     float *g = ctx->g, *u = ctx->u;
 """ + kernel + """    return 0;
 }
@@ -333,8 +343,8 @@ static int lmb_olmoe_reference(void *opaque, int layer, int expert,
     Model *m = ctx->m;
     const char *idot = getenv("IDOT");
     if (D != m->c.hidden || layer < 0 || layer >= m->c.n_layers ||
-        expert < 0 || expert >= m->c.n_experts || m->quant_bits != 8 ||
-        (idot && *idot == '1') || g_fused3 || g_pilot) return -1;
+        expert < 0 || expert >= m->c.n_experts || m->quant_bits != 8 || m->gx ||
+        (idot && *idot == '1') || g_pilot) return -1;
     /* Do not call expert_get: a reference must NEVER fetch a missing weight.
      * The model's existing cache lock protects the resident slot lifetime. */
     pthread_mutex_lock(&g_pilot_mx);
