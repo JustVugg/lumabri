@@ -49,6 +49,13 @@ and a loading temporary. Missing tensors, duplicate used tensors, truncated
 files, incoherent packed encodings, and invalid scale sizes reject sizing.
 Disk execution is not enabled by this resident contract.
 
+Native GGUF uses a separate inspector. It checks every used tensor shape,
+per-layer local/global KV geometry and the shared-expert router, including
+native block types and packed expert containers. The budget includes padded
+expert slabs, row scales, source indexes and temporary packing buffers.
+`test-inkling-gguf` compares every split with the pinned monolithic CPU engine
+and exercises independent conversations, snapshots and the household flow.
+
 Linux checks 24 generated float tokens against an independent PyTorch oracle,
 then runs approved two-donor household execution. Packed int4 additionally
 checks whole/split equivalence and lost-donor cleanup. Native macOS Intel/ARM

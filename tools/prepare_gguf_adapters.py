@@ -9,6 +9,14 @@ def replace_once(s, old, new):
 
 
 def prepare_header(root):
+    # The wrapper path strings have already been copied before this parser
+    # returns. Release the JSON nodes as well as the legacy (null) arena,
+    # otherwise each unloaded model leaks a locked allocation tree.
+    path=Path(root)/'st_gguf.h'
+    s=path.read_text()
+    s=replace_once(s,'    free(arena);\n    if (getenv("GGUF_CHECK"))',
+                   '    json_free(root); free(arena);\n    if (getenv("GGUF_CHECK"))')
+    path.write_text(s)
     # The mirror's stdio path materializes a file. Header discovery must use
     # descriptors so it fetches only the CAS blocks that contain the header.
     path=Path(root)/'gguf.h'
