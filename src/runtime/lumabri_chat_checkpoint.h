@@ -23,7 +23,7 @@ static char *chat_checkpoint_text(const char *root,const char *file,int *error) 
 
 static EngKind chat_checkpoint_kind(const char *root,const char *engine) {
     EngKind base=engine_kind_of(engine),kind=base;
-    if (base!=EK_QWEN36) return base;
+    if (base!=EK_QWEN36 && base!=EK_GLM) return base;
     int error=0;
     char *config=chat_checkpoint_text(root,"config.json",&error),type[64];
     if (!config) return EK_INVALID;

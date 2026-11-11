@@ -945,6 +945,7 @@ SEGMENT_COMMON = segment_colibri.h src/runtime/lumabri_thread_capacity.h src/run
 		$(PROTO_DEPS) $(SIGN_DEPS) lumabri_sha.h $(SECURE_DEPS)
 
 HYBRID_PATCH_INPUTS = tools/prepare_gguf_adapters.py tools/prepare_qwen_variants.py tools/prepare_qwen_gguf.py engine_patches/qwen_gguf_source.h tools/prepare_resident_adapters.py engine_patches/make_patches.py \
+	tools/prepare_mistral_segments.py engine_patches/mistral_boundary.h \
 	engine_patches/qwen38_vision_edge.h src/runtime/lumabri_vision.h src/runtime/lumabri_image.h \
 	src/runtime/lumabri_engine_memory_override.h src/runtime/lumabri_engine_memory.h \
 	lumabri_home_hybrid.h src/runtime/lumabri_hybrid_policy.h src/runtime/lumabri_q8_reference.h \
@@ -1388,7 +1389,7 @@ build/qwen-upstream-oracle: tests/c/qwen_upstream_oracle.c build/segment-sources
 	@mkdir -p build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(OMP_FLAGS) -pthread -I$(ENGINE) $< -o $@ -lm $(OMP_LIBS)
 
-lumabri test_chat_ui segment_chat: src/runtime/lumabri_chat_checkpoint.h src/runtime/lumabri_chat_format.h src/runtime/lumabri_muse_chat.h
+lumabri test_chat_ui segment_chat: src/runtime/lumabri_chat_checkpoint.h src/runtime/lumabri_chat_format.h src/runtime/lumabri_muse_chat.h src/runtime/lumabri_mistral_chat.h
 .PHONY: test-qwen-architectures
 build/qwen-state-oracle: tests/c/qwen_state_oracle.c $(COLIBRI_SEGMENT_LIB) build/segment-sources build/segment-options
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Wno-unused-function $(OMP_FLAGS) -pthread -I$(ENGINE) $< $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
@@ -1408,3 +1409,22 @@ build/qwen-mixed-oracle: tests/c/qwen_mixed_oracle.c tests/c/edge_segment_greedy
 
 test-qwen-gguf: build/test_gguf_inventory build/qwen-upstream-oracle build/gguf-segment-oracle build/qwen-state-oracle build/qwen-mixed-oracle
 	$(PYTHON) tests/integration/qwen_native_gguf_test.py --engine $(ENGINE) $(QWEN_GGUF_TEST_OPTIONS)
+
+build/glm-upstream-oracle: tests/c/glm_upstream_oracle.c build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(OMP_FLAGS) -pthread -I$(ENGINE) $< -o $@ -lm $(OMP_LIBS)
+
+build/test_mistral_chat: tests/c/test_mistral_chat.c src/runtime/lumabri_chat_format.h src/runtime/lumabri_mistral_chat.h
+	@mkdir -p build
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Wno-unused-function $< -o $@
+
+.PHONY: test-mistral-segments
+build/mistral-state-oracle: tests/c/mistral_state_oracle.c $(COLIBRI_SEGMENT_LIB) build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Wno-unused-function $(OMP_FLAGS) -pthread -I$(ENGINE) $< $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
+
+build/mistral-mixed-oracle: tests/c/qwen_mixed_oracle.c tests/c/edge_segment_greedy.c $(COLIBRI_SEGMENT_LIB) build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(OMP_FLAGS) -pthread -I$(ENGINE) $(GGUF_READ_GUARD) -DLMB_MIXED_FAMILY='"glm"' $< $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
+
+test-mistral-segments: build/test_gguf_inventory build/glm-upstream-oracle build/gguf-segment-oracle build/mistral-state-oracle build/mistral-mixed-oracle test_api_compat build/test_mistral_chat
+	$(PYTHON) tests/integration/mistral_segment_test.py --engine $(ENGINE) $(MISTRAL_TEST_OPTIONS)
+	$(PYTHON) tests/integration/qwen_chat_template_test.py $(ENGINE)
+	./build/test_mistral_chat

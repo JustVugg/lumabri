@@ -281,8 +281,10 @@ as resident CPU segments. Both native GGUF and converted Safetensors support
 Qwen3 dense/MoE (including Qwen3-Coder), Qwen3.5 dense/MoE, Flint and LFM3
 text through the Qwen adapter. See [formats and validation](docs/QWEN_ARCHITECTURES.md).
 Muse Spark text is supported through its native GGUF CPU path, including its
-latent expert dimension and chat format. Other GGUF architectures and Mistral
-Large 4 still require their resident integration.
+latent expert dimension and chat format. [Mistral Large 4 text](docs/MISTRAL.md)
+also runs as resident GGUF CPU segments, preserving its cross-layer KV and
+sparse attention state. Other GGUF architectures still require their own
+resident integration.
 Standalone CUDA/Vulkan support does not enable a distributed
 GPU backend; the shipped Edge/Segment adapters remain CPU-only.
 
