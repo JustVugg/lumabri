@@ -40,6 +40,7 @@
 #define LMB_UNUSED
 #endif
 #include "lumabri_families.h"
+#include "src/planner/lumabri_capabilities.h"
 
 #define LMB_PLAN_LAYER_MAX 512
 
@@ -67,6 +68,7 @@ typedef struct {
     uint32_t bits_per_weight;   /* 16 bf16, 8, 4 for fp4 checkpoints */
     int disk_streaming;         /* the adapter has DEMONSTRATED disk mode */
     int sizing_verified;        /* adapter-specific arithmetic was verified */
+    uint32_t execution_ops;     /* operations validated by this checkpoint inspector */
     uint32_t memory_contract;   /* 0: historical estimate, 1: explicit layer map */
     uint32_t max_context;
     uint32_t boundary_width;    /* zero: hidden; otherwise the actual Edge/Segment state width */
@@ -342,6 +344,12 @@ static LMB_UNUSED int lmb_shape_from_config(const char *model_dir,
     int path_len=snprintf(path, sizeof path, "%s/config.json", model_dir);
     if(path_len<0 || (size_t)path_len>=sizeof path) return -1;
     FILE *f = lmb_plan_fopen(path);
+    int pipeline_index=0;
+    if (!f) {
+        path_len=snprintf(path,sizeof path,"%s/model_index.json",model_dir);
+        if (path_len<0 || (size_t)path_len>=sizeof path) return -1;
+        f=lmb_plan_fopen(path);pipeline_index=1;
+    }
     if (!f) return -1;
     char buf[65536];
     size_t n = fread(buf, 1, sizeof buf - 1, f);
@@ -352,10 +360,17 @@ static LMB_UNUSED int lmb_shape_from_config(const char *model_dir,
     const char *end=lmb_plan_object_end(lmb_plan_space(buf));
     if(!end || *lmb_plan_space(end)) return -1;
 
-    if (lmb_json_string(buf, "model_type", out->model_type,
+    if (pipeline_index) {
+        char kind[64];
+        if (lmb_json_string(buf,"_class_name",kind,sizeof kind) || strcmp(kind,"QwenImage21Pipeline")) return -1;
+        strcpy(out->model_type,"qwenimage21pipeline");
+    } else if (lmb_json_string(buf, "model_type", out->model_type,
                         sizeof out->model_type)) return -1;
     const LmbModelFamily *fam = lmb_family_for(out->model_type);
-    if (!fam) return -1;
+    /* Recognition includes image/decision engines and text families whose
+     * distributed adapter is not implemented yet. No memory/fit permission
+     * follows from this metadata-only result. */
+    if (!fam) return lmb_capability_for(out->model_type) ? 0 : -1;
     snprintf(out->segment_id, sizeof out->segment_id, "%s", fam->segment_id);
 
     const char *cfg = buf;
@@ -397,6 +412,8 @@ static LMB_UNUSED int lmb_shape_from_config(const char *model_dir,
     /* A registered family is not proof that this checkpoint encoding is
      * compatible. Only its explicit inspector may enable a fit decision. */
     out->sizing_verified = !lmb_describe_memory(fam->segment_id, model_dir, buf, cfg, out);
+    if (out->sizing_verified) out->execution_ops |= LMB_OP_CHAT;
+    else out->execution_ops=0;
     return out->layers && out->hidden ? 0 : -1;
 }
 

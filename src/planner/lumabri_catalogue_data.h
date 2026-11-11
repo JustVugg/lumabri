@@ -14,6 +14,7 @@ typedef struct {
     int has_weights;
     uint64_t checkpoint_bytes;
     int inventory_ok;
+    uint32_t formats;
 } CatalogEntry;
 
 typedef struct {const char *root;CatalogEntry *out;int count,cap;} CatalogScan;
@@ -29,6 +30,7 @@ static int catalog_scan_entry(const char *name,void *context) {
     LmbCheckpointInventory inventory;
     entry->inventory_ok=!lmb_checkpoint_inventory(path,&inventory);
     entry->has_weights=inventory.has_weights;entry->checkpoint_bytes=inventory.bytes;
+    entry->formats=inventory.formats;
     scan->count++;return 0;
 }
 static int catalog_scan(const char *root,CatalogEntry *out,int cap) {
@@ -153,6 +155,7 @@ static int catalog_plan_entry(LmbTuiState *st,LmbTuiModel *m,const CatalogEntry 
     m->weights_present = entry->has_weights;
     m->checkpoint_bytes = entry->checkpoint_bytes;
     m->checkpoint_inventory_ok = entry->inventory_ok;
+    m->weight_formats = entry->formats;
     st->nodes[0].has_checkpoint = entry->has_weights;
     uint32_t nselected=0;int household=0;
     for (uint32_t j = 0; j < st->nnodes; j++)

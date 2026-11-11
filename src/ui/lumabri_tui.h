@@ -33,6 +33,7 @@ typedef struct {
     int weights_present;
     uint64_t checkpoint_bytes;
     int checkpoint_inventory_ok;
+    uint32_t weight_formats;
     LmbCalibration calibration;    /* owned by the snapshot, never a borrowed pointer */
     int has_calibration;
     char content_id[65];
@@ -40,6 +41,28 @@ typedef struct {
     int calibration_key_valid;
     uint32_t advice_flags;
 } LmbTuiModel;
+
+/* Runtime observations never inherit upstream's potential modality flags.
+ * Detailed backend/operation handshakes are attached after preparation. */
+static inline const char *lmb_catalogue_capability_reason(const LmbTuiModel *m) {
+    if (!lmb_capability_for(m->shape.model_type)) return "Architecture not recognized";
+    if (!m->shape.segment_id[0]) return "Distributed runtime not integrated for this family";
+    if (!m->checkpoint_inventory_ok) return "Checkpoint inventory unavailable";
+    if (!m->weights_present) return "Checkpoint weights missing";
+    if (!m->shape.sizing_verified) return "Resident memory contract unavailable for this encoding";
+    if (!m->planned || m->plan.state!=LMB_PLAN_RESIDENT || !m->plan.nslices)
+        return "No complete resident plan on the selected computers";
+    return "Resident plan available; runtime approval and preparation required";
+}
+static inline int lmb_catalogue_executable(const LmbTuiModel *m) {
+    return lmb_capability_for(m->shape.model_type) && m->shape.segment_id[0] &&
+        m->shape.sizing_verified && m->checkpoint_inventory_ok && m->weights_present &&
+        m->planned && m->plan.state==LMB_PLAN_RESIDENT && m->plan.nslices;
+}
+static inline const char *lmb_catalogue_support_state(const LmbTuiModel *m) {
+    if (lmb_catalogue_executable(m)) return "executable";
+    return lmb_capability_for(m->shape.model_type) ? "recognized" : "unknown";
+}
 
 typedef struct LmbTuiState {
     LmbTuiModel models[LMB_TUI_MAX_MODELS];
