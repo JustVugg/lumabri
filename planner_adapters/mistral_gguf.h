@@ -139,6 +139,13 @@ static int lmb_mistral_gguf_memory(const LmbGguf *g,const char *cfg,LmbModelShap
     LmbMistralGguf c;if(lmb_ml4_geometry(g,&c))return -1;
     if(lmb_ml4_config_matches(cfg,&c))return -1;
     if(m->layers!=c.layers || m->hidden!=c.hidden || m->vocab!=c.vocab || m->experts!=c.experts || m->experts_per_tok!=c.topk)return -1;
+    uint64_t width=(uint64_t)c.hidden+2+c.itop;
+    for(uint32_t source=0;source<c.layers;source++) {
+        int used=0;for(uint32_t l=source+1;l<c.layers;l++)used|=c.source[l]==source;
+        if(used)width+=1+c.kv+(c.rotated[source]?c.rope:0);
+    }
+    if(width>1048576)return -1;
+    m->boundary_width=(uint32_t)width;
     const char *layout=lmb_gguf_text(lmb_gguf_get(g,"colibri.layout"));
     int packed=layout && !strcmp(layout,"expert-packed-v1");
     if(layout && !packed)return -1;
@@ -221,11 +228,13 @@ static int lmb_mistral_gguf_memory(const LmbGguf *g,const char *cfg,LmbModelShap
     uint64_t headers=lmb_size_add(lmb_size_mul(g->header_bytes,6),lmb_size_mul(g->ntensors,1024));
     m->edge_resident_bytes=lmb_size_add(m->edge_resident_bytes,headers);
     m->edge_scratch_fixed_bytes=lmb_size_add(v.largest,((uint64_t)c.vocab+H)*4);
+    m->edge_scratch_fixed_bytes=lmb_size_add(m->edge_scratch_fixed_bytes,width*512u*8u);
     m->segment_fixed_bytes=lmb_size_add(m->segment_fixed_bytes,lmb_size_add(headers,(uint64_t)c.layers*(8192u+(uint64_t)c.experts*2048u)));
     uint64_t wide=H+(uint64_t)c.heads*(c.key+c.value)+c.kv+c.dense+(uint64_t)c.shared*c.inter+
         (uint64_t)c.topk*(H+c.inter)+c.experts+(uint64_t)c.ih*c.idim;
     m->scratch_fixed_bytes=lmb_size_add(wide*512u*16u*4u,lmb_size_add(v.largest,lmb_size_mul(maxexpert,c.experts<256?c.experts:256)));
     m->scratch_fixed_bytes=lmb_size_add(m->scratch_fixed_bytes,lmb_size_mul(maxexpert,64));
+    m->scratch_fixed_bytes=lmb_size_add(m->scratch_fixed_bytes,width*512u*12u+(uint64_t)c.itop*4u);
     m->scratch_token_bytes=256u*32u;m->heads=c.heads;m->kv_heads=c.heads;m->moe_intermediate=c.inter;
     m->max_context=c.context;m->memory_contract=1;rc=0;
 done:free(v.seen);return rc;

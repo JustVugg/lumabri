@@ -58,6 +58,10 @@ static int run_oracle(const char *family, const char *path, ColiEdgeEngine *edge
     }
     a=malloc((size_t)np*row); b=malloc((size_t)np*row);
     REQUIRE(a && b && ec->state_dtype==COLI_EDGE_DTYPE_F32 && ec->num_layers>=2);
+    if(getenv("LMB_ORACLE_WIDTH")) {
+        char *end;unsigned long expected=strtoul(getenv("LMB_ORACLE_WIDTH"),&end,10);
+        REQUIRE(!*end && expected==ec->state_width);
+    }
     for(int i=0;i<ranges;i++) {
         ColiSegmentEngineOptions eo={.struct_size=sizeof(eo),.model_dir=path,
             .layer_begin=i?cut:0,

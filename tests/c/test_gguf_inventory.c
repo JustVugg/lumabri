@@ -11,6 +11,11 @@ int main(int argc,char **argv) {
             m.config.data,m.tokenizer.data,m.tokenizer_config.data,m.generation_config.data);
         lmb_gguf_metadata_free(&m);lmb_gguf_free(&g);return rc?1:0;
     }
+    if(argc==3 && !strcmp(argv[1],"--boundary")) {
+        LmbModelShape m;
+        if(lmb_shape_from_config(argv[2],&m) || !m.sizing_verified)return 1;
+        printf("%u\n",m.boundary_width?m.boundary_width:m.hidden);return 0;
+    }
     if(argc==3 && !strcmp(argv[1],"--cost")) {
         LmbModelShape m;
         if(lmb_shape_from_config(argv[2],&m) || !m.sizing_verified)return 1;

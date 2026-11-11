@@ -41,6 +41,7 @@ def main():
         for key,value in metadata.items():(root/(key+'.json')).write_text(json.dumps(value))
         costs=run(['build/test_gguf_inventory','--cost',root],env)
         assert len(costs.splitlines())==36
+        env['LMB_ORACLE_WIDTH']=run(['build/test_gguf_inventory','--boundary',root],env).strip()
         run(['build/glm-upstream-oracle',root,root/'oracle.json'],env)
         for cut in range(1,8):
             run(['build/gguf-segment-oracle','glm',root,root/'oracle.json'],{**env,'LMB_ORACLE_CUT':str(cut)})
