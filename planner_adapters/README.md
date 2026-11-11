@@ -2,8 +2,8 @@
 
 These are Lumabri-side descriptions, not changes to Colibri. They read small
 checkpoint metadata before donor approval; they do not initialize an engine.
-The implementation under test is pinned by CI to Colibri
-`12a5c464b5c1f8292d578c62458706bc32d6ac95`.
+The implementation under test is pinned by CI to Colibri `v2.1.0`, commit
+`704a3f68184b78367a04cb5526e428dc2f90f05b`.
 
 ## Qwen3.6 converted CPU checkpoints
 
@@ -75,15 +75,15 @@ are conservatively covered by a whole-boundary reservation, not disk-mode admiss
 KDA recurrence and convolution state are fixed per session. MLA latent/rotary
 and optional DSA index caches grow with context. Edge/Segment exchange AttnRes
 state with width `hidden * (1 + ceil(layers / block_size))`, not just `hidden`;
-both boundary buffers and loading workspace are reserved. Expert capacity is
-an upper bound: native `K3_EXPERT_GB`/RAM policy can choose a smaller cache, so
-this contract does not certify that every admitted weight was warmed into RAM.
+both boundary buffers and loading workspace are reserved. Resident preparation
+requires slots for every assigned expert and checks the approved budget while
+warming them. A smaller cache cannot silently become a resident allocation.
 
-Admission also reserves the pinned initializer's unconditional 3.7 GB policy
-floor, plus its whole-model KV projection. The policy is not measured tiny-model
-RSS, but ignoring it produces plans the native engine refuses to open. We do not
-enable `COLI_RAM_OVERCOMMIT` to bypass it. The standard macOS ARM CI runner tests
-insufficient-memory refusal; two-range Kimi execution needs a larger machine.
+The resident loader and planner reserve kernel workspace from the geometry,
+plus the conservative whole-model KV projection. Standalone streaming keeps
+its original page-cache policy. No `COLI_RAM_OVERCOMMIT` bypass is enabled.
+Embeddings are owned by Edge in RAM. Native, split and packed GGUFs use a
+separate inspector for block types, residual scores and expert slot padding.
 
 The numpy-generated tiny fixture retains native MXFP4 experts. Its eight-token
 independent oracle comes from upstream's hash-pinned Moonshot reference, in the

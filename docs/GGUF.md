@@ -15,7 +15,7 @@ them.
 
 The integrated GGUF CPU paths cover OLMoE, Qwen3 dense/MoE, Qwen3.5/3.6
 dense/MoE, Flint, Muse Spark, LFM3 text, GLM-5.2/5.3 (`glm-dsa`),
-GLM5-Next text (`glm5-next`) and Mistral Large 4 text. See
+GLM5-Next text (`glm5-next`), Kimi K3 text (`kimi-k3`) and Mistral Large 4 text. See
 [Qwen architecture contracts](QWEN_ARCHITECTURES.md) and [Mistral](MISTRAL.md).
 The inspector checks the
 actual tensor names, dimensions, native quantization block geometry and
@@ -45,6 +45,20 @@ engine. Vision and NextN generation are not enabled by this text contract.
 `make test-glm53-gguf ENGINE="$COLIBRI_SOURCE" GLM53_GGUF_TEST_OPTIONS=--household`
 checks monolithic/split tokens, independent conversations, snapshots, multiple
 resident engines and the normal donor approval and chat flow.
+
+Kimi K3 keeps attention-residual boundaries, KDA recurrence/convolution and
+MLA history on the assigned segments. Its GGUF contract accepts native, split
+and packed containers with block-quantized routed experts. Float dense weights
+follow the engine's dense quantization settings; embeddings and residual-score
+weights are prepared in engine-owned RAM before chat. The inspector accounts
+for padded expert slots and a kernel-workspace reserve derived from the model
+geometry, without the standalone streaming loader's page-cache reserve.
+Floating routed-expert matrices, tied heads and DSA
+extensions absent from this GGUF layout are rejected before admission.
+`make test-kimi-gguf ENGINE="$COLIBRI_SOURCE" KIMI_GGUF_TEST_OPTIONS=--household`
+checks every layer cut, session isolation, snapshot continuation and household
+chat with the source offline. These reduced-checkpoint checks do not establish
+performance for a full-size Kimi checkpoint.
 
 `make test-glm-gguf ENGINE="$COLIBRI_SOURCE" GLM_GGUF_TEST_OPTIONS=--household`
 compares every layer cut against the pinned monolithic engine, including

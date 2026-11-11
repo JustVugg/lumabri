@@ -285,7 +285,9 @@ latent expert dimension and chat format. [Mistral Large 4 text](docs/MISTRAL.md)
 also runs as resident GGUF CPU segments, preserving its cross-layer KV and
 sparse attention state. GLM-5.2/5.3 `glm-dsa` GGUFs preserve shared indexer
 selections across segments. GLM5-Next `glm5-next` GGUFs use their separate
-resident CPU adapter for recurrent and sparse attention. Other GGUF
+resident CPU adapter for recurrent and sparse attention. Kimi K3 `kimi-k3`
+GGUFs preserve attention-residual boundaries and recurrent state, with
+embeddings and routed experts prepared in RAM before chat. Other GGUF
 architectures still require their own resident integration.
 Standalone CUDA/Vulkan support does not enable a distributed
 GPU backend; the shipped Edge/Segment adapters remain CPU-only.
