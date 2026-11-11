@@ -1,5 +1,21 @@
 # Third-party build inputs
 
+## Colibri GLM5-Next GGUF integration
+
+- Source: `JustVugg/colibri`, tag `v2.1.0`, commit
+  `704a3f68184b78367a04cb5526e428dc2f90f05b`.
+- Source files: `c/glm53.c`, `c/st_gguf.h`, `c/tools/gguf_import.py`,
+  `c/tools/make_glm53_tiny.py` and `c/tests/test_segment_adapters_real.c`.
+- License: Apache-2.0; attribution: Colibri contributors. Original source
+  headers, license and notices remain in generated copies and packages.
+- Lumabri adds C metadata and tensor accounting for the native GLM5-Next
+  layout, serializes generated-copy adapter opens around temporary GGUF
+  metadata, and records a distinct numerical class for this source format.
+  The pinned engine still performs the model arithmetic. Test checkpoint
+  geometry follows the upstream contract; deterministic random GGUF weights
+  are generated separately and compared with the unmodified monolithic
+  engine. ABI state tests reuse the upstream snapshot helpers.
+
 ## Colibri GLM GGUF integration
 
 - Source: `JustVugg/colibri`, tag `v2.1.0`, commit

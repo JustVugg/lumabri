@@ -14,7 +14,8 @@ them.
 ## Current execution contract
 
 The integrated GGUF CPU paths cover OLMoE, Qwen3 dense/MoE, Qwen3.5/3.6
-dense/MoE, Flint, Muse Spark, LFM3 text, GLM-5.2/5.3 (`glm-dsa`) and Mistral Large 4 text. See
+dense/MoE, Flint, Muse Spark, LFM3 text, GLM-5.2/5.3 (`glm-dsa`),
+GLM5-Next text (`glm5-next`) and Mistral Large 4 text. See
 [Qwen architecture contracts](QWEN_ARCHITECTURES.md) and [Mistral](MISTRAL.md).
 The inspector checks the
 actual tensor names, dimensions, native quantization block geometry and
@@ -32,7 +33,18 @@ activations; per-conversation KV and indexer history stay on their owners.
 The GLM inspector accepts native, split and `expert-packed-v1` containers,
 validates each attention/expert tensor and prices native block layouts.
 Optional NextN tensors are excluded from the text chain; this path does not
-enable speculative decoding. `glm5-next` is a separate architecture.
+enable speculative decoding.
+
+GLM5-Next uses its own `glm53` adapter. Its KDA recurrence and convolution,
+pooled sparse-attention history and hyper-connections are accounted separately
+from `glm-dsa`. Native, split and packed expert containers are validated before
+admission; mixed native block types and tied heads retain their runtime layout.
+The CPU contract covers NoPE text attention with an indexer on each MLA layer,
+and a single SwiGLU clamp shared by those layers, as implemented by the pinned
+engine. Vision and NextN generation are not enabled by this text contract.
+`make test-glm53-gguf ENGINE="$COLIBRI_SOURCE" GLM53_GGUF_TEST_OPTIONS=--household`
+checks monolithic/split tokens, independent conversations, snapshots, multiple
+resident engines and the normal donor approval and chat flow.
 
 `make test-glm-gguf ENGINE="$COLIBRI_SOURCE" GLM_GGUF_TEST_OPTIONS=--household`
 compares every layer cut against the pinned monolithic engine, including

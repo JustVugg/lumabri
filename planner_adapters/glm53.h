@@ -1,5 +1,6 @@
 #ifndef LUMABRI_PLAN_GLM53_H
 #define LUMABRI_PLAN_GLM53_H
+#include "glm53_gguf.h"
 /* Initial float-source text contract. Packed containers and the vision tower
  * are deliberately not inferred from this contract. Colibri remains unchanged. */
 typedef struct {
@@ -118,6 +119,11 @@ static int lmb_glm53_tensor(const LmbPlanTensor *t, void *opaque) {
 static int LMB_UNUSED lmb_glm53_memory(const char *root, const char *whole,
                                        const char *json, LmbModelShape *m) {
     if (lmb_json_member(whole, "vision_config")) return -1;
+    LmbGguf gguf;int opened=lmb_gguf_model(root,&gguf);
+    if(opened<=0) {
+        if(opened<0)return -1;
+        int rc=lmb_g5_gguf_memory(&gguf,json,m);lmb_gguf_free(&gguf);return rc;
+    }
     LmbGlm53Inventory v = { .model=m };
     uint32_t layers, topk, rope, index_topk;
 #define NEED(key,dst,lo,hi) if (lmb_plan_u32(json,key,lo,hi,&dst)) return -1

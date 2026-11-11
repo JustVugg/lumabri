@@ -283,9 +283,10 @@ text through the Qwen adapter. See [formats and validation](docs/QWEN_ARCHITECTU
 Muse Spark text is supported through its native GGUF CPU path, including its
 latent expert dimension and chat format. [Mistral Large 4 text](docs/MISTRAL.md)
 also runs as resident GGUF CPU segments, preserving its cross-layer KV and
-sparse attention state. GLM-5.2/5.3 `glm-dsa` GGUFs also use the resident
-CPU path, including shared sparse indexer selections. Other GGUF architectures still require their own
-resident integration.
+sparse attention state. GLM-5.2/5.3 `glm-dsa` GGUFs preserve shared indexer
+selections across segments. GLM5-Next `glm5-next` GGUFs use their separate
+resident CPU adapter for recurrent and sparse attention. Other GGUF
+architectures still require their own resident integration.
 Standalone CUDA/Vulkan support does not enable a distributed
 GPU backend; the shipped Edge/Segment adapters remain CPU-only.
 

@@ -945,7 +945,7 @@ SEGMENT_COMMON = segment_colibri.h src/runtime/lumabri_thread_capacity.h src/run
 		$(PROTO_DEPS) $(SIGN_DEPS) lumabri_sha.h $(SECURE_DEPS)
 
 HYBRID_PATCH_INPUTS = tools/prepare_gguf_adapters.py tools/prepare_qwen_variants.py tools/prepare_qwen_gguf.py engine_patches/qwen_gguf_source.h tools/prepare_resident_adapters.py engine_patches/make_patches.py \
-	tools/prepare_mistral_segments.py engine_patches/mistral_boundary.h \
+	tools/prepare_mistral_segments.py tools/prepare_glm53_gguf.py engine_patches/mistral_boundary.h \
 	engine_patches/qwen38_vision_edge.h src/runtime/lumabri_vision.h src/runtime/lumabri_image.h \
 	src/runtime/lumabri_engine_memory_override.h src/runtime/lumabri_engine_memory.h \
 	lumabri_home_hybrid.h src/runtime/lumabri_hybrid_policy.h src/runtime/lumabri_q8_reference.h \
@@ -1432,3 +1432,16 @@ test-mistral-segments: build/test_gguf_inventory build/glm-upstream-oracle build
 .PHONY: test-glm-gguf
 test-glm-gguf: build/test_gguf_inventory build/glm-upstream-oracle build/gguf-segment-oracle build/mistral-state-oracle build/mistral-mixed-oracle
 	$(PYTHON) tests/integration/glm_native_gguf_test.py --engine $(ENGINE) $(GLM_GGUF_TEST_OPTIONS)
+
+build/glm53-upstream-oracle: tests/c/glm53_upstream_oracle.c build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(OMP_FLAGS) -pthread -I$(ENGINE) $< -o $@ -lm $(OMP_LIBS)
+
+.PHONY: test-glm53-gguf
+build/glm53-state-oracle: tests/c/mistral_state_oracle.c $(COLIBRI_SEGMENT_LIB) build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Wno-unused-function $(OMP_FLAGS) -pthread -I$(ENGINE) -DLMB_STATE_FAMILY='"glm53"' $< $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
+
+build/glm53-mixed-oracle: tests/c/qwen_mixed_oracle.c tests/c/edge_segment_greedy.c $(COLIBRI_SEGMENT_LIB) build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(OMP_FLAGS) -pthread -I$(ENGINE) $(GGUF_READ_GUARD) -DLMB_MIXED_FAMILY='"glm53"' $< $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
+
+test-glm53-gguf: build/test_gguf_inventory build/glm53-upstream-oracle build/gguf-segment-oracle build/glm53-state-oracle build/glm53-mixed-oracle
+	$(PYTHON) tests/integration/glm53_native_gguf_test.py --engine $(ENGINE) $(GLM53_GGUF_TEST_OPTIONS)
