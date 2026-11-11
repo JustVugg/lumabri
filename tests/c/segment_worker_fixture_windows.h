@@ -20,6 +20,7 @@ typedef struct {
     atomic_int stop;
     atomic_int pause_registration;
     atomic_uint lost_registration_replies;
+    atomic_uint rejected_handshakes;
     HANDLE before_reply,release_reply,after_reply;
     LmbSegAdvert advert,adverts[4];
     unsigned nadverts,machine_reports;
@@ -36,7 +37,14 @@ static void *fixture_tracker(void *opaque) {
     while (!atomic_load(&f->stop)) {
         if (lmb_socket_wait(f->listener,0,10)==1) {
             LmbSocket fd=lmb_socket_accept(f->listener,NULL,NULL); assert(fd!=LMB_INVALID_SOCKET);
-            assert(!lmb_socket_timeout(fd,2000) && !lmb_secure_server(fd));
+            assert(!lmb_socket_timeout(fd,2000));
+            if(lmb_secure_server(fd)) {
+                /* A launcher probe or cancelled UI request may close during
+                 * the handshake. Drop that connection, as the production
+                 * tracker does; never register it or weaken authentication. */
+                atomic_fetch_add(&f->rejected_handshakes,1);
+                lmb_close(fd);continue;
+            }
             unsigned i=0; while (i<8 && clients[i]!=LMB_INVALID_SOCKET) i++;
             assert(i<8); clients[i]=fd;authed[i]=challenged[i]=0;
         }
@@ -134,6 +142,7 @@ static void *fixture_tracker(void *opaque) {
 static void fixture_start(WorkerFixture *f,char *address,size_t cap,const char *checkpoint) {
     memset(f,0,sizeof *f);atomic_init(&f->stop,0);pthread_mutex_init(&f->lock,NULL);
     atomic_init(&f->pause_registration,0);atomic_init(&f->lost_registration_replies,0);
+    atomic_init(&f->rejected_handshakes,0);
     f->registered=CreateEventW(NULL,TRUE,FALSE,NULL);assert(f->registered);
     f->owner.lease_id.bytes[0]=7;f->owner.fencing_epoch=3;f->owner.route_generation=5;
     f->listener=lmb_listen(0);assert(f->listener!=LMB_INVALID_SOCKET);
@@ -145,6 +154,27 @@ static void fixture_start(WorkerFixture *f,char *address,size_t cap,const char *
         strcpy(f->checkpoint.address,address);checkpoint_fixture_load(&f->checkpoint,checkpoint);
     }
     assert(!pthread_create(&f->thread,NULL,fixture_tracker,f));
+}
+
+static void fixture_handshake_disconnect(WorkerFixture *f,const char *address) {
+    struct sockaddr_in bound;LmbSocketLength size=sizeof bound;
+    assert(!getsockname(f->listener,(struct sockaddr *)&bound,&size));
+    bound.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+    unsigned before=atomic_load(&f->rejected_handshakes);
+    for(unsigned partial=0;partial<2;partial++) {
+        LmbSocket fd=lmb_socket_open(AF_INET,SOCK_STREAM,0);assert(fd!=LMB_INVALID_SOCKET);
+        assert(!lmb_socket_connect(fd,(struct sockaddr *)&bound,sizeof bound));
+        if(partial) {char prefix[8]={0};assert(send(fd,prefix,sizeof prefix,0)==sizeof prefix);}
+        lmb_close(fd);
+    }
+    uint64_t deadline=GetTickCount64()+5000;
+    while(atomic_load(&f->rejected_handshakes)!=before+2) {assert(GetTickCount64()<deadline);Sleep(10);}
+    assert(!f->nadverts && !f->machine_reports && WaitForSingleObject(f->registered,0)==WAIT_TIMEOUT);
+    LmbSocket fd=lmb_connect_ms_io(address,2000,2000);assert(fd!=LMB_INVALID_SOCKET && !lmb_auth(fd));
+    assert(!lmb_send(fd,LMB_PING,NULL,0,NULL,0));LmbMsg reply={0};
+    assert(!lmb_recv(fd,&reply) && reply.op==LMB_OK && !reply.body_len && !reply.pay_len);
+    lmb_msg_free(&reply);lmb_close(fd);
+    puts("FIXTURE HANDSHAKE: PASS (closed/partial handshake rejected, authenticated reconnect)");
 }
 
 /* A worker can close with a heartbeat already queued (for example on retire).
