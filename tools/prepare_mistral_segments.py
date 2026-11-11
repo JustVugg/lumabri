@@ -4,8 +4,29 @@ from prepare_qwen_variants import once
 
 
 def prepare(root):
+    # The standalone dashboard owns a single, first-model-sized hit bitmap.
+    # Embedded adapters use Lumabri's allocation metrics; sharing this bitmap
+    # across independent model engines corrupts memory (and mixes telemetry).
+    telemetry=Path(root)/'telemetry.h'
+    t=telemetry.read_text()
+    t=once(t,'static void ehit_mark(Model *m, int layer, int eid){',
+        '''static void ehit_mark(Model *m, int layer, int eid){
+#if defined(COLI_SEGMENT_ADAPTER) || defined(COLI_EDGE_ADAPTER)
+    (void)m; (void)layer; (void)eid;
+#else''')
+    t=once(t,'    g_ehit[layer][eid]=1;','    g_ehit[layer][eid]=1;\n#endif')
+    telemetry.write_text(t)
     path=Path(root)/'colibri.c'
     s=path.read_text()
+    s=once(s,'    int n_group, topk_group, norm_topk;',
+        '    int n_group, topk_group, norm_topk, lmb_tied_head;')
+    s=once(s,'    c->n_group=gi(r,"n_group"); c->topk_group=gi(r,"topk_group");',
+        '    jval *tie=json_get(r,"tie_word_embeddings"); c->lmb_tied_head=tie && tie->t==J_BOOL && tie->boolean;\n'
+        '    c->n_group=gi(r,"n_group"); c->topk_group=gi(r,"topk_group");')
+    s=once(s,'m->lm_head = qt_load(m,"lm_head.weight", c->vocab, D, io_bits);',
+        'm->lm_head = qt_load(m,c->lmb_tied_head && !st_has(&m->S,"lm_head.weight")?"model.embed_tokens.weight":"lm_head.weight", c->vocab, D, io_bits);')
+    s=once(s,'model->lm_head = qt_load(model, "lm_head.weight",',
+        'model->lm_head = qt_load(model, model->c.lmb_tied_head && !st_has(&model->S,"lm_head.weight")?"model.embed_tokens.weight":"lm_head.weight",')
     s=once(s,'    int *dsa_sel, *dsa_nsel; int dsa_scap;',
         '    const float *lmb_ml4_cross[128];\n    int *dsa_sel, *dsa_nsel; int dsa_scap;')
     s=once(s,'typedef struct { int pos,qk,valid,inv_valid; float theta,inv_theta,inv[128],cs[128],sn[128]; } RopeCache;',
@@ -54,20 +75,20 @@ static void lmb_glm_source_release(void) {
         b=s.index('\nstatic ',a+1)
         part=s[a:b]
         cfg='config' if kind=='segment' else 'model->c'
-        part=part.replace('"glm/mla-rope-dsa-f32-v1"',cfg+'.ml4 ? "mistral-large4/latent-selection-f32-v1" : "glm/mla-rope-dsa-f32-v1"')
-        part=part.replace('"glm/e%d-d%d-dsa%d-kvf32/cpu-v1"',cfg+'.ml4 ? "mistral-large4/e%d-d%d-dsa%d-kvf32/cpu-v1" : "glm/e%d-d%d-dsa%d-kvf32/cpu-v1"')
+        part=part.replace('"glm/mla-rope-dsa-f32-v1"',cfg+'.ml4 ? "mistral-large4/latent-selection-f32-v1" : "glm/mla-rope-selection-f32-v2"')
+        part=part.replace('"glm/e%d-d%d-dsa%d-kvf32/cpu-v1"',cfg+'.ml4 ? "mistral-large4/e%d-d%d-dsa%d-kvf32/cpu-v1" : "glm/e%d-d%d-dsa%d-selection-f32/cpu-v2"')
         part=once(part,'capabilities->state_width = (uint32_t)'+cfg+'.hidden;',
             'capabilities->state_width = (uint32_t)lmb_ml4_width(&'+cfg+');')
         s=s[:a]+part+s[b:]
     a=s.index('static int glm_segment_session_run(');b=s.index('\nstatic int glm_segment_spans(',a)
     part=s[a:b]
     part=once(part,'    if (request->output != request->input)',
-        '''    if(engine->model.c.ml4) {
+        '''    if(lmb_glm_boundary(&engine->model.c)) {
         Model *m=&engine->model;size_t width=lmb_ml4_width(&m->c);
         const float *input=request->input;float *output=request->output;
         for(uint32_t i=0;i<request->rows;i++)
             if(lmb_ml4_validate(m,input+(size_t)i*width,(int)engine->layer_begin,(int)request->position+(int)i))
-                return coli_segment_adapter_error(error,error_size,"invalid Mistral cross-layer state");
+                return coli_segment_adapter_error(error,error_size,"invalid cross-layer attention state");
         pthread_mutex_lock(&engine->run_lock);kv_bind(m,&session->kv);
         int bad=0;
         for(uint32_t i=0;i<request->rows;i++) {
@@ -80,7 +101,7 @@ static void lmb_glm_source_release(void) {
         }
         memset(m->lmb_ml4_cross,0,sizeof m->lmb_ml4_cross);
         kv_bind(m,engine->base_kv);pthread_mutex_unlock(&engine->run_lock);
-        if(bad)return coli_segment_adapter_error(error,error_size,"cannot allocate Mistral sparse state");
+        if(bad)return coli_segment_adapter_error(error,error_size,"cannot allocate sparse selection state");
         session->position+=request->rows;return 0;
     }
     if (request->output != request->input)''')

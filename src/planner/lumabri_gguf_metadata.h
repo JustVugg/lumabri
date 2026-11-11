@@ -122,6 +122,31 @@ static inline int lmb_gguf_qwen_config(const LmbGguf *g,LmbGgufJson *j) {
     }
     lmb_gguf_json_printf(j,"}");return j->bad?-1:0;
 }
+static inline int lmb_gguf_glm_config(const LmbGguf *g,LmbGgufJson *j) {
+    LmbGlmGguf c;if(lmb_glmd_geometry(g,&c))return -1;
+    lmb_gguf_json_printf(j,"{\"model_type\":\"glm_moe_dsa\",\"architectures\":[\"GlmMoeDsaForCausalLM\"]");
+    const char *keys[]={"num_hidden_layers","hidden_size","vocab_size","num_attention_heads","num_key_value_heads","n_routed_experts",
+        "num_experts_per_tok","moe_intermediate_size","intermediate_size","n_shared_experts","first_k_dense_replace",
+        "q_lora_rank","kv_lora_rank","qk_rope_head_dim","qk_nope_head_dim","v_head_dim","index_n_heads",
+        "index_head_dim","index_topk","n_group","topk_group","max_position_embeddings","num_nextn_predict_layers"};
+    uint32_t values[]={c.layers,c.hidden,c.vocab,c.heads,c.heads,c.experts,c.topk,c.inter,c.dense,c.shared,c.first,
+        c.query,c.kv,c.rope,c.key-c.rope,c.value,c.ih,c.idim,c.itop,1,1,c.context,c.nextn};
+    for(unsigned i=0;i<sizeof values/sizeof *values;i++)lmb_gguf_json_printf(j,",\"%s\":%u",keys[i],values[i]);
+    lmb_gguf_json_printf(j,",\"scoring_func\":\"sigmoid\",\"topk_method\":\"noaux_tc\",\"norm_topk_prob\":%s,"
+        "\"rms_norm_eps\":%.17g,\"routed_scaling_factor\":%.17g,\"tie_word_embeddings\":%s,"
+        "\"rope_parameters\":{\"rope_type\":\"default\",\"rope_theta\":%.17g},\"indexer_types\":[",
+        c.normalized?"true":"false",c.eps,c.scale,lmb_gguf_tensor(g,"output.weight")?"false":"true",c.theta);
+    for(uint32_t i=0;i<c.layers;i++)lmb_gguf_json_printf(j,"%s\"%s\"",i?",":"",c.indexed[i]?"full":"shared");
+    lmb_gguf_json_printf(j,"]");
+    const char *ids[]={"bos_token_id","eos_token_id","pad_token_id"};
+    for(unsigned i=0;i<3;i++) {
+        char key[64];snprintf(key,sizeof key,"tokenizer.ggml.%s",ids[i]);uint64_t id;
+        const LmbGgufValue *v=lmb_gguf_get(g,key);lmb_gguf_json_printf(j,",\"%s\":",ids[i]);
+        if(!v)lmb_gguf_json_printf(j,"null");
+        else {if(lmb_gguf_integer(v,&id) || id>=c.vocab)return -1;lmb_gguf_json_printf(j,"%llu",(unsigned long long)id);}
+    }
+    lmb_gguf_json_printf(j,"}");return j->bad?-1:0;
+}
 static inline int lmb_gguf_mistral_config(const LmbGguf *g,LmbGgufJson *j) {
     LmbMistralGguf c;if(lmb_ml4_geometry(g,&c))return -1;
     lmb_gguf_json_printf(j,"{\"model_type\":\"mistral_large4\",\"architectures\":[\"MistralLarge4ForCausalLM\"]");
@@ -158,7 +183,8 @@ static inline int lmb_gguf_metadata(const LmbGguf *g,LmbGgufMetadata *out) {
     memset(out,0,sizeof *out);LmbGgufToken *tokens=NULL,*merges=NULL,*ordered=NULL;
     uint32_t nt=0,nm=0;const char *arch=lmb_gguf_text(lmb_gguf_get(g,"general.architecture"));
     if(!arch || (!strcmp(arch,"olmoe")?lmb_gguf_olmoe_config(g,&out->config):
-        !strcmp(arch,"mistral-large4")?lmb_gguf_mistral_config(g,&out->config):lmb_gguf_qwen_config(g,&out->config)))goto fail;
+        !strcmp(arch,"mistral-large4")?lmb_gguf_mistral_config(g,&out->config):
+        !strcmp(arch,"glm-dsa")?lmb_gguf_glm_config(g,&out->config):lmb_gguf_qwen_config(g,&out->config)))goto fail;
     const LmbGgufValue *v=lmb_gguf_get(g,"tokenizer.ggml.model");
     if(v && (!lmb_gguf_text(v) || strcmp(lmb_gguf_text(v),"gpt2")))goto fail;
     if(lmb_gguf_strings(lmb_gguf_get(g,"tokenizer.ggml.tokens"),&tokens,&nt) || !nt)goto fail;

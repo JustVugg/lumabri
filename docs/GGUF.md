@@ -14,7 +14,7 @@ them.
 ## Current execution contract
 
 The integrated GGUF CPU paths cover OLMoE, Qwen3 dense/MoE, Qwen3.5/3.6
-dense/MoE, Flint, Muse Spark, LFM3 text and Mistral Large 4 text. See
+dense/MoE, Flint, Muse Spark, LFM3 text, GLM-5.2/5.3 (`glm-dsa`) and Mistral Large 4 text. See
 [Qwen architecture contracts](QWEN_ARCHITECTURES.md) and [Mistral](MISTRAL.md).
 The inspector checks the
 actual tensor names, dimensions, native quantization block geometry and
@@ -26,6 +26,18 @@ GGUF runs through Segment. The merged-int8 Hybrid expert provider is not
 used for GGUF. Context uses the checkpoint's declared limit capped by the
 adapter's limit (4096 for OLMoE, 262144 for Qwen, 1048576 for Mistral), with F32 KV state per session. There is no
 disk-streaming fallback.
+
+GLM's shared indexer selections cross Segment boundaries with the hidden
+activations; per-conversation KV and indexer history stay on their owners.
+The GLM inspector accepts native, split and `expert-packed-v1` containers,
+validates each attention/expert tensor and prices native block layouts.
+Optional NextN tensors are excluded from the text chain; this path does not
+enable speculative decoding. `glm5-next` is a separate architecture.
+
+`make test-glm-gguf ENGINE="$COLIBRI_SOURCE" GLM_GGUF_TEST_OPTIONS=--household`
+compares every layer cut against the pinned monolithic engine, including
+shared sparse selections, mixed quantizations, conversation interleaving,
+snapshot restoration and source-offline household chat.
 
 The source computer generates small JSON metadata files using C. It preserves
 the embedded tokenizer, pre-tokenizer, special tokens and chat template. There

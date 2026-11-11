@@ -1,4 +1,4 @@
-/* Lumabri-owned per-token Mistral Large 4 boundary state. Included after
+/* Lumabri-owned per-token GLM/Mistral boundary state. Included after
  * Colibri's Model type. KV history stays on its owner; only the current
  * cross-layer latent row and the sparse selection travel with activations. */
 #ifndef LMB_MISTRAL_BOUNDARY_H
@@ -9,9 +9,12 @@ static int lmb_ml4_source(const Cfg *c,int source) {
     for(int i=source+1;i<c->n_layers;i++)if(c->kv_src[i]==source)return 1;
     return 0;
 }
+static int lmb_glm_boundary(const Cfg *c) {
+    return c->ml4 || (c->index_topk>0 && c->index_nh>0 && c->index_hd>0);
+}
 static size_t lmb_ml4_width(const Cfg *c) {
     size_t n=(size_t)c->hidden;
-    if(!c->ml4)return n;
+    if(!lmb_glm_boundary(c))return n;
     for(int i=0;i<c->n_layers;i++)if(lmb_ml4_source(c,i))
         n+=1u+(size_t)c->kv_lora+(c->rope_on[i]?(size_t)c->qk_rope:0u);
     return n+2u+(size_t)c->index_topk;

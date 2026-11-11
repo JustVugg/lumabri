@@ -1428,3 +1428,7 @@ test-mistral-segments: build/test_gguf_inventory build/glm-upstream-oracle build
 	$(PYTHON) tests/integration/mistral_segment_test.py --engine $(ENGINE) $(MISTRAL_TEST_OPTIONS)
 	$(PYTHON) tests/integration/qwen_chat_template_test.py $(ENGINE)
 	./build/test_mistral_chat
+
+.PHONY: test-glm-gguf
+test-glm-gguf: build/test_gguf_inventory build/glm-upstream-oracle build/gguf-segment-oracle build/mistral-state-oracle build/mistral-mixed-oracle
+	$(PYTHON) tests/integration/glm_native_gguf_test.py --engine $(ENGINE) $(GLM_GGUF_TEST_OPTIONS)

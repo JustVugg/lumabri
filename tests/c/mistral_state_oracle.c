@@ -53,5 +53,5 @@ int main(int argc,char **argv) {
         for(int i=0;i<3;i++)OK(coli_segment_engine_close(eng[i],error,sizeof error));
     }
     coli_edge_engine_close(edge);free(input);free(full);free(left);free(chain);free(other);
-    puts("MISTRAL STATE: PASS (all cuts, interleaved sessions, snapshot/restore, malformed boundary atomicity)");return 0;
+    puts("GLM/MISTRAL STATE: PASS (all cuts, interleaved sessions, snapshot/restore, malformed boundary atomicity)");return 0;
 }
