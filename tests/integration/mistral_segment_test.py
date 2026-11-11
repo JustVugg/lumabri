@@ -99,11 +99,14 @@ def main():
                 print(run([sys.executable,'tests/integration/home_flow_test.py','--models-dir',models,
                     '--resident-default','--crash-requester','--context','512'],env,600),end='',flush=True)
 
-    # Same architecture/theta, different learned RoPE frequencies: opening
-    # and executing one model must not poison another model's thread cache.
+    # Same hidden width/theta, different learned RoPE frequencies and larger
+    # layer/expert counts: no first-model-sized global state may be reused.
     different=dest/'different-rope';different.mkdir(exist_ok=True)
-    weights['alpha']=weights['alpha']+.7
-    module.write_gguf(different/'model.gguf',config,weights)
+    larger={**config,'experts':16,'rope_pattern':config['rope_pattern']+[True],
+        'kv_source':config['kv_source']+[8],'indexer_full':config['indexer_full']+[True]}
+    larger_weights=module.random_weights(larger,20261031)
+    larger_weights['alpha']=weights['alpha']+.7
+    module.write_gguf(different/'model.gguf',larger,larger_weights)
     kv,ts=fixture_contents(different/'model.gguf')
     (different/'model.gguf').write_bytes(_gguf_bytes(byte_tokens(kv),ts))
     (different/'gguf.json').write_text(json.dumps({'format':'colibri-gguf-v1','gguf':'model.gguf'}))

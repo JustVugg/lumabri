@@ -4,6 +4,18 @@ from prepare_qwen_variants import once
 
 
 def prepare(root):
+    # The standalone dashboard owns a single, first-model-sized hit bitmap.
+    # Embedded adapters use Lumabri's allocation metrics; sharing this bitmap
+    # across independent model engines corrupts memory (and mixes telemetry).
+    telemetry=Path(root)/'telemetry.h'
+    t=telemetry.read_text()
+    t=once(t,'static void ehit_mark(Model *m, int layer, int eid){',
+        '''static void ehit_mark(Model *m, int layer, int eid){
+#if defined(COLI_SEGMENT_ADAPTER) || defined(COLI_EDGE_ADAPTER)
+    (void)m; (void)layer; (void)eid;
+#else''')
+    t=once(t,'    g_ehit[layer][eid]=1;','    g_ehit[layer][eid]=1;\n#endif')
+    telemetry.write_text(t)
     path=Path(root)/'colibri.c'
     s=path.read_text()
     s=once(s,'    int *dsa_sel, *dsa_nsel; int dsa_scap;',

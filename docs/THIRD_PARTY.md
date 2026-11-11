@@ -58,7 +58,7 @@
 
 - Source: `JustVugg/colibri`, tag `v2.1.0`, commit
   `704a3f68184b78367a04cb5526e428dc2f90f05b`.
-- Upstream files: `c/colibri.c`, `c/st_gguf.h`, `c/openai_server.py`,
+- Upstream files: `c/colibri.c`, `c/telemetry.h`, `c/st_gguf.h`, `c/openai_server.py`,
   `c/tools/make_mistral_large4_tiny.py`, `c/tools/gguf_import.py`, and
   `c/tests/test_segment_adapters_real.c`.
 - License: Apache-2.0; attribution: Colibri contributors. Original headers,
@@ -67,7 +67,9 @@
   selections with activations, keep conversation KV on each owning segment,
   serialize source metadata opening, and free model-specific allocations.
   Model arithmetic remains in the pinned engine. The RoPE cache key also
-  includes the learned frequency table to isolate different models.
+  includes the learned frequency table to isolate different models. The
+  standalone dashboard hit bitmap is disabled in embedded adapters; Lumabri
+  reports per-allocation metrics without sharing first-model-sized telemetry.
 - `src/runtime/lumabri_mistral_chat.h` and the shared chat formatter express
   the upstream text framing in C with bounded stream state. Tests compare
   the API prompt against the original Python renderer. Fixture generation,
