@@ -59,6 +59,12 @@ def contract(root,kv,tensors,env):
         check(tensors+[('blk.0.unknown.weight',0,[1],b'\0'*4)])
         check(tensors+[('blk.0.unknown.scale',0,[1],b'\0'*4)])
         check([t for t in tensors if t[0]!='output.scale']+[('output.scale',0,[2],b'\0'*8)])
+        if any(k=='general.architecture' and v=='muse-spark' for k,_,v in kv):
+            for suffix in ('ffn_pre_exp_norm.weight','ffn_latent_down.weight','attn_resid_beta.weight','attn_q_norm.weight'):
+                check([t for t in tensors if t[0]!='blk.0.'+suffix])
+            for key,value in [('moe_latent_size',64),('expert_gating_func',0),('logit_scale',0.),
+                              ('expert_weights_scale',.5),('post_norm_epsilon',-1.)]:
+                check(tensors,[(k,t,value) if k=='muse-spark.'+key else (k,t,v) for k,t,v in kv])
 
 
 def run(argv, env, timeout=180):
@@ -70,7 +76,7 @@ def run(argv, env, timeout=180):
 
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--engine',type=Path,required=True)
-    families=('qwen3','qwen3moe','qwen35','qwen35moe','flint','lfm3')
+    families=('qwen3','qwen3moe','qwen35','qwen35moe','flint','lfm3','muse-spark')
     p.add_argument('--only',choices=families)
     p.add_argument('--household',action='store_true')
     p.add_argument('--packed',action='store_true',help='also validate upstream expert-packed-v1 containers')
@@ -80,20 +86,20 @@ def main():
          'LUMABRI_RESIDENT_REQUIRED':'1','LUMABRI_ENGINE_BACKEND':'cpu','PILOT':'0'}
     for name in families:
         if args.only and name!=args.only:continue
-        if name in ('flint','lfm3'):
-            module=importlib.import_module('make_'+name+'_tiny')
+        if name in ('flint','lfm3','muse-spark'):
+            module=importlib.import_module('make_'+('muse' if name=='muse-spark' else name)+'_tiny')
             config=module.tiny_config(vocab=320);weights=module.random_weights(config,20261029)
         for kind in ('F32','Q8_0'):
             root=dest/(name+'-'+kind);root.mkdir(exist_ok=True)
             path=root/'model.gguf'
-            if name=='flint':module.write_gguf(path,config,weights,expert_type='Q8_0',dense_type=kind)
+            if name in ('flint','muse-spark'):module.write_gguf(path,config,weights,expert_type='Q8_0',dense_type=kind)
             elif name=='lfm3':module.write_gguf(path,config,weights,dense_type=kind)
             else:
                 from gguf_qwen_fixture import create
                 create(engine,root,name,kind=='Q8_0')
             from make_flint_tiny import _gguf_bytes
             kv,tensors=fixture_contents(path)
-            if name in ('flint','lfm3'):kv=byte_tokens(kv)
+            if name in ('flint','lfm3','muse-spark'):kv=byte_tokens(kv)
             if kind=='Q8_0':
                 scales=[]
                 for field,_,dims,_ in tensors:
@@ -114,7 +120,7 @@ def main():
             run(['build/qwen-state-oracle','qwen36',root,0,layers//2,layers,128],env)
             print(f'{name} {kind}: native GGUF metadata, memory, local/split/fresh and zero inference reads PASS',flush=True)
             if kind=='Q8_0':
-                if args.packed and name in ('qwen3moe','qwen35moe','flint'):
+                if args.packed and name in ('qwen3moe','qwen35moe','flint','muse-spark'):
                     packed=root/'packed'
                     run([sys.executable,engine/'tools/gguf_import.py',path,packed,'--mode','copy','--no-mmproj','--no-mtp'],env)
                     meta=json.loads(run(['build/test_gguf_inventory','--metadata',packed],env))
@@ -136,14 +142,15 @@ def main():
                     raw=root/'raw';raw.mkdir(exist_ok=True)
                     target=raw/'model.gguf'
                     if not target.exists():os.link(path,target)
-                    catalogue=json.loads(run(['./lumabri','models','--models-dir',raw,'--context','512','--json'],
+                    context='2048' if name=='muse-spark' else '512'
+                    catalogue=json.loads(run(['./lumabri','models','--models-dir',raw,'--context',context,'--json'],
                         {**env,'LUMABRI_NO_DISK_PROBE':'1'}))['models']
                     assert len(catalogue)==1 and catalogue[0]['sizing_verified'] and catalogue[0]['capabilities']['format']=='gguf',catalogue
                     wrapper=next(raw.glob('.lumabri-gguf-*'));models=root/'home';models.mkdir(exist_ok=True)
                     link=models/name
                     if not link.exists():link.symlink_to(wrapper,target_is_directory=True)
                     print(run([sys.executable,'tests/integration/home_flow_test.py','--models-dir',models,
-                        '--resident-default','--crash-requester','--context','512'],env,600),end='',flush=True)
+                        '--resident-default','--crash-requester','--context',context],env,600),end='',flush=True)
     if not args.only:
         from qwen_architectures_test import tokenizer
         converted=dest/'converted-flint'
@@ -155,6 +162,13 @@ def main():
         tokenizer(converted)
         run(['build/qwen-upstream-oracle',converted,converted/'oracle.json'],env)
         models=[dest/'qwen3-Q8_0',dest/'qwen35-F32',converted]
+        cmd=['build/qwen-mixed-oracle']
+        for model in models:cmd.extend([model,model/'oracle.json'])
+        print(run(cmd,env),end='',flush=True)
+        muse=dest/'muse-spark-Q8_0'
+        # Muse changes row permutation, latent expert width and output norms.
+        # Keep it live beside a different native family and an int4 container.
+        models=[muse,dest/'qwen35-F32',converted]
         cmd=['build/qwen-mixed-oracle']
         for model in models:cmd.extend([model,model/'oracle.json'])
         print(run(cmd,env),end='',flush=True)

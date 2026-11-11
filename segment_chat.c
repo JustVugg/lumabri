@@ -2008,7 +2008,16 @@ typedef struct {
     unsigned request_id;
     size_t emitted_bytes;
     LmbServeControl *control;
+    int muse;
+    LmbMuseStream channels;
 } ServeGeneration;
+
+static int serve_generation_data(ServeGeneration *serve,const void *data,size_t bytes) {
+    printf("DATA %u %zu\n",serve->request_id,bytes);
+    if(bytes && fwrite(data,1,bytes,stdout)!=bytes)return -1;
+    fputc('\n',stdout);serve->emitted_bytes+=bytes;
+    return ferror(stdout)?-1:0;
+}
 
 static int serve_generation_event(void *opaque, GenerationEventKind kind,
                                   size_t current, size_t total,
@@ -2033,11 +2042,11 @@ static int serve_generation_event(void *opaque, GenerationEventKind kind,
                current, total);
         break;
     case GEN_EVENT_DATA:
-        printf("DATA %u %zu\n", serve->request_id, data_bytes);
-        if (data_bytes && fwrite(data, 1, data_bytes, stdout) != data_bytes)
-            return -1;
-        fputc('\n', stdout);
-        serve->emitted_bytes += data_bytes;
+        if(serve->muse) {
+            Cap visible={0};int bad=lmb_muse_feed(&serve->channels,&visible,data,data_bytes);
+            if(!bad && visible.len)bad=serve_generation_data(serve,visible.p,visible.len);
+            free(visible.p);if(bad)return -1;
+        } else if(serve_generation_data(serve,data,data_bytes))return -1;
         break;
     }
     fflush(stdout);
@@ -2223,7 +2232,8 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
                                        snapshot.route_generation)
                 route_print(stderr, "[segment-route]", &snapshot,
                             chain, chain_count);
-            ServeGeneration stream = { .request_id = request_id, .control = &control };
+            ServeGeneration stream = { .request_id = request_id, .control = &control,
+                .muse=chat_format && !strcmp(chat_format,"muse_spark") };
             bad = segment_generate(edge, cap, chain, chain_count,
                                    model_root, tokenizer_root,
                                    context, max_rows, prompt, prompt_bytes,
@@ -2234,9 +2244,14 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
                                    snapshot.route_generation,
                                    serve_generation_event, &stream, &result,
                                    error, sizeof error);
+            if(!bad && stream.muse) {
+                Cap tail={0};bad=lmb_muse_finish(&stream.channels,&tail);
+                if(!bad && tail.len)bad=serve_generation_data(&stream,tail.p,tail.len);
+                free(tail.p);
+                if(bad)snprintf(error,sizeof error,"Invalid Muse response framing");
+            }
             if (!bad && !stream.emitted_bytes)
-                (void)serve_generation_event(&stream, GEN_EVENT_DATA,
-                                             0, 0, NULL, 0);
+                (void)serve_generation_data(&stream,NULL,0);
             /* Who actually served this turn — printed EVERY turn, from the
              * conversation's live chain (recovery may have moved it mid-
              * generation). Users kept having to play detective across

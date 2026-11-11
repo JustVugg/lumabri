@@ -14,7 +14,7 @@ them.
 ## Current execution contract
 
 The integrated GGUF CPU paths cover OLMoE, Qwen3 dense/MoE, Qwen3.5/3.6
-dense/MoE, Flint and LFM3 text. See [Qwen architecture contracts](QWEN_ARCHITECTURES.md).
+dense/MoE, Flint, Muse Spark and LFM3 text. See [Qwen architecture contracts](QWEN_ARCHITECTURES.md).
 The inspector checks the
 actual tensor names, dimensions, native quantization block geometry and
 effective memory representation. GGUF support in Colibri alone does not grant

@@ -64,13 +64,6 @@ static inline int lmb_gguf_uint_at(const LmbGgufValue *v,uint64_t index,uint64_t
     LmbGgufValue scalar={.type=v->element_type,.bytes=bytes,.data=v->data+index*bytes};
     return lmb_gguf_integer(&scalar,value);
 }
-static inline int lmb_gguf_number(const LmbGgufValue *v,double fallback,double *out) {
-    if(!v){*out=fallback;return 0;}
-    if(v->type==6){uint32_t u=(uint32_t)lmb_gguf_le(v->data,4);float f;memcpy(&f,&u,4);*out=f;}
-    else if(v->type==12){uint64_t u=lmb_gguf_le(v->data,8);memcpy(out,&u,8);}
-    else {uint64_t u;if(lmb_gguf_integer(v,&u))return -1;*out=(double)u;}
-    return isfinite(*out)?0:-1;
-}
 static inline void lmb_gguf_metadata_free(LmbGgufMetadata *m) {
     free(m->config.data);free(m->tokenizer.data);free(m->tokenizer_config.data);free(m->generation_config.data);
     memset(m,0,sizeof *m);
@@ -118,6 +111,7 @@ static inline int lmb_gguf_qwen_config(const LmbGguf *g,LmbGgufJson *j) {
         "\"num_experts\":%u,\"num_experts_per_tok\":%u,\"moe_intermediate_size\":%u,"
         "\"intermediate_size\":%u,\"vocab_size\":%u,\"max_position_embeddings\":%u",
         c.model_type,c.hidden,c.layers,c.heads,c.kv,c.hd,c.experts,c.topk,c.inter,c.dense_inter,c.vocab,c.context);
+    if(c.muse)lmb_gguf_json_printf(j,",\"moe_hidden_size\":%u",c.expert_hidden);
     const char *ids[]={"bos_token_id","eos_token_id"};
     for(unsigned i=0;i<2;i++) {
         char key[96];snprintf(key,sizeof key,"tokenizer.ggml.%s",ids[i]);
