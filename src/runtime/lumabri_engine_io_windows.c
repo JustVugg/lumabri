@@ -3,6 +3,7 @@
 #include "lumabri_process_memory.h"
 #include <errno.h>
 #include <io.h>
+#include <limits.h>
 
 static SRWLOCK input_lock=SRWLOCK_INIT;
 static volatile LONG64 input_calls,input_bytes,input_denied;
@@ -93,6 +94,17 @@ BOOL WINAPI lmb_engine_ReadFile(HANDLE file,LPVOID buffer,DWORD size,
     InterlockedAdd64(&input_bytes,count);
     ReleaseSRWLockShared(&input_lock);
     SetLastError(error); return ok;
+}
+int lmb_engine_read(int fd,void *buffer,unsigned int size) {
+    if(size>INT_MAX) {errno=EINVAL;return -1;}
+    HANDLE file=(HANDLE)_get_osfhandle(fd);DWORD count=0;
+    if(file==INVALID_HANDLE_VALUE) {errno=EBADF;return -1;}
+    /* GGUF metadata uses descriptors. Route them through the same provider,
+     * accounting and seal as tensor payloads, never native CRT input. */
+    if(!lmb_engine_ReadFile(file,buffer,size,&count,NULL)) {
+        errno=GetLastError()==ERROR_ACCESS_DENIED?EACCES:EIO;return -1;
+    }
+    return (int)count;
 }
 size_t lmb_engine_fread(void *buffer,size_t size,size_t count,FILE *file) {
     if(!size || !count) return 0;

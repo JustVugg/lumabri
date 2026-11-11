@@ -111,6 +111,14 @@ int main(int argc,char **argv) {
     FILE *stream=fopen(path,"rb");assert(stream && !_fseeki64(stream,LMB_HASH_CHUNK-400,SEEK_SET));
     assert(lmb_engine_fread(actual,10,100,stream)==100 && !memcmp(actual,data+LMB_HASH_CHUNK-400,1000));
     fclose(stream);
+    int descriptor=_open(path,_O_RDONLY|_O_BINARY);assert(descriptor>=0);
+    assert(_lseeki64(descriptor,LMB_HASH_CHUNK-400,SEEK_SET)==LMB_HASH_CHUNK-400);
+    assert(lmb_engine_read(descriptor,actual,sizeof actual)==sizeof actual);
+    assert(!memcmp(actual,data+LMB_HASH_CHUNK-400,sizeof actual));
+    assert(_lseeki64(descriptor,0,SEEK_CUR)==LMB_HASH_CHUNK+600);
+    assert(_lseeki64(descriptor,(int64_t)size-17,SEEK_SET)==(int64_t)size-17);
+    assert(lmb_engine_read(descriptor,actual,sizeof actual)==17 && !memcmp(actual,data+size-17,17));
+    assert(lmb_engine_read(descriptor,actual,sizeof actual)==0);
     fprintf(stderr,"checkpoint gate: ranged reads ready\n");fflush(stderr);
     if (invalid) {
         HANDLE unknown=lmb_private_open(identity,0,0,NULL);assert(unknown!=INVALID_HANDLE_VALUE);
@@ -127,8 +135,9 @@ int main(int argc,char **argv) {
     else {
         assert(!lmb_engine_input_seal());
         assert(!lmb_engine_ReadFile(file,actual,1,&got,&at) && !got && GetLastError()==ERROR_ACCESS_DENIED);
+        errno=0;assert(lmb_engine_read(descriptor,actual,1)==-1 && errno==EACCES);
     }
-    CloseHandle(file);lmb_engine_free(weight);
+    _close(descriptor);CloseHandle(file);lmb_engine_free(weight);
     fprintf(stderr,"checkpoint gate: joining source\n");fflush(stderr);
     atomic_store(&source.stop,1);pthread_join(source.thread,NULL);lmb_close(source.listener);
     pthread_mutex_destroy(&source.lock);
