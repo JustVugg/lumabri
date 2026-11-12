@@ -23,6 +23,15 @@ typedef struct {Model weights; unsigned sessions;uint64_t budget,base_bytes,sess
 typedef struct {LmbV41Engine *engine;Model state;int counts[V41_MAX_LAYERS];uint32_t context;} LmbV41Session;
 typedef struct {Model weights;Tok tokenizer;size_t width;} LmbV41Edge;
 
+static void lmb_v41_numeric(const Model *m,char *out,size_t n) {
+    int blocks=0;
+    for(int i=0;i<m->S.n;i++)if(st_ggml_type_any(m->S.t[i].dtype)>=0){blocks=1;break;}
+    if(blocks) {
+        const char *ilv=getenv("V41_ILV16");
+        snprintf(out,n,"v41/ggml/f32/g%d-i%d/row1-v1",gq_exact_mode(),!ilv || atoi(ilv)!=0);
+    } else snprintf(out,n,LMB_V41_NUMERIC);
+}
+
 static int lmb_v41_inspect(const char *root,LmbModelShape *m) {
     static const char *const unsupported[]={"V41_INDEX_OWNER","COLI_MODEL_DIRS","COLI_MODEL_MIRROR","SNAP_MIRROR"};
     for(unsigned i=0;i<sizeof unsupported/sizeof *unsupported;i++) {
@@ -80,7 +89,9 @@ static int lmb_v41_segment_open(void **impl,ColiSegmentCapabilities *cap,
     e->weights.range_enabled=1;e->weights.range_begin=(int)o->layer_begin;e->weights.range_end=(int)o->layer_end;
     e->weights.context_limit=(int)o->context_tokens;
     pthread_mutex_lock(&lmb_v41_runtime_lock);
+    st_gguf_active=0;
     model_load(&e->weights,o->model_dir,c.n_routed,32);
+    gguf_close(&st_gguf_meta);gguf_close(&st_gguf_head);st_gguf_active=0;
     for(uint32_t l=o->layer_begin;l<o->layer_end;l++)
         for(int k=0;k<c.n_routed;k++)(void)expert_slot_at(&e->weights,&e->weights.cache[l],"layers",(int)l,k);
     pthread_mutex_unlock(&lmb_v41_runtime_lock);
@@ -95,7 +106,7 @@ static int lmb_v41_segment_open(void **impl,ColiSegmentCapabilities *cap,
     cap->flags=COLI_SEGMENT_CAP_TOKEN_IDS|COLI_SEGMENT_CAP_RANGE_NATIVE|COLI_SEGMENT_CAP_MULTI_SESSION|COLI_SEGMENT_CAP_CPU;
     snprintf(cap->engine_id,sizeof cap->engine_id,"deepseek_v41");
     snprintf(cap->state_schema,sizeof cap->state_schema,LMB_V41_SCHEMA);
-    snprintf(cap->numeric_class,sizeof cap->numeric_class,LMB_V41_NUMERIC);
+    lmb_v41_numeric(&e->weights,cap->numeric_class,sizeof cap->numeric_class);
     cap->state_dtype=COLI_SEGMENT_DTYPE_F32;cap->state_width=(uint32_t)lmb_v41_state_width(&c);
     cap->max_batch_rows=1;cap->max_context_tokens=o->context_tokens;cap->num_layers=(uint32_t)c.n_layers;
     *impl=e;return 0;
@@ -166,10 +177,14 @@ static int lmb_v41_edge_open(void **impl,ColiEdgeCapabilities *cap,const ColiEdg
     LmbV41Edge *e=calloc(1,sizeof *e);if(!e)return -1;
     Model *m=&e->weights;cfg_load(&m->c,o->model_dir);
     if(!lmb_v41_layout_valid(&m->c)){free(e);return coli_edge_adapter_error(err,size,"invalid V4.1 layout");}
+    pthread_mutex_lock(&lmb_v41_runtime_lock);
+    st_gguf_active=0;
     st_init_multi(&m->S,o->model_dir,NULL);
     wb_load(&m->S,&m->embed,"embed.weight",m->c.vocab,m->c.dim);
     wb_load(&m->S,&m->head,"head.weight",m->c.vocab,m->c.dim);
     wf_load(&m->S,&m->norm,"norm.weight",m->c.dim);
+    gguf_close(&st_gguf_meta);gguf_close(&st_gguf_head);st_gguf_active=0;
+    pthread_mutex_unlock(&lmb_v41_runtime_lock);
     char path[1024];int n=snprintf(path,sizeof path,"%s/tokenizer.json",o->model_dir);
     if(n<0 || (size_t)n>=sizeof path){lmb_v41_edge_destroy(e);return -1;}
     tok_load(&e->tokenizer,path);e->width=lmb_v41_state_width(&m->c);
@@ -183,7 +198,7 @@ static int lmb_v41_edge_open(void **impl,ColiEdgeCapabilities *cap,const ColiEdg
     cap->flags=COLI_EDGE_CAP_TOKENIZE|COLI_EDGE_CAP_DETOKENIZE|COLI_EDGE_CAP_GREEDY|COLI_EDGE_CAP_LOGITS|COLI_EDGE_CAP_CPU;
     snprintf(cap->engine_id,sizeof cap->engine_id,"deepseek_v41");
     snprintf(cap->state_schema,sizeof cap->state_schema,LMB_V41_SCHEMA);
-    snprintf(cap->numeric_class,sizeof cap->numeric_class,LMB_V41_NUMERIC);
+    lmb_v41_numeric(&e->weights,cap->numeric_class,sizeof cap->numeric_class);
     snprintf(cap->tokenizer_class,sizeof cap->tokenizer_class,"colibri-tok-v1");
     cap->state_dtype=COLI_EDGE_DTYPE_F32;cap->state_width=(uint32_t)e->width;
     cap->vocab_size=(uint32_t)m->c.vocab;cap->max_batch_rows=1;
@@ -204,8 +219,9 @@ static int lmb_v41_embed(void *impl,const ColiEdgeEmbedRequest *r,char *err,size
         return coli_edge_adapter_error(err,size,"invalid V4.1 embed input");
     float *row=r->output;memset(row,0,e->width*4);size_t aux=lmb_v41_state_aux(c);
     row[0]=(float)aux;row[1]=(float)(e->width-aux);
+    wb_row_f32(&e->weights.embed,r->token_ids[0],row+2);
     for(int k=0;k<c->hc_mult;k++) {
-        for(int j=0;j<c->dim;j++)row[2+(size_t)k*c->dim+j]=bf16_to_f32(e->weights.embed.w[(size_t)r->token_ids[0]*c->dim+j]);
+        if(k)memcpy(row+2+(size_t)k*c->dim,row+2,(size_t)c->dim*sizeof(float));
         row[2+(size_t)c->hc_mult*c->dim+k]=k ? 0.f : 1.f;
     }
     int counts[V41_MAX_LAYERS]={0};return lmb_v41_aux_write(&e->weights,counts,row+aux,e->width-aux);

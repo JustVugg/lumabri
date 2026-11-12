@@ -8,36 +8,10 @@
 #include "src/runtime/lumabri_api_json.h"
 #include "lumabri_gguf_tokenizers_data.h"
 
-typedef struct { char *data; size_t length,capacity; int bad; } LmbGgufJson;
+#include "lumabri_gguf_json.h"
 typedef struct { const unsigned char *text; size_t length; uint32_t id,kind; } LmbGgufToken;
-typedef struct { LmbGgufJson config,tokenizer,tokenizer_config,generation_config; } LmbGgufMetadata;
+typedef struct { LmbGgufJson config,tokenizer,tokenizer_config,generation_config,dsv41_engram; } LmbGgufMetadata;
 
-static inline void lmb_gguf_json_add(LmbGgufJson *j,const void *data,size_t n) {
-    if(j->bad || n>LMB_GGUF_BUDGET-j->length){j->bad=1;return;}
-    if(j->length+n+1>j->capacity) {
-        size_t cap=(j->length+n+1)*2;
-        if(cap>LMB_GGUF_BUDGET+1)cap=LMB_GGUF_BUDGET+1;
-        char *p=realloc(j->data,cap);
-        if(!p){j->bad=1;return;}j->data=p;j->capacity=cap;
-    }
-    memcpy(j->data+j->length,data,n);j->length+=n;j->data[j->length]=0;
-}
-static inline void lmb_gguf_json_printf(LmbGgufJson *j,const char *fmt,...) {
-    char line[2048];va_list ap;va_start(ap,fmt);int n=vsnprintf(line,sizeof line,fmt,ap);va_end(ap);
-    if(n<0 || (size_t)n>=sizeof line){j->bad=1;return;}lmb_gguf_json_add(j,line,(size_t)n);
-}
-static inline void lmb_gguf_json_quote(LmbGgufJson *j,const unsigned char *p,size_t n) {
-    lmb_gguf_json_add(j,"\"",1);
-    for(size_t i=0;i<n;) {
-        unsigned k=lmb_json_utf8(p+i,n-i);
-        if(!k){j->bad=1;return;}
-        if(p[i]=='"' || p[i]=='\\') {lmb_gguf_json_add(j,"\\",1);lmb_gguf_json_add(j,p+i,1);}
-        else if(p[i]<32)lmb_gguf_json_printf(j,"\\u%04x",p[i]);
-        else lmb_gguf_json_add(j,p+i,k);
-        i+=k;
-    }
-    lmb_gguf_json_add(j,"\"",1);
-}
 static inline int lmb_gguf_strings(const LmbGgufValue *v,LmbGgufToken **out,uint32_t *count) {
     *out=NULL;*count=0;
     if(!v || v->type!=9 || v->element_type!=8 || v->count>1048576)return -1;
@@ -65,7 +39,7 @@ static inline int lmb_gguf_uint_at(const LmbGgufValue *v,uint64_t index,uint64_t
     return lmb_gguf_integer(&scalar,value);
 }
 static inline void lmb_gguf_metadata_free(LmbGgufMetadata *m) {
-    free(m->config.data);free(m->tokenizer.data);free(m->tokenizer_config.data);free(m->generation_config.data);
+    free(m->dsv41_engram.data);free(m->config.data);free(m->tokenizer.data);free(m->tokenizer_config.data);free(m->generation_config.data);
     memset(m,0,sizeof *m);
 }
 static inline int lmb_gguf_olmoe_config(const LmbGguf *g,LmbGgufJson *j) {
@@ -319,6 +293,7 @@ static inline int lmb_gguf_metadata(const LmbGguf *g,LmbGgufMetadata *out) {
         !strcmp(arch,"mistral-large4")?lmb_gguf_mistral_config(g,&out->config):
         !strcmp(arch,"kimi-k3")?lmb_gguf_kimi_config(g,&out->config):
         !strcmp(arch,"qwen4exp")?lmb_gguf_qwen38_config(g,&out->config):
+        !strcmp(arch,"deepseek41")?lmb_v41g_config(g,NULL,&out->config,&out->dsv41_engram):
         !strcmp(arch,"deepseek4")?lmb_gguf_v4_config(g,&out->config):
         !strcmp(arch,"inkling")?lmb_gguf_inkling_config(g,&out->config):
         !strcmp(arch,"glm5-next")?lmb_gguf_glm53_config(g,&out->config):
@@ -390,7 +365,7 @@ static inline int lmb_gguf_metadata(const LmbGguf *g,LmbGgufMetadata *out) {
         if(ids[i]==UINT64_MAX)lmb_gguf_json_printf(j,"null");else lmb_gguf_json_printf(j,"%llu",(unsigned long long)ids[i]);}
     lmb_gguf_json_printf(j,"}");
     free(ordered);free(tokens);free(merges);
-    if(out->config.bad || out->tokenizer.bad || out->tokenizer_config.bad || out->generation_config.bad){lmb_gguf_metadata_free(out);return -1;}
+    if(out->dsv41_engram.bad || out->config.bad || out->tokenizer.bad || out->tokenizer_config.bad || out->generation_config.bad){lmb_gguf_metadata_free(out);return -1;}
     return 0;
 fail:free(ordered);free(tokens);free(merges);lmb_gguf_metadata_free(out);return -1;
 }

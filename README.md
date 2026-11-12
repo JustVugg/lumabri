@@ -293,8 +293,9 @@ including native and packed expert containers. Qwen3.8 `qwen4exp` text GGUFs
 keep hyper-connections, DeltaNet and PLE state on their assigned segments;
 the complete assigned PLE table is loaded into engine-owned RAM before chat.
 DeepSeek V4 `deepseek4` GGUFs retain compressed-attention and hash-routing
-state on their segments, with resident embedding and output tables. Other
-GGUF architectures still require their own resident integration.
+state on their segments, with resident embedding and output tables. DeepSeek
+V4.1 `deepseek41` GGUFs additionally prepare their assigned Engram row ranges
+in RAM and preserve cross-layer attention feedback. Other GGUF architectures still require their own resident integration.
 Standalone CUDA/Vulkan support does not enable a distributed
 GPU backend; the shipped Edge/Segment adapters remain CPU-only.
 

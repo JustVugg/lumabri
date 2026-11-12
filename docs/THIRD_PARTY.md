@@ -1,5 +1,23 @@
 # Third-party build inputs
 
+## Colibri DeepSeek V4.1 GGUF integration
+
+- Source: `JustVugg/colibri`, tag `v2.1.0`, commit
+  `704a3f68184b78367a04cb5526e428dc2f90f05b`.
+- Source files: `c/deepseek_v41.c`, `c/st.h`, `c/st_gguf.h`, `c/gguf.h`,
+  `c/tools/gguf_import.py` and `c/ggml_quants.h`.
+- License: Apache-2.0; attribution: Colibri contributors. Original headers,
+  license and notices are retained in build copies and packages.
+- Lumabri adds C metadata serialization and strict GGUF/Engram inventory.
+  Tensor-name mappings and Engram metadata follow the pinned loader/importer.
+  Range hooks retain only assigned Engram rows; Edge reuses the upstream
+  row decoder. Temporary loader metadata is released after preparation;
+  the shared descriptor-based header reader fetches bounded source blocks.
+  The upstream checkout and numerical kernels are unchanged.
+- The independent test reference compiles the unmodified engine; random
+  fixtures use GGUF's reference writer and quantizers.
+
+
 ## Colibri DeepSeek V4 GGUF integration
 
 - Source: `JustVugg/colibri`, tag `v2.1.0`, commit
@@ -197,6 +215,12 @@
 - The source checkout is never modified. The generated copy is not a general
   engine fork. It is linked through the Lumabri-owned adapter into household
   binaries; Colibri's upstream adapter registry remains unchanged.
+- Native/split GGUF support reuses `c/st.h`, `c/st_gguf.h` and the upstream
+  matrix/row decoders. Generated headers release the temporary GGUF JSON
+  tree. Resident Engram preparation copies only the assigned table row span;
+  both inline FP8 rows and quantized global tables retain upstream arithmetic.
+  The planner validates exact hash metadata and the C importer emits the
+  runtime sidecar. GGUF tests compare every cut against an unmodified engine.
 
 ## Colibri Qwen3.8 GGUF resident integration
 

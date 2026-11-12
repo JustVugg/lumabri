@@ -16,7 +16,8 @@ them.
 The integrated GGUF CPU paths cover OLMoE, Qwen3 dense/MoE, Qwen3.5/3.6
 dense/MoE, Flint, Muse Spark, LFM3 text, GLM-5.2/5.3 (`glm-dsa`),
 GLM5-Next text (`glm5-next`), Kimi K3 text (`kimi-k3`), Inkling text,
-Qwen3.8 text (`qwen4exp`), DeepSeek V4 text (`deepseek4`) and Mistral Large 4 text. See
+Qwen3.8 text (`qwen4exp`), DeepSeek V4 (`deepseek4`), DeepSeek V4.1
+(`deepseek41`) and Mistral Large 4 text. See
 [Qwen architecture contracts](QWEN_ARCHITECTURES.md) and [Mistral](MISTRAL.md).
 The inspector checks the
 actual tensor names, dimensions, native quantization block geometry and
@@ -98,6 +99,19 @@ before admission. NextN generation is not enabled by this text contract.
 `make test-v4-gguf ENGINE="$COLIBRI_SOURCE" V4_GGUF_TEST_OPTIONS=--household`
 checks all cuts against unmodified monolithic execution, mixed block types,
 compressed-state snapshots, model unload and source-offline household chat.
+
+DeepSeek V4.1 preserves its separate cross-layer state contract. Native, split
+and packed GGUFs are inspected before admission. Engram metadata is generated
+in C; integer hash multipliers keep all 64 bits. Both inline FP8 tables and
+shared block-quantized tables are supported. Only the assigned layers' Engram
+row ranges are prepared in RAM. Edited hash sidecars are rejected if they no
+longer describe the GGUF metadata. Embedding and output matrices retain the
+engine's native types. This text path uses single-row RUN and history replay;
+it does not advertise snapshots, GPU, vision or DSpark.
+`make test-v41-gguf ENGINE="$COLIBRI_SOURCE" V41_GGUF_TEST_OPTIONS=--household`
+checks every cut of a six-layer checkpoint, two separate conversations and
+48 exact logit vectors per conversation against unmodified Colibri, followed
+by the normal donor approval and source-offline chat flow.
 
 `make test-glm-gguf ENGINE="$COLIBRI_SOURCE" GLM_GGUF_TEST_OPTIONS=--household`
 compares every layer cut against the pinned monolithic engine, including
