@@ -12,7 +12,7 @@
 #define OK(x) do {if((x)){fprintf(stderr,"line %d: %s\n",__LINE__,error);abort();}}while(0)
 int main(int argc,char **argv) {
     if(argc!=2)return 2;
-    char error[512]="state mismatch";OK(register_all());OK(coli_glm_edge_adapter_register());OK(coli_glm53_edge_adapter_register());OK(coli_kimi_edge_adapter_register());OK(coli_inkling_edge_adapter_register());
+    char error[512]="state mismatch";OK(register_all());OK(coli_glm_edge_adapter_register());OK(coli_glm53_edge_adapter_register());OK(coli_kimi_edge_adapter_register());OK(coli_inkling_edge_adapter_register());OK(coli_qwen38_edge_adapter_register());
     ColiEdgeEngine *edge=NULL;ColiEdgeEngineOptions eo={.struct_size=sizeof eo,.model_dir=argv[1],.memory_limit_bytes=1ull<<30};
     OK(coli_edge_engine_open(LMB_STATE_FAMILY,&eo,&edge,error,sizeof error));
     ColiEdgeCapabilities ec={.struct_size=sizeof ec};OK(coli_edge_engine_capabilities(edge,&ec,error,sizeof error));

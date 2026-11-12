@@ -143,8 +143,9 @@ macOS CI; they do not prove full-size memory or performance.
 
 The contract accepts float/BF16/F16 dense tensors and float or block-E4M3
 experts. It validates the hyper-connection boundary width, DeltaNet recurrence,
-QSA context state and the PLE table's I64 layout metadata. PLE row reads receive
-a whole-source cache allowance; this does not claim that pages are warm/pinned.
+QSA context state and the PLE table's I64 layout metadata. Assigned PLE tables
+are complete engine-owned allocations, priced at their source representation;
+row access during generation decodes RAM directly.
 FP8 experts require correctly shaped 128x128 scale sidecars, including partial
 blocks. Admission conservatively covers optional f32 expansion and coexistence
 of a compact shared scale bank with per-slot scales. Vision is not admitted.
@@ -157,6 +158,12 @@ the unquantized original. Native FP8 and expanded-f32 execution are tested
 separately. TCP split and household approval/generation/cleanup are additional
 tests, not substitutes for numerical comparison. Native macOS CI receives the
 same generated fixtures.
+
+Native/split `qwen4exp` GGUFs have a separate exact tensor contract, including
+the DeltaNet head ordering, transformed norms, PLE hash ranges and block-layout
+overhead. Unknown tensors and incomplete metadata fail admission. Model-owned
+GGUF contexts allow different formats and quantizations to remain resident
+together. The text-only GGUF contract does not enable NextN or vision.
 
 ## OLMoE merged-int8 CPU checkpoints
 

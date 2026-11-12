@@ -647,6 +647,13 @@ jobs:
         run: |
           sudo prlimit --pid $$ --memlock=134217728:134217728
           make test-inkling-gguf ENGINE=../colibri/c INKLING_GGUF_TEST_OPTIONS=--household
+      - name: Qwen3.8 GGUF PLE ownership and household chat
+        # Native Qwen3.8 has its own GGUF loader and recurrent/PLE state.
+        # Keep this gate separate from qwen36 converted checkpoints.
+        working-directory: lumabri
+        run: |
+          sudo prlimit --pid $$ --memlock=134217728:134217728
+          make test-qwen38-gguf ENGINE=../colibri/c QWEN38_GGUF_TEST_OPTIONS=--household
       - name: Qwen hybrid memory contract — real int8 and grouped int4
         working-directory: lumabri
         run: |

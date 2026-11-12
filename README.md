@@ -289,7 +289,9 @@ resident CPU adapter for recurrent and sparse attention. Kimi K3 `kimi-k3`
 GGUFs preserve attention-residual boundaries and recurrent state, with
 embeddings and routed experts prepared in RAM before chat. Inkling text GGUFs
 retain sliding/global attention and convolution state on their segments,
-including native and packed expert containers. Other GGUF
+including native and packed expert containers. Qwen3.8 `qwen4exp` text GGUFs
+keep hyper-connections, DeltaNet and PLE state on their assigned segments;
+the complete assigned PLE table is loaded into engine-owned RAM before chat. Other GGUF
 architectures still require their own resident integration.
 Standalone CUDA/Vulkan support does not enable a distributed
 GPU backend; the shipped Edge/Segment adapters remain CPU-only.

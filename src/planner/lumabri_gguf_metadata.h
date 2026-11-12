@@ -264,12 +264,32 @@ static inline int lmb_gguf_mistral_config(const LmbGguf *g,LmbGgufJson *j) {
     }
     lmb_gguf_json_printf(j,"}");return j->bad?-1:0;
 }
+static inline int lmb_gguf_qwen38_config(const LmbGguf *g,LmbGgufJson *j) {
+    LmbQ38Gguf c;if(lmb_q38g_geometry(g,&c))return -1;
+    lmb_gguf_json_printf(j,"{\"model_type\":\"qwen4_exp_text\",\"architectures\":[\"Qwen4ExpForCausalLM\"]");
+    const char *keys[]={"num_hidden_layers","hidden_size","vocab_size","max_position_embeddings","eos_token_id",
+        "hc_count","hc_lowrank","num_attention_heads","num_key_value_heads","head_dim","indexer_n_heads",
+        "indexer_kv_heads","indexer_head_dim","indexer_budget","indexer_compress_ratio","num_experts",
+        "num_experts_per_tok","moe_intermediate_size","shared_expert_intermediate_size","linear_num_key_heads",
+        "linear_num_value_heads","linear_key_head_dim","linear_value_head_dim","linear_conv_kernel_dim",
+        "ngram_size","heads_per_ngram","ple_conv_kernel_size","ple_embed_dim","split_ngram_parts"};
+    uint32_t values[]={c.layers,c.h,c.vocab,c.context,c.eos,c.hc,c.rank,c.qh,c.kv,c.hd,c.ih,1,c.id,c.budget,
+        c.ratio,c.experts,c.topk,c.inter,c.shared,c.kh,c.vh,c.kd,c.vd,c.conv,3,c.nh/2,c.pc,c.pd,1};
+    for(unsigned i=0;i<sizeof values/sizeof *values;i++)lmb_gguf_json_printf(j,",\"%s\":%u",keys[i],values[i]);
+    lmb_gguf_json_printf(j,",\"rms_norm_eps\":%.17g,\"partial_rotary_factor\":%.17g,\"rope_parameters\":{\"rope_type\":\"default\",\"rope_theta\":%.17g,\"partial_rotary_factor\":%.17g}",c.eps,(double)c.rot/c.hd,c.theta,(double)c.rot/c.hd);
+    lmb_gguf_json_printf(j,",\"ple_layer_ids\":[%u],\"layer_types\":[",c.ple+1);
+    for(uint32_t i=0;i<c.layers;i++)lmb_gguf_json_printf(j,"%s\"%s\"",i?",":"",c.full[i]?"full_attention":"linear_attention");
+    lmb_gguf_json_printf(j,"],\"norm_topk_prob\":true,\"hidden_act\":\"silu\",\"output_gate_type\":\"sigmoid\",\"attention_bias\":false,\"tie_word_embeddings\":false}");
+    return j->bad?-1:0;
+}
+
 static inline int lmb_gguf_metadata(const LmbGguf *g,LmbGgufMetadata *out) {
     memset(out,0,sizeof *out);LmbGgufToken *tokens=NULL,*merges=NULL,*ordered=NULL;
     uint32_t nt=0,nm=0;const char *arch=lmb_gguf_text(lmb_gguf_get(g,"general.architecture"));
     if(!arch || (!strcmp(arch,"olmoe")?lmb_gguf_olmoe_config(g,&out->config):
         !strcmp(arch,"mistral-large4")?lmb_gguf_mistral_config(g,&out->config):
         !strcmp(arch,"kimi-k3")?lmb_gguf_kimi_config(g,&out->config):
+        !strcmp(arch,"qwen4exp")?lmb_gguf_qwen38_config(g,&out->config):
         !strcmp(arch,"inkling")?lmb_gguf_inkling_config(g,&out->config):
         !strcmp(arch,"glm5-next")?lmb_gguf_glm53_config(g,&out->config):
         !strcmp(arch,"glm-dsa")?lmb_gguf_glm_config(g,&out->config):lmb_gguf_qwen_config(g,&out->config)))goto fail;

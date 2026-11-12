@@ -146,6 +146,7 @@ int main(int argc, char **argv) {
     ColiEdgeCapabilities ec={.struct_size=sizeof(ec)};
     REQUIRE(!coli_edge_engine_capabilities(edge,&ec,error,sizeof error));
     REQUIRE(ec.flags&COLI_EDGE_CAP_GREEDY);
+    if(getenv("LMB_ORACLE_PRINT_CAPS"))printf("numeric_class=%s\n",ec.numeric_class);
     for(int i=0;i<nf;i++) REQUIRE((uint32_t)full[i]<ec.vocab_size);
     REQUIRE(!run_oracle(argv[1],argv[2],edge,&ec,1,prompt,np,full,nf));
     REQUIRE(!run_oracle(argv[1],argv[2],edge,&ec,2,prompt,np,full,nf));
