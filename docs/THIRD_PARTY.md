@@ -1,5 +1,22 @@
 # Third-party build inputs
 
+## Colibri GGUF declarations
+
+- Source: `JustVugg/colibri`, tag `v2.1.0`, commit
+  `704a3f68184b78367a04cb5526e428dc2f90f05b`.
+- Source files: `c/ggml_quants.h` and `c/tools/gguf_import.py`.
+- License: Apache-2.0; attribution: Colibri contributors. Preserve the
+  upstream license and notices with generated sources and packaged runtimes.
+- Derived files: `planner_adapters/gguf_types.h` contains container/block
+  geometry; `src/planner/lumabri_gguf_tokenizers_data.h` contains tokenizer
+  regex declarations and BPE flags, converted to C data tables. Neither
+  includes execution kernels. Generation and drift checks live in
+  `tools/sync_gguf_types.py` and `tools/sync_gguf_tokenizers.py`.
+- Lumabri-owned integration: bounded header inventory, metadata serializer,
+  resident memory contracts and generated-copy hooks for quantized Edge
+  boundaries, header I/O and metadata lifetime. Upstream originals remain
+  unchanged; original source headers stay in generated adapter copies.
+
 ## Embedded image decoder
 
 - File: `src/vendor/stb_image.h`, unmodified v2.30 from commit

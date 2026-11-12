@@ -1988,9 +1988,9 @@ int lmb_weights_lock_status(uint64_t *bytes) {
     return bad ? -1 : 0;
 }
 
+#include "src/runtime/lumabri_weight_container.h"
 static int direct_weight_file_p(const RFile *f) {
-    size_t n = f ? strlen(f->rel) : 0;
-    return g.direct_weights && n >= 12 && !strcmp(f->rel + n - 12, ".safetensors");
+    return g.direct_weights && f && lmb_weight_container(f->rel);
 }
 
 int lmb_weights_seal(void) {

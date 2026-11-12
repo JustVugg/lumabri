@@ -531,7 +531,7 @@ static int cmd_home(void) {
             }
         } else if (key == 's') {
             HomeSettings next = s;
-            if (home_field("Folder containing your model directories", next.models, sizeof next.models, 0) ||
+            if (home_field("Model folder or GGUF file", next.models, sizeof next.models, 0) ||
                 home_field("Maximum RAM to offer, in GB", next.ram, sizeof next.ram, 0) ||
                 home_field("Conversation slots per new model (1–8; one turn runs at a time, bounded FIFO queue)",
                            next.sessions, sizeof next.sessions, 0) ||

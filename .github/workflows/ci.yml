@@ -148,6 +148,12 @@ jobs:
         run: |
           set -o pipefail
           ./build/windows-segment/test_segment_worker_windows.exe "$(cygpath -w "$PWD/build/windows-segment/segment_node.exe")" "$(cygpath -w "$PWD/build/fixture")" selftest 2>&1 | tee -a build/windows-segment-evidence.log
+      - name: Native GGUF blocks, locked memory and signed checkpoint transfer
+        run: |
+          set -o pipefail
+          python3 tests/integration/gguf_olmoe_fixture.py build/gguf-native --mixed --byte-vocab --split --layers 4
+          ./build/windows-segment/test_owned_process_windows.exe --engine "$(cygpath -w "$PWD/build/windows-segment/test_segment_windows.exe")" "$(cygpath -w "$PWD/build/gguf-native")" 2>&1 | tee -a build/windows-segment-evidence.log
+          ./build/windows-segment/test_segment_worker_windows.exe "$(cygpath -w "$PWD/build/windows-segment/segment_node.exe")" "$(cygpath -w "$PWD/build/gguf-native")" remote-selftest 2>&1 | tee -a build/windows-segment-evidence.log
       - name: Receive verified checkpoint input and run with resident weights
         run: |
           set -o pipefail
@@ -517,6 +523,14 @@ jobs:
           ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./build/test_v41_abi_san build/v41-tiny
           make household ENGINE=../colibri/c -j3
           python3 tests/integration/v41_product_test.py
+      - name: Raw GGUF catalogue, native blocks and resident split inference
+        working-directory: lumabri
+        run: |
+          make test-gguf-metadata test-gguf-catalogue test-gguf-runtime ENGINE=../colibri/c
+          python3 tests/integration/gguf_olmoe_fixture.py build/gguf-block-layout --mixed --byte-vocab --block-layout
+          python3 tests/integration/home_flow_test.py --models-dir build/gguf-block-layout/weights.gguf --resident-default --expect-gguf-block-layout
+          python3 tests/integration/gguf_olmoe_fixture.py build/gguf-home --mixed --byte-vocab --split
+          python3 tests/integration/home_flow_test.py --models-dir build/gguf-home/weights-00001-of-00002.gguf --resident-default --expect-metrics
       - uses: actions/upload-artifact@v4
         with:
           name: tiny-v41-boundary-checkpoint
@@ -1041,6 +1055,18 @@ jobs:
             make test-v41-range-existing test-v41-transport-existing test-v41-abi-existing test-v41-memory-existing ENGINE=../colibri/c CC=clang
           fi
           python3 tests/integration/v41_product_test.py
+      - name: GGUF resident catalogue and inference on native macOS
+        working-directory: lumabri
+        env:
+          OPENMP_MODE: ${{ matrix.openmp }}
+        run: |
+          if [ "$OPENMP_MODE" = disabled ]; then
+            make test-gguf-metadata test-gguf-catalogue test-gguf-runtime ENGINE=../colibri/c CC=clang OMP_FLAGS= OMP_LIBS=
+          else
+            make test-gguf-metadata test-gguf-catalogue test-gguf-runtime ENGINE=../colibri/c CC=clang
+          fi
+          python3 tests/integration/gguf_olmoe_fixture.py build/gguf-home --mixed --byte-vocab --split
+          python3 tests/integration/home_flow_test.py --models-dir build/gguf-home/weights-00001-of-00002.gguf --resident-default --expect-metrics
       - name: Request, accept, fetch weights and chat on native macOS
         working-directory: lumabri
         run: |

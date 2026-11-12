@@ -134,6 +134,7 @@ int wmain(int argc,wchar_t **wide) {
         !_putenv_s("LUMABRI_ENCRYPT","1") && !_putenv_s("LUMABRI_HOME_FOREGROUND","") && !lmb_secure_init());
     snprintf(endpoint,sizeof endpoint,"127.0.0.1:%u",(unsigned)atoi(port)+1);
     char tracker[100];WorkerFixture fixture;fixture_start(&fixture,tracker,sizeof tracker,model);
+    fixture_handshake_disconnect(&fixture,tracker);
     char path[1024];uint8_t sk[64],pk[32];assert(!lmb_peer_identity(lmb_peer_key_path(path,sizeof path),sk,pk));
     memcpy(fixture.checkpoint.key,pk,32);memcpy(fixture.checkpoint.secret,sk,64);
     assert(!coli_olmoe_edge_adapter_register() && !coli_olmoe_segment_adapter_register());

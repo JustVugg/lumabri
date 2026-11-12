@@ -49,6 +49,9 @@ typedef struct {
     uint64_t state_fixed_bytes;
     uint64_t state_token_bytes;
     uint32_t state_context_limit; /* zero: full context; otherwise a sliding ring */
+    /* Optional uniform expert slot components. The runtime sizes every slot
+     * in a range by the largest gate/up/down component in that range. */
+    uint64_t expert_slot_bytes[3];
 } LmbLayerMemory;
 
 /* How a family's weights are laid out, in the terms the estimates need. All
@@ -69,6 +72,7 @@ typedef struct {
     int disk_streaming;         /* the adapter has DEMONSTRATED disk mode */
     int sizing_verified;        /* adapter-specific arithmetic was verified */
     uint32_t execution_ops;     /* operations validated by this checkpoint inspector */
+    int hybrid_expert;          /* checkpoint encoding accepted by the expert provider */
     uint32_t memory_contract;   /* 0: historical estimate, 1: explicit layer map */
     uint32_t max_context;
     uint32_t boundary_width;    /* zero: hidden; otherwise the actual Edge/Segment state width */
@@ -166,14 +170,19 @@ static LmbRangeCost LMB_UNUSED lmb_estimate_segment(const LmbModelShape *m,
         c.resident_bytes = m->segment_fixed_bytes;
         c.state_bytes = lmb_size_add(m->session_fixed_bytes,
                                     lmb_size_mul(m->session_token_bytes, ctx));
+        uint64_t expert_slot[3] = {0};
         for (uint32_t i = begin; i < end; i++) {
             const LmbLayerMemory *l = &m->memory[i];
+            for (unsigned k=0;k<3;k++)
+                if (l->expert_slot_bytes[k]>expert_slot[k]) expert_slot[k]=l->expert_slot_bytes[k];
             uint32_t rows = l->state_context_limit && ctx > l->state_context_limit
                 ? l->state_context_limit : ctx;
             c.resident_bytes = lmb_size_add(c.resident_bytes, l->resident_bytes);
             c.state_bytes = lmb_size_add(c.state_bytes, lmb_size_add(l->state_fixed_bytes,
                 lmb_size_mul(l->state_token_bytes, rows)));
         }
+        uint64_t slot=lmb_size_add(expert_slot[0],lmb_size_add(expert_slot[1],expert_slot[2]));
+        c.resident_bytes=lmb_size_add(c.resident_bytes,lmb_size_mul(slot,(uint64_t)n*m->experts));
         c.state_bytes = lmb_size_mul(c.state_bytes, sessions ? sessions : 1);
         c.scratch_bytes = lmb_size_add(m->scratch_fixed_bytes,
             lmb_size_mul(m->scratch_token_bytes, ctx));

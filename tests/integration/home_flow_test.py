@@ -37,6 +37,10 @@ class TerminalText:
         self.text = (self.text + self.decoder.decode(data))[-200000:]
 
 
+def checkpoint_files(root):
+    return [p for p in root.rglob("*") if p.suffix in (".safetensors", ".gguf")]
+
+
 def hosted_turn_complete(text):
     # cmd_chat prints timing, transport and final newline in separate calls.
     # A metric prefix is not completion, even on a fast tiny checkpoint.
@@ -112,6 +116,8 @@ def main():
                         help="after reuse, clear weights from the donor workspace and verify an approved cold restart")
     parser.add_argument("--expect-metrics", action="store_true",
                         help="require versioned generation timings through Hosted into the TUI")
+    parser.add_argument("--expect-gguf-block-layout", action="store_true",
+                        help="GGUF fixture: one header block and one assigned-layer block per worker")
     parser.add_argument("--expect-hybrid", action="store_true",
                         help="approve a full resident coordinator and an authenticated expert accelerator")
     parser.add_argument("--expect-hybrid-fanout", action="store_true",
@@ -429,7 +435,7 @@ def main():
                 for lock in ("compute-donor.lock", "home/weights.lock"):
                     with open(tmp / name / ".lumabri" / lock, "r") as lease:
                         fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            assert not list((tmp / "chatter").rglob("*.safetensors"))
+            assert not checkpoint_files(tmp / "chatter")
             reopened = Terminal("probe-catalogue", base, "chatter")
             until(lambda: reopened.has("3 computers"))
             reopened.send("\t\x1b[B\r\x1b[B\r\t")
@@ -550,7 +556,7 @@ def main():
                 ranges.append(next(iter(executed)))
             assert ranges[0] == ranges[1] and ranges[0][0] == 0 and ranges[0][1] > 0
             for chat in chats:
-                assert not list((tmp / chat.name).rglob("*.safetensors"))
+                assert not checkpoint_files(tmp / chat.name)
             print("HOME DISJOINT PLANS: PASS (two simultaneous approved chats, independent engines and leases, closing one preserves the other)", flush=True)
             return
         reject = Terminal("reject", base)
@@ -652,6 +658,10 @@ def main():
         edge_policies = 0
         for donor in ("donor-a", "donor-b"):
             log = (tmp / donor / ".lumabri/home/engines.log").read_text(errors="replace")
+            if args.expect_gguf_block_layout:
+                fetches=re.findall(r'preparation block cache: (\d+) fetches',log)
+                expected=2 if '[segment-chat] backend policy=' in log else 1
+                assert fetches==['2']*expected, (donor,fetches,log)
             assert "[segment-node] backend policy=cpu adapter_mask=0x100" in log, \
                 f"{donor} did not enforce the approved CPU policy"
             edge_log = tmp / donor / ".lumabri/home/edge.log"
@@ -843,7 +853,7 @@ def main():
                     assert memory["swap_bytes"] in (None, 0), memory
                     assert memory["compressed_bytes"] in (None, 0), memory
             for donor in ("donor-a", "donor-b"):
-                for weight in (tmp / donor).rglob("*.safetensors"):
+                for weight in checkpoint_files(tmp / donor):
                     assert weight.stat().st_blocks == 0, f"weight payload reached disk: {weight}"
             assert not leases_released(), "second chat released the resident reservation"
             print("HOME RESIDENT PASS: second private conversation, source offline, no reload, no weight mirror writes", flush=True)
@@ -958,7 +968,7 @@ def main():
                 assert repeat.p.returncode == 0
                 until(lambda: a.has("Released") and b.has("Released"))
                 until(leases_released)
-                assert not list((tmp / "chatter-repeat").rglob("*.safetensors"))
+                assert not checkpoint_files(tmp / "chatter-repeat")
                 if cleared:
                     print("HOME STORAGE: PASS (TUI cleanup, renewed approval, weight refetch, real generation, released leases)", flush=True)
                 else:
@@ -970,7 +980,7 @@ def main():
         if args.kill_donor:
             until(no_owned_processes, message="a donor engine survived its terminated TUI")
         for name in ("chatter", "reject"):
-            assert not list((tmp / name).rglob("*.safetensors")), "thin client downloaded weights"
+            assert not checkpoint_files(tmp / name), "thin client downloaded weights"
             assert not list((tmp / name).rglob("vroot")), "thin client mounted a checkpoint"
         for donor in ([survivor] if args.kill_donor else [a, b]):
             donor.text = ""

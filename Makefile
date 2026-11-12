@@ -152,7 +152,7 @@ HOME_NET_DEPS = lumabri_home_net.h lumabri_home_discovery.h lumabri_platform.h l
 REQUESTER_SHARED_DEPS = src/planner/lumabri_catalogue_data.h src/planner/lumabri_calibration_key.h \
  src/planner/lumabri_portfolio_snapshot.h src/runtime/lumabri_joint_review.h \
  src/runtime/lumabri_home_request_plan.h src/runtime/lumabri_home_session.h \
- src/runtime/lumabri_source_inspect.h src/runtime/lumabri_source_file.h \
+ src/runtime/lumabri_source_inspect.h src/runtime/lumabri_source_file.h src/runtime/lumabri_weight_container.h \
  src/runtime/lumabri_calibration_codec.h src/runtime/lumabri_resident_plan_codec.h
 lumabri test_chat_ui test_host_session_pool test_host_drain test-home-monitor: $(REQUESTER_SHARED_DEPS)
 test_calibration test_content_filter test_planner_io: src/runtime/lumabri_source_file.h src/runtime/lumabri_calibration_codec.h
@@ -562,7 +562,7 @@ maintainer: maintainer.c src/runtime/lumabri_source_file.h src/runtime/lumabri_s
 
 # The shim interposes libc symbols, so it must not itself be interposable
 # state: -fPIC shared object, resolved via RTLD_NEXT at load time.
-$(SHIM_LIB): lumashim.c $(PROTO_DEPS) lumabri_sha.h $(SIGN_DEPS) $(SECURE_DEPS)
+$(SHIM_LIB): lumashim.c src/runtime/lumabri_weight_container.h $(PROTO_DEPS) lumabri_sha.h $(SIGN_DEPS) $(SECURE_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread lumashim.c -o $@ $(SHIM_FLAGS)
 
 test_shim: tests/c/test_shim.c lumabri_content.h
@@ -944,7 +944,7 @@ SEGMENT_COMMON = segment_colibri.h src/runtime/lumabri_thread_capacity.h src/run
 		lumabri_segment_discovery.c lumabri_segment_discovery.h \
 		$(PROTO_DEPS) $(SIGN_DEPS) lumabri_sha.h $(SECURE_DEPS)
 
-HYBRID_PATCH_INPUTS = tools/prepare_resident_adapters.py engine_patches/make_patches.py \
+HYBRID_PATCH_INPUTS = tools/prepare_gguf_adapters.py tools/prepare_resident_adapters.py engine_patches/make_patches.py \
 	engine_patches/qwen38_vision_edge.h src/runtime/lumabri_vision.h src/runtime/lumabri_image.h \
 	src/runtime/lumabri_engine_memory_override.h src/runtime/lumabri_engine_memory.h \
 	lumabri_home_hybrid.h src/runtime/lumabri_hybrid_policy.h src/runtime/lumabri_q8_reference.h \
@@ -1346,3 +1346,40 @@ lumabri test_chat_ui test_host_session_pool test_host_drain test-home-monitor te
 # Build-time metadata is committed; installed catalogues require no Python.
 CAPABILITY_DEPS = src/planner/lumabri_capabilities.h src/planner/lumabri_colibri_capabilities_data.h
 lumabri segment_budget_probe segment_node segment_chat test_model_family test_planner test_planner_io test_chat_ui test_cluster test_memory_budget test_calibration: $(CAPABILITY_DEPS)
+
+# Read header metadata through the same positioned I/O used by the planner.
+GGUF_METADATA_DEPS = src/planner/lumabri_gguf_metadata.h src/planner/lumabri_gguf_tokenizers_data.h src/planner/lumabri_gguf_import.h
+lumabri test_chat_ui: $(GGUF_METADATA_DEPS)
+build/test_gguf_inventory: tests/c/test_gguf_inventory.c lumabri_planner.h $(wildcard planner_adapters/*.h) $(CAPABILITY_DEPS) $(GGUF_METADATA_DEPS)
+	@mkdir -p build
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< -o $@
+.PHONY: test-gguf-inventory
+test-gguf-inventory: build/test_gguf_inventory
+	$(PYTHON) tests/integration/gguf_inventory_test.py
+
+.PHONY: test-gguf-metadata test-gguf-catalogue test-gguf-runtime
+test-gguf-metadata: build/test_gguf_inventory
+	$(PYTHON) tools/sync_gguf_types.py --engine $(ENGINE) --check
+	$(PYTHON) tools/sync_gguf_tokenizers.py --engine $(ENGINE) --check
+	$(PYTHON) tests/integration/gguf_inventory_test.py
+	$(PYTHON) tests/integration/gguf_memory_test.py
+	$(PYTHON) tests/integration/gguf_metadata_test.py $(ENGINE)
+
+test-gguf-catalogue: lumabri
+	$(PYTHON) tests/integration/gguf_catalogue_test.py
+
+build/gguf-upstream-oracle: tests/c/olmoe_upstream_oracle.c build/segment-sources build/segment-options
+	@mkdir -p build
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(OMP_FLAGS) -pthread -I$(ENGINE) $< -o $@ -lm $(OMP_LIBS)
+
+# GNU ld wrapping verifies even accidental new read paths. Other platforms
+# exercise the same source-offline household test through their native shim.
+GGUF_READ_GUARD =
+ifeq ($(shell uname -s),Linux)
+GGUF_READ_GUARD = -DLMB_ORACLE_GUARD_READS -Wl,--wrap=pread,--wrap=read,--wrap=fread
+endif
+build/gguf-segment-oracle: tests/c/edge_segment_greedy.c $(COLIBRI_SEGMENT_LIB) build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(OMP_FLAGS) -pthread -I$(ENGINE) $(GGUF_READ_GUARD) $< $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
+
+test-gguf-runtime: build/gguf-upstream-oracle build/gguf-segment-oracle
+	$(PYTHON) tests/integration/gguf_runtime_test.py --upstream build/gguf-upstream-oracle --segment build/gguf-segment-oracle
