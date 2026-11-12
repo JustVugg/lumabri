@@ -77,6 +77,8 @@ int main(int argc,char **argv) {
         if(coli_kimi_segment_adapter_register() || coli_kimi_edge_adapter_register())return 2;
     } else if(!strcmp(LMB_MIXED_FAMILY,"inkling")) {
         if(coli_inkling_segment_adapter_register() || coli_inkling_edge_adapter_register())return 2;
+    } else if(!strcmp(LMB_MIXED_FAMILY,"deepseek_v4")) {
+        if(coli_deepseek_v4_segment_adapter_register() || coli_deepseek_v4_edge_adapter_register())return 2;
     } else if(!strcmp(LMB_MIXED_FAMILY,"qwen38")) {
         if(coli_qwen38_segment_adapter_register() || coli_qwen38_edge_adapter_register())return 2;
     } else if(coli_qwen36_segment_adapter_register() || coli_qwen36_edge_adapter_register())return 2;

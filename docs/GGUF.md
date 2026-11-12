@@ -16,7 +16,7 @@ them.
 The integrated GGUF CPU paths cover OLMoE, Qwen3 dense/MoE, Qwen3.5/3.6
 dense/MoE, Flint, Muse Spark, LFM3 text, GLM-5.2/5.3 (`glm-dsa`),
 GLM5-Next text (`glm5-next`), Kimi K3 text (`kimi-k3`), Inkling text,
-Qwen3.8 text (`qwen4exp`) and Mistral Large 4 text. See
+Qwen3.8 text (`qwen4exp`), DeepSeek V4 text (`deepseek4`) and Mistral Large 4 text. See
 [Qwen architecture contracts](QWEN_ARCHITECTURES.md) and [Mistral](MISTRAL.md).
 The inspector checks the
 actual tensor names, dimensions, native quantization block geometry and
@@ -85,6 +85,19 @@ enable NextN, vision projectors or packed-expert GGUF containers.
 `make test-qwen38-gguf ENGINE="$COLIBRI_SOURCE" QWEN38_GGUF_TEST_OPTIONS=--household`
 checks all layer cuts against the pinned monolithic engine, mixed formats,
 snapshot continuation, model unload and source-offline household chat.
+
+DeepSeek V4 accepts native, split and `expert-packed-v1` text GGUFs. The
+inspector checks hyper-connections, compressed attention, the indexer and
+hash routing. Expert slots are budgeted at the largest record size across
+the checkpoint, matching the pinned engine. Edge owns complete embedding
+and output tables; no head or embedding row is fetched during inference.
+The resident CPU contract requires block-quantized routed experts. Router
+and index-head projections must be floating tensors because the current
+upstream kernels consume BF16 values there. These constraints are checked
+before admission. NextN generation is not enabled by this text contract.
+`make test-v4-gguf ENGINE="$COLIBRI_SOURCE" V4_GGUF_TEST_OPTIONS=--household`
+checks all cuts against unmodified monolithic execution, mixed block types,
+compressed-state snapshots, model unload and source-offline household chat.
 
 `make test-glm-gguf ENGINE="$COLIBRI_SOURCE" GLM_GGUF_TEST_OPTIONS=--household`
 compares every layer cut against the pinned monolithic engine, including

@@ -654,6 +654,11 @@ jobs:
         run: |
           sudo prlimit --pid $$ --memlock=134217728:134217728
           make test-qwen38-gguf ENGINE=../colibri/c QWEN38_GGUF_TEST_OPTIONS=--household
+      - name: DeepSeek V4 GGUF compressed state and household chat
+        working-directory: lumabri
+        run: |
+          sudo prlimit --pid $$ --memlock=134217728:134217728
+          make test-v4-gguf ENGINE=../colibri/c V4_GGUF_TEST_OPTIONS=--household
       - name: Qwen hybrid memory contract — real int8 and grouped int4
         working-directory: lumabri
         run: |

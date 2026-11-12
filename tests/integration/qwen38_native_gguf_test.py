@@ -16,7 +16,9 @@ def gguf_bytes(metadata,tensors):
     import gguf
     import numpy as np
     with tempfile.TemporaryDirectory(prefix='lmb-q38-writer-') as tmp:
-        path=Path(tmp)/'weights.gguf';writer=gguf.GGUFWriter(path,'qwen4exp')
+        path=Path(tmp)/'weights.gguf'
+        arch=next(value for key,_,value in metadata if key=='general.architecture')
+        writer=gguf.GGUFWriter(path,arch)
         for key,kind,value in metadata:
             if key=='general.architecture':continue
             if kind==9:
