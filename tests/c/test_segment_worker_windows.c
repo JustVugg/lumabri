@@ -87,8 +87,16 @@ int wmain(int argc,wchar_t **wide) {
     uint8_t request[LMB_NODE_CONTROL_REQUEST_BYTES],reply[LMB_NODE_CONTROL_REPLY_BYTES];
     LmbNodeControl current;
     lmb_node_control_request(request,LMB_NODE_CONTROL_QUERY,NULL);
-    assert(!lmb_node_control_local(&control[0],request,reply));
-    assert(!lmb_node_control_decode(reply,sizeof reply,&current));
+    /* The worker answers BUSY, with no snapshot, while its first heartbeat
+     * holds the session lock; that is a valid reply, so ask again. */
+    int queried=LMB_NODE_CONTROL_BUSY;
+    for (ULONGLONG until=GetTickCount64()+5000;;) {
+        assert(!lmb_node_control_local(&control[0],request,reply));
+        queried=lmb_node_control_decode(reply,sizeof reply,&current);
+        if (queried!=LMB_NODE_CONTROL_BUSY || GetTickCount64()>=until) break;
+        Sleep(20);
+    }
+    assert(!queried);
     assert(current.revision==1 && !current.sessions && !current.draining);
     printf("READY %d %lu\n",port,(unsigned long)GetProcessId(child.process));fflush(stdout);
     if (selftest) {fixture_chat(&fixture,model,0);fixture_chat(&fixture,model,0);}
