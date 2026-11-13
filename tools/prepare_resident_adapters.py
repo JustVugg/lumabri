@@ -276,3 +276,6 @@ if __name__ == "__main__":
     prepare_kimi(root)
     from prepare_inkling_gguf import prepare as prepare_inkling
     prepare_inkling(root)
+
+    from prepare_qwen38_gguf import prepare as prepare_qwen38
+    prepare_qwen38(root)

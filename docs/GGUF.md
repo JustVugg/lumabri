@@ -15,7 +15,8 @@ them.
 
 The integrated GGUF CPU paths cover OLMoE, Qwen3 dense/MoE, Qwen3.5/3.6
 dense/MoE, Flint, Muse Spark, LFM3 text, GLM-5.2/5.3 (`glm-dsa`),
-GLM5-Next text (`glm5-next`), Kimi K3 text (`kimi-k3`), Inkling text and Mistral Large 4 text. See
+GLM5-Next text (`glm5-next`), Kimi K3 text (`kimi-k3`), Inkling text,
+Qwen3.8 text (`qwen4exp`) and Mistral Large 4 text. See
 [Qwen architecture contracts](QWEN_ARCHITECTURES.md) and [Mistral](MISTRAL.md).
 The inspector checks the
 actual tensor names, dimensions, native quantization block geometry and
@@ -72,6 +73,18 @@ checks every cut against monolithic execution, snapshots across the sliding
 window, interleaved conversations and models, and the normal approval/chat
 flow with the source offline. This contract requires at least one shared
 expert and does not enable audio or dense-quantization sidecars.
+
+Qwen3.8 accepts native and split `qwen4exp` GGUFs with mixed native matrix
+types. The inspector validates hyper-connections, QSA/indexer geometry,
+DeltaNet state and the PLE hash ranges. The segment that owns the PLE layer
+loads its complete table into engine-owned RAM; the same ownership applies
+to Safetensors PLE tables. Metadata and GGUF arithmetic flags belong to each
+model, so opening a second model cannot change the first model's computation.
+This text contract uses one PLE layer and one indexer KV head, and does not
+enable NextN, vision projectors or packed-expert GGUF containers.
+`make test-qwen38-gguf ENGINE="$COLIBRI_SOURCE" QWEN38_GGUF_TEST_OPTIONS=--household`
+checks all layer cuts against the pinned monolithic engine, mixed formats,
+snapshot continuation, model unload and source-offline household chat.
 
 `make test-glm-gguf ENGINE="$COLIBRI_SOURCE" GLM_GGUF_TEST_OPTIONS=--household`
 compares every layer cut against the pinned monolithic engine, including

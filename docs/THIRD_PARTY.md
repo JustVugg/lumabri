@@ -180,3 +180,22 @@
 - The source checkout is never modified. The generated copy is not a general
   engine fork. It is linked through the Lumabri-owned adapter into household
   binaries; Colibri's upstream adapter registry remains unchanged.
+
+## Colibri Qwen3.8 GGUF resident integration
+
+- Source: `JustVugg/colibri`, tag `v2.1.0`, commit
+  `704a3f68184b78367a04cb5526e428dc2f90f05b`.
+- Upstream files: `c/qwen38.c`, `c/qwen38_core.h`, `c/gguf.h`,
+  `c/tools/gguf_import.py` and the public Edge/Segment ABI.
+- License: Apache-2.0. Preserve the upstream copyright, license and notices
+  in generated copies and distributions. Attribution: Colibri contributors.
+- `tools/prepare_qwen38_gguf.py` modifies disposable build copies: GGUF
+  contexts and numeric-mode flags move into the model; Edge and Segment
+  open native sources and price expert slots; complete GGUF/Safetensors PLE
+  tables become owned resident buffers; engine teardown releases tables,
+  hit counters and metadata. Quantized preparation temporaries are freed.
+  Numerical kernels remain Colibri's. The upstream checkout is unchanged.
+- Lumabri's planner validates metadata, tensors, hash ranges and runtime
+  representation. The C importer emits runtime metadata without Python.
+  Test fixtures use the installed `gguf` writer/quantizers and compare
+  through the public ABI with the unmodified pinned monolithic forward pass.
