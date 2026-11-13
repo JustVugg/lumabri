@@ -651,7 +651,7 @@ test check-warnings: test_socket_transport test_secure_transport
 # tracker and runs the protocol over the encrypted transport.
 PAIRING_DEPS = src/crypto/lumabri_elligator2.h src/crypto/lumabri_cpace.h src/protocol/lumabri_pairing_wire.h src/runtime/lumabri_pairing_registry.h
 tracker tracker_tsan test_tracker_history test_pairing_tracker: $(PAIRING_DEPS) src/runtime/lumabri_pairing_tracker.h
-lumabri test_chat_ui test_host_session_pool test_host_drain test-home-monitor test_pairing_tracker: $(PAIRING_DEPS) src/runtime/lumabri_pairing_client.h src/ui/lumabri_pairing_ui.h
+lumabri test_chat_ui test_host_session_pool test_host_drain test-home-monitor test_pairing_tracker: $(PAIRING_DEPS) src/runtime/lumabri_pairing_client.h src/ui/lumabri_pairing_ui.h src/runtime/lumabri_pairing_http.h
 
 test_pairing: tests/c/test_pairing.c $(PAIRING_DEPS) lumabri_crypto.h $(SIGN_DEPS) $(PROTO_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Wno-unused-function -pthread $< -o $@

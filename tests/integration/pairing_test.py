@@ -32,7 +32,7 @@ REFILL = 2.3   # seconds: a little more than the tracker's refill interval per s
 
 
 def free_base():
-    for base in range(40000, 46000, 16):
+    for base in range(36000, 37600, 16):
         probes = []
         try:
             for offset in range(16):
@@ -166,9 +166,9 @@ def main():
                 time.sleep(REFILL)
             return run(environment(name), "join", "--code", code, *where, seconds=40)
 
-        def probe(name, token):
+        def probe(name, token, where=None):
             env = environment(name, LUMABRI_ENCRYPT="1", LUMABRI_TOKEN=token)
-            return subprocess.run([str(ROOT / "swarm_probe"), "--tracker", address], env=env, text=True,
+            return subprocess.run([str(ROOT / "swarm_probe"), "--tracker", where or address], env=env, text=True,
                                   stdin=subprocess.DEVNULL, capture_output=True, timeout=20).returncode
 
         owner = environment("owner", LUMABRI_ADVERTISE="127.0.0.1")
@@ -201,16 +201,19 @@ def main():
             # No address: the household started by `lumabri start` answers discovery.
             joined = join("first", pairing.shown.lower())
             assert joined.returncode == 0, (joined.stdout, joined.stderr)
-            assert f"Joined the household at {address}" in joined.stdout and key not in joined.stdout + joined.stderr
-            pairing.wait_for("A computer joined from 127.0.0.1")
+            # Discovery reports the address the reply came from: loopback or this machine's LAN address.
+            found = re.search(r"Joined the household at (\S+:%d)\.\n" % base, joined.stdout)
+            assert found and key not in joined.stdout + joined.stderr, (joined.stdout, joined.stderr)
+            found = found.group(1)
+            pairing.wait_for("A computer joined from ")
             assert pairing.finish() == 0
             member = settings("first")
-            assert member["tracker"] == address and member["token"] == key and member["owner"] == "0"
+            assert member["tracker"] == found and member["token"] == key and member["owner"] == "0"
             assert stat.S_IMODE((root / "first/.lumabri/home.conf").stat().st_mode) == 0o600
-            assert (root / "first/known").read_text() == f"{address} {identity}\n"
+            assert (root / "first/known").read_text() == f"{found} {identity}\n"
             # The saved settings authenticate to the tracker; another key does not.
-            assert probe("first", member["token"]) == 0
-            assert probe("first", "0" * 32) != 0
+            assert probe("first", member["token"], found) == 0
+            assert probe("first", "0" * 32, found) != 0
             # The product path on the joined computer: it shares with that household.
             with socket.socket() as reservation:
                 reservation.bind(("127.0.0.1", 0)); second_page = reservation.getsockname()[1]
