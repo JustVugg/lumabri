@@ -239,6 +239,16 @@ static int cmd_start(int argc, char **argv) {
         /* Exactly the TUI /create path: it makes the key and saves the
          * settings on first use, and adopts our own live tracker afterwards. */
         int fresh=!s.tracker[0]; pid_t unused=0;
+        /* The built-in 4 GB share is smaller than any model worth a first
+         * chat. A household created here starts by offering about 60% of
+         * this computer's memory; the donor still caps every reservation at
+         * what is free minus its reserve, and Settings changes the figure. */
+        if (fresh && !strcmp(s.ram,"4")) {
+            LmbMachineProfile machine;
+            (void)lmb_machine_probe(&machine,".",NULL);
+            uint64_t share=machine.ram_total_bytes/UINT64_C(1000000000)*6/10;
+            if (share>4 && share<=1048576) snprintf(s.ram,sizeof s.ram,"%llu",(unsigned long long)share);
+        }
         if (home_tracker_resume(&s,&unused,notice,sizeof notice)) {
             fprintf(stderr,"%s\n",notice[0] ? notice : "The household could not be started."); return 1;
         }

@@ -221,6 +221,8 @@
       const answer = await request("/api/v1/downloads", "POST", {action, id: model.id});
       if (credential !== token) return;
       if (action === "cancel") { note = "Download cancelled. What was downloaded has been removed."; finished = ""; }
+      // A small model can be complete before the reply to "start" arrives.
+      if (action === "start" && answer.models.some(item => item.id === model.id && item.state === "present")) finished = model.id;
       pending = false; accept(answer);
     } catch (error) {
       if (credential === token) { pending = false; note = error.message; render(); }
