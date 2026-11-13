@@ -214,8 +214,10 @@ static int home_tracker_resume(HomeSettings *s, pid_t *child, char *notice, size
     return 0;
 }
 
-/* A hint only becomes an endpoint after an explicit visual identity check.
- * Manual joining stays available when broadcast is filtered by the router. */
+/* A hint only becomes an endpoint after it is authenticated: by the owner's
+ * pairing code, or by an explicit visual identity check before the household
+ * key is typed (home_identity_confirmed). Manual joining stays available when
+ * broadcast is filtered by the router. */
 static int home_pick_household(HomeSettings *s, uint8_t expected[32]) {
     HomeTerminal term; home_terminal_begin(&term);
     ui_begin("find your household");
@@ -251,12 +253,18 @@ static int home_pick_household(HomeSettings *s, uint8_t expected[32]) {
     }
     home_terminal_end(&term);
     if (selected == count) return 0;
-    char hex[65], answer[16] = ""; lmb_hex(hex, found[selected].identity, 32);
-    printf("\nOn the host, open /create to view its identity. It must match: %.16s\n", hex);
-    if (home_field("Type yes only if the identity matches your host", answer, sizeof answer, 0) || strcmp(answer, "yes")) return -1;
     snprintf(s->tracker, sizeof s->tracker, "%s", found[selected].address);
     memcpy(expected, found[selected].identity, 32);
     return 1;
+}
+
+/* Joining with the full household key sends that key to the chosen computer,
+ * so its identity is compared by eye first. A pairing code needs no such
+ * step: the exchange itself fails against any other computer. */
+static int home_identity_confirmed(const uint8_t expected[32]) {
+    char hex[65], answer[16] = ""; lmb_hex(hex, expected, 32);
+    printf("\nOn the host, open /create to view its identity. It must match: %.16s\n", hex);
+    return !home_field("Type yes only if the identity matches your host", answer, sizeof answer, 0) && !strcmp(answer, "yes");
 }
 
 static void home_network_setup(char *notice, size_t cap) {
@@ -419,6 +427,8 @@ static void home_storage_screen(void) {
     home_terminal_end(&term);
 }
 
+#include "src/ui/lumabri_pairing_ui.h"
+
 static int cmd_home(void) {
     if (!isatty(0) || home_private_network()) return 1;
     HomeSettings s; home_settings_load(&s);
@@ -436,7 +446,7 @@ static int cmd_home(void) {
         while (!g_stopping) {
             ui_begin("your workspace");
             int top = 5;
-            int menu_count = actions ? 7 : 5;
+            int menu_count = actions ? 8 : 5;
             if (ui_h >= menu_count * 3 + 20 && ui_w >= 64) {
                 for (int r = 0; r < 6; r++) ui_text(top + r, 5, r < 3 ? UI_ACCENT : UI_SAND, WORDMARK[r]);
                 ui_text(top + 7, 5, UI_MUTED, "tiny engine, immense swarm");
@@ -450,10 +460,11 @@ static int cmd_home(void) {
             static const char *titles[] = {"Start a conversation", "Explore models", "Your computers", "Share resources", "Resident models"};
             static const char *help[] = {"Choose a model and ask your selected donors.", "Memory needs, plans and measured speed.",
                 "See resources. Choose who participates.", "Review a request before anything is loaded.", "Verify, chat with or release approved resident plans."};
-            static const char *commands[] = {"/create", "/join", "/settings", "/quit", "/network", "/storage", "/service"};
-            static const char *command_help[] = {"Create or show this household", "Find your household on the LAN and pair with its key",
+            static const char *commands[] = {"/create", "/join", "/settings", "/quit", "/network", "/storage", "/service", "/pair"};
+            static const char *command_help[] = {"Create or show this household", "Find your household on the LAN; join with a short code or its key",
                 "Model folder and maximum RAM to share", "Close this interface; background services keep running", "Set up trusted LAN access once (Windows/WSL)",
-                "Inspect and clear unused household weight caches", "View service status or explicitly stop all local resources"};
+                "Inspect and clear unused household weight caches", "View service status or explicitly stop all local resources",
+                "Add a computer: show a short one-time code for it to join"};
             ui_text(top, 5, UI_TEXT, actions ? "Workspace actions" : "What would you like to do?");
             int menu_rows = (ui_h - top - 6) / 3; if (menu_rows < 1) menu_rows = 1;
             int menu_first = selected >= menu_rows ? selected - menu_rows + 1 : 0;
@@ -473,11 +484,11 @@ static int cmd_home(void) {
             if (key == 3 || (key == 27 && !actions)) break;
             if (key == 27) { actions = 0; selected = 0; }
             if (key == '/') { actions = !actions; selected = 0; }
-            int choices = actions ? 7 : 5;
+            int choices = actions ? 8 : 5;
             if (key == 1001) selected = (selected + choices - 1) % choices;
             if (key == 1002) selected = (selected + 1) % choices;
             if ((key == '\r' || key == '\n') && ui_h >= 28 && ui_w >= 60) {
-                key = actions ? "njsqfkv"[selected] : selected == 0 && have_resident ? 'r' : "ccpdl"[selected];
+                key = actions ? "njsqfkva"[selected] : selected == 0 && have_resident ? 'r' : "ccpdl"[selected];
                 actions = 0; selected = 0; break;
             }
             (void)poll(NULL, 0, 100);
@@ -495,6 +506,15 @@ static int cmd_home(void) {
             home_storage_screen();
         } else if (key == 'f') {
             home_network_setup(notice, sizeof notice);
+        } else if (key == 'a') {
+            if (!s.owner || !s.token[0] || !s.tracker[0]) {
+                snprintf(notice, sizeof notice, "%s", s.tracker[0] ?
+                    "Only the computer that created this household can add computers." :
+                    "Create a household first with /create."); continue;
+            }
+            if (tracker_child <= 0 && home_tracker_resume(&s, &tracker_child, notice, sizeof notice)) continue;
+            notice[0] = 0;
+            home_pair_screen(&s, notice, sizeof notice);
         } else if (key == 'j') {
             HomeServiceSnapshot running;
             if (tracker_child > 0 || !home_service_query("tracker", HOME_SVC_STATUS, NULL, &running) ||
@@ -505,9 +525,25 @@ static int cmd_home(void) {
             HomeSettings next = s;
             uint8_t expected[32]; int discovered = home_pick_household(&next, expected);
             if (discovered < 0) continue;
+            char code[64] = "";
             if ((!discovered && home_field("Household LAN address (IP:port)", next.tracker, sizeof next.tracker, 0)) ||
+                !next.tracker[0] ||
+                home_field("Pairing code shown on the owner's computer (Enter alone: use the full household key)",
+                           code, sizeof code, 0)) continue;
+            if (code[0]) {
+                char reason[400] = "";
+                int failed = home_join_with_code(&s, &next, code, discovered ? expected : NULL, reason, sizeof reason);
+                lmb_cpace_wipe(code, sizeof code);
+                if (failed) home_error_dialog("Could not join the household", reason);
+                else {
+                    s = next;
+                    snprintf(notice, sizeof notice, "Connected. Open Your computers; helpers must keep Share resources active.");
+                }
+                continue;
+            }
+            if ((discovered && !home_identity_confirmed(expected)) ||
                 home_field("Household key from its owner", next.token, sizeof next.token, 1) ||
-                !next.tracker[0] || !next.token[0]) continue;
+                !next.token[0]) continue;
             char normalized[256];
             if (tracker_addr_set(normalized, sizeof normalized, next.tracker)) continue;
             snprintf(next.tracker, sizeof next.tracker, "%s", normalized);
@@ -558,7 +594,8 @@ static int cmd_home(void) {
             if (tracker_child <= 0 && home_tracker_resume(&s, &tracker_child, notice, sizeof notice)) continue;
             char identity[65]; lmb_hex(identity, g_sec_pk, 32);
             printf("\nOn your other computers choose Join a household.\n\nAddress: %s\nHousehold key: %s\n\n"
-                   "Host identity: %.16s\nThe household service runs independently of this window. Only share the key with your household.\nPress Enter to continue.\n", s.tracker, s.token, identity);
+                   "Host identity: %.16s\nThe household service runs independently of this window. Only share the key with your household.\n"
+                   "Easier: /pair shows a short one-time code that adds one computer without typing this key.\nPress Enter to continue.\n", s.tracker, s.token, identity);
             char line[16]; if (!fgets(line, sizeof line, stdin)) break;
         } else if (key == 'c' || key == 'p' || key == 'd' || key == 'r' || key == 'l') {
             if (!s.tracker[0] || !s.token[0]) { snprintf(notice, sizeof notice, "Create or join a household first."); continue; }
