@@ -582,8 +582,8 @@ static void draw_workspace(const LmbTuiState *st, int tab, int sel, int detail,
         ui_text(9, 5, UI_SAND, m->name);
         ui_printf(11, 5, UI_MUTED, "%s · %u layers · %u context · %u session(s)",
                   m->shape.model_type, m->shape.layers, st->context, st->sessions);
-        ui_printf(12, 5, UI_MUTED, "Support: %s · format: %s · verification: not recorded",
-            lmb_catalogue_support_state(m), lmb_weight_format_name(m->weight_formats));
+        ui_printf(12, 5, UI_MUTED, "Support: %s (%s) · format: %s · verification: not recorded",
+            lmb_catalogue_support_state(m), lmb_catalogue_tier(m), lmb_weight_format_name(m->weight_formats));
         ui_printf(13, 5, UI_TEXT, "Plan: %s%s    Speed: %s", state_word(m), m->plan.hybrid ? " (Hybrid)" : "", speed);
         if (m->stage_cost_placement)
             ui_text(14, 5, UI_MUTED, "Placement guided by previous stage timings; changed ranges need calibration.");

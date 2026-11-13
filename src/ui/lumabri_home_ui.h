@@ -439,7 +439,7 @@ static int cmd_home(void) {
             int menu_count = actions ? 7 : 5;
             if (ui_h >= menu_count * 3 + 20 && ui_w >= 64) {
                 for (int r = 0; r < 6; r++) ui_text(top + r, 5, r < 3 ? UI_ACCENT : UI_SAND, WORDMARK[r]);
-                ui_text(top + 7, 5, UI_MUTED, "tiny engine, immense swarm");
+                ui_text(top + 7, 5, UI_MUTED, "many computers, one model");
                 if (ui_w >= 100) {
                     ui_text(top + 1, 67, UI_TEXT, "Your computers.");
                     ui_text(top + 2, 67, UI_TEXT, "One shared possibility.");

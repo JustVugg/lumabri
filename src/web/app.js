@@ -644,7 +644,7 @@ $("prepare-catalogue").onclick = () => preparationTask(async valid => {
   preparationInvalidate(); $("prepare-models").replaceChildren(); $("prepare-nodes").replaceChildren();
   preparationNames = new Map(workspace.nodes.map(node => [node.id, `${node.name} (${node.id.slice(0, 8)})`]));
   for (const model of catalogue.models) preparationCheck($("prepare-models"), model.name,
-    `${model.name} · ${model.adapter || "recognized architecture"} · ${gib(model.checkpoint_bytes)}${model.source_ready ? "" : ` · ${model.support_reason || "source unavailable"}`}`, model.source_ready);
+    `${model.name} · ${model.adapter || "recognized architecture"} · ${gib(model.checkpoint_bytes)}${model.tier === "experimental" ? " · experimental" : ""}${model.source_ready ? "" : ` · ${model.support_reason || "source unavailable"}`}`, model.source_ready);
   for (const node of workspace.nodes) preparationCheck($("prepare-nodes"), node.id, `${preparationNames.get(node.id)} · ${gib(node.ram_offered_bytes)} offered`);
   $("prepare-form").hidden = false; $("prepare-status").textContent = "Nothing is selected automatically. Preview does not reserve memory.";
 });
