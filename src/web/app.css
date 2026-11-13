@@ -266,6 +266,28 @@ main:has(#chat:not([hidden]) #empty:not([hidden])) #composer-area { margin-botto
 }
 @keyframes blink { 50% { opacity: .15; } }
 
+/* ---- approval of a load on this computer ---- */
+.approval { flex: none; width: calc(100% - 48px); max-width: 772px; margin: 14px auto 0; max-height: 72dvh; overflow-y: auto; scrollbar-width: thin; }
+.approval-card { padding: 20px 22px; border: 1px solid var(--line); border-radius: 18px; background: var(--panel); box-shadow: var(--shadow-soft); }
+.approval-card .lc-k { margin-bottom: 10px; }
+.approval-card h2 { font: 500 20px/1.3 var(--display); color: var(--ink); margin: 0 0 6px; overflow-wrap: anywhere; }
+.approval-card p { margin: 0; font-size: 13.5px; line-height: 1.6; }
+.approval-card dl { display: grid; grid-template-columns: minmax(96px, auto) minmax(0, 1fr); gap: 6px 18px; margin: 14px 0 0; font-size: 13px; line-height: 1.6; }
+.approval-card dl:empty { display: none; }
+.approval-card dt { color: var(--muted); }
+.approval-card dd { margin: 0; color: var(--ink); overflow-wrap: anywhere; }
+.approval-card dd.mono { font-family: var(--mono); font-size: 12px; }
+.approval-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 16px; }
+.approval-actions:not(:has(button:not([hidden]))) { display: none; }
+#approval-decline { padding: 12px 22px; min-height: 46px; font-size: 14px; font-weight: 500; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 100px; }
+#approval-decline:hover:not(:disabled) { background: var(--soft); }
+.approval-actions .text-button { border-color: var(--line); }
+.approval-card .fine-print { margin-top: 12px; font-size: 12px; }
+.approval-card .fine-print:empty, #approval-status:empty { display: none; }
+#approval-status { margin-top: 10px; color: var(--text); }
+.approval.settled .lc-k::before { animation: none; background: var(--faint); }
+.approval.accepted .lc-k::before { background: var(--ok); }
+
 /* ---- notices ---- */
 #notice {
   flex: none; width: calc(100% - 48px); max-width: 772px; margin: 8px auto 0; padding: 11px 15px 11px 38px; position: relative;
@@ -514,6 +536,10 @@ main:has(#chat:not([hidden]) #empty:not([hidden])) #composer-area { margin-botto
   #composer-area { padding: 8px 14px 12px; padding-bottom: max(12px, env(safe-area-inset-bottom)); }
   #composer { padding: 10px 10px 10px 15px; border-radius: 22px; }
   #notice { width: calc(100% - 28px); }
+  .approval { width: calc(100% - 28px); margin-top: 10px; }
+  .approval-card { padding: 16px; }
+  .approval-card h2 { font-size: 18px; }
+  .approval-actions > button { flex: 1 1 auto; }
   #save-status { flex: 1 1 150px; }
   #details { width: min(350px, 92%); }
   #endpoint { padding: 26px 16px; }

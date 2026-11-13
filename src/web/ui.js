@@ -238,6 +238,128 @@ const ROOM_FLOW_ENABLED = false;
     $(id).addEventListener("click", () => { if (app.classList.contains("endpoint-mode")) setEndpoint(false); });
   $("export").addEventListener("click", () => { if (current) toast("Conversation exported"); });
 
+  // ---- approval of a load on this computer ----
+  // The sharing service started without a screen keeps one request waiting for
+  // this computer's owner. It is read here and decided with exactly the fence
+  // it was displayed with. Nothing is chosen for the person: no focus is moved,
+  // no key confirms, and an unanswered request simply expires as declined.
+  const approvalIds = ["approval-decline", "approval-accept", "approval-repeat", "approval-revoke", "approval-dismiss"];
+  const approvalProgress = new Set(["accepted", "loading", "segment_ready", "starting_host"]);
+  let approvalShown = null, approvalSettled = null, approvalBusy = false, approvalRead = 0, approvalNote = "";
+  function approvalFacts(request) {
+    const rows = [
+      ["Requested by", `${request.requester.slice(0, 24)}…`, true],
+      ["Model", `${request.name} (${request.adapter})`],
+      ["Layers", `${request.begin}–${request.end - 1} of ${request.layers}`],
+      ["Memory", `${gib(request.ram_bytes)} kept in RAM · ${gib(request.metadata_bytes)} metadata headroom`],
+      ["Limits", `${request.context} context · ${request.sessions} session slot${request.sessions === 1 ? "" : "s"} · ${request.threads} threads · up to ${request.max_new} new tokens per turn`],
+      ["Request", `${request.allocation.slice(0, 12)}…`, true]];
+    $("approval-facts").replaceChildren();
+    for (const [label, value, mono] of rows) $("approval-facts").append(element("dt", "", label), element("dd", mono ? "mono" : "", value));
+  }
+  function renderApproval() {
+    const box = $("approval"), shown = approvalShown, settled = approvalSettled;
+    const show = buttons => { for (const id of approvalIds) { $(id).hidden = !buttons.includes(id); $(id).disabled = approvalBusy; } };
+    box.hidden = !connected() || (!shown && !settled);
+    box.classList.toggle("settled", !shown);
+    box.classList.toggle("accepted", !shown && settled?.kind === "accepted");
+    $("approval-status").textContent = approvalNote;
+    if (shown) {
+      const request = shown.request;
+      $("approval-kicker").textContent = "approval needed";
+      $("approval-title").textContent = `Load ${request.name} on this computer?`;
+      $("approval-summary").textContent = request.expert_accelerator ? "Expert accelerator: approved layers only; weights remain in RAM." :
+        request.runs_edge ? "This computer hosts the chat and receives the conversation text." :
+        "This computer processes activations and keeps state for its layers.";
+      approvalFacts(request);
+      $("approval-hint").textContent = "Nothing loads unless you accept. Accepted weights stay in memory until you stop sharing. " +
+        `An unanswered request is dropped after about ${Math.round(shown.seconds / 60)} minutes.`;
+      show(["approval-decline", "approval-accept", ...(request.repeat_supported ? ["approval-repeat"] : []), ...(shown.repeat ? ["approval-revoke"] : [])]);
+    } else if (settled) {
+      $("approval-kicker").textContent = settled.kind === "accepted" ? "accepted" : settled.kind === "declined" ? "declined" : "not loaded";
+      $("approval-title").textContent = settled.name;
+      $("approval-summary").textContent = settled.text;
+      $("approval-facts").replaceChildren(); $("approval-hint").textContent = "";
+      show([...(settled.repeat && settled.held ? ["approval-revoke"] : []), "approval-dismiss"]);
+    }
+  }
+  function approvalApply(data) {
+    const request = data.sharing ? data.request : null;
+    const fence = request && {instance: data.instance, allocation: request.allocation, revision: data.revision};
+    if (request && data.pending) {
+      const repeat = approvalShown?.fence.allocation === request.allocation ? approvalShown.repeat : false;
+      if (approvalShown?.fence.allocation !== request.allocation) approvalNote = "";
+      approvalShown = {fence, request, seconds: data.decision_seconds, repeat};
+      if (approvalSettled?.fence.allocation !== request.allocation) approvalSettled = null;
+    } else {
+      if (approvalShown) approvalNote = "";
+      approvalShown = null;
+      const settled = approvalSettled;
+      if (settled?.kind === "accepted") {
+        settled.held = request?.allocation === settled.fence.allocation;
+        if (settled.held) {
+          settled.fence = fence;
+          settled.text = data.phase === "ready" ? "Loaded and ready on this computer. It appears in the model list once your sign-in has access to it." :
+            approvalProgress.has(data.phase) ? `${data.state}.` : data.detail || `${data.state}.`;
+        } else if (settled.seen) settled.text = "This load is no longer the one shown by this computer's sharing service. See Computers & models for its state.";
+        settled.seen = settled.seen || settled.held;
+      }
+    }
+    renderApproval();
+  }
+  async function approvalPoll() {
+    if (!connected() || !management || !token || busy || approvalBusy || document.hidden || requestsActive) return;
+    if (Date.now() - approvalRead < 2500) return;
+    const credential = token;
+    approvalRead = Date.now();
+    try {
+      const data = await request("/api/v1/donor/approval");
+      if (credential === token && !approvalBusy) approvalApply(data);
+    } catch {
+      // Unavailable or not permitted from here: stay quiet and look again later.
+      if (credential === token) { approvalRead = Date.now() + 12000; if (approvalShown) { approvalShown = null; approvalNote = ""; renderApproval(); } }
+    }
+  }
+  async function approvalAct(action) {
+    const target = action === "revoke_repeat" && !approvalShown ? approvalSettled : approvalShown;
+    if (!target || approvalBusy || !management || !token) return;
+    if (action === "allow_repeat" && !confirm("Allow this requester to load this same checkpoint and layers on this computer again for one hour without asking? One allocation at a time, with the limits shown. You can revoke it.")) return;
+    const credential = token, name = approvalShown?.request.name || approvalSettled?.name;
+    approvalBusy = true; approvalNote = "Sending your decision to this computer's sharing service…"; renderApproval();
+    try {
+      const answer = await request("/api/v1/donor/approval", "POST", {action, ...target.fence});
+      if (credential !== token) return;
+      approvalNote = "";
+      if (action === "revoke_repeat") {
+        target.repeat = false; approvalNote = answer.detail || "Repeat permission revoked."; record("Repeat-load permission revoked on this computer.");
+      } else if (answer.result === "pending") {
+        // A saved repeat permission that does not cover this request leaves the decision with the person.
+        approvalNote = answer.detail; if (action === "allow_repeat") approvalShown.repeat = true;
+      } else {
+        const repeat = action === "allow_repeat" || approvalShown.repeat;
+        approvalSettled = {fence: target.fence, name, repeat, held: answer.result === "accepted", seen: false,
+          kind: answer.result === "accepted" ? "accepted" : answer.result === "declined" ? "declined" : "failed",
+          text: answer.result === "accepted" ? (action === "allow_repeat" ? "Accepted, and repeat loads are allowed for one hour. " : "Accepted. ") + "Waiting for the plan to load." :
+            answer.result === "declined" ? "Declined. No weights or model state were loaded." :
+            answer.detail || "This computer could not reserve what the request needs. Nothing was loaded."};
+        approvalShown = null;
+        record(answer.result === "accepted" ? "Accepted a load on this computer." : answer.result === "declined" ? "Declined a load on this computer." : "A load on this computer was not accepted.");
+      }
+    } catch (error) {
+      if (credential === token) approvalNote = error.message;
+    } finally {
+      approvalBusy = false; approvalRead = 0;
+      if (credential === token) renderApproval();
+    }
+  }
+  function approvalReset() { approvalShown = approvalSettled = null; approvalNote = ""; approvalRead = 0; renderApproval(); }
+  $("approval-accept").addEventListener("click", () => approvalAct("accept"));
+  $("approval-decline").addEventListener("click", () => approvalAct("decline"));
+  $("approval-repeat").addEventListener("click", () => approvalAct("allow_repeat"));
+  $("approval-revoke").addEventListener("click", () => approvalAct("revoke_repeat"));
+  $("approval-dismiss").addEventListener("click", () => { approvalSettled = null; approvalNote = ""; renderApproval(); });
+  setInterval(approvalPoll, 1000);
+
   // ---- keep the chrome in step with app.js ----
   function syncChrome() {
     const online = connected(), endpoint = app.classList.contains("endpoint-mode"), workspace = !$("workspace").hidden;
@@ -251,7 +373,7 @@ const ROOM_FLOW_ENABLED = false;
     if (online && !wasConnected) record("Connected to the local Lumabri service.");
     if (!online && wasConnected) {
       // Nothing from one account may remain visible to the next.
-      closeDetails(); setEndpointOff(); endpointConfig = null; clearDevices();
+      closeDetails(); setEndpointOff(); endpointConfig = null; clearDevices(); approvalReset();
       $("activity-log").replaceChildren(); $("toasts").replaceChildren(); lastNotice = "";
       $("model-facts").replaceChildren(); $("model-list").replaceChildren();
       $("endpoint-model").value = ""; renderEndpoint(); $("endpoint-status").textContent = "";

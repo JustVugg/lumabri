@@ -12,6 +12,7 @@ let management = false, managementBusy = false;
 let preparationReview = null, preparationBusy = false, preparationOperation = "";
 let preparationNextCursor = "";
 let preparationNames = new Map();
+let requestsActive = 0; // ui.js keeps its background reads out of the way of these
 let elasticPending = false, elasticEditor = null, elasticReview = null, elasticEpoch = 0;
 const utf8 = new TextEncoder();
 const say = text => { $("notice").textContent = text; };
@@ -50,6 +51,10 @@ const errors = {
   invalid_elastic_policy: "The replica policy contains unsupported or inconsistent settings. Reload and review its limits.",
   admission_unavailable: "Local request admission could not be checked. No response was started.",
   management_permission_required: "Your token has no management permission. An operator must grant it explicitly.",
+  donor_request_changed_review_again: "The request changed or expired before your decision arrived. Nothing was decided; review what is shown now.",
+  donor_decision_not_confirmed_review_again: "This computer did not confirm the decision. Review what is shown now before trying again.",
+  local_donor_unavailable: "This computer is not sharing with this household now, so there is nothing to decide.",
+  donor_approval_local_page_only: "Requests to this computer are decided on the computer itself, from its local page or its Share resources screen.",
   allocation_changed_refresh_before_retry: "The allocation changed after it was inspected. Review its current state before retrying.",
   retirement_started_cannot_resume: "Release has already started and cannot be reversed. Reconcile that release instead.",
   resident_plan_not_found: "This saved model allocation is no longer available. Ask the operator to prepare and grant a new one.",
@@ -84,13 +89,14 @@ async function request(path, method = "GET", body) {
   if (body !== undefined) { options.body = JSON.stringify(body); options.headers["Content-Type"] = "application/json"; }
   const abort = new AbortController(), timer = setTimeout(() => abort.abort(), 15000);
   options.signal = abort.signal;
+  requestsActive++;
   try {
     const response = await fetch(path, options);
     const answer = await response.json();
     if (credential !== token) throw new Error("Connection changed; this result was discarded");
     if (!response.ok) throw new Error(explain(answer.error || answer.state || `Request failed (${response.status})`));
     return answer;
-  } finally { clearTimeout(timer); }
+  } finally { requestsActive--; clearTimeout(timer); }
 }
 function controls() {
   const selected = models.find(model => model.id === $("model").value);

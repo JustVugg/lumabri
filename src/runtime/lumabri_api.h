@@ -134,6 +134,7 @@ static int api_find_plan(const char *tracker, const uint8_t allocation[32], LmbR
 #include "lumabri_workspace.h"
 #include "lumabri_management.h"
 #include "lumabri_preparation_api.h"
+#include "lumabri_donor_approval_api.h"
 #include "lumabri_recovery_wait.h"
 /* The local TUI has the process owner's authority, not a borrowed web user's
  * token. It invokes the same durable operation with a short observation
@@ -508,7 +509,8 @@ static void api_connection_dispatch(int fd, int access_dir, unsigned port, const
     int preparation=!strcmp(request.path,"/api/v1/preparation");
     const char *preparation_after="/api/v1/preparation/after/";
     int preparation_page=!strncmp(request.path,preparation_after,strlen(preparation_after));
-    int management=preparation || policy || elastic || capacity || capacity_apply || !strncmp(request.path,"/api/v1/allocations/",20);
+    int approval=!strcmp(request.path,"/api/v1/donor/approval");
+    int management=preparation || policy || elastic || capacity || capacity_apply || approval || !strncmp(request.path,"/api/v1/allocations/",20);
     if (!strcmp(request.path,"/api/v1/client-config") && !strcmp(request.method,"GET") && !request.length) {
         char origin[160];
         if (https_origin) snprintf(origin,sizeof origin,"%s",https_origin);
@@ -528,6 +530,11 @@ static void api_connection_dispatch(int fd, int access_dir, unsigned port, const
     }
     else if (management && !strcmp(request.method,"POST") && !lmb_management_allows(access_dir,&user))
         api_error(fd,403,"management_permission_required");
+    else if (approval && !strcmp(request.method,"GET") && !request.length) {
+        /* Reading a request is part of deciding it: same capability as POST. */
+        if (lmb_management_allows(access_dir,&user)) api_donor_approval(fd,tracker,https_origin!=NULL,NULL,0);
+        else api_error(fd,403,"management_permission_required");
+    }
     else if (!strcmp(request.method,"GET") && !strcmp(request.path,"/api/v1/session") && !request.length) {
         char response[96]; snprintf(response,sizeof response,"{\"schema\":1,\"operator\":%s,\"management\":%s}",
             lmb_operator_allows(access_dir,&user) ? "true" : "false",lmb_management_allows(access_dir,&user) ? "true" : "false");
@@ -589,6 +596,7 @@ static void api_connection_dispatch(int fd, int access_dir, unsigned port, const
             else if (preparation) api_preparation(fd,access_dir,tracker,body,at);
             else if (policy) api_policy_http(fd,access_dir,tracker,body,at);
             else if (elastic) api_elastic_http(fd,access_dir,tracker,body,at);
+            else if (approval) api_donor_approval(fd,tracker,https_origin!=NULL,body,at);
             else if (capacity_apply) api_capacity_apply_http(fd,access_dir,tracker,body,at);
             else if (capacity) api_capacity_http(fd,access_dir,tracker,request.path,body,at);
             else if (management) api_management(fd,access_dir,tracker,&user,&request,body,at);

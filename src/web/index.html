@@ -33,6 +33,17 @@
         <button class="toolbar-button" type="button" data-panel-open="model" aria-controls="details" aria-expanded="false">Details</button>
         <button id="refresh" class="icon" aria-label="Refresh models and history" title="Refresh" disabled>↻</button>
       </header>
+      <section id="approval" class="approval" hidden aria-labelledby="approval-title">
+        <div class="approval-card">
+          <div class="lc-k">THIS COMPUTER <span id="approval-kicker">approval needed</span></div>
+          <h2 id="approval-title"></h2>
+          <p id="approval-summary"></p>
+          <dl id="approval-facts"></dl>
+          <div class="approval-actions"><button id="approval-decline" type="button">Decline</button><button id="approval-accept" class="primary" type="button">Accept</button><button id="approval-repeat" class="text-button" type="button" title="The same requester, checkpoint and layers; one allocation at a time, with the same limits." hidden>Allow repeat loads for 1 hour</button><button id="approval-revoke" class="text-button" type="button" hidden>Revoke repeat permission</button><button id="approval-dismiss" class="text-button" type="button" hidden>Dismiss</button></div>
+          <p id="approval-hint" class="fine-print"></p>
+          <p id="approval-status" role="status" aria-live="polite"></p>
+        </div>
+      </section>
       <section id="login" class="setup" aria-labelledby="setup-title">
         <div class="setup-header"><img src="/logo.svg" alt="Lumabri" width="168" height="52"><span class="setup-tag">Runs on your own computers</span></div>
         <div class="setup-card">

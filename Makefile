@@ -172,7 +172,7 @@ lumabri test_chat_ui: lumabri_runtime_identity.h lumabri_checkpoint_identity.h l
 lumabri test_chat_ui: src/planner/lumabri_catalogue_advice.h
 lumabri test_chat_ui: src/planner/lumabri_portfolio.h src/planner/lumabri_portfolio_catalogue.h
 lumabri test_chat_ui: src/runtime/lumabri_preload.h
-lumabri test_chat_ui: src/runtime/lumabri_preparation_api.h src/runtime/lumabri_preparation_store.h src/runtime/lumabri_preparation_request.h
+lumabri test_chat_ui: src/runtime/lumabri_preparation_api.h src/runtime/lumabri_preparation_store.h src/runtime/lumabri_preparation_request.h src/runtime/lumabri_donor_approval_api.h
 lumabri test_chat_ui: src/runtime/lumabri_donor_policy.h src/runtime/lumabri_donor_policy_store.h src/runtime/lumabri_donor_policy_cli.h src/runtime/lumabri_content_identity.h
 lumabri test_chat_ui: src/runtime/lumabri_signed_checkpoint.h
 lumabri test_chat_ui: src/runtime/lumabri_demand.h src/runtime/lumabri_demand_runtime.h
@@ -722,8 +722,15 @@ test-api-gateway: lumabri test_chat_ui test-chat-history
 	python3 tests/integration/installed_fleet_contract_test.py
 	python3 tests/integration/chat_history_test.py
 	python3 tests/integration/start_command_test.py
+	$(MAKE) test-web-approval
 
 test: test-api-gateway
+
+# Real engines and a real checkpoint: the donor's request is declined, then
+# approved, through the page's own API.
+.PHONY: test-web-approval
+test-web-approval: lumabri segment_node segment_chat fixture
+	python3 tests/integration/web_approval_test.py
 
 .PHONY: test-chat-history
 test-chat-history: build/web_assets.h
