@@ -526,7 +526,8 @@ def gateway_tests(base, hub):
         {"id": "named", "family": "fixture", "name": "Named file", "repo": "owner/gguf", "revision": COMMIT_A,
          "files": [{"path": "model-q8_0.gguf", "size": len(BIG), "sha256": hashlib.sha256(BIG).hexdigest()}]}]}
     try:
-        first = run("start", "--no-browser", "--port", str(port))
+        # A fixed small share: the built-in entries must not fit on any runner.
+        first = run("start", "--no-browser", "--port", str(port), "--ram-gb", "4")
         assert first.returncode == 0, (first.stdout, first.stderr)
         token = next(line for line in first.stdout.splitlines() if "#token=" in line).split("#token=")[1].strip()
         owner_file = home / ".lumabri/download-catalogue.json"

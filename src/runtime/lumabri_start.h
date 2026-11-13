@@ -216,7 +216,7 @@ static int start_open_browser(const char *url) {
 }
 
 static int cmd_start(int argc, char **argv) {
-    int tui=0, browser=1, port_set=0; unsigned port=47380;
+    int tui=0, browser=1, port_set=0; unsigned port=47380; unsigned long share_gb=0;
     for (int i=0; i<argc; i++) {
         if (!strcmp(argv[i],"--tui")) tui=1;
         else if (!strcmp(argv[i],"--no-browser")) browser=0;
@@ -224,6 +224,9 @@ static int cmd_start(int argc, char **argv) {
             char *end; unsigned long value=strtoul(argv[++i],&end,10);
             if (!*argv[i] || *end || !value || value>65535) goto usage;
             port=(unsigned)value; port_set=1;
+        } else if (!strcmp(argv[i],"--ram-gb") && i+1<argc) {
+            char *end; share_gb=strtoul(argv[++i],&end,10);
+            if (!*argv[i] || *end || !share_gb || share_gb>1048576) goto usage;
         } else goto usage;
     }
     if (home_service_foreground())
@@ -243,7 +246,8 @@ static int cmd_start(int argc, char **argv) {
          * chat. A household created here starts by offering about 60% of
          * this computer's memory; the donor still caps every reservation at
          * what is free minus its reserve, and Settings changes the figure. */
-        if (fresh && !strcmp(s.ram,"4")) {
+        if (fresh && share_gb) snprintf(s.ram,sizeof s.ram,"%lu",share_gb);
+        else if (fresh && !strcmp(s.ram,"4")) {
             LmbMachineProfile machine;
             (void)lmb_machine_probe(&machine,".",NULL);
             uint64_t share=machine.ram_total_bytes/UINT64_C(1000000000)*6/10;
@@ -323,12 +327,13 @@ static int cmd_start(int argc, char **argv) {
     lmb_api_wipe(link,sizeof link);
     return degraded || missing ? 1 : 0;
 usage:
-    fprintf(stderr,"lumabri start [--tui] [--no-browser] [--port N]\n"
+    fprintf(stderr,"lumabri start [--tui] [--no-browser] [--port N] [--ram-gb N]\n"
         "  Creates this computer's household if there is none, starts sharing and the\n"
         "  local web page, then opens that page in the default browser.\n"
         "  --tui         open the terminal workspace instead of the browser\n"
         "  --no-browser  print the private sign-in link instead of opening it\n"
-        "  --port N      local web page port (default 47380, or the running page)\n");
+        "  --port N      local web page port (default 47380, or the running page)\n"
+        "  --ram-gb N    memory a new household shares (default: about 60%% of this computer)\n");
     return 2;
 }
 #endif

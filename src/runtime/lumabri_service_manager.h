@@ -4,6 +4,7 @@
  * containing an old approval. */
 #ifndef LUMABRI_SERVICE_MANAGER_H
 #define LUMABRI_SERVICE_MANAGER_H
+#include "src/runtime/lumabri_memlock.h"
 
 static const char *const home_service_roles[] = {"manager", "donor", "tracker", "prepare", "api"};
 

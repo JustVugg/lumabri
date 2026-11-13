@@ -5667,7 +5667,7 @@ int main(int argc, char **argv) {
     fprintf(stderr,
         "lumabri: your computers, one shared model\n\n"
         "  lumabri                                                    household workspace\n"
-        "  lumabri start [--tui] [--no-browser] [--port N]            start everything here and open the chat page\n"
+        "  lumabri start [--tui] [--no-browser] [--port N] [--ram-gb N]  start everything here and open the chat page\n"
         "  lumabri service [status|start|restart|stop]                 private background service\n"
         "  lumabri service live ROLE                                  supervisor probe (not model readiness)\n"
         "  lumabri api [start|stop|list|user-add|grant|revoke|serve]   authenticated local inference API\n"

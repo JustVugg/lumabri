@@ -234,7 +234,12 @@ static int fetch_attempt(Fetch *f, const char *first, const char **reason) {
         if (!c) { *reason="downloader_unavailable"; return XFER_FATAL; }
         f->curl=c;
         curl_easy_setopt(c,CURLOPT_URL,url);
+        /* One scheme only. libcurl older than 7.85 has just the bitmask form. */
+#if LIBCURL_VERSION_NUM >= 0x075500
         curl_easy_setopt(c,CURLOPT_PROTOCOLS_STR,loopback ? "http" : "https");
+#else
+        curl_easy_setopt(c,CURLOPT_PROTOCOLS,(long)(loopback ? CURLPROTO_HTTP : CURLPROTO_HTTPS));
+#endif
         /* Verification is unconditional: no option, variable or catalogue
          * field reaches these two lines. */
         curl_easy_setopt(c,CURLOPT_SSL_VERIFYPEER,1L);
