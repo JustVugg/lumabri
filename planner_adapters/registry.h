@@ -43,9 +43,8 @@ static const LmbMemoryContract LMB_MEMORY_CONTRACTS[] = {
 
 static int lmb_describe_memory(const char *id, const char *root, const char *whole,
                                const char *cfg, LmbModelShape *m) {
-    /* Muse's native GGUF layout and Mistral's specialized MLA contract are
-     * handled separately; sharing an engine id never enables another layout. */
-    if (!strcmp(m->model_type,"muse_spark") || !strcmp(m->model_type,"mistral_large4")) return -1;
+    /* Mistral's specialized MLA contract is not the GLM layout. */
+    if (!strcmp(m->model_type,"mistral_large4")) return -1;
     for(size_t i=0;i<sizeof LMB_MEMORY_CONTRACTS/sizeof *LMB_MEMORY_CONTRACTS;i++) {
         const LmbMemoryContract *c=&LMB_MEMORY_CONTRACTS[i];
         if(!strcmp(id,c->adapter)) return c->describe ? c->describe(root,whole,cfg,m) : -1;

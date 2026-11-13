@@ -3,6 +3,14 @@
 #ifndef LMB_PLAN_GGUF_MODEL_H
 #define LMB_PLAN_GGUF_MODEL_H
 #include "gguf.h"
+#include <math.h>
+static inline int lmb_gguf_number(const LmbGgufValue *v,double fallback,double *out) {
+    if(!v){*out=fallback;return 0;}
+    if(v->type==6){uint32_t u=(uint32_t)lmb_gguf_le(v->data,4);float f;memcpy(&f,&u,4);*out=f;}
+    else if(v->type==12){uint64_t u=lmb_gguf_le(v->data,8);memcpy(out,&u,8);}
+    else {uint64_t u;if(lmb_gguf_integer(v,&u))return -1;*out=(double)u;}
+    return isfinite(*out)?0:-1;
+}
 static inline const LmbGgufTensor *lmb_gguf_tensor(const LmbGguf *g,const char *name) {
     uint32_t begin=0,end=g->ntensors;
     while(begin<end) {

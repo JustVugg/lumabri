@@ -1388,14 +1388,19 @@ build/qwen-upstream-oracle: tests/c/qwen_upstream_oracle.c build/segment-sources
 	@mkdir -p build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(OMP_FLAGS) -pthread -I$(ENGINE) $< -o $@ -lm $(OMP_LIBS)
 
-lumabri test_chat_ui segment_chat: src/runtime/lumabri_chat_checkpoint.h src/runtime/lumabri_chat_format.h
+lumabri test_chat_ui segment_chat: src/runtime/lumabri_chat_checkpoint.h src/runtime/lumabri_chat_format.h src/runtime/lumabri_muse_chat.h
 .PHONY: test-qwen-architectures
 build/qwen-state-oracle: tests/c/qwen_state_oracle.c $(COLIBRI_SEGMENT_LIB) build/segment-sources build/segment-options
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Wno-unused-function $(OMP_FLAGS) -pthread -I$(ENGINE) $< $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
 
-test-qwen-architectures: build/qwen-upstream-oracle build/qwen-state-oracle build/gguf-segment-oracle segment_budget_probe test_api_compat
+build/test_muse_chat: tests/c/test_muse_chat.c src/runtime/lumabri_chat_format.h src/runtime/lumabri_muse_chat.h
+	@mkdir -p build
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Wno-unused-function $< -o $@
+
+test-qwen-architectures: build/qwen-upstream-oracle build/qwen-state-oracle build/gguf-segment-oracle segment_budget_probe test_api_compat build/test_muse_chat
 	$(PYTHON) tests/integration/qwen_architectures_test.py --engine $(ENGINE) $(QWEN_TEST_OPTIONS)
 	$(PYTHON) tests/integration/qwen_chat_template_test.py $(ENGINE)
+	./build/test_muse_chat
 
 .PHONY: test-qwen-gguf
 build/qwen-mixed-oracle: tests/c/qwen_mixed_oracle.c tests/c/edge_segment_greedy.c $(COLIBRI_SEGMENT_LIB) build/segment-sources build/segment-options

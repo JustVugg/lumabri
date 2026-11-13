@@ -47,6 +47,13 @@
   their API output is compared byte for byte with the upstream Python
   renderers, which are only loaded in tests, without starting their server.
 
+- Muse Spark extension: the same pinned revision's `c/tools/make_muse_tiny.py`
+  supplies fixture weights and `c/openai_server.py` specifies Muse prompt and
+  channel framing. `src/runtime/lumabri_muse_chat.h` is a C adaptation with
+  bounded streaming state and shared TUI/API formatting; its template literals
+  follow that Apache-2.0 source (Colibri contributors). Lumabri supplies the
+  latent-width memory contract and boundary/state/inference-read tests.
+
 ## Embedded image decoder
 
 - File: `src/vendor/stb_image.h`, unmodified v2.30 from commit

@@ -9,8 +9,13 @@ typedef struct {
     uint32_t layers,hidden,vocab,heads,kv,hd,experts,topk,inter,shared,dense_inter,lead;
     uint32_t vh,kh,kdim,vdim,convk,convdim,context,window,interval,mtp;
     uint8_t full[LMB_PLAN_LAYER_MAX],dense[LMB_PLAN_LAYER_MAX];
-    unsigned lfm,plain;
+    uint32_t expert_hidden;
+    unsigned lfm,plain,muse;
 } LmbQwenGguf;
+
+/* GGUF-only Muse weights; the converted checkpoint contract stays separate. */
+enum { QG_RA_A=Q36_FIELDS, QG_RA_B, QG_RF_A, QG_RF_B, QG_LAT_DOWN,
+       QG_LAT_UP, QG_PRE_EXPERT, QG_POST_EXPERT, QG_FIELDS };
 
 static const LmbGgufValue *lmb_qg_value(const LmbGguf *g,const LmbQwenGguf *c,const char *suffix) {
     char key[128];int n=snprintf(key,sizeof key,"%s.%s",c->arch,suffix);
@@ -33,11 +38,12 @@ static int lmb_qg_geometry(const LmbGguf *g,LmbQwenGguf *c) {
     memset(c,0,sizeof *c);
     c->arch=lmb_gguf_text(lmb_gguf_get(g,"general.architecture"));
     if(!c->arch)return -1;
-    static const char *const arches[]={"qwen3","qwen3moe","qwen35","qwen35moe","flint","lfm3"};
-    static const char *const types[]={"qwen3","qwen3_moe","qwen3_5","qwen3_5_moe","flint","lfm3"};
-    unsigned kind=0;while(kind<6 && strcmp(c->arch,arches[kind]))kind++;
-    if(kind==6)return -1;
-    c->model_type=types[kind];c->lfm=kind==5;c->plain=kind==0 || kind==1 || kind==4;
+    static const char *const arches[]={"qwen3","qwen3moe","qwen35","qwen35moe","flint","lfm3","muse-spark"};
+    static const char *const types[]={"qwen3","qwen3_moe","qwen3_5","qwen3_5_moe","flint","lfm3","muse_spark"};
+    unsigned kind=0;while(kind<7 && strcmp(c->arch,arches[kind]))kind++;
+    if(kind==7)return -1;
+    c->model_type=types[kind];c->lfm=kind==5;c->muse=kind==6;
+    c->plain=kind==0 || kind==1 || kind==4 || c->muse;
 #define QG(key,field,def,lo,hi) if(lmb_qg_u32(g,c,key,def,lo,hi,&c->field))return -1
     QG("block_count",layers,0,1,LMB_PLAN_LAYER_MAX);
     QG("nextn_predict_layers",mtp,0,0,c->layers-1);c->layers-=c->mtp;
@@ -70,6 +76,21 @@ static int lmb_qg_geometry(const LmbGguf *g,LmbQwenGguf *c) {
     if(c->plain)c->interval=1;
     if(kind==4) {QG("leading_dense_block_count",lead,0,0,c->layers);}
     if(c->lead && !c->dense_inter)return -1;
+    c->expert_hidden=c->hidden;
+    if(c->muse) {
+        QG("moe_latent_size",expert_hidden,0,1,65536);
+        uint32_t gating;
+        if(c->shared || !c->window || lmb_qg_u32(g,c,"expert_gating_func",2,2,2,&gating))return -1;
+        const LmbGgufValue *norm=lmb_qg_value(g,c,"expert_weights_norm");uint64_t value;
+        if(norm && (norm->type!=7 || lmb_gguf_integer(norm,&value) || value!=1))return -1;
+        double scale,post,softcap,theta,swa,weights;
+        if(lmb_gguf_number(lmb_qg_value(g,c,"logit_scale"),1,&scale) || scale<=0 ||
+           lmb_gguf_number(lmb_qg_value(g,c,"post_norm_epsilon"),1e-8,&post) || post<=0 ||
+           lmb_gguf_number(lmb_qg_value(g,c,"final_logit_softcapping"),0,&softcap) || softcap<0 ||
+           lmb_gguf_number(lmb_qg_value(g,c,"rope.freq_base"),10000,&theta) || theta<=0 ||
+           lmb_gguf_number(lmb_qg_value(g,c,"rope.freq_base_swa"),theta,&swa) || swa!=theta ||
+           lmb_gguf_number(lmb_qg_value(g,c,"expert_weights_scale"),1,&weights) || weights!=1)return -1;
+    }
     if(c->lfm) {
         QG("shortconv.l_cache",convk,0,2,64);c->convdim=c->hidden;
     } else if(!c->plain) {
@@ -90,7 +111,7 @@ static int lmb_qg_geometry(const LmbGguf *g,LmbQwenGguf *c) {
     c->vocab=(uint32_t)tokens->count;
     const LmbGgufValue *windows=lmb_qg_value(g,c,"attention.sliding_window_pattern");
     const LmbGgufValue *ropes=lmb_qg_value(g,c,"attention.rope_pattern");
-    if(kind==4 || c->lfm) {
+    if(kind==4 || c->lfm || c->muse) {
         if(!c->window || !windows || windows->type!=9 || windows->element_type!=7 || windows->count!=c->layers)return -1;
         if(kind==4 && (!ropes || ropes->type!=9 || ropes->element_type!=7 || ropes->count!=c->layers))return -1;
     }
@@ -123,16 +144,19 @@ static int lmb_qwen_gguf_memory(const LmbGguf *g,LmbModelShape *m) {
        m->vocab!=c.vocab || m->experts!=c.experts || m->experts_per_tok!=c.topk)return -1;
     /* The field order matches the converted contract, but sizes describe
      * native matrices: no unpacked int8 or qwen36_meta.json is assumed. */
-    const char *names[Q36_FIELDS]={"attn_norm.weight",c.plain||c.lfm?"ffn_norm.weight":"post_attention_norm.weight",
+    const char *names[QG_FIELDS]={"attn_norm.weight",c.plain||c.lfm?"ffn_norm.weight":"post_attention_norm.weight",
         "ffn_gate_inp.weight","ffn_gate_shexp.weight","ffn_up_shexp.weight","ffn_down_shexp.weight","ffn_gate_inp_shexp.weight",
         "attn_q_norm.weight","attn_k_norm.weight","exp_probs_b.bias","attn_q.weight","attn_k.weight","attn_v.weight","attn_output.weight",
         "attn_qkv.weight","attn_gate.weight","ssm_beta.weight","ssm_alpha.weight","ssm_conv1d.weight","ssm_dt.bias","ssm_a",
         "ssm_norm.weight","ssm_out.weight","ffn_gate.weight","ffn_up.weight","ffn_down.weight","attn_sinks.weight",
-        "post_attention_norm.weight","post_ffw_norm.weight","attn_gate.weight","shortconv.in_proj.weight","shortconv.conv.weight","shortconv.out_proj.weight"};
-    uint64_t H=c.hidden,DV=(uint64_t)c.vh*c.vdim,qd=(uint64_t)c.hd*(c.plain||c.lfm?1:2);
-    uint64_t counts[Q36_FIELDS]={H,H,H*c.experts,H*c.shared,H*c.shared,H*c.shared,H,c.hd,c.hd,c.experts,
+        "post_attention_norm.weight","post_ffw_norm.weight","attn_gate.weight","shortconv.in_proj.weight","shortconv.conv.weight","shortconv.out_proj.weight",
+        "attn_resid_alpha.weight","attn_resid_beta.weight","ffn_resid_alpha.weight","ffn_resid_beta.weight",
+        "ffn_latent_down.weight","ffn_latent_up.weight","ffn_pre_exp_norm.weight","ffn_post_exp_norm.weight"};
+    uint64_t H=c.hidden,EH=c.expert_hidden,DV=(uint64_t)c.vh*c.vdim,qd=(uint64_t)c.hd*(c.plain||c.lfm?1:2);
+    uint64_t counts[QG_FIELDS]={H,H,H*c.experts,H*c.shared,H*c.shared,H*c.shared,H,c.hd,c.hd,c.experts,
         H*c.heads*qd,H*c.kv*c.hd,H*c.kv*c.hd,H*c.heads*c.hd,H*c.convdim,H*DV,H*c.vh,H*c.vh,
-        (uint64_t)c.convdim*c.convk,c.vh,c.vh,c.vdim,H*DV,0,0,0,c.heads,H,H,H*c.heads,3*H*H,H*c.convk,H*H};
+        (uint64_t)c.convdim*c.convk,c.vh,c.vh,c.vdim,H*DV,0,0,0,c.heads,H,H,H*c.heads*(c.muse?c.hd:1),3*H*H,H*c.convk,H*H,
+        H,H,H,H,H*EH,H*EH,EH,EH};
     uint64_t seen[LMB_PLAN_LAYER_MAX]={0},expert[LMB_PLAN_LAYER_MAX][3]={{0}},largest=0,maxslot=0;
     unsigned edges=0;
     for(uint32_t i=0;i<g->ntensors;i++) {
@@ -190,7 +214,7 @@ static int lmb_qwen_gguf_memory(const LmbGguf *g,LmbModelShape *m) {
                 if(lmb_qg_array(pt,(uint32_t)l*3+k,&type) || lmb_qg_array(pb,(uint32_t)l*3+k,&bytes) ||
                     type>=sizeof LMB_GGUF_TYPES/sizeof *LMB_GGUF_TYPES || !LMB_GGUF_TYPES[type].decodable)return -1;
                 const LmbGgufType *format=&LMB_GGUF_TYPES[type];
-                uint64_t cols=k==2?c.inter:H,rows=k==2?H:c.inter;
+                uint64_t cols=k==2?c.inter:EH,rows=k==2?EH:c.inter;
                 if(cols%format->block || bytes!=lmb_size_mul(cols/format->block,format->bytes*rows))return -1;
                 LmbGgufTensor weight={.type=(uint32_t)type,.rank=2,.shape={cols,rows}};
                 expert[l][k]=lmb_gguf_held_bytes(&weight,0,1);
@@ -204,26 +228,26 @@ static int lmb_qwen_gguf_memory(const LmbGguf *g,LmbModelShape *m) {
         unsigned k=0;const char *exps[]={"ffn_gate_exps.weight","ffn_up_exps.weight","ffn_down_exps.weight"};
         for(;k<3 && strcmp(name,exps[k]);k++);
         if(k<3) {
-            if(packed || c.dense[l] || t->rank!=3 || t->shape[0]!=(k==2?c.inter:H) ||
-                t->shape[1]!=(k==2?H:c.inter) || t->shape[2]!=c.experts || expert[l][k])return -1;
+            if(packed || c.dense[l] || t->rank!=3 || t->shape[0]!=(k==2?c.inter:EH) ||
+                t->shape[1]!=(k==2?EH:c.inter) || t->shape[2]!=c.experts || expert[l][k])return -1;
             uint64_t cost=lmb_gguf_held_bytes(t,0,1);if(cost==UINT64_MAX)return -1;
             expert[l][k]=cost;if(cost>largest)largest=cost;continue;
         }
         unsigned f=0;
-        for(;f<Q36_FIELDS;f++) {
-            if(f==Q36_DZ && c.lfm)continue;
+        for(;f<QG_FIELDS;f++) {
+            if(f==Q36_DZ && (c.lfm || c.muse))continue;
             if(f==Q36_POST_OP && !c.lfm)continue;
             if(!strcmp(name,names[f]) || (f==Q36_DT && !strcmp(name,"ssm_dt")))break;
         }
-        if(f==Q36_FIELDS || (seen[l]&(1ull<<f)))return -1;
+        if(f==QG_FIELDS || (f>=Q36_FIELDS && !c.muse) || (seen[l]&(1ull<<f)))return -1;
         uint64_t need=f>=Q36_G && f<=Q36_D?H*(l<c.lead?c.dense_inter:c.shared):counts[f];
         if(!need || count!=need || !LMB_GGUF_TYPES[t->type].decodable)return -1;
         seen[l]|=1ull<<f;
         int matrix=(f>=Q36_Q && f<=Q36_O) || f==Q36_ROUTER || (f>=Q36_SG && f<=Q36_SD) ||
             f==Q36_DQKV || f==Q36_DZ || f==Q36_DOUT || (f>=Q36_G && f<=Q36_D) ||
-            f==Q36_ATTN_GATE || f==Q36_SC_IN || f==Q36_SC_OUT;
+            f==Q36_ATTN_GATE || f==Q36_SC_IN || f==Q36_SC_OUT || f==QG_LAT_DOWN || f==QG_LAT_UP;
         uint64_t columns=f==Q36_O?(uint64_t)c.heads*c.hd:f==Q36_SD?c.shared:
-            f==Q36_DOUT?DV:f==Q36_D?(l<c.lead?c.dense_inter:c.shared):H;
+            f==Q36_DOUT?DV:f==Q36_D?(l<c.lead?c.dense_inter:c.shared):f==QG_LAT_UP?EH:H;
         if(matrix && (t->rank!=2 || t->shape[0]!=columns || t->shape[1]!=need/columns))return -1;
         uint64_t cost=matrix?lmb_gguf_held_bytes(t,1,1):lmb_size_mul(count,4);
         if(cost==UINT64_MAX)return -1;
@@ -249,6 +273,7 @@ static int lmb_qwen_gguf_memory(const LmbGguf *g,LmbModelShape *m) {
         if(c.dense[l] || c.shared)required|=7ull<<(c.dense[l]?Q36_G:Q36_SG);
         required|=c.full[l]?15ull<<Q36_Q:c.lfm?7ull<<Q36_SC_IN:511ull<<Q36_DQKV;
         if(c.lfm)required|=(1ull<<Q36_POST_OP)|(1ull<<Q36_POST_FFN)|(c.full[l]?1ull<<Q36_ATTN_GATE:0);
+        if(c.muse)required|=(255ull<<QG_RA_A)|(1ull<<Q36_POST_FFN)|(1ull<<Q36_ATTN_GATE)|(3ull<<Q36_QN);
         if(qknorm && c.full[l])required|=3ull<<Q36_QN;
         if(sinks)required|=1ull<<Q36_SINKS;
         uint64_t optional=(!c.dense[l]?1ull<<Q36_ROUTER_BIAS:0) |
@@ -265,7 +290,7 @@ static int lmb_qwen_gguf_memory(const LmbGguf *g,LmbModelShape *m) {
     uint64_t headers=lmb_size_add(lmb_size_mul(g->header_bytes,6),lmb_size_mul(g->ntensors,512));
     m->segment_fixed_bytes=lmb_size_add(m->segment_fixed_bytes,lmb_size_add(headers,(uint64_t)c.layers*(8192u+(uint64_t)c.experts*512)));
     m->edge_resident_bytes=lmb_size_add(m->edge_resident_bytes,headers);
-    uint64_t widest=H+(uint64_t)c.heads*qd+2u*c.kv*c.hd+c.convdim+DV+c.inter+c.shared+c.dense_inter+c.experts;
+    uint64_t widest=H+EH+(uint64_t)c.heads*qd+2u*c.kv*c.hd+c.convdim+DV+c.inter+c.shared+c.dense_inter+c.experts;
     m->scratch_fixed_bytes=lmb_size_add(lmb_size_add(largest,maxslot),lmb_size_add(widest*128u*16u*4u,32u<<20));
     m->scratch_token_bytes=256u*4u;m->heads=c.heads;m->kv_heads=c.kv;m->moe_intermediate=c.inter;
     m->max_context=c.context;m->memory_contract=1;

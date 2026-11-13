@@ -155,7 +155,9 @@ fail:
  * turn formatting remains the source for user/assistant and thinking markers. */
 static int api_compat_payload(ApiCompat *c,const LmbJson *j,unsigned messages,EngKind kind) {
     Cap *out=&c->payload; const char *sys=c->system.p ? c->system.p : "";
-    if (kind==EK_QWEN38 && *sys) {
+    if(kind==EK_MUSE) {
+        if(lmb_muse_system(out,sys,NULL))return -1;
+    } else if (kind==EK_QWEN38 && *sys) {
         /* Keep the family default reasoning instruction in the same system turn. */
         if (cap_str(out,"<|im_start|>system\n") || cap_str(out,sys) || cap_str(out,"\n\n") ||
             cap_str(out,&QW38_SYS[strlen("<|im_start|>system\n")])) return -1;
@@ -165,7 +167,7 @@ static int api_compat_payload(ApiCompat *c,const LmbJson *j,unsigned messages,En
         switch (kind) {
         case EK_OLMOE: bad=cap_str(out,"|||IP_ADDRESS|||<|system|>\n") || cap_str(out,sys) || cap_str(out,"\n"); break;
         case EK_GLM: case EK_GLM53: bad=cap_str(out,"<|system|>") || cap_str(out,sys); break;
-        case EK_QWEN38: break;
+        case EK_QWEN38: case EK_MUSE: break;
         case EK_QWEN36: case EK_QWEN_CODER: case EK_LFM3:
             bad=cap_str(out,"<|im_start|>system\n") || cap_str(out,sys) || cap_str(out,QW_AEND); break;
         case EK_FLINT: bad=cap_str(out,"<|system|>") || flint_text(out,sys); break;

@@ -14,6 +14,11 @@ donor approval and preparation flow.
 | Flint | Dense and MoE layers, sliding attention, learned sinks and per-layer RoPE |
 | LFM3 text | Attention and short convolution with separate state per session |
 
+Muse Spark text has a **native GGUF CPU** contract, including latent-width
+experts, attention gates, residual mixing, per-layer sliding attention/RoPE,
+embedding normalization and final logit scaling/soft-capping. Its converted
+Safetensors layout is not enabled by this GGUF contract.
+
 Use containers produced by the pinned Colibri converter. For routed experts,
 the inspector supports int8, packed int4, and mixed int4 gate/up with int8 down
 projections, including their different scale groups. Dense CPU matrices use
@@ -38,6 +43,10 @@ uses its BOS and history rules; Qwen3-Coder is identified by the checkpoint's
 template and uses ChatML without thinking markers. Edge announces this
 format before READY and Hosted passes it to TUI and API clients. A shared
 compute adapter does not force every checkpoint to use the same prompt.
+Muse uses its own system/recipient template. Its generated channel headers
+are decoded during streaming; private reasoning is framed with thinking tags,
+and end-of-turn markers are removed from displayed text. Native Muse function
+call formatting is separate from this text contract.
 
 This contract covers text inference. It does not enable vision,
 audio or GPU execution for these architectures. The catalogue exposes only
