@@ -32,6 +32,12 @@
   interval boundary, release new layer-specific allocations, and allocate
   LFM3's per-session convolution placeholder portably. The planner inspects
   each layer and accounts for the runtime's CPU weight/state representation.
+- Native GGUF hooks give each adapter its own source context, serialize the
+  upstream global mode during callbacks, own/free native expert indexes, and
+  use per-model int4 decisions. The Edge head budgets its actual block layout.
+  GGUF inventory and memory inspection are Lumabri code; native numeric kernels
+  remain in the pinned upstream source. Tests additionally invoke
+  `c/tools/gguf_import.py` and `c/tools/gguf_reader.py` without modifying them.
 - Tests invoke upstream fixture/conversion tools and the original monolithic
   engine from the pinned checkout; no model kernels are rewritten. LFM3 test
   tensors are renamed from the generator's GGUF names to its converter's HF

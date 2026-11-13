@@ -944,7 +944,7 @@ SEGMENT_COMMON = segment_colibri.h src/runtime/lumabri_thread_capacity.h src/run
 		lumabri_segment_discovery.c lumabri_segment_discovery.h \
 		$(PROTO_DEPS) $(SIGN_DEPS) lumabri_sha.h $(SECURE_DEPS)
 
-HYBRID_PATCH_INPUTS = tools/prepare_gguf_adapters.py tools/prepare_qwen_variants.py tools/prepare_resident_adapters.py engine_patches/make_patches.py \
+HYBRID_PATCH_INPUTS = tools/prepare_gguf_adapters.py tools/prepare_qwen_variants.py tools/prepare_qwen_gguf.py engine_patches/qwen_gguf_source.h tools/prepare_resident_adapters.py engine_patches/make_patches.py \
 	engine_patches/qwen38_vision_edge.h src/runtime/lumabri_vision.h src/runtime/lumabri_image.h \
 	src/runtime/lumabri_engine_memory_override.h src/runtime/lumabri_engine_memory.h \
 	lumabri_home_hybrid.h src/runtime/lumabri_hybrid_policy.h src/runtime/lumabri_q8_reference.h \
@@ -1396,3 +1396,10 @@ build/qwen-state-oracle: tests/c/qwen_state_oracle.c $(COLIBRI_SEGMENT_LIB) buil
 test-qwen-architectures: build/qwen-upstream-oracle build/qwen-state-oracle build/gguf-segment-oracle segment_budget_probe test_api_compat
 	$(PYTHON) tests/integration/qwen_architectures_test.py --engine $(ENGINE) $(QWEN_TEST_OPTIONS)
 	$(PYTHON) tests/integration/qwen_chat_template_test.py $(ENGINE)
+
+.PHONY: test-qwen-gguf
+build/qwen-mixed-oracle: tests/c/qwen_mixed_oracle.c tests/c/edge_segment_greedy.c $(COLIBRI_SEGMENT_LIB) build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(OMP_FLAGS) -pthread -I$(ENGINE) $(GGUF_READ_GUARD) $< $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
+
+test-qwen-gguf: build/test_gguf_inventory build/qwen-upstream-oracle build/gguf-segment-oracle build/qwen-state-oracle build/qwen-mixed-oracle
+	$(PYTHON) tests/integration/qwen_native_gguf_test.py --engine $(ENGINE) $(QWEN_GGUF_TEST_OPTIONS)

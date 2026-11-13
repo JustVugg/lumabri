@@ -111,10 +111,27 @@ static inline int lmb_gguf_olmoe_config(const LmbGguf *g,LmbGgufJson *j) {
     lmb_gguf_json_printf(j,"}");
     return j->bad?-1:0;
 }
+static inline int lmb_gguf_qwen_config(const LmbGguf *g,LmbGgufJson *j) {
+    LmbQwenGguf c;if(lmb_qg_geometry(g,&c))return -1;
+    lmb_gguf_json_printf(j,"{\"model_type\":\"%s\",\"hidden_size\":%u,\"num_hidden_layers\":%u,"
+        "\"num_attention_heads\":%u,\"num_key_value_heads\":%u,\"head_dim\":%u,"
+        "\"num_experts\":%u,\"num_experts_per_tok\":%u,\"moe_intermediate_size\":%u,"
+        "\"intermediate_size\":%u,\"vocab_size\":%u,\"max_position_embeddings\":%u",
+        c.model_type,c.hidden,c.layers,c.heads,c.kv,c.hd,c.experts,c.topk,c.inter,c.dense_inter,c.vocab,c.context);
+    const char *ids[]={"bos_token_id","eos_token_id"};
+    for(unsigned i=0;i<2;i++) {
+        char key[96];snprintf(key,sizeof key,"tokenizer.ggml.%s",ids[i]);
+        const LmbGgufValue *v=lmb_gguf_get(g,key);uint64_t id;
+        lmb_gguf_json_printf(j,",\"%s\":",ids[i]);
+        if(!v)lmb_gguf_json_printf(j,"null");
+        else {if(lmb_gguf_integer(v,&id) || id>=c.vocab)return -1;lmb_gguf_json_printf(j,"%llu",(unsigned long long)id);}
+    }
+    lmb_gguf_json_printf(j,"}");return j->bad?-1:0;
+}
 static inline int lmb_gguf_metadata(const LmbGguf *g,LmbGgufMetadata *out) {
     memset(out,0,sizeof *out);LmbGgufToken *tokens=NULL,*merges=NULL,*ordered=NULL;
     uint32_t nt=0,nm=0;const char *arch=lmb_gguf_text(lmb_gguf_get(g,"general.architecture"));
-    if(!arch || strcmp(arch,"olmoe") || lmb_gguf_olmoe_config(g,&out->config))goto fail;
+    if(!arch || (!strcmp(arch,"olmoe")?lmb_gguf_olmoe_config(g,&out->config):lmb_gguf_qwen_config(g,&out->config)))goto fail;
     const LmbGgufValue *v=lmb_gguf_get(g,"tokenizer.ggml.model");
     if(v && (!lmb_gguf_text(v) || strcmp(lmb_gguf_text(v),"gpt2")))goto fail;
     if(lmb_gguf_strings(lmb_gguf_get(g,"tokenizer.ggml.tokens"),&tokens,&nt) || !nt)goto fail;

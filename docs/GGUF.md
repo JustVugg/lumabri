@@ -13,15 +13,17 @@ them.
 
 ## Current execution contract
 
-The integrated GGUF execution path is OLMoE on CPU. The inspector checks the
+The integrated GGUF CPU paths cover OLMoE, Qwen3 dense/MoE, Qwen3.5/3.6
+dense/MoE, Flint and LFM3 text. See [Qwen architecture contracts](QWEN_ARCHITECTURES.md).
+The inspector checks the
 actual tensor names, dimensions, native quantization block geometry and
 effective memory representation. GGUF support in Colibri alone does not grant
 a distributed memory contract to another architecture. Unsupported or invalid
 imports remain visible with an import error and cannot start a plan.
 
-OLMoE GGUF runs through Segment. The merged-int8 Hybrid expert provider is not
+GGUF runs through Segment. The merged-int8 Hybrid expert provider is not
 used for GGUF. Context uses the checkpoint's declared limit capped by the
-adapter's supported 4096 tokens, with F32 KV state per session. There is no
+adapter's limit (4096 for OLMoE, 262144 for Qwen), with F32 KV state per session. There is no
 disk-streaming fallback.
 
 The source computer generates small JSON metadata files using C. It preserves

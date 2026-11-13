@@ -18,10 +18,23 @@ int main(int argc, char **argv) {
     FILE *out=fopen(argv[2],"w"); if (!out) return 2;
     Model m;
     g_q36_kv16=0; g_pilot=0;
+    char path[4096];
+    snprintf(path,sizeof path,"%s/gguf.json",argv[1]);
+    FILE *sidecar=fopen(path,"rb");
+    if(sidecar) {
+        char json[8192],*arena=NULL;
+        size_t n=fread(json,1,sizeof json-1,sidecar);int bad=ferror(sidecar)||fgetc(sidecar)!=EOF;
+        fclose(sidecar);json[n]=0;
+        jval *j=bad?NULL:json_parse(json,&arena);const char *ref=j?jstr(j,"gguf"):NULL;
+        if(!ref)return 2;
+        gguf_path_join(path,sizeof path,argv[1],ref);free(arena);
+        if(gguf_open(&g_gg,path))return 2;
+        g_gguf=1;g_ssm_a_direct=1;g_dn_tiled=1;
+    }
     model_init(&m,argv[1],4096,8);
     int probe=0;
     while(probe+1<m.c.n_layers && q36_dense_l(&m.c,probe)) probe++;
-    m.quant_bits=container_layer_is_int4(&m,probe) ? 4 : 8;
+    m.quant_bits=g_gguf ? 0 : container_layer_is_int4(&m,probe) ? 4 : 8;
     m.max_t=128; ensure_kv(&m);
     int ids[40]={1,2,3,4,5,6,7,8};
     for (int pos=8;pos<40;pos++) {

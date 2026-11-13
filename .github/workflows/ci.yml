@@ -730,6 +730,11 @@ jobs:
           # resident engines must lock their weights and independent KV.
           sudo prlimit --pid $$ --memlock=134217728:134217728
           make test-qwen-architectures ENGINE=../colibri/c QWEN_TEST_OPTIONS=--household
+      - name: Native Qwen GGUF resident ranges
+        working-directory: lumabri
+        run: |
+          sudo prlimit --pid $$ --memlock=134217728:134217728
+          make test-qwen-gguf ENGINE=../colibri/c QWEN_GGUF_TEST_OPTIONS="--household --packed"
       - name: Qwen hybrid memory contract — real int8 and grouped int4
         working-directory: lumabri
         run: |

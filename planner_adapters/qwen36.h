@@ -19,7 +19,13 @@ static int LMB_UNUSED lmb_plan_u32(const char *json, const char *key,
 }
 
 #include "qwen36_variants.h"
+#include "qwen36_gguf.h"
 static int LMB_UNUSED lmb_qwen36_memory(const char *root, const char *cfg, LmbModelShape *m) {
+    LmbGguf g={0};int native=lmb_gguf_model(root,&g);
+    if(native!=1) {
+        int rc=native?-1:lmb_qwen_gguf_memory(&g,m);
+        lmb_gguf_free(&g);return rc;
+    }
     return lmb_q36_variants_memory(root,cfg,m);
 }
 #endif

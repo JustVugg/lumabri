@@ -275,9 +275,9 @@ GLM, GLM5.3, Inkling, Kimi, OLMoE, Qwen3.6, Qwen3.8 and DeepSeek V4.
 Lumabri also provides a [resident DeepSeek V4.1 text CPU adapter](docs/DEEPSEEK_V41.md),
 including Engram and cross-layer state. Other standalone engines added by
 Colibri are not automatically clusterable: each needs a verified adapter.
-The 2.1 update retains Lumabri’s F32 KV contract. [OLMoE GGUF files](docs/GGUF.md),
+The 2.1 update retains Lumabri’s F32 KV contract. [GGUF files](docs/GGUF.md),
 including split containers, can be selected directly in the TUI and distributed
-as resident CPU segments. The converted Safetensors path also supports
+as resident CPU segments. Both native GGUF and converted Safetensors support
 Qwen3 dense/MoE (including Qwen3-Coder), Qwen3.5 dense/MoE, Flint and LFM3
 text through the Qwen adapter. See [formats and validation](docs/QWEN_ARCHITECTURES.md).
 Other GGUF architectures, Mistral Large 4 and Muse Spark still require
