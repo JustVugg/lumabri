@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import pty
+import re
 import select
 import socket
 import struct
@@ -177,7 +178,8 @@ def main():
             wrong = start("wrong")
             wrong.action(1)
             wrong.expect("Choose your computer")
-            wrong.send(b"\r"); wrong.expect("Type yes only")
+            wrong.send(b"\r"); wrong.expect("Pairing code shown on the owner's computer")
+            wrong.send(b"\n"); wrong.expect("Type yes only")   # Enter alone: the full household key
             wrong.send(b"yes\n"); wrong.expect("Household key from its owner")
             wrong.send(b"incorrect-test-key\n"); wrong.expect("Household authentication failed")
             assert not (wrong.home / ".lumabri/home.conf").exists()
@@ -190,13 +192,38 @@ def main():
             joiner = start("joiner")
             joiner.action(1)
             joiner.expect("Choose your computer")
-            joiner.send(b"\r"); joiner.expect("Type yes only")
+            joiner.send(b"\r"); joiner.expect("Pairing code shown on the owner's computer")
+            joiner.send(b"\n"); joiner.expect("Type yes only")
             joiner.send(b"yes\n"); joiner.expect("Household key from its owner")
             joiner.send(saved["token"].encode() + b"\n")
             joiner.expect("Connected. Open Your computers")
             assert joiner.settings()["token"] == saved["token"]
             assert joiner.settings()["owner"] == "0"
             joiner.quit()
+
+            # Add a computer: the owner's screen shows a short code, and the
+            # other workspace joins with it, with no identity to compare and
+            # no household key to type.
+            owner.action(7)
+            owner.expect("lumabri join --code ")
+            owner.expect("Esc withdraw the code")
+            code = re.search(rb"join --code ([0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4})", bytes(owner.data))
+            assert code, "the Add a computer screen showed no code"
+            paired = start("paired")
+            paired.action(1)
+            paired.expect("Choose your computer")
+            paired.send(b"\r"); paired.expect("Pairing code shown on the owner's computer")
+            paired.send(code.group(1).lower() + b"\n")
+            paired.expect("Connected. Open Your computers")
+            assert paired.settings()["token"] == saved["token"] and paired.settings()["owner"] == "0"
+            assert paired.settings()["tracker"].endswith(f":{base}")
+            owner.expect("Computer added")
+            owner.send(b"\r"); owner.expect("What would you like to do?")
+            paired.quit()
+            # A code that is withdrawn admits nobody.
+            owner.action(7)
+            owner.expect("Esc withdraw the code")
+            owner.send(b"\x1b"); owner.expect("The code was withdrawn")
             owner.quit()
 
             resumed = start("owner")

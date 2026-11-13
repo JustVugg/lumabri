@@ -102,7 +102,7 @@ static void api_pairing_join(int fd, unsigned port, const HomeSettings *current,
         LmbHomeFound found[LMB_HOME_DISC_MAX]; int count=lmb_home_find(found,nonce), others=0, chosen=-1;
         for (int i=0; i<count; i++) if (memcmp(found[i].identity,g_sec_pk,32)) { others++; chosen=i; }
         if (others!=1) { api_error(fd,others ? 409 : 404,others ? "several_households_found" : "no_household_found"); return; }
-        snprintf(next.tracker,sizeof next.tracker,"%s",found[chosen].address);
+        snprintf(next.tracker,sizeof next.tracker,"%.63s",found[chosen].address);
         memcpy(expected,found[chosen].identity,32); discovered=1;
     }
     if (!strcmp(next.tracker,current->tracker)) { api_error(fd,409,"already_in_this_household"); return; }
