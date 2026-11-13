@@ -84,6 +84,13 @@ static int lmb_olm_index(shards *S, const char *dir) {
 
 '''+anchor)
     s=replace_once(s,'    st_init(&m->S, snap);','    (void)lmb_olm_index(&m->S, snap);')
+    # OLMoE ends a reply with <|endoftext|>. The upstream capability names the
+    # tokenizer's |||IP_ADDRESS||| entry, which is a different id in the real
+    # vocabulary, so a hosted chat never stopped and ran to its token limit.
+    s=replace_once(s,'    capabilities->eos_token_id = tok_id_of(&engine->tokenizer, "|||IP_ADDRESS|||");',
+                   '''    capabilities->eos_token_id = tok_id_of(&engine->tokenizer, "<|endoftext|>");
+    if (capabilities->eos_token_id < 0)
+        capabilities->eos_token_id = tok_id_of(&engine->tokenizer, "|||IP_ADDRESS|||");''')
     s=replace_once(s,'    st_init(&engine->model.S, options->model_dir);',
                    '    engine->model.gx = lmb_olm_index(&engine->model.S, options->model_dir);')
     s=replace_once(s,'    engine->model.embed = load_t(&engine->model, "model.embed_tokens.weight", ec->vocab, ec->hidden);',
