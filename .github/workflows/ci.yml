@@ -745,6 +745,11 @@ jobs:
         run: |
           sudo prlimit --pid $$ --memlock=134217728:134217728
           make test-glm-gguf ENGINE=../colibri/c GLM_GGUF_TEST_OPTIONS="--household --mistral-fixture build/mistral-native/F32"
+      - name: GLM5-Next GGUF recurrent state and household chat
+        working-directory: lumabri
+        run: |
+          sudo prlimit --pid $$ --memlock=134217728:134217728
+          make test-glm53-gguf ENGINE=../colibri/c GLM53_GGUF_TEST_OPTIONS=--household
       - name: Qwen hybrid memory contract — real int8 and grouped int4
         working-directory: lumabri
         run: |

@@ -294,3 +294,5 @@ if __name__ == "__main__":
     prepare_native_qwen(root)
     from prepare_mistral_segments import prepare as prepare_mistral
     prepare_mistral(root)
+    from prepare_glm53_gguf import prepare as prepare_glm53
+    prepare_glm53(root)

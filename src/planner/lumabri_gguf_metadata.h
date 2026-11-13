@@ -147,6 +147,40 @@ static inline int lmb_gguf_glm_config(const LmbGguf *g,LmbGgufJson *j) {
     }
     lmb_gguf_json_printf(j,"}");return j->bad?-1:0;
 }
+static inline int lmb_gguf_glm53_config(const LmbGguf *g,LmbGgufJson *j) {
+    LmbGlm53Gguf c;if(lmb_g5_geometry(g,&c))return -1;
+    lmb_gguf_json_printf(j,"{\"model_type\":\"glm5_next\",\"architectures\":[\"Glm5NextForConditionalGeneration\"],"
+        "\"text_config\":{\"model_type\":\"glm5_next_text\"");
+    const char *keys[]={"num_hidden_layers","hidden_size","vocab_size","num_attention_heads","num_key_value_heads","n_routed_experts",
+        "num_experts_per_tok","moe_intermediate_size","intermediate_size","n_shared_experts","first_k_dense_replace",
+        "q_lora_rank","kv_lora_rank","qk_rope_head_dim","qk_nope_head_dim","v_head_dim","index_n_heads",
+        "index_head_dim","index_topk","index_kpool","hc_mult","hc_sinkhorn_iters","max_position_embeddings",
+        "num_nextn_predict_layers","linear_head_dim","linear_num_heads","linear_conv_kernel_dim"};
+    uint32_t values[]={c.layers,c.h,c.vocab,c.heads,c.heads,c.experts,c.topk,c.inter,c.dense,c.shared,c.first,
+        c.query,c.kv,0,c.key,c.value,c.ih,c.idim,c.itop,c.pool,c.hc,c.iters,c.context,c.nextn,c.kd,c.heads,c.conv};
+    for(unsigned i=0;i<sizeof values/sizeof *values;i++)lmb_gguf_json_printf(j,",\"%s\":%u",keys[i],values[i]);
+    lmb_gguf_json_printf(j,",\"scoring_func\":\"sigmoid\",\"norm_topk_prob\":true,\"mla_use_nope\":true,"
+        "\"rms_norm_eps\":%.17g,\"hc_eps\":%.17g,\"routed_scaling_factor\":%.17g,\"swiglu_limit\":%.17g,"
+        "\"tie_word_embeddings\":%s,\"index_kpool_always_select_tail\":%s,\"layer_types\":[",
+        c.eps,c.heps,c.scale,c.clamp,lmb_gguf_tensor(g,"output.weight")?"false":"true",c.tail?"true":"false");
+    for(uint32_t i=0;i<c.layers;i++)lmb_gguf_json_printf(j,"%s\"%s\"",i?",":"",c.full[i]?"deepseek_sparse_attention":"linear_attention");
+    lmb_gguf_json_printf(j,"],\"mlp_layer_types\":[");
+    for(uint32_t i=0;i<c.layers;i++)lmb_gguf_json_printf(j,"%s\"%s\"",i?",":"",i<c.first?"dense":"sparse");
+    lmb_gguf_json_printf(j,"],\"indexer_types\":[");
+    for(uint32_t i=0;i<c.layers;i++)lmb_gguf_json_printf(j,"%s\"full\"",i?",":"");
+    lmb_gguf_json_printf(j,"],\"linear_attn_config\":{\"num_heads\":%u,\"head_dim\":%u,\"short_conv_kernel_size\":%u,"
+        "\"gate_lower_bound\":%.17g,\"kda_layers\":[",c.heads,c.kd,c.conv,c.gate);
+    unsigned count=0;for(uint32_t i=0;i<c.layers;i++)if(!c.full[i])lmb_gguf_json_printf(j,"%s%u",count++?",":"",i);
+    lmb_gguf_json_printf(j,"]}");
+    const char *ids[]={"bos_token_id","eos_token_id","pad_token_id"};
+    for(unsigned i=0;i<3;i++) {
+        char key[64];snprintf(key,sizeof key,"tokenizer.ggml.%s",ids[i]);uint64_t id;
+        const LmbGgufValue *v=lmb_gguf_get(g,key);lmb_gguf_json_printf(j,",\"%s\":",ids[i]);
+        if(!v)lmb_gguf_json_printf(j,"null");
+        else {if(lmb_gguf_integer(v,&id) || id>=c.vocab)return -1;lmb_gguf_json_printf(j,"%llu",(unsigned long long)id);}
+    }
+    lmb_gguf_json_printf(j,"}}");return j->bad?-1:0;
+}
 static inline int lmb_gguf_mistral_config(const LmbGguf *g,LmbGgufJson *j) {
     LmbMistralGguf c;if(lmb_ml4_geometry(g,&c))return -1;
     lmb_gguf_json_printf(j,"{\"model_type\":\"mistral_large4\",\"architectures\":[\"MistralLarge4ForCausalLM\"]");
@@ -184,6 +218,7 @@ static inline int lmb_gguf_metadata(const LmbGguf *g,LmbGgufMetadata *out) {
     uint32_t nt=0,nm=0;const char *arch=lmb_gguf_text(lmb_gguf_get(g,"general.architecture"));
     if(!arch || (!strcmp(arch,"olmoe")?lmb_gguf_olmoe_config(g,&out->config):
         !strcmp(arch,"mistral-large4")?lmb_gguf_mistral_config(g,&out->config):
+        !strcmp(arch,"glm5-next")?lmb_gguf_glm53_config(g,&out->config):
         !strcmp(arch,"glm-dsa")?lmb_gguf_glm_config(g,&out->config):lmb_gguf_qwen_config(g,&out->config)))goto fail;
     const LmbGgufValue *v=lmb_gguf_get(g,"tokenizer.ggml.model");
     if(v && (!lmb_gguf_text(v) || strcmp(lmb_gguf_text(v),"gpt2")))goto fail;

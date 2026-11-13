@@ -70,6 +70,8 @@ int main(int argc,char **argv) {
     if(argc!=7){fprintf(stderr,"usage: %s MODEL REF MODEL REF MODEL REF\n",argv[0]);return 2;}
     if(!strcmp(LMB_MIXED_FAMILY,"glm")) {
         if(coli_glm_segment_adapter_register() || coli_glm_edge_adapter_register())return 2;
+    } else if(!strcmp(LMB_MIXED_FAMILY,"glm53")) {
+        if(coli_glm53_segment_adapter_register() || coli_glm53_edge_adapter_register())return 2;
     } else if(coli_qwen36_segment_adapter_register() || coli_qwen36_edge_adapter_register())return 2;
     MixedModel models[3]={{0}};int rc=1;
     for(int i=0;i<3;i++)if(mixed_reference(&models[i],argv[1+2*i],argv[2+2*i]))goto done;

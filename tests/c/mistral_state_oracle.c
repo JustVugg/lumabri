@@ -6,12 +6,15 @@
 #include "edge_runtime.h"
 #include "edge_adapters.h"
 #include <assert.h>
+#ifndef LMB_STATE_FAMILY
+#define LMB_STATE_FAMILY "glm"
+#endif
 #define OK(x) do {if((x)){fprintf(stderr,"line %d: %s\n",__LINE__,error);abort();}}while(0)
 int main(int argc,char **argv) {
     if(argc!=2)return 2;
-    char error[512]="state mismatch";OK(register_all());OK(coli_glm_edge_adapter_register());
+    char error[512]="state mismatch";OK(register_all());OK(coli_glm_edge_adapter_register());OK(coli_glm53_edge_adapter_register());
     ColiEdgeEngine *edge=NULL;ColiEdgeEngineOptions eo={.struct_size=sizeof eo,.model_dir=argv[1],.memory_limit_bytes=1ull<<30};
-    OK(coli_edge_engine_open("glm",&eo,&edge,error,sizeof error));
+    OK(coli_edge_engine_open(LMB_STATE_FAMILY,&eo,&edge,error,sizeof error));
     ColiEdgeCapabilities ec={.struct_size=sizeof ec};OK(coli_edge_engine_capabilities(edge,&ec,error,sizeof error));
     uint32_t width=ec.state_width;size_t bytes=(size_t)width*40*sizeof(float);
     float *input=malloc(bytes),*full=malloc(bytes),*left=malloc(bytes),*chain=malloc(bytes),*other=malloc(bytes);
@@ -21,9 +24,9 @@ int main(int argc,char **argv) {
     OK(coli_edge_embed(edge,&er,error,sizeof error));
     for(uint32_t cut=1;cut<ec.num_layers;cut++) {
         ColiSegmentEngine *eng[3]={0};ColiSegmentCapabilities caps[3];
-        OK(open_engine_limited("glm",argv[1],0,ec.num_layers,64,1ull<<30,&eng[0],&caps[0],error,sizeof error));
-        OK(open_engine_limited("glm",argv[1],0,cut,64,1ull<<30,&eng[1],&caps[1],error,sizeof error));
-        OK(open_engine_limited("glm",argv[1],cut,ec.num_layers,64,1ull<<30,&eng[2],&caps[2],error,sizeof error));
+        OK(open_engine_limited(LMB_STATE_FAMILY,argv[1],0,ec.num_layers,64,1ull<<30,&eng[0],&caps[0],error,sizeof error));
+        OK(open_engine_limited(LMB_STATE_FAMILY,argv[1],0,cut,64,1ull<<30,&eng[1],&caps[1],error,sizeof error));
+        OK(open_engine_limited(LMB_STATE_FAMILY,argv[1],cut,ec.num_layers,64,1ull<<30,&eng[2],&caps[2],error,sizeof error));
         ColiSegmentSession *s[6]={0};
         for(int i=0;i<6;i++)OK(create_session(eng[i%3],64,&s[i],error,sizeof error));
         OK(run_rows(s[0],0,20,width,input,full,tokens,error,sizeof error));
@@ -43,8 +46,12 @@ int main(int argc,char **argv) {
         OK(run_rows(s[4],20,20,width,input+20*width,left,tokens+20,error,sizeof error));
         /* Malformed boundary must not advance the restored right session. */
         MemoryStream before={0},after={0};OK(coli_segment_snapshot(s[5],memory_write,&before,error,sizeof error));
-        float saved=left[width-2];left[width-2]=NAN;
-        assert(run_rows(s[5],20,20,width,left,chain,tokens+20,error,sizeof error));left[width-2]=saved;
+        if(!strcmp(LMB_STATE_FAMILY,"glm")) {
+            float saved=left[width-2];left[width-2]=NAN;
+            assert(run_rows(s[5],20,20,width,left,chain,tokens+20,error,sizeof error));left[width-2]=saved;
+        } else {
+            assert(run_rows(s[5],21,20,width,left,chain,tokens+20,error,sizeof error));
+        }
         OK(coli_segment_snapshot(s[5],memory_write,&after,error,sizeof error));
         assert(before.size==after.size && !memcmp(before.data,after.data,before.size));free(before.data);free(after.data);
         OK(run_rows(s[5],20,20,width,left,chain,tokens+20,error,sizeof error));
@@ -53,5 +60,5 @@ int main(int argc,char **argv) {
         for(int i=0;i<3;i++)OK(coli_segment_engine_close(eng[i],error,sizeof error));
     }
     coli_edge_engine_close(edge);free(input);free(full);free(left);free(chain);free(other);
-    puts("GLM/MISTRAL STATE: PASS (all cuts, interleaved sessions, snapshot/restore, malformed boundary atomicity)");return 0;
+    puts(LMB_STATE_FAMILY " STATE: PASS (all cuts, interleaved sessions, snapshot/restore, invalid request atomicity)");return 0;
 }
