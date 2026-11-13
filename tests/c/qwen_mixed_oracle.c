@@ -4,6 +4,7 @@
 #define main single_checkpoint_main
 #include "edge_segment_greedy.c"
 #undef main
+#include "src/runtime/lumabri_engine_memory.h"
 #ifndef LMB_MIXED_FAMILY
 #define LMB_MIXED_FAMILY "qwen36"
 #endif
@@ -74,9 +75,12 @@ int main(int argc,char **argv) {
         if(coli_glm53_segment_adapter_register() || coli_glm53_edge_adapter_register())return 2;
     } else if(!strcmp(LMB_MIXED_FAMILY,"kimi")) {
         if(coli_kimi_segment_adapter_register() || coli_kimi_edge_adapter_register())return 2;
+    } else if(!strcmp(LMB_MIXED_FAMILY,"inkling")) {
+        if(coli_inkling_segment_adapter_register() || coli_inkling_edge_adapter_register())return 2;
     } else if(coli_qwen36_segment_adapter_register() || coli_qwen36_edge_adapter_register())return 2;
     MixedModel models[3]={{0}};int rc=1;
     for(int i=0;i<3;i++)if(mixed_reference(&models[i],argv[1+2*i],argv[2+2*i]))goto done;
+    LmbEngineMemory baseline={0};
     for(int order=0;order<2;order++) {
         for(int j=0;j<3;j++) {
             int i=order?2-j:j;if(mixed_open(&models[i],argv[1+2*i]))goto done;
@@ -101,6 +105,16 @@ int main(int argc,char **argv) {
 #ifdef LMB_ORACLE_GUARD_READS
         weights_sealed=0;if(forbidden_reads)goto done;
 #endif
+        if(getenv("LMB_ORACLE_ACCOUNTING")) {
+            LmbEngineMemory memory;lmb_engine_memory_snapshot(&memory);
+            if(!memory.enabled || memory.fault)goto done;
+            if(order && (memory.allocations!=baseline.allocations || memory.requested_bytes!=baseline.requested_bytes)) {
+                fprintf(stderr,"engine allocations grow after unload: %llu/%llu bytes -> %llu/%llu bytes\n",
+                    (unsigned long long)baseline.allocations,(unsigned long long)baseline.requested_bytes,
+                    (unsigned long long)memory.allocations,(unsigned long long)memory.requested_bytes);goto done;
+            }
+            baseline=memory;
+        }
     }
     puts(LMB_MIXED_FAMILY " MIXED: PASS (alternating models, reversed open order, early close, no inference reads)");rc=0;
 done:

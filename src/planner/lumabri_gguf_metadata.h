@@ -181,6 +181,32 @@ static inline int lmb_gguf_glm53_config(const LmbGguf *g,LmbGgufJson *j) {
     }
     lmb_gguf_json_printf(j,"}}");return j->bad?-1:0;
 }
+static inline int lmb_gguf_inkling_config(const LmbGguf *g,LmbGgufJson *j) {
+    LmbInkGguf c;if(lmb_ink_geometry(g,&c))return -1;
+    lmb_gguf_json_printf(j,"{\"model_type\":\"inkling\",\"architectures\":[\"InklingForCausalLM\"]");
+    const char *keys[]={"num_hidden_layers","hidden_size","vocab_size","unpadded_vocab_size","num_attention_heads",
+        "swa_num_attention_heads","num_key_value_heads","swa_num_key_value_heads","head_dim","swa_head_dim",
+        "sliding_window_size","d_rel","rel_extent","conv_kernel_size","sconv_kernel_size","n_routed_experts",
+        "num_experts_per_tok","n_shared_experts","intermediate_size","moe_intermediate_size","dense_mlp_idx",
+        "max_position_embeddings","log_scaling_n_floor"};
+    uint32_t values[]={c.layers,c.h,c.vocab,c.unpad,c.heads,c.heads,c.kv,c.local_kv,c.hd,c.hd,
+        c.window,c.rel,c.extent,c.conv,c.conv,c.experts,c.topk,c.shared,c.dense,c.inter,c.first,c.context,c.floor};
+    for(unsigned i=0;i<sizeof values/sizeof *values;i++)lmb_gguf_json_printf(j,",\"%s\":%u",keys[i],values[i]);
+    lmb_gguf_json_printf(j,",\"rms_norm_eps\":%.17g,\"route_scale\":%.17g,\"logits_mup_width_multiplier\":%.17g,"
+        "\"log_scaling_alpha\":%.17g,\"shared_expert_sink\":true,\"hidden_act\":\"silu\",\"local_layer_ids\":[",c.eps,c.scale,c.mup,c.alpha);
+    unsigned n=0;for(uint32_t i=0;i<c.layers;i++)if(c.local[i])lmb_gguf_json_printf(j,"%s%u",n++?",":"",i);
+    lmb_gguf_json_printf(j,"],\"mlp_layer_types\":[");
+    for(uint32_t i=0;i<c.layers;i++)lmb_gguf_json_printf(j,"%s\"%s\"",i?",":"",i<c.first?"dense":"sparse");
+    lmb_gguf_json_printf(j,"]");
+    const char *ids[]={"bos_token_id","eos_token_id"};
+    for(unsigned i=0;i<2;i++) {
+        char key[64];snprintf(key,sizeof key,"tokenizer.ggml.%s",ids[i]);uint64_t id;
+        const LmbGgufValue *v=lmb_gguf_get(g,key);lmb_gguf_json_printf(j,",\"%s\":",ids[i]);
+        if(!v)lmb_gguf_json_printf(j,"null");
+        else {if(lmb_gguf_integer(v,&id) || id>=c.vocab)return -1;lmb_gguf_json_printf(j,"%llu",(unsigned long long)id);}
+    }
+    lmb_gguf_json_printf(j,"}");return j->bad?-1:0;
+}
 static inline int lmb_gguf_kimi_config(const LmbGguf *g,LmbGgufJson *j) {
     LmbKimiGguf c;if(lmb_k3_geometry(g,&c))return -1;
     lmb_gguf_json_printf(j,"{\"model_type\":\"kimi_k3\",\"architectures\":[\"KimiK3ForConditionalGeneration\"],"
@@ -244,6 +270,7 @@ static inline int lmb_gguf_metadata(const LmbGguf *g,LmbGgufMetadata *out) {
     if(!arch || (!strcmp(arch,"olmoe")?lmb_gguf_olmoe_config(g,&out->config):
         !strcmp(arch,"mistral-large4")?lmb_gguf_mistral_config(g,&out->config):
         !strcmp(arch,"kimi-k3")?lmb_gguf_kimi_config(g,&out->config):
+        !strcmp(arch,"inkling")?lmb_gguf_inkling_config(g,&out->config):
         !strcmp(arch,"glm5-next")?lmb_gguf_glm53_config(g,&out->config):
         !strcmp(arch,"glm-dsa")?lmb_gguf_glm_config(g,&out->config):lmb_gguf_qwen_config(g,&out->config)))goto fail;
     const LmbGgufValue *v=lmb_gguf_get(g,"tokenizer.ggml.model");

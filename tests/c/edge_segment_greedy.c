@@ -140,6 +140,7 @@ int main(int argc, char **argv) {
     REQUIRE(!coli_glm_segment_adapter_register() && !coli_glm_edge_adapter_register());
     REQUIRE(!coli_glm53_segment_adapter_register() && !coli_glm53_edge_adapter_register());
     REQUIRE(!coli_kimi_segment_adapter_register() && !coli_kimi_edge_adapter_register());
+    REQUIRE(!coli_inkling_segment_adapter_register() && !coli_inkling_edge_adapter_register());
     ColiEdgeEngineOptions eo={.struct_size=sizeof(eo),.model_dir=argv[2],.memory_limit_bytes=1ull<<30};
     REQUIRE(!coli_edge_engine_open(argv[1],&eo,&edge,error,sizeof error));
     ColiEdgeCapabilities ec={.struct_size=sizeof(ec)};

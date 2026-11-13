@@ -1,5 +1,25 @@
 # Third-party build inputs
 
+## Colibri Inkling GGUF integration
+
+- Source: `JustVugg/colibri`, tag `v2.1.0`, commit
+  `704a3f68184b78367a04cb5526e428dc2f90f05b`.
+- Source files: `c/inkling.c`, `c/st_gguf.h`, `c/tools/gguf_import.py`,
+  `c/tools/make_flint_tiny.py`, `c/ggml_quants.h` and
+  `c/tests/test_segment_adapters_real.c`.
+- License: Apache-2.0; attribution: Colibri contributors. Original license,
+  headers and notices remain in generated copies and packages.
+- Lumabri supplies geometry validation, C metadata and resident accounting.
+  Generated-copy hooks own and release native block buffers, report their
+  byte counts, serialize temporary source metadata during opens, and require
+  all approved expert slots before resident execution. The generated
+  `st_gguf.h` also releases the wrapper's parsed JSON after copying its paths.
+  Kernel arithmetic is
+  unchanged. The upstream checkout is read-only.
+- Tests generate deterministic tensors for the upstream architecture,
+  quantize through GGUF's reference writer and compare with the unmodified
+  monolithic engine. ABI state checks reuse upstream snapshot helpers.
+
 ## Colibri Kimi K3 GGUF integration
 
 - Source: `JustVugg/colibri`, tag `v2.1.0`, commit

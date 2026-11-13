@@ -757,6 +757,11 @@ jobs:
         run: |
           sudo prlimit --pid $$ --memlock=134217728:134217728
           make test-kimi-gguf ENGINE=../colibri/c KIMI_GGUF_TEST_OPTIONS=--household
+      - name: Inkling GGUF attention state and household chat
+        working-directory: lumabri
+        run: |
+          sudo prlimit --pid $$ --memlock=134217728:134217728
+          make test-inkling-gguf ENGINE=../colibri/c INKLING_GGUF_TEST_OPTIONS=--household
       - name: Qwen hybrid memory contract — real int8 and grouped int4
         working-directory: lumabri
         run: |

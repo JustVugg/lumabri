@@ -274,3 +274,5 @@ if __name__ == "__main__":
 
     from prepare_kimi_gguf import prepare as prepare_kimi
     prepare_kimi(root)
+    from prepare_inkling_gguf import prepare as prepare_inkling
+    prepare_inkling(root)

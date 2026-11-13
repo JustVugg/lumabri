@@ -15,7 +15,7 @@ them.
 
 The integrated GGUF CPU paths cover OLMoE, Qwen3 dense/MoE, Qwen3.5/3.6
 dense/MoE, Flint, Muse Spark, LFM3 text, GLM-5.2/5.3 (`glm-dsa`),
-GLM5-Next text (`glm5-next`), Kimi K3 text (`kimi-k3`) and Mistral Large 4 text. See
+GLM5-Next text (`glm5-next`), Kimi K3 text (`kimi-k3`), Inkling text and Mistral Large 4 text. See
 [Qwen architecture contracts](QWEN_ARCHITECTURES.md) and [Mistral](MISTRAL.md).
 The inspector checks the
 actual tensor names, dimensions, native quantization block geometry and
@@ -59,6 +59,19 @@ extensions absent from this GGUF layout are rejected before admission.
 checks every layer cut, session isolation, snapshot continuation and household
 chat with the source offline. These reduced-checkpoint checks do not establish
 performance for a full-size Kimi checkpoint.
+
+Inkling's text path validates the distinct local/global KV heads, sliding
+window, relative-position bank, convolution history, shared-expert routing
+and unpadded output vocabulary. Native, split and `expert-packed-v1` GGUFs
+keep the engine's block layouts, with resident space for its largest expert
+slots, scales and row-interleaving overhead. Each conversation owns its KV
+and convolution state. Embeddings and output weights are loaded before chat;
+their quantized buffers are released when the allocation closes.
+`make test-inkling-gguf ENGINE="$COLIBRI_SOURCE" INKLING_GGUF_TEST_OPTIONS=--household`
+checks every cut against monolithic execution, snapshots across the sliding
+window, interleaved conversations and models, and the normal approval/chat
+flow with the source offline. This contract requires at least one shared
+expert and does not enable audio or dense-quantization sidecars.
 
 `make test-glm-gguf ENGINE="$COLIBRI_SOURCE" GLM_GGUF_TEST_OPTIONS=--household`
 compares every layer cut against the pinned monolithic engine, including
