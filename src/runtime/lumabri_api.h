@@ -133,6 +133,20 @@ static int api_find_plan(const char *tracker, const uint8_t allocation[32], LmbR
 #include "lumabri_retirement.h"
 #include "lumabri_workspace.h"
 #include "lumabri_management.h"
+/* The one place an inference grant is written, shared by `api grant` and by
+ * a preparation's own requester. Caller holds the access database lock.
+ * 0: the user holds the grant. 1: the user's list is full, nothing changed.
+ * -1: unknown user, unapproved allocation or storage failure. */
+static int api_grant_allocation(int dir, const char *tracker, const char *name, const uint8_t allocation[32]) {
+    LmbApiUser user; LmbModelRoute route; LmbResidentPlan *plan=calloc(1,sizeof *plan); int rc=-1;
+    if (plan && !lmb_api_user_load(dir,name,&user) &&
+        (!api_route_read(dir,allocation,tracker,&route) || !api_find_plan(tracker,allocation,plan))) {
+        if (lmb_api_user_allows(&user,allocation)) rc=0;
+        else if (user.count>=LMB_API_MODELS_MAX) rc=1;
+        else { memcpy(user.allocations[user.count++],allocation,32); rc=lmb_api_user_save(dir,&user) ? -1 : 0; }
+    }
+    free(plan); return rc;
+}
 #include "lumabri_preparation_api.h"
 #include "lumabri_donor_approval_api.h"
 #include "lumabri_recovery_wait.h"
@@ -593,7 +607,7 @@ static void api_connection_dispatch(int fd, int access_dir, unsigned port, const
             }
             body[at]=0;
             if (at!=request.length) api_error(fd,408,"request_body_timeout");
-            else if (preparation) api_preparation(fd,access_dir,tracker,body,at);
+            else if (preparation) api_preparation(fd,access_dir,tracker,&user,body,at);
             else if (policy) api_policy_http(fd,access_dir,tracker,body,at);
             else if (elastic) api_elastic_http(fd,access_dir,tracker,body,at);
             else if (approval) api_donor_approval(fd,tracker,https_origin!=NULL,body,at);
@@ -939,14 +953,10 @@ static int cmd_api(int argc, char **argv) {
         char file[40]; snprintf(file,sizeof file,"%s.user",args[0]); rc=unlinkat(dir,file,0);
         if (!rc) rc=fsync(dir);
     } else if (!strcmp(argv[0],"grant") && count==2 && *tracker) {
-        LmbApiUser user; LmbResidentPlan *plan=calloc(1,sizeof *plan); LmbModelRoute route; uint8_t allocation[32];
-        if (plan && strlen(args[1])==64 && !lmb_unhex(allocation,args[1],32) &&
-            !lmb_api_user_load(dir,args[0],&user) &&
-            (!api_route_read(dir,allocation,tracker,&route) || !api_find_plan(tracker,allocation,plan))) {
-            if (lmb_api_user_allows(&user,allocation)) rc=0;
-            else if (user.count<LMB_API_MODELS_MAX) { memcpy(user.allocations[user.count++],allocation,32); rc=lmb_api_user_save(dir,&user); }
-        }
-        free(plan);
+        uint8_t allocation[32];
+        if (strlen(args[1])==64 && !lmb_unhex(allocation,args[1],32)) rc=api_grant_allocation(dir,tracker,args[0],allocation);
+        if (rc>0) fprintf(stderr,"%s already holds %u model grants, the most one API user can hold. Nothing was changed; "
+            "grant this model to another API user.\n",args[0],LMB_API_MODELS_MAX);
     } else { close(lock); close(dir); goto usage; }
     close(lock); close(dir);
     if (rc) fprintf(stderr,"API access operation failed; check the user and approved allocation\n");
@@ -964,7 +974,7 @@ usage:
         "lumabri api user-add NAME\n"
         "lumabri api operator-grant NAME    read-only cluster visibility, no inference grant\n"
         "lumabri api operator-revoke NAME\n"
-        "lumabri api manage-grant NAME      preparation, allocation control and visibility; no inference/history grant\n"
+        "lumabri api manage-grant NAME      preparation, allocation control and visibility; inference only on models it prepares\n"
         "lumabri api manage-revoke NAME\n"
         "lumabri api workspace [--tracker HOST:PORT]\n"
         "lumabri api portfolio-policy [CONFIG_JSON_FILE] [--tracker HOST:PORT]\n"

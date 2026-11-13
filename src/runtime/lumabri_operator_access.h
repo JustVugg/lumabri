@@ -6,7 +6,8 @@
 #include "lumabri_api_access.h"
 
 /* Capability records are bound to credentials, not reusable usernames.
- * Management includes cluster visibility but never inference/history grants. */
+ * Management includes cluster visibility but never history grants, and no
+ * inference grant except for allocations its holder prepared itself. */
 static inline int lmb_operator_capability(int dir, const LmbApiUser *user, int manage) {
     if (!user || !lmb_api_username(user->name)) return 0;
     char file[48]; snprintf(file,sizeof file,"%s.%s",user->name,manage ? "manager" : "operator");

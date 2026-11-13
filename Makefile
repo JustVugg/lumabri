@@ -722,12 +722,13 @@ test-api-gateway: lumabri test_chat_ui test-chat-history
 	python3 tests/integration/installed_fleet_contract_test.py
 	python3 tests/integration/chat_history_test.py
 	python3 tests/integration/start_command_test.py
-	$(MAKE) test-web-approval
 
-test: test-api-gateway
+test: test-api-gateway test-web-approval
 
 # Real engines and a real checkpoint: the donor's request is declined, then
-# approved, through the page's own API.
+# approved, through the page's own API. About a minute and more than 2 GB of
+# resident weights, so it runs with the aggregate, not with the engine-free
+# gateway gate above.
 .PHONY: test-web-approval
 test-web-approval: lumabri segment_node segment_chat fixture
 	python3 tests/integration/web_approval_test.py

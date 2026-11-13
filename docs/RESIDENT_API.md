@@ -639,8 +639,10 @@ lumabri api manage-grant operator-name
 lumabri api manage-revoke operator-name
 ```
 
-It includes workspace visibility but does not authorize inference or access to
-another user's private conversations. An ordinary inference grant or read-only
+It includes workspace visibility but does not authorize inference on existing
+models or access to another user's private conversations. A manager who
+prepares a model receives the inference grant for that exact allocation when it
+is ready; see [model preparation](MODEL_PREPARATION_API.md). An ordinary inference grant or read-only
 `operator-grant` cannot mutate allocations. Grants are bound to the current
 credential digest; replacing a user does not transfer an old management grant.
 
