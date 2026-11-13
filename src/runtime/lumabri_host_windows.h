@@ -48,7 +48,7 @@ static int lmb_windows_host_capabilities(LmbWindowsHost *h) {
             line[used++]=c;continue;
         }
         line[used]=0;used=0;
-        if (ready) return !strcmp(line,"STAT 0 0 0 0") && fields==31 ? 0 : -1;
+        if (ready) return !strcmp(line,"STAT 0 0 0 0") && (fields&31)==31 ? 0 : -1;
         if (!strcmp(line,"\x01\x01" "READY" "\x01\x01")) {ready=1;continue;}
         unsigned bit=0;
         if (!strcmp(line,"LUMABRI_RESET 1")) {bit=1;h->engine.reset_supported=1;}
@@ -70,6 +70,8 @@ static int lmb_windows_host_capabilities(LmbWindowsHost *h) {
             if (!strcmp(line+17,"GREEDY")) h->engine.greedy_only=1;
             else if (strcmp(line+17,"LOGITS")) return -1;
         } else if (!strcmp(line,"LUMABRI_VISION 1")) h->engine.vision_supported=1;
+        /* This host publishes OLMoE only; another prompt format is not it. */
+        else if (!strcmp(line,"LUMABRI_CHAT_FORMAT 1 olmoe")) bit=32;
         else if (!strncmp(line,"LUMABRI_",8)) return -1;
         if (fields&bit) return -1;
         fields|=bit;
