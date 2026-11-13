@@ -1,4 +1,4 @@
-<img src="logo.svg" alt="lumabri: tiny engine, immense swarm" width="524">
+<img src="logo.svg" alt="Lumabri" width="524">
 
 # Your computers. Your models.
 
