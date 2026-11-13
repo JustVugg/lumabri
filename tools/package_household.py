@@ -19,7 +19,10 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE_BINARIES = ("lumabri", "tracker", "maintainer", "segment_node", "segment_chat", "swarm_probe")
-BINARIES = (*CORE_BINARIES, "lumabri-agent")
+# lumabri-fetch is the model download helper: the one program here that links
+# the system's libcurl, so that the others keep no TLS dependency. The native
+# Windows package has no web gateway and does not ship it.
+BINARIES = (*CORE_BINARIES, "lumabri-agent", "lumabri-fetch")
 WINDOWS_BINARIES = ("lumabri.exe", "tracker.exe", "maintainer.exe", "segment_node.exe", "segment_chat.exe")
 
 

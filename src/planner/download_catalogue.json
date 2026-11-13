@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "models": [
+    {
+      "id": "olmoe-1b-7b-instruct",
+      "family": "olmoe",
+      "name": "OLMoE 1B-7B Instruct",
+      "repo": "allenai/OLMoE-1B-7B-0924-Instruct-GGUF",
+      "revision": "02ab6ea6894a8418eb14f6d8ee1bfb08bd298080",
+      "summary": "small starter; native GGUF, Q8_0",
+      "licence": "Apache-2.0",
+      "licence_url": "https://huggingface.co/allenai/OLMoE-1B-7B-0924-Instruct-GGUF",
+      "files": [
+        {
+          "path": "olmoe-1b-7b-0924-instruct-q8_0.gguf",
+          "size": 7359943136,
+          "sha256": "d089e8b12dee00764c1783f6c557a2ddd1f680ffb0d22b44ad28ef25f8909c66"
+        }
+      ]
+    },
+    {
+      "id": "qwen36-35b",
+      "family": "qwen36",
+      "name": "Qwen3.6-35B-A3B",
+      "repo": "Kreuzzelg/qwen36-35b-a3b-colibri-i4-gs64",
+      "disk_gb": 23.1,
+      "ram_min_gb": 10,
+      "ram_good_gb": 20,
+      "summary": "general chat with thinking and tools; int4-gs64 container",
+      "licence": "Apache 2.0"
+    },
+    {
+      "id": "qwen38-flash-next",
+      "family": "qwen38",
+      "name": "Qwen3.8-Flash-Next",
+      "repo": "Qwen/Qwen3.8-Flash-Next-FP8",
+      "revision": "bcd9f01ddc9cff2316eb84281bebcd5b058bddce",
+      "disk_gb": 185.6,
+      "ram_min_gb": 24,
+      "ram_good_gb": 32,
+      "summary": "125B + 51B n-gram, official FP8 checkpoint (pinned revision)",
+      "licence": "Qwen Community License 1.0"
+    }
+  ]
+}

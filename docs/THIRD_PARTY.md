@@ -158,3 +158,23 @@
   forced-colours handling, phone layout, an Advanced disclosure for management
   screens, and a room create/join screen kept inactive behind
   `ROOM_FLOW_ENABLED` in `src/web/ui.js` until the API can serve it.
+
+## libcurl (system library, model download helper)
+
+- Not vendored. `lumabri-fetch` links the libcurl installed on the system
+  (7.85 or newer), the same library the optional `lumabri-kube` controller
+  already uses, and through it the system's TLS library and certificate
+  store. License: curl license (MIT-like); Copyright Daniel Stenberg and
+  contributors.
+- Scope: HTTPS GET requests for model files that a person asked to download
+  (see `docs/MODEL_DOWNLOAD.md`). Certificate and host verification are always
+  on. `lumabri`, `tracker`, `segment_node` and the other household programs
+  do not link it.
+- Build: libcurl development files (`libcurl4-openssl-dev pkg-config` on
+  Debian/Ubuntu; included in the macOS SDK). `make household FETCH_BINARY=`
+  builds without the helper.
+- The repository-listing fields and the snapshot rules follow the Hugging
+  Face Hub's public HTTP interface as used by Colibri's `c/setup_download.py`
+  (Apache-2.0, Colibri contributors); no code was copied. The download
+  catalogue's entries and field names mirror `c/setup_catalog.py` of the same
+  project.
