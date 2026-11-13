@@ -533,7 +533,9 @@ jobs:
     # Real multi-model/recovery and installed-layout gates take 40–45 minutes
     # on current runners. Also build a clean baseline package for the full
     # previous -> candidate -> previous service gate; retain bounded margin.
-    timeout-minutes: 75
+    # With every native-GGUF family in this job a slow runner needs more than
+    # 75 minutes; no gate is removed.
+    timeout-minutes: 120
     steps:
       - name: Checkout Lumabri
         uses: actions/checkout@v4
