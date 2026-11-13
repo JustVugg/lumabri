@@ -9,9 +9,10 @@ let generationMetrics = null;
 let operator = false, workspaceOpen = false, workspacePending = false, workspaceEpoch = 0;
 let workspaceExpires = 0;
 let management = false, managementBusy = false;
-let preparationReview = null, preparationBusy = false, preparationOperation = "";
+let preparationReview = null, preparationBusy = false, preparationOperation = "", preparationWatch = "";
 let preparationNextCursor = "";
 let preparationNames = new Map();
+let requestsActive = 0; // ui.js keeps its background reads out of the way of these
 let elasticPending = false, elasticEditor = null, elasticReview = null, elasticEpoch = 0;
 const utf8 = new TextEncoder();
 const say = text => { $("notice").textContent = text; };
@@ -50,6 +51,10 @@ const errors = {
   invalid_elastic_policy: "The replica policy contains unsupported or inconsistent settings. Reload and review its limits.",
   admission_unavailable: "Local request admission could not be checked. No response was started.",
   management_permission_required: "Your token has no management permission. An operator must grant it explicitly.",
+  donor_request_changed_review_again: "The request changed or expired before your decision arrived. Nothing was decided; review what is shown now.",
+  donor_decision_not_confirmed_review_again: "This computer did not confirm the decision. Review what is shown now before trying again.",
+  local_donor_unavailable: "This computer is not sharing with this household now, so there is nothing to decide.",
+  donor_approval_local_page_only: "Requests to this computer are decided on the computer itself, from its local page or its Share resources screen.",
   allocation_changed_refresh_before_retry: "The allocation changed after it was inspected. Review its current state before retrying.",
   retirement_started_cannot_resume: "Release has already started and cannot be reversed. Reconcile that release instead.",
   resident_plan_not_found: "This saved model allocation is no longer available. Ask the operator to prepare and grant a new one.",
@@ -84,13 +89,14 @@ async function request(path, method = "GET", body) {
   if (body !== undefined) { options.body = JSON.stringify(body); options.headers["Content-Type"] = "application/json"; }
   const abort = new AbortController(), timer = setTimeout(() => abort.abort(), 15000);
   options.signal = abort.signal;
+  requestsActive++;
   try {
     const response = await fetch(path, options);
     const answer = await response.json();
     if (credential !== token) throw new Error("Connection changed; this result was discarded");
     if (!response.ok) throw new Error(explain(answer.error || answer.state || `Request failed (${response.status})`));
     return answer;
-  } finally { clearTimeout(timer); }
+  } finally { requestsActive--; clearTimeout(timer); }
 }
 function controls() {
   const selected = models.find(model => model.id === $("model").value);
@@ -338,6 +344,15 @@ $("login-form").onsubmit = async event => {
   } catch (error) { token = ""; models = []; conversations = []; renderModels(); renderHistory(); say(error.message); }
   finally { button.disabled = false; }
 };
+// A local start link carries the token in the URL fragment, which browsers never send to a server.
+// Treat it as a pasted token, and drop it from the address bar and history entry at once.
+{
+  const linked = new URLSearchParams(location.hash.slice(1)).get("token");
+  if (linked) {
+    history.replaceState(null, "", location.pathname + location.search);
+    setTimeout(() => { $("token").value = linked; $("login-form").requestSubmit(); });
+  }
+}
 $("sign-out").onclick = () => {
   if (busy || managementBusy) return;
   if (unsaved && !confirm("This answer is not saved. Sign out without exporting?")) return;
@@ -345,7 +360,7 @@ $("sign-out").onclick = () => {
   token = ""; models = []; conversations = []; current = null;
   showGenerationMetrics();
   operator = false; management = false; closeWorkspace(); clearWorkspace();
-  preparationOperation = ""; preparationNextCursor = ""; preparationInvalidate();
+  preparationOperation = ""; preparationWatch = ""; preparationNextCursor = ""; preparationInvalidate();
   $("prepare-form").hidden = true; $("prepare-models").replaceChildren(); $("prepare-nodes").replaceChildren();
   $("prepare-status").textContent = ""; $("prepare-operation").replaceChildren(new Option("No operation selected", ""));
   $("prepare-cancel").hidden = true;
@@ -654,7 +669,7 @@ $("prepare-start").onclick = () => preparationTask(async valid => {
   if (!preparationReview) return;
   const reviewed = preparationReview;
   if (!reviewed.operation) reviewed.operation = Array.from(crypto.getRandomValues(new Uint8Array(32)), byte => byte.toString(16).padStart(2, "0")).join("");
-  preparationOperation = reviewed.operation;
+  preparationOperation = preparationWatch = reviewed.operation;
   $("prepare-status").textContent = `Starting ${preparationOperation}. Closing this page will not cancel preparation.`;
   const data = await request("/api/v1/preparation", "POST", {action: "start", operation: reviewed.operation, review: reviewed.review, ...reviewed.intent});
   if (!valid()) return;
@@ -669,7 +684,9 @@ async function preparationObserve() {
     const operation = preparationOperation;
     const data = await request("/api/v1/preparation", "POST", {action: "status", operation});
     if (!valid() || operation !== preparationOperation) return;
-    $("prepare-status").textContent = `${data.state.replaceAll("_", " ")} · ${data.detail}`;
+    $("prepare-status").textContent = `${data.state.replaceAll("_", " ")} · ${data.detail}` +
+      (data.chat_access && data.chat_access !== "none_ready" ? ` ${data.chat_access_detail}` : "");
+    await preparationSeen(operation, data);
     $("prepare-cancel").hidden = !data.live || data.state !== "running";
   });
 }
@@ -679,6 +696,33 @@ $("prepare-cancel").onclick = () => preparationTask(async valid => {
   if (valid()) $("prepare-status").textContent = data.cancel_requested ? "Cancellation requested. Waiting for cleanup." : data.detail;
 });
 setInterval(preparationObserve, 3000);
+// ---- a model this sign-in prepared joins the chat picker when it is ready ----
+// The gateway grants it to the requester; this only re-reads the list, with
+// or without Computers & models open, and says so when the grant was refused.
+async function preparationSeen(operation, data) {
+  const credential = token, ready = (data.allocations || []).filter(entry => entry.state === "ready_observed");
+  if (data.chat_access === "granted" && ready.some(entry => !models.some(model => model.id === entry.id))) {
+    const listed = (await request("/api/v1/models")).models;
+    if (credential !== token) return;
+    const first = !models.length && !$("model").value;
+    models = listed; renderModels(); controls();
+    const added = ready.map(entry => models.find(model => model.id === entry.id)).filter(Boolean);
+    if (first && added.length && !current) $("model").value = added[0].id;
+    $("model").dispatchEvent(new Event("change"));
+    if (added.length) say(`${added.map(model => model.name).join(", ")} is ready to chat.`);
+  }
+  if (operation !== preparationWatch || (data.state !== "done" && data.state !== "failed")) return;
+  preparationWatch = "";
+  if (data.chat_access === "grant_list_full" || data.chat_access === "not_granted") say(data.chat_access_detail);
+}
+setInterval(async () => {
+  if (!preparationWatch || !management || !token || busy || preparationBusy || managementBusy || requestsActive || document.hidden) return;
+  const operation = preparationWatch, credential = token;
+  try {
+    const data = await request("/api/v1/preparation", "POST", {action: "status", operation});
+    if (credential === token && operation === preparationWatch) await preparationSeen(operation, data);
+  } catch { /* Not confirmed now: the next reading decides. */ }
+}, 3000);
 
 // The browser edits policy intent only. Placement, approvals, reservations and
 // reconciliation remain in the same service used by the CLI and other clients.

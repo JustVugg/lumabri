@@ -9,7 +9,18 @@ or automatic donor consent.
 ## Permissions and source
 
 `lumabri api manage-grant NAME` enables preparation and allocation management.
-It does **not** grant inference access or access to another user's history.
+It does **not** grant inference access to existing models or access to another
+user's history. The one exception is narrow: the sign-in that starts a
+preparation receives the exact inference grant for each allocation of that
+operation once it is observed ready, through the same path as
+`lumabri api grant`. The requester is recorded by credential digest beside the
+operation's intent; it must still hold management when the grant is written.
+Observing, listing or cancelling someone else's operation grants nothing, and
+operations started by controllers or the TUI record no requester. Status
+replies to a signed-in requester carry `chat_access` (`none_ready`, `granted`,
+`grant_list_full`, `not_granted`, `not_requested_by_this_sign_in`) and a
+`chat_access_detail` sentence. An API user holds at most 64 model grants: a
+ready model beyond that stays loaded and ungranted, and the reply says so.
 The owner configures the model folder in the existing household settings.
 Clients select catalogue names; paths, executables, backend overrides, endpoint
 addresses, keys and approvals are not accepted in requests.

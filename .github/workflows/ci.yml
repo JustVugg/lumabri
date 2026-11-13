@@ -242,6 +242,9 @@ jobs:
           python-version: '3.12'
       - name: Build the native candidate and reduced fixture from pinned sources
         run: |
+          # lumabri-fetch, the model download helper, links the system libcurl.
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev pkg-config
           make household swarm_probe ENGINE=../colibri/c -j2
           python3 tools/package_household.py --colibri-root ../colibri --output build/container-candidate
           python3 -m pip install --index-url https://download.pytorch.org/whl/cpu torch
@@ -609,6 +612,7 @@ jobs:
           python -m pip install playwright==1.62.0
           python -m playwright install --with-deps chromium
           python3 tests/integration/web_chat_test.py
+          python3 tests/integration/web_download_test.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -976,6 +980,9 @@ jobs:
         working-directory: lumabri
         run: |
           test "$(uname -m)" = aarch64
+          # lumabri-fetch, the model download helper, links the system libcurl.
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev pkg-config
           make household swarm_probe test_machine test_process_memory test_engine_memory test_engine_memory_guard test_memlock test_calibration test_backend_routes test_segment_close test_chat_ui test_hosted_sessions ENGINE=../colibri/c CFLAGS='-O2 -Wall -Wextra -Werror' -j2
           ./test_machine
           ./test_process_memory

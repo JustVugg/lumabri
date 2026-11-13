@@ -3,7 +3,7 @@
 #include <stdio.h>
 
 int main(int argc, char **argv) {
-    const char *names[]={"lmb_web_html","lmb_web_css","lmb_web_js","lmb_web_logo","lmb_web_capacity_js"};
+    const char *names[]={"lmb_web_html","lmb_web_css","lmb_web_js","lmb_web_logo","lmb_web_capacity_js","lmb_web_ui_js"};
     const unsigned assets=sizeof names/sizeof names[0];
     if (argc!=(int)assets+1) return 1;
     puts("/* Generated from src/web and logo.svg; do not edit. */");

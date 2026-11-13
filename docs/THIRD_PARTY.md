@@ -215,6 +215,44 @@
 - The source checkout is never modified. The generated copy is not a general
   engine fork. It is linked through the Lumabri-owned adapter into household
   binaries; Colibri's upstream adapter registry remains unchanged.
+
+## llmshard interface design
+
+- Source: llmshard, an earlier project by the same maintainer. Reference
+  files: `p2p.html`, `assets/room-theme.css`, `assets/art-direction.css`,
+  `assets/app-design.css`, `assets/chat-design.css`, `assets/endpoint.css`,
+  `assets/setup.js` and `assets/chat-layout.js`.
+- License: Apache-2.0; attribution: llmshard contributors.
+- Derived files: `src/web/app.css`, `src/web/index.html` and `src/web/ui.js`
+  adapt its colour system, setup card, conversation pane with history sidebar,
+  right-hand details panel, toasts, load card and endpoint console.
+- Not included: the llmshard name and logo, its artwork and illustrations, web
+  fonts, PeerJS and the in-browser WebGPU/WebRTC engine. Lumabri's page uses
+  system fonts, its own logo and an original inline illustration, and talks
+  only to the local Lumabri HTTP API.
+- Lumabri changes: design tokens with a dark theme, reduced-motion and
+  forced-colours handling, phone layout, an Advanced disclosure for management
+  screens, and a room create/join screen kept inactive behind
+  `ROOM_FLOW_ENABLED` in `src/web/ui.js` until the API can serve it.
+
+## libcurl (system library, model download helper)
+
+- Not vendored. `lumabri-fetch` links the libcurl installed on the system
+  (7.81 or newer), the same library the optional `lumabri-kube` controller
+  already uses, and through it the system's TLS library and certificate
+  store. License: curl license (MIT-like); Copyright the curl contributors.
+- Scope: HTTPS GET requests for model files that a person asked to download
+  (see `docs/MODEL_DOWNLOAD.md`). Certificate and host verification are always
+  on. `lumabri`, `tracker`, `segment_node` and the other household programs
+  do not link it.
+- Build: libcurl development files (`libcurl4-openssl-dev pkg-config` on
+  Debian/Ubuntu; included in the macOS SDK). `make household FETCH_BINARY=`
+  builds without the helper.
+- The repository-listing fields and the snapshot rules follow the Hugging
+  Face Hub's public HTTP interface as used by Colibri's `c/setup_download.py`
+  (Apache-2.0, Colibri contributors); no code was copied. The download
+  catalogue's entries and field names mirror `c/setup_catalog.py` of the same
+  project.
 - Native/split GGUF support reuses `c/st.h`, `c/st_gguf.h` and the upstream
   matrix/row decoders. Generated headers release the temporary GGUF JSON
   tree. Resident Engram preparation copies only the assigned table row span;

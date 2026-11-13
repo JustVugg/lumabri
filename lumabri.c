@@ -5429,6 +5429,26 @@ static int cmd_doctor(int argc, char **argv) {
                    "at least 1 GiB is available at the selected path");
     }
 
+    {
+        /* Not a failure either way: it says what a load on this computer
+         * gets. A live sharing service reports the policy it started with. */
+        LmbMemlockLimit allowance = lmb_memlock_limit(); HomeServiceSnapshot donor; char detail[192];
+        /* The doctor creates no state: ask only where a service directory exists. */
+        char services[1200]; struct stat service_stat;
+        int live = getenv("HOME") && !checked_printf(services, sizeof services, "%s/.lumabri/service", getenv("HOME")) &&
+            !stat(services, &service_stat) && !home_service_query("donor", HOME_SVC_STATUS, NULL, &donor) &&
+            donor.residency != LMB_RESIDENCY_UNREPORTED;
+        int finite = allowance.known && !allowance.unlimited && !allowance.exempt;
+        int unlocked = live && lmb_residency_unlocked(donor.residency) == 1;
+        if (unlocked) snprintf(detail, sizeof detail, "sharing holds model memory in RAM, not locked (%s); allowance %llu MiB",
+            lmb_residency_name(donor.residency), (unsigned long long)(donor.memlock_limit >> 20));
+        else if (finite) snprintf(detail, sizeof detail, "locked-memory allowance is %llu MiB%s%s; larger models: lumabri start holds "
+            "them unlocked, other commands refuse", (unsigned long long)(allowance.bytes >> 20), live ? "; sharing policy " : "",
+            live ? lmb_residency_name(donor.residency) : "");
+        else snprintf(detail, sizeof detail, "%s%s", allowance.known ? "locked-memory allowance is unlimited" :
+            "locked-memory allowance is decided by the OS at load time", live ? "; sharing reports its policy in service status" : "");
+        doctor_add(checks, &count, "memory-lock", !unlocked && !finite, 0, detail);
+    }
     const char *home = getenv("HOME");
     struct stat state_stat;
     char state_dir[1200] = "";
@@ -5591,6 +5611,7 @@ static int home_managed_retire(const char *tracker, const uint8_t allocation[32]
 #include "src/ui/lumabri_home_ui.h"
 #include "src/runtime/lumabri_api.h"
 #include "src/runtime/lumabri_donor_policy_cli.h"
+#include "src/runtime/lumabri_start.h"
 
 int main(int argc, char **argv) {
     (void)setlocale(LC_CTYPE, "");
@@ -5608,8 +5629,15 @@ int main(int argc, char **argv) {
     if (lmb_secure_init()) return 1; /* children inherit the same strict mode */
     if (argc >= 2 && !strcmp(argv[1], "api"))
         return cmd_api(argc - 2, argv + 2);
-    if (argc >= 2 && !strcmp(argv[1], "service"))
+    if (argc >= 2 && !strcmp(argv[1], "service")) {
+        /* A stopped Lumabri leaves no transfer running; the file resumes later. */
+        if (argc == 3 && !strcmp(argv[2], "stop")) download_pause_for_service_stop();
         return cmd_service(argc - 2, argv + 2);
+    }
+    if (argc >= 2 && !strcmp(argv[1], "fetch"))
+        return cmd_fetch(argc - 2, argv + 2);
+    if (argc >= 2 && !strcmp(argv[1], "start"))
+        return cmd_start(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "donor-policy"))
         return cmd_donor_policy(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "models"))
@@ -5639,6 +5667,7 @@ int main(int argc, char **argv) {
     fprintf(stderr,
         "lumabri: your computers, one shared model\n\n"
         "  lumabri                                                    household workspace\n"
+        "  lumabri start [--tui] [--no-browser] [--port N] [--ram-gb N]  start everything here and open the chat page\n"
         "  lumabri service [status|start|restart|stop]                 private background service\n"
         "  lumabri service live ROLE                                  supervisor probe (not model readiness)\n"
         "  lumabri api [start|stop|list|user-add|grant|revoke|serve]   authenticated local inference API\n"
@@ -5647,6 +5676,7 @@ int main(int argc, char **argv) {
         "  lumabri donor --headless --join HOST:PORT --ram-gb N      supervised resident donor\n"
         "  lumabri donor-policy inspect | accept-current REVIEW      review/approve one local offer\n"
         "  lumabri models --tracker HOST:PORT                       cluster planning preview\n"
+        "  lumabri host --model NAME [--port 7350] [--tracker H:P]   hosted conversation service\n"
         "  lumabri status | limits | pause | resume                    resource governor\n"
         "  lumabri doctor [--household] [--json] [--tracker H:P]     runtime diagnostics\n"
         "  lumabri peer-key                                           print this machine's endpoint identity\n"

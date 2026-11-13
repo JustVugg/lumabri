@@ -29,6 +29,9 @@ def configure_from_browser(api, config, artifacts):
             page.locator("#token").fill(api.token)
             page.locator('#login-form button[type="submit"]').click()
             page.locator("#workspace-open").click()
+            # Managed models and replica automation sit behind the page's
+            # Advanced disclosure, closed until a person opens it.
+            page.locator("#advanced > summary").click()
             model = page.locator("#workspace-models article").filter(
                 has=page.get_by_role("heading", name="elastic-olmoe", exact=True))
             model.get_by_role("button", name="Manage replicas", exact=True).click()
