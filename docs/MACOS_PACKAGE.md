@@ -51,6 +51,11 @@ until its runtime is usable. It does not prove inference performance.
 
 ## Join and use your computers
 
+To start on one Mac without typing commands, open **START-HERE.command**. It
+creates this Mac's household if there is none, starts sharing and the local web
+page, and opens the chat page in your browser. The page is served to this Mac
+only. **Lumabri.command** still opens the terminal workspace described below.
+
 Open **Lumabri.command**. Create a household on one computer and join it on the
 others with its displayed address and key. Open **Share resources** on helpers.
 On the requester, set the model folder in **Settings**, select the computers

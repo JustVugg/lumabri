@@ -176,6 +176,7 @@ def package_windows(runtime, colibri, output, repository=ROOT, objdump="objdump"
         raise ValueError(f"output already exists: {output}")
     files = [(regular(runtime / name, True), f"bin/{name}") for name in WINDOWS_BINARIES]
     files += [(regular(repository / "deploy/household-launcher.cmd"), "Lumabri.cmd"),
+              (regular(repository / "deploy/START-HERE.bat"), "START-HERE.bat"),
               (regular(repository / "deploy/verify-windows-package.ps1"), "Verify-Lumabri.ps1"),
               (regular(repository / "docs/WINDOWS_PACKAGE.md"), "START_HERE.md"),
               (regular(runtime / "WINDOWS-RUNTIME-NOTICES.txt"), "licenses/Windows-runtime-NOTICES.txt"),
@@ -229,7 +230,11 @@ def package(runtime, colibri, output, repository=ROOT, openmp_prefix=None, pe_ob
               (regular(repository / ("docs/MACOS_PACKAGE.md" if system == "Darwin"
                                      else "docs/NATIVE_CANDIDATES.md")), "START_HERE.md", 0o644),
               (regular(repository / "deploy/household-launcher.sh"),
-               "Lumabri.command" if system == "Darwin" else "start-lumabri", 0o755)]
+               "Lumabri.command" if system == "Darwin" else "start-lumabri", 0o755),
+              # The one file to double-click. The launcher above keeps its
+              # name and its argument-forwarding behaviour for existing users.
+              (regular(repository / "deploy/start-here.sh"),
+               "START-HERE.command" if system == "Darwin" else "start-here.sh", 0o755)]
     # Keep the upstream notices with the exact checkout used by this build.
     for name in ("NOTICE", "THIRD_PARTY_NOTICES.md"):
         if (colibri / name).exists():

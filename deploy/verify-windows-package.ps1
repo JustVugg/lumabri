@@ -20,7 +20,7 @@ try {
     $manifest = Get-Content -LiteralPath $manifestFile.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
     if ($manifest.schema -cne 'LMB-NATIVE-CANDIDATE-1' -or $manifest.system -cne 'Windows' -or
         $manifest.architecture -cne 'x86_64') { throw 'Not a Windows x86-64 package manifest.' }
-    $required = @('Lumabri.cmd','Verify-Lumabri.ps1','START_HERE.md',
+    $required = @('Lumabri.cmd','START-HERE.bat','Verify-Lumabri.ps1','START_HERE.md',
         'bin/lumabri.exe','bin/tracker.exe','bin/maintainer.exe','bin/segment_node.exe','bin/segment_chat.exe',
         'licenses/Lumabri-LICENSE','licenses/Colibri-LICENSE','licenses/Windows-runtime-NOTICES.txt')
     $optional = @('licenses/Colibri-NOTICE','licenses/Colibri-THIRD_PARTY_NOTICES.md')

@@ -8,6 +8,17 @@ Keep the whole folder together. On macOS, open `Lumabri.command`; on Linux,
 run `./start-lumabri` from a terminal. The launcher opens the normal TUI.
 Python, pip and the Colibri source checkout are not needed to run the folder.
 
+To use one computer straight away, open `START-HERE.command` on macOS or
+`start-here.sh` on Linux instead. It runs `lumabri start`: it creates this
+computer's household if there is none, starts sharing and the local web page,
+and opens the chat page in your browser at `http://127.0.0.1:47380/`. The page
+is served to this computer only. Run it again at any time; it reuses what is
+already running, and adds models approved since the last start to the local
+sign-in. `--tui` opens the terminal workspace instead, and `--no-browser`
+prints the private sign-in link. Stop everything with `service stop` through
+the launcher. A model still has to be approved by its computer's owner in
+**Share resources** before it is loaded.
+
 If startup or sharing fails, run `./Lumabri.command doctor --household` on
 macOS, or `./start-lumabri doctor --household` on Linux. This tests that both
 installed Segment executables can actually start, including their linked
