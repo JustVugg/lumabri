@@ -5629,8 +5629,13 @@ int main(int argc, char **argv) {
     if (lmb_secure_init()) return 1; /* children inherit the same strict mode */
     if (argc >= 2 && !strcmp(argv[1], "api"))
         return cmd_api(argc - 2, argv + 2);
-    if (argc >= 2 && !strcmp(argv[1], "service"))
+    if (argc >= 2 && !strcmp(argv[1], "service")) {
+        /* A stopped Lumabri leaves no transfer running; the file resumes later. */
+        if (argc == 3 && !strcmp(argv[2], "stop")) download_pause_for_service_stop();
         return cmd_service(argc - 2, argv + 2);
+    }
+    if (argc >= 2 && !strcmp(argv[1], "fetch"))
+        return cmd_fetch(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "start"))
         return cmd_start(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "donor-policy"))

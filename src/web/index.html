@@ -7,9 +7,11 @@
   <title>Lumabri — Your conversations</title>
   <link rel="icon" href="/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/app.css">
+  <link rel="stylesheet" href="/download.css">
   <script src="/capacity.js" defer></script>
   <script src="/app.js" defer></script>
   <script src="/ui.js" defer></script>
+  <script src="/download.js" defer></script>
 </head>
 <body>
   <div class="app" id="app">
@@ -81,6 +83,17 @@
       </section>
       <section id="chat" hidden aria-label="Chat">
         <div id="empty" class="welcome"><span class="eyebrow">READY WHEN YOU ARE</span><h1>What are we<br>working on?</h1><p>Select an approved resident model above, then start a conversation.</p></div>
+        <section id="get-model" class="get-model" hidden aria-labelledby="get-model-title">
+          <div class="lc-k">FIRST STEP <span>downloaded once, kept on this computer</span></div>
+          <h2 id="get-model-title">Get a model</h2>
+          <p id="get-model-intro" class="muted"></p>
+          <dl id="get-model-facts"></dl>
+          <progress id="get-model-progress" max="1" value="0" hidden aria-label="Download progress"></progress>
+          <p id="get-model-status" role="status"></p>
+          <div class="get-model-actions"><button id="get-model-download" class="primary" type="button" hidden>Download</button><button id="get-model-cancel" class="text-button danger" type="button" hidden>Cancel download</button><button id="get-model-open" class="text-button" type="button" hidden>Open Computers &amp; models</button></div>
+          <p id="get-model-next" class="fine-print"></p>
+          <div id="get-model-others" class="get-model-others" hidden></div>
+        </section>
         <div id="messages" aria-label="Conversation messages" aria-live="off"></div>
       </section>
       <section id="endpoint" hidden aria-labelledby="endpoint-title">

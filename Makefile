@@ -53,6 +53,30 @@ lumabri-kube: src/control/lumabri_kube.c src/planner/lumabri_elastic_json.h src/
 test-kubernetes: lumabri-kube
 	$(PYTHON) tests/integration/kubernetes_control_test.py
 
+# Model download helper: the only household program that links libcurl, so
+# that lumabri, the tracker and the workers keep no TLS dependency. It needs
+# the libcurl development files (>= 7.85). `make household FETCH_BINARY=`
+# builds a household that cannot download models.
+FETCH_BINARY ?= lumabri-fetch
+FETCH_CURL_LIBS = $(if $(strip $(CURL_LIBS)),$(CURL_LIBS),-lcurl)
+DOWNLOAD_DEPS = src/runtime/lumabri_download.h src/runtime/lumabri_api_json.h
+lumabri-fetch: src/control/lumabri_fetch.c $(DOWNLOAD_DEPS) lumabri_sha.h
+	@printf '#include <curl/curl.h>\n' | $(CC) $(CPPFLAGS) $(CURL_CFLAGS) -E -x c - >/dev/null 2>&1 || { \
+		echo "lumabri-fetch needs the libcurl development files (Debian/Ubuntu: libcurl4-openssl-dev pkg-config)." >&2; \
+		echo "Install them, or build without model download: make ... FETCH_BINARY=" >&2; exit 1; }
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(CURL_CFLAGS) src/control/lumabri_fetch.c $(FETCH_CURL_LIBS) -o $@
+all: $(FETCH_BINARY)
+
+build/embed-data: tools/embed_data.c
+	mkdir -p build
+	$(HOSTCC) -O2 -Wall -Wextra -Werror tools/embed_data.c -o $@
+
+build/download_assets.h: build/embed-data src/planner/download_catalogue.json src/web/download.js src/web/download.css
+	build/embed-data lmb_download_catalogue_json=src/planner/download_catalogue.json \
+		lmb_web_download_js=src/web/download.js lmb_web_download_css=src/web/download.css > $@.tmp
+	mv $@.tmp $@
+lumabri test_chat_ui test_host_session_pool test-home-monitor test-chat-history test-sanitize: build/download_assets.h $(DOWNLOAD_DEPS) src/runtime/lumabri_download_api.h
+
 check-warnings: lumabri-agent
 test: test-agent-control
 
@@ -66,7 +90,7 @@ test_weight_cache: tests/c/test_weight_cache.c src/runtime/lumabri_weight_cache.
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_weight_cache.c -o $@
 
 # Native household runtime (Colibri sources are a build-time dependency).
-household: tracker maintainer $(SHIM_LIB) lumabri lumabri-agent segment_node segment_chat
+household: tracker maintainer $(SHIM_LIB) lumabri lumabri-agent $(FETCH_BINARY) segment_node segment_chat
 
 lumabri segment_node segment_chat test_calibration test_chat_ui: src/planner/lumabri_link_evidence.h
 lumabri test_calibration test_chat_ui test_portfolio: src/planner/lumabri_workload_facts.h
@@ -705,7 +729,7 @@ test_replica_rank: tests/c/test_replica_rank.c src/planner/lumabri_replica_rank.
 
 test: test-api
 
-test-api-gateway: lumabri test_chat_ui test-chat-history
+test-api-gateway: lumabri $(FETCH_BINARY) test_chat_ui test-chat-history
 	./test_chat_ui api-codec
 	./test_chat_ui preparation-codec
 	./test_chat_ui preparation-observe
@@ -722,6 +746,7 @@ test-api-gateway: lumabri test_chat_ui test-chat-history
 	python3 tests/integration/installed_fleet_contract_test.py
 	python3 tests/integration/chat_history_test.py
 	python3 tests/integration/start_command_test.py
+	python3 tests/integration/model_download_test.py
 
 test: test-api-gateway test-web-approval test-residency-auto
 
@@ -1305,14 +1330,14 @@ PREFIX ?= /usr/local
 # optional loop below, a missing Segment service is a build/install failure.
 install-household: household swarm_probe
 	install -d "$(DESTDIR)$(PREFIX)/bin" "$(DESTDIR)$(PREFIX)/lib/lumabri"
-	install -m 755 lumabri lumabri-agent tracker maintainer swarm_probe segment_node segment_chat "$(DESTDIR)$(PREFIX)/bin/"
+	install -m 755 lumabri lumabri-agent $(FETCH_BINARY) tracker maintainer swarm_probe segment_node segment_chat "$(DESTDIR)$(PREFIX)/bin/"
 	install -m 644 $(SHIM_LIB) tools/setup-household-firewall.ps1 "$(DESTDIR)$(PREFIX)/lib/lumabri/"
 
 .PHONY: install-household
 
 install: all
 	install -d $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(PREFIX)/lib/lumabri
-	install -m 755 lumabri lumabri-agent tracker maintainer swarm_probe $(DESTDIR)$(PREFIX)/bin/
+	install -m 755 lumabri lumabri-agent $(FETCH_BINARY) tracker maintainer swarm_probe $(DESTDIR)$(PREFIX)/bin/
 	install -m 644 $(SHIM_LIB) $(DESTDIR)$(PREFIX)/lib/lumabri/
 	install -m 644 tools/setup-household-firewall.ps1 $(DESTDIR)$(PREFIX)/lib/lumabri/
 	@for b in expert_node expert_node_glm expert_node_inkling expert_node_kimi \
@@ -1323,7 +1348,7 @@ install: all
 	@echo "installed under $(DESTDIR)$(PREFIX)"
 
 clean:
-	rm -f tracker maintainer liblumabri.so liblumabri.dylib test_shim swarm_probe lumabri lumabri-agent lumabri-kube \
+	rm -f tracker maintainer liblumabri.so liblumabri.dylib test_shim swarm_probe lumabri lumabri-agent lumabri-fetch lumabri-kube \
 	      test_relay_exec test_swarm_fed test_key_rotation test_hedge \
 	      test_local_fallback test_accum_order test_hybrid_parallel test_residency_report \
 	      test_model_family test_planner test_planner_io test_cluster test_memory_budget test_calibration test_catalogue_advice test_metrics test_inventory test_home test_home_expert test_chat_ui test_weight_cache segment_budget_probe \

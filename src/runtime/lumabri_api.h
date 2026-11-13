@@ -73,6 +73,7 @@ static int api_json_text(Cap *c, const char *s) {
 }
 #include "lumabri_demand_runtime.h"
 #include "lumabri_chat_history.h"
+#include "lumabri_download_api.h"
 
 /* Only these compiled assets are public. No generic file-serving path and no
  * redirects, external scripts, cookies, CORS or browser-persisted credentials. */
@@ -85,6 +86,8 @@ static int api_web(int fd, const LmbApiHttp *request) {
     else if (!strcmp(request->path,"/capacity.js")) { data=lmb_web_capacity_js; size=sizeof lmb_web_capacity_js-1; type="text/javascript; charset=utf-8"; }
     else if (!strcmp(request->path,"/ui.js")) { data=lmb_web_ui_js; size=sizeof lmb_web_ui_js-1; type="text/javascript; charset=utf-8"; }
     else if (!strcmp(request->path,"/logo.svg")) { data=lmb_web_logo; size=sizeof lmb_web_logo-1; type="image/svg+xml"; }
+    else if (!strcmp(request->path,"/download.js")) { data=lmb_web_download_js; size=sizeof lmb_web_download_js-1; type="text/javascript; charset=utf-8"; }
+    else if (!strcmp(request->path,"/download.css")) { data=lmb_web_download_css; size=sizeof lmb_web_download_css-1; type="text/css; charset=utf-8"; }
     if (!data) return 0;
     char header[1024];
     int n=snprintf(header,sizeof header,"HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %zu\r\n"
@@ -510,6 +513,7 @@ static void api_connection_dispatch(int fd, int access_dir, unsigned port, const
     lmb_api_wipe(header,sizeof header); lmb_api_wipe(request.authorization,sizeof request.authorization); lmb_api_wipe(request.api_key,sizeof request.api_key);
     int permit=lmb_api_user_permit(access_dir,user.name,2);
     if (permit<0) { api_error(fd,429,"user_request_limit"); return; }
+    if (api_download_route(fd,access_dir,tracker,&user,&request,https_origin!=NULL)) { close(permit); return; }
     const char *history_path="/api/v1/conversations";
     size_t history_prefix=strlen(history_path);
     int history=!strncmp(request.path,history_path,history_prefix) &&

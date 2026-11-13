@@ -53,7 +53,10 @@ To use one computer straight away, run `./lumabri start` instead (in a
 package, open `start-here.sh` on Linux or `START-HERE.command` on macOS). It
 creates this computer's household if there is none, starts sharing and the
 local web page, and opens the chat page in your browser. The page is served on
-`127.0.0.1` only. `--tui` opens the workspace below instead.
+`127.0.0.1` only. `--tui` opens the workspace below instead. If the computer
+has no model yet, the page offers one that fits the memory your computers
+share and downloads it when you press Download
+([Downloading a model](docs/MODEL_DOWNLOAD.md)).
 
 After launch, use **arrow keys and Enter**. Press **/** for workspace actions
 and **Esc** to go back. Use a terminal at least 60 columns by 28 rows.
@@ -277,6 +280,9 @@ There are no promised tok/s or automatic “best model” recommendations.
 ### Native runtime build
 
 Build the complete runtime with `make household ENGINE=/path/to/colibri/c`.
+This also builds `lumabri-fetch`, the model download helper, which needs the
+libcurl development files (Debian/Ubuntu: `libcurl4-openssl-dev pkg-config`);
+add `FETCH_BINARY=` to build without it ([Downloading a model](docs/MODEL_DOWNLOAD.md)).
 Building only `lumabri` does not install the model services. macOS builds use
 Homebrew `libomp` when available and work single-threaded without it. Changing
 OpenMP flags invalidates the generated engine build automatically. CI pins
