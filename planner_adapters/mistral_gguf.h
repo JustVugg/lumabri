@@ -1,6 +1,6 @@
 #ifndef LMB_PLAN_MISTRAL_GGUF_H
 #define LMB_PLAN_MISTRAL_GGUF_H
-#include "olmoe_gguf.h"
+#include "gguf_inventory.h"
 
 typedef struct {
     uint32_t layers,hidden,vocab,heads,experts,topk,inter,dense,shared,first;
@@ -75,14 +75,6 @@ static int lmb_ml4_geometry(const LmbGguf *g,LmbMistralGguf *c) {
     return 0;
 }
 
-typedef struct {const LmbGguf *g;uint8_t *seen;uint64_t largest;} LmbMistralInventory;
-static int lmb_ml4_item(const LmbGgufValue *v,uint32_t i,uint64_t *out) {
-    if(!v || v->type!=9 || i>=v->count)return -1;
-    unsigned width=lmb_gguf_scalar_bytes(v->element_type);
-    if(!width || (uint64_t)(i+1)*width>v->bytes)return -1;
-    LmbGgufValue item={.type=v->element_type,.bytes=width,.data=v->data+(size_t)i*width};
-    return lmb_gguf_integer(&item,out);
-}
 static int lmb_ml4_config_matches(const char *cfg,const LmbMistralGguf *c) {
     const char *keys[]={"num_hidden_layers","hidden_size","vocab_size","num_attention_heads","n_routed_experts",
         "num_experts_per_tok","moe_intermediate_size","intermediate_size","n_shared_experts","first_k_dense_replace",
@@ -115,26 +107,6 @@ static int lmb_ml4_config_matches(const char *cfg,const LmbMistralGguf *c) {
     if(lmb_plan_kinds(cfg,"indexer_types","shared","full",indexed,c->layers) || memcmp(indexed,c->indexed,c->layers))return -1;
     return 0;
 }
-static int lmb_ml4_weight(LmbMistralInventory *v,const char *name,uint32_t rank,
-                          uint64_t x,uint64_t y,uint64_t z,int matrix,uint64_t *cost) {
-    const LmbGgufTensor *t=lmb_gguf_tensor(v->g,name);
-    if(!t || t->rank!=rank || t->shape[0]!=x || (rank>1 && t->shape[1]!=y) || (rank>2 && t->shape[2]!=z) ||
-       !LMB_GGUF_TYPES[t->type].decodable || v->seen[t-v->g->tensors])return -1;
-    v->seen[t-v->g->tensors]=1;
-    uint64_t elements=lmb_size_mul(x,lmb_size_mul(y,z));
-    uint64_t bytes=lmb_size_mul(elements,4);
-    if(matrix) {
-        LmbGgufTensor flat=*t;flat.rank=2;flat.shape[1]=lmb_size_mul(y,z);
-        bytes=lmb_gguf_held_bytes(&flat,1,1);
-        if(t->type==0 || t->type==1 || t->type==30) {
-            /* Also cover float-source quantization choices and row scales. */
-            uint64_t floating=lmb_size_mul(elements,5);if(floating>bytes)bytes=floating;
-        }
-    }
-    if(bytes==UINT64_MAX)return -1;
-    if(bytes>v->largest)v->largest=bytes;
-    *cost=lmb_size_add(*cost,bytes);return *cost==UINT64_MAX?-1:0;
-}
 static int lmb_mistral_gguf_memory(const LmbGguf *g,const char *cfg,LmbModelShape *m) {
     LmbMistralGguf c;if(lmb_ml4_geometry(g,&c))return -1;
     if(lmb_ml4_config_matches(cfg,&c))return -1;
@@ -155,9 +127,9 @@ static int lmb_mistral_gguf_memory(const LmbGguf *g,const char *cfg,LmbModelShap
         pb->type!=9 || pb->element_type!=10 || pb->count!=3u*c.layers ||
         ps->type!=9 || ps->element_type!=10 || ps->count!=c.layers ||
         pd->type!=9 || pd->element_type!=10 || pd->count!=6u*c.layers))return -1;
-    LmbMistralInventory v={.g=g,.seen=calloc(g->ntensors,1)};if(!v.seen)return -1;
+    LmbGgufInventory v={.g=g,.seen=calloc(g->ntensors,1)};if(!v.seen)return -1;
     int rc=-1;uint64_t H=c.hidden;char name[128];
-#define MW(n,r,x,y,z,mat,budget) if(lmb_ml4_weight(&v,n,r,x,y,z,mat,budget))goto done
+#define MW(n,r,x,y,z,mat,budget) if(lmb_gguf_inventory_weight(&v,n,r,x,y,z,mat,budget))goto done
     MW("token_embd.weight",2,H,c.vocab,1,1,&m->edge_resident_bytes);
     MW("output.weight",2,H,c.vocab,1,1,&m->edge_resident_bytes);
     MW("output_norm.weight",1,H,1,1,0,&m->edge_resident_bytes);
@@ -195,16 +167,16 @@ static int lmb_mistral_gguf_memory(const LmbGguf *g,const char *cfg,LmbModelShap
             if(packed) {
                 snprintf(name,sizeof name,"blk.%u.ffn_exps_colibri",l);
                 const LmbGgufTensor *t=lmb_gguf_tensor(g,name);uint64_t stride,total=0;
-                if(!t || t->rank!=2 || t->type!=24 || lmb_ml4_item(ps,l,&stride) || !stride ||
+                if(!t || t->rank!=2 || t->type!=24 || lmb_gguf_inventory_item(ps,l,&stride) || !stride ||
                     t->shape[0]!=stride || t->shape[1]!=c.experts)goto done;
                 v.seen[t-g->tensors]=1;
                 for(unsigned k=0;k<3;k++) {
                     uint64_t type,bytes;
-                    if(lmb_ml4_item(pt,3*l+k,&type) || lmb_ml4_item(pb,3*l+k,&bytes) ||
+                    if(lmb_gguf_inventory_item(pt,3*l+k,&type) || lmb_gguf_inventory_item(pb,3*l+k,&bytes) ||
                        type>=sizeof LMB_GGUF_TYPES/sizeof *LMB_GGUF_TYPES || !LMB_GGUF_TYPES[type].decodable)goto done;
                     const LmbGgufType *q=&LMB_GGUF_TYPES[type];
                     uint64_t cols=k==2?c.inter:H,rows=k==2?H:c.inter,x,y;
-                    if(lmb_ml4_item(pd,6*l+2*k,&x) || lmb_ml4_item(pd,6*l+2*k+1,&y) || x!=cols || y!=rows ||
+                    if(lmb_gguf_inventory_item(pd,6*l+2*k,&x) || lmb_gguf_inventory_item(pd,6*l+2*k+1,&y) || x!=cols || y!=rows ||
                         cols%q->block || bytes!=lmb_size_mul(cols/q->block,q->bytes*rows))goto done;
                     LmbGgufTensor weight={.type=(uint32_t)type,.rank=2,.shape={cols,rows}};
                     uint64_t one=lmb_gguf_held_bytes(&weight,1,1);

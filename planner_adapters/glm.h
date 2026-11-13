@@ -1,5 +1,6 @@
 #ifndef LUMABRI_PLAN_GLM_H
 #define LUMABRI_PLAN_GLM_H
+#include "glm_gguf.h"
 /* Float-source GLM/MLA contract. Prepared quantized containers must not be
  * inferred from file bytes: their per-tensor format stamps need validation. */
 typedef struct {
@@ -74,6 +75,11 @@ static int lmb_glm_tensor(const LmbPlanTensor *t, void *opaque) {
 }
 
 static int LMB_UNUSED lmb_glm_memory(const char *root, const char *json, LmbModelShape *m) {
+    LmbGguf gguf;int opened=lmb_gguf_model(root,&gguf);
+    if(opened<=0) {
+        if(opened<0)return -1;
+        int rc=lmb_glmd_gguf_memory(&gguf,json,m);lmb_gguf_free(&gguf);return rc;
+    }
     LmbGlmInventory v = { .model = m };
     uint32_t h, layers, heads, qrank, kvrank, nope, rope, vd, experts, topk, inter;
     uint32_t dense, shared, first, groups, index, ih, ik, freq, offset;
@@ -125,6 +131,11 @@ static int LMB_UNUSED lmb_glm_memory(const char *root, const char *json, LmbMode
     }
     free(v.expert_seen);
     if (rc) return -1;
+    uint64_t width=h;
+    if(index && ih && ik)width+=2u+ik;
+    if(width>1048576)return -1;
+    m->boundary_width=(uint32_t)width;
+    m->edge_scratch_fixed_bytes=lmb_size_add(m->edge_scratch_fixed_bytes,width*512u*8u);
     uint64_t wide = h + (uint64_t)heads * (nope + rope + vd) + qrank + kvrank + dense +
         (uint64_t)shared * inter + (uint64_t)topk * (h + inter) + experts + (uint64_t)ih * index;
     uint64_t loaders = experts < 256 ? experts : 256; /* up to one load per engine-team worker */
@@ -137,6 +148,7 @@ static int LMB_UNUSED lmb_glm_memory(const char *root, const char *json, LmbMode
     m->scratch_fixed_bytes = lmb_size_add(lmb_size_mul(wide, 512u * 16u * 4u),
         lmb_size_add(misses, lmb_size_add(v.largest_dense, lmb_size_mul(v.largest_expert, loaders))));
     m->scratch_token_bytes = 256u * 32u;
+    m->scratch_fixed_bytes=lmb_size_add(m->scratch_fixed_bytes,width*512u*12u+(uint64_t)ik*4u);
     m->segment_fixed_bytes = (uint64_t)(layers + 1u) * (8192u + (uint64_t)experts * 2048u);
     m->max_context = 1048576;
     m->memory_contract = 1;

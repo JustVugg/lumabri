@@ -1,5 +1,22 @@
 # Third-party build inputs
 
+## Colibri GLM GGUF integration
+
+- Source: `JustVugg/colibri`, tag `v2.1.0`, commit
+  `704a3f68184b78367a04cb5526e428dc2f90f05b`.
+- Upstream files: `c/colibri.c`, `c/st_gguf.h`,
+  `c/tools/gguf_import.py`, `c/tests/test_gguf_import.py`, and
+  `c/tests/test_segment_adapters_real.c`.
+- License: Apache-2.0; attribution: Colibri contributors. Original license,
+  headers and notices remain with build copies and distributed runtimes.
+- Lumabri supplies C metadata/geometry validation and memory accounting,
+  extending its shared-state boundary to carry GLM's sparse selections.
+  Engine arithmetic is unchanged. Tests invoke upstream mixed-quantization
+  fixtures and monolithic execution, remove selected indexer banks to exercise
+  sharing, and also dequantize a fixture to test the float-source path.
+  A declared tied head loads its embedding tensor through the same native
+  loader; its independent oracle uses an explicit head with identical bytes.
+
 ## Colibri GGUF declarations
 
 - Source: `JustVugg/colibri`, tag `v2.1.0`, commit
