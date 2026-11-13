@@ -5429,6 +5429,26 @@ static int cmd_doctor(int argc, char **argv) {
                    "at least 1 GiB is available at the selected path");
     }
 
+    {
+        /* Not a failure either way: it says what a load on this computer
+         * gets. A live sharing service reports the policy it started with. */
+        LmbMemlockLimit allowance = lmb_memlock_limit(); HomeServiceSnapshot donor; char detail[192];
+        /* The doctor creates no state: ask only where a service directory exists. */
+        char services[1200]; struct stat service_stat;
+        int live = getenv("HOME") && !checked_printf(services, sizeof services, "%s/.lumabri/service", getenv("HOME")) &&
+            !stat(services, &service_stat) && !home_service_query("donor", HOME_SVC_STATUS, NULL, &donor) &&
+            donor.residency != LMB_RESIDENCY_UNREPORTED;
+        int finite = allowance.known && !allowance.unlimited && !allowance.exempt;
+        int unlocked = live && lmb_residency_unlocked(donor.residency) == 1;
+        if (unlocked) snprintf(detail, sizeof detail, "sharing holds model memory in RAM, not locked (%s); allowance %llu MiB",
+            lmb_residency_name(donor.residency), (unsigned long long)(donor.memlock_limit >> 20));
+        else if (finite) snprintf(detail, sizeof detail, "locked-memory allowance is %llu MiB%s%s; larger models: lumabri start holds "
+            "them unlocked, other commands refuse", (unsigned long long)(allowance.bytes >> 20), live ? "; sharing policy " : "",
+            live ? lmb_residency_name(donor.residency) : "");
+        else snprintf(detail, sizeof detail, "%s%s", allowance.known ? "locked-memory allowance is unlimited" :
+            "locked-memory allowance is decided by the OS at load time", live ? "; sharing reports its policy in service status" : "");
+        doctor_add(checks, &count, "memory-lock", !unlocked && !finite, 0, detail);
+    }
     const char *home = getenv("HOME");
     struct stat state_stat;
     char state_dir[1200] = "";

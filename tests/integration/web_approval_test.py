@@ -14,7 +14,6 @@ import base64
 import http.client
 import json
 import os
-import resource
 from pathlib import Path
 import secrets
 import shutil
@@ -51,14 +50,8 @@ def main():
            "LUMABRI_NO_DISK_PROBE": "1", "LUMABRI_RAM_RESERVE_MB": "256"}
     for name in ("LUMABRI_ENCRYPT", "LUMABRI_TOKEN", "LUMABRI_HOME_FOREGROUND", "LUMABRI_RESIDENT_REQUIRED"):
         env.pop(name, None)
-    # The household default locks resident weights. Where the OS allowance
-    # is smaller than this checkpoint, the gate still exercises approval and
-    # inference under the explicit diagnostic policy, and says so.
-    soft = resource.getrlimit(resource.RLIMIT_MEMLOCK)[0]
-    weights = sum(p.stat().st_size for p in model.rglob("*") if p.is_file())
-    if "LUMABRI_RESIDENCY_POLICY" not in env and soft != resource.RLIM_INFINITY and soft < 2 * weights:
-        env["LUMABRI_RESIDENCY_POLICY"] = "observe"
-        print(f"memlock allowance {soft} bytes < 2 x {weights}: using LUMABRI_RESIDENCY_POLICY=observe", flush=True)
+    # No residency policy is forced: lumabri start chooses per load whether
+    # this account's locked-memory allowance covers it (residency_auto_test).
 
     def run(*arguments, timeout=90):
         return subprocess.run([str(ROOT / "lumabri"), *arguments], env=env, text=True,
@@ -211,7 +204,7 @@ def main():
         shown2 = pending(plan, known={shown["allocation"]})
         assert shown2["instance"] == shown["instance"]
         if browser:
-            page_approve(browser, shown2["allocation"])
+            page_approve(browser, shown2["allocation"], call(PATH, token)[1])
         else:
             status, repeated = call(PATH, token, {"action": "allow_repeat", **shown2})
             assert status == 200 and repeated["result"] == "accepted" and "owner policy" in repeated["detail"], repeated
@@ -334,11 +327,24 @@ def page_prepare(port, token, node):
     return {"playwright": playwright, "chromium": chromium, "page": page, "errors": errors, "operation": operation}
 
 
-def page_approve(browser, allocation):
+def page_approve(browser, allocation, shown):
     from playwright.sync_api import expect
     page = browser["page"]
     try:
         expect(page.locator("#approval-title")).to_have_text("Load reduced on this computer?", timeout=15000)
+        # Where this account's locked-memory allowance does not cover the
+        # load, the prompt says so before the person decides, and the note
+        # stands beside this computer in Computers.
+        if shown["request"]["memory_locked"] is False:
+            assert shown["memory"]["warning"] is True, shown
+            expect(page.locator("#approval-hint")).to_contain_text("it is held in RAM but not locked")
+            expect(page.locator("#approval-hint")).to_contain_text("To lock it:")
+            page.locator("#devices-button").click()
+            expect(page.locator("#peers .peer-memory")).to_have_count(1, timeout=15000)
+            expect(page.locator("#peers .peer-card .peer-memory")).to_contain_text("To lock it:")
+            page.locator("#details-close").click()
+        else:
+            expect(page.locator("#approval-hint")).not_to_contain_text("not locked")
         page.once("dialog", lambda dialog: dialog.accept())
         with page.expect_response(lambda r: r.url.endswith(PATH) and r.request.method == "POST") as sent:
             page.locator("#approval-repeat").click()

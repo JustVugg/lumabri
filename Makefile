@@ -723,7 +723,7 @@ test-api-gateway: lumabri test_chat_ui test-chat-history
 	python3 tests/integration/chat_history_test.py
 	python3 tests/integration/start_command_test.py
 
-test: test-api-gateway test-web-approval
+test: test-api-gateway test-web-approval test-residency-auto
 
 # Real engines and a real checkpoint: the donor's request is declined, then
 # approved, through the page's own API. About a minute and more than 2 GB of
@@ -732,6 +732,13 @@ test: test-api-gateway test-web-approval
 .PHONY: test-web-approval
 test-web-approval: lumabri segment_node segment_chat fixture
 	python3 tests/integration/web_approval_test.py
+
+# Real engines and a generated checkpoint of a few megabytes: explicit
+# engine-locked still refuses under a low locked-memory allowance, and the
+# automatic choice of lumabri start loads and reports "not locked".
+.PHONY: test-residency-auto
+test-residency-auto: lumabri segment_node segment_chat
+	python3 tests/integration/residency_auto_test.py
 
 .PHONY: test-chat-history
 test-chat-history: build/web_assets.h

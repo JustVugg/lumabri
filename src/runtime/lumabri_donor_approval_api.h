@@ -23,6 +23,33 @@ static int donor_approval_observe(const char *tracker,HomeServiceSnapshot *s) {
     if (home_service_query("donor",HOME_SVC_STATUS,NULL,s) || s->state!=HOME_SVC_RUNNING) return 1;
     return strcmp(s->tracker,tracker) ? 2 : 0;
 }
+/* Whether this load is, or would be, page-locked on this computer. Under the
+ * automatic choice it is the donor's own rule: the whole reservation against
+ * the allowance. "null" when this service did not report its policy. */
+static const char *donor_approval_locked(const HomeServiceSnapshot *s) {
+    switch (s->residency) {
+    case LMB_RESIDENCY_ENGINE_LOCKED: case LMB_RESIDENCY_PROCESS_LOCKED: return "true";
+    case LMB_RESIDENCY_OBSERVE: return "false";
+    case LMB_RESIDENCY_AUTO_LOCKED: case LMB_RESIDENCY_AUTO_UNLOCKED:
+        return !s->memlock_limit || s->memlock_limit==UINT64_MAX || s->offer.ram_bytes<=s->memlock_limit ? "true" : "false";
+    default: return "null";
+    }
+}
+static int donor_approval_memory_json(Cap *body,const HomeServiceSnapshot *s) {
+    int unlocked=lmb_residency_unlocked(s->residency);
+    if (api_addf(body,",\"memory\":{\"mode\":\"%s\",\"locked\":%s,\"memlock_limit_bytes\":",lmb_residency_name(s->residency),
+            unlocked<0 ? "null" : unlocked ? "false" : "true")) return -1;
+    if (!s->memlock_limit || s->memlock_limit==UINT64_MAX ? cap_str(body,"null") :
+            api_addf(body,"%llu",(unsigned long long)s->memlock_limit)) return -1;
+    /* The warning is for weights held without locks, and for the automatic
+     * choice whenever a larger model would be held that way. */
+    int warn=unlocked==1 || (s->residency==LMB_RESIDENCY_AUTO_LOCKED && s->memlock_limit && s->memlock_limit!=UINT64_MAX);
+    char text[900]="";
+    if (unlocked==1) snprintf(text,sizeof text,LMB_MEMLOCK_UNLOCKED_NOTE " To lock it: %s",lmb_memlock_howto());
+    else if (warn) snprintf(text,sizeof text,"Models above %llu MiB are held in RAM without locking on this computer. "
+        LMB_MEMLOCK_UNLOCKED_NOTE " To lock it: %s",(unsigned long long)(s->memlock_limit>>20),lmb_memlock_howto());
+    return api_addf(body,",\"warning\":%s,\"detail\":",warn ? "true" : "false") || api_json_text(body,text) || cap_str(body,"}");
+}
 static int donor_approval_request_json(Cap *body,const HomeServiceSnapshot *s) {
     const LmbHomeOffer *o=&s->offer; char allocation[65],requester[65];
     lmb_hex(allocation,o->id,32); lmb_hex(requester,o->requester,32);
@@ -40,9 +67,9 @@ static int donor_approval_request_json(Cap *body,const HomeServiceSnapshot *s) {
             o->begin,o->end,o->layers,(unsigned long long)o->ram_bytes,(unsigned long long)o->disk_bytes) ||
         api_addf(body,"\"context\":%u,\"sessions\":%u,\"threads\":%u,\"max_new\":%u,",o->context,
             o->sessions ? o->sessions : 1,o->threads<s->threads ? o->threads : s->threads,o->max_new) ||
-        api_addf(body,"\"runs_edge\":%s,\"expert_accelerator\":%s,\"repeat_supported\":%s}",
+        api_addf(body,"\"runs_edge\":%s,\"expert_accelerator\":%s,\"repeat_supported\":%s,\"memory_locked\":%s}",
             o->runs_edge ? "true" : "false",o->hybrid_role==LMB_HYBRID_ACCELERATOR ? "true" : "false",
-            repeat ? "true" : "false");
+            repeat ? "true" : "false",donor_approval_locked(s));
 }
 static int donor_approval_json(Cap *body,const HomeServiceSnapshot *s,int observed) {
     if (observed) return api_addf(body,"{\"schema\":1,\"scope\":\"this_computer\",\"sharing\":false,"
@@ -59,6 +86,7 @@ static int donor_approval_json(Cap *body,const HomeServiceSnapshot *s,int observ
         api_addf(body,",\"pending\":%s,\"decision_seconds\":%u,\"request\":",
             shown && s->phase==LMB_HOME_PENDING ? "true" : "false",LMB_HOME_DECISION_MS/1000u) ||
         (shown ? donor_approval_request_json(body,s) : cap_str(body,"null")) ||
+        donor_approval_memory_json(body,s) ||
         cap_str(body,",\"automatic_consent\":false}");
 }
 /* The page repeats the exact request it displayed. A decimal string keeps the
