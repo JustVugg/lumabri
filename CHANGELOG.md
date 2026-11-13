@@ -5,6 +5,15 @@ a tag stay under Unreleased until a new tag is created.
 
 ## Unreleased
 
+- `lumabri start` no longer fails its first model on computers with a small
+  locked-memory allowance: when no residency policy was requested, its sharing
+  service locks a load whose reservation fits the allowance and otherwise
+  holds the weights fully in RAM without locks, reported as "not locked" in
+  the start output, donor log, service status, `lumabri doctor` and the page.
+  An explicit `engine-locked` and all other commands still refuse as before.
+- The sign-in that prepares a model from the page receives the inference grant
+  for that allocation when it is ready, and the chat picker gains the model
+  without a reload. A full grant list is reported instead of failing silently.
 - Raspberry Pi: `segment_node` without `--max-rows` now clamps its 256-row
   default to the engine's batch cap instead of refusing to start (OLMoE caps
   at 128), and arm64 Pi kernels report the CPU via the `Model` line of

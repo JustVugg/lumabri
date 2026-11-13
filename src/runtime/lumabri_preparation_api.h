@@ -119,6 +119,96 @@ static int preparation_results_json(Cap *body,const HomeServiceSnapshot *s) {
     }
     return cap_str(body,"],\"result_scope\":\"historical_preparation_not_live_readiness\"");
 }
+/* A person who prepares a model from the page expects to chat with it. The
+ * requester's credential is recorded beside the intent, and each allocation
+ * of that operation observed ready is granted to that same credential through
+ * the ordinary grant path. Nobody else gains anything: the record names one
+ * credential digest (a recreated username does not inherit it), the holder
+ * must still have management when the grant is written, and an operation
+ * started without a signed-in user (controllers, the TUI) has no record. */
+#define LMB_PREPARATION_OWNER 105u
+static int preparation_owner_write(int dir,const char *id,const LmbApiUser *user) {
+    char name[80],intent[80]; snprintf(name,sizeof name,"%s.owner",id); snprintf(intent,sizeof intent,"%s.intent",id);
+    uint8_t record[LMB_PREPARATION_OWNER]={0};
+    memcpy(record,"LMBPOWN1",8); memcpy(record+8,user->digest,64);
+    memcpy(record+72,user->name,strnlen(user->name,32));
+    int target=lmb_journal_location(dir,intent);
+    if (target<0) return -1;
+    int fd=openat(target,name,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);
+    int bad=fd<0 || preparation_write(fd,record,sizeof record) || fsync(fd);
+    if (fd>=0 && close(fd)) bad=1;
+    if (!bad) bad=fsync(target);
+    close(target); lmb_api_wipe(record,sizeof record); return bad ? -1 : 0;
+}
+/* 0: the recorded requester still exists with the same credential and still
+ * holds management. 1: no requester, or it is no longer that credential. */
+static int preparation_owner(int dir,int access,const char *id,LmbApiUser *owner) {
+    char name[80]; snprintf(name,sizeof name,"%s.owner",id);
+    uint8_t record[LMB_PREPARATION_OWNER]; size_t n=0; char user[33];
+    if (preparation_read(dir,name,record,sizeof record,&n) || n!=sizeof record || memcmp(record,"LMBPOWN1",8)) return 1;
+    memcpy(user,record+72,33); user[32]=0;
+    int stale=lmb_api_user_load(access,user,owner) || memcmp(owner->digest,record+8,64) ||
+        !lmb_management_allows(access,owner);
+    lmb_api_wipe(record,sizeof record); return stale ? 1 : 0;
+}
+enum { LMB_PREPARATION_GRANT_NONE=0,LMB_PREPARATION_GRANTED,LMB_PREPARATION_GRANT_FULL,
+       LMB_PREPARATION_GRANT_FAILED,LMB_PREPARATION_GRANT_OTHER };
+/* Grants what is ready and not yet held. `caller`, when given, must be the
+ * recorded requester: observing someone else's operation grants nothing. */
+static int preparation_grant_ready(int dir,int access,const HomeServiceSnapshot *s,const LmbApiUser *caller) {
+    char id[65]; lmb_hex(id,s->instance,32);
+    LmbApiUser owner; int outcome=LMB_PREPARATION_GRANT_NONE;
+    if (preparation_owner(dir,access,id,&owner) ||
+        (caller && (strcmp(caller->name,owner.name) || memcmp(caller->digest,owner.digest,64)))) {
+        lmb_api_wipe(&owner,sizeof owner); return LMB_PREPARATION_GRANT_OTHER;
+    }
+    for (uint32_t i=0;i<s->preparation_result_count;i++) {
+        const HomePreparationResult *r=&s->preparation_results[i];
+        if (!r->ready_observed) continue;
+        if (lmb_api_user_allows(&owner,r->allocation)) { if (!outcome) outcome=LMB_PREPARATION_GRANTED; continue; }
+        int lock=-1,rc=-1;
+        for (unsigned attempt=0;attempt<40 && lock<0;attempt++) {
+            lock=lmb_api_access_lock(access);
+            if (lock<0) { if (errno!=EAGAIN && errno!=EWOULDBLOCK) break; (void)poll(NULL,0,50); }
+        }
+        if (lock>=0) {
+            /* Decide again under the lock: the credential may have changed. */
+            LmbApiUser current;
+            if (!preparation_owner(dir,access,id,&current) && !memcmp(current.digest,owner.digest,64))
+                rc=api_grant_allocation(access,s->tracker,owner.name,r->allocation);
+            lmb_api_wipe(&current,sizeof current); close(lock);
+        }
+        char allocation[65]; lmb_hex(allocation,r->allocation,32);
+        fprintf(stderr,"[preparation-grant] user=%s allocation=%s result=%s\n",owner.name,allocation,
+            !rc ? "granted" : rc>0 ? "grant_list_full" : "failed");
+        if (rc>0) outcome=LMB_PREPARATION_GRANT_FULL;
+        else if (rc<0) { if (outcome!=LMB_PREPARATION_GRANT_FULL) outcome=LMB_PREPARATION_GRANT_FAILED; }
+        else if (!outcome) outcome=LMB_PREPARATION_GRANTED;
+    }
+    lmb_api_wipe(&owner,sizeof owner); return outcome;
+}
+/* The keeper's observer: the grant does not depend on a page staying open.
+ * The descriptor is the preparations directory inside the access directory. */
+static int preparation_save_granting(int dir,const HomeServiceSnapshot *s) {
+    int rc=preparation_save(dir,s);
+    if (rc) return rc;
+    int access=openat(dir,"..",O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+    if (access>=0 && !lmb_api_private_fd(access,1)) (void)preparation_grant_ready(dir,access,s,NULL);
+    if (access>=0) close(access);
+    return 0;
+}
+static int preparation_access_json(Cap *body,int outcome) {
+    static const char *const states[]={"none_ready","granted","grant_list_full","not_granted","not_requested_by_this_sign_in"};
+    static const char *const details[]={
+        "No model of this operation is ready yet.",
+        "Ready models of this operation are in your chat model list.",
+        "The model is ready, but your sign-in already holds the most model grants one API user can hold, so it was "
+            "not added to your chat models. Grant it to another API user: lumabri api grant NAME ALLOCATION_ID.",
+        "The model is ready, but it could not be added to your chat models now. Check this operation again, or run: "
+            "lumabri api grant NAME ALLOCATION_ID.",
+        "This operation was requested by another sign-in. Observing it grants nothing."};
+    return api_addf(body,",\"chat_access\":\"%s\",\"chat_access_detail\":\"%s\"",states[outcome],details[outcome]);
+}
 /* The keeper may commit its terminal receipt and close the socket between
  * our file read and RPC. Re-read that exact operation on a failed RPC; a
  * timeout alone never proves interruption and never authorizes a new OFFER. */
@@ -131,7 +221,7 @@ static int preparation_observe(int dir,const char *id,HomeServiceSnapshot *saved
     }
     return preparation_load(dir,id,saved);
 }
-static int preparation_status(int dir,const char *tracker,const char *id,int cancel,Cap *body) {
+static int preparation_status(int dir,int access,const LmbApiUser *caller,const char *tracker,const char *id,int cancel,Cap *body) {
     HomeServiceSnapshot saved,current; char intent[80]; uint8_t digest[32]; size_t n=0; int live=0;
     snprintf(intent,sizeof intent,"%s.intent",id);
     if (preparation_read(dir,intent,digest,sizeof digest,&n) || n!=32) return 404;
@@ -146,6 +236,7 @@ static int preparation_status(int dir,const char *tracker,const char *id,int can
     if (api_addf(body,"{\"schema\":1,\"operation\":\"%s\",\"state\":\"%s\",\"live\":%s,"
         "\"cancel_requested\":%s,\"detail\":",id,state,live ? "true" : "false",cancel && live ? "true" : "false") ||
         api_json_text(body,saved.detail) || preparation_results_json(body,&saved) ||
+        (caller && preparation_access_json(body,preparation_grant_ready(dir,access,&saved,caller))) ||
         cap_str(body,",\"approval_replayed\":false}")) return 500;
     return 200;
 }
@@ -189,28 +280,28 @@ static void api_preparation_list(int fd,int access,const char *tracker,const cha
  * and must not contend with a new start (or an inherited startup lock while
  * the detached keeper is closing descriptors). Zero means no intent exists;
  * uncertain/corrupt evidence is never permission to start again. */
-static int preparation_repeat(int dir,const char *tracker,const LmbPreparationRequest *r,Cap *result) {
+static int preparation_repeat(int dir,int access,const LmbApiUser *caller,const char *tracker,const LmbPreparationRequest *r,Cap *result) {
     uint8_t digest[32],old[32]; size_t n=0; char name[80];
     preparation_request_hash(tracker,r,digest); snprintf(name,sizeof name,"%s.intent",r->operation);
     int found=preparation_read(dir,name,old,sizeof old,&n);
-    if (!found) return n==32 && !memcmp(digest,old,32) ? preparation_status(dir,tracker,r->operation,0,result) : 409;
+    if (!found) return n==32 && !memcmp(digest,old,32) ? preparation_status(dir,access,caller,tracker,r->operation,0,result) : 409;
     return found<0 ? 409 : 0;
 }
 /* The authenticated HTTP handler and service controllers share one typed
  * operation. The caller supplies a validated request; neither transport is
  * allowed to bypass the review, intent or keeper admission path. */
-static int preparation_execute(int access,const char *tracker,const LmbPreparationRequest *request,Cap *reply) {
+static int preparation_execute_as(int access,const char *tracker,const LmbApiUser *caller,const LmbPreparationRequest *request,Cap *reply) {
     LmbPreparationRequest r=*request; Cap result={0},plan={0}; LmbTuiState *st=NULL;
     int status=400,dir=-1,lock=-1; char review[65];
     int start=!strcmp(r.action,"start"), preview=!strcmp(r.action,"preview");
     if (!preview) {
         dir=preparation_dir(access); if (dir<0) { status=503; goto done; }
-        if (!start) { status=preparation_status(dir,tracker,r.operation,!strcmp(r.action,"cancel"),&result); goto done; }
-        status=preparation_repeat(dir,tracker,&r,&result); if (status) goto done;
+        if (!start) { status=preparation_status(dir,access,caller,tracker,r.operation,!strcmp(r.action,"cancel"),&result); goto done; }
+        status=preparation_repeat(dir,access,caller,tracker,&r,&result); if (status) goto done;
         lock=lmb_api_access_lock(dir); if (lock<0) { status=409; goto done; }
         /* A concurrent starter may have committed while we acquired the
          * guard. Only the missing-intent path can create a new keeper. */
-        status=preparation_repeat(dir,tracker,&r,&result); if (status) goto done;
+        status=preparation_repeat(dir,access,caller,tracker,&r,&result); if (status) goto done;
     }
     st=preparation_catalogue(tracker,&r); if (!st) { status=503; goto done; }
     status=preparation_review(st,&r,&plan,review); if (status!=200) goto done;
@@ -222,7 +313,8 @@ static int preparation_execute(int access,const char *tracker,const LmbPreparati
     if (strcmp(review,r.review)) { status=409; goto done; }
     uint8_t digest[32]; preparation_request_hash(tracker,&r,digest);
     if (preparation_intent(dir,r.operation,digest,1)) { status=409; goto done; }
-    HomePreparationObserver observer={.fd=dir,.save=preparation_save}; HomeServiceSnapshot started;
+    if (caller && preparation_owner_write(dir,r.operation,caller)) { status=503; goto done; }
+    HomePreparationObserver observer={.fd=dir,.save=caller ? preparation_save_granting : preparation_save}; HomeServiceSnapshot started;
     (void)lmb_unhex(observer.instance,r.operation,32);
     memset(&started,0,sizeof started); memcpy(started.instance,observer.instance,32);
     started.state=HOME_SVC_RUNNING; strcpy(started.role,"prepare");
@@ -240,9 +332,13 @@ done:
     free(st); free(plan.p); *reply=result;
     return status;
 }
-static void api_preparation(int fd,int access,const char *tracker,const char *text,size_t size) {
+/* Controllers act without a signed-in user: nothing is recorded or granted. */
+static int preparation_execute(int access,const char *tracker,const LmbPreparationRequest *request,Cap *reply) {
+    return preparation_execute_as(access,tracker,NULL,request,reply);
+}
+static void api_preparation(int fd,int access,const char *tracker,const LmbApiUser *user,const char *text,size_t size) {
     LmbPreparationRequest request; Cap result={0};
-    int status=lmb_preparation_parse(text,size,&request) ? 400 : preparation_execute(access,tracker,&request,&result);
+    int status=lmb_preparation_parse(text,size,&request) ? 400 : preparation_execute_as(access,tracker,user,&request,&result);
     if (status==200 || status==202) (void)api_response(fd,(unsigned)status,result.p);
     else api_error(fd,(unsigned)status,status==400 ? "invalid_preparation_request" : status==404 ? "preparation_not_found" :
         status==409 ? "review_or_operation_changed" : status==422 ? "resident_plan_unavailable" : "preparation_not_confirmed_inspect_before_retry");

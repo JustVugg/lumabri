@@ -572,3 +572,4 @@ main:has(#chat:not([hidden]) #empty:not([hidden])) #composer-area { margin-botto
   .status-dot, .dot, .device-indicator { border: 1px solid CanvasText; }
   #composer, .workspace-switch button[aria-pressed="true"], .details-tabs button[aria-expanded="true"] { border: 1px solid CanvasText; }
 }
+.peer-memory { color: var(--warn); font-size: 12px; line-height: 1.5; margin-top: 8px; overflow-wrap: anywhere; }

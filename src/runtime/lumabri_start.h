@@ -148,6 +148,13 @@ static int start_sharing(const HomeSettings *s, char *notice, size_t cap) {
             if (nullfd<0 || logfd<0 || dup2(nullfd,0)<0 || dup2(logfd,1)<0 || dup2(logfd,2)<0) _exit(125);
             if (nullfd>2) close(nullfd);
             if (logfd>2) close(logfd);
+            /* An ordinary desktop allows very little locked memory, and the
+             * strict household default would refuse the first model there.
+             * Only when nothing was requested, this donor chooses per load:
+             * locked if the allowance covers it, otherwise resident and not
+             * locked, and reported as such. An explicit policy is inherited
+             * untouched and still refuses loudly. */
+            if (!getenv("LUMABRI_RESIDENCY_POLICY") && setenv("LUMABRI_RESIDENCY_POLICY","auto",1)) _exit(125);
             char *args[]={binary,"donor","--headless","--join",(char *)s->tracker,"--ram-gb",(char *)s->ram,NULL};
             execv(binary,args); _exit(127);
         }
@@ -165,6 +172,24 @@ static int start_sharing(const HomeSettings *s, char *notice, size_t cap) {
 /* The fragment is the only place the token appears, and the opener is run
  * directly: no shell ever parses the address. The household key is removed
  * from the browser's environment. */
+/* One line about what this computer's sharing service does with model memory,
+ * from the service itself: an adopted donor keeps the policy it started with. */
+static void start_memory_line(void) {
+    HomeServiceSnapshot seen;
+    if (!start_donor_live(&seen) || seen.residency==LMB_RESIDENCY_UNREPORTED) return;
+    int automatic=seen.residency==LMB_RESIDENCY_AUTO_LOCKED || seen.residency==LMB_RESIDENCY_AUTO_UNLOCKED;
+    if (!automatic) {
+        printf("  Memory:         %s, requested explicitly%s\n",lmb_residency_name(seen.residency),
+            seen.residency==LMB_RESIDENCY_ENGINE_LOCKED ? "; a model above the OS locked-memory allowance is refused" : "");
+    } else if (!seen.memlock_limit || seen.memlock_limit==UINT64_MAX) {
+        printf("  Memory:         model memory is locked in RAM\n");
+    } else {
+        printf("  Memory:         not locked for models above %llu MiB, this account's locked-memory allowance.\n"
+               "                  Such models are still loaded fully into RAM. " LMB_MEMLOCK_UNLOCKED_NOTE "\n"
+               "                  To lock it: %s\n",(unsigned long long)(seen.memlock_limit>>20),lmb_memlock_howto());
+    }
+}
+
 static int start_open_browser(const char *url) {
 #ifdef __APPLE__
     const char *opener="open";
@@ -273,6 +298,7 @@ static int cmd_start(int argc, char **argv) {
            "  Stop:           lumabri service stop\n",
         address,s.tracker,household,degraded ? "not active" : "up to ",degraded ? "" : s.ram,
         degraded ? "" : " GB of this computer's memory",s.models);
+    if (!degraded) start_memory_line();
     if (granted) printf("  %u approved model%s added to the local sign-in.\n",granted,granted==1 ? " was" : "s were");
     if (missing) printf("  %u approved model%s could not be added to the local sign-in.\n",missing,missing==1 ? "" : "s");
     if (taken)

@@ -127,6 +127,7 @@ const ROOM_FLOW_ENABLED = false;
       stat("offered", gib(node.ram_offered_bytes));
       if (workload) stat("work", `${workload.active} active · ${workload.queued} queued`);
       card.append(name, element("div", "peer-gpu", `${node.cpu} · ${node.os} / ${node.arch}`), stats);
+      card.dataset.computer = node.name;
       $("peers").append(card);
       if (Number.isFinite(node.ram_offered_bytes)) offered += node.ram_offered_bytes;
     }
@@ -135,6 +136,16 @@ const ROOM_FLOW_ENABLED = false;
     $("cluster-summary").textContent = `${count} · ${gib(offered)} offered`;
     $("devices-status").textContent = `Reports captured at ${new Date(data.captured_at * 1000).toLocaleTimeString()}.`;
     devicesExpiry = Date.now() + Math.max(0, data.inventory_ttl_ms - Math.max(...data.nodes.map(node => node.age_ms)));
+    renderMemory();
+  }
+  // What this computer's sharing service reports about locking model memory,
+  // shown next to this computer. Other computers report on their own pages.
+  function renderMemory() {
+    for (const old of $("peers").querySelectorAll(".peer-memory")) old.remove();
+    if (!approvalMemory?.warning || !approvalMemory.detail || !$("peers").childElementCount) return;
+    const own = Array.from($("peers").children).find(card => card.dataset.computer === approvalMemory.computer);
+    const note = element("div", "peer-memory", own ? approvalMemory.detail : `This computer: ${approvalMemory.detail}`);
+    if (own) own.append(note); else $("peers").prepend(note);
   }
   async function loadDevices() {
     if (!operator || !token || devicesPending) return;
@@ -246,6 +257,9 @@ const ROOM_FLOW_ENABLED = false;
   const approvalIds = ["approval-decline", "approval-accept", "approval-repeat", "approval-revoke", "approval-dismiss"];
   const approvalProgress = new Set(["accepted", "loading", "segment_ready", "starting_host"]);
   let approvalShown = null, approvalSettled = null, approvalBusy = false, approvalRead = 0, approvalNote = "";
+  let approvalMemory = null;
+  const notLocked = request => request.memory_locked === false ?
+    ` This load is larger than this computer's locked-memory allowance: it is held in RAM but not locked. ${approvalMemory?.detail || ""}` : "";
   function approvalFacts(request) {
     const rows = [
       ["Requested by", `${request.requester.slice(0, 24)}…`, true],
@@ -273,7 +287,7 @@ const ROOM_FLOW_ENABLED = false;
         "This computer processes activations and keeps state for its layers.";
       approvalFacts(request);
       $("approval-hint").textContent = "Nothing loads unless you accept. Accepted weights stay in memory until you stop sharing. " +
-        `An unanswered request is dropped after about ${Math.round(shown.seconds / 60)} minutes.`;
+        `An unanswered request is dropped after about ${Math.round(shown.seconds / 60)} minutes.` + notLocked(request);
       show(["approval-decline", "approval-accept", ...(request.repeat_supported ? ["approval-repeat"] : []), ...(shown.repeat ? ["approval-revoke"] : [])]);
     } else if (settled) {
       $("approval-kicker").textContent = settled.kind === "accepted" ? "accepted" : settled.kind === "declined" ? "declined" : "not loaded";
@@ -285,6 +299,7 @@ const ROOM_FLOW_ENABLED = false;
   }
   function approvalApply(data) {
     const request = data.sharing ? data.request : null;
+    approvalMemory = data.sharing && data.memory ? {computer: data.computer, ...data.memory} : null; renderMemory();
     const fence = request && {instance: data.instance, allocation: request.allocation, revision: data.revision};
     if (request && data.pending) {
       const repeat = approvalShown?.fence.allocation === request.allocation ? approvalShown.repeat : false;
@@ -299,7 +314,7 @@ const ROOM_FLOW_ENABLED = false;
         settled.held = request?.allocation === settled.fence.allocation;
         if (settled.held) {
           settled.fence = fence;
-          settled.text = data.phase === "ready" ? "Loaded and ready on this computer. It appears in the model list once your sign-in has access to it." :
+          settled.text = data.phase === "ready" ? "Loaded and ready on this computer. It appears in the model list once your sign-in has access to it." + notLocked(request) :
             approvalProgress.has(data.phase) ? `${data.state}.` : data.detail || `${data.state}.`;
         } else if (settled.seen) settled.text = "This load is no longer the one shown by this computer's sharing service. See Computers & models for its state.";
         settled.seen = settled.seen || settled.held;
@@ -352,7 +367,7 @@ const ROOM_FLOW_ENABLED = false;
       if (credential === token) renderApproval();
     }
   }
-  function approvalReset() { approvalShown = approvalSettled = null; approvalNote = ""; approvalRead = 0; renderApproval(); }
+  function approvalReset() { approvalShown = approvalSettled = approvalMemory = null; approvalNote = ""; approvalRead = 0; renderMemory(); renderApproval(); }
   $("approval-accept").addEventListener("click", () => approvalAct("accept"));
   $("approval-decline").addEventListener("click", () => approvalAct("decline"));
   $("approval-repeat").addEventListener("click", () => approvalAct("allow_repeat"));

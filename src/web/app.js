@@ -9,7 +9,7 @@ let generationMetrics = null;
 let operator = false, workspaceOpen = false, workspacePending = false, workspaceEpoch = 0;
 let workspaceExpires = 0;
 let management = false, managementBusy = false;
-let preparationReview = null, preparationBusy = false, preparationOperation = "";
+let preparationReview = null, preparationBusy = false, preparationOperation = "", preparationWatch = "";
 let preparationNextCursor = "";
 let preparationNames = new Map();
 let requestsActive = 0; // ui.js keeps its background reads out of the way of these
@@ -360,7 +360,7 @@ $("sign-out").onclick = () => {
   token = ""; models = []; conversations = []; current = null;
   showGenerationMetrics();
   operator = false; management = false; closeWorkspace(); clearWorkspace();
-  preparationOperation = ""; preparationNextCursor = ""; preparationInvalidate();
+  preparationOperation = ""; preparationWatch = ""; preparationNextCursor = ""; preparationInvalidate();
   $("prepare-form").hidden = true; $("prepare-models").replaceChildren(); $("prepare-nodes").replaceChildren();
   $("prepare-status").textContent = ""; $("prepare-operation").replaceChildren(new Option("No operation selected", ""));
   $("prepare-cancel").hidden = true;
@@ -669,7 +669,7 @@ $("prepare-start").onclick = () => preparationTask(async valid => {
   if (!preparationReview) return;
   const reviewed = preparationReview;
   if (!reviewed.operation) reviewed.operation = Array.from(crypto.getRandomValues(new Uint8Array(32)), byte => byte.toString(16).padStart(2, "0")).join("");
-  preparationOperation = reviewed.operation;
+  preparationOperation = preparationWatch = reviewed.operation;
   $("prepare-status").textContent = `Starting ${preparationOperation}. Closing this page will not cancel preparation.`;
   const data = await request("/api/v1/preparation", "POST", {action: "start", operation: reviewed.operation, review: reviewed.review, ...reviewed.intent});
   if (!valid()) return;
@@ -684,7 +684,9 @@ async function preparationObserve() {
     const operation = preparationOperation;
     const data = await request("/api/v1/preparation", "POST", {action: "status", operation});
     if (!valid() || operation !== preparationOperation) return;
-    $("prepare-status").textContent = `${data.state.replaceAll("_", " ")} · ${data.detail}`;
+    $("prepare-status").textContent = `${data.state.replaceAll("_", " ")} · ${data.detail}` +
+      (data.chat_access && data.chat_access !== "none_ready" ? ` ${data.chat_access_detail}` : "");
+    await preparationSeen(operation, data);
     $("prepare-cancel").hidden = !data.live || data.state !== "running";
   });
 }
@@ -694,6 +696,33 @@ $("prepare-cancel").onclick = () => preparationTask(async valid => {
   if (valid()) $("prepare-status").textContent = data.cancel_requested ? "Cancellation requested. Waiting for cleanup." : data.detail;
 });
 setInterval(preparationObserve, 3000);
+// ---- a model this sign-in prepared joins the chat picker when it is ready ----
+// The gateway grants it to the requester; this only re-reads the list, with
+// or without Computers & models open, and says so when the grant was refused.
+async function preparationSeen(operation, data) {
+  const credential = token, ready = (data.allocations || []).filter(entry => entry.state === "ready_observed");
+  if (data.chat_access === "granted" && ready.some(entry => !models.some(model => model.id === entry.id))) {
+    const listed = (await request("/api/v1/models")).models;
+    if (credential !== token) return;
+    const first = !models.length && !$("model").value;
+    models = listed; renderModels(); controls();
+    const added = ready.map(entry => models.find(model => model.id === entry.id)).filter(Boolean);
+    if (first && added.length && !current) $("model").value = added[0].id;
+    $("model").dispatchEvent(new Event("change"));
+    if (added.length) say(`${added.map(model => model.name).join(", ")} is ready to chat.`);
+  }
+  if (operation !== preparationWatch || (data.state !== "done" && data.state !== "failed")) return;
+  preparationWatch = "";
+  if (data.chat_access === "grant_list_full" || data.chat_access === "not_granted") say(data.chat_access_detail);
+}
+setInterval(async () => {
+  if (!preparationWatch || !management || !token || busy || preparationBusy || managementBusy || requestsActive || document.hidden) return;
+  const operation = preparationWatch, credential = token;
+  try {
+    const data = await request("/api/v1/preparation", "POST", {action: "status", operation});
+    if (credential === token && operation === preparationWatch) await preparationSeen(operation, data);
+  } catch { /* Not confirmed now: the next reading decides. */ }
+}, 3000);
 
 // The browser edits policy intent only. Placement, approvals, reservations and
 // reconciliation remain in the same service used by the CLI and other clients.

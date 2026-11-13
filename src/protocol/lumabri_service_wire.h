@@ -5,7 +5,7 @@
 #include "lumabri_home.h"
 
 #define HOME_SVC_VERSION 1u
-#define HOME_SVC_RECORD_VERSION 5u
+#define HOME_SVC_RECORD_VERSION 6u
 #define HOME_SVC_MAX 65536u
 #define HOME_PREPARATION_RESULTS 8u
 enum { HOME_SVC_STATUS = 0, HOME_SVC_STOP, HOME_SVC_ACCEPT, HOME_SVC_DECLINE,
@@ -37,6 +37,11 @@ typedef struct {
     uint8_t allocation_set[32];
     uint32_t preparation_results_known, preparation_result_count;
     HomePreparationResult preparation_results[HOME_PREPARATION_RESULTS];
+    /* Donor only, record version 6: LMB_RESIDENCY_* for the weights this
+     * keeper holds or would load, and its locked-memory allowance in bytes
+     * (0 unknown, UINT64_MAX unlimited or exempt). Zero in older records. */
+    uint32_t residency;
+    uint64_t memlock_limit;
 } HomeServiceSnapshot;
 
 static int home_service_role(const char *role) {
@@ -56,6 +61,7 @@ static int home_service_pack(LmbBuf *b, const HomeServiceSnapshot *s) {
     if (s->preparation_results_known > 1 || s->preparation_result_count > HOME_PREPARATION_RESULTS ||
         (s->preparation_result_count && !s->preparation_results_known) ||
         (s->preparation_results_known && strcmp(s->role,"prepare"))) return -1;
+    if (s->residency > 5 || ((s->residency || s->memlock_limit) && strcmp(s->role,"donor"))) return -1;
     for (uint32_t i=0;i<s->preparation_result_count;i++) {
         const HomePreparationResult *r=&s->preparation_results[i]; unsigned nonzero=0;
         for (unsigned j=0;j<32;j++) nonzero|=r->allocation[j];
@@ -65,7 +71,10 @@ static int home_service_pack(LmbBuf *b, const HomeServiceSnapshot *s) {
         for (uint32_t j=0;j<i;j++)
             if (!memcmp(r->allocation,s->preparation_results[j].allocation,32)) return -1;
     }
-    if (lmb_buf_u32(b, HOME_SVC_RECORD_VERSION) || lmb_buf_bytes(b, s->instance, 32) ||
+    /* Records without the version 6 fields keep their version 5 bytes, so
+     * every role but a reporting donor stays readable by earlier builds. */
+    uint32_t version = s->residency || s->memlock_limit ? HOME_SVC_RECORD_VERSION : 5u;
+    if (lmb_buf_u32(b, version) || lmb_buf_bytes(b, s->instance, 32) ||
         lmb_buf_u32(b, s->state) || lmb_buf_u32(b, s->phase) ||
         lmb_buf_u32(b, s->retained) || lmb_buf_u32(b, s->threads) ||
         lmb_buf_u64(b, s->pid) || lmb_buf_u64(b, s->segment_pid) ||
@@ -86,6 +95,7 @@ static int home_service_pack(LmbBuf *b, const HomeServiceSnapshot *s) {
         const HomePreparationResult *r=&s->preparation_results[i];
         rc=lmb_buf_bytes(b,r->allocation,32) || lmb_buf_str(b,r->catalogue_name) || lmb_buf_u32(b,r->ready_observed);
     }
+    if (!rc && version >= 6) rc=lmb_buf_u32(b,s->residency) || lmb_buf_u64(b,s->memlock_limit);
     return rc || b->len > HOME_SVC_MAX ? -1 : 0;
 }
 
@@ -124,6 +134,7 @@ static int home_service_unpack(const uint8_t *bytes, size_t n, HomeServiceSnapsh
                 lmb_cur_u32(&c,&r->ready_observed)) return -1;
         }
     }
+    if (v >= 6 && (lmb_cur_u32(&c,&s->residency) || lmb_cur_u64(&c,&s->memlock_limit))) return -1;
     if (c.off != c.len) return -1;
     LmbBuf check = {0}; int rc = home_service_pack(&check, s); free(check.p); return rc;
 }
