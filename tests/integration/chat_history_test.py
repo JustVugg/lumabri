@@ -58,7 +58,7 @@ def main():
                     time.sleep(.05)
             initial = request(); assert initial[0] == 200, initial
             assert initial[1]["conversations"] == []
-            for asset in ("/", "/app.css", "/app.js", "/logo.svg"):
+            for asset in ("/", "/app.css", "/app.js", "/capacity.js", "/ui.js", "/logo.svg"):
                 status, content, headers = request(asset, token="")
                 assert status == 200 and len(content) > 100
                 assert "frame-ancestors 'none'" in headers["Content-Security-Policy"]
