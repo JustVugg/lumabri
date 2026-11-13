@@ -66,16 +66,7 @@
             </svg>
           </div>
           <div class="setup-form">
-            <!-- Room flow: shown only when ROOM_FLOW_ENABLED is true in ui.js. -->
-            <div class="setup-tabs" id="setup-tabs" role="group" aria-label="How would you like to start?" hidden><button id="mode-token" type="button" aria-pressed="true">Access token</button><button id="mode-create" type="button" aria-pressed="false">Create a room</button><button id="mode-join" type="button" aria-pressed="false">I have a code</button></div>
             <form id="login-form"><div class="setup-field"><label for="token">Your access token</label><div class="token-row"><input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="name.token" required><button type="submit" class="primary">Connect →</button></div></div></form>
-            <div id="room-flow" class="setup-fields" hidden>
-              <div class="setup-field"><label for="room-name">Computer name <span>optional</span></label><input id="room-name" placeholder="e.g. Study laptop" maxlength="20" autocomplete="off"><small>Helps others recognise this computer.</small></div>
-              <div class="setup-field" id="room-code-field" hidden><label for="room-code">Room code</label><input id="room-code" placeholder="e.g. AB12" maxlength="6" minlength="4" pattern="[A-Za-z0-9]{4,6}" autocomplete="off" spellcheck="false"><small>Ask the person hosting the room.</small></div>
-              <div class="contribution"><div><label for="room-gb">Your contribution</label><p>Choose how much memory this computer shares.</p></div><div class="pledge"><button class="step" id="room-gb-minus" type="button" aria-label="Decrease memory">−</button><input aria-label="Contributed memory in gibibytes" id="room-gb" type="number" min="1" max="256" step="1" value="1" inputmode="numeric"><span>GiB</span><button class="step" id="room-gb-plus" type="button" aria-label="Increase memory">+</button></div></div>
-              <div class="join-row"><button id="room-create" class="primary" type="button">Create your room <span aria-hidden="true">↗</span></button><button id="room-join" class="primary" type="button" hidden>Join a room <span aria-hidden="true">↗</span></button></div>
-              <div id="room-status" role="status" aria-live="polite"></div>
-            </div>
             <p class="fine-print">Ask your cluster operator for a token. It is kept only in this page's memory. The computer hosting inference receives your conversation.</p>
             <div class="setup-footer">Your computers. Your models. Your conversations.</div>
           </div>
@@ -232,6 +223,21 @@
         <div id="cluster-bar">Together: <b id="cluster-summary">—</b></div>
         <div class="panel-actions"><button id="devices-refresh" type="button">Refresh reports</button><button id="devices-workspace" type="button">Open computers &amp; models</button></div>
         <p class="side-hint">Reports are leased observations, not reserved capacity. They are read when this panel opens, not continuously.</p>
+        <!-- Room flow: shown only when ROOM_FLOW_ENABLED is true in ui.js, to a sign-in that may manage this computer. -->
+        <div id="rooms" class="rooms" hidden>
+          <div class="side-k">ADD OR JOIN</div>
+          <div class="setup-tabs" id="setup-tabs" role="group" aria-label="Add a computer or join a household"><button id="mode-create" type="button" aria-pressed="true">Add a computer</button><button id="mode-join" type="button" aria-pressed="false">I have a code</button></div>
+          <div id="room-flow" class="setup-fields">
+            <p id="room-intro" class="side-hint"></p>
+            <output id="room-code-shown" class="room-code" aria-label="Pairing code" hidden></output>
+            <div class="setup-field" id="room-code-field" hidden><label for="room-code">Code shown on the other computer</label><input id="room-code" placeholder="e.g. 7K3M-9QXT" maxlength="12" autocomplete="off" autocapitalize="characters" spellcheck="false"><small>It works once, for a few minutes.</small></div>
+            <div class="setup-field" id="room-address-field" hidden><label for="room-address">Household address <span>optional</span></label><input id="room-address" placeholder="looked for on this network" maxlength="80" autocomplete="off" spellcheck="false"><small>Shown next to the code, for networks where it is not found.</small></div>
+            <div class="contribution" id="room-pledge" hidden><div><label for="room-gb">Your contribution</label><p>Memory this computer shares there.</p></div><div class="pledge"><button class="step" id="room-gb-minus" type="button" aria-label="Decrease memory">−</button><input aria-label="Contributed memory in gibibytes" id="room-gb" type="number" min="1" max="256" step="1" value="4" inputmode="numeric"><span>GiB</span><button class="step" id="room-gb-plus" type="button" aria-label="Increase memory">+</button></div></div>
+            <label class="room-consent" id="room-consent-field" hidden><input id="room-consent" type="checkbox"> This computer leaves its current household. Everything running on it stops, then Lumabri restarts.</label>
+            <div class="join-row"><button id="room-create" class="primary" type="button">Show a code</button><button id="room-cancel" type="button" hidden>Withdraw the code</button><button id="room-join" class="primary" type="button" hidden disabled>Join that household</button></div>
+            <div id="room-status" role="status" aria-live="polite"></div>
+          </div>
+        </div>
       </section>
       <section data-panel="activity" hidden>
         <div class="side-k">THIS SESSION</div>

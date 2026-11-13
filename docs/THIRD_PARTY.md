@@ -232,8 +232,10 @@
   only to the local Lumabri HTTP API.
 - Lumabri changes: design tokens with a dark theme, reduced-motion and
   forced-colours handling, phone layout, an Advanced disclosure for management
-  screens, and a room create/join screen kept inactive behind
-  `ROOM_FLOW_ENABLED` in `src/web/ui.js` until the API can serve it.
+  screens, and its room create/join controls reworked as "Add a computer" and
+  "I have a code" in the Computers panel (`ROOM_FLOW_ENABLED` in
+  `src/web/ui.js`), backed by Lumabri's own pairing protocol
+  (docs/PAIRING.md).
 
 ## libcurl (system library, model download helper)
 
