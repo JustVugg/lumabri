@@ -2,39 +2,90 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="color-scheme" content="light dark">
   <title>Lumabri — Your conversations</title>
   <link rel="icon" href="/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/app.css">
   <script src="/capacity.js" defer></script>
   <script src="/app.js" defer></script>
+  <script src="/ui.js" defer></script>
 </head>
 <body>
   <div class="app" id="app">
     <aside id="sidebar" aria-label="Conversations">
-      <div class="brand"><img src="/logo.svg" alt="Lumabri" width="162" height="65"><button id="collapse" class="icon" aria-label="Collapse sidebar" title="Collapse sidebar">‹</button></div>
+      <div class="brand"><img src="/logo.svg" alt="Lumabri" width="148" height="46"><button id="collapse" class="icon" aria-label="Collapse sidebar" title="Collapse sidebar">‹</button></div>
       <button id="new-chat" class="new-chat" disabled><span aria-hidden="true">＋</span> New conversation</button>
+      <div class="history-scroll">
+        <div class="section-label">Your conversations</div>
+        <nav id="history" aria-label="Saved conversations"><p class="muted">Connect to see your history.</p></nav>
+      </div>
       <button id="workspace-open" class="workspace-link" hidden>Computers &amp; models <span aria-hidden="true">↗</span></button>
-      <div class="section-label">YOUR CONVERSATIONS</div>
-      <nav id="history" aria-label="Saved conversations"><p class="muted">Connect to see your history.</p></nav>
       <div class="sidebar-footer"><span class="status-dot" aria-hidden="true"></span><span id="identity">Not connected</span><button id="sign-out" class="text-button" hidden>Sign out</button></div>
     </aside>
     <main>
-      <header>
+      <header class="chat-toolbar">
         <button id="expand" class="icon" aria-label="Expand sidebar" title="Expand sidebar" hidden>☰</button>
+        <div class="chat-heading"><div id="conversation-title" class="chat-title">New conversation</div><span class="local-label">On your computers</span></div>
+        <div class="workspace-switch" role="group" aria-label="Workspace view"><button type="button" data-view="chat" aria-pressed="true">Chat</button><button type="button" data-view="endpoint" aria-pressed="false">API</button></div>
         <div class="model-control"><label for="model">Resident model</label><select id="model" disabled><option value="">No models loaded</option></select></div>
-        <div class="header-right"><span class="local-label">ON YOUR COMPUTERS</span><button id="refresh" class="icon" aria-label="Refresh models and history" title="Refresh" disabled>↻</button></div>
+        <button class="toolbar-button" id="devices-button" type="button" data-panel-open="devices" aria-controls="details" aria-expanded="false" hidden><span class="device-indicator" aria-hidden="true"></span><span id="device-count">Computers</span></button>
+        <button class="toolbar-button" type="button" data-panel-open="model" aria-controls="details" aria-expanded="false">Details</button>
+        <button id="refresh" class="icon" aria-label="Refresh models and history" title="Refresh" disabled>↻</button>
       </header>
-      <section id="login" class="welcome">
-        <span class="eyebrow">YOUR MODELS. YOUR SPACE.</span><h1>A conversation,<br>closer to home.</h1>
-        <p>Chat with models already approved on your computers.<br>Your history stays with your local Lumabri service.</p>
-        <form id="login-form"><label for="token">Your access token</label><div class="token-row"><input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="name.token" required><button type="submit" class="primary">Connect →</button></div></form>
-        <p class="fine-print">Ask your cluster operator for a token. It is kept only in this page's memory. The computer hosting inference receives your conversation.</p>
+      <section id="login" class="setup" aria-labelledby="setup-title">
+        <div class="setup-header"><img src="/logo.svg" alt="Lumabri" width="168" height="52"><span class="setup-tag">Runs on your own computers</span></div>
+        <div class="setup-card">
+          <div class="setup-intro">
+            <span class="eyebrow">YOUR MODELS. YOUR SPACE.</span><h1 id="setup-title">A conversation,<br>closer to home.</h1>
+            <p id="setup-description">Chat with models already approved on your computers.<br>Your history stays with your local Lumabri service.</p>
+            <svg class="setup-network" viewBox="0 0 360 250" width="360" height="250" role="img" aria-label="Several home computers connected to one shared model.">
+              <g class="net-line" fill="none" stroke-width="1.5" stroke-dasharray="3 6" stroke-linecap="round"><path d="M92 62 150 104"/><path d="M270 60 212 104"/><path d="M84 196 150 148"/><path d="M276 196 212 148"/></g>
+              <g class="net-dot"><circle cx="121" cy="83" r="3"/><circle cx="241" cy="82" r="3"/><circle cx="117" cy="172" r="3"/><circle cx="244" cy="172" r="3"/></g>
+              <g class="net-device" stroke-width="1.5" stroke-linejoin="round">
+                <rect x="34" y="22" width="62" height="40" rx="5"/><path d="M24 68h82l-6 8H30z"/>
+                <rect x="250" y="18" width="70" height="44" rx="5"/><path d="M276 62v9m18-9v9m-27 0h36" fill="none" stroke-linecap="round"/>
+                <rect x="60" y="176" width="30" height="56" rx="6"/><path d="M71 224h8" fill="none" stroke-linecap="round"/>
+                <rect x="262" y="180" width="60" height="48" rx="6"/><path d="M272 194h24m-24 10h24" fill="none" stroke-linecap="round"/><circle cx="309" cy="216" r="3"/>
+              </g>
+              <rect class="net-core" x="142" y="88" width="76" height="76" rx="16" stroke-width="1.5"/>
+              <g class="net-px"><rect x="158" y="104" width="12" height="12" opacity=".95"/><rect x="174" y="104" width="12" height="12" opacity=".6"/><rect x="190" y="104" width="12" height="12" opacity=".85"/><rect x="158" y="120" width="12" height="12" opacity=".55"/><rect x="174" y="120" width="12" height="12"/><rect x="190" y="120" width="12" height="12" opacity=".5"/><rect x="158" y="136" width="12" height="12" opacity=".8"/><rect x="174" y="136" width="12" height="12" opacity=".45"/><rect x="190" y="136" width="12" height="12" opacity=".9"/></g>
+            </svg>
+          </div>
+          <div class="setup-form">
+            <!-- Room flow: shown only when ROOM_FLOW_ENABLED is true in ui.js. -->
+            <div class="setup-tabs" id="setup-tabs" role="group" aria-label="How would you like to start?" hidden><button id="mode-token" type="button" aria-pressed="true">Access token</button><button id="mode-create" type="button" aria-pressed="false">Create a room</button><button id="mode-join" type="button" aria-pressed="false">I have a code</button></div>
+            <form id="login-form"><div class="setup-field"><label for="token">Your access token</label><div class="token-row"><input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="name.token" required><button type="submit" class="primary">Connect →</button></div></div></form>
+            <div id="room-flow" class="setup-fields" hidden>
+              <div class="setup-field"><label for="room-name">Computer name <span>optional</span></label><input id="room-name" placeholder="e.g. Study laptop" maxlength="20" autocomplete="off"><small>Helps others recognise this computer.</small></div>
+              <div class="setup-field" id="room-code-field" hidden><label for="room-code">Room code</label><input id="room-code" placeholder="e.g. AB12" maxlength="6" minlength="4" pattern="[A-Za-z0-9]{4,6}" autocomplete="off" spellcheck="false"><small>Ask the person hosting the room.</small></div>
+              <div class="contribution"><div><label for="room-gb">Your contribution</label><p>Choose how much memory this computer shares.</p></div><div class="pledge"><button class="step" id="room-gb-minus" type="button" aria-label="Decrease memory">−</button><input aria-label="Contributed memory in gibibytes" id="room-gb" type="number" min="1" max="256" step="1" value="1" inputmode="numeric"><span>GiB</span><button class="step" id="room-gb-plus" type="button" aria-label="Increase memory">+</button></div></div>
+              <div class="join-row"><button id="room-create" class="primary" type="button">Create your room <span aria-hidden="true">↗</span></button><button id="room-join" class="primary" type="button" hidden>Join a room <span aria-hidden="true">↗</span></button></div>
+              <div id="room-status" role="status" aria-live="polite"></div>
+            </div>
+            <p class="fine-print">Ask your cluster operator for a token. It is kept only in this page's memory. The computer hosting inference receives your conversation.</p>
+            <div class="setup-footer">Your computers. Your models. Your conversations.</div>
+          </div>
+        </div>
       </section>
       <section id="chat" hidden aria-label="Chat">
         <div id="empty" class="welcome"><span class="eyebrow">READY WHEN YOU ARE</span><h1>What are we<br>working on?</h1><p>Select an approved resident model above, then start a conversation.</p></div>
         <div id="messages" aria-label="Conversation messages" aria-live="off"></div>
+      </section>
+      <section id="endpoint" hidden aria-labelledby="endpoint-title">
+        <div class="endpoint-intro"><span class="eyebrow">LOCAL INFERENCE API</span><h1 id="endpoint-title">Your models.<br><em>Where you work.</em></h1><p>Use the models approved for your token from an editor, an agent or your own application.</p></div>
+        <div class="endpoint-flow" aria-label="Clients send requests to the Lumabri API; your computers run the model"><span>Your client</span><span aria-hidden="true">→</span><strong>Lumabri API</strong><span aria-hidden="true">→</span><span>Your computers</span></div>
+        <div class="endpoint-card">
+          <div class="endpoint-card-heading"><div><h2>Connect your client</h2><p id="endpoint-status" role="status">Reading the connection settings…</p></div><span class="endpoint-badge">Token protected</span></div>
+          <label for="endpoint-openai">OpenAI-compatible base URL</label><div class="endpoint-field"><input id="endpoint-openai" readonly><button type="button" data-copy="endpoint-openai">Copy</button></div>
+          <label for="endpoint-anthropic">Anthropic-compatible base URL</label><div class="endpoint-field"><input id="endpoint-anthropic" readonly><button type="button" data-copy="endpoint-anthropic">Copy</button></div>
+          <label for="endpoint-model">Model id <small>The model selected in the toolbar. Use an id returned for your token.</small></label><div class="endpoint-field"><input id="endpoint-model" readonly placeholder="No approved model selected"><button type="button" data-copy="endpoint-model">Copy</button></div>
+          <label for="endpoint-client">Client configuration</label><select id="endpoint-client"><option value="curl">HTTP request · Chat Completions</option><option value="openai">OpenAI Python client</option><option value="anthropic">Anthropic Python client</option></select>
+          <div class="endpoint-example"><pre id="endpoint-example" tabindex="0"></pre><button type="button" data-copy="endpoint-example">Copy</button></div>
+          <ul id="endpoint-scope" class="endpoint-scope" aria-label="Supported scope"></ul>
+          <p class="endpoint-note">Your token is never displayed here. Keep it in your application's secret store and pass it as the API key.</p>
+        </div>
+        <p class="endpoint-note">These are configuration values, not a connectivity test. The address works wherever this Lumabri service is reachable; Lumabri does not open tunnels. The computer hosting inference receives the request text.</p>
       </section>
       <section id="workspace" hidden aria-label="Cluster workspace">
         <div class="workspace-heading"><div><span class="eyebrow">YOUR INFERENCE SERVICE</span><h1>Computers &amp; models</h1></div><button id="workspace-refresh">Refresh</button></div>
@@ -52,14 +103,19 @@
           </form>
           <div id="prepare-review" class="workspace-grid"></div>
           <button id="prepare-start" class="primary" hidden>Request donor approval</button>
-          <label class="prepare-history" for="prepare-operation">Preparation history</label><select id="prepare-operation"><option value="">No operation selected</option></select>
-          <p id="prepare-history-page" class="muted" role="status"></p>
-          <button id="prepare-history-first" class="text-button">Refresh history</button>
-          <button id="prepare-history-next" class="text-button" hidden>Next history page</button>
-          <p id="prepare-status" role="status"></p><button id="prepare-cancel" class="text-button danger" hidden>Cancel preparation</button>
+          <div class="load-card">
+            <div class="lc-k">PREPARATION <span>history and progress</span></div>
+            <label class="prepare-history" for="prepare-operation">Preparation history</label><select id="prepare-operation"><option value="">No operation selected</option></select>
+            <p id="prepare-history-page" class="muted" role="status"></p>
+            <button id="prepare-history-first" class="text-button">Refresh history</button>
+            <button id="prepare-history-next" class="text-button" hidden>Next history page</button>
+            <p id="prepare-status" role="status"></p><button id="prepare-cancel" class="text-button danger" hidden>Cancel preparation</button>
+          </div>
         </section>
         <h2>Computers</h2><div id="workspace-nodes" class="workspace-grid"></div>
-        <h2>Managed models</h2><div id="workspace-models" class="workspace-grid"></div>
+        <details id="advanced" class="advanced">
+          <summary><span class="advanced-title">Advanced</span><span class="advanced-hint">Managed models, replica automation, measurements and saved allocations</span></summary>
+          <h2>Managed models</h2><div id="workspace-models" class="workspace-grid"></div>
         <section id="elastic" aria-label="Replica automation">
           <h2>Replica automation</h2>
           <p class="muted">Prepare and release replicas on computers you authorize. Donors still approve each allocation or grant a bounded repeat policy. No cloud servers are created.</p>
@@ -121,19 +177,46 @@
           </form>
           <p class="fine-print">Historical records are not revalidated by refreshing this list. Checking and applying revalidate the exact configuration. Prices describe the selected whole machines, not a bill or realized savings.</p>
         </section>
-        <h2>Saved allocations</h2><p class="muted">An allocation is not a health check. Hosts and approvals are checked again before each request.</p>
-        <div id="workspace-allocations" class="workspace-grid"></div>
+          <h2>Saved allocations</h2><p class="muted">An allocation is not a health check. Hosts and approvals are checked again before each request.</p>
+          <div id="workspace-allocations" class="workspace-grid"></div>
+        </details>
         <p class="fine-print">Queue counts are leased machine observations, not reserved free capacity. Costs are operator declarations, not a bill. Detected GPUs are not treated as working inference backends.</p>
       </section>
       <div id="notice" role="status" aria-live="polite"></div>
       <div id="composer-area" hidden>
         <div id="generation-metrics" hidden aria-label="Response performance"><strong id="generation-speed"></strong><span id="generation-detail"></span></div>
-        <div class="conversation-actions"><span id="save-status">History is saved on this computer.</span><button id="retry" class="text-button" hidden>Retry last question</button><button id="export" class="text-button" disabled>Export</button><button id="delete" class="text-button danger" disabled>Delete</button></div>
         <form id="composer"><label class="sr-only" for="prompt">Your message</label><textarea id="prompt" rows="1" maxlength="16000" placeholder="Message your model…" disabled></textarea><button id="stop" type="button" hidden>Stop</button><button id="send" class="primary" type="submit" disabled aria-label="Send message">↑</button></form>
+        <div class="conversation-actions"><span id="save-status">History is saved on this computer.</span><button id="retry" class="text-button" hidden>Retry last question</button><button id="export" class="text-button" disabled>Export</button><button id="delete" class="text-button danger" disabled>Delete</button></div>
+        <label class="composer-note composer-option"><input id="recovery-wait" type="checkbox" checked> Wait up to 2 minutes for approved replacement capacity if a replica stops. Stop remains available.</label>
         <p class="composer-note">Enter to send · Shift + Enter for a new line. Responses can be wrong; check important information.</p>
-        <label class="composer-note"><input id="recovery-wait" type="checkbox" checked> Wait up to 2 minutes for approved replacement capacity if a replica stops. Stop remains available.</label>
       </div>
     </main>
+    <aside id="details" aria-label="Session details" hidden inert>
+      <div class="details-heading"><h2 id="details-title">Model</h2><button id="details-close" type="button" aria-label="Close details">×</button></div>
+      <div class="details-tabs" role="group" aria-label="Details"><button type="button" data-panel-open="model" aria-expanded="false">Model</button><button type="button" id="devices-tab" data-panel-open="devices" aria-expanded="false" hidden>Computers</button><button type="button" data-panel-open="activity" aria-expanded="false">Activity</button></div>
+      <section data-panel="model">
+        <div class="side-k">SELECTED MODEL</div>
+        <div id="model-facts" class="panel-card"></div>
+        <div class="side-k">APPROVED FOR YOUR TOKEN</div>
+        <div id="model-list" class="peer-list"></div>
+        <p class="side-hint">A conversation keeps the model it started with. Start a new conversation to use another approved model.</p>
+      </section>
+      <section data-panel="devices" hidden>
+        <div class="side-k">REPORTING COMPUTERS</div>
+        <p id="devices-status" class="side-hint" role="status"></p>
+        <div id="peers" class="peer-list"></div>
+        <div id="cluster-bar">Together: <b id="cluster-summary">—</b></div>
+        <div class="panel-actions"><button id="devices-refresh" type="button">Refresh reports</button><button id="devices-workspace" type="button">Open computers &amp; models</button></div>
+        <p class="side-hint">Reports are leased observations, not reserved capacity. They are read when this panel opens, not continuously.</p>
+      </section>
+      <section data-panel="activity" hidden>
+        <div class="side-k">THIS SESSION</div>
+        <div id="activity-log" role="log" aria-label="Session activity"></div>
+        <p class="side-hint">Kept only in this page's memory and cleared when you sign out. Message text is never listed here.</p>
+      </section>
+    </aside>
+    <button id="panel-scrim" type="button" aria-label="Close panel" tabindex="-1"></button>
   </div>
+  <div id="toasts" aria-live="polite"></div>
 </body>
 </html>

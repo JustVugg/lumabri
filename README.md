@@ -200,7 +200,11 @@ read-only **Computers & models** view, explicitly grant
 `./lumabri api operator-grant local-chat`.
 
 The page provides model selection, streaming, Stop, collapsible private
-history and export. No separate web server or browser-side AI engine is needed.
+history and export. A details panel lists the selected model, reporting
+computers (operators only) and this session's activity; the **API** view shows
+the connection settings from `GET /api/v1/client-config` with copyable client
+examples. It follows the system light or dark theme and works at phone width.
+No separate web server or browser-side AI engine is needed.
 During a response, the speed indicator updates in tok/s once enough tokens have
 arrived. It shows the measured response rate, not the model's guaranteed capacity;
 preparation, recovery and unavailable measurements have separate labels.
@@ -211,7 +215,9 @@ computers, use the explicit [HTTPS reverse-proxy setup](docs/HTTPS_INGRESS.md).
 **Computers & models** shows resource reports, resident allocation references,
 model routes and gateway activity. Explicit management permission adds model
 preparation, donor approval requests, replica policies, draining and release.
-Read-only operators cannot change allocations.
+Read-only operators cannot change allocations. Computers and model preparation
+are shown first; managed models, replica automation, measurements and saved
+allocations are under **Advanced** on the same page.
 
 **Measure & compare** runs a bounded workload on models already approved and
 loaded. Choose allocations, client count and rounds; then check first-text and

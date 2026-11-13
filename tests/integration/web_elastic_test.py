@@ -111,6 +111,7 @@ async def elastic_workspace(browser, port, token, env, artifacts):
         await page.locator("#token").fill(token); await page.locator("#login-form button").click()
         await expect(page.locator("#workspace-open")).to_be_visible()
         await page.locator("#workspace-open").click()
+        await page.locator("#advanced > summary").click()
         await expect(page.locator("#elastic-policies")).to_contain_text("Registered replicas / limits")
         await expect(page.locator("#elastic-policies")).to_contain_text("last availability check: unreachable")
         await expect(page.locator("#elastic-policies")).to_contain_text("3/3 failed checks")

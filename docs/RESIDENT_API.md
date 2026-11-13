@@ -399,8 +399,8 @@ An operator can inspect the same routing evidence without opening a chat:
 ```
 
 The command emits JSON. `GET /api/v1/routing/MODEL_ID` exposes the same snapshot
-to a bearer token with an operator grant. In **Computers & models**, choose
-**Inspect routing** on a managed model. No management or inference grant is
+to a bearer token with an operator grant. In **Computers & models**, expand
+**Advanced** and choose **Inspect routing** on a managed model. No management or inference grant is
 added by this read-only operation.
 
 The snapshot includes the model revision, policy, preference order, reason,
@@ -631,8 +631,8 @@ nor authorize an HTTP inference user to perform management mutations.
 
 ### Shared allocation management
 
-The **Computers & models** workspace can inspect, drain, resume and deliberately
-release an exact saved allocation. Management is a separate local-owner grant:
+The **Computers & models** workspace (under **Advanced → Saved allocations**)
+can inspect, drain, resume and deliberately release an exact saved allocation. Management is a separate local-owner grant:
 
 ```sh
 lumabri api manage-grant operator-name
@@ -959,7 +959,7 @@ certify a large-model LAN, datacenter workload or remote browser deployment.
 
 ### Measure and compare from the workspace
 
-In **Computers & models → Measure & compare**, an operator can inspect saved
+In **Computers & models → Advanced → Measure & compare**, an operator can inspect saved
 historical measurements. Management permission is required to run or check
 measurements, compare plans, remove observations or change model routing.
 Refreshing the list does not turn historical evidence into a current result.

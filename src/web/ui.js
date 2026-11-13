@@ -1,0 +1,311 @@
+"use strict";
+// Page shell: details panel, API console, toasts and session activity.
+// Presentation only. It reads state owned by app.js, never changes how sign-in,
+// history or generation work, and keeps nothing in URLs or browser storage.
+
+// Room flow (create or join a room by short code, with a memory pledge).
+// The markup and styles exist, but the local API cannot serve it yet. Keep this
+// false until an endpoint exists; while false none of its controls are shown.
+const ROOM_FLOW_ENABLED = false;
+
+(() => {
+  const app = $("app"), details = $("details");
+  const narrow = window.matchMedia("(max-width: 760px)");
+  const panelTitles = {model: "Model", devices: "Computers", activity: "Activity"};
+  let lastPanelButton = null, panel = "model";
+  let endpointConfig = null, endpointPending = false;
+  let devicesPending = false, devicesExpiry = 0;
+  let wasConnected = false, wasBusy = false, lastNotice = "";
+
+  const connected = () => app.classList.contains("connected");
+  const element = (tag, className, text) => {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  };
+
+  // ---- toasts and activity ----
+  function toast(text) {
+    const node = element("div", "toast", text);
+    $("toasts").append(node);
+    setTimeout(() => node.classList.add("leaving"), 3600);
+    setTimeout(() => node.remove(), 4000);
+  }
+  function record(text) {
+    const entry = element("div"), stamp = element("time", "", new Date().toLocaleTimeString());
+    entry.append(stamp, document.createTextNode(text));
+    $("activity-log").prepend(entry);
+    while ($("activity-log").childElementCount > 60) $("activity-log").lastElementChild.remove();
+  }
+
+  // ---- details panel ----
+  function openDetails(name, button) {
+    if (!connected()) return;
+    if (name === "devices" && !operator) name = "model";
+    panel = name; lastPanelButton = button || lastPanelButton;
+    if (narrow.matches) sidebar(false);
+    details.hidden = false; details.inert = false; app.classList.add("details-open");
+    for (const section of details.querySelectorAll("[data-panel]")) section.hidden = section.dataset.panel !== name;
+    for (const control of document.querySelectorAll("[data-panel-open]"))
+      control.setAttribute("aria-expanded", String(control.dataset.panelOpen === name));
+    $("details-title").textContent = panelTitles[name];
+    if (name === "model") renderModel();
+    if (name === "devices") loadDevices();
+    $("details-close").focus();
+  }
+  function closeDetails(restoreFocus = false) {
+    if (details.hidden) return;
+    details.hidden = true; details.inert = true; app.classList.remove("details-open");
+    for (const control of document.querySelectorAll("[data-panel-open]")) control.setAttribute("aria-expanded", "false");
+    if (restoreFocus && lastPanelButton?.isConnected && !lastPanelButton.hidden) lastPanelButton.focus();
+  }
+  function closePanels() {
+    closeDetails(true);
+    if (narrow.matches && connected()) sidebar(false);
+  }
+  for (const control of document.querySelectorAll("[data-panel-open]"))
+    control.addEventListener("click", () => {
+      if (!details.hidden && panel === control.dataset.panelOpen && !details.contains(control)) closeDetails(true);
+      else openDetails(control.dataset.panelOpen, details.contains(control) ? null : control);
+    });
+  $("details-close").addEventListener("click", () => closeDetails(true));
+  $("panel-scrim").addEventListener("click", closePanels);
+  document.addEventListener("keydown", event => {
+    if (event.key === "Escape" && (!details.hidden || (narrow.matches && connected() && !app.classList.contains("sidebar-hidden")))) closePanels();
+  });
+
+  // ---- model facts ----
+  function facts(parent, rows) {
+    const list = element("dl");
+    for (const [label, value, mono] of rows) {
+      if (value === undefined || value === null || value === "") continue;
+      list.append(element("dt", "", label), element("dd", mono ? "mono" : "", String(value)));
+    }
+    parent.append(list);
+  }
+  function renderModel() {
+    const selected = models.find(model => model.id === $("model").value);
+    $("model-facts").replaceChildren();
+    if (!selected) $("model-facts").append(element("p", "panel-empty",
+      models.length ? "The saved model of this conversation is currently unavailable." : "No approved resident models are assigned to this token yet."));
+    else facts($("model-facts"), [
+      ["Name", selected.name],
+      ["Context", Number.isInteger(selected.context) ? `${selected.context} tokens` : null],
+      ["Output limit", Number.isInteger(selected.max_tokens) ? `${selected.max_tokens} tokens per reply` : null],
+      ["Sessions", Number.isInteger(selected.sessions) ? String(selected.sessions) : null],
+      ["State", typeof selected.state === "string" ? selected.state.replaceAll("_", " ") : null],
+      ["Model id", selected.id, true]]);
+    $("model-list").replaceChildren();
+    for (const model of models) {
+      const card = element("div", "peer-card"), name = element("div", "peer-name");
+      card.classList.toggle("self", model === selected);
+      name.append(element("span", model === selected ? "dot ok" : "dot"), document.createTextNode(model.name));
+      card.append(name); $("model-list").append(card);
+    }
+    $("endpoint-model").value = selected ? selected.id : "";
+    renderExample();
+  }
+
+  // ---- computers (operator reports) ----
+  function clearDevices(message = "") {
+    devicesExpiry = 0;
+    $("peers").replaceChildren(); $("cluster-summary").textContent = "—";
+    $("devices-status").textContent = message; $("device-count").textContent = "Computers";
+  }
+  function renderDevices(data) {
+    clearDevices();
+    if (!data.inventory_ok) { $("devices-status").textContent = "Inventory unavailable — live resource values withheld."; return; }
+    if (!data.nodes.length) { $("devices-status").textContent = "No current machine reports."; return; }
+    let offered = 0;
+    for (const node of data.nodes) {
+      const card = element("div", "peer-card"), name = element("div", "peer-name"), stats = element("div", "peer-stats");
+      const workload = node.workload;
+      name.append(element("span", "dot ok"), document.createTextNode(node.name));
+      const stat = (label, value) => { const item = element("span"); item.append(`${label} `, element("b", "", value)); stats.append(item); };
+      stat("RAM free", gib(node.ram_available_bytes));
+      stat("offered", gib(node.ram_offered_bytes));
+      if (workload) stat("work", `${workload.active} active · ${workload.queued} queued`);
+      card.append(name, element("div", "peer-gpu", `${node.cpu} · ${node.os} / ${node.arch}`), stats);
+      $("peers").append(card);
+      if (Number.isFinite(node.ram_offered_bytes)) offered += node.ram_offered_bytes;
+    }
+    const count = `${data.nodes.length} ${data.nodes.length === 1 ? "computer" : "computers"}`;
+    $("device-count").textContent = count;
+    $("cluster-summary").textContent = `${count} · ${gib(offered)} offered`;
+    $("devices-status").textContent = `Reports captured at ${new Date(data.captured_at * 1000).toLocaleTimeString()}.`;
+    devicesExpiry = Date.now() + Math.max(0, data.inventory_ttl_ms - Math.max(...data.nodes.map(node => node.age_ms)));
+  }
+  async function loadDevices() {
+    if (!operator || !token || devicesPending) return;
+    // A response in progress already holds one of the two per-user request
+    // permits and needs the other to save its turn; do not compete with it.
+    if (busy) { if (!$("peers").childElementCount) $("devices-status").textContent = "Reports are not read while a response is being generated."; return; }
+    const credential = token;
+    devicesPending = true; $("devices-refresh").disabled = true;
+    if (!$("peers").childElementCount) $("devices-status").textContent = "Reading the local service…";
+    try {
+      const data = await request("/api/v1/workspace");
+      if (credential === token) renderDevices(data);
+    } catch (error) {
+      if (credential === token) clearDevices(`Computers unavailable: ${error.message}`);
+    } finally { devicesPending = false; $("devices-refresh").disabled = false; }
+  }
+  $("devices-refresh").addEventListener("click", loadDevices);
+  $("devices-workspace").addEventListener("click", () => { closeDetails(); $("workspace-open").click(); });
+  setInterval(() => {
+    if (devicesExpiry && Date.now() >= devicesExpiry) clearDevices("Machine reports expired. Refresh to read current values.");
+  }, 1000);
+
+  // ---- API console ----
+  function renderExample() {
+    const config = endpointConfig, model = $("endpoint-model").value || "MODEL_ID";
+    if (!config) { $("endpoint-example").textContent = ""; return; }
+    const examples = {
+      curl: `curl --fail-with-body "${config.openai_base_url}/chat/completions" \\\n` +
+        `  -H "Authorization: Bearer $LUMABRI_API_KEY" \\\n  -H "Content-Type: application/json" \\\n` +
+        `  -d '{"model":"${model}","messages":[{"role":"user","content":"Hello"}],"max_tokens":128}'`,
+      openai: `import os\nfrom openai import OpenAI\n\nclient = OpenAI(\n    base_url="${config.openai_base_url}",\n` +
+        `    api_key=os.environ["LUMABRI_API_KEY"],\n    max_retries=0,\n)\nreply = client.chat.completions.create(\n` +
+        `    model="${model}",\n    messages=[{"role": "user", "content": "Hello"}],\n    max_tokens=128,\n)\n` +
+        `print(reply.choices[0].message.content)`,
+      anthropic: `import os\nfrom anthropic import Anthropic\n\nclient = Anthropic(\n    base_url="${config.anthropic_base_url}",\n` +
+        `    api_key=os.environ["LUMABRI_API_KEY"],\n    max_retries=0,\n)\nwith client.messages.stream(\n` +
+        `    model="${model}",\n    max_tokens=128,\n    messages=[{"role": "user", "content": "Hello"}],\n) as stream:\n` +
+        `    for text in stream.text_stream:\n        print(text, end="", flush=True)`
+    };
+    $("endpoint-example").textContent = examples[$("endpoint-client").value] || examples.curl;
+  }
+  function renderEndpoint() {
+    const config = endpointConfig;
+    $("endpoint-openai").value = config?.openai_base_url || "";
+    $("endpoint-anthropic").value = config?.anthropic_base_url || "";
+    $("endpoint-scope").replaceChildren();
+    if (config) {
+      const scope = [];
+      if (config.streaming === true) scope.push("Streaming");
+      if (config.tools === true) scope.push("Tool calls");
+      if (config.responses_api === true) scope.push(config.responses_storage === false ? "Responses API · not stored" : "Responses API");
+      if (config.images) scope.push(`Inline images · up to ${config.images.max_images}, where the model has visual weights`);
+      if (Array.isArray(config.anthropic_versions)) scope.push(`Anthropic versions ${config.anthropic_versions.join(", ")}`);
+      for (const item of scope) $("endpoint-scope").append(element("li", "", item));
+      $("endpoint-status").textContent = config.remote_reachability_verified === true ?
+        "Connection settings for this service." :
+        "Connection settings for this service. Reachability from other devices has not been verified.";
+    }
+    renderExample();
+  }
+  async function loadEndpoint() {
+    if (endpointConfig || endpointPending || !token) return;
+    if (busy) { $("endpoint-status").textContent = "Connection settings are read when no response is being generated. Switch back here afterwards."; return; }
+    const credential = token;
+    endpointPending = true; $("endpoint-status").textContent = "Reading the connection settings…";
+    try {
+      const config = await request("/api/v1/client-config");
+      if (credential === token) { endpointConfig = config; renderEndpoint(); }
+    } catch (error) {
+      if (credential === token) $("endpoint-status").textContent = `Connection settings unavailable: ${error.message}`;
+    } finally { endpointPending = false; }
+  }
+  function setEndpoint(open) {
+    open = open && connected();
+    app.classList.toggle("endpoint-mode", open); $("endpoint").hidden = !open;
+    if (open) { closeDetails(); renderModel(); renderEndpoint(); loadEndpoint(); }
+    syncChrome();
+  }
+  for (const control of document.querySelectorAll("[data-view]"))
+    control.addEventListener("click", () => {
+      if (control.dataset.view === "endpoint") { setEndpoint(true); return; }
+      setEndpoint(false);
+      // Return from the workspace to the conversation that was open.
+      if (!$("workspace").hidden && !busy) { closeWorkspace(); syncChrome(); }
+    });
+  $("endpoint-client").addEventListener("change", renderExample);
+  async function copy(id) {
+    const source = $(id), text = "value" in source ? source.value : source.textContent;
+    if (!text) return;
+    try { await navigator.clipboard.writeText(text); toast("Copied"); }
+    catch {
+      // Clipboard access needs a secure context; fall back to a selection the user can copy.
+      if ("select" in source) source.select(); else window.getSelection().selectAllChildren(source);
+      toast("Selected — press Ctrl or ⌘ + C to copy");
+    }
+  }
+  for (const control of document.querySelectorAll("[data-copy]"))
+    control.addEventListener("click", () => copy(control.dataset.copy));
+  // Leaving through the sidebar always lands on the view that app.js selects.
+  for (const id of ["new-chat", "history", "workspace-open", "sign-out"])
+    $(id).addEventListener("click", () => { if (app.classList.contains("endpoint-mode")) setEndpoint(false); });
+  $("export").addEventListener("click", () => { if (current) toast("Conversation exported"); });
+
+  // ---- keep the chrome in step with app.js ----
+  function syncChrome() {
+    const online = connected(), endpoint = app.classList.contains("endpoint-mode"), workspace = !$("workspace").hidden;
+    $("conversation-title").textContent = endpoint ? "API access" : workspace ? "Computers & models" :
+      current?.conversation.title || "New conversation";
+    for (const control of document.querySelectorAll("[data-view]"))
+      control.setAttribute("aria-pressed", String(control.dataset.view === "endpoint" ? endpoint : !endpoint && !workspace));
+    $("devices-button").hidden = !operator || !online;
+    $("devices-tab").hidden = !operator || !online;
+    if (!operator && panel === "devices" && !details.hidden) openDetails("model");
+    if (online && !wasConnected) record("Connected to the local Lumabri service.");
+    if (!online && wasConnected) {
+      // Nothing from one account may remain visible to the next.
+      closeDetails(); setEndpointOff(); endpointConfig = null; clearDevices();
+      $("activity-log").replaceChildren(); $("toasts").replaceChildren(); lastNotice = "";
+      $("model-facts").replaceChildren(); $("model-list").replaceChildren();
+      $("endpoint-model").value = ""; renderEndpoint(); $("endpoint-status").textContent = "";
+    }
+    wasConnected = online;
+    if (!details.hidden && panel === "model") renderModel();
+  }
+  function setEndpointOff() { app.classList.remove("endpoint-mode"); $("endpoint").hidden = true; }
+  function syncBusy() {
+    const now = !$("stop").hidden;
+    app.classList.toggle("generating", now);
+    if (now && !wasBusy) record("Response started.");
+    if (!now && wasBusy) record(`Response finished · ${$("generation-speed").textContent || "no timing reported"}.`);
+    wasBusy = now;
+  }
+  function syncNotice() {
+    const text = $("notice").textContent;
+    if (text && text !== lastNotice && connected()) record(text);
+    lastNotice = text;
+  }
+  new MutationObserver(syncChrome).observe(app, {attributes: true, attributeFilter: ["class"]});
+  new MutationObserver(syncChrome).observe($("workspace"), {attributes: true, attributeFilter: ["hidden"]});
+  new MutationObserver(syncChrome).observe($("history"), {childList: true});
+  new MutationObserver(syncChrome).observe($("workspace-open"), {attributes: true, attributeFilter: ["hidden"]});
+  new MutationObserver(() => { if (!details.hidden && panel === "model") renderModel(); }).observe($("model"), {childList: true});
+  $("model").addEventListener("change", () => { if (!details.hidden || app.classList.contains("endpoint-mode")) renderModel(); });
+  new MutationObserver(syncBusy).observe($("stop"), {attributes: true, attributeFilter: ["hidden"]});
+  new MutationObserver(syncNotice).observe($("notice"), {childList: true, characterData: true, subtree: true});
+
+  // ---- room flow (inactive unless ROOM_FLOW_ENABLED) ----
+  function setRoomMode(mode) {
+    const rooms = mode !== "token", joining = mode === "join";
+    for (const [id, value] of [["mode-token", "token"], ["mode-create", "create"], ["mode-join", "join"]])
+      $(id).setAttribute("aria-pressed", String(mode === value));
+    $("login-form").hidden = rooms; $("room-flow").hidden = !rooms;
+    $("room-code-field").hidden = !joining; $("room-create").hidden = joining; $("room-join").hidden = !joining;
+    $("room-status").textContent = "";
+  }
+  if (ROOM_FLOW_ENABLED) {
+    $("setup-tabs").hidden = false;
+    $("mode-token").addEventListener("click", () => setRoomMode("token"));
+    $("mode-create").addEventListener("click", () => setRoomMode("create"));
+    $("mode-join").addEventListener("click", () => setRoomMode("join"));
+    const step = delta => {
+      const field = $("room-gb"), value = Math.round(Number(field.value) || 1) + delta;
+      field.value = String(Math.min(Number(field.max), Math.max(Number(field.min), value)));
+    };
+    $("room-gb-minus").addEventListener("click", () => step(-1));
+    $("room-gb-plus").addEventListener("click", () => step(1));
+    // Connect these two handlers to the room API when it exists.
+    const unavailable = () => { $("room-status").textContent = "Rooms are not available from this Lumabri service yet."; };
+    $("room-create").addEventListener("click", unavailable);
+    $("room-join").addEventListener("click", unavailable);
+  }
+
+  syncChrome();
+})();

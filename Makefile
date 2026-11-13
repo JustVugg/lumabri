@@ -202,8 +202,8 @@ build/embed-web: tools/embed_web.c
 	mkdir -p build
 	$(HOSTCC) -O2 -Wall -Wextra -Werror tools/embed_web.c -o $@
 
-build/web_assets.h: build/embed-web src/web/index.html src/web/app.css src/web/app.js logo.svg src/web/capacity.js
-	build/embed-web src/web/index.html src/web/app.css src/web/app.js logo.svg src/web/capacity.js > $@.tmp
+build/web_assets.h: build/embed-web src/web/index.html src/web/app.css src/web/app.js logo.svg src/web/capacity.js src/web/ui.js
+	build/embed-web src/web/index.html src/web/app.css src/web/app.js logo.svg src/web/capacity.js src/web/ui.js > $@.tmp
 	mv $@.tmp $@
 lumabri segment_chat test_chat_ui: lumabri_metrics.h
 lumabri test_chat_ui test_host_session_pool test_host_drain test-home-monitor: src/runtime/lumabri_response_metrics.h

@@ -447,6 +447,10 @@ async def exercise(port, alice, bob, artifacts, env):
         await page.locator("#workspace-open").click()
         await expect(page.locator("#workspace")).to_be_visible()
         await expect(page.locator("#workspace-nodes")).to_contain_text("2 queued")
+        # Managed models, automation, measurements and allocations sit behind
+        # one disclosure; the main surface is chat, computers and model.
+        await expect(page.locator("#workspace-models")).to_be_hidden()
+        await page.locator("#advanced > summary").click()
         await expect(page.locator("#workspace-allocations")).to_contain_text("Obsolete")
         await expect(page.locator("#workspace-summary")).to_contain_text("Partial window")
         await expect(page.locator("#workspace-allocations")).to_contain_text("4 capacity rejected")
@@ -544,7 +548,8 @@ async def exercise(port, alice, bob, artifacts, env):
         await page.locator("#expand").click(); await page.locator("#sign-out").click()
         await expect(page.locator("#workspace-open")).to_be_hidden()
         assert await page.locator("#workspace-nodes article").count() == 0
-        await page.locator("#collapse").click()
+        # Signed out, the page is the sign-in card alone: no history sidebar.
+        await expect(page.locator("#sidebar")).to_be_hidden()
         await page.screenshot(path=str(artifacts / "web-mobile.png"))
         assert not failures, failures
         await elastic_workspace(browser, port, bob, env, artifacts)
