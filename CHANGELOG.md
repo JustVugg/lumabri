@@ -5,6 +5,13 @@ a tag stay under Unreleased until a new tag is created.
 
 ## Unreleased
 
+- A computer can join a household with a short one-time code instead of the
+  32-character key: `lumabri pair` and `lumabri join --code`, `/pair` and
+  `/join` in the workspace, and Computers > Add a computer / I have a code on
+  the page. The code only selects the base point of a password-authenticated
+  exchange, the tracker allows five attempts per code, and joining with the
+  full key is unchanged. The exchange has not been checked against the CPace
+  draft's own test vectors; see docs/PAIRING.md.
 - `lumabri start` no longer fails its first model on computers with a small
   locked-memory allowance: when no residency policy was requested, its sharing
   service locks a load whose reservation fits the allowance and otherwise

@@ -669,6 +669,11 @@ test-pairing: test_pairing test_pairing_tracker lumabri tracker
 test check-warnings: test_pairing test_pairing_tracker
 test: test-pairing
 
+# Both pages in Chromium, two households on loopback. Needs Playwright.
+.PHONY: test-pairing-web
+test-pairing-web: lumabri tracker
+	$(PYTHON) tests/integration/pairing_web_test.py
+
 test_tcp_latency: tests/c/test_tcp_latency.c $(SECURE_DEPS) $(PROTO_DEPS) $(SIGN_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_tcp_latency.c -o $@
 

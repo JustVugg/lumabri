@@ -119,7 +119,7 @@ static int cmd_join(int argc, char **argv) {
                 return home_fail("No household was chosen.");
             chosen = (int)picked - 1;
         }
-        snprintf(next.tracker, sizeof next.tracker, "%s", found[chosen].address);
+        snprintf(next.tracker, sizeof next.tracker, "%.63s", found[chosen].address);
         memcpy(expected, found[chosen].identity, 32); discovered = 1;
         printf("Found %s at %s.\n", found[chosen].name, found[chosen].address);
     }
