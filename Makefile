@@ -167,6 +167,7 @@ check-warnings:
 		test_segment_discovery test_swarm_detail test_relay_rate test_machine \
 		test_meminfo test_process_memory test_engine_memory test_engine_memory_guard test_serve_control test_host_session_pool test_hosted_sessions test_host_drain test_node_control test_compute_broker test_compute_lease test_content_filter \
 		test_scheduler test_run_gate test_inventory test_home test_chat_ui test_weight_cache test_planner_io test_portfolio test_reply_stream test_chat_store test_model_routes test_replica_admission test_replica_rank test_replay_prefix test_capacity test_portfolio_policy test_socket_transport test_secure_transport \
+		test_pairing test_pairing_tracker \
 		CFLAGS='$(CFLAGS) -Werror'
 
 SECURE_DEPS = lumabri_secure.h lumabri_crypto.h src/protocol/lumabri_secure_channel.h $(SIGN_DEPS) $(PROTO_DEPS)
@@ -645,6 +646,29 @@ test_secure_transport: tests/c/test_secure_transport.c $(SECURE_DEPS)
 
 test check-warnings: test_socket_transport test_secure_transport
 
+# Pairing with a short code (docs/PAIRING.md). test_pairing is the arithmetic,
+# the exchange and the tracker's limits; test_pairing_tracker embeds the
+# tracker and runs the protocol over the encrypted transport.
+PAIRING_DEPS = src/crypto/lumabri_elligator2.h src/crypto/lumabri_cpace.h src/protocol/lumabri_pairing_wire.h src/runtime/lumabri_pairing_registry.h
+tracker tracker_tsan test_tracker_history test_pairing_tracker: $(PAIRING_DEPS) src/runtime/lumabri_pairing_tracker.h
+lumabri test_chat_ui test_host_session_pool test_host_drain test-home-monitor test_pairing_tracker: $(PAIRING_DEPS) src/runtime/lumabri_pairing_client.h src/ui/lumabri_pairing_ui.h
+
+test_pairing: tests/c/test_pairing.c $(PAIRING_DEPS) lumabri_crypto.h $(SIGN_DEPS) $(PROTO_DEPS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Wno-unused-function -pthread $< -o $@
+
+test_pairing_tracker: tests/c/test_pairing_tracker.c tracker.c lumabri_segment_discovery.c lumabri_segment.c $(SECURE_DEPS) $(HOME_NET_DEPS) $(PROTO_DEPS) lumabri_sha.h $(SIGN_DEPS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_pairing_tracker.c lumabri_segment_discovery.c lumabri_segment.c -o $@
+
+.PHONY: test-pairing
+test-pairing: test_pairing test_pairing_tracker lumabri tracker
+	./test_pairing
+	./test_pairing_tracker
+	$(PYTHON) tests/integration/pairing_model_test.py
+	$(PYTHON) tests/integration/pairing_test.py
+
+test check-warnings: test_pairing test_pairing_tracker
+test: test-pairing
+
 test_tcp_latency: tests/c/test_tcp_latency.c $(SECURE_DEPS) $(PROTO_DEPS) $(SIGN_DEPS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread tests/c/test_tcp_latency.c -o $@
 
@@ -903,6 +927,8 @@ test-sanitize: build/web_assets.h
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_allocation_lifetime.c -o build/sanitize/test_allocation_lifetime
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_journal_index.c -o build/sanitize/test_journal_index
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_tracker_history.c lumabri_segment_discovery.c lumabri_segment.c -o build/sanitize/test_tracker_history
+	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -Wno-unused-function -pthread tests/c/test_pairing.c -o build/sanitize/test_pairing
+	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_pairing_tracker.c lumabri_segment_discovery.c lumabri_segment.c -o build/sanitize/test_pairing_tracker
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_compute_broker.c -o build/sanitize/test_compute_broker
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) -pthread tests/c/test_compute_lease.c $(MACHINE_SRC) -o build/sanitize/test_compute_lease
 	$(CC) $(CPPFLAGS) $(SANITIZE_FLAGS) tests/c/test_content_filter.c -o build/sanitize/test_content_filter
@@ -940,6 +966,8 @@ test-sanitize: build/web_assets.h
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/sanitize/test_allocation_lifetime
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/sanitize/test_journal_index
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/sanitize/test_tracker_history
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/sanitize/test_pairing
+	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 build/sanitize/test_pairing_tracker
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_compute_broker
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_compute_lease
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build/sanitize/test_content_filter

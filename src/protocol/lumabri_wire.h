@@ -291,6 +291,13 @@ enum {
     LMB_SEG_COMPUTE_GET = 100, LMB_SEG_COMPUTE_GET_R = 101,
     LMB_SEG_COMPUTE_PUT = 102, LMB_SEG_COMPUTE_PUT_R = 103,
     LMB_HOME_EXIT_PROOF = 104, LMB_HOME_EXIT_PROOF_R = 105, /* immutable allocation, all descendants exited */
+    /* Household pairing with a short code (docs/PAIRING.md). HELLO starts a
+     * password-authenticated exchange and is accepted before AUTH; OPEN,
+     * STATUS and CANCEL need AUTH and the tracker's own identity. A tracker
+     * that predates them answers ERR and the long household key still works. */
+    LMB_PAIR_HELLO = 106, LMB_PAIR_HELLO_R = 107, LMB_PAIR_CONFIRM = 108, LMB_PAIR_DONE = 109,
+    LMB_PAIR_OPEN = 110, LMB_PAIR_OPEN_R = 111, LMB_PAIR_STATUS = 112, LMB_PAIR_STATUS_R = 113,
+    LMB_PAIR_CANCEL = 114,
 };
 #define LMB_CAP_EXEC2 (1u << 0)
 #define LMB_ENC_F32  0u
@@ -359,6 +366,11 @@ static inline void lmb_frame_caps(uint32_t op, uint32_t *body_cap, uint32_t *pay
     case LMB_LINK_PROBE:
     case LMB_LINK_PROBE_R:
         *body_cap = 16; *pay_cap = 64u << 10;
+        break;
+    case LMB_PAIR_HELLO: case LMB_PAIR_HELLO_R: case LMB_PAIR_CONFIRM: case LMB_PAIR_DONE:
+    case LMB_PAIR_OPEN: case LMB_PAIR_OPEN_R: case LMB_PAIR_STATUS: case LMB_PAIR_STATUS_R:
+    case LMB_PAIR_CANCEL:
+        *body_cap = 256; /* fixed-size bodies; HELLO arrives before AUTH */
         break;
     case LMB_HOME_EXPERT:
         *body_cap = 80;
