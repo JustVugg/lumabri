@@ -19,6 +19,7 @@ Changing one payload never permits silently reinterpreting another.
 | household consent (`LMB_HOME_*` 80–85) | body version 1 | authenticated offer, immutable allocation, explicit donor approval and commit; no negotiation or execution fallback |
 | household allocation-exit proof (`LMB_HOME_EXIT_PROOF/R` 104/105) | immutable `LMBLIF1` record | missing operation, missing record or unreachable peer means unknown, never released memory |
 | hosted greeting | optional codec field `2` after limits | new hosts explicitly declare SUBMIT/DATA/DONE independently of model family; unsupported codecs fail closed |
+| household pairing code (`LMB_PAIR_*` 106–114) | body version 1, exact lengths | older trackers answer `ERR` and close; the joiner reports it and the full household key still joins; an unknown version is refused, never guessed ([docs/PAIRING.md](docs/PAIRING.md)) |
 | encoded expert call (`LMB_EXEC2` 72/73, caps word in `ERES_R`) | additive op | a chatter sends `EXEC2` only to a node whose `ERES_R` carries `LMB_CAP_EXEC2`; the tunnel keeps `EXEC`; bf16 only for values that are exactly bf16 |
 
 The model root, engine ID, source/build profile, numeric class, state schema,

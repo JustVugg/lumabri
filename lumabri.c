@@ -5638,6 +5638,10 @@ int main(int argc, char **argv) {
         return cmd_fetch(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "start"))
         return cmd_start(argc - 2, argv + 2);
+    if (argc >= 2 && !strcmp(argv[1], "pair"))
+        return cmd_pair(argc - 2, argv + 2);
+    if (argc >= 2 && !strcmp(argv[1], "join"))
+        return cmd_join(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "donor-policy"))
         return cmd_donor_policy(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "models"))
@@ -5668,6 +5672,8 @@ int main(int argc, char **argv) {
         "lumabri: your computers, one shared model\n\n"
         "  lumabri                                                    household workspace\n"
         "  lumabri start [--tui] [--no-browser] [--port N] [--ram-gb N]  start everything here and open the chat page\n"
+        "  lumabri pair                                               show a short code that adds one computer\n"
+        "  lumabri join --code CODE [HOST:PORT]                       join a household with its owner's code\n"
         "  lumabri service [status|start|restart|stop]                 private background service\n"
         "  lumabri service live ROLE                                  supervisor probe (not model readiness)\n"
         "  lumabri api [start|stop|list|user-add|grant|revoke|serve]   authenticated local inference API\n"

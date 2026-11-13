@@ -58,6 +58,12 @@ has no model yet, the page offers one that fits the memory your computers
 share and downloads it when you press Download
 ([Downloading a model](docs/MODEL_DOWNLOAD.md)).
 
+To add a second computer, run `./lumabri pair` on the first (or choose
+Computers > Add a computer on its page) and type the eight-character code it
+shows on the other one: `./lumabri join --code CODE`, then `./lumabri start`.
+The code works once, for five minutes, and the household key is never typed
+([Adding a computer with a short code](docs/PAIRING.md)).
+
 After launch, use **arrow keys and Enter**. Press **/** for workspace actions
 and **Esc** to go back. Use a terminal at least 60 columns by 28 rows.
 

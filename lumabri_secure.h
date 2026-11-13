@@ -248,6 +248,9 @@ static void lmb_sec_forget_hook(LmbSocket fd) {
     if (reap) lmb_sec_entry_free(e);
 }
 
+/* Set only by lmb_secure_connect_unpinned(), for the calling thread. */
+static _Thread_local int lmb_sec_unpinned;
+
 static int lmb_sec_wrap_hook(LmbSocket fd, int is_client, const char *addr) {
     if (!lmb_sec_fd_valid(fd)) return -1;
     LmbSecEntry *e = (LmbSecEntry *)calloc(1, sizeof *e);
@@ -257,7 +260,7 @@ static int lmb_sec_wrap_hook(LmbSocket fd, int is_client, const char *addr) {
         pthread_mutex_destroy(&e->tx_lk); free(e); return -1;
     }
     if (lmb_secure_handshake(fd, is_client, g_sec_sk, g_sec_pk, &e->sec) ||
-        (is_client && lmb_sec_check_peer(addr, e->sec.peer_id))) {
+        (is_client && !lmb_sec_unpinned && lmb_sec_check_peer(addr, e->sec.peer_id))) {
         lmb_sec_entry_free(e); return -1;
     }
     lmb_sec_forget_hook(fd);                 /* fd reuse drops the old keys */
@@ -315,6 +318,31 @@ static LMB_MAYBE_UNUSED int lmb_secure_peer_matches(LmbSocket fd,
 
 static LMB_MAYBE_UNUSED int lmb_secure_enabled(void) {
     return g_sec_enabled && !g_sec_failed;
+}
+
+/* 0 and the identity that signed this connection's handshake, or -1 when fd
+ * is not an encrypted connection. */
+static LMB_MAYBE_UNUSED int lmb_secure_peer_id(LmbSocket fd, uint8_t pk[32]) {
+    LmbSecEntry *e = lmb_sec_acquire(fd);
+    if (!e) return -1;
+    int have = e->sec.active && e->sec.have_peer_id;
+    if (have) memcpy(pk, e->sec.peer_id, 32);
+    lmb_sec_release(e);
+    return have ? 0 : -1;
+}
+
+/* Household pairing only: an encrypted connection whose peer identity is
+ * neither checked against a pin nor learned. The handshake still proves that
+ * the peer holds the key it presents; whether that key is the right one is
+ * for the caller to establish (a password-authenticated exchange bound to
+ * it) before it calls lmb_sec_check_peer() and sends anything of value. */
+static LMB_MAYBE_UNUSED LmbSocket lmb_secure_connect_unpinned(const char *addr, int timeout_ms,
+                                                              int io_timeout_ms) {
+    if (!lmb_secure_enabled()) { errno = EACCES; return LMB_INVALID_SOCKET; }
+    lmb_sec_unpinned = 1;
+    LmbSocket fd = lmb_connect_ms_io(addr, timeout_ms, io_timeout_ms);
+    lmb_sec_unpinned = 0;
+    return fd;
 }
 
 static int lmb_secure_init(void) {

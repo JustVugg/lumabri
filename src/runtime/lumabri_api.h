@@ -152,6 +152,7 @@ static int api_grant_allocation(int dir, const char *tracker, const char *name, 
 }
 #include "lumabri_preparation_api.h"
 #include "lumabri_donor_approval_api.h"
+#include "lumabri_pairing_http.h"
 #include "lumabri_recovery_wait.h"
 /* The local TUI has the process owner's authority, not a borrowed web user's
  * token. It invokes the same durable operation with a short observation
@@ -514,6 +515,7 @@ static void api_connection_dispatch(int fd, int access_dir, unsigned port, const
     int permit=lmb_api_user_permit(access_dir,user.name,2);
     if (permit<0) { api_error(fd,429,"user_request_limit"); return; }
     if (api_download_route(fd,access_dir,tracker,&user,&request,https_origin!=NULL)) { close(permit); return; }
+    if (api_pairing_route(fd,access_dir,port,&user,&request,https_origin!=NULL)) { close(permit); return; }
     const char *history_path="/api/v1/conversations";
     size_t history_prefix=strlen(history_path);
     int history=!strncmp(request.path,history_path,history_prefix) &&
