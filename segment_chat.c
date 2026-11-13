@@ -17,6 +17,7 @@
 #include "src/runtime/lumabri_compute_broker.h"
 #include "src/runtime/lumabri_thread_capacity.h"
 #include "lumabri_planner.h"
+#include "src/runtime/lumabri_chat_checkpoint.h"
 #include "src/runtime/lumabri_memlock.h"
 #include "src/runtime/lumabri_vision.h"
 
@@ -2081,7 +2082,8 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
                               const uint8_t model_root[32],
                               const uint8_t tokenizer_root[32],
                               uint32_t context, uint32_t max_rows,
-                              uint64_t seed, uint32_t slots, uint32_t discovery_timeout_ms) {
+                              uint64_t seed, uint32_t slots, uint32_t discovery_timeout_ms,
+                              const char *chat_format) {
     /* Report capabilities before READY, so a pipe reader cannot consume
      * readiness first and lose a later capability line. Direct CLI requests
      * for unavailable stochastic sampling still fail explicitly. */
@@ -2099,6 +2101,7 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
     /* The optional seeded SUBMIT field is accepted only by clients that
      * discover this explicit capability; ordinary six-field SUBMIT remains. */
     fputs("\nLUMABRI_RESET 1\n", stdout);
+    if (chat_format) printf("LUMABRI_CHAT_FORMAT 1 %s\n",chat_format);
     if (lmb_vision_available()) fputs("LUMABRI_VISION 1\n",stdout);
     fputs("LUMABRI_REQUEST_SEED 1\n", stdout);
     if (controlled) printf("LUMABRI_SLOTS %u\n", slots);
@@ -2422,6 +2425,10 @@ int main(int argc, char **argv) {
             lmb_memlock_preflight(shape.edge_resident_bytes,"Edge CPU weight payload"))
             return LMB_MEMLOCK_EXIT;
     }
+    EngKind chat_kind=chat_checkpoint_kind(model_dir,engine_id);
+    if (serve_mode && chat_kind==EK_INVALID) {
+        fprintf(stderr,"Checkpoint chat format is not supported\n"); return 2;
+    }
     ColiEdgeEngine *edge = NULL;
     /* Never hand an uninitialised buffer to the engine ABI: a failure that
      * writes nothing would otherwise be reported as whatever was on the
@@ -2563,7 +2570,8 @@ int main(int argc, char **argv) {
         }
         int result = segment_serve_loop(edge, &cap, discovery,
                                         model_root, tokenizer_root,
-                                        context, max_rows, seed, slots, discovery_timeout_ms);
+                                        context, max_rows, seed, slots, discovery_timeout_ms,
+                                        engine_format_name(chat_kind));
         lmb_seg_discovery_stop(discovery);
         coli_edge_engine_close(edge);
         free(expected);

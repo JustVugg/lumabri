@@ -8,7 +8,7 @@ static void qwen36_contract_test(void) {
     CHECK(f != NULL, "cannot create Qwen config");
     if (!f) return;
     fputs("{\"model_type\":\"qwen3_5_moe_text\",\"hidden_size\":64,"
-          "\"num_hidden_layers\":2,\"vocab_size\":320}", f);
+          "\"num_hidden_layers\":2,\"vocab_size\":320,\"num_experts\":8,\"num_experts_per_tok\":2}", f);
     fclose(f);
     LmbModelShape m;
     CHECK(!lmb_shape_from_config(dir, &m) && !m.sizing_verified,
@@ -28,30 +28,43 @@ static void qwen36_contract_test(void) {
         fclose(f);
         CHECK(!lmb_shape_from_config(dir, &m) && !m.sizing_verified,
               "Qwen metadata without actual tensor coverage was admitted");
-        LmbQwen36Inventory inventory;
-        CHECK(!lmb_qwen36_metadata(dir,&m,&inventory) && m.memory_contract==1,
+        LmbQ36Variants inventory;
+        CHECK(!lmb_q36_variants_metadata(dir,&m,&inventory) && m.memory_contract==1,
               "valid Qwen metadata did not produce base memory arithmetic");
         m.sizing_verified=1; /* arithmetic-only fixture, not product admission */
         uint8_t seen[16]={0}; inventory.experts=seen;
         LmbPlanTensor tensor={.elements=6144,.bytes=6144,.rank=1,.shape={6144}};
         snprintf(tensor.name,sizeof tensor.name,"model.layers.0.mlp.experts.0.merged_weight");
         snprintf(tensor.dtype,sizeof tensor.dtype,"I8");
-        CHECK(!lmb_q36_tensor(&tensor,&inventory),"valid merged Qwen int8 header rejected");
-        CHECK(lmb_q36_tensor(&tensor,&inventory)!=0,"duplicate Qwen expert admitted");
+        CHECK(!lmb_q36_variant_tensor(&tensor,&inventory),"valid merged Qwen int8 header rejected");
+        CHECK(lmb_q36_variant_tensor(&tensor,&inventory)!=0,"duplicate Qwen expert admitted");
         snprintf(tensor.name,sizeof tensor.name,"model.layers.0.mlp.experts.1.merged_weight");
         snprintf(tensor.dtype,sizeof tensor.dtype,"U8");
         tensor.bytes=tensor.elements=tensor.shape[0]=3072;
-        CHECK(!lmb_q36_tensor(&tensor,&inventory),"actual packed Qwen int4 header rejected");
+        CHECK(!lmb_q36_variant_tensor(&tensor,&inventory),"actual packed Qwen int4 header rejected");
         snprintf(tensor.name,sizeof tensor.name,"model.layers.0.mlp.experts.2.merged_weight");
         tensor.bytes=tensor.elements=tensor.shape[0]=3071;
-        CHECK(lmb_q36_tensor(&tensor,&inventory)!=0,"short Qwen expert admitted");
+        CHECK(lmb_q36_variant_tensor(&tensor,&inventory)!=0,"short Qwen expert admitted");
         snprintf(tensor.name,sizeof tensor.name,"model.layers.0.mlp.experts.0.qs");
         snprintf(tensor.dtype,sizeof tensor.dtype,"F32");
-        tensor.elements=inventory.scale_elements; tensor.bytes=tensor.elements*4;
-        CHECK(!lmb_q36_tensor(&tensor,&inventory),"valid grouped Qwen scales rejected");
+        tensor.elements=inventory.scales; tensor.bytes=tensor.elements*4;
+        CHECK(!lmb_q36_variant_tensor(&tensor,&inventory),"valid grouped Qwen scales rejected");
         snprintf(tensor.name,sizeof tensor.name,"model.layers.0.mlp.experts.1.qs");
         tensor.elements--;
-        CHECK(lmb_q36_tensor(&tensor,&inventory)!=0,"Qwen group count mismatch admitted");
+        CHECK(lmb_q36_variant_tensor(&tensor,&inventory)!=0,"Qwen group count mismatch admitted");
+        /* Dense payload is now accounted from headers, including optional
+         * matrices. Feed the independent fixture's attention layer headers. */
+        const char *fields[]={"input_layernorm.weight","post_attention_layernorm.weight",
+            "mlp.gate.weight","mlp.shared_expert.gate_proj.weight","mlp.shared_expert.up_proj.weight",
+            "mlp.shared_expert.down_proj.weight","mlp.shared_expert_gate.weight",
+            "self_attn.q_norm.weight","self_attn.k_norm.weight","mlp.gate.e_score_correction_bias",
+            "self_attn.q_proj.weight","self_attn.k_proj.weight","self_attn.v_proj.weight","self_attn.o_proj.weight"};
+        uint64_t elements[]={64,64,512,2048,2048,2048,64,16,16,8,8192,2048,2048,4096};
+        for (unsigned i=0;i<sizeof fields/sizeof *fields;i++) {
+            snprintf(tensor.name,sizeof tensor.name,"model.layers.1.%s",fields[i]);
+            tensor.elements=elements[i]; tensor.bytes=elements[i]*4;
+            CHECK(!lmb_q36_variant_tensor(&tensor,&inventory),"Qwen attention tensor rejected: %s",fields[i]);
+        }
         uint64_t scales = grouped ? 2u * 32 * 4 + 64 * 2 : 2u * 32 + 64;
         uint64_t common = 3u * 64 + 8u * 64 + 8 + 3u * 64 * 32 + 2u * 16;
         uint64_t attention = 4u * 32 * 64 + 2u * 32 * 64 + 64u * 64;

@@ -2319,6 +2319,7 @@ typedef enum { PROTO_UNKNOWN = 0, PROTO_LINE, PROTO_FRAMED, PROTO_SERVE2 } Proto
  * gateway, must apply each engine's own chat template. GLM (EK_GLM) templates
  * inside its serve and speaks the older framed dialect, so it needs neither. */
 #include "src/runtime/lumabri_chat_format.h"
+#include "src/runtime/lumabri_chat_checkpoint.h"
 /* Where the engine actually is.
  *
  * Every shutdown path in this file was written for a child process: stop
@@ -2411,6 +2412,16 @@ static int engine_wait_ready(Engine *e) {
             e->greedy_only = strstr(buf, "\nLUMABRI_SAMPLING GREEDY\n") != NULL;
             e->request_seed_supported = strstr(buf, "\nLUMABRI_REQUEST_SEED 1\n") != NULL;
             e->vision_supported = strstr(buf, "\nLUMABRI_VISION 1\n") != NULL;
+            const char *format=strstr(buf,"\nLUMABRI_CHAT_FORMAT 1 ");
+            if (format) {
+                char name[64]; int used=0;
+                if (sscanf(format,"\nLUMABRI_CHAT_FORMAT 1 %63[^\n]%n",name,&used)!=1 ||
+                    format[used]!='\n' || engine_kind_of(name)==EK_INVALID ||
+                    engine_family_kind(engine_kind_of(name))!=engine_family_kind(e->kind)) {
+                    free(buf); return -1;
+                }
+                e->kind=engine_kind_of(name);
+            }
             const char *numeric = strstr(buf, "\nLUMABRI_NUMERIC ");
             if (numeric) {
                 unsigned abi = 0; char value[97] = ""; int consumed = 0;
@@ -2781,7 +2792,8 @@ static int segment_engine_spawn(const char *engine, const char *shim,
                                 const char *tracker, const char *model,
                                 const char *model_type, int ctx, Engine *e) {
     const char *segment_id = segment_engine_for(model_type);
-    if (!segment_id) return -1;
+    EngKind kind=engine_kind_of(model_type);
+    if (!segment_id || kind==EK_INVALID) return -1;
     const char *home = getenv("HOME") ? getenv("HOME") : ".";
     char vroot[1024], cache[1024], cas[1024];
     const char *vroot_env = getenv("LUMABRI_VROOT");
@@ -2830,12 +2842,7 @@ static int segment_engine_spawn(const char *engine, const char *shim,
     e->pid = pid; e->to = in_pipe[1]; e->from = out_pipe[0];
     g_signal_engine_pid = (sig_atomic_t)pid;
     e->proto = PROTO_UNKNOWN;
-    e->kind = engine_kind_of(model_type);
-    if (e->kind == EK_INVALID) {
-        close(e->to); close(e->from); kill(pid, SIGTERM); waitpid(pid, NULL, 0);
-        e->pid = 0; e->to = e->from = -1;
-        return -1;
-    }
+    e->kind = kind;
     e->segment = 1;
     pthread_t thread;
     pthread_create(&thread, NULL, stderr_thread,
@@ -3113,7 +3120,7 @@ static int cmd_host(int argc, char **argv) {
     char mtype[64] = "";
     if (local_dir) local_model_type(local_dir, mtype, sizeof mtype);
     else snprintf(mtype, sizeof mtype, "%s", sw.model_type);
-    const char *host_engine = engine_for(mtype);
+    const char *host_engine = engine_format_name(eng.kind);
     if (!host_engine) { close(lfd); engine_stop(&eng); return 1; }
     LmbHostEngine gateway=host_engine_view(&eng);
     HostState h = {.engine=&gateway, .model_type=mtype, .engine_kind=host_engine, .max_frame=max_frame,
@@ -4050,7 +4057,7 @@ static int model_boot(const char *tracker, const char *model, const char *shim,
         return -1;
     }
     const char *expected_engine = engine_for(mtype);
-    EngKind expected_kind = engine_kind_of(expected_engine);
+    EngKind expected_kind = local_dir ? chat_checkpoint_kind(local_dir,expected_engine) : engine_kind_of(mtype);
     if (!expected_engine || expected_kind == EK_INVALID) {
         printf("  %sunsupported model_type: %s%s\n", C_RED,
                mtype[0] ? mtype : "(missing)", C_R);

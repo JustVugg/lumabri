@@ -17,6 +17,30 @@
   boundaries, header I/O and metadata lifetime. Upstream originals remain
   unchanged; original source headers stay in generated adapter copies.
 
+## Colibri qwen36 architecture integration
+
+- Source: `JustVugg/colibri`, tag `v2.1.0`, commit
+  `704a3f68184b78367a04cb5526e428dc2f90f05b`.
+- Upstream files: `c/qwen36.c`, `c/tests/test_segment_adapters_real.c`,
+  `c/tools/make_qwen36_tiny.py`, `c/tools/make_flint_tiny.py`,
+  `c/tools/make_lfm3_tiny.py`, `c/tools/convert_qwen36.py` and
+  `c/openai_server.py` (checkpoint template detection and text rendering).
+- License: Apache-2.0; attribution: Colibri contributors. Original copyright,
+  source headers and license files remain in generated copies and packages.
+- Lumabri changes: generated-copy hooks skip routed expert preparation in
+  dense layers, probe the checkpoint's routed encoding independently of the
+  interval boundary, release new layer-specific allocations, and allocate
+  LFM3's per-session convolution placeholder portably. The planner inspects
+  each layer and accounts for the runtime's CPU weight/state representation.
+- Tests invoke upstream fixture/conversion tools and the original monolithic
+  engine from the pinned checkout; no model kernels are rewritten. LFM3 test
+  tensors are renamed from the generator's GGUF names to its converter's HF
+  names without changing their values. The upstream checkout is read-only.
+- Flint escaping and LFM3/Coder prompt conventions are expressed in C in
+  `src/runtime/lumabri_chat_format.h` and `lumabri_chat_checkpoint.h`;
+  their API output is compared byte for byte with the upstream Python
+  renderers, which are only loaded in tests, without starting their server.
+
 ## Embedded image decoder
 
 - File: `src/vendor/stb_image.h`, unmodified v2.30 from commit
