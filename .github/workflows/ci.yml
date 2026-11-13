@@ -807,7 +807,9 @@ jobs:
           python3 ../colibri/c/tools/make_edge_tiny_tokenizer.py build/kimi-contract/kimi-tiny --vocab-size 320
           python3 tests/integration/planner_tensor_contract_test.py --family kimi --model build/kimi-contract/kimi-tiny
           K3_BITS=32 K3_MLA_BITS=32 K3_HEAD_BITS=32 K3_IDOT=0 OMP_NUM_THREADS=2 build/qwen-edge-oracle kimi build/kimi-contract/kimi-tiny ../colibri/c/kimi_k3_tiny/ref.json 8
-          python3 tests/integration/home_flow_test.py --models-dir build/kimi-contract --expect-no-fit
+          # The resident path no longer carries the 3.7 GB streaming floor: the
+          # reduced model needs 0.36 GB, so refuse with a donor smaller than that.
+          python3 tests/integration/home_flow_test.py --models-dir build/kimi-contract --expect-no-fit --donor-ram-gb 0.2
           K3_BITS=32 K3_MLA_BITS=32 K3_HEAD_BITS=32 K3_IDOT=0 python3 tests/integration/home_flow_test.py --models-dir build/kimi-contract --donor-ram-gb 4.5
           python3 tests/integration/home_flow_test.py --models-dir build/kimi-contract --donor-ram-gb 4.5 --kill-donor
           SPLIT_MODEL_DIR=build/kimi-contract/kimi-tiny SPLIT_ENGINE=kimi SPLIT_MODEL=kimi-mxfp4 SPLIT_ROUNDS=1 SPLIT_THREADS=2 SPLIT_TOKENS=8 PORT=9740 K3_BITS=32 K3_MLA_BITS=32 K3_HEAD_BITS=32 K3_IDOT=0 bash tests/integration/segment_split_test.sh
@@ -1252,7 +1254,7 @@ jobs:
           path: lumabri/build/kimi-home-models/kimi-tiny
       - name: Native Kimi insufficient-memory admission
         working-directory: lumabri
-        run: python3 tests/integration/home_flow_test.py --models-dir build/kimi-home-models --expect-no-fit
+        run: python3 tests/integration/home_flow_test.py --models-dir build/kimi-home-models --expect-no-fit --donor-ram-gb 0.2
       # The standard ARM runner cannot provide two native Kimi 3.7 GB floors.
       # Exercise refusal there; do not override the engine's RAM safeguard.
       - name: Native Kimi MXFP4 execution on sufficient-memory runner
