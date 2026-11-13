@@ -292,3 +292,5 @@ if __name__ == "__main__":
     prepare_qwen(root)
     from prepare_qwen_gguf import prepare as prepare_native_qwen
     prepare_native_qwen(root)
+    from prepare_mistral_segments import prepare as prepare_mistral
+    prepare_mistral(root)

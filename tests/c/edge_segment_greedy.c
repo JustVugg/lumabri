@@ -51,12 +51,21 @@ static int run_oracle(const char *family, const char *path, ColiEdgeEngine *edge
     ColiSegmentEngine *engines[2]={0}; ColiSegmentSession *sessions[2]={0};
     float *a=NULL,*b=NULL; int rc=1;
     size_t row=(size_t)ec->state_width*sizeof(float);
+    uint32_t cut=ec->num_layers/2;
+    if(getenv("LMB_ORACLE_CUT")) {
+        char *end;unsigned long chosen=strtoul(getenv("LMB_ORACLE_CUT"),&end,10);
+        REQUIRE(!*end && chosen>0 && chosen<ec->num_layers);cut=(uint32_t)chosen;
+    }
     a=malloc((size_t)np*row); b=malloc((size_t)np*row);
     REQUIRE(a && b && ec->state_dtype==COLI_EDGE_DTYPE_F32 && ec->num_layers>=2);
+    if(getenv("LMB_ORACLE_WIDTH")) {
+        char *end;unsigned long expected=strtoul(getenv("LMB_ORACLE_WIDTH"),&end,10);
+        REQUIRE(!*end && expected==ec->state_width);
+    }
     for(int i=0;i<ranges;i++) {
         ColiSegmentEngineOptions eo={.struct_size=sizeof(eo),.model_dir=path,
-            .layer_begin=(uint32_t)i*ec->num_layers/(uint32_t)ranges,
-            .layer_end=(uint32_t)(i+1)*ec->num_layers/(uint32_t)ranges,.context_tokens=(uint32_t)nf,
+            .layer_begin=i?cut:0,
+            .layer_end=ranges==1 || i?ec->num_layers:cut,.context_tokens=(uint32_t)nf,
             .memory_limit_bytes=1ull<<30};
         REQUIRE(!coli_segment_engine_open(family,&eo,&engines[i],error,sizeof error));
         ColiSegmentCapabilities sc={.struct_size=sizeof(sc)};
@@ -128,6 +137,7 @@ int main(int argc, char **argv) {
     REQUIRE(!coli_deepseek_v4_segment_adapter_register() && !coli_deepseek_v4_edge_adapter_register());
     REQUIRE(!coli_olmoe_segment_adapter_register() && !coli_olmoe_edge_adapter_register());
     REQUIRE(!coli_qwen36_segment_adapter_register() && !coli_qwen36_edge_adapter_register());
+    REQUIRE(!coli_glm_segment_adapter_register() && !coli_glm_edge_adapter_register());
     ColiEdgeEngineOptions eo={.struct_size=sizeof(eo),.model_dir=argv[2],.memory_limit_bytes=1ull<<30};
     REQUIRE(!coli_edge_engine_open(argv[1],&eo,&edge,error,sizeof error));
     ColiEdgeCapabilities ec={.struct_size=sizeof(ec)};

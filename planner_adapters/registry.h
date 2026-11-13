@@ -4,6 +4,7 @@
 #include "inkling.h"
 #include "kimi.h"
 #include "glm.h"
+#include "mistral_gguf.h"
 #include "glm53.h"
 #include "qwen38.h"
 #include "olmoe.h"
@@ -43,8 +44,11 @@ static const LmbMemoryContract LMB_MEMORY_CONTRACTS[] = {
 
 static int lmb_describe_memory(const char *id, const char *root, const char *whole,
                                const char *cfg, LmbModelShape *m) {
-    /* Mistral's specialized MLA contract is not the GLM layout. */
-    if (!strcmp(m->model_type,"mistral_large4")) return -1;
+    if (!strcmp(m->model_type,"mistral_large4")) {
+        LmbGguf g;int opened=lmb_gguf_model(root,&g);
+        if(opened)return -1;
+        int rc=lmb_mistral_gguf_memory(&g,cfg,m);lmb_gguf_free(&g);return rc;
+    }
     for(size_t i=0;i<sizeof LMB_MEMORY_CONTRACTS/sizeof *LMB_MEMORY_CONTRACTS;i++) {
         const LmbMemoryContract *c=&LMB_MEMORY_CONTRACTS[i];
         if(!strcmp(id,c->adapter)) return c->describe ? c->describe(root,whole,cfg,m) : -1;

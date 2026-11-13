@@ -4,6 +4,9 @@
 #define main single_checkpoint_main
 #include "edge_segment_greedy.c"
 #undef main
+#ifndef LMB_MIXED_FAMILY
+#define LMB_MIXED_FAMILY "qwen36"
+#endif
 
 typedef struct {
     ColiSegmentEngine *engine;
@@ -22,7 +25,7 @@ static int mixed_open(MixedModel *m,const char *path) {
     char error[512]="mixed oracle setup failed";int rc=1;
     ColiSegmentEngineOptions options={.struct_size=sizeof options,.model_dir=path,
         .layer_end=m->layers,.context_tokens=m->nf,.memory_limit_bytes=1ull<<30};
-    REQUIRE(!coli_segment_engine_open("qwen36",&options,&m->engine,error,sizeof error));
+    REQUIRE(!coli_segment_engine_open(LMB_MIXED_FAMILY,&options,&m->engine,error,sizeof error));
     ColiSegmentSessionOptions session={.struct_size=sizeof session,.context_tokens=m->nf};
     REQUIRE(!coli_segment_session_create(m->engine,&session,&m->session,error,sizeof error));rc=0;
 done:
@@ -46,7 +49,7 @@ static int mixed_reference(MixedModel *m,const char *path,const char *ref) {
     REQUIRE(!bad && !memchr(text,0,n));json=json_parse_checked(text);REQUIRE(json);
     int nf=ids(json,"full_ids",m->full);REQUIRE(nf>0 && nf<=128);m->nf=(uint32_t)nf;
     ColiEdgeEngineOptions eo={.struct_size=sizeof eo,.model_dir=path,.memory_limit_bytes=1ull<<30};
-    REQUIRE(!coli_edge_engine_open("qwen36",&eo,&edge,error,sizeof error));
+    REQUIRE(!coli_edge_engine_open(LMB_MIXED_FAMILY,&eo,&edge,error,sizeof error));
     ColiEdgeCapabilities caps={.struct_size=sizeof caps};
     REQUIRE(!coli_edge_engine_capabilities(edge,&caps,error,sizeof error));
     m->width=caps.state_width;m->layers=caps.num_layers;
@@ -65,7 +68,9 @@ done:
 }
 int main(int argc,char **argv) {
     if(argc!=7){fprintf(stderr,"usage: %s MODEL REF MODEL REF MODEL REF\n",argv[0]);return 2;}
-    if(coli_qwen36_segment_adapter_register() || coli_qwen36_edge_adapter_register())return 2;
+    if(!strcmp(LMB_MIXED_FAMILY,"glm")) {
+        if(coli_glm_segment_adapter_register() || coli_glm_edge_adapter_register())return 2;
+    } else if(coli_qwen36_segment_adapter_register() || coli_qwen36_edge_adapter_register())return 2;
     MixedModel models[3]={{0}};int rc=1;
     for(int i=0;i<3;i++)if(mixed_reference(&models[i],argv[1+2*i],argv[2+2*i]))goto done;
     for(int order=0;order<2;order++) {
@@ -93,7 +98,7 @@ int main(int argc,char **argv) {
         weights_sealed=0;if(forbidden_reads)goto done;
 #endif
     }
-    puts("QWEN MIXED: PASS (native/converted, alternating engines, early close, no inference reads)");rc=0;
+    puts(LMB_MIXED_FAMILY " MIXED: PASS (alternating models, reversed open order, early close, no inference reads)");rc=0;
 done:
 #ifdef LMB_ORACLE_GUARD_READS
     weights_sealed=0;

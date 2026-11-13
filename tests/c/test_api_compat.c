@@ -54,7 +54,8 @@ int main(int argc,char **argv) {
     assert(engine_kind_of("lfm3_vl")==EK_LFM3 && engine_kind_of("flint")==EK_FLINT);
     assert(engine_kind_of("qwen3_future")==EK_INVALID);
     assert(engine_kind_of("muse_spark")==EK_MUSE);
-    for (int i=EK_GLM;i<=EK_MUSE;i++)
+    assert(engine_kind_of("mistral_large4")==EK_MISTRAL);
+    for (int i=EK_GLM;i<=EK_MISTRAL;i++)
         assert(engine_kind_of(engine_format_name((EngKind)i))==(EngKind)i);
     {
         char dir[]="/tmp/lmb-chat-format.XXXXXX",path[256]; assert(mkdtemp(dir));
@@ -111,7 +112,7 @@ int main(int argc,char **argv) {
     LmbJsonToken tokens[128]; LmbJson j; int f[3]; const char *const keys[]={"model","messages","max_tokens"};
     assert(!lmb_json_parse(&j,normalized.normalized.p,normalized.normalized.len,tokens,128));
     assert(!lmb_json_fields(&j,0,keys,3,f));
-    EngKind kinds[]={EK_OLMOE,EK_GLM,EK_GLM53,EK_DEEPSEEK,EK_KIMI,EK_QWEN36,EK_QWEN38,EK_INKLING,EK_FLINT,EK_LFM3,EK_QWEN_CODER,EK_MUSE};
+    EngKind kinds[]={EK_OLMOE,EK_GLM,EK_GLM53,EK_DEEPSEEK,EK_KIMI,EK_QWEN36,EK_QWEN38,EK_INKLING,EK_FLINT,EK_LFM3,EK_QWEN_CODER,EK_MUSE,EK_MISTRAL};
     for (unsigned i=0;i<sizeof kinds/sizeof *kinds;i++) {
         assert(!api_compat_payload(&normalized,&j,(unsigned)f[1],kinds[i]));
         assert(strstr(normalized.payload.p,"instruction\n\nmore"));

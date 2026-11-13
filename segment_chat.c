@@ -2010,6 +2010,8 @@ typedef struct {
     LmbServeControl *control;
     int muse;
     LmbMuseStream channels;
+    int mistral;
+    LmbMistralStream markers;
 } ServeGeneration;
 
 static int serve_generation_data(ServeGeneration *serve,const void *data,size_t bytes) {
@@ -2044,6 +2046,10 @@ static int serve_generation_event(void *opaque, GenerationEventKind kind,
     case GEN_EVENT_DATA:
         if(serve->muse) {
             Cap visible={0};int bad=lmb_muse_feed(&serve->channels,&visible,data,data_bytes);
+            if(!bad && visible.len)bad=serve_generation_data(serve,visible.p,visible.len);
+            free(visible.p);if(bad)return -1;
+        } else if(serve->mistral) {
+            Cap visible={0};int bad=lmb_mistral_feed(&serve->markers,&visible,data,data_bytes);
             if(!bad && visible.len)bad=serve_generation_data(serve,visible.p,visible.len);
             free(visible.p);if(bad)return -1;
         } else if(serve_generation_data(serve,data,data_bytes))return -1;
@@ -2233,7 +2239,8 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
                 route_print(stderr, "[segment-route]", &snapshot,
                             chain, chain_count);
             ServeGeneration stream = { .request_id = request_id, .control = &control,
-                .muse=chat_format && !strcmp(chat_format,"muse_spark") };
+                .muse=chat_format && !strcmp(chat_format,"muse_spark"),
+                .mistral=chat_format && !strcmp(chat_format,"mistral_large4") };
             bad = segment_generate(edge, cap, chain, chain_count,
                                    model_root, tokenizer_root,
                                    context, max_rows, prompt, prompt_bytes,
@@ -2249,6 +2256,12 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
                 if(!bad && tail.len)bad=serve_generation_data(&stream,tail.p,tail.len);
                 free(tail.p);
                 if(bad)snprintf(error,sizeof error,"Invalid Muse response framing");
+            }
+            if(!bad && stream.mistral) {
+                Cap tail={0};bad=lmb_mistral_finish(&stream.markers,&tail);
+                if(!bad && tail.len)bad=serve_generation_data(&stream,tail.p,tail.len);
+                free(tail.p);
+                if(bad)snprintf(error,sizeof error,"Cannot finish Mistral response framing");
             }
             if (!bad && !stream.emitted_bytes)
                 (void)serve_generation_data(&stream,NULL,0);

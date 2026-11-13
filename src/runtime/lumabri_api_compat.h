@@ -165,6 +165,7 @@ static int api_compat_payload(ApiCompat *c,const LmbJson *j,unsigned messages,En
     if (*sys) {
         int bad=0;
         switch (kind) {
+        case EK_MISTRAL: bad=cap_str(out,"[SYSTEM_PROMPT]") || cap_str(out,sys) || cap_str(out,"[/SYSTEM_PROMPT]"); break;
         case EK_OLMOE: bad=cap_str(out,"|||IP_ADDRESS|||<|system|>\n") || cap_str(out,sys) || cap_str(out,"\n"); break;
         case EK_GLM: case EK_GLM53: bad=cap_str(out,"<|system|>") || cap_str(out,sys); break;
         case EK_QWEN38: case EK_MUSE: break;

@@ -735,6 +735,11 @@ jobs:
         run: |
           sudo prlimit --pid $$ --memlock=134217728:134217728
           make test-qwen-gguf ENGINE=../colibri/c QWEN_GGUF_TEST_OPTIONS="--household --packed"
+      - name: Mistral shared-state resident ranges and household chat
+        working-directory: lumabri
+        run: |
+          sudo prlimit --pid $$ --memlock=134217728:134217728
+          make test-mistral-segments ENGINE=../colibri/c MISTRAL_TEST_OPTIONS=--household
       - name: Qwen hybrid memory contract — real int8 and grouped int4
         working-directory: lumabri
         run: |

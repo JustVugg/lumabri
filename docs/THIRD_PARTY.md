@@ -54,6 +54,28 @@
   follow that Apache-2.0 source (Colibri contributors). Lumabri supplies the
   latent-width memory contract and boundary/state/inference-read tests.
 
+## Colibri Mistral Large 4 integration
+
+- Source: `JustVugg/colibri`, tag `v2.1.0`, commit
+  `704a3f68184b78367a04cb5526e428dc2f90f05b`.
+- Upstream files: `c/colibri.c`, `c/telemetry.h`, `c/st_gguf.h`, `c/openai_server.py`,
+  `c/tools/make_mistral_large4_tiny.py`, `c/tools/gguf_import.py`, and
+  `c/tests/test_segment_adapters_real.c`.
+- License: Apache-2.0; attribution: Colibri contributors. Original headers,
+  license and notices remain in generated sources and packages.
+- Lumabri-owned generated-copy hooks carry cross-layer latent rows and sparse
+  selections with activations, keep conversation KV on each owning segment,
+  serialize source metadata opening, and free model-specific allocations.
+  Model arithmetic remains in the pinned engine. The RoPE cache key also
+  includes the learned frequency table to isolate different models. The
+  standalone dashboard hit bitmap is disabled in embedded adapters; Lumabri
+  reports per-allocation metrics without sharing first-model-sized telemetry.
+- `src/runtime/lumabri_mistral_chat.h` and the shared chat formatter express
+  the upstream text framing in C with bounded stream state. Tests compare
+  the API prompt against the original Python renderer. Fixture generation,
+  quantization and monolithic numerical oracles use the upstream files;
+  none of these tests changes the original checkout.
+
 ## Embedded image decoder
 
 - File: `src/vendor/stb_image.h`, unmodified v2.30 from commit

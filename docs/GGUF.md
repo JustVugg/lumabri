@@ -14,7 +14,8 @@ them.
 ## Current execution contract
 
 The integrated GGUF CPU paths cover OLMoE, Qwen3 dense/MoE, Qwen3.5/3.6
-dense/MoE, Flint, Muse Spark and LFM3 text. See [Qwen architecture contracts](QWEN_ARCHITECTURES.md).
+dense/MoE, Flint, Muse Spark, LFM3 text and Mistral Large 4 text. See
+[Qwen architecture contracts](QWEN_ARCHITECTURES.md) and [Mistral](MISTRAL.md).
 The inspector checks the
 actual tensor names, dimensions, native quantization block geometry and
 effective memory representation. GGUF support in Colibri alone does not grant
@@ -23,7 +24,7 @@ imports remain visible with an import error and cannot start a plan.
 
 GGUF runs through Segment. The merged-int8 Hybrid expert provider is not
 used for GGUF. Context uses the checkpoint's declared limit capped by the
-adapter's limit (4096 for OLMoE, 262144 for Qwen), with F32 KV state per session. There is no
+adapter's limit (4096 for OLMoE, 262144 for Qwen, 1048576 for Mistral), with F32 KV state per session. There is no
 disk-streaming fallback.
 
 The source computer generates small JSON metadata files using C. It preserves

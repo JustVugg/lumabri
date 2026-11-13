@@ -25,9 +25,10 @@ defaults must not silently change an existing numeric class, snapshot layout or
 memory contract. The new source/build identity invalidates prior calibrations.
 
 Exact aliases now include Mistral Large 4 and the expanded Qwen engine families.
-Recognition does not enable resident admission: the new architectures still
-need their own inspected memory/layout contracts. GGUF containers and standalone
-CUDA/Vulkan improvements do not automatically enable distributed execution.
+Recognition does not enable resident admission. Qwen variants, Muse and Mistral
+GGUF have their own inspected memory/layout contracts; other architectures and
+formats need separate contracts. Standalone CUDA/Vulkan improvements do not
+automatically enable distributed execution.
 The shipped upstream Edge/Segment library remains CPU-only.
 
 `tests/integration/engine_patch_test.py --engine /path/to/colibri/c` checks

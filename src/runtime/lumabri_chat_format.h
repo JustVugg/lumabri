@@ -18,7 +18,7 @@ typedef enum {
     EK_QWEN38,         /* qwen38:       system reasoning prompt + ChatML     */
     EK_INKLING,        /* inkling:      <|message_user|><|content_text|>…      */
     EK_KIMI,           /* kimi_k3:      K3CHAT1 byte-counted wire              */
-    EK_FLINT, EK_LFM3, EK_QWEN_CODER, EK_MUSE
+    EK_FLINT, EK_LFM3, EK_QWEN_CODER, EK_MUSE, EK_MISTRAL
 } EngKind;
 /* A growable capture of the assistant's reply, to feed back as history. */
 typedef struct { char *p; size_t len, cap; } Cap;
@@ -48,6 +48,7 @@ static int cap_addf(Cap *c, const char *fmt, ...) {
     return cap_add(c, tmp, (size_t)n);
 }
 #include "lumabri_muse_chat.h"
+#include "lumabri_mistral_chat.h"
 
 static int artifact_is(const char *value, const char *name) {
     if (!value || !name) return 0;
@@ -66,9 +67,7 @@ static EngKind engine_kind_of(const char *engine) {
     if (!strcmp(engine,"lfm3") || !strcmp(engine,"lfm3_vl")) return EK_LFM3;
     if (!strcmp(engine,"qwen3_coder")) return EK_QWEN_CODER;
     if (!strcmp(engine,"muse_spark")) return EK_MUSE;
-    /* These need their own templates; recognition never implies that a
-     * related engine's chat format can be used. */
-    if (!strcmp(engine,"mistral_large4")) return EK_INVALID;
+    if (!strcmp(engine,"mistral_large4")) return EK_MISTRAL;
     const LmbModelFamily *family=lmb_family_for(engine);
     if (family) engine=family->engine;
     if (artifact_is(engine, "colibri") || !strcmp(engine ? engine : "", "glm") ||
@@ -96,6 +95,7 @@ static EngKind engine_kind_of(const char *engine) {
 }
 
 static inline EngKind engine_family_kind(EngKind kind) {
+    if(kind==EK_MISTRAL)return EK_GLM;
     return kind==EK_FLINT || kind==EK_LFM3 || kind==EK_QWEN_CODER || kind==EK_MUSE ? EK_QWEN36 : kind;
 }
 static inline const char *engine_format_name(EngKind kind) {
@@ -105,7 +105,8 @@ static inline const char *engine_format_name(EngKind kind) {
     case EK_QWEN36: return "qwen36"; case EK_QWEN38: return "qwen38";
     case EK_INKLING: return "inkling"; case EK_KIMI: return "kimi_k3";
     case EK_FLINT: return "flint"; case EK_LFM3: return "lfm3";
-    case EK_QWEN_CODER: return "qwen3_coder"; case EK_MUSE: return "muse_spark"; default: return NULL;
+    case EK_QWEN_CODER: return "qwen3_coder"; case EK_MUSE: return "muse_spark";
+    case EK_MISTRAL: return "mistral_large4"; default: return NULL;
     }
 }
 /* The serve-codec engines tokenize the SUBMIT payload as-is: coli_v4_prompt_build
@@ -192,6 +193,10 @@ static int lfm3_history_text(Cap *out,const char *reply) {
 static inline int serve2_turn(Cap *c, EngKind k, int first, const char *u, const char *reply) {
     (void)first;
     switch (k) {
+    case EK_MISTRAL:
+        if(first && cap_str(c,"[MODEL_SETTINGS]{\"reasoning_effort\": \"high\"}[/MODEL_SETTINGS]"))return -1;
+        if(cap_str(c,"[INST]") || cap_str(c,u) || cap_str(c,"[/INST]"))return -1;
+        return reply ? (lmb_mistral_history(c,reply) || cap_str(c,"</s>")) : 0;
     case EK_GLM:
         if (cap_str(c, GLM_U) || cap_str(c, u) || cap_str(c, GLM_ASST)) return -1;
         return reply ? cap_str(c, reply) : 0;
@@ -244,6 +249,7 @@ static inline int serve2_turn(Cap *c, EngKind k, int first, const char *u, const
 
 /* The once-at-front SUBMIT prefix (kept out of the stored history). */
 static inline int serve2_prefix(Cap *c, EngKind k) {
+    if (k == EK_MISTRAL)  return cap_str(c,"<s>");
     if (k == EK_GLM)      return cap_str(c, GLM_BOS);
     if (k == EK_GLM53)    return cap_str(c, GLM_BOS);
     if (k == EK_DEEPSEEK) return cap_str(c, DS_BOS);
