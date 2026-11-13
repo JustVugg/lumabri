@@ -17,10 +17,13 @@ def prepare_header(root):
     s=replace_once(s,'    free(arena);\n    if (getenv("GGUF_CHECK"))',
                    '    json_free(root); free(arena);\n    if (getenv("GGUF_CHECK"))')
     path.write_text(s)
+    path=Path(root)/'gguf.h'
+    path.write_text(prepare_gguf_io(path.read_text()))
+
+
+def prepare_gguf_io(s):
     # The mirror's stdio path materializes a file. Header discovery must use
     # descriptors so it fetches only the CAS blocks that contain the header.
-    path=Path(root)/'gguf.h'
-    s=path.read_text()
     s=replace_once(s,'typedef struct { FILE *f; uint64_t pos, size; int bad; char *err; } gguf_rd;',
                    'typedef struct { int fd; uint64_t pos, size; int bad; char *err; } gguf_rd;')
     old='''    if (n && fread(dst, 1, (size_t)n, r->f) != (size_t)n) { r->bad = 1; snprintf(r->err, 512, "read error at byte %llu", (unsigned long long)r->pos); return -1; }'''
@@ -59,7 +62,7 @@ def prepare_header(root):
         done += (uint64_t)got;
     }
     close(fd); return done == sizeof m && !memcmp(m, "GGUF", sizeof m);''')
-    path.write_text(s)
+    return s
 
 
 def prepare(root):

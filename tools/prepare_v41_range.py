@@ -22,22 +22,37 @@ def prepare(text):
     # functions in a future release. Deliberate revalidation is required.
     if hashlib.sha256(text.encode()).hexdigest() != '3dbc511047cc0fd40b09d8476d00bf6cdbef08f54ebd70cf4d10b24e10c833ff':
         raise ValueError('V4.1 range engine requires pinned Colibri 2.1.0')
+    text = replace_once(text, '#include "st.h"', '#include "v41_st.h"')
     text = replace_once(text, '    int fd_w, fd_s;\n    int64_t off_w, off_s, rows;',
-                        '    int fd_w, fd_s;\n    uint8_t *resident_w, *resident_s;\n    size_t resident_w_bytes, resident_s_bytes;\n    int64_t off_w, off_s, rows;')
+                        '    int fd_w, fd_s;\n    uint8_t *resident_w, *resident_s;\n    size_t resident_w_bytes, resident_s_bytes;\n    int64_t resident_base_w, resident_base_s;\n    int64_t off_w, off_s, rows;')
+    text = replace_once(text, "int head_dim, int cache_rows) {", "int head_dim, int cache_rows, int64_t first_row, int64_t end_row) {")
+    text = replace_once(text,
+        '            engram_table_open(&e->table[t], &m->S, layer, e->head_dim, engram_cache_rows);',
+        '''            int64_t first_row=INT64_MAX,end_row=0;
+            for(int g=0;g<e->max_ngram-1;g++)for(int h=0;h<e->heads;h++) {
+                int k=g*e->heads+h;int64_t off=e->offsets[t][k],rows=e->primes[t][g][h];
+                if(off<first_row)first_row=off;
+                if(off+rows>end_row)end_row=off+rows;
+            }
+            engram_table_open(&e->table[t], &m->S, layer, e->head_dim, engram_cache_rows, first_row, end_row);''')
     # The released engine now also understands inline and ggml Engram rows.
     # Retain their exact bytes and keep its decoder unchanged. Planner format
     # admission remains separate; no format may fall back to disk at RUN.
     text = replace_once(text, 'cache:;\n    int cap = 1;', '''cache:;
     const st_tensor *weights = t->gt >= 0 ? g : w;
     if (!weights || weights->nbytes <= 0 || (uint64_t)weights->nbytes > SIZE_MAX) exit(1);
-    t->resident_w_bytes = (size_t)weights->nbytes;
+    if (first_row < 0 || end_row <= first_row || end_row > t->rows) exit(1);
+    size_t row_bytes = t->gt >= 0 ? (size_t)t->rb : (size_t)head_dim + (t->inline_scales ? (size_t)head_dim/32 : 0);
+    t->resident_w_bytes = (size_t)(end_row-first_row) * row_bytes;
+    t->resident_base_w = t->off_w + first_row * (int64_t)row_bytes;
     t->resident_w = xmalloc(t->resident_w_bytes, "resident Engram weights");
-    st_pread_full(t->fd_w, t->resident_w, t->resident_w_bytes, t->off_w, "prepare Engram weights");
+    st_pread_full(t->fd_w, t->resident_w, t->resident_w_bytes, t->resident_base_w, "prepare Engram weights");
     if (t->gt < 0 && !t->inline_scales) {
         if (!s || s->nbytes <= 0 || (uint64_t)s->nbytes > SIZE_MAX) exit(1);
-        t->resident_s_bytes = (size_t)s->nbytes;
+        t->resident_s_bytes = (size_t)(end_row-first_row) * (size_t)head_dim/32;
+        t->resident_base_s = t->off_s + first_row * (head_dim/32);
         t->resident_s = xmalloc(t->resident_s_bytes, "resident Engram scales");
-        st_pread_full(t->fd_s, t->resident_s, t->resident_s_bytes, t->off_s, "prepare Engram scales");
+        st_pread_full(t->fd_s, t->resident_s, t->resident_s_bytes, t->resident_base_s, "prepare Engram scales");
     }
     int cap = 1;''')
     text = replace_once(text, '} EngramTable;', '''} EngramTable;
@@ -45,7 +60,7 @@ static void lmb_v41_engram_read(const EngramTable *t, int scales, void *out,
                                 size_t bytes, int64_t offset, const char *what) {
     const uint8_t *data = scales ? t->resident_s : t->resident_w;
     size_t size = scales ? t->resident_s_bytes : t->resident_w_bytes;
-    int64_t base = scales ? t->off_s : t->off_w;
+    int64_t base = scales ? t->resident_base_s : t->resident_base_w;
     (void)what;
     if (!data || offset < base || (uint64_t)(offset-base) > size ||
         bytes > size-(size_t)(offset-base)) exit(1);
@@ -122,10 +137,21 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--source', required=True, type=Path)
     p.add_argument('--output', required=True, type=Path)
+    p.add_argument('--artifact', choices=('core', 'st', 'st_gguf', 'gguf'), default='core')
     a = p.parse_args()
     if (a.source.resolve().parent in a.output.resolve().parents or a.output.is_symlink()):
         p.error('output must be a separate regular build artifact outside upstream')
-    result = prepare(a.source.read_text())
+    if a.artifact == 'core':
+        result = prepare(a.source.read_text())
+    elif a.artifact == 'st':
+        result = replace_once(a.source.read_text(), '#include "st_gguf.h"', '#include "v41_st_gguf.h"')
+    elif a.artifact == 'st_gguf':
+        result = replace_once(a.source.read_text(), '    free(arena);\n',
+                              '    json_free(root); free(arena);\n')
+        result = replace_once(result, '#include "gguf.h"', '#include "v41_gguf.h"')
+    else:
+        from prepare_gguf_adapters import prepare_gguf_io
+        result = prepare_gguf_io(a.source.read_text())
     a.output.parent.mkdir(parents=True, exist_ok=True)
     a.output.write_text(result)
 

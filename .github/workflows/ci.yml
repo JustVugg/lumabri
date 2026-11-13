@@ -774,6 +774,13 @@ jobs:
         run: |
           sudo prlimit --pid $$ --memlock=134217728:134217728
           make test-v4-gguf ENGINE=../colibri/c V4_GGUF_TEST_OPTIONS=--household
+      - name: DeepSeek V4.1 GGUF Engram, shared state and household chat
+        working-directory: lumabri
+        run: |
+          sudo prlimit --pid $$ --memlock=134217728:134217728
+          make test-v41-gguf ENGINE=../colibri/c V41_GGUF_TEST_OPTIONS=--household
+          cc -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -pthread -I. -Ibuild -I../colibri/c tests/c/test_v41_mixed_gguf.c ../colibri/c/segment_runtime.c ../colibri/c/edge_runtime.c -o build/test_v41_mixed_gguf_san -lm
+          ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 GQ_EXACT=1 ./build/test_v41_mixed_gguf_san build/v41-native/float build/v41-native/Q8_0 build/v41-native/mixed-keys
       - name: Qwen hybrid memory contract — real int8 and grouped int4
         working-directory: lumabri
         run: |
