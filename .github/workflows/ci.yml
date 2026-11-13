@@ -4,6 +4,10 @@ on:
   pull_request:
   push:
     branches: [main]
+  schedule:
+    # Nightly run of the complete native matrix on main.
+    - cron: '30 2 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -1072,8 +1076,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [macos-15-intel, macos-15]
-        openmp: [enabled, disabled]
+        # A pull request runs one variant; every merge to main, the nightly
+        # run and a manual run keep both runners and both OpenMP settings.
+        runner: ${{ fromJSON(github.event_name == 'pull_request' && '["macos-15-intel"]' || '["macos-15-intel","macos-15"]') }}
+        openmp: ${{ fromJSON(github.event_name == 'pull_request' && '["enabled"]' || '["enabled","disabled"]') }}
     runs-on: ${{ matrix.runner }}
     # The real elastic gate includes a complete demand window and idle grace
     # for both scale-downs, plus the two-portfolio comparison. Keep production
