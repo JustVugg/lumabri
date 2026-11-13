@@ -49,6 +49,12 @@ make household swarm_probe ENGINE=/path/to/colibri/c
 ./lumabri
 ```
 
+To use one computer straight away, run `./lumabri start` instead (in a
+package, open `start-here.sh` on Linux or `START-HERE.command` on macOS). It
+creates this computer's household if there is none, starts sharing and the
+local web page, and opens the chat page in your browser. The page is served on
+`127.0.0.1` only. `--tui` opens the workspace below instead.
+
 After launch, use **arrow keys and Enter**. Press **/** for workspace actions
 and **Esc** to go back. Use a terminal at least 60 columns by 28 rows.
 

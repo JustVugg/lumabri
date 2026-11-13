@@ -338,6 +338,15 @@ $("login-form").onsubmit = async event => {
   } catch (error) { token = ""; models = []; conversations = []; renderModels(); renderHistory(); say(error.message); }
   finally { button.disabled = false; }
 };
+// A local start link carries the token in the URL fragment, which browsers never send to a server.
+// Treat it as a pasted token, and drop it from the address bar and history entry at once.
+{
+  const linked = new URLSearchParams(location.hash.slice(1)).get("token");
+  if (linked) {
+    history.replaceState(null, "", location.pathname + location.search);
+    setTimeout(() => { $("token").value = linked; $("login-form").requestSubmit(); });
+  }
+}
 $("sign-out").onclick = () => {
   if (busy || managementBusy) return;
   if (unsaved && !confirm("This answer is not saved. Sign out without exporting?")) return;

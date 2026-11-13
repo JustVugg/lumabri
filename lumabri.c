@@ -5591,6 +5591,7 @@ static int home_managed_retire(const char *tracker, const uint8_t allocation[32]
 #include "src/ui/lumabri_home_ui.h"
 #include "src/runtime/lumabri_api.h"
 #include "src/runtime/lumabri_donor_policy_cli.h"
+#include "src/runtime/lumabri_start.h"
 
 int main(int argc, char **argv) {
     (void)setlocale(LC_CTYPE, "");
@@ -5610,6 +5611,8 @@ int main(int argc, char **argv) {
         return cmd_api(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "service"))
         return cmd_service(argc - 2, argv + 2);
+    if (argc >= 2 && !strcmp(argv[1], "start"))
+        return cmd_start(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "donor-policy"))
         return cmd_donor_policy(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "models"))
@@ -5639,6 +5642,7 @@ int main(int argc, char **argv) {
     fprintf(stderr,
         "lumabri: your computers, one shared model\n\n"
         "  lumabri                                                    household workspace\n"
+        "  lumabri start [--tui] [--no-browser] [--port N]            start everything here and open the chat page\n"
         "  lumabri service [status|start|restart|stop]                 private background service\n"
         "  lumabri service live ROLE                                  supervisor probe (not model readiness)\n"
         "  lumabri api [start|stop|list|user-add|grant|revoke|serve]   authenticated local inference API\n"
@@ -5647,6 +5651,7 @@ int main(int argc, char **argv) {
         "  lumabri donor --headless --join HOST:PORT --ram-gb N      supervised resident donor\n"
         "  lumabri donor-policy inspect | accept-current REVIEW      review/approve one local offer\n"
         "  lumabri models --tracker HOST:PORT                       cluster planning preview\n"
+        "  lumabri host --model NAME [--port 7350] [--tracker H:P]   hosted conversation service\n"
         "  lumabri status | limits | pause | resume                    resource governor\n"
         "  lumabri doctor [--household] [--json] [--tracker H:P]     runtime diagnostics\n"
         "  lumabri peer-key                                           print this machine's endpoint identity\n"

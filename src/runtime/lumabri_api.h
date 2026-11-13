@@ -766,6 +766,8 @@ static int api_serve(int access_dir, unsigned port, const char *tracker, HomeSer
     for (unsigned i=0;i<LMB_API_CHILDREN;i++) if (telemetry[i]>=0) close(telemetry[i]);
     return 0;
 }
+/* Set only by lumabri start, which prints its own summary of the address. */
+static int api_start_quiet;
 static int api_start(int access_dir, unsigned port, const char *tracker, const char *https_origin, const char *access_path) {
     if (strlen(tracker)>=sizeof ((HomeServiceSnapshot *)0)->tracker) return 1;
     if (home_service_foreground() || home_service_ensure()) {
@@ -805,7 +807,8 @@ static int api_start(int access_dir, unsigned port, const char *tracker, const c
             if (!home_service_query("api",HOME_SVC_STATUS,NULL,&observed) && observed.phase==2 &&
                 !strcmp(observed.tracker,tracker) && !strcmp(observed.name,endpoint)) {
                 if (https_origin) fprintf(stderr,"[api] Private upstream ready; configure and verify your same-user TLS proxy separately.\n");
-                puts(https_origin ? https_origin : endpoint); return 0;
+                if (!api_start_quiet) puts(https_origin ? https_origin : endpoint);
+                return 0;
             }
             (void)poll(NULL,0,50);
         }
