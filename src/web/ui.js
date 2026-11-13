@@ -3,10 +3,11 @@
 // Presentation only. It reads state owned by app.js, never changes how sign-in,
 // history or generation work, and keeps nothing in URLs or browser storage.
 
-// Room flow (create or join a room by short code, with a memory pledge).
-// The markup and styles exist, but the local API cannot serve it yet. Keep this
-// false until an endpoint exists; while false none of its controls are shown.
-const ROOM_FLOW_ENABLED = false;
+// Room flow: add a computer to this household with a short code, or move this
+// computer into another household with one. It lives in the Computers panel
+// and is offered only to a sign-in that may manage this computer. The code is
+// kept in this page's memory and on screen, nowhere else.
+const ROOM_FLOW_ENABLED = true;
 
 (() => {
   const app = $("app"), details = $("details");
@@ -51,7 +52,7 @@ const ROOM_FLOW_ENABLED = false;
       control.setAttribute("aria-expanded", String(control.dataset.panelOpen === name));
     $("details-title").textContent = panelTitles[name];
     if (name === "model") renderModel();
-    if (name === "devices") loadDevices();
+    if (name === "devices") { loadDevices(); roomRefresh(); }
     $("details-close").focus();
   }
   function closeDetails(restoreFocus = false) {
@@ -384,11 +385,12 @@ const ROOM_FLOW_ENABLED = false;
       control.setAttribute("aria-pressed", String(control.dataset.view === "endpoint" ? endpoint : !endpoint && !workspace));
     $("devices-button").hidden = !operator || !online;
     $("devices-tab").hidden = !operator || !online;
+    if (ROOM_FLOW_ENABLED && online) $("rooms").hidden = !management;
     if (!operator && panel === "devices" && !details.hidden) openDetails("model");
     if (online && !wasConnected) record("Connected to the local Lumabri service.");
     if (!online && wasConnected) {
       // Nothing from one account may remain visible to the next.
-      closeDetails(); setEndpointOff(); endpointConfig = null; clearDevices(); approvalReset();
+      closeDetails(); setEndpointOff(); endpointConfig = null; clearDevices(); approvalReset(); roomReset();
       $("activity-log").replaceChildren(); $("toasts").replaceChildren(); lastNotice = "";
       $("model-facts").replaceChildren(); $("model-list").replaceChildren();
       $("endpoint-model").value = ""; renderEndpoint(); $("endpoint-status").textContent = "";
@@ -419,17 +421,118 @@ const ROOM_FLOW_ENABLED = false;
   new MutationObserver(syncNotice).observe($("notice"), {childList: true, characterData: true, subtree: true});
 
   // ---- room flow (inactive unless ROOM_FLOW_ENABLED) ----
+  const room = {id: "", timer: 0, owner: false, tracker: "", busy: false, waiting: 0};
+  const roomSay = text => { $("room-status").textContent = text; };
+  function roomClearCode() {
+    clearInterval(room.timer); room.timer = 0; room.id = "";
+    $("room-code-shown").textContent = ""; $("room-code-shown").hidden = true; $("room-cancel").hidden = true;
+  }
+  function roomControls() {
+    const joining = $("mode-join").getAttribute("aria-pressed") === "true";
+    for (const id of ["room-code-field", "room-address-field", "room-pledge", "room-consent-field", "room-join"]) $(id).hidden = !joining;
+    $("room-create").hidden = joining || Boolean(room.id);
+    $("room-create").disabled = room.busy || !room.owner;
+    $("room-join").disabled = room.busy || !$("room-consent").checked || !$("room-code").value.trim();
+    $("room-intro").textContent = !room.tracker ? "" : joining ?
+      `This computer is in the household at ${room.tracker}. A code from another household moves it there.` : room.owner ?
+      `This computer owns the household at ${room.tracker}. A code lets one other computer join it.` :
+      `This computer joined the household at ${room.tracker}. Codes are created on the computer that owns it.`;
+  }
   function setRoomMode(mode) {
-    const rooms = mode !== "token", joining = mode === "join";
-    for (const [id, value] of [["mode-token", "token"], ["mode-create", "create"], ["mode-join", "join"]])
-      $(id).setAttribute("aria-pressed", String(mode === value));
-    $("login-form").hidden = rooms; $("room-flow").hidden = !rooms;
-    $("room-code-field").hidden = !joining; $("room-create").hidden = joining; $("room-join").hidden = !joining;
-    $("room-status").textContent = "";
+    $("mode-create").setAttribute("aria-pressed", String(mode === "create"));
+    $("mode-join").setAttribute("aria-pressed", String(mode === "join"));
+    roomSay(""); roomControls();
+  }
+  function roomReset() {
+    roomClearCode(); clearInterval(room.waiting); room.waiting = 0; room.busy = false; room.tracker = ""; room.owner = false;
+    $("room-code").value = ""; $("room-address").value = ""; $("room-consent").checked = false; roomSay("");
+    $("rooms").hidden = true;
+  }
+  async function roomRefresh() {
+    if (!ROOM_FLOW_ENABLED || !management || !token || room.busy || room.waiting) return;
+    const credential = token;
+    try {
+      const household = await request("/api/v1/household");
+      if (credential !== token) return;
+      room.tracker = household.tracker; room.owner = household.owner === true;
+      if (!room.owner && !room.id) setRoomMode("join"); else roomControls();
+    } catch (error) { roomSay(error.message); }
+  }
+  async function roomPoll() {
+    if (!room.id || !token) return;
+    const id = room.id;
+    let state;
+    try { state = await request(`/api/v1/household/pairing/${id}`); } catch { return; }
+    if (id !== room.id) return;
+    if (state.state === "waiting") {
+      const left = `${Math.floor(state.expires_in / 60)}:${String(state.expires_in % 60).padStart(2, "0")}`;
+      roomSay(`Type it on the other computer, under “I have a code”. Valid for ${left} more, for one computer.` +
+        (state.failed ? ` ${state.failed} of ${state.max_attempts} wrong attempts so far.` : ""));
+      return;
+    }
+    roomClearCode(); roomControls();
+    const outcome = state.state === "used" ? `A computer joined from ${state.source || "an unknown address"} (identity ${state.joiner}). The code no longer works.` :
+      state.state === "expired" ? "The code expired unused. Show a new one when the other computer is ready." :
+      state.state === "locked" ? `The code was destroyed after ${state.failed} wrong attempts. Nobody joined. If that was not you, someone on this network is guessing.` :
+      state.state === "cancelled" ? "The code was withdrawn. Nobody joined." : "The code was replaced or the household restarted. Nobody joined with it.";
+    roomSay(outcome); record(outcome);
+    if (state.state === "used") { clearDevices(); loadDevices(); }
+  }
+  async function roomCreate() {
+    if (room.busy || room.id) return;
+    room.busy = true; roomControls(); roomSay("");
+    try {
+      const made = await request("/api/v1/household/pairing", "POST", {action: "create"});
+      room.id = made.id;
+      $("room-code-shown").textContent = made.code; $("room-code-shown").hidden = false; $("room-cancel").hidden = false;
+      roomSay(`Type it on the other computer, under “I have a code”. If that computer cannot find this household, its address is ${made.address}.`);
+      room.timer = setInterval(roomPoll, 1000);
+    } catch (error) { roomSay(error.message); }
+    finally { room.busy = false; roomControls(); }
+  }
+  async function roomCancel() {
+    const id = room.id;
+    if (!id) return;
+    roomClearCode(); roomControls();
+    try { await request("/api/v1/household/pairing", "POST", {action: "cancel", id}); roomSay("The code was withdrawn. Nobody joined."); }
+    catch (error) { roomSay(error.message); }
+  }
+  async function roomJoin() {
+    if (room.busy || !$("room-consent").checked) return;
+    const body = {code: $("room-code").value.trim()}, address = $("room-address").value.trim();
+    const pledge = Math.round(Number($("room-gb").value));
+    if (address) body.address = address;
+    if (pledge >= 1) body.ram_gb = pledge;
+    room.busy = true; roomControls(); roomSay("Checking the code with that household…");
+    let answer;
+    try { answer = await request("/api/v1/household/join", "POST", body); }
+    catch (error) { room.busy = false; roomControls(); roomSay(error.message); return; }
+    $("room-code").value = ""; $("room-consent").checked = false;
+    if (!answer.restarting) {
+      room.busy = false; roomControls();
+      roomSay(`This computer joined the household at ${answer.tracker}, but Lumabri could not restart itself. In a terminal run: lumabri service stop, then lumabri start.`);
+      return;
+    }
+    roomSay(`Joined the household at ${answer.tracker}. Lumabri is restarting on this computer…`);
+    const credential = token, deadline = Date.now() + 120000;
+    room.waiting = setInterval(async () => {
+      if (credential !== token) { clearInterval(room.waiting); room.waiting = 0; return; }
+      let household = null;
+      try { household = await request("/api/v1/household"); } catch { /* the service is restarting */ }
+      const back = household && household.tracker === answer.tracker && household.owner === false;
+      if (!back && Date.now() < deadline) return;
+      clearInterval(room.waiting); room.waiting = 0; room.busy = false;
+      if (back) {
+        room.tracker = household.tracker; room.owner = false; roomControls();
+        const done = `This computer now shares with the household at ${answer.tracker}.`;
+        roomSay(done); record(done); clearDevices(); loadDevices();
+      } else {
+        roomControls();
+        roomSay("This computer joined, but Lumabri did not come back. In a terminal run: lumabri service stop, then lumabri start.");
+      }
+    }, 1500);
   }
   if (ROOM_FLOW_ENABLED) {
-    $("setup-tabs").hidden = false;
-    $("mode-token").addEventListener("click", () => setRoomMode("token"));
     $("mode-create").addEventListener("click", () => setRoomMode("create"));
     $("mode-join").addEventListener("click", () => setRoomMode("join"));
     const step = delta => {
@@ -438,10 +541,12 @@ const ROOM_FLOW_ENABLED = false;
     };
     $("room-gb-minus").addEventListener("click", () => step(-1));
     $("room-gb-plus").addEventListener("click", () => step(1));
-    // Connect these two handlers to the room API when it exists.
-    const unavailable = () => { $("room-status").textContent = "Rooms are not available from this Lumabri service yet."; };
-    $("room-create").addEventListener("click", unavailable);
-    $("room-join").addEventListener("click", unavailable);
+    $("room-code").addEventListener("input", roomControls);
+    $("room-consent").addEventListener("change", roomControls);
+    $("room-create").addEventListener("click", roomCreate);
+    $("room-cancel").addEventListener("click", roomCancel);
+    $("room-join").addEventListener("click", roomJoin);
+    roomControls();
   }
 
   syncChrome();
