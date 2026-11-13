@@ -279,3 +279,5 @@ if __name__ == "__main__":
 
     from prepare_qwen38_gguf import prepare as prepare_qwen38
     prepare_qwen38(root)
+    from prepare_v4_gguf import prepare as prepare_v4
+    prepare_v4(root)

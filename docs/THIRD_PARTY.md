@@ -1,5 +1,22 @@
 # Third-party build inputs
 
+## Colibri DeepSeek V4 GGUF integration
+
+- Source: `JustVugg/colibri`, tag `v2.1.0`, commit
+  `704a3f68184b78367a04cb5526e428dc2f90f05b`.
+- Source files: `c/deepseek_v4.c`, `c/deepseek_v4_internal.h`,
+  `c/st_gguf.h`, `c/tools/gguf_import.py` and `c/ggml_quants.h`.
+- License: Apache-2.0; attribution: Colibri contributors. Original headers,
+  licenses and notices remain in generated copies and packages.
+- The planner's tensor-name mapping follows `st_gguf.h`. Geometry validation,
+  metadata serialization and memory accounting live in Lumabri.
+  `tools/prepare_v4_gguf.py` changes disposable engine copies to retain Edge
+  weights in owned allocations, select native GGUF kernels, size expert slots
+  for their actual block representation, and release temporary metadata.
+  The upstream checkout and numerical kernels remain unchanged.
+- The test reference links the unmodified public monolithic engine API.
+  Fixtures use deterministic random tensors and the GGUF reference writer.
+
 ## Colibri Inkling GGUF integration
 
 - Source: `JustVugg/colibri`, tag `v2.1.0`, commit

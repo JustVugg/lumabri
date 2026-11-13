@@ -264,6 +264,35 @@ static inline int lmb_gguf_mistral_config(const LmbGguf *g,LmbGgufJson *j) {
     }
     lmb_gguf_json_printf(j,"}");return j->bad?-1:0;
 }
+static inline int lmb_gguf_v4_config(const LmbGguf *g,LmbGgufJson *j) {
+    LmbV4Gguf c;if(lmb_v4g_geometry(g,&c))return -1;
+    lmb_gguf_json_printf(j,"{\"model_type\":\"deepseek_v4\",\"architectures\":[\"DeepseekV4ForCausalLM\"],"
+        "\"expert_dtype\":\"fp4\",\"scoring_func\":\"sqrtsoftplus\",\"topk_method\":\"noaux_tc\","
+        "\"n_shared_experts\":1,\"num_key_value_heads\":1,\"num_nextn_predict_layers\":0,\"tie_word_embeddings\":false");
+    const char *keys[]={"num_hidden_layers","hidden_size","vocab_size","num_attention_heads","head_dim","q_lora_rank",
+        "qk_rope_head_dim","o_groups","o_lora_rank","sliding_window","index_n_heads","index_head_dim","index_topk",
+        "n_routed_experts","num_experts_per_tok","moe_intermediate_size","num_hash_layers","hc_mult","hc_sinkhorn_iters",
+        "max_position_embeddings"};
+    uint32_t values[]={c.layers,c.h,c.vocab,c.heads,c.hd,c.qr,c.rope,c.og,c.orr,c.window,c.ih,c.id,c.topk,
+        c.e,c.k,c.inter,c.hash,c.hc,c.iters,c.context};
+    for(unsigned i=0;i<sizeof values/sizeof *values;i++)lmb_gguf_json_printf(j,",\"%s\":%u",keys[i],values[i]);
+    lmb_gguf_json_printf(j,",\"rms_norm_eps\":%.17g,\"hc_eps\":%.17g,\"routed_scaling_factor\":%.17g,"
+        "\"swiglu_limit\":%.17g,\"rope_theta\":%.17g,\"compress_rope_theta\":%.17g,\"norm_topk_prob\":%s,"
+        "\"rope_scaling\":{\"type\":\"yarn\",\"factor\":%.17g,\"original_max_position_embeddings\":%u,"
+        "\"beta_fast\":%u,\"beta_slow\":%u},\"compress_ratios\":[",
+        c.eps,c.heps,c.scale,c.clamp,c.theta,c.ctheta,c.normalized?"true":"false",c.factor,c.orig,c.fast,c.slow);
+    for(uint32_t i=0;i<c.layers;i++)lmb_gguf_json_printf(j,"%s%u",i?",":"",c.ratios[i]);
+    lmb_gguf_json_printf(j,"],\"quantization_config\":{\"activation_scheme\":\"dynamic\",\"fmt\":\"e4m3\","
+        "\"scale_fmt\":\"ue8m0\",\"quant_method\":\"fp8\",\"weight_block_size\":[128,128]}");
+    const char *ids[]={"bos_token_id","eos_token_id"};
+    for(unsigned i=0;i<2;i++) {
+        char key[64];snprintf(key,sizeof key,"tokenizer.ggml.%s",ids[i]);uint64_t id=i;
+        const LmbGgufValue *v=lmb_gguf_get(g,key);
+        if((v && lmb_gguf_integer(v,&id)) || id>=c.vocab)return -1;
+        lmb_gguf_json_printf(j,",\"%s\":%llu",ids[i],(unsigned long long)id);
+    }
+    lmb_gguf_json_printf(j,"}");return j->bad?-1:0;
+}
 static inline int lmb_gguf_qwen38_config(const LmbGguf *g,LmbGgufJson *j) {
     LmbQ38Gguf c;if(lmb_q38g_geometry(g,&c))return -1;
     lmb_gguf_json_printf(j,"{\"model_type\":\"qwen4_exp_text\",\"architectures\":[\"Qwen4ExpForCausalLM\"]");
@@ -290,6 +319,7 @@ static inline int lmb_gguf_metadata(const LmbGguf *g,LmbGgufMetadata *out) {
         !strcmp(arch,"mistral-large4")?lmb_gguf_mistral_config(g,&out->config):
         !strcmp(arch,"kimi-k3")?lmb_gguf_kimi_config(g,&out->config):
         !strcmp(arch,"qwen4exp")?lmb_gguf_qwen38_config(g,&out->config):
+        !strcmp(arch,"deepseek4")?lmb_gguf_v4_config(g,&out->config):
         !strcmp(arch,"inkling")?lmb_gguf_inkling_config(g,&out->config):
         !strcmp(arch,"glm5-next")?lmb_gguf_glm53_config(g,&out->config):
         !strcmp(arch,"glm-dsa")?lmb_gguf_glm_config(g,&out->config):lmb_gguf_qwen_config(g,&out->config)))goto fail;

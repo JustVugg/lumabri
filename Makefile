@@ -945,7 +945,7 @@ SEGMENT_COMMON = segment_colibri.h src/runtime/lumabri_thread_capacity.h src/run
 		$(PROTO_DEPS) $(SIGN_DEPS) lumabri_sha.h $(SECURE_DEPS)
 
 HYBRID_PATCH_INPUTS = tools/prepare_gguf_adapters.py tools/prepare_qwen_variants.py tools/prepare_qwen_gguf.py engine_patches/qwen_gguf_source.h tools/prepare_resident_adapters.py engine_patches/make_patches.py \
-	tools/prepare_mistral_segments.py tools/prepare_glm53_gguf.py tools/prepare_kimi_gguf.py tools/prepare_inkling_gguf.py tools/prepare_qwen38_gguf.py engine_patches/mistral_boundary.h \
+	tools/prepare_mistral_segments.py tools/prepare_glm53_gguf.py tools/prepare_kimi_gguf.py tools/prepare_inkling_gguf.py tools/prepare_qwen38_gguf.py tools/prepare_v4_gguf.py engine_patches/mistral_boundary.h \
 	engine_patches/qwen38_vision_edge.h src/runtime/lumabri_vision.h src/runtime/lumabri_image.h \
 	src/runtime/lumabri_engine_memory_override.h src/runtime/lumabri_engine_memory.h \
 	lumabri_home_hybrid.h src/runtime/lumabri_hybrid_policy.h src/runtime/lumabri_q8_reference.h \
@@ -1483,3 +1483,16 @@ build/qwen38-mixed-oracle: tests/c/qwen_mixed_oracle.c tests/c/edge_segment_gree
 .PHONY: test-qwen38-gguf
 test-qwen38-gguf: build/test_gguf_inventory build/qwen38-upstream-oracle build/gguf-segment-oracle build/qwen38-state-oracle build/qwen38-mixed-oracle
 	$(PYTHON) tests/integration/qwen38_native_gguf_test.py --engine $(ENGINE) $(QWEN38_GGUF_TEST_OPTIONS)
+
+build/v4-upstream-oracle: tests/c/v4_upstream_oracle.c $(DS_OBJS) $(DS_SIBLING_OBJS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DS_UNIT_CFLAGS) $< $(DS_OBJS) $(DS_SIBLING_OBJS) -o $@ -lm
+
+build/v4-state-oracle: tests/c/mistral_state_oracle.c $(COLIBRI_SEGMENT_LIB) build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Wno-unused-function $(OMP_FLAGS) -pthread -I$(ENGINE) -DLMB_STATE_FAMILY='"deepseek_v4"' $< $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
+
+build/v4-mixed-oracle: tests/c/qwen_mixed_oracle.c tests/c/edge_segment_greedy.c $(COLIBRI_SEGMENT_LIB) build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(OMP_FLAGS) -pthread -I$(ENGINE) $(GGUF_READ_GUARD) -DLMB_MIXED_FAMILY='"deepseek_v4"' $< $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
+
+.PHONY: test-v4-gguf
+test-v4-gguf: build/test_gguf_inventory build/v4-upstream-oracle build/gguf-segment-oracle build/v4-state-oracle build/v4-mixed-oracle
+	$(PYTHON) tests/integration/v4_native_gguf_test.py --engine $(ENGINE) $(V4_GGUF_TEST_OPTIONS)
