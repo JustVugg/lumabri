@@ -536,7 +536,9 @@ jobs:
     # Real multi-model/recovery and installed-layout gates take 40–45 minutes
     # on current runners. Also build a clean baseline package for the full
     # previous -> candidate -> previous service gate; retain bounded margin.
-    timeout-minutes: 75
+    # With every native-GGUF family in this job a slow runner needs more than
+    # 75 minutes; no gate is removed.
+    timeout-minutes: 120
     steps:
       - name: Checkout Lumabri
         uses: actions/checkout@v4
@@ -754,6 +756,35 @@ jobs:
         run: |
           sudo prlimit --pid $$ --memlock=134217728:134217728
           make test-glm53-gguf ENGINE=../colibri/c GLM53_GGUF_TEST_OPTIONS=--household
+      - name: Kimi K3 GGUF recurrent state and household chat
+        working-directory: lumabri
+        run: |
+          sudo prlimit --pid $$ --memlock=134217728:134217728
+          make test-kimi-gguf ENGINE=../colibri/c KIMI_GGUF_TEST_OPTIONS=--household
+      - name: Inkling GGUF attention state and household chat
+        working-directory: lumabri
+        run: |
+          sudo prlimit --pid $$ --memlock=134217728:134217728
+          make test-inkling-gguf ENGINE=../colibri/c INKLING_GGUF_TEST_OPTIONS=--household
+      - name: Qwen3.8 GGUF PLE ownership and household chat
+        # Native Qwen3.8 has its own GGUF loader and recurrent/PLE state.
+        # Keep this gate separate from qwen36 converted checkpoints.
+        working-directory: lumabri
+        run: |
+          sudo prlimit --pid $$ --memlock=134217728:134217728
+          make test-qwen38-gguf ENGINE=../colibri/c QWEN38_GGUF_TEST_OPTIONS=--household
+      - name: DeepSeek V4 GGUF compressed state and household chat
+        working-directory: lumabri
+        run: |
+          sudo prlimit --pid $$ --memlock=134217728:134217728
+          make test-v4-gguf ENGINE=../colibri/c V4_GGUF_TEST_OPTIONS=--household
+      - name: DeepSeek V4.1 GGUF Engram, shared state and household chat
+        working-directory: lumabri
+        run: |
+          sudo prlimit --pid $$ --memlock=134217728:134217728
+          make test-v41-gguf ENGINE=../colibri/c V41_GGUF_TEST_OPTIONS=--household
+          cc -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -pthread -I. -Ibuild -I../colibri/c tests/c/test_v41_mixed_gguf.c ../colibri/c/segment_runtime.c ../colibri/c/edge_runtime.c -o build/test_v41_mixed_gguf_san -lm
+          ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 GQ_EXACT=1 ./build/test_v41_mixed_gguf_san build/v41-native/float build/v41-native/Q8_0 build/v41-native/mixed-keys
       - name: Qwen hybrid memory contract — real int8 and grouped int4
         working-directory: lumabri
         run: |
@@ -789,7 +820,9 @@ jobs:
           python3 ../colibri/c/tools/make_edge_tiny_tokenizer.py build/kimi-contract/kimi-tiny --vocab-size 320
           python3 tests/integration/planner_tensor_contract_test.py --family kimi --model build/kimi-contract/kimi-tiny
           K3_BITS=32 K3_MLA_BITS=32 K3_HEAD_BITS=32 K3_IDOT=0 OMP_NUM_THREADS=2 build/qwen-edge-oracle kimi build/kimi-contract/kimi-tiny ../colibri/c/kimi_k3_tiny/ref.json 8
-          python3 tests/integration/home_flow_test.py --models-dir build/kimi-contract --expect-no-fit
+          # The resident path no longer carries the 3.7 GB streaming floor: the
+          # reduced model needs 0.36 GB, so refuse with a donor smaller than that.
+          python3 tests/integration/home_flow_test.py --models-dir build/kimi-contract --expect-no-fit --donor-ram-gb 0.2
           K3_BITS=32 K3_MLA_BITS=32 K3_HEAD_BITS=32 K3_IDOT=0 python3 tests/integration/home_flow_test.py --models-dir build/kimi-contract --donor-ram-gb 4.5
           python3 tests/integration/home_flow_test.py --models-dir build/kimi-contract --donor-ram-gb 4.5 --kill-donor
           SPLIT_MODEL_DIR=build/kimi-contract/kimi-tiny SPLIT_ENGINE=kimi SPLIT_MODEL=kimi-mxfp4 SPLIT_ROUNDS=1 SPLIT_THREADS=2 SPLIT_TOKENS=8 PORT=9740 K3_BITS=32 K3_MLA_BITS=32 K3_HEAD_BITS=32 K3_IDOT=0 bash tests/integration/segment_split_test.sh
@@ -1237,7 +1270,7 @@ jobs:
           path: lumabri/build/kimi-home-models/kimi-tiny
       - name: Native Kimi insufficient-memory admission
         working-directory: lumabri
-        run: python3 tests/integration/home_flow_test.py --models-dir build/kimi-home-models --expect-no-fit
+        run: python3 tests/integration/home_flow_test.py --models-dir build/kimi-home-models --expect-no-fit --donor-ram-gb 0.2
       # The standard ARM runner cannot provide two native Kimi 3.7 GB floors.
       # Exercise refusal there; do not override the engine's RAM safeguard.
       - name: Native Kimi MXFP4 execution on sufficient-memory runner

@@ -15,7 +15,9 @@ them.
 
 The integrated GGUF CPU paths cover OLMoE, Qwen3 dense/MoE, Qwen3.5/3.6
 dense/MoE, Flint, Muse Spark, LFM3 text, GLM-5.2/5.3 (`glm-dsa`),
-GLM5-Next text (`glm5-next`) and Mistral Large 4 text. See
+GLM5-Next text (`glm5-next`), Kimi K3 text (`kimi-k3`), Inkling text,
+Qwen3.8 text (`qwen4exp`), DeepSeek V4 (`deepseek4`), DeepSeek V4.1
+(`deepseek41`) and Mistral Large 4 text. See
 [Qwen architecture contracts](QWEN_ARCHITECTURES.md) and [Mistral](MISTRAL.md).
 The inspector checks the
 actual tensor names, dimensions, native quantization block geometry and
@@ -45,6 +47,71 @@ engine. Vision and NextN generation are not enabled by this text contract.
 `make test-glm53-gguf ENGINE="$COLIBRI_SOURCE" GLM53_GGUF_TEST_OPTIONS=--household`
 checks monolithic/split tokens, independent conversations, snapshots, multiple
 resident engines and the normal donor approval and chat flow.
+
+Kimi K3 keeps attention-residual boundaries, KDA recurrence/convolution and
+MLA history on the assigned segments. Its GGUF contract accepts native, split
+and packed containers with block-quantized routed experts. Float dense weights
+follow the engine's dense quantization settings; embeddings and residual-score
+weights are prepared in engine-owned RAM before chat. The inspector accounts
+for padded expert slots and a kernel-workspace reserve derived from the model
+geometry, without the standalone streaming loader's page-cache reserve.
+Floating routed-expert matrices, tied heads and DSA
+extensions absent from this GGUF layout are rejected before admission.
+`make test-kimi-gguf ENGINE="$COLIBRI_SOURCE" KIMI_GGUF_TEST_OPTIONS=--household`
+checks every layer cut, session isolation, snapshot continuation and household
+chat with the source offline. These reduced-checkpoint checks do not establish
+performance for a full-size Kimi checkpoint.
+
+Inkling's text path validates the distinct local/global KV heads, sliding
+window, relative-position bank, convolution history, shared-expert routing
+and unpadded output vocabulary. Native, split and `expert-packed-v1` GGUFs
+keep the engine's block layouts, with resident space for its largest expert
+slots, scales and row-interleaving overhead. Each conversation owns its KV
+and convolution state. Embeddings and output weights are loaded before chat;
+their quantized buffers are released when the allocation closes.
+`make test-inkling-gguf ENGINE="$COLIBRI_SOURCE" INKLING_GGUF_TEST_OPTIONS=--household`
+checks every cut against monolithic execution, snapshots across the sliding
+window, interleaved conversations and models, and the normal approval/chat
+flow with the source offline. This contract requires at least one shared
+expert and does not enable audio or dense-quantization sidecars.
+
+Qwen3.8 accepts native and split `qwen4exp` GGUFs with mixed native matrix
+types. The inspector validates hyper-connections, QSA/indexer geometry,
+DeltaNet state and the PLE hash ranges. The segment that owns the PLE layer
+loads its complete table into engine-owned RAM; the same ownership applies
+to Safetensors PLE tables. Metadata and GGUF arithmetic flags belong to each
+model, so opening a second model cannot change the first model's computation.
+This text contract uses one PLE layer and one indexer KV head, and does not
+enable NextN, vision projectors or packed-expert GGUF containers.
+`make test-qwen38-gguf ENGINE="$COLIBRI_SOURCE" QWEN38_GGUF_TEST_OPTIONS=--household`
+checks all layer cuts against the pinned monolithic engine, mixed formats,
+snapshot continuation, model unload and source-offline household chat.
+
+DeepSeek V4 accepts native, split and `expert-packed-v1` text GGUFs. The
+inspector checks hyper-connections, compressed attention, the indexer and
+hash routing. Expert slots are budgeted at the largest record size across
+the checkpoint, matching the pinned engine. Edge owns complete embedding
+and output tables; no head or embedding row is fetched during inference.
+The resident CPU contract requires block-quantized routed experts. Router
+and index-head projections must be floating tensors because the current
+upstream kernels consume BF16 values there. These constraints are checked
+before admission. NextN generation is not enabled by this text contract.
+`make test-v4-gguf ENGINE="$COLIBRI_SOURCE" V4_GGUF_TEST_OPTIONS=--household`
+checks all cuts against unmodified monolithic execution, mixed block types,
+compressed-state snapshots, model unload and source-offline household chat.
+
+DeepSeek V4.1 preserves its separate cross-layer state contract. Native, split
+and packed GGUFs are inspected before admission. Engram metadata is generated
+in C; integer hash multipliers keep all 64 bits. Both inline FP8 tables and
+shared block-quantized tables are supported. Only the assigned layers' Engram
+row ranges are prepared in RAM. Edited hash sidecars are rejected if they no
+longer describe the GGUF metadata. Embedding and output matrices retain the
+engine's native types. This text path uses single-row RUN and history replay;
+it does not advertise snapshots, GPU, vision or DSpark.
+`make test-v41-gguf ENGINE="$COLIBRI_SOURCE" V41_GGUF_TEST_OPTIONS=--household`
+checks every cut of a six-layer checkpoint, two separate conversations and
+48 exact logit vectors per conversation against unmodified Colibri, followed
+by the normal donor approval and source-offline chat flow.
 
 `make test-glm-gguf ENGINE="$COLIBRI_SOURCE" GLM_GGUF_TEST_OPTIONS=--household`
 compares every layer cut against the pinned monolithic engine, including

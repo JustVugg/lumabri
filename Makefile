@@ -986,7 +986,7 @@ SEGMENT_COMMON = segment_colibri.h src/runtime/lumabri_thread_capacity.h src/run
 		$(PROTO_DEPS) $(SIGN_DEPS) lumabri_sha.h $(SECURE_DEPS)
 
 HYBRID_PATCH_INPUTS = tools/prepare_gguf_adapters.py tools/prepare_qwen_variants.py tools/prepare_qwen_gguf.py engine_patches/qwen_gguf_source.h tools/prepare_resident_adapters.py engine_patches/make_patches.py \
-	tools/prepare_mistral_segments.py tools/prepare_glm53_gguf.py engine_patches/mistral_boundary.h \
+	tools/prepare_mistral_segments.py tools/prepare_glm53_gguf.py tools/prepare_kimi_gguf.py tools/prepare_inkling_gguf.py tools/prepare_qwen38_gguf.py tools/prepare_v4_gguf.py engine_patches/mistral_boundary.h \
 	engine_patches/qwen38_vision_edge.h src/runtime/lumabri_vision.h src/runtime/lumabri_image.h \
 	src/runtime/lumabri_engine_memory_override.h src/runtime/lumabri_engine_memory.h \
 	lumabri_home_hybrid.h src/runtime/lumabri_hybrid_policy.h src/runtime/lumabri_q8_reference.h \
@@ -1095,6 +1095,17 @@ segment-direct: segment_node segment_chat
 # creation needs the upstream test dependencies (torch/safetensors/numpy/sympy).
 build/v41_range_core.c: tools/prepare_v41_range.py $(ENGINE)/deepseek_v41.c
 	python3 tools/prepare_v41_range.py --source $(ENGINE)/deepseek_v41.c --output $@
+
+build/v41_st.h: tools/prepare_v41_range.py $(ENGINE)/st.h
+	python3 tools/prepare_v41_range.py --artifact st --source $(ENGINE)/st.h --output $@
+
+build/v41_st_gguf.h: tools/prepare_v41_range.py $(ENGINE)/st_gguf.h
+	python3 tools/prepare_v41_range.py --artifact st_gguf --source $(ENGINE)/st_gguf.h --output $@
+
+build/v41_gguf.h: tools/prepare_v41_range.py tools/prepare_gguf_adapters.py $(ENGINE)/gguf.h
+	python3 tools/prepare_v41_range.py --artifact gguf --source $(ENGINE)/gguf.h --output $@
+
+build/v41_adapter.o build/test_v41_range build/test_v41_transport build/test_v41_abi build/test_v41_mixed_gguf: build/v41_st.h build/v41_st_gguf.h build/v41_gguf.h
 
 build/test_v41_range: tests/c/test_v41_range.c engine_patches/v41_boundary.h engine_patches/v41_lifecycle.h build/v41_range_core.c build/segment-sources build/segment-options
 	$(CC) $(CPPFLAGS) -O2 $(OMP_FLAGS) -pthread -I. -Ibuild -I$(ENGINE) tests/c/test_v41_range.c -o $@ -lm $(OMP_LIBS)
@@ -1390,7 +1401,7 @@ CAPABILITY_DEPS = src/planner/lumabri_capabilities.h src/planner/lumabri_colibri
 lumabri segment_budget_probe segment_node segment_chat test_model_family test_planner test_planner_io test_chat_ui test_cluster test_memory_budget test_calibration: $(CAPABILITY_DEPS)
 
 # Read header metadata through the same positioned I/O used by the planner.
-GGUF_METADATA_DEPS = src/planner/lumabri_gguf_metadata.h src/planner/lumabri_gguf_tokenizers_data.h src/planner/lumabri_gguf_import.h
+GGUF_METADATA_DEPS = src/planner/lumabri_gguf_json.h src/planner/lumabri_gguf_metadata.h src/planner/lumabri_gguf_tokenizers_data.h src/planner/lumabri_gguf_import.h
 lumabri test_chat_ui: $(GGUF_METADATA_DEPS)
 build/test_gguf_inventory: tests/c/test_gguf_inventory.c lumabri_planner.h $(wildcard planner_adapters/*.h) $(CAPABILITY_DEPS) $(GGUF_METADATA_DEPS)
 	@mkdir -p build
@@ -1486,3 +1497,65 @@ build/glm53-mixed-oracle: tests/c/qwen_mixed_oracle.c tests/c/edge_segment_greed
 
 test-glm53-gguf: build/test_gguf_inventory build/glm53-upstream-oracle build/gguf-segment-oracle build/glm53-state-oracle build/glm53-mixed-oracle
 	$(PYTHON) tests/integration/glm53_native_gguf_test.py --engine $(ENGINE) $(GLM53_GGUF_TEST_OPTIONS)
+
+build/kimi-upstream-oracle: tests/c/kimi_upstream_oracle.c build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(OMP_FLAGS) -pthread -I$(ENGINE) $< -o $@ -lm $(OMP_LIBS)
+
+build/kimi-state-oracle: tests/c/mistral_state_oracle.c $(COLIBRI_SEGMENT_LIB) build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Wno-unused-function $(OMP_FLAGS) -pthread -I$(ENGINE) -DLMB_STATE_FAMILY='"kimi"' $< $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
+
+build/kimi-mixed-oracle: tests/c/qwen_mixed_oracle.c tests/c/edge_segment_greedy.c $(COLIBRI_SEGMENT_LIB) build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(OMP_FLAGS) -pthread -I$(ENGINE) $(GGUF_READ_GUARD) -DLMB_MIXED_FAMILY='"kimi"' $< $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
+
+.PHONY: test-kimi-gguf
+test-kimi-gguf: build/test_gguf_inventory build/kimi-upstream-oracle build/gguf-segment-oracle build/kimi-state-oracle build/kimi-mixed-oracle
+	$(PYTHON) tests/integration/kimi_native_gguf_test.py --engine $(ENGINE) $(KIMI_GGUF_TEST_OPTIONS)
+
+build/inkling-upstream-oracle: tests/c/inkling_upstream_oracle.c build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(OMP_FLAGS) -pthread -I$(ENGINE) $< -o $@ -lm $(OMP_LIBS)
+
+build/inkling-state-oracle: tests/c/mistral_state_oracle.c $(COLIBRI_SEGMENT_LIB) build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Wno-unused-function $(OMP_FLAGS) -pthread -I$(ENGINE) -DLMB_STATE_FAMILY='"inkling"' $< $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
+
+build/inkling-mixed-oracle: tests/c/qwen_mixed_oracle.c tests/c/edge_segment_greedy.c $(COLIBRI_SEGMENT_LIB) build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(OMP_FLAGS) -pthread -I$(ENGINE) $(GGUF_READ_GUARD) -DLMB_MIXED_FAMILY='"inkling"' $< $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
+
+.PHONY: test-inkling-gguf
+test-inkling-gguf: build/test_gguf_inventory build/inkling-upstream-oracle build/gguf-segment-oracle build/inkling-state-oracle build/inkling-mixed-oracle
+	$(PYTHON) tests/integration/inkling_native_gguf_test.py --engine $(ENGINE) $(INKLING_GGUF_TEST_OPTIONS)
+build/qwen38-upstream-oracle: tests/c/qwen38_upstream_oracle.c build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(OMP_FLAGS) -pthread -I$(ENGINE) $< -o $@ -lm $(OMP_LIBS)
+
+build/qwen38-state-oracle: tests/c/mistral_state_oracle.c $(COLIBRI_SEGMENT_LIB) build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Wno-unused-function $(OMP_FLAGS) -pthread -I$(ENGINE) -DLMB_STATE_FAMILY='"qwen38"' $< $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
+
+build/qwen38-mixed-oracle: tests/c/qwen_mixed_oracle.c tests/c/edge_segment_greedy.c $(COLIBRI_SEGMENT_LIB) build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(OMP_FLAGS) -pthread -I$(ENGINE) $(GGUF_READ_GUARD) -DLMB_MIXED_FAMILY='"qwen38"' $< $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
+
+.PHONY: test-qwen38-gguf
+test-qwen38-gguf: build/test_gguf_inventory build/qwen38-upstream-oracle build/gguf-segment-oracle build/qwen38-state-oracle build/qwen38-mixed-oracle
+	$(PYTHON) tests/integration/qwen38_native_gguf_test.py --engine $(ENGINE) $(QWEN38_GGUF_TEST_OPTIONS)
+
+build/v4-upstream-oracle: tests/c/v4_upstream_oracle.c $(DS_OBJS) $(DS_SIBLING_OBJS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DS_UNIT_CFLAGS) $< $(DS_OBJS) $(DS_SIBLING_OBJS) -o $@ -lm
+
+build/v4-state-oracle: tests/c/mistral_state_oracle.c $(COLIBRI_SEGMENT_LIB) build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Wno-unused-function $(OMP_FLAGS) -pthread -I$(ENGINE) -DLMB_STATE_FAMILY='"deepseek_v4"' $< $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
+
+build/v4-mixed-oracle: tests/c/qwen_mixed_oracle.c tests/c/edge_segment_greedy.c $(COLIBRI_SEGMENT_LIB) build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(OMP_FLAGS) -pthread -I$(ENGINE) $(GGUF_READ_GUARD) -DLMB_MIXED_FAMILY='"deepseek_v4"' $< $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
+
+.PHONY: test-v4-gguf
+test-v4-gguf: build/test_gguf_inventory build/v4-upstream-oracle build/gguf-segment-oracle build/v4-state-oracle build/v4-mixed-oracle
+	$(PYTHON) tests/integration/v4_native_gguf_test.py --engine $(ENGINE) $(V4_GGUF_TEST_OPTIONS)
+
+
+build/v41-gguf-upstream-oracle: tests/c/v41_gguf_upstream_oracle.c build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) -O2 $(OMP_FLAGS) -pthread -I$(ENGINE) $< -o $@ -lm $(OMP_LIBS)
+
+.PHONY: test-v41-gguf
+build/test_v41_mixed_gguf: tests/c/test_v41_mixed_gguf.c tests/c/test_v41_abi.c engine_patches/v41_adapter.h engine_patches/v41_boundary.h engine_patches/v41_lifecycle.h $(wildcard planner_adapters/*.h) src/runtime/lumabri_v41_contract.h build/v41_range_core.c build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) -O2 $(OMP_FLAGS) -pthread -I. -Ibuild -I$(ENGINE) tests/c/test_v41_mixed_gguf.c $(ENGINE)/segment_runtime.c $(ENGINE)/edge_runtime.c -o $@ -lm $(OMP_LIBS)
+
+test-v41-gguf: build/test_gguf_inventory build/v41-gguf-upstream-oracle build/test_v41_abi build/test_v41_mixed_gguf
+	$(PYTHON) tests/integration/v41_native_gguf_test.py --engine $(ENGINE) $(V41_GGUF_TEST_OPTIONS)

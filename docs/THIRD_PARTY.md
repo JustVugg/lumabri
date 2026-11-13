@@ -1,5 +1,81 @@
 # Third-party build inputs
 
+## Colibri DeepSeek V4.1 GGUF integration
+
+- Source: `JustVugg/colibri`, tag `v2.1.0`, commit
+  `704a3f68184b78367a04cb5526e428dc2f90f05b`.
+- Source files: `c/deepseek_v41.c`, `c/st.h`, `c/st_gguf.h`, `c/gguf.h`,
+  `c/tools/gguf_import.py` and `c/ggml_quants.h`.
+- License: Apache-2.0; attribution: Colibri contributors. Original headers,
+  license and notices are retained in build copies and packages.
+- Lumabri adds C metadata serialization and strict GGUF/Engram inventory.
+  Tensor-name mappings and Engram metadata follow the pinned loader/importer.
+  Range hooks retain only assigned Engram rows; Edge reuses the upstream
+  row decoder. Temporary loader metadata is released after preparation;
+  the shared descriptor-based header reader fetches bounded source blocks.
+  The upstream checkout and numerical kernels are unchanged.
+- The independent test reference compiles the unmodified engine; random
+  fixtures use GGUF's reference writer and quantizers.
+
+
+## Colibri DeepSeek V4 GGUF integration
+
+- Source: `JustVugg/colibri`, tag `v2.1.0`, commit
+  `704a3f68184b78367a04cb5526e428dc2f90f05b`.
+- Source files: `c/deepseek_v4.c`, `c/deepseek_v4_internal.h`,
+  `c/st_gguf.h`, `c/tools/gguf_import.py` and `c/ggml_quants.h`.
+- License: Apache-2.0; attribution: Colibri contributors. Original headers,
+  licenses and notices remain in generated copies and packages.
+- The planner's tensor-name mapping follows `st_gguf.h`. Geometry validation,
+  metadata serialization and memory accounting live in Lumabri.
+  `tools/prepare_v4_gguf.py` changes disposable engine copies to retain Edge
+  weights in owned allocations, select native GGUF kernels, size expert slots
+  for their actual block representation, and release temporary metadata.
+  The upstream checkout and numerical kernels remain unchanged.
+- The test reference links the unmodified public monolithic engine API.
+  Fixtures use deterministic random tensors and the GGUF reference writer.
+
+## Colibri Inkling GGUF integration
+
+- Source: `JustVugg/colibri`, tag `v2.1.0`, commit
+  `704a3f68184b78367a04cb5526e428dc2f90f05b`.
+- Source files: `c/inkling.c`, `c/st_gguf.h`, `c/tools/gguf_import.py`,
+  `c/tools/make_flint_tiny.py`, `c/ggml_quants.h` and
+  `c/tests/test_segment_adapters_real.c`.
+- License: Apache-2.0; attribution: Colibri contributors. Original license,
+  headers and notices remain in generated copies and packages.
+- Lumabri supplies geometry validation, C metadata and resident accounting.
+  Generated-copy hooks own and release native block buffers, report their
+  byte counts, serialize temporary source metadata during opens, and require
+  all approved expert slots before resident execution. The generated
+  `st_gguf.h` also releases the wrapper's parsed JSON after copying its paths.
+  Kernel arithmetic is
+  unchanged. The upstream checkout is read-only.
+- Tests generate deterministic tensors for the upstream architecture,
+  quantize through GGUF's reference writer and compare with the unmodified
+  monolithic engine. ABI state checks reuse upstream snapshot helpers.
+
+## Colibri Kimi K3 GGUF integration
+
+- Source: `JustVugg/colibri`, tag `v2.1.0`, commit
+  `704a3f68184b78367a04cb5526e428dc2f90f05b`.
+- Source files: `c/kimi_k3.c`, `c/st_gguf.h`, `c/tools/gguf_import.py`,
+  `c/tools/make_kimi_k3_tiny.py`, `c/tools/make_flint_tiny.py` and
+  `c/tests/test_segment_adapters_real.c`.
+- License: Apache-2.0; attribution: Colibri contributors. Original source
+  headers, license and notices remain in generated copies and packages.
+- Lumabri adds C metadata, geometry validation and memory accounting. Hooks
+  in disposable build copies connect the native residual-score head, retain
+  embeddings in engine-owned RAM, count native quantized head bytes, release
+  expert metadata and telemetry on close, and serialize temporary source
+  metadata during adapter opens. Resident initialization reserves workspace
+  by geometry instead of page cache for streaming, retaining the existing
+  memory admission checks. Numeric kernels are unchanged.
+- Tests invoke the upstream tiny tensor generator and quantizer, encode its
+  KDA/MLA/attention-residual tensors into deterministic GGUF checkpoints,
+  and compare against unmodified monolithic execution. State checks reuse
+  upstream ABI snapshot helpers. The upstream checkout is never modified.
+
 ## Colibri GLM5-Next GGUF integration
 
 - Source: `JustVugg/colibri`, tag `v2.1.0`, commit
@@ -162,10 +238,9 @@
 ## libcurl (system library, model download helper)
 
 - Not vendored. `lumabri-fetch` links the libcurl installed on the system
-  (7.85 or newer), the same library the optional `lumabri-kube` controller
+  (7.81 or newer), the same library the optional `lumabri-kube` controller
   already uses, and through it the system's TLS library and certificate
-  store. License: curl license (MIT-like); Copyright Daniel Stenberg and
-  contributors.
+  store. License: curl license (MIT-like); Copyright the curl contributors.
 - Scope: HTTPS GET requests for model files that a person asked to download
   (see `docs/MODEL_DOWNLOAD.md`). Certificate and host verification are always
   on. `lumabri`, `tracker`, `segment_node` and the other household programs
@@ -178,3 +253,28 @@
   (Apache-2.0, Colibri contributors); no code was copied. The download
   catalogue's entries and field names mirror `c/setup_catalog.py` of the same
   project.
+- Native/split GGUF support reuses `c/st.h`, `c/st_gguf.h` and the upstream
+  matrix/row decoders. Generated headers release the temporary GGUF JSON
+  tree. Resident Engram preparation copies only the assigned table row span;
+  both inline FP8 rows and quantized global tables retain upstream arithmetic.
+  The planner validates exact hash metadata and the C importer emits the
+  runtime sidecar. GGUF tests compare every cut against an unmodified engine.
+
+## Colibri Qwen3.8 GGUF resident integration
+
+- Source: `JustVugg/colibri`, tag `v2.1.0`, commit
+  `704a3f68184b78367a04cb5526e428dc2f90f05b`.
+- Upstream files: `c/qwen38.c`, `c/qwen38_core.h`, `c/gguf.h`,
+  `c/tools/gguf_import.py` and the public Edge/Segment ABI.
+- License: Apache-2.0. Preserve the upstream copyright, license and notices
+  in generated copies and distributions. Attribution: Colibri contributors.
+- `tools/prepare_qwen38_gguf.py` modifies disposable build copies: GGUF
+  contexts and numeric-mode flags move into the model; Edge and Segment
+  open native sources and price expert slots; complete GGUF/Safetensors PLE
+  tables become owned resident buffers; engine teardown releases tables,
+  hit counters and metadata. Quantized preparation temporaries are freed.
+  Numerical kernels remain Colibri's. The upstream checkout is unchanged.
+- Lumabri's planner validates metadata, tensors, hash ranges and runtime
+  representation. The C importer emits runtime metadata without Python.
+  Test fixtures use the installed `gguf` writer/quantizers and compare
+  through the public ABI with the unmodified pinned monolithic forward pass.

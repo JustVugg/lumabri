@@ -7,7 +7,7 @@ typedef struct {
     uint32_t h,layers,heads,hd,rope,q,o,groups,inter,experts,k,vocab,ctx;
     uint32_t hc,window,ih,id,topk,blocks,block_size,saved;
     uint32_t en,eh,ed,ng,pad;
-    uint64_t ratio[64],el[8],erows[8];
+    uint64_t ratio[64],el[8],erows[8],ebegin[8];
     uint8_t kv[64],ix[64];
     uint64_t seen[64],edge,metadata,largest;
     uint8_t *expert_seen;
@@ -91,10 +91,12 @@ static int lmb_v41_sidecar(const char *root,const char *cfg,LmbV41Inventory *v) 
     p=lmb_json_member(j,"offsets");if(!p||lmb_v41_punct(&p,'['))goto done;
     unsigned cols=(v->ng-1)*v->eh;
     for(unsigned t=0;t<count;t++) {
+        v->ebegin[t]=UINT64_MAX;
         if((t && lmb_v41_punct(&p,','))||lmb_v41_punct(&p,'['))goto done;
         for(unsigned i=0;i<cols;i++) {
             uint64_t *x=&offsets[t][i];
             if((i && lmb_v41_punct(&p,','))||lmb_v41_uint(&p,x)||*x>INT64_MAX-primes[t][i])goto done;
+            if(*x<v->ebegin[t])v->ebegin[t]=*x;
             uint64_t end=*x+primes[t][i];if(end>v->erows[t])v->erows[t]=end;
         }
         if(lmb_v41_punct(&p,']'))goto done;
@@ -192,7 +194,8 @@ static int lmb_v41_tensor(const LmbPlanTensor *t,void *opaque) {
     return m->memory[l].resident_bytes==UINT64_MAX?-1:0;
 }
 
-static int lmb_v41_memory(const char *root,const char *cfg,LmbModelShape *m) {
+#include "deepseek_v41_gguf.h"
+static int lmb_v41_memory_impl(const char *root,const char *cfg,LmbModelShape *m,const LmbGguf *gg) {
     LmbV41Inventory v={.m=m};uint32_t shared,source,iters;
 #define N(a,b,d,lo,hi) if(lmb_v41_u32(cfg,a,b,lo,hi,&d))return -1
     N("dim","hidden_size",v.h,32,65536);N("n_layers","num_hidden_layers",v.layers,1,64);
@@ -232,15 +235,20 @@ static int lmb_v41_memory(const char *root,const char *cfg,LmbModelShape *m) {
     if(lmb_v41_sidecar(root,cfg,&v))return -1;
     m->layers=v.layers;m->hidden=v.h;m->heads=v.heads;m->kv_heads=v.heads;m->vocab=v.vocab;
     m->experts=v.experts;m->experts_per_tok=v.k;m->moe_intermediate=v.inter;m->bits_per_weight=4;
+    int rc=0;
+    if(gg)rc=lmb_v41g_tensors(gg,&v);
+    else {
     v.expert_seen=calloc((size_t)v.layers*v.experts,1);if(!v.expert_seen)return -1;
-    int rc=lmb_plan_tensors(root,lmb_v41_tensor,&v);
+    rc=lmb_plan_tensors(root,lmb_v41_tensor,&v);
     if(v.edge!=7)rc=-1;
     for(unsigned l=0;l<v.layers && !rc;l++) {
         LmbV41Spec s[64];unsigned count=lmb_v41_specs(&v,l,s);
         if(v.seen[l]!=(UINT64_C(1)<<count)-1)rc=-1;
         for(unsigned e=0;e<v.experts;e++)if(v.expert_seen[l*v.experts+e]!=63)rc=-1;
     }
-    free(v.expert_seen);if(rc)return -1;
+    free(v.expert_seen);
+    }
+    if(rc)return -1;
     /* Both the prepared template and each conversation own state. Count two
      * copies per admitted session (conservative for >1), including ALL foreign
      * compressed KV owners. Weights, rope and token map are shared read-only. */
@@ -268,5 +276,17 @@ static int lmb_v41_memory(const char *root,const char *cfg,LmbModelShape *m) {
     m->edge_scratch_fixed_bytes=(UINT64_C(16)<<20)+(uint64_t)v.vocab*8+(uint64_t)v.h*16+width*16;
     m->max_context=v.ctx;m->memory_contract=1;m->disk_streaming=0;
     return m->segment_fixed_bytes==UINT64_MAX||m->scratch_fixed_bytes==UINT64_MAX||m->edge_resident_bytes==UINT64_MAX?-1:0;
+}
+static int lmb_v41_memory(const char *root,const char *cfg,LmbModelShape *m) {
+    LmbGguf gg={0};int native=lmb_gguf_model(root,&gg);
+    if(native<0)return -1;
+    if(native)return lmb_v41_memory_impl(root,cfg,m,NULL);
+    LmbGgufJson expected={0},actual={0},side={0},unused={0};int rc=-1;
+    if(lmb_v41g_config(&gg,NULL,&expected,&side) || lmb_v41g_config(&gg,cfg,&actual,&unused) ||
+       expected.length!=actual.length || memcmp(expected.data,actual.data,expected.length) ||
+       lmb_v41g_sidecar_matches(root,&side))goto done;
+    rc=lmb_v41_memory_impl(root,expected.data,m,&gg);
+done:
+    free(expected.data);free(actual.data);free(side.data);free(unused.data);lmb_gguf_free(&gg);return rc;
 }
 #endif

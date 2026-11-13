@@ -139,11 +139,14 @@ int main(int argc, char **argv) {
     REQUIRE(!coli_qwen36_segment_adapter_register() && !coli_qwen36_edge_adapter_register());
     REQUIRE(!coli_glm_segment_adapter_register() && !coli_glm_edge_adapter_register());
     REQUIRE(!coli_glm53_segment_adapter_register() && !coli_glm53_edge_adapter_register());
+    REQUIRE(!coli_kimi_segment_adapter_register() && !coli_kimi_edge_adapter_register());
+    REQUIRE(!coli_inkling_segment_adapter_register() && !coli_inkling_edge_adapter_register());
     ColiEdgeEngineOptions eo={.struct_size=sizeof(eo),.model_dir=argv[2],.memory_limit_bytes=1ull<<30};
     REQUIRE(!coli_edge_engine_open(argv[1],&eo,&edge,error,sizeof error));
     ColiEdgeCapabilities ec={.struct_size=sizeof(ec)};
     REQUIRE(!coli_edge_engine_capabilities(edge,&ec,error,sizeof error));
     REQUIRE(ec.flags&COLI_EDGE_CAP_GREEDY);
+    if(getenv("LMB_ORACLE_PRINT_CAPS"))printf("numeric_class=%s\n",ec.numeric_class);
     for(int i=0;i<nf;i++) REQUIRE((uint32_t)full[i]<ec.vocab_size);
     REQUIRE(!run_oracle(argv[1],argv[2],edge,&ec,1,prompt,np,full,nf));
     REQUIRE(!run_oracle(argv[1],argv[2],edge,&ec,2,prompt,np,full,nf));

@@ -45,8 +45,16 @@ artifacts/
 # exactly how test_local_fallback and test_nat_adopt slipped into a commit
 test_*
 !test_*.c
+!test_*.h
 !test_*.py
 !test_*.sh
+
+# `lumabri key --out NAME` writes NAME.key and NAME.pub into the current directory.
+*.key
+*.pub
+swarm_rows_bench
+*.dSYM/
+.DS_Store
 
 # Build outputs. These were tracked by accident in 67e0b73 (#88): `git add -A`
 # in a built tree picked up every binary the Makefile had just produced.
