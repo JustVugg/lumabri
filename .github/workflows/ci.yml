@@ -87,7 +87,7 @@ jobs:
   windows-segment:
     # Native PE/COFF execution and installed household lifecycle. Physical
     # mixed-machine acceptance remains a separate release gate.
-    needs: linux
+    needs: fixtures
     runs-on: windows-latest
     timeout-minutes: 25
     defaults:
@@ -405,6 +405,129 @@ jobs:
           python3 tests/integration/prepare_engine_source_test.py
           python3 tests/integration/package_household_test.py
           python3 tests/integration/preload_path_test.py
+  fixtures:
+    # Reduced checkpoints and their references for the native jobs. They are
+    # generated once here, by the same commands the Linux job runs for its
+    # own gates, so Windows, macOS and ARM64 start without waiting for it.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout Lumabri
+        uses: actions/checkout@v4
+        with:
+          path: lumabri
+      - name: Checkout Colibri v2.1.0
+        uses: actions/checkout@v4
+        with:
+          repository: JustVugg/colibri
+          ref: 704a3f68184b78367a04cb5526e428dc2f90f05b
+          path: colibri
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: lumabri/requirements-test.txt
+      - name: Install generator dependencies
+        working-directory: lumabri
+        run: |
+          python -m pip install --requirement requirements-test.txt
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          python -m pip install safetensors huggingface_hub transformers
+      - name: OLMoE
+        working-directory: colibri/c
+        run: |
+          python3 tools/make_olmoe_tiny.py --output olmoe_tiny_src --force
+          python3 tools/make_edge_tiny_tokenizer.py olmoe_tiny_src --vocab-size 128
+          python3 tools/convert_olmoe_merged.py --model olmoe_tiny_src --out olmoe_tiny_merged --min-free-gb 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tiny-olmoe-checkpoint
+          path: colibri/c/olmoe_tiny_merged/*
+          retention-days: 3
+      - name: DeepSeek V4.1 boundary
+        working-directory: lumabri
+        run: make build/v41-tiny/ref.json ENGINE=../colibri/c
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tiny-v41-boundary-checkpoint
+          path: lumabri/build/v41-tiny/*
+          retention-days: 3
+      - name: Qwen3.6 grouped int4
+        working-directory: lumabri
+        run: |
+          python3 ../colibri/c/tools/make_qwen36_tiny.py --out build/qwen36-hf --ref-mode full --emit-ref build/qwen36-ref.json
+          python3 ../colibri/c/tools/convert_qwen36.py --model build/qwen36-hf --out build/qwen-int4/qwen36-tiny --ebits 4 --gs 16 --no-readme
+          python3 ../colibri/c/tools/make_edge_tiny_tokenizer.py build/qwen-int4/qwen36-tiny --vocab-size 320
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tiny-qwen36-checkpoint
+          path: lumabri/build/qwen-int4/qwen36-tiny/*
+          retention-days: 3
+      - name: Inkling packed int4
+        working-directory: lumabri
+        run: |
+          python3 -m pip install transformers==5.16.1
+          python3 tests/integration/prepare_inkling_fixture.py --engine ../colibri/c --out build/inkling-contract
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tiny-inkling-checkpoint
+          path: lumabri/build/inkling-contract/int4/inkling-tiny/*
+          retention-days: 3
+      - name: Kimi MXFP4
+        working-directory: lumabri
+        run: |
+          python3 ../colibri/c/tools/make_kimi_k3_tiny.py --output build/kimi-contract/kimi-tiny
+          python3 ../colibri/c/tools/make_edge_tiny_tokenizer.py build/kimi-contract/kimi-tiny --vocab-size 320
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tiny-kimi-checkpoint
+          path: lumabri/build/kimi-contract/kimi-tiny/*
+          retention-days: 3
+      - name: GLM float source
+        working-directory: lumabri
+        run: python3 tests/integration/prepare_glm_fixture.py --engine ../colibri/c --out build/glm-contract
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tiny-glm-checkpoint
+          path: lumabri/build/glm-contract/glm_tiny/*
+          retention-days: 3
+      - name: GLM5.3
+        working-directory: lumabri
+        run: python3 tests/integration/prepare_glm53_fixture.py --engine ../colibri/c --out build/glm53-contract/glm53-tiny
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tiny-glm53-checkpoint
+          path: lumabri/build/glm53-contract/glm53-tiny/*
+          retention-days: 3
+      - name: Qwen3.8 BF16 and block-FP8 experts
+        working-directory: lumabri
+        run: |
+          python3 tests/integration/prepare_qwen38_fixture.py --engine ../colibri/c --out build/qwen38-contract/qwen38-tiny
+          python3 tests/integration/prepare_qwen38_fixture.py --engine ../colibri/c --out build/qwen38-fp8-contract/qwen38-tiny --fp8-experts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tiny-qwen38-checkpoint
+          path: lumabri/build/qwen38-contract/qwen38-tiny/*
+          retention-days: 3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tiny-qwen38-fp8-checkpoint
+          path: lumabri/build/qwen38-fp8-contract/qwen38-tiny/*
+          retention-days: 3
+      - name: DeepSeek V4
+        working-directory: lumabri
+        run: |
+          python3 ../colibri/c/tools/make_deepseek_v4_tiny.py --output build/v4-contract/deepseek-v4-tiny
+          python3 tests/integration/prepare_v4_oracles.py build/v4-contract/deepseek-v4-tiny
+          mkdir -p build/v4-chat
+          cp -a build/v4-contract/deepseek-v4-tiny build/v4-chat/deepseek-v4-tiny
+          python3 ../colibri/c/tools/make_edge_tiny_tokenizer.py build/v4-chat/deepseek-v4-tiny --vocab-size 128
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tiny-v4-checkpoint
+          path: lumabri/build/v4-chat/deepseek-v4-tiny/*
+          retention-days: 3
   linux:
     runs-on: ubuntu-24.04
     # Real multi-model/recovery and installed-layout gates take 40–45 minutes
@@ -505,11 +628,6 @@ jobs:
           python3 tools/make_olmoe_tiny.py --output olmoe_tiny_src --force
           python3 tools/make_edge_tiny_tokenizer.py olmoe_tiny_src --vocab-size 128
           python3 tools/convert_olmoe_merged.py --model olmoe_tiny_src --out olmoe_tiny_merged --min-free-gb 0
-      - uses: actions/upload-artifact@v4
-        with:
-          name: tiny-olmoe-checkpoint
-          path: colibri/c/olmoe_tiny_merged/*
-          retention-days: 3
       - name: V4.1 resident boundary, budgets and isolated sessions
         working-directory: lumabri
         run: |
@@ -531,11 +649,6 @@ jobs:
           python3 tests/integration/home_flow_test.py --models-dir build/gguf-block-layout/weights.gguf --resident-default --expect-gguf-block-layout
           python3 tests/integration/gguf_olmoe_fixture.py build/gguf-home --mixed --byte-vocab --split
           python3 tests/integration/home_flow_test.py --models-dir build/gguf-home/weights-00001-of-00002.gguf --resident-default --expect-metrics
-      - uses: actions/upload-artifact@v4
-        with:
-          name: tiny-v41-boundary-checkpoint
-          path: lumabri/build/v41-tiny/*
-          retention-days: 3
       - name: Segment failover gate — run
         working-directory: lumabri
         run: |
@@ -683,11 +796,6 @@ jobs:
           python3 tests/integration/home_flow_test.py --models-dir build/qwen-int4 --kill-donor
           SPLIT_MODEL_DIR=build/qwen-int4/qwen36-tiny SPLIT_ENGINE=qwen36 SPLIT_MODEL=qwen-int4 SPLIT_ROUNDS=1 SPLIT_THREADS=2 SPLIT_TOKENS=8 PORT=8940 bash tests/integration/segment_split_test.sh
           OLMOE_EDGE_MODEL=build/home-flow-models/olmoe-tiny OLMOE_EDGE_REF=../colibri/c/olmoe_tiny_src/ref_olmoe.json bash tests/integration/segment_relay_test.sh
-      - uses: actions/upload-artifact@v4
-        with:
-          name: tiny-qwen36-checkpoint
-          path: lumabri/build/qwen-int4/qwen36-tiny/*
-          retention-days: 3
       - name: Inkling memory contract — float oracle and packed int4
         working-directory: lumabri
         run: |
@@ -699,11 +807,6 @@ jobs:
           INK_SEGMENT_BITS=0 python3 tests/integration/home_flow_test.py --models-dir build/inkling-contract/float
           python3 tests/integration/home_flow_test.py --models-dir build/inkling-contract/int4 --kill-donor
           SPLIT_MODEL_DIR=build/inkling-contract/int4/inkling-tiny SPLIT_ENGINE=inkling SPLIT_MODEL=inkling-int4 SPLIT_ROUNDS=1 SPLIT_THREADS=2 SPLIT_TOKENS=8 PORT=9340 bash tests/integration/segment_split_test.sh
-      - uses: actions/upload-artifact@v4
-        with:
-          name: tiny-inkling-checkpoint
-          path: lumabri/build/inkling-contract/int4/inkling-tiny/*
-          retention-days: 3
       - name: Kimi memory contract — MXFP4 and AttnRes boundaries
         working-directory: lumabri
         run: |
@@ -715,11 +818,6 @@ jobs:
           K3_BITS=32 K3_MLA_BITS=32 K3_HEAD_BITS=32 K3_IDOT=0 python3 tests/integration/home_flow_test.py --models-dir build/kimi-contract --donor-ram-gb 4.5
           python3 tests/integration/home_flow_test.py --models-dir build/kimi-contract --donor-ram-gb 4.5 --kill-donor
           SPLIT_MODEL_DIR=build/kimi-contract/kimi-tiny SPLIT_ENGINE=kimi SPLIT_MODEL=kimi-mxfp4 SPLIT_ROUNDS=1 SPLIT_THREADS=2 SPLIT_TOKENS=8 PORT=9740 K3_BITS=32 K3_MLA_BITS=32 K3_HEAD_BITS=32 K3_IDOT=0 bash tests/integration/segment_split_test.sh
-      - uses: actions/upload-artifact@v4
-        with:
-          name: tiny-kimi-checkpoint
-          path: lumabri/build/kimi-contract/kimi-tiny/*
-          retention-days: 3
       - name: GLM memory contract — float source, MLA and DSA
         working-directory: lumabri
         run: |
@@ -729,11 +827,6 @@ jobs:
           GLM_SEGMENT_EBITS=16 GLM_SEGMENT_DBITS=16 python3 tests/integration/home_flow_test.py --models-dir build/glm-contract
           python3 tests/integration/home_flow_test.py --models-dir build/glm-contract --kill-donor
           SPLIT_MODEL_DIR=build/glm-contract/glm_tiny SPLIT_ENGINE=glm SPLIT_MODEL=glm-float SPLIT_ROUNDS=1 SPLIT_THREADS=2 SPLIT_TOKENS=8 PORT=10140 GLM_SEGMENT_EBITS=16 GLM_SEGMENT_DBITS=16 bash tests/integration/segment_split_test.sh
-      - uses: actions/upload-artifact@v4
-        with:
-          name: tiny-glm-checkpoint
-          path: lumabri/build/glm-contract/glm_tiny/*
-          retention-days: 3
       - name: GLM5.3 contract — replicated session state and stateless Edge
         working-directory: lumabri
         run: |
@@ -743,11 +836,6 @@ jobs:
           GLM53_BITS=32 python3 tests/integration/home_flow_test.py --models-dir build/glm53-contract
           python3 tests/integration/home_flow_test.py --models-dir build/glm53-contract --kill-donor
           SPLIT_MODEL_DIR=build/glm53-contract/glm53-tiny SPLIT_ENGINE=glm53 SPLIT_MODEL=glm53-float SPLIT_ROUNDS=1 SPLIT_THREADS=2 SPLIT_TOKENS=8 PORT=10540 GLM53_BITS=32 bash tests/integration/segment_split_test.sh
-      - uses: actions/upload-artifact@v4
-        with:
-          name: tiny-glm53-checkpoint
-          path: lumabri/build/glm53-contract/glm53-tiny/*
-          retention-days: 3
       - name: Qwen3.8 contract — DeltaNet, QSA and checked PLE metadata
         working-directory: lumabri
         run: |
@@ -771,11 +859,6 @@ jobs:
           python3 tests/integration/planner_tensor_contract_test.py --family qwen38 --model build/qwen38-vision/model
           OMP_NUM_THREADS=2 COLI_NO_OMP_TUNE=1 build/test_vision_segment build/qwen38-vision/model
           LUMABRI_TEST_IMAGES_DIR=build/qwen38-vision/model LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/qwen38-vision --context 2048 --donor-ram-gb 2 --keep-requester --multi-model --sessions 2 --api
-      - uses: actions/upload-artifact@v4
-        with:
-          name: tiny-qwen38-checkpoint
-          path: lumabri/build/qwen38-contract/qwen38-tiny/*
-          retention-days: 3
       - name: Qwen3.8 real block-FP8 experts and independent dequantized oracle
         working-directory: lumabri
         run: |
@@ -786,11 +869,6 @@ jobs:
           done
           python3 tests/integration/home_flow_test.py --models-dir build/qwen38-fp8-contract --context 512 --expect-greedy --expect-metrics --kill-donor
           SPLIT_MODEL_DIR=build/qwen38-fp8-contract/qwen38-tiny SPLIT_ENGINE=qwen38 SPLIT_MODEL=qwen38-fp8 SPLIT_ROUNDS=1 SPLIT_THREADS=2 SPLIT_TOKENS=8 PORT=11040 bash tests/integration/segment_split_test.sh
-      - uses: actions/upload-artifact@v4
-        with:
-          name: tiny-qwen38-fp8-checkpoint
-          path: lumabri/build/qwen38-fp8-contract/qwen38-tiny/*
-          retention-days: 3
       - name: DeepSeek V4 native memory contract and compressed-state oracles
         working-directory: lumabri
         run: |
@@ -805,11 +883,6 @@ jobs:
           python3 ../colibri/c/tools/make_edge_tiny_tokenizer.py build/v4-chat/deepseek-v4-tiny --vocab-size 128
           python3 tests/integration/home_flow_test.py --models-dir build/v4-chat --donor-ram-gb 1.0 --kill-donor
           SPLIT_REFERENCE=build/v4-contract/deepseek-v4-tiny/edge_ref_short.json SPLIT_MODEL_DIR=build/v4-contract/deepseek-v4-tiny SPLIT_ENGINE=deepseek_v4 SPLIT_MODEL=v4-native SPLIT_ROUNDS=1 SPLIT_THREADS=2 SPLIT_TOKENS=8 PORT=10940 bash tests/integration/segment_split_test.sh
-      - uses: actions/upload-artifact@v4
-        with:
-          name: tiny-v4-checkpoint
-          path: lumabri/build/v4-chat/deepseek-v4-tiny/*
-          retention-days: 3
       - name: Resident RAM — every adapter, second conversation without the source
         working-directory: lumabri
         env:
@@ -927,7 +1000,7 @@ jobs:
   linux-arm64-household:
     # Native ARM64 execution with the older glibc floor. This is not a
     # physical Raspberry Pi or multi-machine cluster certification.
-    needs: [linux, linux-arm64-build]
+    needs: [fixtures, linux-arm64-build]
     runs-on: ubuntu-22.04-arm
     timeout-minutes: 45
     steps:
@@ -955,7 +1028,7 @@ jobs:
         with:
           pattern: tiny-*-checkpoint
           path: lumabri/build/arm64-fixtures
-      - name: Arrange the exact fixture bytes from the Linux oracle job
+      - name: Arrange the exact fixture bytes from the fixtures job
         working-directory: lumabri
         run: |
           python3 - <<'PY'
@@ -1020,7 +1093,7 @@ jobs:
   macos-household:
     # Real native CPU engines + signed CAS + approvals + streaming. Loopback
     # coverage does not replace the macOS 12.6 / physical household LAN test.
-    needs: linux
+    needs: fixtures
     env:
       # A native macOS 15 test is not a macOS 12 test, but do not ship a binary
       # whose load commands already forbid the user's macOS 12.6 machine.
