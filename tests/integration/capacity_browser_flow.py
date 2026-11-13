@@ -70,6 +70,8 @@ def verify_browser_capacity(api, managed, static, artifacts):
             page.goto(f"http://127.0.0.1:{api.port}/")
             page.locator("#token").fill(api.token); page.locator("#login-form button").click()
             page.locator("#workspace-open").click()
+            # Measurements sit behind the page's Advanced disclosure.
+            page.locator("#advanced > summary").click()
             expect(page.locator("#capacity-records")).to_contain_text("placement-static")
             page.locator("#capacity-measure-details summary").click()
             page.locator("#capacity-name").fill("browser-measured")
