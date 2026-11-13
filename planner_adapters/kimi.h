@@ -103,7 +103,13 @@ static int lmb_plan_indices(const char *json, const char *key, uint8_t *dst,
     return 0;
 }
 
+#include "kimi_gguf.h"
 static int LMB_UNUSED lmb_kimi_memory(const char *root, const char *json, LmbModelShape *m) {
+    LmbGguf g;int opened=lmb_gguf_model(root,&g);
+    if(opened<=0) {
+        if(opened<0)return -1;
+        int rc=lmb_k3_gguf_memory(&g,json,m);lmb_gguf_free(&g);return rc;
+    }
     LmbKimiInventory v = { .model = m };
     uint32_t h, layers, heads, qrank, kvrank, nope, rope, vd, experts, topk, inter, latent;
     uint32_t dense, shared, first, block, kh, kd, conv, index, index_heads, index_topk;
@@ -163,13 +169,10 @@ static int LMB_UNUSED lmb_kimi_memory(const char *root, const char *json, LmbMod
     uint64_t wide = m->boundary_width + (uint64_t)heads * (nope + rope + 2u * vd) +
         proj * (kd + 8u) + (uint64_t)shared * inter + dense + latent + qrank + kvrank +
         (uint64_t)index * (index_heads + 1u) + experts + (uint64_t)topk * (latent + inter);
-    /* The pinned native initializer refuses even tiny ranges below its
-     * unconditional 2.5 GB page-cache + 1.2 GB activation policy reserve.
-     * Keep this floor in admission; never bypass COLI_RAM_OVERCOMMIT to make
-     * an optimistic plan start. Its KV projection includes unowned layers. */
-    m->scratch_fixed_bytes = lmb_size_add(UINT64_C(3700000000),
-        lmb_size_add(lmb_size_mul(wide, 128u * 16u * 4u),
-                     lmb_size_mul(wide, 1024u * 4u)));
+    /* Matches the generated resident loader's geometry-based work reserve.
+     * Its conservative KV projection still includes unowned layers. */
+    m->scratch_fixed_bytes = lmb_size_add(lmb_size_mul(wide, 128u * 16u * 4u),
+                                         lmb_size_mul(wide, 1024u * 4u));
     m->scratch_token_bytes = lmb_size_add(256u * 32u,
         (uint64_t)layers * (kvrank + rope) * 4u);
     m->segment_fixed_bytes = (uint64_t)layers * (4096u + (uint64_t)experts * 512u);

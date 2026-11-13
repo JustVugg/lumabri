@@ -945,7 +945,7 @@ SEGMENT_COMMON = segment_colibri.h src/runtime/lumabri_thread_capacity.h src/run
 		$(PROTO_DEPS) $(SIGN_DEPS) lumabri_sha.h $(SECURE_DEPS)
 
 HYBRID_PATCH_INPUTS = tools/prepare_gguf_adapters.py tools/prepare_qwen_variants.py tools/prepare_qwen_gguf.py engine_patches/qwen_gguf_source.h tools/prepare_resident_adapters.py engine_patches/make_patches.py \
-	tools/prepare_mistral_segments.py tools/prepare_glm53_gguf.py engine_patches/mistral_boundary.h \
+	tools/prepare_mistral_segments.py tools/prepare_glm53_gguf.py tools/prepare_kimi_gguf.py engine_patches/mistral_boundary.h \
 	engine_patches/qwen38_vision_edge.h src/runtime/lumabri_vision.h src/runtime/lumabri_image.h \
 	src/runtime/lumabri_engine_memory_override.h src/runtime/lumabri_engine_memory.h \
 	lumabri_home_hybrid.h src/runtime/lumabri_hybrid_policy.h src/runtime/lumabri_q8_reference.h \
@@ -1445,3 +1445,16 @@ build/glm53-mixed-oracle: tests/c/qwen_mixed_oracle.c tests/c/edge_segment_greed
 
 test-glm53-gguf: build/test_gguf_inventory build/glm53-upstream-oracle build/gguf-segment-oracle build/glm53-state-oracle build/glm53-mixed-oracle
 	$(PYTHON) tests/integration/glm53_native_gguf_test.py --engine $(ENGINE) $(GLM53_GGUF_TEST_OPTIONS)
+
+build/kimi-upstream-oracle: tests/c/kimi_upstream_oracle.c build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(OMP_FLAGS) -pthread -I$(ENGINE) $< -o $@ -lm $(OMP_LIBS)
+
+build/kimi-state-oracle: tests/c/mistral_state_oracle.c $(COLIBRI_SEGMENT_LIB) build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Wno-unused-function $(OMP_FLAGS) -pthread -I$(ENGINE) -DLMB_STATE_FAMILY='"kimi"' $< $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
+
+build/kimi-mixed-oracle: tests/c/qwen_mixed_oracle.c tests/c/edge_segment_greedy.c $(COLIBRI_SEGMENT_LIB) build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(OMP_FLAGS) -pthread -I$(ENGINE) $(GGUF_READ_GUARD) -DLMB_MIXED_FAMILY='"kimi"' $< $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
+
+.PHONY: test-kimi-gguf
+test-kimi-gguf: build/test_gguf_inventory build/kimi-upstream-oracle build/gguf-segment-oracle build/kimi-state-oracle build/kimi-mixed-oracle
+	$(PYTHON) tests/integration/kimi_native_gguf_test.py --engine $(ENGINE) $(KIMI_GGUF_TEST_OPTIONS)

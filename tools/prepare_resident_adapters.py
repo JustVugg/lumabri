@@ -105,31 +105,6 @@ def other_adapters(root):
             }
         }
 '''.replace("CLEANUP", cleanup).replace("BUDGET", budget(cleanup)))
-    path=root / "kimi_k3.c"
-    source=path.read_text()
-    start=source.index("static int kimi_edge_engine_open(")
-    at=source.index("    uint64_t resident = kimi_edge_w_bytes", start)
-    code='''
-    if (REQUIRED) {
-        snprintf(name,sizeof name,"%smodel.embed_tokens.weight",model->pfx);
-        st_tensor *embedding=st_find(&model->S,name);
-        if (!embedding || lmb_resident_retain(embedding->fd,embedding->off,embedding->nbytes,
-                                               options->memory_limit_bytes)) {
-            kimi_edge_engine_destroy(engine);
-            return coli_edge_adapter_error(error,error_size,"cannot retain Kimi embedding in RAM");
-        }
-    }
-'''.replace("REQUIRED", REQUIRED)
-    source=source[:at]+code+source[at:]
-    # Report the retained embedding too; planner already reserves its F32 upper bound.
-    anchor="    int bits = getenv(\"K3_BITS\") ? atoi(getenv(\"K3_BITS\")) : 4;"
-    at=source.index(anchor, source.index("static int kimi_edge_engine_open("))
-    source=source[:at]+f'''    if ({REQUIRED}) {{
-        snprintf(name,sizeof name,"%smodel.embed_tokens.weight",model->pfx);
-        resident+=(uint64_t)st_find(&model->S,name)->nbytes;
-    }}
-'''+source[at:]
-    path.write_text(source)
     path=root / "glm53.c"
     source=path.read_text()
     anchor="    if (cap > c->n_experts) cap = c->n_experts;\n"
@@ -296,3 +271,6 @@ if __name__ == "__main__":
     prepare_mistral(root)
     from prepare_glm53_gguf import prepare as prepare_glm53
     prepare_glm53(root)
+
+    from prepare_kimi_gguf import prepare as prepare_kimi
+    prepare_kimi(root)

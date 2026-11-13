@@ -1,5 +1,26 @@
 # Third-party build inputs
 
+## Colibri Kimi K3 GGUF integration
+
+- Source: `JustVugg/colibri`, tag `v2.1.0`, commit
+  `704a3f68184b78367a04cb5526e428dc2f90f05b`.
+- Source files: `c/kimi_k3.c`, `c/st_gguf.h`, `c/tools/gguf_import.py`,
+  `c/tools/make_kimi_k3_tiny.py`, `c/tools/make_flint_tiny.py` and
+  `c/tests/test_segment_adapters_real.c`.
+- License: Apache-2.0; attribution: Colibri contributors. Original source
+  headers, license and notices remain in generated copies and packages.
+- Lumabri adds C metadata, geometry validation and memory accounting. Hooks
+  in disposable build copies connect the native residual-score head, retain
+  embeddings in engine-owned RAM, count native quantized head bytes, release
+  expert metadata and telemetry on close, and serialize temporary source
+  metadata during adapter opens. Resident initialization reserves workspace
+  by geometry instead of page cache for streaming, retaining the existing
+  memory admission checks. Numeric kernels are unchanged.
+- Tests invoke the upstream tiny tensor generator and quantizer, encode its
+  KDA/MLA/attention-residual tensors into deterministic GGUF checkpoints,
+  and compare against unmodified monolithic execution. State checks reuse
+  upstream ABI snapshot helpers. The upstream checkout is never modified.
+
 ## Colibri GLM5-Next GGUF integration
 
 - Source: `JustVugg/colibri`, tag `v2.1.0`, commit
