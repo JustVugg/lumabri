@@ -61,6 +61,14 @@ static inline int lmb_catalogue_executable(const LmbTuiModel *m) {
         m->shape.sizing_verified && m->checkpoint_inventory_ok && m->weights_present &&
         m->planned && m->plan.state==LMB_PLAN_RESIDENT && m->plan.nslices;
 }
+/* Official: the families proven end to end on real weights for 1.0. Every
+ * other recognized family runs through the same checks but is experimental. */
+static inline const char *lmb_catalogue_tier(const LmbTuiModel *m) {
+    static const char *const official[]={"olmoe","qwen36","qwen38","deepseek_v41"};
+    for (size_t i=0;i<sizeof official/sizeof *official;i++)
+        if (!strcmp(m->shape.segment_id,official[i])) return "official";
+    return "experimental";
+}
 static inline const char *lmb_catalogue_support_state(const LmbTuiModel *m) {
     if (lmb_catalogue_executable(m)) return "executable";
     return lmb_capability_for(m->shape.model_type) ? "recognized" : "unknown";

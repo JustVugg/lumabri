@@ -23,6 +23,7 @@ static void api_preparation_catalogue(int fd,const char *tracker) {
         const LmbTuiModel *m=&st->models[i];
         bad=(i && cap_str(&body,",")) || cap_str(&body,"{\"name\":") || api_json_text(&body,m->name) ||
             cap_str(&body,",\"adapter\":") || api_json_text(&body,m->shape.segment_id) ||
+            cap_str(&body,",\"tier\":") || api_json_text(&body,lmb_catalogue_tier(m)) ||
             cap_str(&body,",\"support_state\":") || api_json_text(&body,lmb_catalogue_support_state(m)) ||
             cap_str(&body,",\"support_reason\":") || api_json_text(&body,lmb_catalogue_capability_reason(m)) ||
             cap_str(&body,",\"weight_format\":") || api_json_text(&body,lmb_weight_format_name(m->weight_formats)) ||
