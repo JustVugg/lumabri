@@ -8,7 +8,39 @@
 
 typedef struct {
     uint64_t segment_bytes, edge_bytes, total_bytes;
+    uint64_t vram_bytes; /* zero until an adapter declares a GPU memory contract */
 } LmbHomeReservation;
+
+/* Admission compares two budgets that are never fungible: host RAM and
+ * device VRAM. Every current adapter executes on the CPU, so every need
+ * carries vram_bytes == 0 today. A future GPU role fills the second field;
+ * it must not turn VRAM into RAM or the reverse. */
+typedef struct {
+    uint64_t ram_bytes, vram_bytes;
+} LmbMemoryBudget;
+
+typedef enum {
+    LMB_ADMIT_OK = 0, LMB_ADMIT_RAM_SHORT, LMB_ADMIT_VRAM_SHORT, LMB_ADMIT_INVALID
+} LmbAdmission;
+
+static LMB_UNUSED LmbAdmission lmb_budget_admit(const LmbMemoryBudget *need,
+                                                const LmbMemoryBudget *offer) {
+    if (!need || !offer || need->ram_bytes == UINT64_MAX || need->vram_bytes == UINT64_MAX ||
+        offer->ram_bytes == UINT64_MAX || offer->vram_bytes == UINT64_MAX ||
+        (!need->ram_bytes && !need->vram_bytes)) return LMB_ADMIT_INVALID;
+    if (need->ram_bytes > offer->ram_bytes) return LMB_ADMIT_RAM_SHORT;
+    if (need->vram_bytes > offer->vram_bytes) return LMB_ADMIT_VRAM_SHORT;
+    return LMB_ADMIT_OK;
+}
+
+static LMB_UNUSED const char *lmb_admission_name(LmbAdmission a) {
+    switch (a) {
+    case LMB_ADMIT_OK: return "admitted";
+    case LMB_ADMIT_RAM_SHORT: return "not enough RAM";
+    case LMB_ADMIT_VRAM_SHORT: return "not enough VRAM";
+    default: return "invalid memory request";
+    }
+}
 
 typedef struct {
     uint64_t weights, state, scratch, overhead, reserved;

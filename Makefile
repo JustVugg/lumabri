@@ -669,6 +669,20 @@ test-pairing: test_pairing test_pairing_tracker lumabri tracker
 test check-warnings: test_pairing test_pairing_tracker
 test: test-pairing
 
+# A placement chosen for speed: estimates and the choice on simulated mixed
+# households. No model, no network.
+SPEED_PLAN_DEPS = src/planner/lumabri_speed_plan.h src/planner/lumabri_machine_speed.h src/planner/lumabri_stage_placement.h \
+	lumabri_cluster.h lumabri_memory_budget.h lumabri_planner.h lumabri_calibration.h
+test_speed_plan: tests/c/test_speed_plan.c $(SPEED_PLAN_DEPS) $(wildcard planner_adapters/*.h)
+	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_speed_plan.c -o $@ -lm
+
+.PHONY: test-speed-plan
+test-speed-plan: test_speed_plan
+	./test_speed_plan
+
+test check-warnings: test_speed_plan
+test: test-speed-plan
+
 # Both pages in Chromium, two households on loopback. Needs Playwright.
 .PHONY: test-pairing-web
 test-pairing-web: lumabri tracker
