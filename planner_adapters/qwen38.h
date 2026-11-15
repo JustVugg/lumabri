@@ -1,13 +1,11 @@
 #ifndef LUMABRI_PLAN_QWEN38_H
 #define LUMABRI_PLAN_QWEN38_H
-/* Float/BF16 and block-FP8-expert Qwen4-Exp contract with optional resident
- * vision boundaries, pinned Colibri 1.12.1.
- * PLE tables are row-read by the native engine: reserve their complete source
- * footprint as well as all expert slots, without advertising a disk mode or
- * claiming that admission has warmed the filesystem cache. */
+/* Qwen4-Exp contracts for the pinned Colibri 2.1 loader. Assigned PLE tables
+ * and all expert slots are prepared as engine-owned resident allocations. */
 #include <float.h>
 #include <math.h>
 #include "qwen38_vision.h"
+#include "qwen38_gguf.h"
 typedef struct {
     LmbModelShape *m;
     LmbQ38Vision vision;
@@ -95,7 +93,7 @@ static int lmb_q38_tensor(const LmbPlanTensor *t, void *opaque) {
             if (v->rows[part] || !lmb_q38_float(t->dtype) || t->rank!=2 ||
                 !t->shape[0] || t->shape[1]!=v->nd) return -1;
             v->rows[part]=t->shape[0];
-            bytes=t->bytes; /* full PLE source cache allowance, not allocation */
+            bytes=t->bytes; /* complete, engine-owned PLE source representation */
         }
     } else if (!strncmp(field,"mlp.experts.",12)) {
         const char *suffix=field+12;
@@ -183,6 +181,12 @@ static int lmb_q38_tensor(const LmbPlanTensor *t, void *opaque) {
 
 static int LMB_UNUSED lmb_qwen38_memory(const char *root, const char *whole,
                                         const char *json, LmbModelShape *m) {
+    LmbGguf gg={0};int native=lmb_gguf_model(root,&gg);
+    if(native<0)return -1;
+    if(!native) {
+        int rc=lmb_json_member(whole,"vision_config")?-1:lmb_q38g_memory(&gg,json,m);
+        lmb_gguf_free(&gg);return rc;
+    }
     LmbQwen38Inventory v={.m=m};
     if (lmb_q38_vision_config(whole,m->hidden,m->vocab,&v.vision)) return -1;
     uint32_t layers, maxctx, eos, ik, ns;

@@ -72,8 +72,7 @@ static int lmb_v4_tensor(const LmbPlanTensor *t,void *opaque) {
     for(unsigned i=0;i<6;i++) if(!strcmp(t->name,globals[i].name)) {
         if((v->edge&(1u<<i)) || !lmb_v4_shape(t,&globals[i])) return -1;
         v->edge|=1u<<i;
-        /* Embedding and head are row-read by Edge. Full source-cache allowance
-         * is deliberate, not a claim that the runtime pins the entire file. */
+        /* Edge owns the complete embedding and output matrices in RAM. */
         uint64_t cost=i<2 ? t->bytes : lmb_size_mul(t->elements,4);
         m->edge_resident_bytes=lmb_size_add(m->edge_resident_bytes,cost);
         return m->edge_resident_bytes==UINT64_MAX ? -1 : 0;
@@ -110,7 +109,11 @@ static int lmb_v4_tensor(const LmbPlanTensor *t,void *opaque) {
 static int lmb_v4_string(const char *cfg,const char *key,const char *expected) {
     char text[64]; return lmb_json_string(cfg,key,text,sizeof text) || strcmp(text,expected);
 }
+#include "deepseek_v4_gguf.h"
 static int lmb_v4_memory(const char *root,const char *cfg,LmbModelShape *m) {
+    LmbGguf gg={0};int native=lmb_gguf_model(root,&gg);
+    if(native<0)return -1;
+    if(!native){int rc=lmb_v4g_memory(&gg,cfg,m);lmb_gguf_free(&gg);return rc;}
     LmbV4Inventory v={.m=m}; uint32_t layers,experts,k,vocab,shared,rope,ctx,mtp,iters;
 #define V4_NEED(key,dst,lo,hi) if(lmb_plan_u32(cfg,key,lo,hi,&dst)) return -1
     V4_NEED("hidden_size",v.h,128,1048576); V4_NEED("num_hidden_layers",layers,1,128);

@@ -24,6 +24,8 @@ static int lmb_plan_kinds(const char *json, const char *key, const char *zero,
     return 0;
 }
 
+#include "inkling_gguf.h"
+
 typedef struct {
     LmbModelShape *model;
     uint8_t sparse[256], local[256], packed[256];
@@ -118,6 +120,14 @@ static int lmb_inkling_tensor(const LmbPlanTensor *t, void *opaque) {
 }
 
 static int LMB_UNUSED lmb_inkling_memory(const char *root, const char *json, LmbModelShape *m) {
+    LmbGguf g={0};int gg=lmb_gguf_model(root,&g);
+    if(gg<0)return -1;
+    if(!gg){
+        char sidecar[1024];int n=snprintf(sidecar,sizeof sidecar,"%s/dense-int4g64",root);
+        int rc=n<0 || (size_t)n>=sizeof sidecar || lmb_plan_optional_directory(sidecar)!=0
+            ? -1:lmb_ink_gguf_memory(&g,json,m);
+        lmb_gguf_free(&g);return rc;
+    }
     LmbInklingInventory v = { .model = m };
     uint32_t h, layers, heads, kv, hd, sh, sk, sd, window, rel, extent, conv, experts, topk;
     uint32_t shared, dense, inter, first, unpadded;

@@ -104,6 +104,7 @@ async def capacity_workspace(browser, port, token, env, artifacts):
         await page.goto(f"http://127.0.0.1:{port}/")
         await page.locator("#token").fill(token); await page.locator("#login-form button").click()
         await page.locator("#workspace-open").click()
+        await page.locator("#advanced > summary").click()
         await expect(record("baseline")).to_contain_text("Historical — not revalidated")
         await expect(page.locator("#capacity-measure-details")).to_be_hidden()
         await expect(record("baseline").get_by_role("button", name="Check limits")).to_be_hidden()

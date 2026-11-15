@@ -91,11 +91,20 @@ static LmbSegAdvert advert_for(WorkerFixture *f,const LmbHomeOffer *o) {
 static LmbNodeControl control(const LmbHomeOffer *o,uint32_t action,const LmbNodeControl *expected) {
     uint8_t body[64+LMB_NODE_CONTROL_REQUEST_BYTES];memcpy(body,o->id,32);memcpy(body+32,o->model_root,32);
     lmb_node_control_request(body+64,action,expected);
-    LmbSocket fd=lmb_connect_ms_io(endpoint,2000,2000);assert(fd!=LMB_INVALID_SOCKET && !lmb_auth(fd));
-    assert(!lmb_send(fd,LMB_HOME_NODE_CONTROL,body,sizeof body,NULL,0));LmbMsg m={0};
-    assert(!lmb_recv_bounded(fd,&m,4096,2000) && m.op==LMB_HOME_NODE_CONTROL_R && m.body_len==64+LMB_NODE_CONTROL_REPLY_BYTES && !m.pay_len);
-    LmbNodeControl state;assert(!memcmp(body,m.body,64) && !lmb_node_control_decode(m.body+64,LMB_NODE_CONTROL_REPLY_BYTES,&state));
-    lmb_msg_free(&m);lmb_close(fd);return state;
+    /* A worker whose session lock is held answers BUSY without applying the
+     * action or giving a snapshot; that is a valid reply, so ask again. */
+    LmbNodeControl state;int status=LMB_NODE_CONTROL_BUSY;
+    for (uint64_t until=GetTickCount64()+5000;;) {
+        LmbSocket fd=lmb_connect_ms_io(endpoint,2000,2000);assert(fd!=LMB_INVALID_SOCKET && !lmb_auth(fd));
+        assert(!lmb_send(fd,LMB_HOME_NODE_CONTROL,body,sizeof body,NULL,0));LmbMsg m={0};
+        assert(!lmb_recv_bounded(fd,&m,4096,2000) && m.op==LMB_HOME_NODE_CONTROL_R && m.body_len==64+LMB_NODE_CONTROL_REPLY_BYTES && !m.pay_len);
+        assert(!memcmp(body,m.body,64));
+        status=lmb_node_control_decode(m.body+64,LMB_NODE_CONTROL_REPLY_BYTES,&state);
+        lmb_msg_free(&m);lmb_close(fd);
+        if (status!=LMB_NODE_CONTROL_BUSY || GetTickCount64()>=until) break;
+        Sleep(20);
+    }
+    assert(!status);return state;
 }
 static void retire(const LmbHomeOffer *o,const LmbNodeControl *seal) {
     uint64_t until=GetTickCount64()+5000;

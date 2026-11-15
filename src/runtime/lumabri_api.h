@@ -73,6 +73,7 @@ static int api_json_text(Cap *c, const char *s) {
 }
 #include "lumabri_demand_runtime.h"
 #include "lumabri_chat_history.h"
+#include "lumabri_download_api.h"
 
 /* Only these compiled assets are public. No generic file-serving path and no
  * redirects, external scripts, cookies, CORS or browser-persisted credentials. */
@@ -83,7 +84,10 @@ static int api_web(int fd, const LmbApiHttp *request) {
     else if (!strcmp(request->path,"/app.css")) { data=lmb_web_css; size=sizeof lmb_web_css-1; type="text/css; charset=utf-8"; }
     else if (!strcmp(request->path,"/app.js")) { data=lmb_web_js; size=sizeof lmb_web_js-1; type="text/javascript; charset=utf-8"; }
     else if (!strcmp(request->path,"/capacity.js")) { data=lmb_web_capacity_js; size=sizeof lmb_web_capacity_js-1; type="text/javascript; charset=utf-8"; }
+    else if (!strcmp(request->path,"/ui.js")) { data=lmb_web_ui_js; size=sizeof lmb_web_ui_js-1; type="text/javascript; charset=utf-8"; }
     else if (!strcmp(request->path,"/logo.svg")) { data=lmb_web_logo; size=sizeof lmb_web_logo-1; type="image/svg+xml"; }
+    else if (!strcmp(request->path,"/download.js")) { data=lmb_web_download_js; size=sizeof lmb_web_download_js-1; type="text/javascript; charset=utf-8"; }
+    else if (!strcmp(request->path,"/download.css")) { data=lmb_web_download_css; size=sizeof lmb_web_download_css-1; type="text/css; charset=utf-8"; }
     if (!data) return 0;
     char header[1024];
     int n=snprintf(header,sizeof header,"HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %zu\r\n"
@@ -132,7 +136,22 @@ static int api_find_plan(const char *tracker, const uint8_t allocation[32], LmbR
 #include "lumabri_retirement.h"
 #include "lumabri_workspace.h"
 #include "lumabri_management.h"
+/* The one place an inference grant is written, shared by `api grant` and by
+ * a preparation's own requester. Caller holds the access database lock.
+ * 0: the user holds the grant. 1: the user's list is full, nothing changed.
+ * -1: unknown user, unapproved allocation or storage failure. */
+static int api_grant_allocation(int dir, const char *tracker, const char *name, const uint8_t allocation[32]) {
+    LmbApiUser user; LmbModelRoute route; LmbResidentPlan *plan=calloc(1,sizeof *plan); int rc=-1;
+    if (plan && !lmb_api_user_load(dir,name,&user) &&
+        (!api_route_read(dir,allocation,tracker,&route) || !api_find_plan(tracker,allocation,plan))) {
+        if (lmb_api_user_allows(&user,allocation)) rc=0;
+        else if (user.count>=LMB_API_MODELS_MAX) rc=1;
+        else { memcpy(user.allocations[user.count++],allocation,32); rc=lmb_api_user_save(dir,&user) ? -1 : 0; }
+    }
+    free(plan); return rc;
+}
 #include "lumabri_preparation_api.h"
+#include "lumabri_donor_approval_api.h"
 #include "lumabri_recovery_wait.h"
 /* The local TUI has the process owner's authority, not a borrowed web user's
  * token. It invokes the same durable operation with a short observation
@@ -494,6 +513,7 @@ static void api_connection_dispatch(int fd, int access_dir, unsigned port, const
     lmb_api_wipe(header,sizeof header); lmb_api_wipe(request.authorization,sizeof request.authorization); lmb_api_wipe(request.api_key,sizeof request.api_key);
     int permit=lmb_api_user_permit(access_dir,user.name,2);
     if (permit<0) { api_error(fd,429,"user_request_limit"); return; }
+    if (api_download_route(fd,access_dir,tracker,&user,&request,https_origin!=NULL)) { close(permit); return; }
     const char *history_path="/api/v1/conversations";
     size_t history_prefix=strlen(history_path);
     int history=!strncmp(request.path,history_path,history_prefix) &&
@@ -507,7 +527,8 @@ static void api_connection_dispatch(int fd, int access_dir, unsigned port, const
     int preparation=!strcmp(request.path,"/api/v1/preparation");
     const char *preparation_after="/api/v1/preparation/after/";
     int preparation_page=!strncmp(request.path,preparation_after,strlen(preparation_after));
-    int management=preparation || policy || elastic || capacity || capacity_apply || !strncmp(request.path,"/api/v1/allocations/",20);
+    int approval=!strcmp(request.path,"/api/v1/donor/approval");
+    int management=preparation || policy || elastic || capacity || capacity_apply || approval || !strncmp(request.path,"/api/v1/allocations/",20);
     if (!strcmp(request.path,"/api/v1/client-config") && !strcmp(request.method,"GET") && !request.length) {
         char origin[160];
         if (https_origin) snprintf(origin,sizeof origin,"%s",https_origin);
@@ -527,6 +548,11 @@ static void api_connection_dispatch(int fd, int access_dir, unsigned port, const
     }
     else if (management && !strcmp(request.method,"POST") && !lmb_management_allows(access_dir,&user))
         api_error(fd,403,"management_permission_required");
+    else if (approval && !strcmp(request.method,"GET") && !request.length) {
+        /* Reading a request is part of deciding it: same capability as POST. */
+        if (lmb_management_allows(access_dir,&user)) api_donor_approval(fd,tracker,https_origin!=NULL,NULL,0);
+        else api_error(fd,403,"management_permission_required");
+    }
     else if (!strcmp(request.method,"GET") && !strcmp(request.path,"/api/v1/session") && !request.length) {
         char response[96]; snprintf(response,sizeof response,"{\"schema\":1,\"operator\":%s,\"management\":%s}",
             lmb_operator_allows(access_dir,&user) ? "true" : "false",lmb_management_allows(access_dir,&user) ? "true" : "false");
@@ -585,9 +611,10 @@ static void api_connection_dispatch(int fd, int access_dir, unsigned port, const
             }
             body[at]=0;
             if (at!=request.length) api_error(fd,408,"request_body_timeout");
-            else if (preparation) api_preparation(fd,access_dir,tracker,body,at);
+            else if (preparation) api_preparation(fd,access_dir,tracker,&user,body,at);
             else if (policy) api_policy_http(fd,access_dir,tracker,body,at);
             else if (elastic) api_elastic_http(fd,access_dir,tracker,body,at);
+            else if (approval) api_donor_approval(fd,tracker,https_origin!=NULL,body,at);
             else if (capacity_apply) api_capacity_apply_http(fd,access_dir,tracker,body,at);
             else if (capacity) api_capacity_http(fd,access_dir,tracker,request.path,body,at);
             else if (management) api_management(fd,access_dir,tracker,&user,&request,body,at);
@@ -766,6 +793,8 @@ static int api_serve(int access_dir, unsigned port, const char *tracker, HomeSer
     for (unsigned i=0;i<LMB_API_CHILDREN;i++) if (telemetry[i]>=0) close(telemetry[i]);
     return 0;
 }
+/* Set only by lumabri start, which prints its own summary of the address. */
+static int api_start_quiet;
 static int api_start(int access_dir, unsigned port, const char *tracker, const char *https_origin, const char *access_path) {
     if (strlen(tracker)>=sizeof ((HomeServiceSnapshot *)0)->tracker) return 1;
     if (home_service_foreground() || home_service_ensure()) {
@@ -805,7 +834,8 @@ static int api_start(int access_dir, unsigned port, const char *tracker, const c
             if (!home_service_query("api",HOME_SVC_STATUS,NULL,&observed) && observed.phase==2 &&
                 !strcmp(observed.tracker,tracker) && !strcmp(observed.name,endpoint)) {
                 if (https_origin) fprintf(stderr,"[api] Private upstream ready; configure and verify your same-user TLS proxy separately.\n");
-                puts(https_origin ? https_origin : endpoint); return 0;
+                if (!api_start_quiet) puts(https_origin ? https_origin : endpoint);
+                return 0;
             }
             (void)poll(NULL,0,50);
         }
@@ -927,14 +957,10 @@ static int cmd_api(int argc, char **argv) {
         char file[40]; snprintf(file,sizeof file,"%s.user",args[0]); rc=unlinkat(dir,file,0);
         if (!rc) rc=fsync(dir);
     } else if (!strcmp(argv[0],"grant") && count==2 && *tracker) {
-        LmbApiUser user; LmbResidentPlan *plan=calloc(1,sizeof *plan); LmbModelRoute route; uint8_t allocation[32];
-        if (plan && strlen(args[1])==64 && !lmb_unhex(allocation,args[1],32) &&
-            !lmb_api_user_load(dir,args[0],&user) &&
-            (!api_route_read(dir,allocation,tracker,&route) || !api_find_plan(tracker,allocation,plan))) {
-            if (lmb_api_user_allows(&user,allocation)) rc=0;
-            else if (user.count<LMB_API_MODELS_MAX) { memcpy(user.allocations[user.count++],allocation,32); rc=lmb_api_user_save(dir,&user); }
-        }
-        free(plan);
+        uint8_t allocation[32];
+        if (strlen(args[1])==64 && !lmb_unhex(allocation,args[1],32)) rc=api_grant_allocation(dir,tracker,args[0],allocation);
+        if (rc>0) fprintf(stderr,"%s already holds %u model grants, the most one API user can hold. Nothing was changed; "
+            "grant this model to another API user.\n",args[0],LMB_API_MODELS_MAX);
     } else { close(lock); close(dir); goto usage; }
     close(lock); close(dir);
     if (rc) fprintf(stderr,"API access operation failed; check the user and approved allocation\n");
@@ -952,7 +978,7 @@ usage:
         "lumabri api user-add NAME\n"
         "lumabri api operator-grant NAME    read-only cluster visibility, no inference grant\n"
         "lumabri api operator-revoke NAME\n"
-        "lumabri api manage-grant NAME      preparation, allocation control and visibility; no inference/history grant\n"
+        "lumabri api manage-grant NAME      preparation, allocation control and visibility; inference only on models it prepares\n"
         "lumabri api manage-revoke NAME\n"
         "lumabri api workspace [--tracker HOST:PORT]\n"
         "lumabri api portfolio-policy [CONFIG_JSON_FILE] [--tracker HOST:PORT]\n"

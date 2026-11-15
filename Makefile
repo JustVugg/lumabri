@@ -53,6 +53,30 @@ lumabri-kube: src/control/lumabri_kube.c src/planner/lumabri_elastic_json.h src/
 test-kubernetes: lumabri-kube
 	$(PYTHON) tests/integration/kubernetes_control_test.py
 
+# Model download helper: the only household program that links libcurl, so
+# that lumabri, the tracker and the workers keep no TLS dependency. It needs
+# the libcurl development files (>= 7.85). `make household FETCH_BINARY=`
+# builds a household that cannot download models.
+FETCH_BINARY ?= lumabri-fetch
+FETCH_CURL_LIBS = $(if $(strip $(CURL_LIBS)),$(CURL_LIBS),-lcurl)
+DOWNLOAD_DEPS = src/runtime/lumabri_download.h src/runtime/lumabri_api_json.h
+lumabri-fetch: src/control/lumabri_fetch.c $(DOWNLOAD_DEPS) lumabri_sha.h
+	@printf '#include <curl/curl.h>\n' | $(CC) $(CPPFLAGS) $(CURL_CFLAGS) -E -x c - >/dev/null 2>&1 || { \
+		echo "lumabri-fetch needs the libcurl development files (Debian/Ubuntu: libcurl4-openssl-dev pkg-config)." >&2; \
+		echo "Install them, or build without model download: make ... FETCH_BINARY=" >&2; exit 1; }
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(CURL_CFLAGS) src/control/lumabri_fetch.c $(FETCH_CURL_LIBS) -o $@
+all: $(FETCH_BINARY)
+
+build/embed-data: tools/embed_data.c
+	mkdir -p build
+	$(HOSTCC) -O2 -Wall -Wextra -Werror tools/embed_data.c -o $@
+
+build/download_assets.h: build/embed-data src/planner/download_catalogue.json src/web/download.js src/web/download.css
+	build/embed-data lmb_download_catalogue_json=src/planner/download_catalogue.json \
+		lmb_web_download_js=src/web/download.js lmb_web_download_css=src/web/download.css > $@.tmp
+	mv $@.tmp $@
+lumabri test_chat_ui test_host_session_pool test-home-monitor test-chat-history test-sanitize: build/download_assets.h $(DOWNLOAD_DEPS) src/runtime/lumabri_download_api.h
+
 check-warnings: lumabri-agent
 test: test-agent-control
 
@@ -66,7 +90,7 @@ test_weight_cache: tests/c/test_weight_cache.c src/runtime/lumabri_weight_cache.
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_weight_cache.c -o $@
 
 # Native household runtime (Colibri sources are a build-time dependency).
-household: tracker maintainer $(SHIM_LIB) lumabri lumabri-agent segment_node segment_chat
+household: tracker maintainer $(SHIM_LIB) lumabri lumabri-agent $(FETCH_BINARY) segment_node segment_chat
 
 lumabri segment_node segment_chat test_calibration test_chat_ui: src/planner/lumabri_link_evidence.h
 lumabri test_calibration test_chat_ui test_portfolio: src/planner/lumabri_workload_facts.h
@@ -172,7 +196,7 @@ lumabri test_chat_ui: lumabri_runtime_identity.h lumabri_checkpoint_identity.h l
 lumabri test_chat_ui: src/planner/lumabri_catalogue_advice.h
 lumabri test_chat_ui: src/planner/lumabri_portfolio.h src/planner/lumabri_portfolio_catalogue.h
 lumabri test_chat_ui: src/runtime/lumabri_preload.h
-lumabri test_chat_ui: src/runtime/lumabri_preparation_api.h src/runtime/lumabri_preparation_store.h src/runtime/lumabri_preparation_request.h
+lumabri test_chat_ui: src/runtime/lumabri_preparation_api.h src/runtime/lumabri_preparation_store.h src/runtime/lumabri_preparation_request.h src/runtime/lumabri_donor_approval_api.h
 lumabri test_chat_ui: src/runtime/lumabri_donor_policy.h src/runtime/lumabri_donor_policy_store.h src/runtime/lumabri_donor_policy_cli.h src/runtime/lumabri_content_identity.h
 lumabri test_chat_ui: src/runtime/lumabri_signed_checkpoint.h
 lumabri test_chat_ui: src/runtime/lumabri_demand.h src/runtime/lumabri_demand_runtime.h
@@ -180,7 +204,7 @@ lumabri test_chat_ui: src/runtime/lumabri_service.h src/runtime/lumabri_service_
 lumabri test_chat_ui: src/runtime/lumabri_joint_prepare.h
 lumabri test_chat_ui: src/ui/lumabri_resident_ui.h
 lumabri test_chat_ui: src/runtime/lumabri_resident_control.h
-lumabri test_chat_ui: src/runtime/lumabri_api_compat.h src/runtime/lumabri_api_tools.h src/runtime/lumabri_api_responses.h src/runtime/lumabri_api.h src/runtime/lumabri_api_http.h src/runtime/lumabri_api_json.h src/runtime/lumabri_api_access.h src/runtime/lumabri_api_proxy.h
+lumabri test_chat_ui: src/runtime/lumabri_api_compat.h src/runtime/lumabri_api_tools.h src/runtime/lumabri_api_responses.h src/runtime/lumabri_api.h src/runtime/lumabri_api_http.h src/runtime/lumabri_api_json.h src/runtime/lumabri_api_access.h src/runtime/lumabri_api_proxy.h src/runtime/lumabri_start.h
 lumabri test_chat_ui test_host_session_pool test-home-monitor test_elastic_policy: src/runtime/lumabri_recovery_wait.h src/runtime/lumabri_recovery_policy.h
 lumabri test_chat_ui test_host_session_pool test-home-monitor test_api_access: src/runtime/lumabri_operator_access.h src/runtime/lumabri_workspace.h
 lumabri test_chat_ui test_host_session_pool test-home-monitor: src/runtime/lumabri_management.h
@@ -202,8 +226,8 @@ build/embed-web: tools/embed_web.c
 	mkdir -p build
 	$(HOSTCC) -O2 -Wall -Wextra -Werror tools/embed_web.c -o $@
 
-build/web_assets.h: build/embed-web src/web/index.html src/web/app.css src/web/app.js logo.svg src/web/capacity.js
-	build/embed-web src/web/index.html src/web/app.css src/web/app.js logo.svg src/web/capacity.js > $@.tmp
+build/web_assets.h: build/embed-web src/web/index.html src/web/app.css src/web/app.js logo.svg src/web/capacity.js src/web/ui.js
+	build/embed-web src/web/index.html src/web/app.css src/web/app.js logo.svg src/web/capacity.js src/web/ui.js > $@.tmp
 	mv $@.tmp $@
 lumabri segment_chat test_chat_ui: lumabri_metrics.h
 lumabri test_chat_ui test_host_session_pool test_host_drain test-home-monitor: src/runtime/lumabri_response_metrics.h
@@ -705,7 +729,7 @@ test_replica_rank: tests/c/test_replica_rank.c src/planner/lumabri_replica_rank.
 
 test: test-api
 
-test-api-gateway: lumabri test_chat_ui test-chat-history
+test-api-gateway: lumabri $(FETCH_BINARY) test_chat_ui test-chat-history
 	./test_chat_ui api-codec
 	./test_chat_ui preparation-codec
 	./test_chat_ui preparation-observe
@@ -721,8 +745,25 @@ test-api-gateway: lumabri test_chat_ui test-chat-history
 	python3 tests/integration/installed_managed_contract_test.py
 	python3 tests/integration/installed_fleet_contract_test.py
 	python3 tests/integration/chat_history_test.py
+	python3 tests/integration/start_command_test.py
+	python3 tests/integration/model_download_test.py
 
-test: test-api-gateway
+test: test-api-gateway test-web-approval test-residency-auto
+
+# Real engines and a real checkpoint: the donor's request is declined, then
+# approved, through the page's own API. About a minute and more than 2 GB of
+# resident weights, so it runs with the aggregate, not with the engine-free
+# gateway gate above.
+.PHONY: test-web-approval
+test-web-approval: lumabri segment_node segment_chat fixture
+	python3 tests/integration/web_approval_test.py
+
+# Real engines and a generated checkpoint of a few megabytes: explicit
+# engine-locked still refuses under a low locked-memory allowance, and the
+# automatic choice of lumabri start loads and reports "not locked".
+.PHONY: test-residency-auto
+test-residency-auto: lumabri segment_node segment_chat
+	python3 tests/integration/residency_auto_test.py
 
 .PHONY: test-chat-history
 test-chat-history: build/web_assets.h
@@ -945,7 +986,7 @@ SEGMENT_COMMON = segment_colibri.h src/runtime/lumabri_thread_capacity.h src/run
 		$(PROTO_DEPS) $(SIGN_DEPS) lumabri_sha.h $(SECURE_DEPS)
 
 HYBRID_PATCH_INPUTS = tools/prepare_gguf_adapters.py tools/prepare_qwen_variants.py tools/prepare_qwen_gguf.py engine_patches/qwen_gguf_source.h tools/prepare_resident_adapters.py engine_patches/make_patches.py \
-	tools/prepare_mistral_segments.py tools/prepare_glm53_gguf.py engine_patches/mistral_boundary.h \
+	tools/prepare_mistral_segments.py tools/prepare_glm53_gguf.py tools/prepare_kimi_gguf.py tools/prepare_inkling_gguf.py tools/prepare_qwen38_gguf.py tools/prepare_v4_gguf.py engine_patches/mistral_boundary.h \
 	engine_patches/qwen38_vision_edge.h src/runtime/lumabri_vision.h src/runtime/lumabri_image.h \
 	src/runtime/lumabri_engine_memory_override.h src/runtime/lumabri_engine_memory.h \
 	lumabri_home_hybrid.h src/runtime/lumabri_hybrid_policy.h src/runtime/lumabri_q8_reference.h \
@@ -1054,6 +1095,17 @@ segment-direct: segment_node segment_chat
 # creation needs the upstream test dependencies (torch/safetensors/numpy/sympy).
 build/v41_range_core.c: tools/prepare_v41_range.py $(ENGINE)/deepseek_v41.c
 	python3 tools/prepare_v41_range.py --source $(ENGINE)/deepseek_v41.c --output $@
+
+build/v41_st.h: tools/prepare_v41_range.py $(ENGINE)/st.h
+	python3 tools/prepare_v41_range.py --artifact st --source $(ENGINE)/st.h --output $@
+
+build/v41_st_gguf.h: tools/prepare_v41_range.py $(ENGINE)/st_gguf.h
+	python3 tools/prepare_v41_range.py --artifact st_gguf --source $(ENGINE)/st_gguf.h --output $@
+
+build/v41_gguf.h: tools/prepare_v41_range.py tools/prepare_gguf_adapters.py $(ENGINE)/gguf.h
+	python3 tools/prepare_v41_range.py --artifact gguf --source $(ENGINE)/gguf.h --output $@
+
+build/v41_adapter.o build/test_v41_range build/test_v41_transport build/test_v41_abi build/test_v41_mixed_gguf: build/v41_st.h build/v41_st_gguf.h build/v41_gguf.h
 
 build/test_v41_range: tests/c/test_v41_range.c engine_patches/v41_boundary.h engine_patches/v41_lifecycle.h build/v41_range_core.c build/segment-sources build/segment-options
 	$(CC) $(CPPFLAGS) -O2 $(OMP_FLAGS) -pthread -I. -Ibuild -I$(ENGINE) tests/c/test_v41_range.c -o $@ -lm $(OMP_LIBS)
@@ -1289,14 +1341,14 @@ PREFIX ?= /usr/local
 # optional loop below, a missing Segment service is a build/install failure.
 install-household: household swarm_probe
 	install -d "$(DESTDIR)$(PREFIX)/bin" "$(DESTDIR)$(PREFIX)/lib/lumabri"
-	install -m 755 lumabri lumabri-agent tracker maintainer swarm_probe segment_node segment_chat "$(DESTDIR)$(PREFIX)/bin/"
+	install -m 755 lumabri lumabri-agent $(FETCH_BINARY) tracker maintainer swarm_probe segment_node segment_chat "$(DESTDIR)$(PREFIX)/bin/"
 	install -m 644 $(SHIM_LIB) tools/setup-household-firewall.ps1 "$(DESTDIR)$(PREFIX)/lib/lumabri/"
 
 .PHONY: install-household
 
 install: all
 	install -d $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(PREFIX)/lib/lumabri
-	install -m 755 lumabri lumabri-agent tracker maintainer swarm_probe $(DESTDIR)$(PREFIX)/bin/
+	install -m 755 lumabri lumabri-agent $(FETCH_BINARY) tracker maintainer swarm_probe $(DESTDIR)$(PREFIX)/bin/
 	install -m 644 $(SHIM_LIB) $(DESTDIR)$(PREFIX)/lib/lumabri/
 	install -m 644 tools/setup-household-firewall.ps1 $(DESTDIR)$(PREFIX)/lib/lumabri/
 	@for b in expert_node expert_node_glm expert_node_inkling expert_node_kimi \
@@ -1307,7 +1359,7 @@ install: all
 	@echo "installed under $(DESTDIR)$(PREFIX)"
 
 clean:
-	rm -f tracker maintainer liblumabri.so liblumabri.dylib test_shim swarm_probe lumabri lumabri-agent lumabri-kube \
+	rm -f tracker maintainer liblumabri.so liblumabri.dylib test_shim swarm_probe lumabri lumabri-agent lumabri-fetch lumabri-kube \
 	      test_relay_exec test_swarm_fed test_key_rotation test_hedge \
 	      test_local_fallback test_accum_order test_hybrid_parallel test_residency_report \
 	      test_model_family test_planner test_planner_io test_cluster test_memory_budget test_calibration test_catalogue_advice test_metrics test_inventory test_home test_home_expert test_chat_ui test_weight_cache segment_budget_probe \
@@ -1349,7 +1401,7 @@ CAPABILITY_DEPS = src/planner/lumabri_capabilities.h src/planner/lumabri_colibri
 lumabri segment_budget_probe segment_node segment_chat test_model_family test_planner test_planner_io test_chat_ui test_cluster test_memory_budget test_calibration: $(CAPABILITY_DEPS)
 
 # Read header metadata through the same positioned I/O used by the planner.
-GGUF_METADATA_DEPS = src/planner/lumabri_gguf_metadata.h src/planner/lumabri_gguf_tokenizers_data.h src/planner/lumabri_gguf_import.h
+GGUF_METADATA_DEPS = src/planner/lumabri_gguf_json.h src/planner/lumabri_gguf_metadata.h src/planner/lumabri_gguf_tokenizers_data.h src/planner/lumabri_gguf_import.h
 lumabri test_chat_ui: $(GGUF_METADATA_DEPS)
 build/test_gguf_inventory: tests/c/test_gguf_inventory.c lumabri_planner.h $(wildcard planner_adapters/*.h) $(CAPABILITY_DEPS) $(GGUF_METADATA_DEPS)
 	@mkdir -p build
@@ -1445,3 +1497,65 @@ build/glm53-mixed-oracle: tests/c/qwen_mixed_oracle.c tests/c/edge_segment_greed
 
 test-glm53-gguf: build/test_gguf_inventory build/glm53-upstream-oracle build/gguf-segment-oracle build/glm53-state-oracle build/glm53-mixed-oracle
 	$(PYTHON) tests/integration/glm53_native_gguf_test.py --engine $(ENGINE) $(GLM53_GGUF_TEST_OPTIONS)
+
+build/kimi-upstream-oracle: tests/c/kimi_upstream_oracle.c build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(OMP_FLAGS) -pthread -I$(ENGINE) $< -o $@ -lm $(OMP_LIBS)
+
+build/kimi-state-oracle: tests/c/mistral_state_oracle.c $(COLIBRI_SEGMENT_LIB) build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Wno-unused-function $(OMP_FLAGS) -pthread -I$(ENGINE) -DLMB_STATE_FAMILY='"kimi"' $< $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
+
+build/kimi-mixed-oracle: tests/c/qwen_mixed_oracle.c tests/c/edge_segment_greedy.c $(COLIBRI_SEGMENT_LIB) build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(OMP_FLAGS) -pthread -I$(ENGINE) $(GGUF_READ_GUARD) -DLMB_MIXED_FAMILY='"kimi"' $< $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
+
+.PHONY: test-kimi-gguf
+test-kimi-gguf: build/test_gguf_inventory build/kimi-upstream-oracle build/gguf-segment-oracle build/kimi-state-oracle build/kimi-mixed-oracle
+	$(PYTHON) tests/integration/kimi_native_gguf_test.py --engine $(ENGINE) $(KIMI_GGUF_TEST_OPTIONS)
+
+build/inkling-upstream-oracle: tests/c/inkling_upstream_oracle.c build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(OMP_FLAGS) -pthread -I$(ENGINE) $< -o $@ -lm $(OMP_LIBS)
+
+build/inkling-state-oracle: tests/c/mistral_state_oracle.c $(COLIBRI_SEGMENT_LIB) build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Wno-unused-function $(OMP_FLAGS) -pthread -I$(ENGINE) -DLMB_STATE_FAMILY='"inkling"' $< $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
+
+build/inkling-mixed-oracle: tests/c/qwen_mixed_oracle.c tests/c/edge_segment_greedy.c $(COLIBRI_SEGMENT_LIB) build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(OMP_FLAGS) -pthread -I$(ENGINE) $(GGUF_READ_GUARD) -DLMB_MIXED_FAMILY='"inkling"' $< $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
+
+.PHONY: test-inkling-gguf
+test-inkling-gguf: build/test_gguf_inventory build/inkling-upstream-oracle build/gguf-segment-oracle build/inkling-state-oracle build/inkling-mixed-oracle
+	$(PYTHON) tests/integration/inkling_native_gguf_test.py --engine $(ENGINE) $(INKLING_GGUF_TEST_OPTIONS)
+build/qwen38-upstream-oracle: tests/c/qwen38_upstream_oracle.c build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(OMP_FLAGS) -pthread -I$(ENGINE) $< -o $@ -lm $(OMP_LIBS)
+
+build/qwen38-state-oracle: tests/c/mistral_state_oracle.c $(COLIBRI_SEGMENT_LIB) build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Wno-unused-function $(OMP_FLAGS) -pthread -I$(ENGINE) -DLMB_STATE_FAMILY='"qwen38"' $< $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
+
+build/qwen38-mixed-oracle: tests/c/qwen_mixed_oracle.c tests/c/edge_segment_greedy.c $(COLIBRI_SEGMENT_LIB) build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(OMP_FLAGS) -pthread -I$(ENGINE) $(GGUF_READ_GUARD) -DLMB_MIXED_FAMILY='"qwen38"' $< $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
+
+.PHONY: test-qwen38-gguf
+test-qwen38-gguf: build/test_gguf_inventory build/qwen38-upstream-oracle build/gguf-segment-oracle build/qwen38-state-oracle build/qwen38-mixed-oracle
+	$(PYTHON) tests/integration/qwen38_native_gguf_test.py --engine $(ENGINE) $(QWEN38_GGUF_TEST_OPTIONS)
+
+build/v4-upstream-oracle: tests/c/v4_upstream_oracle.c $(DS_OBJS) $(DS_SIBLING_OBJS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DS_UNIT_CFLAGS) $< $(DS_OBJS) $(DS_SIBLING_OBJS) -o $@ -lm
+
+build/v4-state-oracle: tests/c/mistral_state_oracle.c $(COLIBRI_SEGMENT_LIB) build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Wno-unused-function $(OMP_FLAGS) -pthread -I$(ENGINE) -DLMB_STATE_FAMILY='"deepseek_v4"' $< $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
+
+build/v4-mixed-oracle: tests/c/qwen_mixed_oracle.c tests/c/edge_segment_greedy.c $(COLIBRI_SEGMENT_LIB) build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(OMP_FLAGS) -pthread -I$(ENGINE) $(GGUF_READ_GUARD) -DLMB_MIXED_FAMILY='"deepseek_v4"' $< $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
+
+.PHONY: test-v4-gguf
+test-v4-gguf: build/test_gguf_inventory build/v4-upstream-oracle build/gguf-segment-oracle build/v4-state-oracle build/v4-mixed-oracle
+	$(PYTHON) tests/integration/v4_native_gguf_test.py --engine $(ENGINE) $(V4_GGUF_TEST_OPTIONS)
+
+
+build/v41-gguf-upstream-oracle: tests/c/v41_gguf_upstream_oracle.c build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) -O2 $(OMP_FLAGS) -pthread -I$(ENGINE) $< -o $@ -lm $(OMP_LIBS)
+
+.PHONY: test-v41-gguf
+build/test_v41_mixed_gguf: tests/c/test_v41_mixed_gguf.c tests/c/test_v41_abi.c engine_patches/v41_adapter.h engine_patches/v41_boundary.h engine_patches/v41_lifecycle.h $(wildcard planner_adapters/*.h) src/runtime/lumabri_v41_contract.h build/v41_range_core.c build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) -O2 $(OMP_FLAGS) -pthread -I. -Ibuild -I$(ENGINE) tests/c/test_v41_mixed_gguf.c $(ENGINE)/segment_runtime.c $(ENGINE)/edge_runtime.c -o $@ -lm $(OMP_LIBS)
+
+test-v41-gguf: build/test_gguf_inventory build/v41-gguf-upstream-oracle build/test_v41_abi build/test_v41_mixed_gguf
+	$(PYTHON) tests/integration/v41_native_gguf_test.py --engine $(ENGINE) $(V41_GGUF_TEST_OPTIONS)

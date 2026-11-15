@@ -4,6 +4,7 @@
  * containing an old approval. */
 #ifndef LUMABRI_SERVICE_MANAGER_H
 #define LUMABRI_SERVICE_MANAGER_H
+#include "src/runtime/lumabri_memlock.h"
 
 static const char *const home_service_roles[] = {"manager", "donor", "tracker", "prepare", "api"};
 
@@ -163,14 +164,21 @@ static int cmd_service(int argc, char **argv) {
             printf(",\"compute\":{\"enabled\":%s,\"active\":%u,\"queued\":%u,\"grants\":%llu}",
                 live && s.compute_enabled ? "true" : "false", live ? s.compute_active : 0,
                 live ? s.compute_queued : 0, (unsigned long long)(live ? s.compute_grants : 0));
+            /* Whether held weights are page-locked: never implied when unknown. */
+            int unlocked = live ? lmb_residency_unlocked(s.residency) : -1;
+            printf(",\"memory\":{\"mode\":\"%s\",\"locked\":%s,\"memlock_limit_bytes\":", lmb_residency_name(live ? s.residency : 0),
+                unlocked < 0 ? "null" : unlocked ? "false" : "true");
+            if (!live || !s.memlock_limit || s.memlock_limit == UINT64_MAX) fputs("null}", stdout);
+            else printf("%llu}", (unsigned long long)s.memlock_limit);
             fputs(",\"detail\":", stdout);
             doctor_json_string(s.detail);
             fputs(",\"operation_state\":", stdout);
             doctor_json_string(!recorded ? "unknown" : s.state == HOME_SVC_RUNNING ? "running" :
                 s.state == HOME_SVC_DONE ? "done" : s.state == HOME_SVC_FAILED ? "failed" : "stopped");
             fputc('}', stdout);
-        } else printf("%-8s %-12s %s%s\n", home_service_roles[i], state,
-            live && s.has_offer ? s.offer.model : "", recorded && !live ? " (saved state is not a live allocation)" : "");
+        } else printf("%-8s %-12s %s%s%s\n", home_service_roles[i], state,
+            live && s.has_offer ? s.offer.model : "", recorded && !live ? " (saved state is not a live allocation)" : "",
+            live && lmb_residency_unlocked(s.residency) == 1 ? " (memory not locked)" : "");
     }
     if (json) puts("]}");
     return 0;

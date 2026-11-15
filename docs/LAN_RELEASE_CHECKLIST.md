@@ -769,9 +769,10 @@ not a completed gate.
    and the full AttnRes boundary width. Prepared U8 dense containers are not
    yet admitted by this contract. Native cache policy may reserve less than
    the upper bound; full warm residency still needs execution evidence.
-   Its native 3.7 GB policy floor is included in admission. Standard ARM CI
-   validates low-memory refusal, not two-range Kimi execution; sufficient-RAM
-   native ARM execution remains open. No overcommit override is enabled.
+   The later Kimi GGUF integration replaces the resident 3.7 GB streaming
+   policy floor with a geometry-based workspace reserve in both planner and
+   loader. Standalone streaming is unchanged. Native ARM execution still
+   requires its own verification; no overcommit override is enabled.
    GLM float source adds latent MLA/DSA state and separate miss/load workspace;
    prepared quantized GLM containers remain unverified.
    GLM5.3 accounts for its engine-wide replicated session state and context-sized

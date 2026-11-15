@@ -27,10 +27,43 @@ expires. Stopping sharing ends the permission's scope: a new donor incarnation
 requires new authorization. Closing the TUI or restarting only the manager does
 not change the donor incarnation.
 
+## From the page on the same computer
+
+`lumabri start` shares this computer's memory without the **Share resources**
+screen. The page it opens shows the waiting request instead: the requester's
+identity, the model, the layer range, the memory and the limits, with
+**Decline**, **Accept** and, for a resident Segment request, **Allow repeat
+loads for 1 hour**. They are the TUI's three actions, sent to the same sharing
+service with the same fences: its incarnation, the immutable allocation and the
+request revision that were displayed. A request that changed or expired is
+refused and shown again. Nothing is preselected, no key confirms, and an
+unanswered request is dropped after two minutes exactly as before. After a
+repeat permission was saved from the page, the page offers **Revoke repeat
+permission** while that allocation is the one shown.
+
+```
+GET  /api/v1/donor/approval
+POST /api/v1/donor/approval  {"action","instance","allocation","revision"}
+```
+
+`action` is `accept`, `decline`, `allow_repeat` or `revoke_repeat`. Both
+methods need the explicit management permission; an operator or inference
+token receives 403. The route acts only on the sharing service of the computer
+and OS user that run this gateway: a request carries no address or computer
+name. It is refused when the gateway is published through a TLS proxy
+(`lumabri api start --https-origin`), so the page of another computer cannot
+decide for this one. The page does not read requests while a response is being
+generated; use the TUI or the CLI meanwhile.
+
+The loopback gate `tests/integration/web_approval_test.py` prepares a real
+reduced checkpoint through the page's API, declines once and checks that
+nothing was loaded, then allows, accepts and revokes, with real inference.
+
 ## Local administration
 
 Only the donor's OS owner can create these grants. An API management credential
-on a different computer cannot authorize that donor on its owner's behalf.
+on a different computer cannot authorize that donor on its owner's behalf; the
+page route above is served on loopback by the owner's own gateway.
 
 ```sh
 lumabri donor-policy inspect

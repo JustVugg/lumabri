@@ -67,15 +67,15 @@ static inline int lmb_gguf_import_cached(const char *root,const char *ref,char *
        lmb_gguf_metadata(&g,&metadata))goto done;
     sources=calloc(g.nfiles,sizeof *sources);if(!sources)goto done;
     LmbSha digest;lmb_sha_init(&digest);
-    const char version[]="lumabri-gguf-import-v2";lmb_sha_update(&digest,version,sizeof version);
+    const char version[]="lumabri-gguf-import-v3";lmb_sha_update(&digest,version,sizeof version);
     /* File identities below, not the spelling of the selected folder, define
      * this cache key. A relative path must reuse the absolute path's import. */
-    LmbGgufJson *docs[]={&metadata.tokenizer,&metadata.tokenizer_config,&metadata.generation_config,&sidecar,&metadata.config};
-    const char *names[]={"tokenizer.json","tokenizer_config.json","generation_config.json","gguf.json","config.json"};
+    LmbGgufJson *docs[]={&metadata.tokenizer,&metadata.tokenizer_config,&metadata.generation_config,&sidecar,&metadata.config,&metadata.dsv41_engram};
+    const char *names[]={"tokenizer.json","tokenizer_config.json","generation_config.json","gguf.json","config.json","dsv41_engram.json"};
     if(g.nfiles==1)lmb_gguf_json_printf(&sidecar,"{\"format\":\"colibri-gguf-v1\",\"gguf\":\"weights.gguf\"}");
     else lmb_gguf_json_printf(&sidecar,"{\"format\":\"colibri-gguf-v1\",\"gguf\":\"weights-00001-of-%05u.gguf\"}",g.nfiles);
     if(sidecar.bad)goto done;
-    for(unsigned i=0;i<5;i++){lmb_sha_le64(&digest,docs[i]->length);lmb_sha_update(&digest,docs[i]->data,docs[i]->length);}
+    for(unsigned i=0;i<6;i++){lmb_sha_le64(&digest,docs[i]->length);lmb_sha_update(&digest,docs[i]->data,docs[i]->length);}
     for(uint32_t i=0;i<g.nfiles;i++) {
         int n=snprintf(source,sizeof source,"%s/%s",root,g.files[i]);
         if(n<0 || (size_t)n>=sizeof source || lmb_source_stat(source,&sources[i]) || !sources[i].regular)goto done;
@@ -106,7 +106,8 @@ static inline int lmb_gguf_import_cached(const char *root,const char *ref,char *
     }
     /* Build privately, then publish the complete directory atomically. A crash
      * leaves only an unused temporary directory, never a poisoned cache key. */
-    for(unsigned i=0;i<5;i++) {
+    for(unsigned i=0;i<6;i++) {
+        if(!docs[i]->length)continue;
         snprintf(path,sizeof path,"%s/%s",work,names[i]);
         if(lmb_gguf_file_text(path,docs[i],created))goto done;
     }
@@ -117,8 +118,8 @@ static inline int lmb_gguf_import_cached(const char *root,const char *ref,char *
     strcpy(directory,output);rc=0;
 done:
     if(rc && created) {
-        const char *files[]={"config.json","tokenizer.json","tokenizer_config.json","generation_config.json","gguf.json"};
-        for(unsigned i=0;i<5;i++){snprintf(path,sizeof path,"%s/%s",work,files[i]);(void)lmb_source_unlink(path);}
+        const char *files[]={"config.json","tokenizer.json","tokenizer_config.json","generation_config.json","gguf.json","dsv41_engram.json"};
+        for(unsigned i=0;i<6;i++){snprintf(path,sizeof path,"%s/%s",work,files[i]);(void)lmb_source_unlink(path);}
         for(unsigned i=0;i<linked;i++) {
             if(g.nfiles==1)snprintf(path,sizeof path,"%s/weights.gguf",work);
             else snprintf(path,sizeof path,"%s/weights-%05u-of-%05u.gguf",work,i+1,g.nfiles);

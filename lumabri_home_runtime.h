@@ -21,7 +21,18 @@ static int home_fail(const char *fmt, ...) {
     fprintf(stderr, "%s\n", home_error);
     return 1;
 }
+/* Set once per process when the launcher asked for the automatic choice. The
+ * environment itself is rewritten to the strict policy, so every child that
+ * is not given an explicit per-allocation decision still locks or refuses. */
+static int home_residency_auto;
 static int home_resident_environment(void) {
+    const char *requested = getenv("LUMABRI_RESIDENCY_POLICY");
+    if (requested && !strcmp(requested, "auto")) {
+        home_residency_auto = home_resident_required();
+        if (home_residency_auto ? setenv("LUMABRI_RESIDENCY_POLICY", "engine-locked", 1) :
+                                  unsetenv("LUMABRI_RESIDENCY_POLICY"))
+            return home_fail("Cannot configure resident memory protection. No model was started.");
+    }
     if (!home_resident_required()) return 0;
     /* Set this in the worker as well as the requester: existing services
      * have independent environments. A resident household must wire its
@@ -264,6 +275,7 @@ typedef struct HomeDonor {
     int client, lease, weight_lease, segment_port, host_port, segment_ready, host_ready, node_control;
     LmbNodeControl retired_receipt; /* unpersisted terminal proof pins this keeper slot until reconciled */
     int lifetime_fd_plus_one, lifetime_started, release_pending;
+    int memory_unlocked; /* automatic policy: this allocation is resident without page locks */
     LmbHomePhase release_phase;
     char release_reason[160];
     pid_t segment, host;
@@ -629,11 +641,30 @@ static int home_donor_launch(HomeDonor *d, int edge,char *error,size_t error_siz
     }
     if (!edge && o->hybrid_role == LMB_HYBRID_ACCELERATOR)
         snprintf(e_accelerator, sizeof e_accelerator, "LUMABRI_HOME_ACCELERATOR=%s", id);
+    /* Automatic policy: one decision for the Segment and the chat host of
+     * this allocation, against its whole reservation. Not locked still means
+     * resident: LUMABRI_RESIDENT_REQUIRED stays set, the weights are loaded
+     * into RAM and sealed before READY, and nothing is read from disk later. */
+    int unlocked = 0;
+    if (home_residency_auto) {
+        LmbMemlockLimit allowance = lmb_memlock_limit();
+        unlocked = !lmb_memlock_auto_locks(&allowance, o->ram_bytes);
+        if (!edge) {
+            if (unlocked) fprintf(stderr, "[resident-memory] automatic policy=not-locked allocation=%.12s reservation=%llu bytes "
+                "allowance=%llu bytes (RLIMIT_MEMLOCK). Weights are loaded fully into RAM but not locked. "
+                LMB_MEMLOCK_UNLOCKED_NOTE " To lock it: %s\n", id, (unsigned long long)o->ram_bytes,
+                (unsigned long long)allowance.bytes, lmb_memlock_howto());
+            else fprintf(stderr, "[resident-memory] automatic policy=engine-locked allocation=%.12s reservation=%llu bytes "
+                "is within the OS locked-memory allowance\n", id, (unsigned long long)o->ram_bytes);
+        }
+    }
+    d->memory_unlocked = unlocked;
     char *envv[] = {e_shim, e_vroot, e_cache, e_cas, e_tracker, e_model, e_root,
                    e_key, "LUMABRI_SEGMENT_REQUIRED=1", "LUMABRI_VERIFY=0",
                    "LUMABRI_PREFETCH=0", "LUMABRI_NO_EXEC=1",
                    "LUMABRI_ENGINE_BACKEND=cpu", e_log,
-                   edge ? e_limit : "LUMABRI_HOME_SEGMENT=1", e_omp, e_omp_limit, e_hybrid, e_accelerator, NULL};
+                   edge ? e_limit : "LUMABRI_HOME_SEGMENT=1", e_omp, e_omp_limit, e_hybrid, e_accelerator,
+                   unlocked ? "LUMABRI_RESIDENCY_POLICY=observe" : NULL, NULL};
     int chosen_port = 0, listener = home_listen(&chosen_port);
     if (listener < 0) return -1;
     snprintf(port, sizeof port, "%d", chosen_port);
@@ -923,6 +954,22 @@ static void home_service_donor_snapshot(HomeService *service, const HomeDonor *d
     s->compute_active = s->compute_enabled ? atomic_load(&home_compute_broker.active) : 0;
     s->compute_queued = s->compute_enabled ? atomic_load(&home_compute_broker.queued) : 0;
     s->compute_grants = atomic_load(&home_compute_broker.grants);
+    /* What this computer does with the weights it holds: the launch policy,
+     * or under the automatic choice whether any held allocation is unlocked. */
+    const char *policy = getenv("LUMABRI_RESIDENCY_POLICY");
+    LmbMemlockLimit allowance = lmb_memlock_limit();
+    s->memlock_limit = !allowance.known ? 0 : allowance.unlimited || allowance.exempt ? UINT64_MAX :
+        allowance.bytes ? allowance.bytes : 1; /* zero means unknown in the record */
+    s->residency = !home_resident_required() || !policy ? LMB_RESIDENCY_UNREPORTED :
+        home_residency_auto ? LMB_RESIDENCY_AUTO_LOCKED : !strcmp(policy, "engine-locked") ? LMB_RESIDENCY_ENGINE_LOCKED :
+        !strcmp(policy, "locked") ? LMB_RESIDENCY_PROCESS_LOCKED : !strcmp(policy, "observe") ? LMB_RESIDENCY_OBSERVE :
+        LMB_RESIDENCY_UNREPORTED;
+    for (uint32_t i = 0; home_residency_auto && i <= d->park_capacity; i++) {
+        const HomeDonor *model = i ? &d->parked[i-1] : d;
+        if (model->memory_unlocked && model->transaction.reservation_held &&
+            model->transaction.phase >= LMB_HOME_ACCEPTED && model->transaction.phase <= LMB_HOME_READY)
+            s->residency = LMB_RESIDENCY_AUTO_UNLOCKED;
+    }
     /* Tab changes the displayed allocation, not the workload identity. */
     uint8_t ids[4][32]; uint32_t count = 0;
     for (uint32_t i = 0; i <= d->park_capacity && count < 4; i++) {

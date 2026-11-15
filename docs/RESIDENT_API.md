@@ -399,8 +399,8 @@ An operator can inspect the same routing evidence without opening a chat:
 ```
 
 The command emits JSON. `GET /api/v1/routing/MODEL_ID` exposes the same snapshot
-to a bearer token with an operator grant. In **Computers & models**, choose
-**Inspect routing** on a managed model. No management or inference grant is
+to a bearer token with an operator grant. In **Computers & models**, expand
+**Advanced** and choose **Inspect routing** on a managed model. No management or inference grant is
 added by this read-only operation.
 
 The snapshot includes the model revision, policy, preference order, reason,
@@ -631,16 +631,18 @@ nor authorize an HTTP inference user to perform management mutations.
 
 ### Shared allocation management
 
-The **Computers & models** workspace can inspect, drain, resume and deliberately
-release an exact saved allocation. Management is a separate local-owner grant:
+The **Computers & models** workspace (under **Advanced → Saved allocations**)
+can inspect, drain, resume and deliberately release an exact saved allocation. Management is a separate local-owner grant:
 
 ```sh
 lumabri api manage-grant operator-name
 lumabri api manage-revoke operator-name
 ```
 
-It includes workspace visibility but does not authorize inference or access to
-another user's private conversations. An ordinary inference grant or read-only
+It includes workspace visibility but does not authorize inference on existing
+models or access to another user's private conversations. A manager who
+prepares a model receives the inference grant for that exact allocation when it
+is ready; see [model preparation](MODEL_PREPARATION_API.md). An ordinary inference grant or read-only
 `operator-grant` cannot mutate allocations. Grants are bound to the current
 credential digest; replacing a user does not transfer an old management grant.
 
@@ -959,7 +961,7 @@ certify a large-model LAN, datacenter workload or remote browser deployment.
 
 ### Measure and compare from the workspace
 
-In **Computers & models → Measure & compare**, an operator can inspect saved
+In **Computers & models → Advanced → Measure & compare**, an operator can inspect saved
 historical measurements. Management permission is required to run or check
 measurements, compare plans, remove observations or change model routing.
 Refreshing the list does not turn historical evidence into a current result.

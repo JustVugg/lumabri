@@ -2,8 +2,8 @@
 
 These are Lumabri-side descriptions, not changes to Colibri. They read small
 checkpoint metadata before donor approval; they do not initialize an engine.
-The implementation under test is pinned by CI to Colibri
-`12a5c464b5c1f8292d578c62458706bc32d6ac95`.
+The implementation under test is pinned by CI to Colibri `v2.1.0`, commit
+`704a3f68184b78367a04cb5526e428dc2f90f05b`.
 
 ## Qwen3.6 converted CPU checkpoints
 
@@ -49,6 +49,13 @@ and a loading temporary. Missing tensors, duplicate used tensors, truncated
 files, incoherent packed encodings, and invalid scale sizes reject sizing.
 Disk execution is not enabled by this resident contract.
 
+Native GGUF uses a separate inspector. It checks every used tensor shape,
+per-layer local/global KV geometry and the shared-expert router, including
+native block types and packed expert containers. The budget includes padded
+expert slabs, row scales, source indexes and temporary packing buffers.
+`test-inkling-gguf` compares every split with the pinned monolithic CPU engine
+and exercises independent conversations, snapshots and the household flow.
+
 Linux checks 24 generated float tokens against an independent PyTorch oracle,
 then runs approved two-donor household execution. Packed int4 additionally
 checks whole/split equivalence and lost-donor cleanup. Native macOS Intel/ARM
@@ -75,15 +82,15 @@ are conservatively covered by a whole-boundary reservation, not disk-mode admiss
 KDA recurrence and convolution state are fixed per session. MLA latent/rotary
 and optional DSA index caches grow with context. Edge/Segment exchange AttnRes
 state with width `hidden * (1 + ceil(layers / block_size))`, not just `hidden`;
-both boundary buffers and loading workspace are reserved. Expert capacity is
-an upper bound: native `K3_EXPERT_GB`/RAM policy can choose a smaller cache, so
-this contract does not certify that every admitted weight was warmed into RAM.
+both boundary buffers and loading workspace are reserved. Resident preparation
+requires slots for every assigned expert and checks the approved budget while
+warming them. A smaller cache cannot silently become a resident allocation.
 
-Admission also reserves the pinned initializer's unconditional 3.7 GB policy
-floor, plus its whole-model KV projection. The policy is not measured tiny-model
-RSS, but ignoring it produces plans the native engine refuses to open. We do not
-enable `COLI_RAM_OVERCOMMIT` to bypass it. The standard macOS ARM CI runner tests
-insufficient-memory refusal; two-range Kimi execution needs a larger machine.
+The resident loader and planner reserve kernel workspace from the geometry,
+plus the conservative whole-model KV projection. Standalone streaming keeps
+its original page-cache policy. No `COLI_RAM_OVERCOMMIT` bypass is enabled.
+Embeddings are owned by Edge in RAM. Native, split and packed GGUFs use a
+separate inspector for block types, residual scores and expert slot padding.
 
 The numpy-generated tiny fixture retains native MXFP4 experts. Its eight-token
 independent oracle comes from upstream's hash-pinned Moonshot reference, in the
@@ -136,8 +143,9 @@ macOS CI; they do not prove full-size memory or performance.
 
 The contract accepts float/BF16/F16 dense tensors and float or block-E4M3
 experts. It validates the hyper-connection boundary width, DeltaNet recurrence,
-QSA context state and the PLE table's I64 layout metadata. PLE row reads receive
-a whole-source cache allowance; this does not claim that pages are warm/pinned.
+QSA context state and the PLE table's I64 layout metadata. Assigned PLE tables
+are complete engine-owned allocations, priced at their source representation;
+row access during generation decodes RAM directly.
 FP8 experts require correctly shaped 128x128 scale sidecars, including partial
 blocks. Admission conservatively covers optional f32 expansion and coexistence
 of a compact shared scale bank with per-slot scales. Vision is not admitted.
@@ -150,6 +158,12 @@ the unquantized original. Native FP8 and expanded-f32 execution are tested
 separately. TCP split and household approval/generation/cleanup are additional
 tests, not substitutes for numerical comparison. Native macOS CI receives the
 same generated fixtures.
+
+Native/split `qwen4exp` GGUFs have a separate exact tensor contract, including
+the DeltaNet head ordering, transformed norms, PLE hash ranges and block-layout
+overhead. Unknown tensors and incomplete metadata fail admission. Model-owned
+GGUF contexts allow different formats and quantizations to remain resident
+together. The text-only GGUF contract does not enable NextN or vision.
 
 ## OLMoE merged-int8 CPU checkpoints
 

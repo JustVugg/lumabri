@@ -1,4 +1,4 @@
-<img src="logo.svg" alt="lumabri: tiny engine, immense swarm" width="524">
+<img src="logo.svg" alt="Lumabri" width="524">
 
 # Your computers. Your models.
 
@@ -48,6 +48,15 @@ On Linux or macOS, build from source with a compatible Colibri checkout:
 make household swarm_probe ENGINE=/path/to/colibri/c
 ./lumabri
 ```
+
+To use one computer straight away, run `./lumabri start` instead (in a
+package, open `start-here.sh` on Linux or `START-HERE.command` on macOS). It
+creates this computer's household if there is none, starts sharing and the
+local web page, and opens the chat page in your browser. The page is served on
+`127.0.0.1` only. `--tui` opens the workspace below instead. If the computer
+has no model yet, the page offers one that fits the memory your computers
+share and downloads it when you press Download
+([Downloading a model](docs/MODEL_DOWNLOAD.md)).
 
 After launch, use **arrow keys and Enter**. Press **/** for workspace actions
 and **Esc** to go back. Use a terminal at least 60 columns by 28 rows.
@@ -194,7 +203,11 @@ read-only **Computers & models** view, explicitly grant
 `./lumabri api operator-grant local-chat`.
 
 The page provides model selection, streaming, Stop, collapsible private
-history and export. No separate web server or browser-side AI engine is needed.
+history and export. A details panel lists the selected model, reporting
+computers (operators only) and this session's activity; the **API** view shows
+the connection settings from `GET /api/v1/client-config` with copyable client
+examples. It follows the system light or dark theme and works at phone width.
+No separate web server or browser-side AI engine is needed.
 During a response, the speed indicator updates in tok/s once enough tokens have
 arrived. It shows the measured response rate, not the model's guaranteed capacity;
 preparation, recovery and unavailable measurements have separate labels.
@@ -205,7 +218,9 @@ computers, use the explicit [HTTPS reverse-proxy setup](docs/HTTPS_INGRESS.md).
 **Computers & models** shows resource reports, resident allocation references,
 model routes and gateway activity. Explicit management permission adds model
 preparation, donor approval requests, replica policies, draining and release.
-Read-only operators cannot change allocations.
+Read-only operators cannot change allocations. Computers and model preparation
+are shown first; managed models, replica automation, measurements and saved
+allocations are under **Advanced** on the same page.
 
 **Measure & compare** runs a bounded workload on models already approved and
 loaded. Choose allocations, client count and rounds; then check first-text and
@@ -265,6 +280,9 @@ There are no promised tok/s or automatic “best model” recommendations.
 ### Native runtime build
 
 Build the complete runtime with `make household ENGINE=/path/to/colibri/c`.
+This also builds `lumabri-fetch`, the model download helper, which needs the
+libcurl development files (Debian/Ubuntu: `libcurl4-openssl-dev pkg-config`);
+add `FETCH_BINARY=` to build without it ([Downloading a model](docs/MODEL_DOWNLOAD.md)).
 Building only `lumabri` does not install the model services. macOS builds use
 Homebrew `libomp` when available and work single-threaded without it. Changing
 OpenMP flags invalidates the generated engine build automatically. CI pins
@@ -285,8 +303,17 @@ latent expert dimension and chat format. [Mistral Large 4 text](docs/MISTRAL.md)
 also runs as resident GGUF CPU segments, preserving its cross-layer KV and
 sparse attention state. GLM-5.2/5.3 `glm-dsa` GGUFs preserve shared indexer
 selections across segments. GLM5-Next `glm5-next` GGUFs use their separate
-resident CPU adapter for recurrent and sparse attention. Other GGUF
-architectures still require their own resident integration.
+resident CPU adapter for recurrent and sparse attention. Kimi K3 `kimi-k3`
+GGUFs preserve attention-residual boundaries and recurrent state, with
+embeddings and routed experts prepared in RAM before chat. Inkling text GGUFs
+retain sliding/global attention and convolution state on their segments,
+including native and packed expert containers. Qwen3.8 `qwen4exp` text GGUFs
+keep hyper-connections, DeltaNet and PLE state on their assigned segments;
+the complete assigned PLE table is loaded into engine-owned RAM before chat.
+DeepSeek V4 `deepseek4` GGUFs retain compressed-attention and hash-routing
+state on their segments, with resident embedding and output tables. DeepSeek
+V4.1 `deepseek41` GGUFs additionally prepare their assigned Engram row ranges
+in RAM and preserve cross-layer attention feedback. Other GGUF architectures still require their own resident integration.
 Standalone CUDA/Vulkan support does not enable a distributed
 GPU backend; the shipped Edge/Segment adapters remain CPU-only.
 

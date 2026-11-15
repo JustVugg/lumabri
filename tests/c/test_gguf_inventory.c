@@ -7,8 +7,12 @@ int main(int argc,char **argv) {
         LmbGguf g={0};LmbGgufMetadata m={0};
         if(lmb_gguf_model(argv[2],&g))return 1;
         int rc=lmb_gguf_metadata(&g,&m);
-        if(!rc)printf("{\"config\":%s,\"tokenizer\":%s,\"tokenizer_config\":%s,\"generation_config\":%s}\n",
-            m.config.data,m.tokenizer.data,m.tokenizer_config.data,m.generation_config.data);
+        if(!rc) {
+            printf("{\"config\":%s,\"tokenizer\":%s,\"tokenizer_config\":%s,\"generation_config\":%s",
+                m.config.data,m.tokenizer.data,m.tokenizer_config.data,m.generation_config.data);
+            if(m.dsv41_engram.length)printf(",\"dsv41_engram\":%s",m.dsv41_engram.data);
+            puts("}");
+        }
         lmb_gguf_metadata_free(&m);lmb_gguf_free(&g);return rc?1:0;
     }
     if(argc==3 && !strcmp(argv[1],"--boundary")) {

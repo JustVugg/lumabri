@@ -3,6 +3,8 @@
 Extract the entire ZIP into a new folder and open **Lumabri.cmd**. Keep its
 `bin` folder alongside it. You do not need WSL, Python or a compiler.
 This x86-64 package requires Windows 10 version 1903 or newer.
+**START-HERE.bat** opens the same workspace. The Windows package has no web
+server, so neither file opens a browser chat page on this computer.
 
 1. Choose **Create a household** on one computer. On the others, choose
    **Join a household** and use the displayed address and household key.

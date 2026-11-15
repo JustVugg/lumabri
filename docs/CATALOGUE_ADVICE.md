@@ -18,6 +18,9 @@ then lowest RAM, then checkpoint size. With fewer than two eligible choices
 there is no comparative advice. Unknown speeds are never invented. Selecting
 different computers clears advice immediately while the planner refreshes.
 
+Getting a model that is not on disk yet is a separate, explicit action: see
+[Downloading a model](MODEL_DOWNLOAD.md).
+
 The TUI and JSON use the same computed snapshot; model families are not
 hard-coded in the advisor. No host, donor or model is selected on your behalf.
 

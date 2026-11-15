@@ -26,6 +26,24 @@ hash-checked build copy of the engine into the household binaries.
   Recovery uses the existing history replay path, not a fabricated snapshot.
   Loader failures stay in the supervised runtime subprocess.
 
+## GGUF input
+
+Select a native or split `deepseek41` GGUF from the catalog. Lumabri creates
+its configuration and Engram sidecar in C, preserving integer hash metadata.
+The resident inspector checks both the checkpoint and this sidecar before
+accepting a plan. The GGUF's packed-expert form is also supported.
+
+Engram may use per-layer inline FP8 rows or a single block-quantized table.
+For the shared table, each segment loads only the contiguous rows belonging
+to its assigned Engram layers. The remaining table stays at the source;
+normal inference uses the prepared buffers. This does not enable vision,
+DSpark or additional KV modes.
+
+`make test-v41-gguf ENGINE=/path/to/colibri/c V41_GGUF_TEST_OPTIONS=--household`
+compares split execution with the unmodified engine, including mixed block
+types, global and inline Engram, exact hash metadata, separate conversations,
+source-offline chat and invalid-input rejection.
+
 ## Why the boundary carries more than a residual
 
 Each cut needs mHC `pre_mix`, compressed-KV/index updates from foreign owners,

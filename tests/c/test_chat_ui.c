@@ -681,8 +681,23 @@ int main(int argc, char **argv) {
         lmb_put32(b.p, 1);
         assert(!home_service_unpack(b.p, b.len-72, &output));
         assert(!output.model_count && !output.compute_enabled);
+        /* Version 6 needs its own fields; an unknown version is refused. */
         lmb_put32(b.p, 6); assert(home_service_unpack(b.p, b.len, &output));
+        lmb_put32(b.p, 7); assert(home_service_unpack(b.p, b.len, &output));
         free(b.p); b = (LmbBuf){0};
+        /* A donor's memory report rides in version 6 only when it is set, so
+         * every other record keeps the bytes earlier builds read. */
+        assert(!home_service_pack(&b, &input) && lmb_get32(b.p) == 5);
+        size_t plain = b.len; free(b.p); b = (LmbBuf){0};
+        input.residency = LMB_RESIDENCY_AUTO_UNLOCKED; input.memlock_limit = 64u << 20;
+        assert(!home_service_pack(&b, &input) && lmb_get32(b.p) == 6 && b.len == plain + 12);
+        assert(!home_service_unpack(b.p, b.len, &output));
+        assert(output.residency == LMB_RESIDENCY_AUTO_UNLOCKED && output.memlock_limit == 64u << 20);
+        for (size_t n = 0; n < b.len; n++) assert(home_service_unpack(b.p, n, &output));
+        free(b.p); b = (LmbBuf){0};
+        input.residency = 6; assert(home_service_pack(&b, &input));
+        input.residency = LMB_RESIDENCY_ENGINE_LOCKED; strcpy(input.role, "api"); assert(home_service_pack(&b, &input));
+        strcpy(input.role, "donor"); input.residency = 0; input.memlock_limit = 0;
         input.compute_active = 2; assert(home_service_pack(&b, &input));
         input.compute_active = 1; input.compute_queued = 33; assert(home_service_pack(&b, &input));
         input.compute_queued = 3; input.compute_enabled = 0; assert(home_service_pack(&b, &input));

@@ -123,7 +123,9 @@ Session creation checks the process budget again after allocating its state.
 
 Household sharing uses `LUMABRI_RESIDENCY_POLICY=engine-locked` by default,
 including direct TUI, headless donors and background services. No launcher
-variable is needed. Configure the OS locked-memory allowance before starting
+variable is needed. The one exception is the sharing service started by
+`lumabri start` when no policy was requested; see
+[the automatic choice](#the-automatic-choice-of-lumabri-start). Configure the OS locked-memory allowance before starting
 the service; an insufficient allowance refuses preparation instead of
 falling back to pageable weights. Restart existing sharing services after
 updating so they use the new default. Explicit diagnostic policies remain
@@ -206,6 +208,57 @@ manager or an administrator, then verify that its engine children inherit it.
 Changing a shell's allowance does not update a donor already running in the
 background. Lumabri never raises limits, disables swap or silently switches
 from `engine-locked` to `observe`.
+
+### The automatic choice of lumabri start
+
+An ordinary desktop account may lock very little memory (64 MiB is a common
+`ulimit -l`), so the strict default refuses the first model there. `lumabri
+start` therefore starts its sharing service with
+`LUMABRI_RESIDENCY_POLICY=auto` when, and only when, the variable is not set.
+An explicit value is inherited untouched: `engine-locked` still refuses with
+"OS locked-memory limit is too low", and every other command (`lumabri donor`,
+the TUI, installed services) keeps the strict default.
+
+`auto` is a launcher word, not an engine policy. The donor decides once per
+accepted allocation, before starting any engine, by comparing the **whole
+approved reservation** with the process's known `RLIMIT_MEMLOCK`:
+
+- the allowance covers it (or is unlimited, exempt or unknown, as on kernels
+  other than Linux): the Segment and the chat host are started as
+  `engine-locked`, exactly as before, including its refusals;
+- the allowance is smaller: they are started as `observe`. The resident
+  contract is unchanged: weights are loaded fully into RAM and sealed before
+  READY, and nothing is read from disk during inference. What is missing is
+  the page lock. Under memory pressure the OS may swap model memory; responses
+  slow down, and the `observe` guard refuses further inference on a model it
+  finds swapped until it is prepared again.
+
+The reservation is deliberately the conservative measure: it includes
+preparation headroom, so a small model can be left unlocked although its
+weights alone would fit the allowance. It is never a partial lock.
+
+The choice is reported, never implied:
+
+- `lumabri start` prints a `Memory:` line with the allowance and how to raise it;
+- the donor log records `[resident-memory] automatic policy=not-locked` (or
+  `=engine-locked`) with the reservation and the allowance, and the engines'
+  own `event=ready policy=...` records name the policy they run under;
+- `lumabri service status --json` adds `memory` to the donor
+  (`mode`: `engine-locked`, `process-locked`, `observe`, `automatic-locked`,
+  `automatic-not-locked` or `unreported`; `locked`: true, false or null;
+  `memlock_limit_bytes`), and the text form marks `(memory not locked)`;
+- `GET /api/v1/donor/approval` carries the same `memory` object with a
+  `warning` flag and a sentence for the page, and `memory_locked` on the
+  request; the page shows it in the approval prompt and beside this computer
+  in **Computers**;
+- `lumabri doctor` has a `memory-lock` check.
+
+The report covers the computer that serves the page. Other computers report
+on their own page and service status; the household inventory does not carry
+this field. To lock memory on Linux, give the account a larger allowance, for
+example a file `/etc/security/limits.d/90-lumabri.conf` containing
+`USERNAME - memlock unlimited`, sign in again, then run `lumabri service stop`
+and `lumabri start`. Lumabri never raises a limit itself.
 
 ## Linux container resource boundaries
 

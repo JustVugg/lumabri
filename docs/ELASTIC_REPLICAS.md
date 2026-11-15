@@ -21,8 +21,8 @@ No configuration means no automatic preparation or unloading.
 
 ### Web workspace
 
-Sign in with a management-enabled account, open **Computers & models**, and
-choose **Manage replicas** on a registered model. Select a local checkpoint
+Sign in with a management-enabled account, open **Computers & models**, expand
+**Advanced**, and choose **Manage replicas** on a registered model. Select a local checkpoint
 source and explicitly check the computers authorized for this policy. Enter
 the total memory budget and replica limits; expand **Timing, demand and
 session limits** when those settings need changing. A new policy starts

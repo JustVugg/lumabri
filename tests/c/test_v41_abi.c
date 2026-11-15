@@ -67,6 +67,12 @@ static void prove(const char *path,int cut) {
     float *a=malloc(bytes),*b=malloc(bytes),*feedback[2]={calloc(1,auxbytes),calloc(1,auxbytes)};
     float *expected=malloc((size_t)c.vocab*4),*actual=malloc((size_t)c.vocab*4);
     assert(a && b && feedback[0] && feedback[1] && expected && actual);
+    float *independent=NULL;const char *oracle=getenv("LMB_V41_ORACLE");
+    if(oracle) {
+        FILE *f=fopen(oracle,"rb");assert(f);size_t cells=(size_t)c.vocab*48*2;
+        independent=malloc(cells*sizeof(float));assert(independent);
+        assert(fread(independent,sizeof(float),cells,f)==cells && fgetc(f)==EOF && !ferror(f));fclose(f);
+    }
     int32_t ids[2]={177,28};weights_sealed=1;
     for(int step=0;step<48;step++)for(int chat=0;chat<2;chat++) {
         ColiEdgeEmbedRequest embed={.struct_size=sizeof embed,.rows=1,.token_ids=&ids[chat],.token_count=1,
@@ -90,6 +96,7 @@ static void prove(const char *path,int cut) {
         ColiEdgeLogitsRequest logits={.struct_size=sizeof logits,.rows=1,.input=a,.input_bytes=bytes,
             .logits=actual,.logits_capacity=(size_t)c.vocab};OK(coli_edge_logits(edge,&logits,error,sizeof error));
         forward(&refs[chat],&ids[chat],1,expected);assert(!memcmp(actual,expected,(size_t)c.vocab*4));
+        if(independent)assert(!memcmp(actual,independent+((size_t)step*2+chat)*c.vocab,(size_t)c.vocab*4));
         int32_t greedy=-1;ColiEdgeSelectRequest select={.struct_size=sizeof select,.rows=1,.input=a,.input_bytes=bytes,
             .token_ids=&greedy,.token_capacity=1};OK(coli_edge_select(edge,&select,error,sizeof error));
         assert(greedy==argmax(expected,c.vocab));ids[chat]=greedy;
@@ -113,10 +120,11 @@ static void prove(const char *path,int cut) {
     lmb_v41_state_reset(&refs[0]);forward(&refs[0],&first,1,expected);assert(!memcmp(actual,expected,(size_t)c.vocab*4));
     assert(!forbidden_reads);
     for(int i=0;i<2;i++){free(feedback[i]);lmb_v41_model_destroy(&refs[i],0);}lmb_v41_model_destroy(&reference,1);
-    coli_edge_engine_close(edge);free(a);free(b);free(expected);free(actual);
+    coli_edge_engine_close(edge);free(independent);free(a);free(b);free(expected);free(actual);
     printf("V41 public Edge/Segment ABI: cut %d, two isolated chats, 48 exact logits, clean reopen; bounded admission enforced.\n",cut);
 #undef OK
 }
+#ifndef LMB_V41_ABI_NO_MAIN
 int main(int argc,char **argv) {
     assert(argc==2);setenv("CTX","128",1);setenv("PIN","off",1);unsetenv("V41_INDEX_OWNER");
     for(int cut=1;cut<=5;cut++) {
@@ -126,3 +134,4 @@ int main(int argc,char **argv) {
     }
     puts("V41 ABI PASS: resident budgets, isolated state and exact inference.");return 0;
 }
+#endif

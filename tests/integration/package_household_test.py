@@ -59,6 +59,12 @@ class PackageTest(unittest.TestCase):
         names = {str(p.relative_to(self.output)) for p in self.output.rglob("*") if p.is_file()}
         self.assertEqual(names, set(result["files"]) | {"manifest.json"})
         self.assertEqual(set(p.name for p in (self.output / "bin").iterdir()), set(module.BINARIES))
+        # The double-click start ships beside the launcher, which keeps its name.
+        self.assertEqual({name for name in names if "/" not in name},
+                         {"manifest.json", "START_HERE.md", "start-lumabri", "start-here.sh"})
+        self.assertEqual(result["files"]["start-here.sh"]["mode"], "0o755")
+        self.assertEqual((self.output / "start-here.sh").read_bytes(), (ROOT / "deploy/start-here.sh").read_bytes())
+        self.assertEqual((self.output / "start-lumabri").read_bytes(), (ROOT / "deploy/household-launcher.sh").read_bytes())
         self.assertNotIn("private.key", " ".join(names))
         self.assertNotIn("weights.safetensors", " ".join(names))
         for name, info in result["files"].items():
@@ -118,6 +124,10 @@ class PackageTest(unittest.TestCase):
     def test_macos_launcher_and_upstream_notices(self):
         result = self.build("Darwin")
         self.assertIn("Lumabri.command", result["files"])
+        self.assertIn("START-HERE.command", result["files"])
+        self.assertEqual(result["files"]["START-HERE.command"]["mode"], "0o755")
+        self.assertNotIn("start-here.sh", result["files"])
+        self.assertEqual((self.output / "Lumabri.command").read_bytes(), (ROOT / "deploy/household-launcher.sh").read_bytes())
         self.assertIn("lib/lumabri/liblumabri.dylib", result["files"])
         self.assertEqual((self.output / "licenses/Colibri-THIRD_PARTY_NOTICES.md").read_text(), "test upstream notices")
 
@@ -140,6 +150,15 @@ class PackageTest(unittest.TestCase):
         self.assertEqual(result, module.verify(self.output))
         self.assertEqual(set(p.name for p in (self.output / "bin").iterdir()), set(module.WINDOWS_BINARIES))
         self.assertIn("Lumabri.cmd", result["files"])
+        self.assertIn("START-HERE.bat", result["files"])
+        # No web server in the native Windows build: the start file must open
+        # the native workspace and must not launch a browser.
+        start = (self.output / "START-HERE.bat").read_text()
+        self.assertIn('call "%~dp0Lumabri.cmd" %*', start)
+        self.assertFalse(result["capabilities"]["http_api_server"])
+        self.assertFalse(any(not line.lstrip().lower().startswith("rem") and
+                             ("http" in line.lower() or "start " in line.lower()) for line in start.splitlines()))
+        self.assertIn("'START-HERE.bat'", (ROOT / "deploy/verify-windows-package.ps1").read_text())
         self.assertIn("Verify-Lumabri.ps1", result["files"])
         self.assertEqual(result["capabilities"]["local_adapters"], ["olmoe"])
         self.assertFalse(result["capabilities"]["http_api_server"])
