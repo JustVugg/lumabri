@@ -118,6 +118,9 @@ typedef struct {
     uint64_t restored_sequence;
     uint64_t restored_position;
     int restored_valid;
+    /* Rows one provisional run may carry inside this session's memory
+     * reservation; 0 when the session was not offered draft rows. */
+    uint32_t draft_rows;
 } NodeSession;
 
 typedef struct {
@@ -874,6 +877,13 @@ static int handle_open(Node *node, LmbSocket fd, const LmbMsg *msg) {
                     slot->used = 1;
                     slot->id = open.session_id;
                     slot->session = session;
+                    slot->draft_rows = 0;
+                    if (node_draft_rows(node) &&
+                        !lmb_segment_session_draft_room(
+                            session, node->session_memory_limit_bytes,
+                            &slot->draft_rows) &&
+                        slot->draft_rows > open.max_rows)
+                        slot->draft_rows = open.max_rows < 2 ? 0 : open.max_rows;
                     pthread_mutex_lock(&node->registration.lock);
                     node->registration.advert.active_sessions++;
                     pthread_mutex_unlock(&node->registration.lock);
@@ -902,7 +912,15 @@ static int handle_open(Node *node, LmbSocket fd, const LmbMsg *msg) {
     }
     LmbSegReply reply = make_reply(&open.session_id, &open.request_id,
                                    &open.owner, status);
-    if (node_draft_rows(node)) reply.flags |= LMB_SEG_REPLY_DRAFT_ROWS;
+    if (status == LMB_SEG_STATUS_OK || status == LMB_SEG_STATUS_DUPLICATE) {
+        NodeSession *offered = session_lock_id(node, &open.session_id);
+        if (offered) {
+            if (offered->draft_rows)
+                reply.flags |= LMB_SEG_REPLY_DRAFT_ROWS |
+                               (offered->draft_rows << LMB_SEG_REPLY_DRAFT_ROWS_SHIFT);
+            pthread_mutex_unlock(&offered->lock);
+        }
+    }
     if (status == LMB_SEG_STATUS_OK || status == LMB_SEG_STATUS_DUPLICATE)
         reply_state(node, &reply);
     return send_reply(fd, LMB_SEG_OPEN_R, &reply, NULL, 0);
@@ -963,6 +981,10 @@ static int handle_run_op(Node *node, LmbSocket fd, const LmbMsg *msg, int draft)
         char rewind_error[256] = "";
         if (!session || !output || bytes != msg->pay_len) {
             status = LMB_SEG_STATUS_INTERNAL;
+        } else if (draft && (!slot->draft_rows || run.rows > slot->draft_rows)) {
+            /* More rows than this session's reservation covers, or a
+             * session that was never offered any. */
+            status = LMB_SEG_STATUS_UNSUPPORTED;
         } else if (draft && !run.rows) {
             /* Nothing to run: the discard is the whole request. A refused
              * rewind leaves the engine session as it was. */

@@ -13,7 +13,22 @@ INCLUDE = '#include "engine_patches/segment_draft.h"\n'
 RUNTIME = INCLUDE + '''
 int lmb_segment_engine_draft_rows(const struct ColiSegmentEngine *engine) {
     return engine && engine->adapter &&
-           engine->adapter->reserved_fn[LMB_SEGMENT_REWIND_SLOT] != NULL;
+           engine->adapter->reserved_fn[LMB_SEGMENT_REWIND_SLOT] != NULL &&
+           engine->adapter->reserved_fn[LMB_SEGMENT_DRAFT_ROOM_SLOT] != NULL;
+}
+
+int lmb_segment_session_draft_room(struct ColiSegmentSession *session,
+                                   uint64_t memory_limit_bytes,
+                                   uint32_t *rows) {
+    if (!rows) return -1;
+    *rows = 0;
+    if (!session || !lmb_segment_engine_draft_rows(session->engine)) return -1;
+    LmbSegmentDraftRoomFn room = (LmbSegmentDraftRoomFn)
+        session->engine->adapter->reserved_fn[LMB_SEGMENT_DRAFT_ROOM_SLOT];
+    if (room(session->impl, memory_limit_bytes, rows)) { *rows = 0; return -1; }
+    if (*rows > LMB_SEGMENT_DRAFT_MAX_ROWS) *rows = LMB_SEGMENT_DRAFT_MAX_ROWS;
+    if (*rows < 2) *rows = 0;
+    return 0;
 }
 
 int lmb_segment_session_rewind(struct ColiSegmentSession *session,
@@ -40,6 +55,17 @@ static int olmoe_segment_session_rewind(void *session_impl, uint64_t position,
         return coli_segment_adapter_error(
             error, error_size, "OLMoE Segment cannot rewind forwards");
     session->position = (uint32_t)position;
+    return 0;
+}
+
+/* A rollback only forgets KV rows the session already owns: a block costs
+ * no memory beyond the session state. */
+static int olmoe_segment_session_draft_room(void *session_impl,
+                                            uint64_t memory_limit_bytes,
+                                            uint32_t *rows) {
+    (void)memory_limit_bytes;
+    if (!session_impl || !rows) return -1;
+    *rows = LMB_SEGMENT_DRAFT_MAX_ROWS;
     return 0;
 }
 
@@ -86,6 +112,23 @@ static int lmb_q38_draft_reserve(Qwen38SegmentSession *s,uint32_t rows) {
         memset(&s->lmb_draft[s->lmb_draft_capacity],0,sizeof(*grown));
         s->lmb_draft[s->lmb_draft_capacity++].cells=state;
     }
+    return 0;
+}
+/* Rows one provisional run may carry: the session state plus rows-1 copies
+ * of the recurrent state must stay inside the session's memory limit. */
+static int qwen38_segment_session_draft_room(void *impl,uint64_t memory_limit_bytes,uint32_t *rows) {
+    Qwen38SegmentSession *s=(Qwen38SegmentSession*)impl;
+    if(!s||!rows) return -1;
+    uint64_t state=0,copy=(uint64_t)lmb_q38_draft_cells(s)*sizeof(float);
+    if(q38_segment_session_state_bytes(&s->engine->model.c,s->engine->layer_begin,s->engine->layer_end,
+                                       s->context_tokens,&state)) return -1;
+    uint64_t fit=LMB_SEGMENT_DRAFT_MAX_ROWS;
+    if(memory_limit_bytes&&copy) {
+        uint64_t spare=memory_limit_bytes>state?memory_limit_bytes-state:0;
+        if(spare/copy<fit-1) fit=1+spare/copy;
+    }
+    s->lmb_draft_limit=fit<2?0:(uint32_t)fit;
+    *rows=s->lmb_draft_limit;
     return 0;
 }
 static int qwen38_segment_session_rewind(void *impl,uint64_t position,char *error,size_t error_size) {
@@ -139,7 +182,8 @@ def prepare(root):
     session->position += request->rows;''')
     s = once(s, '    olmoe_segment_session_restore, {0}\n};',
              '    olmoe_segment_session_restore,\n'
-             '    {(void (*)(void))olmoe_segment_session_rewind}\n};')
+             '    {(void (*)(void))olmoe_segment_session_rewind,\n'
+             '     (void (*)(void))olmoe_segment_session_draft_room}\n};')
     path.write_text(s)
 
     path = root / 'qwen38.c'
@@ -150,6 +194,7 @@ def prepare(root):
     uint32_t context_tokens, position;
     struct LmbQ38DraftRow *lmb_draft;
     uint32_t lmb_draft_capacity, lmb_draft_rows, lmb_draft_base;
+    uint32_t lmb_draft_limit; /* rows per provisional run the reservation covers */
 } Qwen38SegmentSession;''')
     s = once(s, '''typedef struct {
     Qwen38SegmentEngine *engine;
@@ -182,12 +227,14 @@ typedef struct {
     s->ple_history_len=m->ple_history_len;''')
     s = once(s, '''    if(r->output!=r->input)memcpy(r->output,r->input,bytes);
     pthread_mutex_lock(&e->run_lock); Model *m=&e->model;''', '''    int provisional=r->reserved_u64[0]==LMB_SEGMENT_RUN_PROVISIONAL;
-    if(provisional&&lmb_q38_draft_reserve(s,r->rows))return coli_segment_adapter_error(error,error_size,"out of memory keeping Qwen3.8 draft state");
+    if(provisional&&r->rows>1&&r->rows>s->lmb_draft_limit)return coli_segment_adapter_error(error,error_size,"Qwen3.8 draft block exceeds the session's reserved rows");
+    if(provisional&&lmb_q38_draft_reserve(s,r->rows-1))return coli_segment_adapter_error(error,error_size,"out of memory keeping Qwen3.8 draft state");
     if(r->output!=r->input)memcpy(r->output,r->input,bytes);
     pthread_mutex_lock(&e->run_lock); Model *m=&e->model;''')
     s = once(s, '    s->position=h.position;return 0;\n}',
              '    s->position=h.position;s->lmb_draft_rows=0;return 0;\n}')
     s = once(s, 'qwen38_segment_session_run,qwen38_segment_session_snapshot,qwen38_segment_session_restore,{0}};',
              'qwen38_segment_session_run,qwen38_segment_session_snapshot,qwen38_segment_session_restore,'
-             '{(void (*)(void))qwen38_segment_session_rewind}};')
+             '{(void (*)(void))qwen38_segment_session_rewind,'
+             '(void (*)(void))qwen38_segment_session_draft_room}};')
     path.write_text(s)

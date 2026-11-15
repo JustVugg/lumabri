@@ -59,6 +59,11 @@ enum {
  * bit ignores it, and an executor that does not know it never sets it. */
 enum {
     LMB_SEG_REPLY_DRAFT_ROWS = 1u << 0,
+    /* With DRAFT_ROWS: bits 8..15 carry how many rows one LMB_SEG_DRAFT of
+     * this session may hold (2..255), the certain row included. It is what
+     * the session's memory reservation covers; more is refused. */
+    LMB_SEG_REPLY_DRAFT_ROWS_SHIFT = 8,
+    LMB_SEG_REPLY_DRAFT_ROWS_MASK = 0xffu << 8,
 };
 
 typedef enum {

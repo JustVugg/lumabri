@@ -1569,7 +1569,10 @@ build/qwen38-mixed-oracle: tests/c/qwen_mixed_oracle.c tests/c/edge_segment_gree
 # chatter on loopback. Replies with drafts must equal replies without them and
 # cost fewer than one network round per token (docs/DRAFTS.md).
 .PHONY: test-drafts
-test-drafts: build/test_gguf_inventory tracker segment_node segment_chat test_segment_v2
+build/draft-room-oracle: tests/c/draft_room_oracle.c engine_patches/segment_draft.h $(COLIBRI_SEGMENT_LIB) build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Wno-unused-function $(OMP_FLAGS) -pthread -I$(ENGINE) $< $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
+
+test-drafts: build/test_gguf_inventory build/draft-room-oracle tracker segment_node segment_chat test_segment_v2
 	./test_segment_v2
 	$(PYTHON) tests/integration/drafts_test.py --engine $(ENGINE)
 

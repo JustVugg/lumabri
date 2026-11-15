@@ -74,8 +74,12 @@ engine by `tools/prepare_draft_rows.py`; the upstream checkout is untouched):
   backwards, so the segment keeps one copy of that state after every row of a
   block but the last. Rolling back to a row restores its copy. Cost: `rows - 1`
   copies of the recurrent state per conversation, allocated on first use.
-  These copies are **not yet priced** in the segment's session reservation;
-  that has to be added to the planner before drafts are enabled by default.
+  The copies live inside the session's existing memory limit: at OPEN the
+  segment asks the adapter how many rows a block may carry so that the
+  session state plus those copies still fit, offers exactly that many (0
+  means no drafts for this session), and the adapter refuses a larger block
+  before touching state. OLMoE's rollback needs no memory. The chatter uses
+  the smallest offer along the chain.
 - Both run a provisional block **one row at a time**, with the forward a
   decode step uses. Every kept row is therefore bit for bit the row plain
   decode computes; a batched forward would be a different kernel and could
@@ -145,7 +149,7 @@ rather than added on top of sources that are not measured on real checkpoints.
 ## Compatibility
 
 A segment says in `SEG_OPEN_R` (`flags` bit 0) that it accepts provisional
-rows. The chatter drafts only when **every** segment of the chain said so; an
+rows, and in bits 8–15 how many rows one block of this session may hold. The chatter drafts only when **every** segment of the chain said so; an
 older segment never sets the bit and is never sent the new operation, an older
 chatter ignores the bit, and the whole chain then decodes one row per round as
 before. Relayed segments work when the tracker forwards `LMB_SEG_DRAFT`; an

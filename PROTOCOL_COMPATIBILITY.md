@@ -89,6 +89,10 @@ reply bit; no existing body changes.
   when the executor's engine can discard provisional rows. The word was
   always on the wire and always zero; an older chatter ignores it and an older
   executor never sets it.
+- With that bit set, bits 8–15 of the same word carry the rows one draft of
+  this session may hold (2–255, the certain row included): what the session's
+  memory reservation covers. A draft with more rows is answered
+  `UNSUPPORTED`. A value below 2 means no drafts for the session.
 - `LMB_SEG_DRAFT` reuses the `SEG2` run envelope and answers with the ordinary
   reply. Unlike `SEG_RUN` its position may lie inside the previous committed
   draft, and it may carry no rows. An executor without draft rows answers

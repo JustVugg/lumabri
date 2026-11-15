@@ -331,6 +331,11 @@ def main():
             ending = check_family(tmp / family, family, root, ranges, family_env, prompt, 40,
                                   lookup_pays=family == 'olmoe', samples=family == 'olmoe')
             if family == 'qwen38':
+                # At the adapter: rollback state and the memory a block may use.
+                oracle = subprocess.run([str(ROOT / 'build/draft-room-oracle'), str(root)], env=family_env,
+                                        capture_output=True, text=True, timeout=120)
+                assert oracle.returncode == 0, oracle.stdout[-2000:] + oracle.stderr[-4000:]
+                print(oracle.stdout.strip().splitlines()[-1], flush=True)
                 # OLMoE names its end token by a vocabulary string the byte
                 # fixture does not have; Qwen3.8 takes it from metadata.
                 assert ending, 'no fixture reply starts with printable byte tokens'

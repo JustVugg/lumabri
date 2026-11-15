@@ -71,7 +71,7 @@ typedef struct {
     LmbLinkEvidence link;
     uint8_t *feedback; /* head only: committed tail delta of this conversation */
     size_t feedback_bytes;
-    int draft_rows; /* this session's OPEN_R offered provisional rows */
+    uint32_t draft_rows; /* rows per block this session's OPEN_R offered; 0 none */
 } RemoteSegment;
 
 typedef struct {
@@ -664,7 +664,9 @@ static int remote_open(RemoteSegment *remote, const LmbSegId *session_id,
         remote->opened = 1;
         /* An executor that predates drafts leaves the flag clear and is
          * never sent LMB_SEG_DRAFT; the whole chain then runs without. */
-        remote->draft_rows = !!(reply.flags & LMB_SEG_REPLY_DRAFT_ROWS);
+        remote->draft_rows = reply.flags & LMB_SEG_REPLY_DRAFT_ROWS
+            ? (reply.flags & LMB_SEG_REPLY_DRAFT_ROWS_MASK) >> LMB_SEG_REPLY_DRAFT_ROWS_SHIFT : 0;
+        if (remote->draft_rows < 2) remote->draft_rows = 0;
         remote_measure_link(remote);
         return 0;
     }
@@ -1106,12 +1108,16 @@ static int chain_run_observed(RemoteSegment *chain, size_t count,
  * drafts off for the whole chain; nothing is ever sent that it would refuse.
  * The V4.1 chain carries per-token feedback from its tail to its head, so a
  * block of rows cannot cross it in one traversal. */
-static int chain_draft_rows(const RemoteSegment *chain, size_t count) {
+static uint32_t chain_draft_rows(const RemoteSegment *chain, size_t count) {
     if (!count || !strcmp(chain[0].route.advert.state_schema, LMB_V41_SCHEMA))
         return 0;
-    for (size_t i = 0; i < count; i++)
+    uint32_t rows = UINT32_MAX;
+    for (size_t i = 0; i < count; i++) {
         if (!chain[i].opened || !chain[i].draft_rows) return 0;
-    return 1;
+        /* Each segment reserved memory for this many rows of one block. */
+        if (chain[i].draft_rows < rows) rows = chain[i].draft_rows;
+    }
+    return rows;
 }
 
 /* One round: `rows` provisional rows starting at `position` through every
@@ -1841,7 +1847,8 @@ static int segment_generate(ColiEdgeEngine *edge,
         if(lmb_resident_memory_check()) {
             snprintf(error,error_size,"Edge physical residency lost; resident preparation must be renewed");goto cleanup;
         }
-        if (draft_block && chain_draft_rows(active_chain, active_count)) {
+        uint32_t chain_rows = draft_block ? chain_draft_rows(active_chain, active_count) : 0;
+        if (chain_rows) {
             /* One round carries the certain row (the last selected token)
              * and the drafts after it. Row i's output is what the model
              * selects after the tokens up to row i, so it stands exactly
@@ -1852,6 +1859,7 @@ static int segment_generate(ColiEdgeEngine *edge,
             uint64_t position = prompt_count + generated_count - 1;
             size_t room = wanted_tokens - generated_count;
             if (room > draft_block) room = draft_block;
+            if (room > chain_rows) room = chain_rows;
             block[0] = generated[generated_count - 1];
             uint32_t rows = 1;
             if (room > 1 && segment_draft_script.count)
