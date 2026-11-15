@@ -144,12 +144,21 @@ static int unlinkat(int dir, const char *name, int flags) {
     }
 }
 
-static int lmb_private_fstat(int fd, struct _stat64 *st) {
+/* `struct stat` is the caller's type: the C runtimes disagree on whether it
+ * is `struct _stat64`, so the runtime's own answer is copied field by field. */
+static int lmb_private_fstat(int fd, struct stat *st) {
     HANDLE h = (HANDLE)_get_osfhandle(fd);
     BY_HANDLE_FILE_INFORMATION info;
     if (h == INVALID_HANDLE_VALUE) { errno = EBADF; return -1; }
     /* Pipes and consoles keep the C runtime's answer. */
-    if (GetFileType(h) != FILE_TYPE_DISK) return _fstat64(fd, st);
+    if (GetFileType(h) != FILE_TYPE_DISK) {
+        struct _stat64 raw;
+        if (_fstat64(fd, &raw)) return -1;
+        memset(st, 0, sizeof *st);
+        st->st_mode = raw.st_mode; st->st_nlink = raw.st_nlink; st->st_size = raw.st_size;
+        st->st_mtime = raw.st_mtime; st->st_atime = raw.st_atime; st->st_ctime = raw.st_ctime;
+        return 0;
+    }
     if (!GetFileInformationByHandle(h, &info)) { errno = EACCES; return -1; }
     int directory = (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
     LmbPrivateSecurity s;
@@ -169,7 +178,7 @@ static int lmb_private_fstat(int fd, struct _stat64 *st) {
 #undef fstat
 #define fstat lmb_private_fstat
 
-static int fstatat(int dir, const char *name, struct _stat64 *st, int flags) {
+static int fstatat(int dir, const char *name, struct stat *st, int flags) {
     (void)flags;
     int fd = openat(dir, name, O_RDONLY);
     if (fd < 0) return -1;
