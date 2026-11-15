@@ -3,8 +3,19 @@
 Extract the entire ZIP into a new folder and open **Lumabri.cmd**. Keep its
 `bin` folder alongside it. You do not need WSL, Python or a compiler.
 This x86-64 package requires Windows 10 version 1903 or newer.
-**START-HERE.bat** opens the same workspace. The Windows package has no web
-server, so neither file opens a browser chat page on this computer.
+
+**START-HERE.bat** is the one-step start. It runs `lumabri start`: it creates
+this computer's household if there is none, starts sharing, starts the local
+web page and opens it in your default browser with a private sign-in link.
+The page is served on `127.0.0.1` only. `START-HERE.bat --no-browser` prints
+the link instead of opening it, `--tui` opens the console workspace, `--port N`
+chooses the page port and `--ram-gb N` the memory a new household shares.
+Everything keeps running after the window closes; `Lumabri.cmd service stop`
+stops it.
+
+The steps below describe the console workspace. The page offers the same
+household: prepare a model under **Computers & models**, approve the request
+for this computer on the page, then chat.
 
 1. Choose **Create a household** on one computer. On the others, choose
    **Join a household** and use the displayed address and household key.
@@ -23,8 +34,40 @@ are stored privately under `%LOCALAPPDATA%\Lumabri`, outside the package.
 The local Windows engine currently runs **OLMoE on CPU**. Other compatible
 machines can serve models through the authenticated household protocol; their
 advertised backend and memory limits determine what can run. This package does
-not include GPU execution or a Windows HTTP/web API server. The Linux/macOS
-gateway provides the web and application API for a mixed household.
+not include GPU execution.
+
+## The web page on Windows
+
+`lumabri start` and `lumabri api start` serve the same compiled page as on
+Linux and macOS, with the same bearer tokens and the same operator and
+management permissions. Credentials, capabilities, the saved local sign-in
+token and chat history live under `%LOCALAPPDATA%\Lumabri\api-access`. Each
+of those files and folders is owned by your Windows account with a protected
+access list that names only your account and the system; a record that anyone
+else could read is refused, not used.
+
+Working on Windows: sign-in, chat with a prepared model, private history, the
+model catalogue, the computers view, preparing a model that is already in the
+models folder, and approving or declining a request for this computer.
+
+Not available on Windows yet. The page lists these after sign-in and each
+request answers `not_available_on_windows_yet`:
+
+- downloading a model from the page or with `lumabri fetch`: copy the model
+  folder into the models folder shown by `lumabri start`;
+- capacity measurement, portfolio policy and replica (elastic) policy;
+- drain, resume and release of an allocation, and routing details;
+- managed model routes with several replicas, and recovering a reply on
+  another replica: a Windows gateway makes one attempt on the saved plan;
+- demand counters and the API console;
+- OpenAI and Anthropic compatible clients (`/v1/...`) and `--https-origin`;
+- standing repeat-load consent: each request is accepted or declined.
+
+A model prepared from the page is added to the chat list of the sign-in that
+asked for it when that sign-in next looks at the operation, or by the next
+`lumabri start`. Only the latest preparation keeps its outcome; an older one
+is shown as no longer recorded. A Linux or macOS gateway in the same household
+still provides everything in the list above.
 
 ## Check the download and runtime
 

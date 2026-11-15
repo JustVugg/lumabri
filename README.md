@@ -38,9 +38,13 @@ how to expose an existing gateway through a Kubernetes Service.
 ## Start here
 
 On native Windows, extract the complete Windows candidate and open
-**Lumabri.cmd**. No WSL or compiler is needed. Its local runtime supports
-**OLMoE on CPU**; see [installation, verification and updates](docs/WINDOWS_PACKAGE.md).
-The web/API gateway runs on a Linux or macOS computer in the household.
+**START-HERE.bat**: it creates this computer's household if there is none,
+starts sharing and the local web page, and opens the chat page in your browser.
+**Lumabri.cmd** opens the console workspace instead. No WSL or compiler is
+needed. Its local runtime supports **OLMoE on CPU**; see
+[installation, verification and updates](docs/WINDOWS_PACKAGE.md), which also
+lists what the Windows page does not do yet (model download, capacity and
+policy tools, OpenAI/Anthropic compatible clients).
 
 On Linux or macOS, build from source with a compatible Colibri checkout:
 
