@@ -5,6 +5,7 @@
 #include "lumabri_calibration.h"
 #include "lumabri_metrics.h"
 #include "lumabri_stage_metrics.h"
+#include "src/runtime/lumabri_draft_metrics.h"
 
 static inline int lmb_turn_observation(LmbCalibration *out, const LmbCalibration *seed,
     const LmbCalKey *key, const char *stat, uint32_t abi, const char *numeric_class,
@@ -43,10 +44,14 @@ static inline int lmb_turn_observation(LmbCalibration *out, const LmbCalibration
         record.link_count=record.key.nodes;
     LmbStageSample stages[LMB_STAGE_PROFILE_MAX]; uint32_t count=0;
     if (!lmb_stage_samples_parse(stat,stages,&count) && count==record.key.nodes) {
+        /* With drafts only the rounds that carried one row are timed as
+         * steps; every range must report the same number of them. */
+        LmbDraftMetrics drafts; int drafted=!lmb_draft_metrics_parse(stat,&drafts);
         int valid=1;
         for (uint32_t i=0;i<count;i++) {
             if (stages[i].begin!=record.key.layer_begin[i] || stages[i].end!=record.key.layer_end[i] ||
-                stages[i].calls!=metrics.decode_steps) valid=0;
+                (drafted ? stages[i].calls>drafts.rounds-drafts.discards || stages[i].calls!=stages[0].calls
+                         : stages[i].calls!=metrics.decode_steps)) valid=0;
             record.stage_decode_seconds[i]=stages[i].seconds/stages[i].calls;
         }
         if (valid) record.stage_count=count;

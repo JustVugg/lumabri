@@ -227,6 +227,15 @@ def check_family(tmp, family, model_dir, ranges, env, prompt, tokens, lookup_pay
             on_replies, on_stats, on_log = home.serve(mode, turns, script=script)
             assert off_replies == on_replies, f'{family}: drafts changed a resident conversation\n{off_replies}\n{on_replies}'
             assert all(drafts_stat(stat) for stat in on_stats), on_stats
+            # Rounds that carried one row keep feeding the per-range timing.
+            if script:
+                for stat in on_stats:
+                    fields = stat.split()
+                    assert 'STAGES1' in fields and 'LINKS1' in fields, stat
+                    at = fields.index('STAGES1')
+                    calls = [int(fields[at + 4 + 4 * i]) for i in range(int(fields[at + 1]))]
+                    rounds = drafts_stat(stat)
+                    assert len(set(calls)) == 1 and 0 < calls[0] <= rounds['rounds'], stat
             assert off_log.count('Segment KV reuse') == on_log.count('Segment KV reuse'), (off_log[-2000:], on_log[-2000:])
         assert all(drafts_stat(stat) is None for stat in off_stats), off_stats
         print(f'{family}: greedy{", seeded" if samples else ""} and resident replies identical with drafts; '

@@ -1124,11 +1124,24 @@ static uint32_t chain_draft_rows(const RemoteSegment *chain, size_t count) {
  * segment. rows == 0 only discards what each segment holds above `position`. */
 static int chain_draft(RemoteSegment *chain, size_t count,
                        const int32_t *tokens, uint32_t rows, uint64_t position,
-                       uint8_t **first, uint8_t **second, size_t bytes) {
+                       uint8_t **first, uint8_t **second, size_t bytes,
+                       GenerationResult *observation) {
     uint8_t *input = *first, *output = *second;
     for (size_t i = 0; i < count; i++) {
+        double started = observation ? monotonic_seconds() : 0;
         if (remote_run_op(&chain[i], tokens, rows, input, bytes, output, 1,
-                          position)) return -(int)i - 1;
+                          position)) {
+            if (observation) observation->stages_valid = 0;
+            return -(int)i - 1;
+        }
+        /* A round that carried only the certain row is an ordinary one-row
+         * decode step and is timed as one. Blocks are not: their time covers
+         * several rows and would distort the per-step calibration. */
+        if (observation && rows == 1 && observation->stages_valid &&
+            (i >= observation->stage_count ||
+             lmb_stage_metrics_add(&observation->stages[i].timing, 1, 1,
+                                   monotonic_seconds() - started)))
+            observation->stages_valid = 0;
         uint8_t *swap = input; input = output; output = swap;
     }
     *first = input;
@@ -1833,6 +1846,7 @@ static int segment_generate(ColiEdgeEngine *edge,
     }
     double first_selected_at=monotonic_seconds(), last_selected_at=first_selected_at;
     size_t generated_count = 1;
+    uint64_t draft_single_rounds = 0; /* draft rounds that carried one row */
     if (history) history[prompt_count] = generated[0];
     if (event &&
         (generation_stream_prefix(edge, generated, generated_count,
@@ -1883,8 +1897,7 @@ static int segment_generate(ColiEdgeEngine *edge,
             if (coli_edge_embed(edge, &embed, error, error_size)) goto cleanup;
             uint8_t *first = buffer_a, *second = buffer_b;
             int failed = chain_draft(active_chain, active_count, block, rows,
-                                     position, &first, &second, bytes);
-            result->stages_valid = 0; /* a block is not a one-row decode step */
+                                     position, &first, &second, bytes, result);
             if (failed) {
                 size_t failed_index = (size_t)(-failed - 1);
                 const char *peer = active_chain[failed_index].route.advert.peer_name;
@@ -1911,6 +1924,7 @@ static int segment_generate(ColiEdgeEngine *edge,
             }
             result->drafts.rounds++;
             result->drafts.proposed += rows - 1;
+            if (rows == 1) draft_single_rounds++;
             for (uint32_t row = 0; row < rows; row++) {
                 const uint8_t *state = first + (size_t)row * state_row_bytes;
                 select.input = state;
@@ -2007,6 +2021,7 @@ static int segment_generate(ColiEdgeEngine *edge,
         if (result->drafts.rounds) { /* a mixed reply still counts every round */
             result->drafts.rounds++;
             result->drafts.tokens++;
+            draft_single_rounds++;
         }
         if (event &&
             (generation_stream_prefix(edge, generated, generated_count,
@@ -2030,7 +2045,7 @@ static int segment_generate(ColiEdgeEngine *edge,
         if (ahead) {
             uint8_t *first = buffer_a, *second = buffer_b;
             if (chain_draft(active_chain, active_count, NULL, 0,
-                            committed_position, &first, &second, 0)) {
+                            committed_position, &first, &second, 0, NULL)) {
                 /* The reply is complete and correct; only the resident
                  * state is unusable. Rebuild it on the next turn. */
                 fprintf(stderr, "[lumabri] Segment chain could not discard its "
@@ -2119,8 +2134,13 @@ static int segment_generate(ColiEdgeEngine *edge,
         .total_seconds=finished_at-started};
     /* A one-token answer has no decode observation. Completed turns must
      * have one measured RUN per decode step at EVERY range. */
+    /* With drafts the measured steps are the rounds that carried one row;
+     * a reply made only of blocks has no per-step observation. */
+    uint64_t measured_steps = result->drafts.rounds ? draft_single_rounds
+                                                    : result->metrics.decode_steps;
     for (size_t i = 0; i < result->stage_count; i++)
-        if (result->stages[i].timing.decode_calls != result->metrics.decode_steps)
+        if (result->stages[i].timing.decode_calls != measured_steps ||
+            (result->drafts.rounds && !measured_steps))
             result->stages_valid = 0;
     generated = NULL;
     rc = 0;

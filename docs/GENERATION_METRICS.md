@@ -46,9 +46,11 @@ tokens` the network cost per token (1 without drafts). The serve codec adds
 `DRAFTS1 rounds tokens proposed accepted discards` to `STAT`;
 `segment_chat --json` adds a `draft_metrics` object with `version: 1`, the
 same fields, the setting's `mode` and `rounds_per_token`. `decode_seconds`
-and the decode rate keep their meaning. Per-range `STAGES1` and `LINKS1`
-observations are not emitted for such a reply, because a block is not a
-one-row decode step.
+and the decode rate keep their meaning. Per-range `STAGES1` then covers only
+the rounds that carried one row, which are ordinary decode steps: its call
+count is the same for every range and at most `rounds - discards`, and the
+planner accepts it on that condition. A reply made only of blocks reports no
+`STAGES1`.
 
 These are observations, not capacity promises. Persisting them against complete
 checkpoint/build/hardware/plan keys, invalidating stale records, and using them

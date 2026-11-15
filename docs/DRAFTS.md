@@ -184,9 +184,14 @@ metrics (`GENERATION_METRICS.md`):
 - `discards`: rounds that only took rows back.
 
 `rounds / tokens` is the network cost per token; without drafts it is 1.
-Per-segment stage timing (`STAGES1`, link evidence) is omitted for such a
-reply: a block is not a one-row decode step, and mixing them would corrupt the
-calibration that reads it.
+Per-segment timing keeps flowing. A round that carried only the certain row
+is an ordinary one-row decode step and is timed as one; `STAGES1` then reports
+those rounds (its call count is below `decode_steps`, and equal for every
+range) and `LINKS1` is emitted as usual. Blocks are not timed as steps: their
+time covers several rows and would distort the per-step calibration. A reply
+made only of blocks has no stage observation. The recorded decode rate of a
+drafted reply is the rate it really had, drafts included; the calibration key
+does not yet say whether drafts were on.
 
 ## Verification
 
