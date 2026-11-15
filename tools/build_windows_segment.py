@@ -55,6 +55,7 @@ def main():
     parser.add_argument('--ar',default='ar')
     parser.add_argument('--nm',default='nm')
     parser.add_argument('--windres',help='defaults to the windres matching --cc')
+    parser.add_argument('--host-cc',help='compiler for build-time tools; defaults to --cc on Windows, cc elsewhere')
     args=parser.parse_args()
     if args.only != 'contracts' and not args.engine:
         parser.error('--engine is required for inference builds')
@@ -67,6 +68,22 @@ def main():
         subprocess.run([str(v) for v in command],cwd=root,check=True)
     flags=['-I'+str(root),'-I'+str(source),'-O2','-Wall','-Wextra',
            '-D_FILE_OFFSET_BITS=64','-D_WIN32_WINNT=0x0A00']
+    # The web page is compiled into lumabri.exe, exactly as the Makefile does it.
+    host_cc=args.host_cc or (args.cc if platform.system() == 'Windows' else 'cc')
+    suffix='.exe' if platform.system() == 'Windows' else ''
+    generated=root/'build'
+    generated.mkdir(exist_ok=True)
+    web=root/'src/web'
+    for tool,header,inputs in (
+            ('embed_web','web_assets.h',[web/'index.html',web/'app.css',web/'app.js',root/'logo.svg',
+                                         web/'capacity.js',web/'ui.js']),
+            ('embed_data','download_assets.h',[
+                'lmb_download_catalogue_json='+str(root/'src/planner/download_catalogue.json'),
+                'lmb_web_download_js='+str(web/'download.js'),'lmb_web_download_css='+str(web/'download.css')])):
+        binary=output/(tool+'-host'+suffix)
+        run([host_cc,'-O2','-Wall','-Wextra','-Werror',root/'tools'/(tool+'.c'),'-o',binary])
+        text=subprocess.run([str(binary),*map(str,inputs)],cwd=root,check=True,stdout=subprocess.PIPE).stdout
+        (generated/header).write_bytes(text)
     resource=output/'windows_manifest.o'
     windres=args.windres or (args.cc[:-3]+'windres' if args.cc.endswith('gcc') else 'windres')
     run([windres,'-I',root,root/'src/platform/lumabri_windows.rc','-O','coff','-o',resource])
@@ -74,7 +91,7 @@ def main():
          '-static','-o',output/'test_owned_process_windows.exe'])
     run([args.cc,*flags,'-Werror','-Wno-unused-function','-Wno-unused-variable','-municode',
          root/'lumabri.c',root/'src/ui/lumabri_tui.c',root/'lumabri_machine.c',root/'lumabri_run_gate.c',resource,'-static','-lwinpthread','-lws2_32',
-         '-lbcrypt','-liphlpapi','-lpsapi','-ladvapi32','-ldxgi','-ldxguid',
+         '-lbcrypt','-liphlpapi','-lpsapi','-ladvapi32','-ldxgi','-ldxguid','-lshell32',
          '-o',output/'lumabri.exe'])
     for name,file in (('tracker','tracker.c'),('test_tracker_history','tests/c/test_tracker_history.c')):
         run([args.cc,*flags,'-Werror','-Wno-unused-function','-municode',root/file,

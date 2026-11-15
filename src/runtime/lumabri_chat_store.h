@@ -4,7 +4,9 @@
 #ifndef LMB_CHAT_STORE_H
 #define LMB_CHAT_STORE_H
 #include "lumabri_api_access.h"
+#ifndef _WIN32
 #include <dirent.h>
+#endif
 
 #define LMB_CHAT_MAX 32u
 #define LMB_CHAT_BYTES (256u * 1024u)
@@ -62,6 +64,22 @@ static inline int lmb_chat_load(int dir, const char *id, LmbChat *chat) {
 }
 /* The list is independently opened: dup(dir) would share the directory
  * cursor between forked API children. Never silently omit unsafe entries. */
+#ifdef _WIN32
+typedef struct { int dir, rc; char (*ids)[33]; size_t *count; } LmbChatListing;
+static int lmb_chat_list_entry(const char *name, void *context) {
+    LmbChatListing *l=context; struct stat st;
+    if (!lmb_chat_id(name)) return 0;
+    if (*l->count==LMB_CHAT_MAX || fstatat(l->dir,name,&st,AT_SYMLINK_NOFOLLOW) ||
+        !S_ISREG(st.st_mode) || st.st_uid!=geteuid() || (st.st_mode&077) ||
+        st.st_nlink!=1 || st.st_size<16 || st.st_size>16+LMB_CHAT_BYTES) { l->rc=LMB_CHAT_UNSAFE; return 1; }
+    memcpy(l->ids[(*l->count)++],name,33); return 0;
+}
+static inline int lmb_chat_list(int dir, char ids[LMB_CHAT_MAX][33], size_t *count) {
+    *count=0; LmbChatListing listing={dir,LMB_CHAT_OK,ids,count};
+    int rc=lmb_private_dir_each(dir,lmb_chat_list_entry,&listing);
+    return listing.rc ? listing.rc : rc<0 ? LMB_CHAT_UNSAFE : LMB_CHAT_OK;
+}
+#else
 static inline int lmb_chat_list(int dir, char ids[LMB_CHAT_MAX][33], size_t *count) {
     *count=0; int fd=openat(dir,".",O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
     if (fd<0) return LMB_CHAT_UNSAFE;
@@ -80,6 +98,7 @@ static inline int lmb_chat_list(int dir, char ids[LMB_CHAT_MAX][33], size_t *cou
     if (errno && !entry) rc=LMB_CHAT_UNSAFE;
     closedir(stream); return rc;
 }
+#endif
 /* Exact fixed transaction name under the per-user lock: crashes leave at
  * most one bounded temporary file, recovered on the next write. */
 static inline int lmb_chat_temporary_clear(int dir) {

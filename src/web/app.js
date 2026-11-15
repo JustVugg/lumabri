@@ -76,6 +76,7 @@ const errors = {
   conversation_limit_32: "Your history has reached 32 conversations. Export and delete one before creating another.",
   history_busy_retry: "Another history operation is in progress. Try again in a moment.",
   user_request_limit: "Two requests are already active for your account. Wait or stop one before retrying.",
+  not_available_on_windows_yet: "This is not available on Windows yet. Nothing was changed.",
   history_storage_unavailable: "Private history storage is unavailable. No new question was sent unless generation had already started."
 };
 const explain = code => errors[code] || String(code).replaceAll("_", " ");
@@ -194,10 +195,25 @@ function renderMessages() {
     i === messages.length - 1 && message.role === "assistant" && current.conversation.state !== "complete"));
   scrollToEnd(); controls();
 }
+// A gateway that cannot do everything says which parts are missing, once,
+// instead of leaving their controls to fail one by one.
+function platformNotice(permissions) {
+  const names = {model_download: "downloading a model from this page", capacity_measurement: "capacity measurement",
+    portfolio_policy: "portfolio policy", elastic_policy: "replica policy", allocation_control: "drain, resume and release",
+    routing_inspection: "routing details", demand: "demand counters", client_config: "the API console",
+    openai_anthropic_clients: "OpenAI and Anthropic compatible clients", repeat_consent: "repeat-load consent",
+    reply_recovery: "recovering a reply on another replica"};
+  const missing = Array.isArray(permissions?.unavailable) ? permissions.unavailable : [];
+  $("platform-notice").hidden = !missing.length;
+  $("platform-notice").textContent = missing.length ?
+    `Not available on ${permissions.platform === "windows" ? "Windows" : "this computer"} yet: ${missing.map(name => names[name] || String(name).replaceAll("_", " ")).join(", ")}. ` +
+    "Chat, history, preparing a model already in this computer's models folder and approving requests work here." : "";
+}
 async function refresh() {
   // Sequential calls leave the second per-user permit free for another tab.
   const permissions = await request("/api/v1/session");
   operator = permissions.operator === true; management = permissions.management === true;
+  platformNotice(permissions);
   if (!operator && workspaceOpen) closeWorkspace();
   models = (await request("/api/v1/models")).models;
   conversations = (await request("/api/v1/conversations")).conversations;
@@ -373,7 +389,7 @@ $("sign-out").onclick = () => {
   navigation++; opening = null; unsaved = false;
   token = ""; models = []; conversations = []; current = null;
   showGenerationMetrics();
-  operator = false; management = false; closeWorkspace(); clearWorkspace();
+  operator = false; management = false; closeWorkspace(); clearWorkspace(); platformNotice(null);
   preparationOperation = ""; preparationWatch = ""; preparationNextCursor = ""; preparationInvalidate();
   $("prepare-form").hidden = true; $("prepare-models").replaceChildren(); $("prepare-nodes").replaceChildren();
   $("prepare-status").textContent = ""; $("prepare-operation").replaceChildren(new Option("No operation selected", ""));

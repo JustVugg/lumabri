@@ -5,7 +5,11 @@
 #define LMB_API_ACCESS_H
 #include "lumabri_proto.h"
 #include "lumabri_sign.h"
+#ifdef _WIN32
+#include "lumabri_private_dir_windows.h" /* the same anchored, owner-only calls */
+#else
 #include <sys/file.h>
+#endif
 #include <sys/stat.h>
 
 #define LMB_API_MODELS_MAX 64u
@@ -36,11 +40,15 @@ static inline int lmb_api_private_fd(int fd, int directory) {
     return 0;
 }
 static inline int lmb_api_access_dir(const char *path, int create) {
+#ifdef _WIN32
+    return lmb_private_dir_open(path,create);
+#else
     if (create && mkdir(path,0700) && errno!=EEXIST) return -1;
     int fd=open(path,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
     if (fd<0) return -1;
     if (lmb_api_private_fd(fd,1)) { close(fd); return -1; }
     return fd;
+#endif
 }
 /* Separate lookup from exclusive creation. Native cold-start admission has
  * returned ENOENT while acquiring this lock. Keep creation explicit: a concurrent creator is

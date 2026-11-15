@@ -74,6 +74,7 @@ static int home_donor_entry_windows(int argc,char **argv,int internal) {
 #include "src/runtime/lumabri_requester_windows.h"
 #include "src/ui/lumabri_home_windows.h"
 #include "src/runtime/lumabri_doctor_windows.h"
+#include "src/runtime/lumabri_api_windows.h"
 static int cmd_chat_windows(int argc,char **argv) {
     const char *address=NULL,*key=NULL,*root=NULL,*model=NULL;unsigned max_new=256;
     for(int i=0;i<argc;i++) {
@@ -106,6 +107,8 @@ static int lmb_windows_main(int argc, char **argv) {
     if (argc>=2 && !strcmp(argv[1],"doctor")) return cmd_doctor_windows(argc-2,argv+2);
     if (argc==1 || (argc==2 && !strcmp(argv[1],"share"))) return home_windows_run(argc==2);
     if (argc>=2 && !strcmp(argv[1],"chat")) return cmd_chat_windows(argc-2,argv+2);
+    if (argc>=2 && !strcmp(argv[1],"api")) return cmd_api_windows(argc-2,argv+2);
+    if (argc>=2 && !strcmp(argv[1],"--internal-api")) return home_api_entry_windows(argc-2,argv+2);
     if (argc>=2 && !strcmp(argv[1],"--internal-prepare")) return home_prepare_entry_windows(argc-2,argv+2);
     if (argc>=2 && !strcmp(argv[1],"--internal-tracker")) return home_tracker_entry_windows(argc-2,argv+2);
     if (argc>=2 && (!strcmp(argv[1],"donor") || !strcmp(argv[1],"--internal-donor")))
@@ -125,6 +128,7 @@ static int lmb_windows_main(int argc, char **argv) {
         return 0;
     }
     fputs("Lumabri native Windows control\n\n"
+          "  lumabri api start|stop|serve|list|user-add|grant|revoke ...   the local web gateway\n"
           "  lumabri service [start|status|restart|stop] [--json]\n"
           "  lumabri service live ROLE\n"
           "  lumabri machine --json\n\n"
