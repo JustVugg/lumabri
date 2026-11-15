@@ -194,7 +194,7 @@ def package_windows(runtime, colibri, output, repository=ROOT, objdump="objdump"
                 "minimum_windows_build": 18362, "lumabri": revision(runtime_repository or repository),
                 "colibri_checkout": revision(colibri), "dependencies": report,
                 "capabilities": {"local_adapters": ["olmoe"], "backend": "cpu",
-                                 "household": True, "http_api_server": False},
+                                 "household": True, "http_api_server": True},
                 "signature": "unsigned; manifest hashes are consistency checks", "files": {}}
     output.mkdir(mode=0o755)
     for source, relative in files:

@@ -151,17 +151,18 @@ class PackageTest(unittest.TestCase):
         self.assertEqual(set(p.name for p in (self.output / "bin").iterdir()), set(module.WINDOWS_BINARIES))
         self.assertIn("Lumabri.cmd", result["files"])
         self.assertIn("START-HERE.bat", result["files"])
-        # No web server in the native Windows build: the start file must open
-        # the native workspace and must not launch a browser.
+        # The native Windows build serves the page itself: the start file runs
+        # `lumabri start`, which opens the default browser with the private
+        # link. The batch file must not open a browser or name an address.
         start = (self.output / "START-HERE.bat").read_text()
-        self.assertIn('call "%~dp0Lumabri.cmd" %*', start)
-        self.assertFalse(result["capabilities"]["http_api_server"])
+        self.assertIn('"%~dp0bin\\lumabri.exe" start %*', start)
+        self.assertTrue(result["capabilities"]["http_api_server"])
         self.assertFalse(any(not line.lstrip().lower().startswith("rem") and
-                             ("http" in line.lower() or "start " in line.lower()) for line in start.splitlines()))
+                             ("http" in line.lower() or line.lstrip().lower().startswith("start ")) for line in start.splitlines()))
         self.assertIn("'START-HERE.bat'", (ROOT / "deploy/verify-windows-package.ps1").read_text())
         self.assertIn("Verify-Lumabri.ps1", result["files"])
         self.assertEqual(result["capabilities"]["local_adapters"], ["olmoe"])
-        self.assertFalse(result["capabilities"]["http_api_server"])
+        self.assertTrue(result["capabilities"]["http_api_server"])
         self.assertNotIn("mode", result["files"]["bin/lumabri.exe"])
 
     def test_windows_runtime_notices_follow_installed_toolchain_layout(self):
