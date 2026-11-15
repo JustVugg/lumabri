@@ -96,43 +96,94 @@ on quoted text, code edits and repeated structure; on free text it proposes
 little.
 
 **Qwen3.8 MTP head (design, not implemented).** In Colibri the head is one
-extra layer (index `num_layers`) with its own KV. It is fed the final hidden
-row of every position together with the next token (`q38_mtp_feed`) and
-drafts from there (`q38_mtp_draft`, `q38_mtp_draft_more`). The Edge already
-receives every final row, prefill included, so the head belongs at the Edge:
+extra transformer layer (`blk.<num_layers>`, with its own attention, experts
+and `nextn.eh_proj`) that shares the embedding and the output head. It is fed
+the final streams of every position paired with the token after it
+(`q38_mtp_feed`), keeps its own KV rows for verified pairs only, and drafts
+with `q38_mtp_draft` / `q38_mtp_draft_more`. The Edge already receives every
+final row, prefill included, so the head belongs at the Edge. What stands
+between the engine's implementation and a household:
 
-1. load the head's layer and attach it in the Qwen3.8 Edge adapter, behind a
-   reserved Edge entry point, as `tools/prepare_draft_rows.py` does for the
-   segments;
-2. keep one head state per conversation (its KV rows and pending streams) and
-   roll it back with the block;
-3. price the head in the Edge's resident reservation (`planner_adapters`),
-   since weights load before READY and nothing may be read later;
-4. extend the reduced fixture with head tensors. A random head on a random
-   model accepts almost nothing, so the fixture gate needs trained-like
-   agreement or keeps using scripted drafts for the round count.
+1. `q38_mtp_attach` refuses unless the **whole model** is loaded in one
+   process (`range_begin == 0 && range_end == layers` and a resident output
+   head). The Edge holds no layer. The build-copy patch has to open the Edge's
+   model with the range `[layers, layers + 1)` so that only the head's layer
+   loads, and lift that check for this case;
+2. the head's state lives in the engine's single `Model` (`K/V/IK[layers]`,
+   `mtp_len`, `mtp_pend`). A resident Edge serves several conversations, so
+   that state must become per conversation, swapped in around each call as
+   the Segment adapters do for their sessions, and must roll back with the
+   block. `q38_mtp_feed` already tolerates a rewind: rows above the new
+   position are dropped;
+3. the Edge ABI has no call for "these rows were committed" or "propose";
+   both need reserved Edge entry points, as `segment_draft.h` does for the
+   Segment side;
+4. the head's layer (attention, all its experts, `eh_proj`) and its KV per
+   conversation must be priced in the Edge's resident reservation and loaded
+   before READY (`planner_adapters`, the GGUF inspector, which today refuses
+   unknown tensors);
+5. the reduced fixture needs `blk.<layers>.*` tensors. The generator in
+   `tests/integration/qwen38_native_gguf_test.py` is numpy only and can be
+   extended without torch. A random head on a random model accepts almost
+   nothing, so its gate proves identity under rejection; the round count
+   still needs scripted drafts or a fixture built to agree.
 
 The chain side needs nothing new: proposals are token ids, and rows are
-verified and rolled back exactly as for lookup.
+verified and rolled back exactly as for lookup. This is the largest remaining
+piece: an engine patch of a few hundred lines against the least stable part
+of the Qwen3.8 source, plus the planner and inspector contracts.
 
-**DeepSeek V4.1 (not possible today).** Two independent obstacles:
+**DeepSeek V4.1 (not possible today; design).** Two independent obstacles.
 
-- The production V4.1 chain feeds the committed state of its **tail back to
-  its head for the next token** (compressed-KV rows, the published index
-  owner, shared top-k and candidate blocks; see `DEEPSEEK_V41.md`). Row `i+1`
-  at the first segment needs what the last segment produced for row `i`, so a
-  block cannot cross the chain in one traversal. This is why the adapter is
-  single-row. Lifting it means letting every segment own and carry forward the
-  shared state for a whole block, with a boundary that carries one delta per
-  row; that is a new state schema and a new range oracle, not a change to
-  drafts.
-- DSpark reads the hidden states of several target layers
-  (`dspark_target_layer_ids`), not only the last one. With layers on other
-  machines those rows are not at the Edge; the boundary would have to carry
-  them.
+*1. The chain's feedback.* Every V4.1 boundary row carries, beside the mHC
+streams, an auxiliary frame (`engine_patches/v41_boundary.h`): for every
+compressed-KV owner layer the newest closed row of its compressed K/V and
+index key, the published index owner, the candidate block mask and the shared
+top-k indices. Layers consume state published by owners **on other machines**,
+including owners later in the chain: the committed frame of the tail is fed
+back into the head's input for the next token (`chain_run_observed`). Row
+`i+1` at the first segment therefore needs what the last segment produced for
+row `i`, and a block cannot cross the chain in one traversal.
 
-Until both are solved a V4.1 household runs without drafts, whatever the
-setting says.
+What has to change so it can:
+
+- Classify each published item by direction. State published by an *earlier*
+  layer and read by a later one can travel forward inside the block: the
+  boundary carries one auxiliary frame **per row** instead of one. This is a
+  wider frame, not a new idea.
+- State published by a *later* layer and read by an earlier one on the next
+  token is the real obstacle. For compressed KV it only changes when a row
+  closes, once every `compress_ratio` tokens. A block can cross in one
+  traversal exactly when no backward-read item changes inside it; the chatter
+  can compute that from positions and ratios and cut blocks at those
+  boundaries. Whether the published index owner, candidate mask and shared
+  top-k are read backwards per token has to be established from the engine
+  (`deepseek_v41.c` forward, not from the boundary codec). If they are, drafts
+  are limited to what one segment can verify alone, which is no gain.
+- Each segment then needs its foreign-owner state per row, with rollback:
+  compressed-KV counts and rows are position-indexed and truncate like KV;
+  candidate masks and top-k are per token and must be kept per row, as
+  Qwen3.8's recurrent state is.
+- A new state schema (`lmb-v41-text-delta2`), numeric class and range oracle:
+  the existing `test-v41-range` proves exact logits for one row per round at
+  every cut; the same proof is needed for blocks, including a block that
+  straddles a compressed-row boundary being refused or split.
+
+*2. DSpark's inputs.* DSpark reads the hidden states of several target layers
+(`dspark_target_layer_ids`) and has its own experts and a confidence output
+that Colibri's gate uses to choose the depth. Options: carry the target
+layers' rows to the Edge inside the boundary (wider by one hidden row per
+target layer not in the last segment), or run DSpark in the last segment and
+return its proposals and confidences in a reply extension, which requires all
+target layers to be in that segment or forwarded to it. The second keeps the
+Edge small and is preferable; it needs a draft-source reply on `SEG_DRAFT_R`.
+
+Size and risk: the schema, per-row frames, rollback and oracle are comparable
+to the original V4.1 adapter work; DSpark is a second piece of similar size
+(loader, memory pricing, Engram interaction, fixtures with a DSpark head).
+The main risk is the backward-read question above: if it holds per token,
+part 1 does not pay and only DSpark-free plain decode remains. Until both are
+solved a V4.1 household runs without drafts, whatever the setting says.
 
 ## Chained blocks (design, not implemented)
 
