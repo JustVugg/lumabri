@@ -12,6 +12,16 @@ a tag stay under Unreleased until a new tag is created.
   exchange, the tracker allows five attempts per code, and joining with the
   full key is unchanged. The exchange is checked against the published
   CPace and RFC 9380 test vectors; see docs/PAIRING.md.
+- Standing consent: a computer can accept its own household's requests to
+  load a model without a person clicking. One owner-only switch per computer
+  (`lumabri consent on|off|status`, **/settings** in the terminal workspace,
+  or **Computers & models** on that computer's own page); no other computer
+  can set it. It replaces the click only: memory budget and reserve, household
+  authentication, identity pinning, residency policy and model integrity are
+  checked as before, and each automatic acceptance is recorded with requester,
+  model and memory. `lumabri start` turns it on for a household it creates on
+  a fresh installation and says so; existing installations stay off. Turning
+  it off holds from the next request and unloads nothing. POSIX only for now.
 - `lumabri start` no longer fails its first model on computers with a small
   locked-memory allowance: when no residency policy was requested, its sharing
   service locks a load whose reservation fits the allowance and otherwise

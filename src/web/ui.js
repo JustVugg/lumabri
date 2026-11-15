@@ -376,6 +376,52 @@ const ROOM_FLOW_ENABLED = true;
   $("approval-dismiss").addEventListener("click", () => { approvalSettled = null; approvalNote = ""; renderApproval(); });
   setInterval(approvalPoll, 1000);
 
+  // ---- standing consent of this computer ----
+  // The switch replaces the click and nothing else; the service keeps every
+  // other check. It is read from and written to this computer only.
+  let consentRead = 0, consentBusy = false;
+  function consentApply(data) {
+    $("consent").hidden = false;
+    $("consent-switch").checked = data.enabled; $("consent-switch").disabled = consentBusy;
+    $("consent-note").textContent = data.enabled ?
+      `On: requests from this household load here without a click, within the ${data.shared_gb} GB this computer shares. The household key, this computer's memory limits and the model's integrity are still checked. Turning it off applies from the next request; loaded models stay.` :
+      "Off: every request to load a model here waits for a person to accept it on this computer.";
+    const list = $("consent-accepted"); list.replaceChildren();
+    for (const item of data.accepted.slice().reverse()) {
+      const name = item.model.replace(/^home-[0-9a-f]{12}-[0-9a-f]{12}-/, "");
+      list.append(element("li", "", `${new Date(item.time * 1000).toLocaleString()} · accepted automatically · ${name} · layers ${item.begin}–${item.end - 1} · ${gib(item.ram_bytes)} · requested by ${item.requester.slice(0, 12)}…`));
+    }
+  }
+  async function consentPoll() {
+    if (!connected() || !management || !token || $("workspace").hidden) { if (!connected() || !management) $("consent").hidden = true; return; }
+    if (consentBusy || document.hidden || Date.now() - consentRead < 5000) return;
+    const credential = token; consentRead = Date.now();
+    try {
+      const data = await request("/api/v1/donor/consent");
+      if (credential === token && !consentBusy) consentApply(data);
+    } catch {
+      // Not offered from here (for example behind the HTTPS proxy): show no switch.
+      if (credential === token) { $("consent").hidden = true; consentRead = Date.now() + 25000; }
+    }
+  }
+  $("consent-switch").addEventListener("change", async event => {
+    const enabled = event.target.checked, credential = token;
+    if (enabled && !confirm("Accept this household's requests to load a model on this computer without asking each time? Memory limits, the household key and model integrity are still checked. You can turn this off at any time.")) { event.target.checked = false; return; }
+    consentBusy = true; event.target.disabled = true; $("consent-status").textContent = "Saving on this computer…";
+    try {
+      const data = await request("/api/v1/donor/consent", "POST", {enabled});
+      consentBusy = false;
+      if (credential !== token) return;
+      consentApply(data);
+      $("consent-status").textContent = data.enabled ? "Saved. Requests from this household are accepted automatically." : "Saved. The next request will wait for your approval.";
+      record(data.enabled ? "Automatic acceptance turned on for this computer." : "Automatic acceptance turned off for this computer.");
+    } catch (error) {
+      consentBusy = false;
+      if (credential === token) { event.target.checked = !enabled; event.target.disabled = false; $("consent-status").textContent = error.message; }
+    } finally { consentRead = 0; }
+  });
+  setInterval(consentPoll, 1000);
+
   // ---- keep the chrome in step with app.js ----
   function syncChrome() {
     const online = connected(), endpoint = app.classList.contains("endpoint-mode"), workspace = !$("workspace").hidden;
@@ -390,7 +436,7 @@ const ROOM_FLOW_ENABLED = true;
     if (online && !wasConnected) record("Connected to the local Lumabri service.");
     if (!online && wasConnected) {
       // Nothing from one account may remain visible to the next.
-      closeDetails(); setEndpointOff(); endpointConfig = null; clearDevices(); approvalReset(); roomReset();
+      closeDetails(); setEndpointOff(); endpointConfig = null; clearDevices(); approvalReset(); roomReset(); $("consent").hidden = true; $("consent-accepted").replaceChildren(); $("consent-status").textContent = ""; consentRead = 0;
       $("activity-log").replaceChildren(); $("toasts").replaceChildren(); lastNotice = "";
       $("model-facts").replaceChildren(); $("model-list").replaceChildren();
       $("endpoint-model").value = ""; renderEndpoint(); $("endpoint-status").textContent = "";

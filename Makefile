@@ -777,7 +777,7 @@ test-api-gateway: lumabri $(FETCH_BINARY) test_chat_ui test-chat-history
 	python3 tests/integration/start_command_test.py
 	python3 tests/integration/model_download_test.py
 
-test: test-api-gateway test-web-approval test-residency-auto
+test: test-api-gateway test-web-approval test-residency-auto test-standing-consent
 
 # Real engines and a real checkpoint: the donor's request is declined, then
 # approved, through the page's own API. About a minute and more than 2 GB of
@@ -793,6 +793,13 @@ test-web-approval: lumabri segment_node segment_chat fixture
 .PHONY: test-residency-auto
 test-residency-auto: lumabri segment_node segment_chat
 	python3 tests/integration/residency_auto_test.py
+
+# Real engines and the same generated checkpoint: a household created by
+# lumabri start loads with no approval, records it, and asks again once its
+# owner turns standing consent off.
+.PHONY: test-standing-consent
+test-standing-consent: lumabri segment_node segment_chat
+	python3 tests/integration/standing_consent_test.py
 
 .PHONY: test-chat-history
 test-chat-history: build/web_assets.h

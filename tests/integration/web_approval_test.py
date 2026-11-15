@@ -86,6 +86,9 @@ def main():
         assert answer.returncode == 0, (answer.stdout, answer.stderr)
         links = [line.strip() for line in answer.stdout.splitlines() if "#token=" in line]
         assert len(links) == 1, answer.stdout
+        # A household created by start accepts its own requests automatically.
+        # This test is about the request a person decides, so ask each time.
+        assert run("consent", "off").returncode == 0
         return links[0].split("#token=", 1)[1]
 
     stopped = None; passed = False

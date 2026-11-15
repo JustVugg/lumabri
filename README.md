@@ -53,7 +53,10 @@ To use one computer straight away, run `./lumabri start` instead (in a
 package, open `start-here.sh` on Linux or `START-HERE.command` on macOS). It
 creates this computer's household if there is none, starts sharing and the
 local web page, and opens the chat page in your browser. The page is served on
-`127.0.0.1` only. `--tui` opens the workspace below instead. If the computer
+`127.0.0.1` only. A household created this way accepts its own requests to
+load a model without asking; `lumabri consent off` makes this computer ask
+each time ([standing consent](docs/DONOR_AUTHORIZATION.md)). `--tui` opens the
+workspace below instead. If the computer
 has no model yet, the page offers one that fits the memory your computers
 share and downloads it when you press Download
 ([Downloading a model](docs/MODEL_DOWNLOAD.md)).

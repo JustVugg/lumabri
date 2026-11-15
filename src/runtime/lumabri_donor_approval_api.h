@@ -71,10 +71,26 @@ static int donor_approval_request_json(Cap *body,const HomeServiceSnapshot *s) {
             o->runs_edge ? "true" : "false",o->hybrid_role==LMB_HYBRID_ACCELERATOR ? "true" : "false",
             repeat ? "true" : "false",donor_approval_locked(s));
 }
+/* This computer's standing consent for its saved household, read from the
+ * owner-only record on every call: the gateway caches no authority. */
+static int donor_consent_state(HomeSettings *settings,char *path,size_t cap,LmbStandingConsent *c,int *found) {
+    home_settings_load(settings);
+    if (found) *found=0;
+    if (c) memset(c,0,sizeof *c);
+    if (home_service_directory(path,cap)) return 0;
+    return lmb_standing_consent_for(path,settings->tracker,settings->token,c,found);
+}
+static int donor_consent_on(void) {
+    HomeSettings *settings=malloc(sizeof *settings); char path[1200];
+    int on=settings && donor_consent_state(settings,path,sizeof path,NULL,NULL);
+    if (settings) lmb_api_wipe(settings,sizeof *settings);
+    free(settings); return on;
+}
 static int donor_approval_json(Cap *body,const HomeServiceSnapshot *s,int observed) {
+    const char *consent=donor_consent_on() ? "true" : "false";
     if (observed) return api_addf(body,"{\"schema\":1,\"scope\":\"this_computer\",\"sharing\":false,"
-        "\"reason\":\"%s\",\"pending\":false,\"request\":null,\"automatic_consent\":false}",
-        observed==2 ? "sharing_with_another_household" : "not_sharing");
+        "\"reason\":\"%s\",\"pending\":false,\"request\":null,\"automatic_consent\":%s}",
+        observed==2 ? "sharing_with_another_household" : "not_sharing",consent);
     char instance[65]; lmb_hex(instance,s->instance,32);
     int shown=s->has_offer && s->phase!=LMB_HOME_IDLE;
     return api_addf(body,"{\"schema\":1,\"scope\":\"this_computer\",\"sharing\":true,\"instance\":\"%s\","
@@ -87,7 +103,7 @@ static int donor_approval_json(Cap *body,const HomeServiceSnapshot *s,int observ
             shown && s->phase==LMB_HOME_PENDING ? "true" : "false",LMB_HOME_DECISION_MS/1000u) ||
         (shown ? donor_approval_request_json(body,s) : cap_str(body,"null")) ||
         donor_approval_memory_json(body,s) ||
-        cap_str(body,",\"automatic_consent\":false}");
+        api_addf(body,",\"automatic_consent\":%s}",consent);
 }
 /* The page repeats the exact request it displayed. A decimal string keeps the
  * 64-bit revision out of JavaScript's number rounding. */
@@ -116,6 +132,51 @@ static int donor_approval_parse(const char *text,size_t size,uint32_t *operation
     else if (!strcmp(verb,"revoke_repeat")) *operation=HOME_SVC_REVOKE_REPEAT;
     else return -1;
     return 0;
+}
+/* GET shows the switch and what it accepted; POST {"enabled":true|false} is
+ * the owner's explicit choice. Same authority as the decision itself: the
+ * management capability, on this computer's own page, never through a proxy
+ * and never for another computer. Turning it off holds from the next request
+ * and unloads nothing. */
+static void api_donor_consent(int fd,int proxied,const char *input,size_t size) {
+    if (proxied) { api_error(fd,403,"donor_approval_local_page_only"); return; }
+    HomeSettings *settings=malloc(sizeof *settings);
+    LmbStandingAccepted *recent=calloc(LMB_STANDING_RECENT,sizeof *recent);
+    char path[1200]; Cap body={0}; LmbStandingConsent c; int found=0,enabled=0;
+    if (!settings || !recent) { api_error(fd,500,"allocation_failed"); goto done; }
+    enabled=donor_consent_state(settings,path,sizeof path,&c,&found);
+    if (input) {
+        LmbJsonToken tokens[4]; LmbJson j; int f[1]; const char *const names[]={"enabled"};
+        if (!size || size>64 || lmb_json_parse(&j,input,size,tokens,4) || lmb_json_fields(&j,0,names,1,f) || f[0]<0 ||
+            (tokens[f[0]].kind!=LMB_JSON_TRUE && tokens[f[0]].kind!=LMB_JSON_FALSE)) {
+            api_error(fd,400,"invalid_donor_consent_request"); goto done;
+        }
+        if (!settings->tracker[0]) { api_error(fd,409,"no_household_on_this_computer"); goto done; }
+        int enable=tokens[f[0]].kind==LMB_JSON_TRUE;
+        if (lmb_standing_consent_set(path,settings->tracker,settings->token,enable,LMB_STANDING_OWNER)) {
+            api_error(fd,500,"donor_consent_not_saved"); goto done;
+        }
+        enabled=donor_consent_state(settings,path,sizeof path,&c,&found);
+        fprintf(stderr,"[donor-consent] automatic acceptance turned %s from this computer's page\n",enabled ? "on" : "off");
+    }
+    unsigned count=lmb_standing_journal_recent(path,recent,LMB_STANDING_RECENT);
+    int bad=cap_str(&body,"{\"schema\":1,\"scope\":\"this_computer\",\"household\":") ||
+        api_json_text(&body,settings->tracker) ||
+        api_addf(&body,",\"enabled\":%s,\"chosen\":%s,\"origin\":\"%s\",\"changed\":%llu,\"shared_gb\":",
+            enabled ? "true" : "false",found ? "true" : "false",
+            !found ? "none" : c.origin==LMB_STANDING_START ? "start" : "owner",(unsigned long long)c.changed) ||
+        api_json_text(&body,settings->ram) || cap_str(&body,",\"accepted\":[");
+    for (unsigned i=0;i<count && !bad;i++)
+        bad=api_addf(&body,"%s{\"time\":%llu,\"requester\":\"%s\",\"allocation\":\"%s\",\"model\":",i ? "," : "",
+                (unsigned long long)recent[i].when,recent[i].requester,recent[i].allocation) ||
+            api_json_text(&body,recent[i].model) ||
+            api_addf(&body,",\"begin\":%u,\"end\":%u,\"ram_bytes\":%llu}",recent[i].begin,recent[i].end,
+                (unsigned long long)recent[i].ram_bytes);
+    if (bad || cap_str(&body,"]}")) api_error(fd,500,"allocation_failed");
+    else (void)api_response(fd,200,body.p);
+done:
+    if (settings) lmb_api_wipe(settings,sizeof *settings);
+    free(settings); free(recent); free(body.p);
 }
 static void api_donor_approval(int fd,const char *tracker,int proxied,const char *input,size_t size) {
     if (proxied) { api_error(fd,403,"donor_approval_local_page_only"); return; }
