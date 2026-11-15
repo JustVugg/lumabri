@@ -94,6 +94,43 @@ freed when weight input is sealed, before READY. Sparse virtual
 file descriptors exist for metadata/offset compatibility; the resident path
 does not write weight payloads to the mirror or CAS.
 
+### When the source is this same computer
+
+A computer that publishes a model and also loads it used to pull every block
+of its own disk through the encrypted peer transport on loopback. The
+household launcher now records the directory its source service publishes in
+`~/.lumabri/local-sources/<model>` (directory `0700`, record `0600`), and the
+donor keeper passes that directory to its engine as `LUMABRI_LOCAL_SOURCES`.
+During resident preparation the loader reads blocks from those files instead.
+
+The record and the path are hints, never authority:
+
+- the record is accepted only when its directory and the record itself are
+  owned by the loader's own user and writable by nobody else, are not
+  symbolic links, and name an absolute directory owned by that user;
+- a weight file is used only when it is a regular file of that user with
+  exactly the size the manifest announces;
+- every block is hashed per MiB against the same authenticated truth a block
+  from a peer is hashed against, before a byte reaches the engine. The first
+  mismatch or short read retires that local file and the block, with the rest
+  of the file, comes from the peers through the unchanged network path.
+
+Nothing listens and no protocol message was added, so another computer can
+neither publish a record nor learn that one exists; across computers nothing
+changes. The bounded preparation cache, the seal before READY and the rule
+that nothing is read from disk during inference are the same: the local file
+is closed at the seal. The seal reports the split, for example
+`preparation source: 1455 verified block(s) from this computer's own files, 0
+from peers`. POSIX only; a Windows donor keeps the network path.
+
+SHA-256 uses the x86 SHA extensions when the CPU has them (checked once from
+CPUID; `LUMABRI_SHA_SCALAR=1` forces the reference rounds). Digests are
+identical, so the source's index, the peers' verification and the local
+verification all get faster without any change of format.
+`make test-local-source` covers the local read, a forged local file, a wrong
+size, loose or linked records, the unchanged network path, and both hash
+implementations against each other.
+
 All assigned expert slots are prepared before READY. Kimi embeddings, V4
 embedding/head and Qwen3.8 PLE tables are explicitly retained as native raw
 tensor ranges where upstream kernels still use pread. Those reads resolve

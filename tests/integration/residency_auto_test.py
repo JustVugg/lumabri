@@ -22,6 +22,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import resource
 import secrets
 import shutil
@@ -205,6 +206,11 @@ def automatic(model, allowance, locks):
         # Resident either way: the engines were started under the resident
         # contract and reported ready only after loading their weights.
         assert state["model_count"] == 1 and state["reserved_total_bytes"] == reserved, state
+        # The source and the donor are this same computer and user: verified
+        # blocks come from its own files, none through the peer transport.
+        sources = re.findall(r"preparation source: (\d+) verified block\(s\) from this "
+                             r"computer's own files, (\d+) from peers", logs)
+        assert sources and all(int(local) > 0 and peers == "0" for local, peers in sources), logs[-3000:]
         if locks:
             assert f"automatic policy=engine-locked allocation={allocation[:12]}" in logs, logs[-3000:]
             assert "event=ready policy=engine-locked fault=0" in logs and "policy=observe" not in logs, logs[-3000:]

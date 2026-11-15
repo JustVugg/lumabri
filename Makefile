@@ -83,6 +83,7 @@ test: test-agent-control
 lumabri test_chat_ui: src/runtime/lumabri_weight_cache.h
 lumabri test_chat_ui: src/runtime/lumabri_prepare_progress.h
 lumabri test_chat_ui test_memory_budget test_cluster segment_node test_calibration $(SHIM_LIB): src/runtime/lumabri_prepare_limits.h
+lumabri test_chat_ui $(SHIM_LIB): src/runtime/lumabri_local_source.h
 lumabri test_chat_ui test_home test_hybrid_parallel test_accum_order test_local_fallback test_verify_failover test_nat_adopt: lumabri_home_hybrid.h
 test_hybrid_parallel test_accum_order test_local_fallback test_verify_failover test_nat_adopt build/segment_hybrid_bridge.o build/bench_home_hybrid: src/runtime/lumabri_hybrid_policy.h
 
@@ -1229,6 +1230,9 @@ test-resident: tracker swarm_probe expert_node fixture
 test-segment-hybrid: tracker swarm_probe expert_node segment_node segment_chat fixture
 	ENGINE=$(ENGINE) bash ./tests/integration/segment_hybrid_test.sh
 
+test-local-source: tracker maintainer swarm_probe $(SHIM_LIB)
+	python3 tests/integration/local_weight_source_test.py
+
 test-cas: tracker maintainer liblumabri.so test_shim
 	bash ./tests/integration/cas_test.sh
 
@@ -1320,6 +1324,7 @@ test: all test_weight_cache test_key_rotation test_hedge test_local_fallback tes
 	./test_planner_io
 	python3 tests/integration/native_shim_readiness_test.py
 	python3 tests/integration/native_shim_test.py
+	python3 tests/integration/local_weight_source_test.py
 	./test_cluster
 	./test_memory_budget
 	./test_weight_cache
