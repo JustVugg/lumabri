@@ -314,7 +314,7 @@ static int api_elastic_begin_grow(int dir,LmbElasticPolicy *p) {
     if (!st || api_elastic_source(p,st,stamp) || strcmp(stamp,p->source_stamp)) {
         strcpy(p->reason,"source_changed_or_not_available"); goto done;
     }
-    if (preparation_review(st,&p->request,&review,digest)!=200) { strcpy(p->reason,"authorized_resident_plan_unavailable"); goto done; }
+    if (preparation_review(st,&p->request,&review,digest,NULL)!=200) { strcpy(p->reason,"authorized_resident_plan_unavailable"); goto done; }
     const LmbClusterPlan *plan=&st->joint.plan.plans[0];
     for (uint32_t i=0;i<plan->nslices;i++) {
         uint64_t n=plan->slices[i].bytes_resident;

@@ -5,6 +5,14 @@ a tag stay under Unreleased until a new tag is created.
 
 ## Unreleased
 
+- Placement is chosen for speed: every computer that can hold a model alone is
+  a candidate, and a split is selected only when no single computer fits or
+  when it is estimated at least 5% faster. Reviewing one model with no
+  computer ticked lets the planner choose among all sharing computers; the
+  review, the API (`speed_plan`), the terminal and `--speed-plan` show the
+  estimate and the reason. Estimates come from a short machine probe, link
+  probes and calibration records, and were checked on fixtures only. See
+  `docs/SPEED_PLANNER.md`.
 - A computer can join a household with a short one-time code instead of the
   32-character key: `lumabri pair` and `lumabri join --code`, `/pair` and
   `/join` in the workspace, and Computers > Add a computer / I have a code on

@@ -51,8 +51,9 @@ static inline int lmb_preparation_parse(const char *text,size_t size,LmbPreparat
         for (uint32_t i=0;i<r->model_count;i++) if (!strcmp(name,r->models[i])) return -1;
         r->model_count++;
     }
+    /* An empty list asks the planner to choose among every sharing computer. */
     list=&tokens[f[4]];
-    if (list->kind!=LMB_JSON_ARRAY || !list->children || list->children>LMB_PREPARATION_NODES) return -1;
+    if (list->kind!=LMB_JSON_ARRAY || list->children>LMB_PREPARATION_NODES) return -1;
     for (unsigned at=(unsigned)f[4]+1;at<list->next;at=tokens[at].next) {
         char *id=r->nodes[r->node_count];
         if (lmb_api_json_string(&j,at,id,65) || !lmb_preparation_hex(id)) return -1;

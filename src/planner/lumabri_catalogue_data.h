@@ -111,6 +111,8 @@ static int catalog_inventory(LmbTuiState *st) {
     memset(st->ages_ms, 0, sizeof st->ages_ms);
     memset(st->facts, 0, sizeof st->facts);
     memset(st->workloads, 0, sizeof st->workloads);
+    memset(st->speeds, 0, sizeof st->speeds);
+    memset(st->links, 0, sizeof st->links);
     catalog_self(&st->nodes[0], &st->profiles[0], st->disk[0] ? st->disk : ".");
     st->facts[0] = lmb_resource_facts_local(st->profiles[0].logical_cpus ? st->profiles[0].load_one : -1);
     st->nnodes = 1;
@@ -153,6 +155,8 @@ static int catalog_inventory(LmbTuiState *st) {
         st->profiles[at] = r->machine;
         st->facts[at] = r->facts;
         st->workloads[at] = r->workload;
+        st->speeds[at] = r->speed;
+        st->links[at] = r->links;
         st->ages_ms[at] = r->age_ms;
         inventory_id_text(r->identity, st->identities[at]);
     }

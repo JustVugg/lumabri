@@ -37,7 +37,7 @@
 #define LMB_SPEED_SPLIT_MAX 4u       /* computers in one split candidate */
 #define LMB_SPEED_SPLIT_MARGIN 1.05  /* a split must beat one computer by 5% */
 #define LMB_SPEED_SWITCH_MARGIN 1.10 /* re-planning proposes only above 10% */
-#define LMB_SPEED_TIE 0.05           /* single computers this close are equal */
+#define LMB_SPEED_TIE 0.10           /* single computers this close are equal */
 
 enum { LMB_SPEED_BASIS_PROBE = 1u, LMB_SPEED_BASIS_OBSERVED = 2u, LMB_SPEED_BASIS_MEASURED_PLAN = 4u };
 
@@ -287,18 +287,24 @@ static LMB_UNUSED void lmb_speed_choose(LmbSpeedDecision *d, const LmbSpeedMachi
     for (uint32_t i = 0; i < d->count; i++) {
         const LmbSpeedCandidate *c = &d->candidates[i];
         if (c->machines > 1) {
-            if (d->best_split < 0 || lmb_speed_better(c, &d->candidates[d->best_split])) d->best_split = (int)i;
+            const LmbSpeedCandidate *b = d->best_split < 0 ? NULL : &d->candidates[d->best_split];
+            /* With nothing to compare, a placement already found or running stays. */
+            if (!b || (!c->estimated && !b->estimated ? (int)i == d->incumbent ||
+                (d->best_split != d->incumbent && lmb_speed_better(c, b)) : lmb_speed_better(c, b)))
+                d->best_split = (int)i;
             continue;
         }
         if (d->best_single < 0) { d->best_single = (int)i; continue; }
         const LmbSpeedCandidate *b = &d->candidates[d->best_single];
         /* Estimated beats unestimated. Estimates within the tie band, or two
-         * unestimated computers, fall back to a stable order: more offered
-         * RAM, then more threads, then inventory order. */
+         * unestimated computers, fall back to a stable order: the placement
+         * already found or running, then more offered RAM, then more
+         * threads, then inventory order. */
         int c_top = c->estimated && c->tok_s >= fastest * (1.0 - LMB_SPEED_TIE);
         int b_top = b->estimated && b->tok_s >= fastest * (1.0 - LMB_SPEED_TIE);
         const LmbClusterNode *cn = &machines[c->plan.edge_node].node, *bn = &machines[b->plan.edge_node].node;
-        int stable = cn->ram_budget_bytes != bn->ram_budget_bytes ? cn->ram_budget_bytes > bn->ram_budget_bytes :
+        int stable = (int)i == d->incumbent ? 1 : d->best_single == d->incumbent ? 0 :
+            cn->ram_budget_bytes != bn->ram_budget_bytes ? cn->ram_budget_bytes > bn->ram_budget_bytes :
             cn->threads > bn->threads;
         if (c->estimated != b->estimated) { if (c->estimated) d->best_single = (int)i; }
         else if (!c->estimated) { if (stable) d->best_single = (int)i; }
@@ -426,9 +432,25 @@ static LMB_UNUSED int lmb_speed_decide(const LmbSpeedMachine *machines, uint32_t
         while (at && nodes[pool[at - 1]].ram_budget_bytes < nodes[i].ram_budget_bytes) { pool[at] = pool[at - 1]; at--; }
         pool[at] = i;
     }
+    /* Each split costs a range search. With a computer that holds the model
+     * alone, a split can only win when one of its members runs the layers
+     * faster than that computer runs the whole token; the others are not
+     * searched, except a few pairs kept to explain the choice. */
     double cube = (double)shape->layers * shape->layers * shape->layers;
-    uint32_t allowance = cube > 0 ? (uint32_t)fmin(160.0, fmax(12.0, 3e9 / cube)) : 160;
-    uint32_t runs = 0;
+    double afford = 1.5e8 / cube;
+    uint32_t allowance = afford > 160.0 ? 160u : afford < 8.0 ? 8u : (uint32_t)afford;
+    uint32_t runs = 0, shown = 0;
+    double single_seconds = 0;
+    for (uint32_t i = 0; i < d->count; i++)
+        if (d->candidates[i].machines == 1 && d->candidates[i].estimated &&
+            (!(single_seconds > 0) || d->candidates[i].seconds_per_token < single_seconds))
+            single_seconds = d->candidates[i].seconds_per_token;
+    double whole_layers[LMB_CLUSTER_MAX_NODES];
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t unused = 0;
+        whole_layers[i] = nodes[i].ram_budget_bytes ?
+            lmb_speed_layers(&machines[i], model, d->probe_scale, 0, shape->layers, &unused) : 0;
+    }
     for (uint32_t size = 2; size <= npool && size <= LMB_SPEED_SPLIT_MAX && size <= shape->layers; size++)
         for (uint32_t mask = 1; mask < (UINT32_C(1) << npool); mask++) {
             uint32_t bits = 0, members[LMB_SPEED_SPLIT_MAX];
@@ -440,6 +462,17 @@ static LMB_UNUSED int lmb_speed_decide(const LmbSpeedMachine *machines, uint32_t
             uint64_t together = 0;
             for (uint32_t b = 0; b < size; b++) together = lmb_size_add(together, nodes[members[b]].ram_budget_bytes);
             if (together < d->needed_bytes) continue;   /* necessary condition, not admission */
+            if (d->fits_single) {
+                double fastest_member = 0; int priced = 1;
+                for (uint32_t b = 0; b < size; b++) {
+                    double w = whole_layers[members[b]];
+                    if (!(w > 0)) priced = 0;
+                    else if (!(fastest_member > 0) || w < fastest_member) fastest_member = w;
+                }
+                int could_win = priced && single_seconds > 0 && fastest_member < single_seconds;
+                if (!could_win && (size > 2 || shown >= 3)) continue;
+                if (!could_win) shown++;
+            }
             for (uint32_t e = 0; e < size; e++) {
                 if (runs >= allowance) { d->bounded = 1; goto searched; }
                 /* The chat host keeps the first range; the others follow,
@@ -449,10 +482,8 @@ static LMB_UNUSED int lmb_speed_decide(const LmbSpeedMachine *machines, uint32_t
                 map[n++] = members[e];
                 for (uint32_t b = 0; b < size; b++) if (b != e) map[n++] = members[b];
                 for (uint32_t b = 0; b < size; b++) {
-                    uint32_t unused = 0;
                     subset[b] = nodes[map[b]];
-                    costs[b] = lmb_speed_layers(&machines[map[b]], model, d->probe_scale, 0, shape->layers, &unused) /
-                        (double)shape->layers;
+                    costs[b] = whole_layers[map[b]] / (double)shape->layers;
                     if (!(costs[b] > 0) || !isfinite(costs[b])) priced = 0;
                 }
                 LmbClusterPlan seed = {0}, planned = {0};

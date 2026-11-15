@@ -12,6 +12,15 @@ static LmbTuiState *preparation_catalogue(const char *tracker,const LmbPreparati
     if (checked_printf(st->root,sizeof st->root,"%s",settings.models) ||
         checked_printf(st->tracker,sizeof st->tracker,"%s",tracker)) { free(st); return NULL; }
     if (r) for (uint32_t i=0;i<r->node_count;i++) strcpy(st->selected_nodes[i],r->nodes[i]);
+    if (r && !r->node_count) {
+        /* Automatic: the candidates are every computer that is sharing with
+         * a known workload. Being a candidate is not being used, and nothing
+         * is offered to a computer the reviewed plan does not name. */
+        uint32_t chosen=0;
+        if (catalog_inventory(st)) { free(st); return NULL; }
+        for (uint32_t i=0;i<st->nnodes;i++)
+            if (catalog_speed_eligible(st,i)) strcpy(st->selected_nodes[chosen++],st->identities[i]);
+    }
     st->refresh=catalog_state_refresh;
     if (catalog_state_refresh(st,NULL)) { free(st); return NULL; }
     return st;
@@ -60,14 +69,56 @@ static int preparation_source_stamp(const char *root,char out[65]) {
 /* This JSON is a second consumer of the typed plan, not its internal ABI.
  * Volatile free RAM/report ages are deliberately not a review identity;
  * exact reservations and donor admission still recheck remaining capacity. */
-static int preparation_review(LmbTuiState *st,const LmbPreparationRequest *r,Cap *body,char review[65]) {
+/* One model: the placement is the speed plan's. The memory-only joint
+ * search still runs and its result competes as a candidate, so a household
+ * without measurements keeps the placement it had before; what changes is
+ * that a split is never kept when one computer is not shown to be slower.
+ * Returns 0 with the joint snapshot replaced, 1 refused, -1 not applicable. */
+static int preparation_speed_plan(LmbTuiState *st,const LmbPreparationRequest *r,int model,LmbSpeedSnapshot *speed) {
+    LmbClusterPlan found,*memory_plan=NULL;
+    if (st->joint.ready && st->joint.plan.model_count==1) {
+        found=st->joint.plan.plans[0]; memory_plan=&found;
+        found.edge_node=st->joint.node_indices[found.edge_node];
+        for (uint32_t i=0;i<found.nslices;i++) found.slices[i].node=st->joint.node_indices[found.slices[i].node];
+    }
+    int rc=catalog_speed_build(st,model,!r->node_count,memory_plan,0,speed); /* a candidate, not a running model */
+    /* A listed computer that cannot be planned on stays an explicit refusal
+     * of the whole request, as before; it is never dropped silently. */
+    if (r->node_count && speed->node_count!=r->node_count) return -1;
+    if (rc) return rc;
+    LmbPortfolioSnapshot *joint=&st->joint; memset(joint,0,sizeof *joint);
+    joint->node_count=speed->node_count;
+    memcpy(joint->node_indices,speed->node_indices,sizeof joint->node_indices);
+    joint->model_indices[0]=(uint32_t)model; joint->plan.model_count=1;
+    joint->plan.plans[0]=speed->decision.candidates[speed->decision.chosen].plan;
+    for (uint32_t i=0;i<joint->plan.plans[0].nslices;i++) {
+        const LmbSlice *slice=&joint->plan.plans[0].slices[i];
+        joint->plan.reserved[slice->node]=lmb_size_add(joint->plan.reserved[slice->node],slice->bytes_resident);
+        joint->plan.added[slice->node]++; joint->plan.node_mask|=UINT32_C(1)<<slice->node;
+    }
+    joint->ready=1;
+    snprintf(joint->reason,sizeof joint->reason,"%.180s",speed->decision.reason);
+    return 0;
+}
+static int preparation_review(LmbTuiState *st,const LmbPreparationRequest *r,Cap *body,char review[65],LmbSpeedText *speed_json) {
     const char *names[LMB_PREPARATION_MODELS];
     for (uint32_t i=0;i<r->model_count;i++) {
         unsigned matches=0; names[i]=r->models[i];
         for (int j=0;j<st->nmodels;j++) if (!strcmp(names[i],st->models[j].name)) matches++;
         if (matches!=1) return 422;
     }
-    if (catalog_portfolio_build(st,names,r->model_count,&st->joint) || !st->joint.ready || !st->build_id[0]) return 422;
+    int joint_bad=catalog_portfolio_build(st,names,r->model_count,&st->joint) || !st->joint.ready;
+    if (r->model_count==1 && st->build_id[0]) {
+        int model=-1;
+        for (int j=0;j<st->nmodels;j++) if (!strcmp(names[0],st->models[j].name)) model=j;
+        LmbSpeedSnapshot *speed=malloc(sizeof *speed); if (!speed) return 500;
+        int rc=preparation_speed_plan(st,r,model,speed);
+        if (rc>=0 && speed_json && catalog_speed_json(st,speed,rc,speed_json)) { free(speed); return 500; }
+        free(speed);
+        if (!rc) joint_bad=0;
+        else if (rc>0 && joint_bad) return 422; /* refused, with the reason in speed_json */
+    }
+    if (joint_bad || !st->build_id[0]) return 422;
     if (api_addf(body,"{\"schema\":1,\"mode\":\"resident_segment\",\"requires_approval\":true,"
         "\"decode_tok_s\":null,\"context\":%u,\"sessions\":%u,\"max_new\":%u,\"build_id\":\"%s\",\"tracker\":",
         st->context,st->sessions,st->max_new,st->build_id) || api_json_text(body,st->tracker) || cap_str(body,",\"nodes\":[")) return 500;
@@ -292,7 +343,7 @@ static int preparation_repeat(int dir,int access,const LmbApiUser *caller,const 
  * operation. The caller supplies a validated request; neither transport is
  * allowed to bypass the review, intent or keeper admission path. */
 static int preparation_execute_as(int access,const char *tracker,const LmbApiUser *caller,const LmbPreparationRequest *request,Cap *reply) {
-    LmbPreparationRequest r=*request; Cap result={0},plan={0}; LmbTuiState *st=NULL;
+    LmbPreparationRequest r=*request; Cap result={0},plan={0}; LmbTuiState *st=NULL; LmbSpeedText speed={0};
     int status=400,dir=-1,lock=-1; char review[65];
     int start=!strcmp(r.action,"start"), preview=!strcmp(r.action,"preview");
     if (!preview) {
@@ -305,10 +356,22 @@ static int preparation_execute_as(int access,const char *tracker,const LmbApiUse
         status=preparation_repeat(dir,access,caller,tracker,&r,&result); if (status) goto done;
     }
     st=preparation_catalogue(tracker,&r); if (!st) { status=503; goto done; }
-    status=preparation_review(st,&r,&plan,review); if (status!=200) goto done;
+    status=preparation_review(st,&r,&plan,review,&speed);
+    if (status==422 && preview && !r.node_count && speed.p && !speed.bad) {
+        /* Automatic selection found nothing to review. Say why instead of
+         * leaving the person to guess which computer to add. */
+        status=cap_str(&result,"{\"schema\":1,\"review\":null,\"plan\":null,\"speed_plan\":") ||
+            cap_add(&result,speed.p,speed.len) || cap_str(&result,"}") ? 500 : 200;
+        goto done;
+    }
+    if (status!=200) goto done;
     if (preview) {
+        /* The estimate sits beside the reviewed plan, not inside it: a
+         * re-measured link must not invalidate an unchanged placement. */
         if (api_addf(&result,"{\"schema\":1,\"review\":\"%s\",\"plan\":",review) ||
-            cap_add(&result,plan.p,plan.len) || cap_str(&result,"}")) status=500;
+            cap_add(&result,plan.p,plan.len) || cap_str(&result,",\"speed_plan\":") ||
+            (speed.p && !speed.bad ? cap_add(&result,speed.p,speed.len) : cap_str(&result,"null")) ||
+            cap_str(&result,"}")) status=500;
         goto done;
     }
     if (strcmp(review,r.review)) { status=409; goto done; }
@@ -330,7 +393,7 @@ static int preparation_execute_as(int access,const char *tracker,const LmbApiUse
 done:
     if (lock>=0) close(lock);
     if (dir>=0) close(dir);
-    free(st); free(plan.p); *reply=result;
+    free(st); free(plan.p); free(speed.p); *reply=result;
     return status;
 }
 /* Controllers act without a signed-in user: nothing is recorded or granted. */

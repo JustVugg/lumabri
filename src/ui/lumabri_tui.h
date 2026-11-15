@@ -20,6 +20,7 @@
 #include "src/planner/lumabri_resource_facts.h"
 #include "src/planner/lumabri_workload_facts.h"
 #include "src/planner/lumabri_portfolio.h"
+#include "src/planner/lumabri_machine_speed.h"
 
 #define LMB_TUI_MAX_MODELS 64
 
@@ -41,6 +42,10 @@ typedef struct {
     LmbCalKey calibration_key;      /* exact current conditions */
     int calibration_key_valid;
     uint32_t advice_flags;
+    /* The speed plan over every eligible computer: an estimate and its reason. */
+    int speed_planned, speed_estimated, speed_computers;
+    double speed_tok_s;
+    char speed_reason[640];
 } LmbTuiModel;
 
 /* Runtime observations never inherit upstream's potential modality flags.
@@ -81,6 +86,8 @@ typedef struct LmbTuiState {
     LmbMachineProfile profiles[LMB_CLUSTER_MAX_NODES];
     LmbResourceFacts facts[LMB_CLUSTER_MAX_NODES];
     LmbWorkloadFacts workloads[LMB_CLUSTER_MAX_NODES];
+    LmbMachineSpeed speeds[LMB_CLUSTER_MAX_NODES];   /* self-probe, unknown on older peers */
+    LmbMachineLinks links[LMB_CLUSTER_MAX_NODES];    /* each computer's own echoes */
     char identities[LMB_CLUSTER_MAX_NODES][65];
     char runtime_ids[LMB_CLUSTER_MAX_NODES][65];
     uint32_t ages_ms[LMB_CLUSTER_MAX_NODES];

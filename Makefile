@@ -186,6 +186,8 @@ MACHINE_DEPS = lumabri_machine.h $(MACHINE_SRC) src/runtime/lumabri_container_li
 lumabri test_chat_ui test_host_session_pool test-home-monitor test_calibration: src/planner/lumabri_turn_observation.h
 lumabri tracker test_chat_ui test_inventory test_home: src/planner/lumabri_resource_facts.h src/planner/lumabri_workload_facts.h
 lumabri tracker test_chat_ui test_inventory test_home test_cluster test_memory_budget test_portfolio: src/planner/lumabri_runtime_roles.h
+lumabri tracker test_chat_ui test_inventory test_home test_speed_plan: src/planner/lumabri_machine_speed.h
+lumabri test_chat_ui: src/runtime/lumabri_machine_probe.h src/planner/lumabri_speed_plan.h src/planner/lumabri_speed_catalogue.h
 lumabri test_chat_ui: src/ui/lumabri_donor_view.h
 lumabri test_chat_ui: src/ui/lumabri_home_settings.h
 PLANNER_ADAPTER_DEPS = $(wildcard planner_adapters/*.h)
@@ -676,9 +678,16 @@ SPEED_PLAN_DEPS = src/planner/lumabri_speed_plan.h src/planner/lumabri_machine_s
 test_speed_plan: tests/c/test_speed_plan.c $(SPEED_PLAN_DEPS) $(wildcard planner_adapters/*.h)
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/c/test_speed_plan.c -o $@ -lm
 
+# The flow test needs one small household checkpoint under SPEED_PLAN_MODELS
+# (CI copies the engine's tiny merged OLMoE there). Without it the unit test
+# still runs and the skip is said out loud.
+SPEED_PLAN_MODELS ?= build/home-flow-models
 .PHONY: test-speed-plan
-test-speed-plan: test_speed_plan
+test-speed-plan: test_speed_plan lumabri tracker segment_node segment_chat $(SHIM_LIB)
 	./test_speed_plan
+	@if ls $(SPEED_PLAN_MODELS)/*/config.json >/dev/null 2>&1; then \
+		$(PYTHON) tests/integration/speed_plan_flow_test.py --models-dir $(SPEED_PLAN_MODELS); \
+	else echo "SPEED PLAN FLOW: SKIPPED (no checkpoint under $(SPEED_PLAN_MODELS))"; fi
 
 test check-warnings: test_speed_plan
 test: test-speed-plan
