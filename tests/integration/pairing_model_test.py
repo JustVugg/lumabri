@@ -6,9 +6,8 @@ standard library, and shares no code with the C implementation: the field is
 is the ladder of RFC 7748, and the AEAD is RFC 8439 spelled out.
 
 What agreement proves: the C code computes the construction documented in
-src/crypto/lumabri_cpace.h. What it does not prove: that this construction is
-byte for byte the CPace draft. Both sides were written from the same reading of
-it, without its test vectors. See docs/PAIRING.md, "Open item".
+src/crypto/lumabri_cpace.h. The published CPace and RFC 9380 vectors are checked
+separately, in tests/c/test_pairing.c. See docs/PAIRING.md.
 """
 import hashlib
 import hmac
@@ -258,7 +257,7 @@ def main():
                             os.urandom(32).hex(), os.urandom(32).hex(), point.hex())
             assert answer["low_order"] == "1" and "seal_key" not in answer
     print("pairing model: PASS (Elligator 2 on 311 inputs, 24 exchanges in both directions, "
-          "low-order values; not a CPace conformance test)")
+          "low-order values)")
 
 
 if __name__ == "__main__":

@@ -7,7 +7,8 @@
  *   test_pairing map R                                   Elligator 2
  *   test_pairing begin ROLE CODE IDT IDJ SID SCALAR      public value
  *   test_pairing finish ROLE CODE IDT IDJ SID SCALAR PEER [KEY | SEALED]
- * None of this is a conformance test of the CPace draft: see docs/PAIRING.md.
+ * The published vectors of the CPace draft and RFC 9380 are checked in
+ * test_published_vectors: see docs/PAIRING.md.
  */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -506,6 +507,56 @@ static int model(int argc, char **argv) {
     return 0;
 }
 
+/* ---- published vectors ---------------------------------------------------
+ * draft-irtf-cfrg-cpace-18, appendix B.1 (X25519, SHA-512), and RFC 9380,
+ * appendix J.4.2 (curve25519_XMD:SHA-512_ELL2_NU_; u[0] and Q.x are printed
+ * there big-endian, Q being the mapped point before cofactor clearing). */
+static void kat_hex(uint8_t *out, size_t n, const char *hex, int reverse) {
+    assert(strlen(hex) == 2 * n);
+    for (size_t i = 0; i < n; i++) {
+        unsigned v; assert(sscanf(hex + 2 * i, "%2x", &v) == 1);
+        out[reverse ? n - 1 - i : i] = (uint8_t)v;
+    }
+}
+static void test_published_vectors(void) {
+    static const char *const map[][2] = {
+        {"608d892b641f0328523802a6603427c26e55e6f27e71a91a478148d45b5093cd",
+         "51125222da5e763d97f3c10fcc92ea6860b9ccbbd2eb1285728f566721c1e65b"},
+        {"46f5b22494bfeaa7f232cc8d054be68561af50230234d7d1d63d1d9abeca8da5",
+         "7d56d1e08cb0ccb92baf069c18c49bb5a0dcd927eff8dcf75ca921ef7f3e6eeb"},
+        {"235fe40c443766ce7e18111c33862d66c3b33267efa50d50f9e8e5d252a40aaa",
+         "3fbe66b9c9883d79e8407150e7c2a1c8680bee496c62fabe4619a72b3cabe90f"},
+        {"001e92a544463bda9bd04ddbe3d6eed248f82de32f522669efc5ddce95f46f5b",
+         "227e0bb89de700385d19ec40e857db6e6a3e634b1c32962f370d26f84ff19683"},
+    };
+    for (size_t i = 0; i < sizeof map / sizeof *map; i++) {
+        uint8_t r[32], want[32], got[32];
+        kat_hex(r, 32, map[i][0], 1); kat_hex(want, 32, map[i][1], 1);
+        lmb_elligator2(got, r);
+        assert(!memcmp(got, want, 32));
+    }
+    static const uint8_t ci[] = "oc\x0b" "B_responder\x0b" "A_initiator";
+    uint8_t sid[16], g[32], want[64], ya[32], yb[32], Ya[32], Yb[32], k1[32], k2[32], isk[64];
+    kat_hex(sid, 16, "7e4b4791d6a8ef019b936c79fb7f2c57", 0);
+    assert(!lmb_cpace_generator(g, (const uint8_t *)"Password", 8, ci, sizeof ci - 1, sid, 16));
+    kat_hex(want, 32, "64e8099e3ea682cfdc5cb665c057ebb514d06bf23ebc9f743b51b82242327074", 0);
+    assert(!memcmp(g, want, 32));
+    kat_hex(ya, 32, "21b4f4bd9e64ed355c3eb676a28ebedaf6d8f17bdc365995b319097153044080", 0);
+    kat_hex(yb, 32, "848b0779ff415f0af4ea14df9dd1d3c29ac41d836c7808896c4eba19c51ac40a", 0);
+    lc_x25519(Ya, ya, g); lc_x25519(Yb, yb, g);
+    kat_hex(want, 32, "1b02dad6dbd29a07b6d28c9e04cb2f184f0734350e32bb7e62ff9dbcfdb63d15", 0);
+    assert(!memcmp(Ya, want, 32));
+    kat_hex(want, 32, "20cda5955f82c4931545bcbf40758ce1010d7db4db2a907013d79c7a8fcf957f", 0);
+    assert(!memcmp(Yb, want, 32));
+    lc_x25519(k1, ya, Yb); lc_x25519(k2, yb, Ya);
+    kat_hex(want, 32, "f97fdfcfff1c983ed6283856a401de3191ca919902b323c5f950c9703df7297a", 0);
+    assert(!memcmp(k1, want, 32) && !memcmp(k2, want, 32));
+    lmb_cpace_isk(isk, sid, 16, k1, Ya, (const uint8_t *)"ADa", 3, Yb, (const uint8_t *)"ADb", 3);
+    kat_hex(want, 64, "a051ee5ee2499d16da3f69f430218b8ea94a18a45b67f9e86495b382c33d14a5"
+                      "c38cecc0cc834f960e39e0d1bf7d76b9ef5d54eecc5e0f386c97ad12da8c3d5f", 0);
+    assert(!memcmp(isk, want, 64));
+}
+
 int main(int argc, char **argv) {
     if (argc > 1) return model(argc, argv);
     test_field();
@@ -513,6 +564,7 @@ int main(int argc, char **argv) {
     test_code();
     test_exchange();
     test_registry();
+    test_published_vectors();
     puts("pairing: PASS");
     return 0;
 }

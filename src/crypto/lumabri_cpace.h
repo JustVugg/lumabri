@@ -21,16 +21,11 @@
  * with DSI = "CPace255", lv(x) the LEB128 length of x followed by x, and the
  * zero padding sized so that the code fills the first SHA-512 block.
  *
- * NOT VERIFIED AGAINST THE SPECIFICATION. This file was written without
- * network access to the draft and has not been run against its published
- * test vectors, so it must not be described as conforming or interoperable.
- * It is tested against an independent big-integer model of the formulas
- * above (tests/integration/pairing_model_test.py), which shows that the C
- * code computes what this comment says, not that this comment matches the
- * draft byte for byte. See docs/PAIRING.md, "Open item".
- *
- * On top of that exchange, the pairing layer below fixes the inputs and adds
- * key confirmation in both directions and one sealed message.
+ * The generator, both public values, K and the ISK are checked against the
+ * vectors of draft-irtf-cfrg-cpace-18 appendix B.1, and the map against
+ * RFC 9380 appendix J.4.2 (tests/c/test_pairing.c). The confirmation tags and
+ * the sealed message are Lumabri's own layer; the exchange has not been run
+ * against another implementation. See docs/PAIRING.md.
  */
 #ifndef LUMABRI_CPACE_H
 #define LUMABRI_CPACE_H

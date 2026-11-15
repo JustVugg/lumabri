@@ -119,29 +119,28 @@ so and the full key remains. Bodies have one exact length and version 1.
 The Windows workspace does not offer the code yet; `lumabri` on Windows can
 still join with the full key, and a Windows tracker serves codes.
 
-## Open item: the specification's test vectors
+## Checked against the published test vectors
 
 The base-point and session-key formulas follow the IRTF CFRG draft "CPace, a
 balanced composable PAKE" (`draft-irtf-cfrg-cpace`), suite
-CPACE-X25519-SHA512, with Elligator 2 as in RFC 9380 section 6.7.1. They were
-written without network access and **have not been run against the published
-vectors, so no conformance is claimed.** The confirmation tags and the sealed
-message are Lumabri's own layer, not the draft's.
+CPACE-X25519-SHA512, with Elligator 2 as in RFC 9380 section 6.7.1.
+`tests/c/test_pairing.c` runs the C code against the published values:
 
-What has been checked: Elligator 2 output is a canonical u-coordinate on the
-curve; the C code agrees with an independent big-integer model on the map, on
-whole exchanges in both directions and on low-order values
+- `draft-irtf-cfrg-cpace-18`, appendix B.1: the generator from
+  `calculate_generator`, both public values, the secret point `K` from both
+  sides, and the `ISK` for the initiator/responder order.
+- RFC 9380, appendix J.4.2 (`curve25519_XMD:SHA-512_ELL2_NU_`): the map from
+  `u[0]` to `Q.x` for the first four vectors.
+
+Not covered by published vectors: the draft's low-order-point table (the C
+code rejects an all-zero `K`, tested with its own low-order inputs), and the
+confirmation tags and sealed message, which are Lumabri's own layer and not
+the draft's. The exchange has not been run against another implementation.
+
+Also checked: Elligator 2 output is a canonical u-coordinate on the curve; the
+C code agrees with an independent big-integer model on the map, on whole
+exchanges in both directions and on low-order values
 (`tests/integration/pairing_model_test.py`); wrong codes, relays, replays,
 tampered values, truncated frames and the limits are refused
 (`tests/c/test_pairing.c`, `tests/c/test_pairing_tracker.c`,
-`tests/integration/pairing_test.py`). The model was written from the same
-reading of the draft, so it cannot catch a misreading.
-
-To close the item, someone with network access should check, in the draft's
-appendix "Test vectors", the section "Test vector for CPace using group X25519
-and hash SHA-512" (B.1 in the revisions known to the author: generator string
-and `calculate_generator`, both messages, the secret point `K`, the `ISK`
-calculation for initiator and responder, and the low-order points for
-`scalar_mult_vfy`), and the `curve25519_XMD:SHA-512_ELL2_NU_` vectors of RFC
-9380 Appendix J for the map. `./test_pairing map HEX` prints the map for one
-input.
+`tests/integration/pairing_test.py`).
