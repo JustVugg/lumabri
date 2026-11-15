@@ -778,6 +778,11 @@ jobs:
         run: |
           sudo prlimit --pid $$ --memlock=134217728:134217728
           make test-qwen38-gguf ENGINE=../colibri/c QWEN38_GGUF_TEST_OPTIONS=--household
+      - name: Drafts across the segments — identical replies in fewer rounds
+        # Two real segments per family on loopback; about ten seconds.
+        working-directory: lumabri
+        run: |
+          make test-drafts ENGINE=../colibri/c
       - name: DeepSeek V4 GGUF compressed state and household chat
         working-directory: lumabri
         run: |

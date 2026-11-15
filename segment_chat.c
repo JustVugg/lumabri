@@ -71,6 +71,7 @@ typedef struct {
     LmbLinkEvidence link;
     uint8_t *feedback; /* head only: committed tail delta of this conversation */
     size_t feedback_bytes;
+    int draft_rows; /* this session's OPEN_R offered provisional rows */
 } RemoteSegment;
 
 typedef struct {
@@ -90,6 +91,11 @@ typedef struct {
 #include "lumabri_metrics.h"
 #include "lumabri_stage_metrics.h"
 #include "src/runtime/lumabri_request_seed.h"
+#include "src/runtime/lumabri_draft.h"
+
+/* Explicit setting, off unless asked for (docs/DRAFTS.md). */
+static LmbDraftSetting segment_drafts = { LMB_DRAFT_OFF, LMB_DRAFT_DEFAULT_ROWS };
+static LmbDraftScript segment_draft_script; /* gates only: LUMABRI_DRAFT_SCRIPT */
 
 typedef struct {
     uint32_t begin, end;
@@ -109,6 +115,7 @@ typedef struct {
     LmbGenerationMetrics metrics;
     int stages_valid;
     int replica_unavailable;
+    LmbDraftMetrics drafts; /* all zero when the reply used no draft rounds */
     size_t stage_count;
     StageObservation stages[LMB_SEG_ROUTE_MAX];
     LmbLinkEvidence links[LMB_SEG_ROUTE_MAX];
@@ -159,6 +166,7 @@ static void usage(const char *program) {
         "((--prompt TEXT | --prompt-ids CSV) | --serve) "
         "[--expect-ids CSV] [--tokens N] [--context N] [--max-rows N] "
         "[--temperature F --top-p F --seed N] "
+        "[--drafts off|lookup|head|auto] [--draft-rows 2..16] "
         "[--discovery-timeout-ms N] [--retry-first-run] [--direct-only] [--json] "
         "[--checkpoint-signer HEX64 --model-bytes N (native Windows)]\n",
         program);
@@ -654,6 +662,9 @@ static int remote_open(RemoteSegment *remote, const LmbSegId *session_id,
         remote->sequence = reply.next_sequence;
         remote->position = reply.next_position;
         remote->opened = 1;
+        /* An executor that predates drafts leaves the flag clear and is
+         * never sent LMB_SEG_DRAFT; the whole chain then runs without. */
+        remote->draft_rows = !!(reply.flags & LMB_SEG_REPLY_DRAFT_ROWS);
         remote_measure_link(remote);
         return 0;
     }
@@ -705,29 +716,39 @@ static int remote_open_current(RemoteSegment *remote, const LmbSegId *session_id
     }
 }
 
-static int remote_run(RemoteSegment *remote, const int32_t *tokens,
-                      uint32_t rows, const void *input, size_t bytes,
-                      void *output) {
+/* RUN continues at the remote's position. DRAFT names the position its rows
+ * start from: the executor first discards the provisional rows at and above
+ * it, then runs these rows as the next provisional block (none: discard only). */
+static int remote_run_op(RemoteSegment *remote, const int32_t *tokens,
+                         uint32_t rows, const void *input, size_t bytes,
+                         void *output, int draft, uint64_t position) {
+    const uint32_t request_op = draft ? LMB_SEG_DRAFT : LMB_SEG_RUN;
+    const uint32_t reply_op = draft ? LMB_SEG_DRAFT_R : LMB_SEG_RUN_R;
+    const char *name = draft ? "DRAFT" : "RUN";
     LmbSegRun run;
     memset(&run, 0, sizeof run);
     run.session_id = remote->open.session_id;
     lmb_random(run.request_id.bytes, sizeof run.request_id.bytes);
     run.owner = remote->open.owner;
     run.sequence = remote->sequence;
-    run.position = remote->position;
+    run.position = draft ? position : remote->position;
     run.rows = rows;
     run.token_count = rows;
-    run.token_ids = tokens;
+    run.token_ids = rows ? tokens : NULL;
     uint8_t *body = NULL;
     uint32_t body_len = 0;
-    if (lmb_seg_run_encode(&run, &body, &body_len) || bytes > UINT32_MAX)
+    if ((draft ? lmb_seg_draft_encode(&run, &body, &body_len)
+               : lmb_seg_run_encode(&run, &body, &body_len)) ||
+        bytes > UINT32_MAX) {
+        free(body);
         return -1;
+    }
     LmbMsg msg = {0};
     LmbSegReply reply;
     memset(&reply, 0, sizeof reply);
     remote->operation_error[0] = 0;
     remote->failure_transport = 0;
-    int bad = remote_request(remote, LMB_SEG_RUN, body, body_len,
+    int bad = remote_request(remote, request_op, body, body_len,
                              input, (uint32_t)bytes, &msg);
     if (bad) {
         remote->failure_transport = 1;
@@ -736,27 +757,27 @@ static int remote_run(RemoteSegment *remote, const int32_t *tokens,
                  "no usable Segment transport");
     } else if (msg.op == LMB_ERR) {
         snprintf(remote->operation_error, sizeof remote->operation_error,
-                 "%s refused RUN: %.*s", remote->route.advert.peer_name,
+                 "%s refused %s: %.*s", remote->route.advert.peer_name, name,
                  (int)msg.body_len, msg.body ? (const char *)msg.body : "");
         bad = 1;
-    } else if (msg.op != LMB_SEG_RUN_R ||
+    } else if (msg.op != reply_op ||
                lmb_seg_reply_decode(msg.body, msg.body_len, &reply)) {
         snprintf(remote->operation_error, sizeof remote->operation_error,
-                 "%s answered RUN with an unreadable message (op %u)",
-                 remote->route.advert.peer_name, msg.op);
+                 "%s answered %s with an unreadable message (op %u)",
+                 remote->route.advert.peer_name, name, msg.op);
         bad = 1;
     } else if (!lmb_seg_id_equal(&reply.session_id, &run.session_id) ||
                !lmb_seg_id_equal(&reply.request_id, &run.request_id) ||
                reply.route_generation != run.owner.route_generation) {
         snprintf(remote->operation_error, sizeof remote->operation_error,
-                 "%s answered RUN for a different session or route generation",
-                 remote->route.advert.peer_name);
+                 "%s answered %s for a different session or route generation",
+                 remote->route.advert.peer_name, name);
         bad = 1;
     } else if (reply.status != LMB_SEG_STATUS_OK &&
                reply.status != LMB_SEG_STATUS_DUPLICATE) {
         snprintf(remote->operation_error, sizeof remote->operation_error,
-                 "%s rejected RUN [%u:%u]: %s",
-                 remote->route.advert.peer_name,
+                 "%s rejected %s [%u:%u]: %s",
+                 remote->route.advert.peer_name, name,
                  remote->route.advert.layer_begin,
                  remote->route.advert.layer_end,
                  segment_status_name(reply.status));
@@ -768,12 +789,12 @@ static int remote_run(RemoteSegment *remote, const int32_t *tokens,
         bad = 1;
     }
     if (!bad) {
-        memcpy(output, msg.pay, bytes);
+        if (bytes) memcpy(output, msg.pay, bytes);
         if (reply.next_sequence != run.sequence + 1 ||
             reply.next_position != run.position + rows) {
             snprintf(remote->operation_error, sizeof remote->operation_error,
-                     "%s advanced RUN to an invalid sequence/position",
-                     remote->route.advert.peer_name);
+                     "%s advanced %s to an invalid sequence/position",
+                     remote->route.advert.peer_name, name);
             bad = 1;
         }
         else {
@@ -782,7 +803,7 @@ static int remote_run(RemoteSegment *remote, const int32_t *tokens,
         }
     }
     lmb_msg_free(&msg);
-    if (!bad && retry_first_run) {
+    if (!bad && retry_first_run && !draft) {
         retry_first_run = 0;
         memset(&msg, 0, sizeof msg);
         bad = remote_request(remote, LMB_SEG_RUN, body, body_len,
@@ -804,6 +825,12 @@ static int remote_run(RemoteSegment *remote, const int32_t *tokens,
     }
     free(body);
     return bad ? -1 : 0;
+}
+
+static int remote_run(RemoteSegment *remote, const int32_t *tokens,
+                      uint32_t rows, const void *input, size_t bytes,
+                      void *output) {
+    return remote_run_op(remote, tokens, rows, input, bytes, output, 0, 0);
 }
 
 typedef struct {
@@ -1071,6 +1098,35 @@ static int chain_run_observed(RemoteSegment *chain, size_t count,
          * creates a fresh chain and rebuilds feedback while replaying history. */
         memcpy(chain[0].feedback,input+offset,length);
     }
+    return 0;
+}
+
+/* Every hop must have offered provisional rows at OPEN. One hop that did not
+ * (an older release, a family without a rewind, LUMABRI_DRAFT_ROWS=0) turns
+ * drafts off for the whole chain; nothing is ever sent that it would refuse.
+ * The V4.1 chain carries per-token feedback from its tail to its head, so a
+ * block of rows cannot cross it in one traversal. */
+static int chain_draft_rows(const RemoteSegment *chain, size_t count) {
+    if (!count || !strcmp(chain[0].route.advert.state_schema, LMB_V41_SCHEMA))
+        return 0;
+    for (size_t i = 0; i < count; i++)
+        if (!chain[i].opened || !chain[i].draft_rows) return 0;
+    return 1;
+}
+
+/* One round: `rows` provisional rows starting at `position` through every
+ * segment. rows == 0 only discards what each segment holds above `position`. */
+static int chain_draft(RemoteSegment *chain, size_t count,
+                       const int32_t *tokens, uint32_t rows, uint64_t position,
+                       uint8_t **first, uint8_t **second, size_t bytes) {
+    uint8_t *input = *first, *output = *second;
+    for (size_t i = 0; i < count; i++) {
+        if (remote_run_op(&chain[i], tokens, rows, input, bytes, output, 1,
+                          position)) return -(int)i - 1;
+        uint8_t *swap = input; input = output; output = swap;
+    }
+    *first = input;
+    *second = output;
     return 0;
 }
 
@@ -1539,6 +1595,7 @@ static int segment_generate(ColiEdgeEngine *edge,
     size_t opened = 0;
     int32_t *prompt_tokens = NULL;
     int32_t *generated = NULL;
+    int32_t *history = NULL; /* prompt + generated: what a draft source reads */
     uint8_t *buffer_a = NULL, *buffer_b = NULL;
     float *logits = NULL;
     char *stream_text = NULL;
@@ -1650,6 +1707,15 @@ static int segment_generate(ColiEdgeEngine *edge,
         goto cleanup;
     }
     generated = malloc((size_t)wanted_tokens * sizeof *generated);
+    /* A block never exceeds what one RUN, one Edge call or the setting takes. */
+    uint32_t draft_block = segment_drafts.mode == LMB_DRAFT_OFF ? 0 : segment_drafts.rows;
+    if (draft_block > max_rows) draft_block = max_rows;
+    if (draft_block > cap->max_batch_rows) draft_block = cap->max_batch_rows;
+    if (draft_block < 2) draft_block = 0;
+    if (draft_block) {
+        history = malloc((prompt_count + (size_t)wanted_tokens) * sizeof *history);
+        if (history) memcpy(history, prompt_tokens, prompt_count * sizeof *history);
+    }
     if (temperature > 0.0) {
         if (!(cap->flags & COLI_EDGE_CAP_LOGITS) || !sampler) {
             snprintf(error, error_size,
@@ -1662,7 +1728,7 @@ static int segment_generate(ColiEdgeEngine *edge,
                                        cap->state_dtype);
     buffer_a = max_bytes ? malloc(max_bytes) : NULL;
     buffer_b = max_bytes ? malloc(max_bytes) : NULL;
-    if (!generated || !buffer_a || !buffer_b ||
+    if (!generated || !buffer_a || !buffer_b || (draft_block && !history) ||
         (temperature > 0.0 && !logits)) {
         snprintf(error, error_size, "out of memory preparing Segment run");
         goto cleanup;
@@ -1761,6 +1827,7 @@ static int segment_generate(ColiEdgeEngine *edge,
     }
     double first_selected_at=monotonic_seconds(), last_selected_at=first_selected_at;
     size_t generated_count = 1;
+    if (history) history[prompt_count] = generated[0];
     if (event &&
         (generation_stream_prefix(edge, generated, generated_count,
                                   cap->eos_token_id, 0, event, event_opaque,
@@ -1773,6 +1840,106 @@ static int segment_generate(ColiEdgeEngine *edge,
            generated[generated_count - 1] != cap->eos_token_id) {
         if(lmb_resident_memory_check()) {
             snprintf(error,error_size,"Edge physical residency lost; resident preparation must be renewed");goto cleanup;
+        }
+        if (draft_block && chain_draft_rows(active_chain, active_count)) {
+            /* One round carries the certain row (the last selected token)
+             * and the drafts after it. Row i's output is what the model
+             * selects after the tokens up to row i, so it stands exactly
+             * while every draft before it was the token really selected.
+             * Selection, sampling included, runs once per kept token in the
+             * same order as without drafts: the reply is identical. */
+            int32_t block[LMB_DRAFT_MAX_ROWS];
+            uint64_t position = prompt_count + generated_count - 1;
+            size_t room = wanted_tokens - generated_count;
+            if (room > draft_block) room = draft_block;
+            block[0] = generated[generated_count - 1];
+            uint32_t rows = 1;
+            if (room > 1 && segment_draft_script.count)
+                rows += (uint32_t)lmb_draft_scripted(&segment_draft_script, generated_count,
+                                                     block + 1, room - 1);
+            else if (room > 1 && segment_drafts.mode != LMB_DRAFT_HEAD)
+                rows += (uint32_t)lmb_draft_lookup(history, prompt_count + generated_count,
+                                                   block + 1, room - 1);
+            /* A proposal the vocabulary does not hold cannot be selected. */
+            for (uint32_t row = 1; row < rows; row++)
+                if (block[row] < 0 || (uint32_t)block[row] >= cap->vocab_size) {
+                    rows = row;
+                    break;
+                }
+            size_t bytes = lmb_state_bytes(rows, cap->state_width, cap->state_dtype);
+            ColiEdgeEmbedRequest embed = {
+                .struct_size = sizeof embed, .rows = rows,
+                .token_ids = block, .token_count = rows,
+                .output = buffer_a, .output_bytes = bytes,
+            };
+            if (coli_edge_embed(edge, &embed, error, error_size)) goto cleanup;
+            uint8_t *first = buffer_a, *second = buffer_b;
+            int failed = chain_draft(active_chain, active_count, block, rows,
+                                     position, &first, &second, bytes);
+            result->stages_valid = 0; /* a block is not a one-row decode step */
+            if (failed) {
+                size_t failed_index = (size_t)(-failed - 1);
+                const char *peer = active_chain[failed_index].route.advert.peer_name;
+                if (event)
+                    (void)event(event_opaque, GEN_EVENT_FAILOVER, failed_index,
+                                active_count, peer, strlen(peer));
+                /* Recovery opens fresh sessions and replays the committed
+                 * tokens; nothing provisional survives it. The step is then
+                 * taken again, with or without drafts as the new chain allows. */
+                if (!conversation || !route_snapshot ||
+                    conversation_recover(conversation, discovery, route_snapshot,
+                                         failed_index, edge, cap,
+                                         model_root, tokenizer_root, context, max_rows,
+                                         prompt_tokens, prompt_count,
+                                         generated, generated_count - 1,
+                                         buffer_a, buffer_b, error, error_size)) {
+                    if (!error[0])
+                        peer_failure_reason(active_chain, failed_index,
+                                            error, error_size);
+                    result->replica_unavailable=1;
+                    goto cleanup;
+                }
+                continue;
+            }
+            result->drafts.rounds++;
+            result->drafts.proposed += rows - 1;
+            for (uint32_t row = 0; row < rows; row++) {
+                const uint8_t *state = first + (size_t)row * state_row_bytes;
+                select.input = state;
+                select.token_ids = generated + generated_count;
+                logits_request.input = state;
+                if (temperature > 0.0) {
+                    if (coli_edge_logits(edge, &logits_request, error, error_size) ||
+                        lmb_sample_logits(sampler, logits, cap->vocab_size,
+                                          temperature, top_p,
+                                          generated + generated_count)) {
+                        if (!error[0]) snprintf(error, error_size, "sampling failed");
+                        goto cleanup;
+                    }
+                } else if (coli_edge_select(edge, &select, error, error_size))
+                    goto cleanup;
+                int32_t selected = generated[generated_count];
+                history[prompt_count + generated_count] = selected;
+                last_selected_at=monotonic_seconds();
+                generated_count++;
+                result->drafts.tokens++;
+                if (row) result->drafts.accepted++;
+                if (event &&
+                    (generation_stream_prefix(edge, generated, generated_count,
+                                              cap->eos_token_id, 0, event, event_opaque,
+                                              &stream_text, &stream_text_bytes,
+                                              &stream_emitted_bytes,
+                                              error, error_size) ||
+                     event(event_opaque, GEN_EVENT_DECODE, generated_count,
+                           wanted_tokens, NULL, 0))) goto cleanup;
+                if (generated_count >= wanted_tokens ||
+                    selected == cap->eos_token_id ||
+                    (row + 1 < rows && block[row + 1] != selected)) break;
+            }
+            if(lmb_resident_memory_check()) {
+                snprintf(error,error_size,"Edge physical residency lost; resident preparation must be renewed");goto cleanup;
+            }
+            continue;
         }
         int32_t token = generated[generated_count - 1];
         size_t bytes = lmb_state_bytes(1, cap->state_width, cap->state_dtype);
@@ -1827,7 +1994,12 @@ static int segment_generate(ColiEdgeEngine *edge,
             snprintf(error,error_size,"Edge physical residency lost; resident preparation must be renewed");goto cleanup;
         }
         last_selected_at=monotonic_seconds();
+        if (history) history[prompt_count + generated_count] = generated[generated_count];
         generated_count++;
+        if (result->drafts.rounds) { /* a mixed reply still counts every round */
+            result->drafts.rounds++;
+            result->drafts.tokens++;
+        }
         if (event &&
             (generation_stream_prefix(edge, generated, generated_count,
                                       cap->eos_token_id, 0, event, event_opaque,
@@ -1836,6 +2008,32 @@ static int segment_generate(ColiEdgeEngine *edge,
                                       error, error_size) ||
              event(event_opaque, GEN_EVENT_DECODE, generated_count,
                    wanted_tokens, NULL, 0))) goto cleanup;
+    }
+    /* The last block may have left rows whose draft was wrong. A persistent
+     * conversation takes them back now, so the checkpoint and the next
+     * turn's prefill find every segment at the committed position. A
+     * one-shot chain is closed below and needs nothing. */
+    int draft_tail_lost = 0;
+    if (conversation && result->drafts.rounds) {
+        uint64_t committed_position = prompt_count + generated_count - 1;
+        int ahead = 0;
+        for (size_t i = 0; i < active_count; i++)
+            ahead |= active_chain[i].position != committed_position;
+        if (ahead) {
+            uint8_t *first = buffer_a, *second = buffer_b;
+            if (chain_draft(active_chain, active_count, NULL, 0,
+                            committed_position, &first, &second, 0)) {
+                /* The reply is complete and correct; only the resident
+                 * state is unusable. Rebuild it on the next turn. */
+                fprintf(stderr, "[lumabri] Segment chain could not discard its "
+                                "last draft rows; the next turn rebuilds the session\n");
+                conversation_reset(conversation);
+                draft_tail_lost = 1;
+            } else {
+                result->drafts.rounds++;
+                result->drafts.discards++;
+            }
+        }
     }
     /* The token that stopped generation is a control marker, not text. The
      * monolithic engines never put it in the reply and the TUI must not
@@ -1867,7 +2065,7 @@ static int segment_generate(ColiEdgeEngine *edge,
         text[text_bytes] = 0;
     }
     stream_text = NULL;
-    if (conversation) {
+    if (conversation && !draft_tail_lost) {
         size_t generated_committed = generated_count ? generated_count - 1 : 0;
         size_t committed_count = prompt_count + generated_committed;
         if (conversation_has_replica(conversation, route_snapshot,
@@ -1932,6 +2130,7 @@ cleanup:
     }
     free(prompt_tokens);
     free(generated);
+    free(history);
     free(logits);
     free(buffer_a);
     free(buffer_b);
@@ -2305,6 +2504,16 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
         printf("DONE %u STAT %zu %.3f 0 0 %zu 0 STOP1 %s", request_id,
                result.token_count, lmb_metrics_decode_rate(&result.metrics), result.prompt_count,
                result.ended_by_eos ? "eos" : "length");
+        char drafts[96];
+        if (!lmb_draft_metrics_format(&result.drafts, drafts, sizeof drafts)) {
+            printf(" %s", drafts);
+            fprintf(stderr, "[segment-drafts] request=%u rounds=%u tokens=%u "
+                    "proposed=%u accepted=%u discards=%u rounds_per_token=%.3f\n",
+                    request_id, result.drafts.rounds, result.drafts.tokens,
+                    result.drafts.proposed, result.drafts.accepted,
+                    result.drafts.discards,
+                    lmb_draft_rounds_per_token(&result.drafts));
+        }
         int links_valid = result.stages_valid && result.stage_count && result.stage_count <= LMB_STAGE_PROFILE_MAX;
         for (size_t i = 0; links_valid && i < result.stage_count; i++)
             links_valid = lmb_link_current(&result.links[i], (double)time(NULL));
@@ -2395,6 +2604,21 @@ int main(int argc, char **argv) {
          parse_u64(arg_value(argc, argv, "--seed"), &(uint64_t){0}))) {
         usage(argv[0]); return 2;
     }
+    if (lmb_draft_setting(arg_value(argc, argv, "--drafts"),
+                          arg_value(argc, argv, "--draft-rows"), &segment_drafts)) {
+        fprintf(stderr, "Drafts setting is not valid: use --drafts off|lookup|head|auto "
+                        "(or LUMABRI_DRAFTS) and --draft-rows 2..%u (or LUMABRI_DRAFT_BLOCK)\n",
+                LMB_DRAFT_MAX_ROWS);
+        return 2;
+    }
+    if (segment_drafts.mode != LMB_DRAFT_OFF && lmb_draft_script_load(&segment_draft_script)) {
+        fprintf(stderr, "LUMABRI_DRAFT_SCRIPT is not a comma-separated list of token IDs\n");
+        return 2;
+    }
+    if (segment_drafts.mode != LMB_DRAFT_OFF)
+        fprintf(stderr, "[lumabri] drafts: %s, up to %u rows per round where every "
+                        "segment of the chain supports them\n",
+                lmb_draft_mode_name(segment_drafts.mode), segment_drafts.rows);
     uint64_t seed = sampler_seed(arg_value(argc, argv, "--seed"));
     LmbSampler sampler;
     lmb_sampler_init(&sampler, seed);
@@ -2659,13 +2883,25 @@ int main(int argc, char **argv) {
                "\"bytes\":{\"segment\":%llu},"
                "\"generation_metrics\":{\"version\":1,\"generated_tokens\":%u,"
                "\"decode_steps\":%u,\"prefill_seconds\":%.9f,"
-               "\"decode_seconds\":%.9f,\"total_seconds\":%.9f},\"stage_observations\":",
+               "\"decode_seconds\":%.9f,\"total_seconds\":%.9f},",
                generated.token_count, generated.decode_seconds,
                generated.elapsed_seconds,
                (unsigned long long)segment_wire_bytes,
                generated.metrics.generated_tokens,generated.metrics.decode_steps,
                generated.metrics.prefill_seconds,generated.metrics.decode_seconds,
                generated.metrics.total_seconds);
+        /* Absent when the reply used no draft round (setting off, an older
+         * segment in the chain, a one-token reply). */
+        if (lmb_draft_metrics_valid(&generated.drafts))
+            printf("\"draft_metrics\":{\"version\":1,\"mode\":\"%s\",\"rounds\":%u,"
+                   "\"tokens\":%u,\"proposed\":%u,\"accepted\":%u,\"discards\":%u,"
+                   "\"rounds_per_token\":%.6f},",
+                   lmb_draft_mode_name(segment_drafts.mode),
+                   generated.drafts.rounds, generated.drafts.tokens,
+                   generated.drafts.proposed, generated.drafts.accepted,
+                   generated.drafts.discards,
+                   lmb_draft_rounds_per_token(&generated.drafts));
+        printf("\"stage_observations\":");
         stage_observations_print(stdout, &generated);
         printf("}\n");
     }

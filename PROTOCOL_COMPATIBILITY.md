@@ -9,6 +9,7 @@ Changing one payload never permits silently reinterpreting another.
 | Expert manifest | `LEM2` | skip the executor; local/replica fallback |
 | signed model identity | `MID1` | refuse to mix checkpoint roots |
 | Segment request/state | `SEG2` / 2 | explicit unsupported/bad-request reply |
+| Segment draft rows (`LMB_SEG_DRAFT/R` 115/116, `flags` bit 0 of `SEG_OPEN_R`) | additive op, `SEG2` run envelope | a segment that does not set the bit is never sent the op; the whole chain then decodes one row per round |
 | Segment discovery | `SGD1` / 1 | publish no compatible route |
 | Segment RUN compute (`LMB_SEG_COMPUTE_GET/PUT` 100-103) | optional `GSC1` / 1 sideband | old trackers return `ERR`; old nodes send no report; old chatters continue to use `SGD1` |
 | Segment assignment | `GSA1` / 2 | release/retry assignment, never guess a range |
@@ -78,6 +79,32 @@ are removed when their connection closes. LIST returns version, count and,
 for each row, age in milliseconds followed by its report without signature.
 The authenticated tracker is trusted to relay inventory; this is not a public
 hardware attestation or permission to run a model.
+
+## Draft rows
+
+Drafts ([docs/DRAFTS.md](docs/DRAFTS.md)) add one Segment operation and one
+reply bit; no existing body changes.
+
+- `SEG_OPEN_R` carries `LMB_SEG_REPLY_DRAFT_ROWS` in the reply's `flags` word
+  when the executor's engine can discard provisional rows. The word was
+  always on the wire and always zero; an older chatter ignores it and an older
+  executor never sets it.
+- `LMB_SEG_DRAFT` reuses the `SEG2` run envelope and answers with the ordinary
+  reply. Unlike `SEG_RUN` its position may lie inside the previous committed
+  draft, and it may carry no rows. An executor without draft rows answers
+  `ERR`, exactly as for any unknown Segment operation.
+- A chatter sends `LMB_SEG_DRAFT` only when every segment of its chain set the
+  bit at OPEN. One older or unsupporting segment therefore turns drafts off
+  for that conversation; nothing is renegotiated per request. Mixed chains are
+  covered by `make test-drafts`.
+- The tracker relays the operation like `SEG_RUN`. An older tracker refuses
+  the relayed frame; the chatter treats that as a transport failure of that
+  hop and recovers the conversation through restore/replay. Upgrade trackers
+  first, as for every other operation.
+- The hosted `STAT` line gains `DRAFTS1 rounds tokens proposed accepted
+  discards` after `STOP1` and before `LINKS1`/`STAGES1`/`PERF1`, only for a
+  reply that used drafts. Readers locate the other fields by their own
+  markers and are unaffected.
 
 ## Resident image input in the hosted codec
 
