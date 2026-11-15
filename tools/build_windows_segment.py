@@ -178,6 +178,9 @@ def main():
          '-o',output/'test_secure_transport.exe'])
     run([args.cc,*flags,'-Werror','-Wno-unused-function',
          root/'tests/c/test_crypto_vectors.c','-static','-o',output/'test_crypto_vectors.exe'])
+    run([args.cc,*flags,'-Werror','-Wno-unused-function',
+         root/'tests/c/test_pairing.c','-static','-lwinpthread','-lws2_32','-lbcrypt',
+         '-o',output/'test_pairing.exe'])
     run([args.cc,*flags,'-Werror','-Wno-unused-function','-municode',
          root/'tests/c/test_peer_identity_windows.c','-static','-lwinpthread',
          '-lws2_32','-lbcrypt','-ladvapi32','-o',output/'test_peer_identity_windows.exe'])

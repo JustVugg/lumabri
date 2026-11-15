@@ -2900,6 +2900,8 @@ static void inventory_disconnect(LmbSocket fd) {
     pthread_mutex_unlock(&g_inventory_lock);
 }
 
+#include "src/runtime/lumabri_pairing_tracker.h"
+
 static void *conn_thread(void *arg) {
     LmbSocket fd = (LmbSocket)(uintptr_t)arg;
     if (lmb_secure_server(fd)) { lmb_close(fd); lmb_conn_gate_leave(&g_conn_gate); return NULL; }
@@ -2982,7 +2984,9 @@ static void *conn_thread(void *arg) {
         LmbMsg m;
         if (lmb_recv(fd, &m) != 0) break;
         int rc = 0;
-        if (!authed && m.op != LMB_AUTH && m.op != LMB_PING) {
+        /* PAIR_HELLO is how a computer without the household key obtains it;
+         * it proves knowledge of the owner's short code instead. */
+        if (!authed && m.op != LMB_AUTH && m.op != LMB_PING && m.op != LMB_PAIR_HELLO) {
             send_err(fd, "this swarm needs an invite token");
             lmb_msg_free(&m);
             break;
@@ -3084,6 +3088,10 @@ static void *conn_thread(void *arg) {
         case LMB_TMAN:      rc = handle_tman(fd, &m); break;
         case LMB_RSEG:      rc = handle_rseg(fd, &m); break;
         case LMB_ASSIGN:    rc = handle_assign(fd, &m); break;
+        case LMB_PAIR_HELLO:  rc = handle_pair_hello(fd, &m); break;
+        case LMB_PAIR_OPEN:   rc = handle_pair_open(fd, &m); break;
+        case LMB_PAIR_STATUS: rc = handle_pair_status(fd, &m); break;
+        case LMB_PAIR_CANCEL: rc = handle_pair_cancel(fd, &m); break;
         default:            send_err(fd, "unknown op"); rc = -1; break;
         }
         lmb_msg_free(&m);
