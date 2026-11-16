@@ -131,6 +131,13 @@ static int home_control_io_ms(int fallback) {
 #include "src/runtime/lumabri_node_control.h"
 #include "src/runtime/lumabri_retired_receipts.h"
 #include "src/runtime/lumabri_allocation_lifetime.h"
+#include "src/runtime/lumabri_local_source.h"
+/* One per user: both the source launcher and the donor keeper of the same
+ * person on the same computer resolve it identically. */
+static void home_local_sources_dir(char *out, size_t cap, const char *prefix) {
+    snprintf(out, cap, "%s%s/.lumabri/local-sources", prefix,
+             getenv("HOME") ? getenv("HOME") : ".");
+}
 /* Consumes listener and private control child end, including on failure;
  * unrelated inherited descriptors remain CLOEXEC. */
 static pid_t home_spawn_guarded(char *const argv[], char *const envv[], const char *log, int *ready_fd, int listener, int control, int lifetime) {
@@ -633,6 +640,7 @@ static int home_donor_launch(HomeDonor *d, int edge,char *error,size_t error_siz
     char shim[1200], binary[1200], vroot[1200], cache[1200], cas[1200];
     char e_shim[1232], e_vroot[1232], e_cache[1232], e_cas[1232];
     char e_tracker[300], e_model[100], e_root[100], e_key[100], e_limit[100], e_log[1232];
+    char e_local[1232];
     char range[40], port[20], addr[64], name[64], context[20], threads[20], ram[32];
     char bytes[32], layers[20], max_new[20], sessions[20], e_omp[64], e_omp_limit[64];
     if (checked_printf(shim, sizeof shim, "%s/" LMB_SHIM_NAME, d->bin_dir) ||
@@ -656,6 +664,10 @@ static int home_donor_launch(HomeDonor *d, int edge,char *error,size_t error_siz
     snprintf(e_key, sizeof e_key, "LUMABRI_SEGMENT_CLIENT_PK=%s", edge_peer);
     snprintf(e_limit, sizeof e_limit, "LUMABRI_EDGE_RAM_BYTES=%llu", (unsigned long long)o->edge_ram_bytes);
     snprintf(e_log, sizeof e_log, "LUMABRI_ENGINE_LOG=%s/edge.log", d->cache_base);
+    /* Where this user's own source service, if it runs on this computer,
+     * records the directory it publishes. A hint only: the loader checks
+     * ownership and verifies every block against the authenticated truth. */
+    home_local_sources_dir(e_local, sizeof e_local, LMB_LOCAL_SOURCES_ENV "=");
     unsigned usable_threads = o->threads < d->thread_capacity ? o->threads : d->thread_capacity;
     if (!usable_threads) return -1;
     snprintf(e_omp, sizeof e_omp, "OMP_NUM_THREADS=%u", usable_threads);
@@ -695,6 +707,7 @@ static int home_donor_launch(HomeDonor *d, int edge,char *error,size_t error_siz
                    "LUMABRI_PREFETCH=0", "LUMABRI_NO_EXEC=1",
                    "LUMABRI_ENGINE_BACKEND=cpu", e_log,
                    edge ? e_limit : "LUMABRI_HOME_SEGMENT=1", e_omp, e_omp_limit, e_hybrid, e_accelerator,
+                   e_local,
                    unlocked ? "LUMABRI_RESIDENCY_POLICY=observe" : NULL, NULL};
     int chosen_port = 0, listener = home_listen(&chosen_port);
     if (listener < 0) return -1;
@@ -1435,6 +1448,15 @@ static int home_request_chat_direct(LmbTuiState *st, int selected) {
     snprintf(name, sizeof name, "home-source-%.16s", idhex);
     snprintf(logdir, sizeof logdir, "%s/.lumabri/logs", getenv("HOME") ? getenv("HOME") : ".");
     mkdir_p(logdir); snprintf(logfile, sizeof logfile, "%s/%s.log", logdir, name);
+    {
+        /* Best effort: a donor on this same computer, run by this same user,
+         * may then read the weights from these files instead of over loopback. */
+        char sources[1232];
+        home_local_sources_dir(sources, sizeof sources, "");
+        if (lmb_local_source_publish(sources, model, m->dir))
+            fprintf(stderr, "[home] no same-computer source record for %s; "
+                            "a local donor loads it through the network\n", model);
+    }
     char *source_argv[] = {maintainer, "--root", m->dir, "--port", port,
         "--tracker", st->tracker, "--name", name, "--model-name", model,
         "--advertise", addr, "--key", kp, NULL};

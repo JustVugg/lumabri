@@ -83,6 +83,7 @@ test: test-agent-control
 lumabri test_chat_ui: src/runtime/lumabri_weight_cache.h
 lumabri test_chat_ui: src/runtime/lumabri_prepare_progress.h
 lumabri test_chat_ui test_memory_budget test_cluster segment_node test_calibration $(SHIM_LIB): src/runtime/lumabri_prepare_limits.h
+lumabri test_chat_ui $(SHIM_LIB): src/runtime/lumabri_local_source.h
 lumabri test_chat_ui test_home test_hybrid_parallel test_accum_order test_local_fallback test_verify_failover test_nat_adopt: lumabri_home_hybrid.h
 test_hybrid_parallel test_accum_order test_local_fallback test_verify_failover test_nat_adopt build/segment_hybrid_bridge.o build/bench_home_hybrid: src/runtime/lumabri_hybrid_policy.h
 
@@ -245,7 +246,7 @@ lumabri: $(HOME_NET_DEPS) src/runtime/lumabri_probe_deadline.h lumabri.c src/ui/
 		lumabri_inventory.h lumabri_home.h lumabri_home_runtime.h src/ui/lumabri_home_ui.h lumabri_ready.h \
 		lumabri_families.h lumabri_planner.h lumabri_cluster.h lumabri_memory_budget.h lumabri_checkpoint_inventory.h lumabri_content.h \
 		lumabri_calibration.h $(SECURE_DEPS) $(MACHINE_DEPS)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread lumabri.c src/ui/lumabri_tui.c $(MACHINE_SRC) lumabri_run_gate.c -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread lumabri.c src/ui/lumabri_tui.c $(MACHINE_SRC) lumabri_run_gate.c -o $@ -lm
 
 # ---- phase 2: peers execute experts ------------------------------------
 # Both sides are built from the engine's own source so the expert math cannot
@@ -1025,7 +1026,7 @@ SEGMENT_COMMON = segment_colibri.h src/runtime/lumabri_thread_capacity.h src/run
 		lumabri_segment_discovery.c lumabri_segment_discovery.h \
 		$(PROTO_DEPS) $(SIGN_DEPS) lumabri_sha.h $(SECURE_DEPS)
 
-HYBRID_PATCH_INPUTS = tools/prepare_gguf_adapters.py tools/prepare_qwen_variants.py tools/prepare_qwen_gguf.py engine_patches/qwen_gguf_source.h tools/prepare_resident_adapters.py engine_patches/make_patches.py \
+HYBRID_PATCH_INPUTS = tools/prepare_gguf_adapters.py tools/prepare_draft_rows.py engine_patches/segment_draft.h tools/prepare_qwen38_mtp.py engine_patches/qwen38_draft_head.h src/runtime/lumabri_draft_head.h tools/prepare_qwen_variants.py tools/prepare_qwen_gguf.py engine_patches/qwen_gguf_source.h tools/prepare_resident_adapters.py engine_patches/make_patches.py \
 	tools/prepare_mistral_segments.py tools/prepare_glm53_gguf.py tools/prepare_kimi_gguf.py tools/prepare_inkling_gguf.py tools/prepare_qwen38_gguf.py tools/prepare_v4_gguf.py engine_patches/mistral_boundary.h \
 	engine_patches/qwen38_vision_edge.h src/runtime/lumabri_vision.h src/runtime/lumabri_image.h \
 	src/runtime/lumabri_engine_memory_override.h src/runtime/lumabri_engine_memory.h \
@@ -1074,13 +1075,15 @@ build/image.o: src/runtime/lumabri_image.c src/runtime/lumabri_image.h src/vendo
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(ENGINE_MEMORY_FLAGS) -c $< -o $@
 build/vision.o: src/runtime/lumabri_vision.c src/runtime/lumabri_vision.h src/runtime/lumabri_media.h src/runtime/lumabri_image.h build/segment-options
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(ENGINE_MEMORY_FLAGS) -c $< -o $@
+build/draft_head.o: src/runtime/lumabri_draft_head.c src/runtime/lumabri_draft_head.h build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(ENGINE_MEMORY_FLAGS) -I. -c $< -o $@
 
-$(COLIBRI_SEGMENT_LIB): $(HYBRID_ENGINE_DIR)/.prepared build/segment_hybrid_bridge.o build/v41_adapter.o build/engine_memory.o build/image.o build/vision.o tools/check_engine_memory.py
+$(COLIBRI_SEGMENT_LIB): $(HYBRID_ENGINE_DIR)/.prepared build/segment_hybrid_bridge.o build/v41_adapter.o build/engine_memory.o build/image.o build/vision.o build/draft_head.o tools/check_engine_memory.py
 	env -u MAKEFLAGS $(MAKE) -C $(HYBRID_ENGINE_DIR) MAKEOVERRIDES= \
 		COLI_V4_SUPPORTED=1 CC='$(CC)' \
 		CFLAGS='-O2 $(ENGINE_CPU_FLAGS) $(CPPFLAGS) $(OMP_FLAGS) $(ENGINE_MEMORY_FLAGS) -pthread -I$(HYBRID_ROOT) -include $(HYBRID_ROOT)/lumi_v4_ext.h -DLUMABRI_P2P -DLUMIBRI_P2P' \
 		segment-edge-library
-	$(AR) rcs $@ build/segment_hybrid_bridge.o build/v41_adapter.o build/engine_memory.o build/image.o build/vision.o
+	$(AR) rcs $@ build/segment_hybrid_bridge.o build/v41_adapter.o build/engine_memory.o build/image.o build/vision.o build/draft_head.o
 	python3 tools/check_engine_memory.py $@
 
 # Optional local Edge memory diagnostic; requires an existing checkpoint.
@@ -1236,6 +1239,9 @@ test-resident: tracker swarm_probe expert_node fixture
 test-segment-hybrid: tracker swarm_probe expert_node segment_node segment_chat fixture
 	ENGINE=$(ENGINE) bash ./tests/integration/segment_hybrid_test.sh
 
+test-local-source: tracker maintainer swarm_probe $(SHIM_LIB)
+	python3 tests/integration/local_weight_source_test.py
+
 test-cas: tracker maintainer liblumabri.so test_shim
 	bash ./tests/integration/cas_test.sh
 
@@ -1328,6 +1334,7 @@ test: all test_weight_cache test_key_rotation test_hedge test_local_fallback tes
 	./test_planner_io
 	python3 tests/integration/native_shim_readiness_test.py
 	python3 tests/integration/native_shim_test.py
+	python3 tests/integration/local_weight_source_test.py
 	./test_cluster
 	./test_memory_budget
 	./test_weight_cache
@@ -1567,11 +1574,33 @@ test-inkling-gguf: build/test_gguf_inventory build/inkling-upstream-oracle build
 build/qwen38-upstream-oracle: tests/c/qwen38_upstream_oracle.c build/segment-sources build/segment-options
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(OMP_FLAGS) -pthread -I$(ENGINE) $< -o $@ -lm $(OMP_LIBS)
 
+# The MTP head's proposals in the unmodified engine, whole model in one process.
+build/qwen38-mtp-oracle: tests/c/qwen38_mtp_oracle.c build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(OMP_FLAGS) -pthread -I$(ENGINE) $< -o $@ -lm $(OMP_LIBS)
+
 build/qwen38-state-oracle: tests/c/mistral_state_oracle.c $(COLIBRI_SEGMENT_LIB) build/segment-sources build/segment-options
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Wno-unused-function $(OMP_FLAGS) -pthread -I$(ENGINE) -DLMB_STATE_FAMILY='"qwen38"' $< $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
 
 build/qwen38-mixed-oracle: tests/c/qwen_mixed_oracle.c tests/c/edge_segment_greedy.c $(COLIBRI_SEGMENT_LIB) build/segment-sources build/segment-options
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(OMP_FLAGS) -pthread -I$(ENGINE) $(GGUF_READ_GUARD) -DLMB_MIXED_FAMILY='"qwen38"' $< $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
+
+# Drafts across the segments: real tracker, two segments per family and the
+# chatter on loopback. Replies with drafts must equal replies without them and
+# cost fewer than one network round per token (docs/DRAFTS.md).
+.PHONY: test-drafts
+build/draft-room-oracle: tests/c/draft_room_oracle.c engine_patches/segment_draft.h $(COLIBRI_SEGMENT_LIB) build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Wno-unused-function $(OMP_FLAGS) -pthread -I$(ENGINE) $< $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
+
+build/draft-head-oracle: tests/c/draft_head_oracle.c src/runtime/lumabri_draft_head.h engine_patches/qwen38_draft_head.h $(COLIBRI_SEGMENT_LIB) build/segment-sources build/segment-options
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Wno-unused-function $(OMP_FLAGS) -pthread -I$(ENGINE) $< $(COLIBRI_SEGMENT_LIB) -o $@ -lm $(OMP_LIBS)
+
+test-drafts: build/test_gguf_inventory build/draft-room-oracle build/draft-head-oracle build/qwen38-mtp-oracle tracker segment_node segment_chat test_segment_v2
+	./test_segment_v2
+	$(PYTHON) tests/integration/drafts_test.py --engine $(ENGINE)
+
+ifneq ($(HAVE_COLIBRI_SEGMENT),)
+test: test-drafts
+endif
 
 .PHONY: test-qwen38-gguf
 test-qwen38-gguf: build/test_gguf_inventory build/qwen38-upstream-oracle build/gguf-segment-oracle build/qwen38-state-oracle build/qwen38-mixed-oracle
