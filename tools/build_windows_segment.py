@@ -155,7 +155,7 @@ def main():
              native_input,resource,archive,*libraries,'-o',output/'segment_node.exe'])
         run([args.cc,*flags,'-Werror','-DLMB_SEGMENT_OLMOE_ONLY','-include',memory,'-municode',
              root/'segment_chat.c',*protocol,root/'lumabri_machine.c',root/'lumabri_sampling.c',
-             root/'src/runtime/lumabri_vision.c',root/'src/runtime/lumabri_image.c',
+             root/'src/runtime/lumabri_vision.c',root/'src/runtime/lumabri_image.c',root/'src/runtime/lumabri_draft_head.c',
              native_input,resource,archive,*libraries,'-o',output/'segment_chat.exe'])
         run([args.cc,*flags,'-Werror','-Wno-unused-function','-municode',
              root/'tests/c/test_segment_worker_windows.c',*protocol,root/'lumabri_run_gate.c',resource,archive,*libraries,

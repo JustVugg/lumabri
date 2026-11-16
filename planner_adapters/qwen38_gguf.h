@@ -1,9 +1,11 @@
 #ifndef LMB_PLAN_QWEN38_GGUF_H
 #define LMB_PLAN_QWEN38_GGUF_H
 #include "gguf_inventory.h"
+#define LMB_Q38_HEAD_PENDING_ROWS 6u /* the engine's Q38_SPEC_ROWS; tools/prepare_qwen38_mtp.py checks it */
 typedef struct {
     uint32_t layers,h,vocab,context,eos,hc,rank,qh,kv,hd,rot,ih,id,budget,ratio;
     uint32_t experts,topk,inter,shared,kh,vh,kd,vd,conv,cd,ple,nd,nh,pd,pc;
+    uint32_t mtp; /* 1: blk.<layers> is the MTP draft head (one attention layer) */
     uint8_t full[LMB_PLAN_LAYER_MAX];double eps,theta;
 } LmbQ38Gguf;
 static const LmbGgufValue *lmb_q38g_value(const LmbGguf *g,const char *key) {
@@ -33,7 +35,11 @@ static int lmb_q38g_geometry(const LmbGguf *g,LmbQ38Gguf *c) {
     QU("ssm.state_size",kd,0,1,65536);QU("ssm.conv_kernel",conv,0,2,65536);
     QU("embedding_length_per_layer_input",nd,0,1,512);QU("ple.conv_kernel",pc,0,2,65536);
 #undef QU
-    if(lmb_q38g_uint(g,"nextn_predict_layers",0,0,0,&mtp) ||
+    /* llama.cpp counts the MTP head's block in block_count where the file
+     * holds it: the model's layers are the blocks before it. */
+    if(lmb_q38g_uint(g,"nextn_predict_layers",0,0,1,&mtp) || (mtp && c->layers<2))return -1;
+    c->mtp=mtp;c->layers-=mtp;
+    if(
        lmb_q38g_uint(g,"ssm.inner_size",0,1,1048576,&inner) ||
        lmb_q38g_uint(g,"ple.ngram_size",0,3,3,&ngram) ||
        lmb_q38g_uint(g,"ple.heads_per_ngram",0,1,32,&per) || inner%c->vh ||
@@ -55,8 +61,10 @@ static int lmb_q38g_geometry(const LmbGguf *g,LmbQ38Gguf *c) {
     const LmbGgufValue *ratios=lmb_q38g_value(g,"attention.compress_ratios"),
         *rec=lmb_q38g_value(g,"attention.recurrent_layers"),*ple=lmb_q38g_value(g,"ple.layers");
     uint32_t every=0;uint64_t pl;
-    if(!ratios || ratios->type!=9 || ratios->count!=c->layers ||
-       (rec && (rec->type!=9 || rec->count!=c->layers)) ||
+    /* The arrays describe the model's layers; a file with the head may also
+     * carry an entry for the head's block, which is not read. */
+    if(!ratios || ratios->type!=9 || ratios->count<c->layers || ratios->count>c->layers+c->mtp ||
+       (rec && (rec->type!=9 || rec->count<c->layers || rec->count>c->layers+c->mtp)) ||
        (!rec && lmb_q38g_uint(g,"full_attention_interval",0,1,c->layers,&every)) ||
        !ple || ple->count!=1 || lmb_gguf_inventory_item(ple,0,&pl) || pl>=c->layers)return -1;
     c->ple=(uint32_t)pl;
@@ -91,6 +99,15 @@ static int lmb_q38g_matches(const char *cfg,const LmbQ38Gguf *c) {
        lmb_plan_number(rope,"rope_theta",NAN,&theta) || (float)theta!=(float)c->theta ||
        lmb_plan_number(rope,"partial_rotary_factor",NAN,&partial) || fabs(partial-(double)c->rot/c->hd)>1e-7 ||
        lmb_plan_number(cfg,"rms_norm_eps",NAN,&eps) || (float)eps!=(float)c->eps)return -1;
+    const char *head=lmb_json_member(cfg,"mtp_num_hidden_layers"),*own=lmb_json_member(cfg,"mtp_use_dedicated_embeddings");
+    uint32_t heads=0;
+    if((head && lmb_plan_u32(cfg,"mtp_num_hidden_layers",0,1,&heads)) || heads!=c->mtp ||
+       (own && strncmp(own,"false",5)))return -1;
+    if(c->mtp) {
+        const char *mtp=lmb_json_member(cfg,"mtp");double head_theta;
+        if(!mtp || *mtp!='{' || lmb_plan_number(mtp,"rope_theta",NAN,&head_theta) ||
+           (float)head_theta!=(float)c->theta)return -1;
+    }
     const char *truth=lmb_json_member(cfg,"norm_topk_prob"),*bias=lmb_json_member(cfg,"attention_bias"),
         *tie=lmb_json_member(cfg,"tie_word_embeddings");
     if(!truth || strncmp(truth,"true",4) || (bias && strncmp(bias,"false",5)) || (tie && strncmp(tie,"false",5)) ||
@@ -110,8 +127,12 @@ static int lmb_q38g_memory(const LmbGguf *g,const char *cfg,LmbModelShape *m) {
     QW("output_hc_norm.weight",1,HC,1,1,0,&m->edge_resident_bytes);
     QW("output_hc_down.weight",2,HC,R,1,1,&m->edge_resident_bytes);
     QW("output_hc_up.weight",2,R,HC,1,1,&m->edge_resident_bytes);
-    for(uint32_t l=0;l<c.layers;l++) {
-        uint64_t *cost=&m->memory[l].resident_bytes;
+    /* Block c.layers, when the file has one, is the MTP draft head: one
+     * attention layer plus its input and output projections. It never runs
+     * in a Segment; the Edge holds it, so the Edge pays for it. */
+    for(uint32_t l=0;l<c.layers+c.mtp;l++) {
+        int head=l==c.layers;
+        uint64_t *cost=head?&m->edge_resident_bytes:&m->memory[l].resident_bytes;
 #define LW(s,r,x,y,z,mat) do{snprintf(name,sizeof name,"blk.%u.%s",l,s);QW(name,r,x,y,z,mat,cost);}while(0)
         const char *prefix[]={"hc_attn","hc_ffn"};
         for(unsigned i=0;i<2;i++) {
@@ -125,7 +146,7 @@ static int lmb_q38g_memory(const LmbGguf *g,const char *cfg,LmbModelShape *m) {
         LW("ffn_down_shexp.weight",2,c.shared,H,1,1);
         LW("ffn_gate_exps.weight",3,H,c.inter,c.experts,1);LW("ffn_up_exps.weight",3,H,c.inter,c.experts,1);
         LW("ffn_down_exps.weight",3,c.inter,H,c.experts,1);
-        if(c.full[l]) {
+        if(head || c.full[l]) {
             LW("attn_q.weight",2,H,2*Q,1,1);LW("attn_k.weight",2,H,K,1,1);LW("attn_v.weight",2,H,K,1,1);
             LW("attn_output.weight",2,Q,H,1,1);LW("attn_q_norm.weight",1,c.hd,1,1,0);LW("attn_k_norm.weight",1,c.hd,1,1,0);
             LW("indexer.q_proj.weight",2,H,(uint64_t)c.ih*c.id,1,1);LW("indexer.k_proj.weight",2,H,c.id,1,1);
@@ -133,7 +154,12 @@ static int lmb_q38g_memory(const LmbGguf *g,const char *cfg,LmbModelShape *m) {
             snprintf(name,sizeof name,"blk.%u.indexer.k_proj.weight",l);const LmbGgufTensor *kt=lmb_gguf_tensor(g,name);
             if(qt->type!=kt->type)goto done;
             LW("indexer.q_norm.weight",1,c.id,1,1,0);LW("indexer.k_norm.weight",1,c.id,1,1,0);
-            m->memory[l].state_token_bytes=(2*K+c.id)*4;
+            if(head) {
+                LW("nextn.eh_proj.weight",2,2*H,H,1,1);LW("nextn.enorm.weight",1,H,1,1,0);
+                LW("nextn.hnorm.weight",1,HC,1,1,0);LW("nextn.hc_head_norm.weight",1,HC,1,1,0);
+                LW("nextn.hc_head_down.weight",2,HC,R,1,1);LW("nextn.hc_head_up.weight",2,R,HC,1,1);
+                m->edge_session_token_bytes=(2*K+c.id)*4;
+            } else m->memory[l].state_token_bytes=(2*K+c.id)*4;
         } else {
             LW("attn_qkv.weight",2,H,c.cd,1,1);LW("attn_gate.weight",2,H,DV,1,1);
             LW("ssm_alpha.weight",2,H,c.vh,1,0);LW("ssm_beta.weight",2,H,c.vh,1,0);
@@ -141,7 +167,7 @@ static int lmb_q38g_memory(const LmbGguf *g,const char *cfg,LmbModelShape *m) {
             LW("ssm_a",1,c.vh,1,1,0);LW("ssm_norm.weight",1,c.vd,1,1,0);LW("ssm_out.weight",2,DV,H,1,1);
             m->memory[l].state_fixed_bytes=((uint64_t)c.vh*c.kd*c.vd+(uint64_t)c.cd*(c.conv-1u))*4;
         }
-        if(l==c.ple) {
+        if(!head && l==c.ple) {
             LW("ple_key.weight",2,c.pd,HC,1,1);LW("ple_value.weight",2,c.pd,H,1,1);
             LW("ple_norm_key.weight",1,HC,1,1,0);LW("ple_norm_query.weight",1,HC,1,1,0);
             LW("ple_norm_conv.weight",1,HC,1,1,0);LW("ple_conv1d.weight",2,c.pc,HC,1,0);
@@ -172,6 +198,16 @@ static int lmb_q38g_memory(const LmbGguf *g,const char *cfg,LmbModelShape *m) {
     uint64_t wide=HC+R+H+c.experts+c.topk+c.inter+c.shared+c.cd+Q+(uint64_t)c.ih*c.id+c.pd+c.budget;
     m->scratch_fixed_bytes=lmb_size_add(lmb_size_add(v.largest,UINT64_C(64)<<20),lmb_size_mul(wide,128u*64u));
     m->scratch_token_bytes=256u*16u;m->edge_scratch_fixed_bytes=v.largest;
+    if(c.mtp) {
+        /* The head runs its layer at the Edge: the same kernel workspace a
+         * Segment reserves, its expert cache index, and the rows of streams
+         * that wait for their next token. */
+        m->edge_scratch_fixed_bytes=lmb_size_add(lmb_size_add(m->edge_scratch_fixed_bytes,UINT64_C(64)<<20),
+            lmb_size_mul(wide,128u*64u));
+        m->edge_resident_bytes=lmb_size_add(m->edge_resident_bytes,16384u+(uint64_t)c.experts*1024u);
+        m->edge_session_fixed_bytes=LMB_Q38_HEAD_PENDING_ROWS*HC*4u+4096u;
+        m->draft_head=1;
+    }
     m->edge_resident_bytes=lmb_size_add(m->edge_resident_bytes,index);
     m->experts=c.experts;m->experts_per_tok=c.topk;m->moe_intermediate=c.inter;
     m->max_context=c.context;m->memory_contract=1;rc=0;

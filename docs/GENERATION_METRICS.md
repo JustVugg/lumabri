@@ -29,6 +29,29 @@ the same fields. Historical top-level `decode_tokens`/`decode_seconds` fields
 remain for compatibility and retain their original convention; new consumers
 should use the versioned object.
 
+## Draft observations, version 1
+
+A reply decoded with [drafts](DRAFTS.md) additionally reports how many network
+rounds it took. Nothing is reported for a reply that used none.
+
+- `rounds`: traversals of the whole chain during decode, including a round
+  that only discards rows.
+- `tokens`: tokens those rounds selected; equal to `decode_steps`.
+- `proposed`, `accepted`: draft rows sent, and draft rows whose output selected
+  a token. `accepted == tokens - (rounds - discards)`.
+- `discards`: rounds that carried no row.
+
+`tokens / rounds` is the accepted tokens per network round and `rounds /
+tokens` the network cost per token (1 without drafts). The serve codec adds
+`DRAFTS1 rounds tokens proposed accepted discards` to `STAT`;
+`segment_chat --json` adds a `draft_metrics` object with `version: 1`, the
+same fields, the setting's `mode` and `rounds_per_token`. `decode_seconds`
+and the decode rate keep their meaning. Per-range `STAGES1` then covers only
+the rounds that carried one row, which are ordinary decode steps: its call
+count is the same for every range and at most `rounds - discards`, and the
+planner accepts it on that condition. A reply made only of blocks reports no
+`STAGES1`.
+
 These are observations, not capacity promises. Persisting them against complete
 checkpoint/build/hardware/plan keys, invalidating stale records, and using them
 in the catalogue are separate unfinished parts of roadmap gate 4. The catalogue

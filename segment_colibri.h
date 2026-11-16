@@ -7,6 +7,7 @@
 #include "segment_adapters.h"
 #include "segment_runtime.h"
 #include "engine_patches/segment_owned.h"
+#include "engine_patches/segment_draft.h"
 #include "src/runtime/lumabri_backend_policy.h"
 #include "src/runtime/lumabri_resident.h"
 extern int lmb_resident_adapter_is_prepared(void);

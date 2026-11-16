@@ -299,9 +299,38 @@ static int seg_run_basic_valid(const LmbSegRun *run) {
            (!!run->token_count == !!run->token_ids);
 }
 
+static int seg_run_valid(const LmbSegRun *run, int draft) {
+    if (!draft || !run || run->rows) return seg_run_basic_valid(run);
+    return !lmb_seg_id_is_zero(&run->session_id) &&
+           !lmb_seg_id_is_zero(&run->request_id) && seg_owner_valid(&run->owner) &&
+           run->sequence != UINT64_MAX && !run->token_count && !run->token_ids;
+}
+
+static int seg_run_encode(const LmbSegRun *run, int draft,
+                          uint8_t **body, uint32_t *body_len);
+static int seg_run_decode(const void *body, size_t body_len, LmbSegRun *run,
+                          int32_t *token_ids, size_t token_capacity, int draft);
+
 int lmb_seg_run_encode(const LmbSegRun *run,
                        uint8_t **body, uint32_t *body_len) {
-    if (!body || !body_len || !seg_run_basic_valid(run)) return -1;
+    return seg_run_encode(run, 0, body, body_len);
+}
+int lmb_seg_draft_encode(const LmbSegRun *run,
+                         uint8_t **body, uint32_t *body_len) {
+    return seg_run_encode(run, 1, body, body_len);
+}
+int lmb_seg_run_decode(const void *body, size_t body_len, LmbSegRun *run,
+                       int32_t *token_ids, size_t token_capacity) {
+    return seg_run_decode(body, body_len, run, token_ids, token_capacity, 0);
+}
+int lmb_seg_draft_decode(const void *body, size_t body_len, LmbSegRun *run,
+                         int32_t *token_ids, size_t token_capacity) {
+    return seg_run_decode(body, body_len, run, token_ids, token_capacity, 1);
+}
+
+static int seg_run_encode(const LmbSegRun *run, int draft,
+                          uint8_t **body, uint32_t *body_len) {
+    if (!body || !body_len || !seg_run_valid(run, draft)) return -1;
     *body = NULL; *body_len = 0;
     SegBuf buf = {0};
     int bad = seg_buf_prefix(&buf) || seg_buf_id(&buf, &run->session_id) ||
@@ -317,8 +346,8 @@ int lmb_seg_run_encode(const LmbSegRun *run,
     return seg_finish(&buf, body, body_len);
 }
 
-int lmb_seg_run_decode(const void *body, size_t body_len, LmbSegRun *run,
-                       int32_t *token_ids, size_t token_capacity) {
+static int seg_run_decode(const void *body, size_t body_len, LmbSegRun *run,
+                          int32_t *token_ids, size_t token_capacity, int draft) {
     if ((!body && body_len) || !run || body_len > LMB_MAX_SMALL_BODY) return -1;
     memset(run, 0, sizeof *run);
     SegCur cur = { (const uint8_t *)body, body_len, 0 };
@@ -337,7 +366,7 @@ int lmb_seg_run_decode(const void *body, size_t body_len, LmbSegRun *run,
         else token_ids[i] = (int32_t)value;
     }
     if (!bad) run->token_ids = run->token_count ? token_ids : NULL;
-    return bad || cur.off != cur.len || !seg_run_basic_valid(run) ? -1 : 0;
+    return bad || cur.off != cur.len || !seg_run_valid(run, draft) ? -1 : 0;
 }
 
 static int seg_chunk_valid(uint64_t snapshot_size, uint64_t offset,
@@ -536,6 +565,10 @@ typedef struct {
     uint64_t next_position;
     uint64_t expires_at_ms;
     LmbSegRun pending;
+    int pending_draft;
+    /* Lowest position a draft may continue from; next_position when the
+     * last committed operation left no provisional rows. */
+    uint64_t draft_floor;
     LmbSegTransfer pending_restore;
     uint8_t pending_digest[32];
     SegHistory history[LMB_SEG_HISTORY_SLOTS];
@@ -717,11 +750,29 @@ LmbSegStatus lmb_seg_table_open(LmbSegTable *table,
     return LMB_SEG_STATUS_OK;
 }
 
+static LmbSegStatus seg_run_begin(LmbSegTable *table, const LmbSegRun *run,
+                                  const void *payload, size_t payload_bytes,
+                                  uint64_t now_ms, int draft);
+
 LmbSegStatus lmb_seg_table_run_begin(LmbSegTable *table,
                                      const LmbSegRun *run,
                                      const void *payload,
                                      size_t payload_bytes, uint64_t now_ms) {
-    if (!table || !run || (!payload && payload_bytes))
+    return seg_run_begin(table, run, payload, payload_bytes, now_ms, 0);
+}
+
+LmbSegStatus lmb_seg_table_draft_begin(LmbSegTable *table,
+                                       const LmbSegRun *run,
+                                       const void *payload,
+                                       size_t payload_bytes, uint64_t now_ms) {
+    return seg_run_begin(table, run, payload, payload_bytes, now_ms, 1);
+}
+
+static LmbSegStatus seg_run_begin(LmbSegTable *table, const LmbSegRun *run,
+                                  const void *payload, size_t payload_bytes,
+                                  uint64_t now_ms, int draft) {
+    if (!table || !run || (!payload && payload_bytes) ||
+        (draft && !seg_run_valid(run, 1)))
         return LMB_SEG_STATUS_BAD_REQUEST;
     pthread_mutex_lock(&table->lock);
     SegSlot *slot = seg_find(table, &run->session_id);
@@ -739,7 +790,7 @@ LmbSegStatus lmb_seg_table_run_begin(LmbSegTable *table,
         return owner;
     }
     size_t expected = 0;
-    if (lmb_seg_run_payload_bytes(&slot->open, run, &expected) ||
+    if ((run->rows && lmb_seg_run_payload_bytes(&slot->open, run, &expected)) ||
         expected != payload_bytes) {
         pthread_mutex_unlock(&table->lock);
         return LMB_SEG_STATUS_BAD_REQUEST;
@@ -769,11 +820,16 @@ LmbSegStatus lmb_seg_table_run_begin(LmbSegTable *table,
         return LMB_SEG_STATUS_NEEDS_RESTORE;
     }
     if (run->sequence != slot->next_sequence ||
-        run->position != slot->next_position) {
+        (draft ? run->position > slot->next_position ||
+                 run->position < slot->draft_floor
+               : run->position != slot->next_position) ||
+        (draft && (run->rows > slot->open.context_tokens ||
+                   run->position > slot->open.context_tokens - run->rows))) {
         pthread_mutex_unlock(&table->lock);
         return LMB_SEG_STATUS_OUT_OF_ORDER;
     }
     slot->busy = 1;
+    slot->pending_draft = draft;
     slot->pending = *run;
     slot->pending.token_ids = NULL;
     memcpy(slot->pending_digest, digest, sizeof digest);
@@ -804,7 +860,10 @@ LmbSegStatus lmb_seg_table_run_commit(LmbSegTable *table,
     memcpy(history->digest, slot->pending_digest, sizeof history->digest);
     slot->history_next = (slot->history_next + 1) % LMB_SEG_HISTORY_SLOTS;
     slot->next_sequence++;
-    slot->next_position += run->rows;
+    slot->next_position = run->position + run->rows;
+    slot->draft_floor = slot->pending_draft && run->rows
+        ? run->position + 1 : slot->next_position;
+    slot->pending_draft = 0;
     slot->busy = 0;
     memset(&slot->pending, 0, sizeof slot->pending);
     memset(slot->pending_digest, 0, sizeof slot->pending_digest);
@@ -813,8 +872,21 @@ LmbSegStatus lmb_seg_table_run_commit(LmbSegTable *table,
     return LMB_SEG_STATUS_OK;
 }
 
+static LmbSegStatus seg_run_abort(LmbSegTable *table, const LmbSegRun *run,
+                                  int rewound);
+
 LmbSegStatus lmb_seg_table_run_abort(LmbSegTable *table,
                                      const LmbSegRun *run) {
+    return seg_run_abort(table, run, 0);
+}
+
+LmbSegStatus lmb_seg_table_draft_abort(LmbSegTable *table,
+                                       const LmbSegRun *run, int rewound) {
+    return seg_run_abort(table, run, rewound);
+}
+
+static LmbSegStatus seg_run_abort(LmbSegTable *table, const LmbSegRun *run,
+                                  int rewound) {
     if (!table || !run) return LMB_SEG_STATUS_BAD_REQUEST;
     pthread_mutex_lock(&table->lock);
     SegSlot *slot = seg_find(table, &run->session_id);
@@ -827,6 +899,9 @@ LmbSegStatus lmb_seg_table_run_abort(LmbSegTable *table,
         return LMB_SEG_STATUS_CONFLICT;
     }
     slot->busy = 0;
+    slot->pending_draft = 0;
+    /* The engine no longer holds the rows the table still counts. */
+    if (rewound) slot->needs_restore = 1;
     memset(&slot->pending, 0, sizeof slot->pending);
     memset(slot->pending_digest, 0, sizeof slot->pending_digest);
     pthread_mutex_unlock(&table->lock);
@@ -887,6 +962,7 @@ LmbSegStatus lmb_seg_table_restore_commit(LmbSegTable *table,
             slot->open.owner = transfer->owner;
             slot->next_sequence = transfer->sequence;
             slot->next_position = transfer->position;
+            slot->draft_floor = transfer->position;
             slot->needs_restore = 0;
             memset(slot->history, 0, sizeof slot->history);
             slot->history_next = 0;
@@ -958,6 +1034,7 @@ LmbSegStatus lmb_seg_table_restore_finish(LmbSegTable *table,
             slot->open.owner = transfer->owner;
             slot->next_sequence = transfer->sequence;
             slot->next_position = transfer->position;
+            slot->draft_floor = transfer->position;
             slot->needs_restore = 0;
             memset(slot->history, 0, sizeof slot->history);
             slot->history_next = 0;
