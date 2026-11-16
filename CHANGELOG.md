@@ -20,6 +20,14 @@ a tag stay under Unreleased until a new tag is created.
   exchange, the tracker allows five attempts per code, and joining with the
   full key is unchanged. The exchange is checked against the published
   CPace and RFC 9380 test vectors; see docs/PAIRING.md.
+- Release archives: `.github/workflows/release.yml` builds one self-contained
+  CPU archive for Windows x86-64, Linux x86-64 and ARM64, macOS Apple Silicon
+  and Intel, on a `v*` tag or by hand. Each archive is verified, unpacked and
+  started on its runner (page, sign-in, first-model offer, `service stop`), and
+  a tag attaches the archives and `SHA256SUMS` to a draft release. Linux
+  archives link OpenMP statically and need only glibc 2.35 and, for model
+  download, the system libcurl. Linux packages now carry `SHA256SUMS` like
+  macOS. The archives are unsigned. See `docs/RELEASE_ARCHIVES.md`.
 - `lumabri start` no longer fails its first model on computers with a small
   locked-memory allowance: when no residency policy was requested, its sharing
   service locks a load whose reservation fits the allowance and otherwise
