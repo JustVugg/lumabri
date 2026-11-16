@@ -101,12 +101,16 @@ class Household:
     def logs(self):
         return "\n".join(p.read_text(errors="replace") for p in sorted(self.home.rglob("*.log")))
 
-    def start(self):
+    def start(self, ask=True):
         answer = self.run("start", "--no-browser", "--port", str(self.port))
         assert answer.returncode == 0, (answer.stdout, answer.stderr)
         (link,) = [line.strip() for line in answer.stdout.splitlines() if "#token=" in line]
         self.token = link.split("#token=", 1)[1]
         (self.home / ".lumabri/models/reduced").symlink_to(self.model, target_is_directory=True)
+        # A household created by start accepts its own requests automatically.
+        # These cases are about the request a person reviews, so ask each time.
+        if ask:
+            assert self.run("consent", "off").returncode == 0
         return answer.stdout
 
     def prepare(self):

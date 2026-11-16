@@ -26,6 +26,16 @@ a tag stay under Unreleased until a new tag is created.
   compatible clients and repeat consent answer `not_available_on_windows_yet`
   and the page says so. Access records are owner-only files under
   `%LOCALAPPDATA%\Lumabri\api-access`.
+- Standing consent: a computer can accept its own household's requests to
+  load a model without a person clicking. One owner-only switch per computer
+  (`lumabri consent on|off|status`, **/settings** in the terminal workspace,
+  or **Computers & models** on that computer's own page); no other computer
+  can set it. It replaces the click only: memory budget and reserve, household
+  authentication, identity pinning, residency policy and model integrity are
+  checked as before, and each automatic acceptance is recorded with requester,
+  model and memory. `lumabri start` turns it on for a household it creates on
+  a fresh installation and says so; existing installations stay off. Turning
+  it off holds from the next request and unloads nothing. POSIX only for now.
 - Preparing a model on the computer that also holds its files is several
   times faster. The donor's loader now reads blocks from the user's own
   source directory instead of pulling them through the encrypted transport on

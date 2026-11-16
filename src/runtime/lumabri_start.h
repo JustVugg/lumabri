@@ -121,7 +121,8 @@ static int start_donor_live(HomeServiceSnapshot *seen) {
 /* "Share resources" without its screen: the supervised headless donor, in
  * its own session so that closing the launching window does not stop it.
  * It only publishes capacity. Loading a model still needs the approval of
- * this computer's owner. 0: sharing with this household. 1: not sharing. */
+ * this computer's owner: a click each time, or the standing consent that the
+ * owner can switch off. 0: sharing with this household. 1: not sharing. */
 static int start_sharing(const HomeSettings *s, char *notice, size_t cap) {
     HomeServiceSnapshot seen;
     if (start_donor_live(&seen)) {
@@ -193,6 +194,17 @@ static void start_memory_line(void) {
     }
 }
 
+/* Said on every start, because it decides whether a person has to click. */
+static void start_consent_line(const HomeSettings *s) {
+    char service[1200];
+    if (!home_service_directory(service,sizeof service) && lmb_standing_consent_for(service,s->tracker,s->token,NULL,NULL))
+        printf("  Requests:       this computer accepts its household's requests to load a model automatically,\n"
+               "                  within the memory it shares. Turn it off with: lumabri consent off\n");
+    else
+        printf("  Requests:       each request to load a model here waits for your approval.\n"
+               "                  To accept this household's requests automatically: lumabri consent on\n");
+}
+
 static int start_open_browser(const char *url) {
 #ifdef __APPLE__
     const char *opener="open";
@@ -260,6 +272,14 @@ static int cmd_start(int argc, char **argv) {
             fprintf(stderr,"%s\n",notice[0] ? notice : "The household could not be started."); return 1;
         }
         household=fresh ? "created now" : "yours";
+        /* A household made here on a fresh install would otherwise ask its
+         * only person to approve their own request. Standing consent starts
+         * on for it, is said out loud below, and is one command to turn off.
+         * An installation that already had a household is never changed. */
+        char service[1200];
+        if (fresh && (home_service_directory(service,sizeof service) ||
+                      lmb_standing_consent_set(service,s.tracker,s.token,1,LMB_STANDING_START)))
+            fprintf(stderr,"Automatic acceptance could not be saved; each request will wait for your approval.\n");
     } else if (!s.token[0] || home_connection_check(s.tracker,NULL)) {
         return home_fail("This computer joined the household at %.200s, which is not reachable now. "
             "Start Lumabri on that computer first, or use lumabri start --tui to join another.",s.tracker);
@@ -316,6 +336,7 @@ static int cmd_start(int argc, char **argv) {
         address,s.tracker,household,degraded ? "not active" : "up to ",degraded ? "" : s.ram,
         degraded ? "" : " GB of this computer's memory",s.models);
     if (!degraded) start_memory_line();
+    start_consent_line(&s);
     if (granted) printf("  %u approved model%s added to the local sign-in.\n",granted,granted==1 ? " was" : "s were");
     if (missing) printf("  %u approved model%s could not be added to the local sign-in.\n",missing,missing==1 ? "" : "s");
     if (taken)

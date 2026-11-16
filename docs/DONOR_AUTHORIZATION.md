@@ -59,6 +59,68 @@ The loopback gate `tests/integration/web_approval_test.py` prepares a real
 reduced checkpoint through the page's API, declines once and checks that
 nothing was loaded, then allows, accepts and revokes, with real inference.
 
+## Standing consent for this computer's household
+
+A computer's owner can let it accept its own household's requests without a
+person clicking. It is one switch per computer, off unless stated otherwise
+below, and it replaces the click and nothing else. With it on, a request is
+taken through the same acceptance as a click, so it is still refused when it
+does not come from an authenticated member of this household, when the
+requester's identity does not match its pinned key, when it does not fit the
+memory this computer shares or the memory that is free after the reserve,
+when the residency policy cannot be honoured, or when the checkpoint fails
+its integrity check. The household planner reads the same budget and refuses
+a plan that does not fit before it is sent.
+
+- **Where it is kept.** One owner-only file (mode 0600) in this OS user's
+  private service directory, `~/.lumabri/service/standing-consent`. It is
+  bound to one household, by its address and a digest of its key: another
+  household, or a later one at the same address, does not inherit it. A
+  missing, damaged or unsafe file means "ask each time".
+- **Who can change it.** Only this computer: `lumabri consent on|off`, the
+  **/settings** screen of the terminal workspace, or the switch under
+  **Computers & models** on this computer's own page with the management
+  permission. No household message carries it, and the page route is refused
+  through a TLS proxy, so a manager on another computer cannot turn it on.
+- **Default.** `lumabri start` turns it on when it creates a household on a
+  fresh installation, and says so in its output together with how to turn it
+  off. If that computer later joins another household from the terminal
+  workspace and its owner never touched the switch, it stays on for the
+  household joined, and the workspace says so. An installation that already
+  had a household is never changed: it stays off until its owner turns it on.
+- **Turning it off** holds from the next request. Nothing that is loaded is
+  unloaded. Turning it on while a request is waiting accepts that request.
+- **What it accepted** is recorded: time, requester identity, model, layers
+  and memory, in `lumabri consent status`, on the page under the switch and
+  as `[standing-consent] accepted …` in the donor log.
+
+```sh
+lumabri consent status [--json]
+lumabri consent on
+lumabri consent off
+```
+
+```
+GET  /api/v1/donor/consent
+POST /api/v1/donor/consent  {"enabled": true|false}
+```
+
+Both methods need the management permission and act only on the computer and
+OS user that run the gateway. `GET /api/v1/donor/approval` reports the switch
+as `automatic_consent`.
+
+Standing consent is deliberately wider than a bounded repeat permission: it
+covers any model, layer range and requester of the household, for as long as
+it is on. Anyone who holds the household key and a paired computer can
+therefore make this computer load a model that fits its shared memory. Leave
+it off on a computer whose owner wants to review each load.
+
+The loopback gate `tests/integration/standing_consent_test.py` starts fresh
+households, loads a generated checkpoint with no approval, checks the record,
+refuses every caller but the local manager, fills the share, turns the switch
+off and checks that the next request waits while the loaded model stays.
+Windows donors do not have this switch yet and ask each time.
+
 ## Local administration
 
 Only the donor's OS owner can create these grants. An API management credential
