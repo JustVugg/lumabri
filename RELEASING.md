@@ -29,6 +29,10 @@ therefore a wire-compatibility statement first and a tarball second.
 2. Run the soak on one machine: `python3 swarm_soak.py` against a local
    tracker with peer churn, at least 30 minutes.
 3. Tag: `git tag -a vX.Y.Z -m "..." && git push origin vX.Y.Z`.
+   Pushing the tag runs `.github/workflows/release.yml`: it builds and tests
+   the five platform archives and attaches them, with `SHA256SUMS`, to a
+   **draft** release. Review the draft and publish it by hand; the archives
+   are unsigned ([release archives](docs/RELEASE_ARCHIVES.md)).
 4. Build the binaries people actually deploy:
    `make all engines chatters ENGINE=../colibri/c` on the oldest glibc you
    intend to support, using the Colibri v1.12.1 revision pinned in CI

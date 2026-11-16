@@ -969,6 +969,26 @@ jobs:
             /tmp/lmb-installed-fleet-*/**/*.log
           include-hidden-files: true
           retention-days: 3
+  release-archive:
+    # The release workflow's own path for one row: build, package, verify and
+    # start Lumabri from the unpacked archive, so that packaging cannot rot
+    # between releases. The other rows run in release.yml.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: lumabri
+      - uses: actions/checkout@v4
+        with:
+          repository: JustVugg/colibri
+          ref: 704a3f68184b78367a04cb5526e428dc2f90f05b
+          path: colibri
+      - uses: ./lumabri/.github/actions/release-archive
+        with:
+          platform: linux-x86_64
+          version: 0.0.0-ci
+
   linux-arm64-build:
     # Native ARM64 execution with the older glibc floor. This is not a
     # physical Raspberry Pi or multi-machine cluster certification.
