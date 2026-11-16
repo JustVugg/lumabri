@@ -298,6 +298,12 @@ enum {
     LMB_PAIR_HELLO = 106, LMB_PAIR_HELLO_R = 107, LMB_PAIR_CONFIRM = 108, LMB_PAIR_DONE = 109,
     LMB_PAIR_OPEN = 110, LMB_PAIR_OPEN_R = 111, LMB_PAIR_STATUS = 112, LMB_PAIR_STATUS_R = 113,
     LMB_PAIR_CANCEL = 114,
+    /* Provisional Segment rows (docs/DRAFTS.md). The body is the SEG2 run
+     * envelope; the rows of one DRAFT stay provisional until the next request
+     * names the position generation continues from. Sent only to an executor
+     * whose SEG_OPEN_R set LMB_SEG_REPLY_DRAFT_ROWS; older executors answer
+     * ERR and are never asked. */
+    LMB_SEG_DRAFT = 115, LMB_SEG_DRAFT_R = 116,
 };
 #define LMB_CAP_EXEC2 (1u << 0)
 #define LMB_ENC_F32  0u
@@ -402,6 +408,8 @@ static inline void lmb_frame_caps(uint32_t op, uint32_t *body_cap, uint32_t *pay
     case LMB_TMAN_R:
     case LMB_SEG_RUN:
     case LMB_SEG_RUN_R:
+    case LMB_SEG_DRAFT:
+    case LMB_SEG_DRAFT_R:
     case LMB_SEG_SNAPSHOT_R:
     case LMB_SEG_RESTORE:
     case LMB_HOST_STREAM:

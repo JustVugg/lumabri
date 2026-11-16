@@ -12,6 +12,16 @@ a tag stay under Unreleased until a new tag is created.
   exchange, the tracker allows five attempts per code, and joining with the
   full key is unchanged. The exchange is checked against the published
   CPace and RFC 9380 test vectors; see docs/PAIRING.md.
+- Drafts across the segments (off by default; `--drafts`/`LUMABRI_DRAFTS`):
+  several candidate tokens cross the whole chain as one block of rows in one
+  network round, and each segment discards the rows whose candidate was
+  wrong. Replies are identical to decode without drafts, greedy and seeded
+  sampling alike. Prompt lookup is the draft source; OLMoE and Qwen3.8
+  segments support rollback (Qwen3.8 keeps one copy of its recurrent state
+  per row). A chain with an older or unsupporting segment decodes as before.
+  The Qwen3.8 MTP head and DeepSeek V4.1 are not wired; `docs/DRAFTS.md` says
+  why and how. New `LMB_SEG_DRAFT` operation, `DRAFTS1` in `STAT`,
+  `draft_metrics` in `segment_chat --json`, `make test-drafts`.
 - Release archives: `.github/workflows/release.yml` builds one self-contained
   CPU archive for Windows x86-64, Linux x86-64 and ARM64, macOS Apple Silicon
   and Intel, on a `v*` tag or by hand. Each archive is verified, unpacked and
