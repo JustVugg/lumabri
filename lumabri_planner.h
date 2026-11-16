@@ -366,10 +366,16 @@ static LMB_UNUSED int lmb_shape_from_config(const char *model_dir,
         f=lmb_plan_fopen(path);pipeline_index=1;
     }
     if (!f) return -1;
-    char *buf = (char *)malloc(LMB_PLAN_CONFIG_MAX);
+    /* Sized to the file, never to the limit: inside a Segment this buffer
+     * comes from the locked allocator, before the lock allowance is checked. */
+    long size = fseek(f, 0, SEEK_END) ? -1 : ftell(f);
+    if (size < 0 || (unsigned long)size >= LMB_PLAN_CONFIG_MAX || fseek(f, 0, SEEK_SET)) {
+        fclose(f); return -1;
+    }
+    char *buf = (char *)malloc((size_t)size + 1);
     if (!buf) { fclose(f); return -1; }
-    size_t n = fread(buf, 1, LMB_PLAN_CONFIG_MAX - 1, f);
-    int invalid=ferror(f) || (n==LMB_PLAN_CONFIG_MAX-1 && fgetc(f)!=EOF);
+    size_t n = fread(buf, 1, (size_t)size, f);
+    int invalid=ferror(f) || n!=(size_t)size || fgetc(f)!=EOF;
     fclose(f);
     int rc = -1;
     if(!invalid && !memchr(buf,0,n)) {

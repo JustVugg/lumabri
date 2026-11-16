@@ -498,9 +498,11 @@ static void local_model_type(const char *model_dir, char *out, size_t cap) {
     snprintf(p, sizeof p, "%s/config.json", model_dir);
     FILE *f = fopen(p, "r");
     if (!f) return;
-    char *buf = (char *)malloc(LMB_PLAN_CONFIG_MAX);
+    long size = fseek(f, 0, SEEK_END) ? -1 : ftell(f);
+    char *buf = size < 0 || (unsigned long)size >= LMB_PLAN_CONFIG_MAX || fseek(f, 0, SEEK_SET) ?
+        NULL : (char *)malloc((size_t)size + 1);
     if (buf) {
-        size_t n = fread(buf, 1, LMB_PLAN_CONFIG_MAX - 1, f);
+        size_t n = fread(buf, 1, (size_t)size, f);
         buf[n] = 0;
         (void)lmb_json_string(buf, "model_type", out, cap);
         free(buf);
