@@ -259,10 +259,13 @@ static LMB_UNUSED void lmb_machine_speed_refresh(LmbMachineSpeedState *s, const 
     s->speed.age_seconds = (uint32_t)(now - s->measured_at);
 }
 
-/* Measuring side. The peer's identity is pinned before anything is sent. */
+/* Measuring side. The peer's identity comes from the household's inventory
+ * and is checked before anything is sent, so the connection neither consults
+ * nor extends known_hosts: a measurement leaves no durable trace. */
 static LMB_UNUSED int lmb_link_probe_measure(const char *addr, const uint8_t peer[32], LmbLinkEvidence *out) {
     memset(out, 0, sizeof *out);
-    LmbSocket fd = lmb_connect_ms_io(addr, 1000, 1000);
+    LmbSocket fd = lmb_secure_enabled() ? lmb_secure_connect_unpinned(addr, 1000, 1000)
+                                        : lmb_connect_ms_io(addr, 1000, 1000);
     if (fd == LMB_INVALID_SOCKET) return -1;
     uint8_t nonce[16], *bytes = malloc(LMB_LINK_BYTES);
     int bad = !bytes || !lmb_secure_peer_matches(fd, peer) || lmb_auth(fd);

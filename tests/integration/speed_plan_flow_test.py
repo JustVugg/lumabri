@@ -237,6 +237,12 @@ def main():
         # All three are candidates; "small" cannot hold even a part of the model.
         doc = until(lambda: measured(3), "speeds and links were not published on their own", 90)
         assert doc["computers_that_fit_alone"] == 2
+        # Measuring a link checks the other computer against the inventory; it
+        # leaves no identity behind in anybody's known_hosts.
+        for name in ("desk", "fast", "small"):
+            known = house.tmp / name / "known"
+            rows = [line.split()[0] for line in known.read_text().splitlines()] if known.exists() else []
+            assert set(rows) <= {house.tracker}, (name, rows)
         assert doc["selection"] == "automatic" and doc["execution"] == "cpu" and not doc["vram_budget_used"]
         chosen = check_never_slower(doc)
         assert names(chosen) == ["fast"] and doc["why"] == "fastest_single_computer", doc
