@@ -431,7 +431,7 @@ const ROOM_FLOW_ENABLED = true;
       control.setAttribute("aria-pressed", String(control.dataset.view === "endpoint" ? endpoint : !endpoint && !workspace));
     $("devices-button").hidden = !operator || !online;
     $("devices-tab").hidden = !operator || !online;
-    if (ROOM_FLOW_ENABLED && online) $("rooms").hidden = !management;
+    if (ROOM_FLOW_ENABLED && online) $("rooms").hidden = !management || pairingMissing;
     if (!operator && panel === "devices" && !details.hidden) openDetails("model");
     if (online && !wasConnected) record("Connected to the local Lumabri service.");
     if (!online && wasConnected) {
@@ -495,7 +495,7 @@ const ROOM_FLOW_ENABLED = true;
     $("rooms").hidden = true;
   }
   async function roomRefresh() {
-    if (!ROOM_FLOW_ENABLED || !management || !token || room.busy || room.waiting) return;
+    if (!ROOM_FLOW_ENABLED || !management || pairingMissing || !token || room.busy || room.waiting) return;
     const credential = token;
     try {
       const household = await request("/api/v1/household");
