@@ -609,7 +609,12 @@ def gateway_tests(base, hub):
         hub.release.set()
         again = run("start", "--no-browser", "--port", str(port))
         assert again.returncode == 0, (again.stdout, again.stderr)
+        # As after the first start, the keeper reports this computer's share a moment later.
+        deadline = time.monotonic() + 60
         status, listing = call("GET", token)
+        while status == 200 and not listing["offered_memory_bytes"] and time.monotonic() < deadline:
+            time.sleep(0.2); status, listing = call("GET", token)
+        assert status == 200 and listing["offered_memory_bytes"] > 0, listing
         assert model(listing, "tiny")["state"] == "interrupted" and listing["local_entries"] == 0
         assert call("POST", token, {"action": "start", "id": "tiny"})[0] == 202
         listing = wait_state(token, "tiny", "present")
