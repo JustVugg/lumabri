@@ -1,0 +1,91 @@
+name: Build, verify and run one Linux or macOS release archive
+description: >
+  Builds the CPU household runtime on this runner, packages it, verifies it and
+  runs the smoke test from the unpacked archive. Expects Lumabri checked out in
+  ./lumabri and the pinned engine in ./colibri. Used by the release workflow
+  and by CI, so that the release path cannot rot. Windows has its own job.
+
+inputs:
+  platform:
+    description: linux-x86_64, linux-arm64, macos-arm64 or macos-x86_64
+    required: true
+  version:
+    description: Version in the archive name, without the leading v
+    required: true
+  retention-days:
+    description: Days to keep the uploaded workflow artifact
+    default: '7'
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - name: Install the libcurl development files (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        # lumabri-fetch links the system libcurl; the archive does not carry it.
+        sudo apt-get update
+        sudo apt-get install -y libcurl4-openssl-dev pkg-config
+    - name: Set the macOS floor
+      if: runner.os == 'macOS'
+      shell: bash
+      run: printf 'MACOSX_DEPLOYMENT_TARGET=12.0\n' >> "$GITHUB_ENV"
+    - uses: actions/checkout@v4
+      if: runner.os == 'macOS'
+      with:
+        repository: llvm/llvm-project
+        ref: 87f0227cb60147a26a1eeb4fb06e3b505e9c7261
+        path: llvm-openmp
+        sparse-checkout: |
+          openmp
+          cmake
+          llvm/cmake
+    - name: Build relocatable OpenMP (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        python3 lumabri/tools/build_macos_openmp.py --source llvm-openmp --build "$RUNNER_TEMP/openmp-build" --prefix "$RUNNER_TEMP/openmp-install"
+        printf 'OMP_PREFIX=%s\n' "$RUNNER_TEMP/openmp-install" >> "$GITHUB_ENV"
+    - name: Build the CPU household runtime
+      shell: bash
+      working-directory: lumabri
+      run: |
+        # CPU only. A GPU backend would be a further platform row with its own
+        # build flags here; none is built.
+        if [ "$RUNNER_OS" = Linux ]; then
+          # OpenMP goes inside the binaries: a clean computer has no libgomp.
+          make household swarm_probe ENGINE=../colibri/c CFLAGS='-O2 -Wall -Wextra -Werror' \
+            OMP_LIBS='-Wl,-Bstatic -lgomp -Wl,-Bdynamic' -j"$(nproc)"
+        else
+          make household swarm_probe ENGINE=../colibri/c CC=clang -j3
+        fi
+    - name: Package, verify and archive
+      shell: bash
+      working-directory: lumabri
+      env:
+        ARCHIVE_PLATFORM: ${{ inputs.platform }}
+        ARCHIVE_VERSION: ${{ inputs.version }}
+      run: |
+        if [ "$RUNNER_OS" = Linux ]; then
+          python3 tools/package_household.py --colibri-root ../colibri --static-openmp --output build/release-candidate
+          (cd build/release-candidate && sha256sum -c SHA256SUMS)
+        else
+          python3 tools/package_household.py --colibri-root ../colibri --openmp-prefix "$OMP_PREFIX" --output build/release-candidate
+          (cd build/release-candidate && shasum -a 256 -c SHA256SUMS)
+        fi
+        python3 tools/package_household.py --verify build/release-candidate
+        python3 tools/release_archive.py --candidate build/release-candidate --platform "$ARCHIVE_PLATFORM" \
+          --version "$ARCHIVE_VERSION" --output-dir build/release --require-clean
+    - name: Start Lumabri from the unpacked archive
+      shell: bash
+      working-directory: lumabri
+      run: python3 tests/integration/release_archive_smoke_test.py --archive build/release/lumabri-*.tar.gz --work-dir "$RUNNER_TEMP"
+    - uses: actions/upload-artifact@v4
+      with:
+        name: release-archive-${{ inputs.platform }}
+        path: lumabri/build/release/
+        if-no-files-found: error
+        retention-days: ${{ inputs.retention-days }}

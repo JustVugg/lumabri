@@ -24,6 +24,14 @@ a tag stay under Unreleased until a new tag is created.
   loaded fully into RAM and sealed before READY. Across computers, and on a
   Windows donor, nothing changes. See
   `docs/RESIDENT_RUNTIME.md#when-the-source-is-this-same-computer`.
+- Release archives: `.github/workflows/release.yml` builds one self-contained
+  CPU archive for Windows x86-64, Linux x86-64 and ARM64, macOS Apple Silicon
+  and Intel, on a `v*` tag or by hand. Each archive is verified, unpacked and
+  started on its runner (page, sign-in, first-model offer, `service stop`), and
+  a tag attaches the archives and `SHA256SUMS` to a draft release. Linux
+  archives link OpenMP statically and need only glibc 2.35 and, for model
+  download, the system libcurl. Linux packages now carry `SHA256SUMS` like
+  macOS. The archives are unsigned. See `docs/RELEASE_ARCHIVES.md`.
 - `lumabri start` no longer fails its first model on computers with a small
   locked-memory allowance: when no residency policy was requested, its sharing
   service locks a load whose reservation fits the allowance and otherwise

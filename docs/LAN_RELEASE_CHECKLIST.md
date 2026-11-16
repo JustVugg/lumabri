@@ -48,6 +48,10 @@ not raise system limits or fall back to pageable weights.
   Developer ID signed or notarized, and the Windows candidate is not
   Authenticode-signed. Hash verification is not publisher authentication.
   See [Mac setup](MACOS_PACKAGE.md) and [Windows setup](WINDOWS_PACKAGE.md).
+  The release workflow builds one archive per platform and starts each from
+  its unpacked folder on the build runner before attaching it to a draft
+  release; that is not clean-machine or physical LAN acceptance. See
+  [release archives](RELEASE_ARCHIVES.md).
 
 Historical trained OLMoE PC+Mac trials and earlier sustained local tests below
 retain their original build and hardware scope. They do not replace the final

@@ -1,0 +1,20 @@
+Lumabri Linux release archive: compiler runtime notice
+
+The programs bin/segment_node and bin/segment_chat in this archive contain
+the GNU OpenMP runtime (libgomp), linked statically by the GNU Compiler
+Collection that built them, so that the archive does not need a compiler
+runtime package on your computer.
+
+libgomp is part of GCC. Copyright (C) Free Software Foundation, Inc.
+It is free software under the GNU General Public License, version 3 or
+later, with the GCC Runtime Library Exception, version 3.1, which permits
+distributing programs compiled with GCC and linked with this runtime under
+terms of the distributor's choice. The licence texts are available at
+https://www.gnu.org/licenses/gpl-3.0.html and
+https://www.gnu.org/licenses/gcc-exception-3.1.html. The corresponding
+source is the GCC source package of the build system recorded in
+manifest.json ("build_os").
+
+Nothing else is bundled. The C library and, for the model download helper
+bin/lumabri-fetch only, libcurl and its TLS library are those installed on
+your computer; they are not part of this archive.
