@@ -61,7 +61,10 @@ request answers `not_available_on_windows_yet`:
   another replica: a Windows gateway makes one attempt on the saved plan;
 - demand counters and the API console;
 - OpenAI and Anthropic compatible clients (`/v1/...`) and `--https-origin`;
-- standing repeat-load consent: each request is accepted or declined.
+- standing repeat-load consent and automatic acceptance for the household:
+  each request is accepted or declined;
+- adding a computer with a one-time code: a Windows computer joins with the
+  full household key (see docs/PAIRING.md).
 
 A model prepared from the page is added to the chat list of the sign-in that
 asked for it when that sign-in next looks at the operation, or by the next

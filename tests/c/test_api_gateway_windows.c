@@ -218,8 +218,9 @@ int wmain(int argc,wchar_t **argv) {
 
     /* What Windows does not serve yet says so, for a signed-in user only. */
     const char *missing[]={"/api/v1/downloads","/api/v1/capacity","/api/v1/portfolio-policy","/api/v1/elastic-policy",
-        "/api/v1/demand","/api/v1/client-config","/v1/models","/api/v1/routing/x","/api/v1/allocations/x/control"};
-    for(unsigned i=0;i<9;i++) {
+        "/api/v1/demand","/api/v1/client-config","/v1/models","/api/v1/routing/x","/api/v1/allocations/x/control",
+        "/api/v1/household","/api/v1/household/pairing/x","/api/v1/donor/consent"};
+    for(unsigned i=0;i<12;i++) {
         assert(http(port,"GET",missing[i],NULL,NULL)==401);
         assert(http(port,"GET",missing[i],token,NULL)==501 && has("not_available_on_windows_yet"));
     }

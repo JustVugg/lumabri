@@ -123,11 +123,11 @@ static int api_web(int fd, const LmbApiHttp *request) {
 /* Every route the POSIX gateway serves and this one does not. */
 static const char api_windows_unavailable[]="[\"model_download\",\"capacity_measurement\",\"portfolio_policy\","
     "\"elastic_policy\",\"allocation_control\",\"routing_inspection\",\"demand\",\"client_config\","
-    "\"openai_anthropic_clients\",\"repeat_consent\",\"reply_recovery\"]";
+    "\"openai_anthropic_clients\",\"repeat_consent\",\"reply_recovery\",\"household_pairing\"]";
 static int api_windows_missing(const char *path) {
     static const char *const prefixes[]={"/api/v1/downloads","/api/v1/capacity","/api/v1/portfolio-policy",
         "/api/v1/elastic-policy","/api/v1/allocations/","/api/v1/routing/","/api/v1/demand",
-        "/api/v1/client-config","/v1/"};
+        "/api/v1/client-config","/api/v1/household","/api/v1/donor/consent","/v1/"};
     for (unsigned i=0;i<sizeof prefixes/sizeof *prefixes;i++) {
         size_t n=strlen(prefixes[i]);
         if (!strncmp(path,prefixes[i],n) && (prefixes[i][n-1]=='/' || !path[n] || path[n]=='/')) return 1;

@@ -9,6 +9,7 @@ let generationMetrics = null;
 let operator = false, workspaceOpen = false, workspacePending = false, workspaceEpoch = 0;
 let workspaceExpires = 0;
 let management = false, managementBusy = false;
+let pairingMissing = false;
 let preparationReview = null, preparationBusy = false, preparationOperation = "", preparationWatch = "";
 let preparationNextCursor = "";
 let preparationNames = new Map();
@@ -202,8 +203,10 @@ function platformNotice(permissions) {
     portfolio_policy: "portfolio policy", elastic_policy: "replica policy", allocation_control: "drain, resume and release",
     routing_inspection: "routing details", demand: "demand counters", client_config: "the API console",
     openai_anthropic_clients: "OpenAI and Anthropic compatible clients", repeat_consent: "repeat-load consent",
-    reply_recovery: "recovering a reply on another replica"};
+    reply_recovery: "recovering a reply on another replica",
+    household_pairing: "adding a computer with a one-time code"};
   const missing = Array.isArray(permissions?.unavailable) ? permissions.unavailable : [];
+  pairingMissing = missing.includes("household_pairing");
   $("platform-notice").hidden = !missing.length;
   $("platform-notice").textContent = missing.length ?
     `Not available on ${permissions.platform === "windows" ? "Windows" : "this computer"} yet: ${missing.map(name => names[name] || String(name).replaceAll("_", " ")).join(", ")}. ` +
