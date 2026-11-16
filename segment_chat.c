@@ -86,12 +86,14 @@ typedef struct {
     size_t committed_count;
     size_t checkpoint_count;
     int image_turn; /* token IDs alone cannot identify image embeddings */
+    void *draft_head; /* the Edge draft head's rows of this conversation; outlives a reset */
 } SegmentConversation;
 
 #include "lumabri_metrics.h"
 #include "lumabri_stage_metrics.h"
 #include "src/runtime/lumabri_request_seed.h"
 #include "src/runtime/lumabri_draft.h"
+#include "src/runtime/lumabri_draft_head.h"
 
 /* Explicit setting, off unless asked for (docs/DRAFTS.md). */
 static LmbDraftSetting segment_drafts = { LMB_DRAFT_OFF, LMB_DRAFT_DEFAULT_ROWS };
@@ -116,6 +118,7 @@ typedef struct {
     int stages_valid;
     int replica_unavailable;
     LmbDraftMetrics drafts; /* all zero when the reply used no draft rounds */
+    uint32_t head_proposed, head_accepted; /* the part of drafts.* the Edge draft head proposed */
     size_t stage_count;
     StageObservation stages[LMB_SEG_ROUTE_MAX];
     LmbLinkEvidence links[LMB_SEG_ROUTE_MAX];
@@ -1034,7 +1037,10 @@ static int conversation_reset(SegmentConversation *conversation) {
         if (remote_dispose(&conversation->chain[i])) failed = 1;
     lmb_read_deadline_ms = prior_deadline;
     free(conversation->committed_tokens);
-    if (!failed) memset(conversation, 0, sizeof *conversation);
+    /* The draft head starts again when its first row is committed at
+     * position 0, so its rows are reused, not reallocated. */
+    void *draft_head = conversation->draft_head;
+    if (!failed) { memset(conversation, 0, sizeof *conversation); conversation->draft_head = draft_head; }
     else {
         /* Preserve failed CLOSE identities for a later reset. Never open
          * replacement sessions while pretending these reservations vanished. */
@@ -1622,6 +1628,8 @@ static int segment_generate(ColiEdgeEngine *edge,
     RemoteSegment *active_chain = chain;
     size_t active_count = chain_count;
     size_t prefilled = 0;
+    const LmbDraftHeadBinding *head = NULL;
+    void *head_session = NULL;
     int rc = -1;
 
     size_t prompt_count = provided_count;
@@ -1752,6 +1760,18 @@ static int segment_generate(ColiEdgeEngine *edge,
         snprintf(error, error_size, "out of memory preparing Segment run");
         goto cleanup;
     }
+    /* The checkpoint's own draft head, when the Edge loaded one. It reads
+     * every committed final row, prefill included, and proposes from them. */
+    if (draft_block && segment_drafts.mode >= LMB_DRAFT_HEAD &&
+        cap->state_dtype == COLI_EDGE_DTYPE_F32 && (head = lmb_draft_head())) {
+        void **slot = conversation ? &conversation->draft_head : &head_session;
+        if (!*slot && head->session_create(head->owner, context, slot)) {
+            fprintf(stderr, "[lumabri] draft head: no memory for this conversation's rows; "
+                            "decoding without it\n");
+            head = NULL;
+        }
+        head_session = *slot;
+    }
     uint8_t *final_state = NULL;
     uint32_t final_rows = 0;
     if (event && event(event_opaque, GEN_EVENT_PREFILL, prefilled,
@@ -1806,6 +1826,9 @@ static int segment_generate(ColiEdgeEngine *edge,
         }
         final_state = first;
         final_rows = rows;
+        if (head && head->commit(head->owner, head_session, offset, rows,
+                                 prompt_tokens + offset, (const float *)(const void *)first))
+            head = NULL;
         if (event && event(event_opaque, GEN_EVENT_PREFILL, offset + rows,
                            prompt_count, NULL, 0)) {
             snprintf(error, error_size, "stream consumer closed during prefill");
@@ -1875,13 +1898,23 @@ static int segment_generate(ColiEdgeEngine *edge,
             if (room > draft_block) room = draft_block;
             if (room > chain_rows) room = chain_rows;
             block[0] = generated[generated_count - 1];
-            uint32_t rows = 1;
+            uint32_t rows = 1, head_rows = 0, used = 0;
             if (room > 1 && segment_draft_script.count)
                 rows += (uint32_t)lmb_draft_scripted(&segment_draft_script, generated_count,
                                                      block + 1, room - 1);
-            else if (room > 1 && segment_drafts.mode != LMB_DRAFT_HEAD)
-                rows += (uint32_t)lmb_draft_lookup(history, prompt_count + generated_count,
-                                                   block + 1, room - 1);
+            else if (room > 1) {
+                /* The head first: it reads the model's own state. Lookup
+                 * stands in when the head is absent or has not read up to
+                 * this position. */
+                uint32_t made = head ? head->propose(head->owner, head_session, block[0], position,
+                                                     block + 1, (uint32_t)(room - 1)) : 0;
+                head_rows = made;
+                lmb_draft_trace(position, block + 1, made);
+                if (!made && segment_drafts.mode != LMB_DRAFT_HEAD)
+                    made = (uint32_t)lmb_draft_lookup(history, prompt_count + generated_count,
+                                                      block + 1, room - 1);
+                rows += made;
+            }
             /* A proposal the vocabulary does not hold cannot be selected. */
             for (uint32_t row = 1; row < rows; row++)
                 if (block[row] < 0 || (uint32_t)block[row] >= cap->vocab_size) {
@@ -1924,6 +1957,8 @@ static int segment_generate(ColiEdgeEngine *edge,
             }
             result->drafts.rounds++;
             result->drafts.proposed += rows - 1;
+            if (head_rows > rows - 1) head_rows = rows - 1;
+            result->head_proposed += head_rows;
             if (rows == 1) draft_single_rounds++;
             for (uint32_t row = 0; row < rows; row++) {
                 const uint8_t *state = first + (size_t)row * state_row_bytes;
@@ -1944,8 +1979,10 @@ static int segment_generate(ColiEdgeEngine *edge,
                 history[prompt_count + generated_count] = selected;
                 last_selected_at=monotonic_seconds();
                 generated_count++;
+                used++;
                 result->drafts.tokens++;
                 if (row) result->drafts.accepted++;
+                if (row && head_rows) result->head_accepted++;
                 if (event &&
                     (generation_stream_prefix(edge, generated, generated_count,
                                               cap->eos_token_id, 0, event, event_opaque,
@@ -1958,6 +1995,10 @@ static int segment_generate(ColiEdgeEngine *edge,
                     selected == cap->eos_token_id ||
                     (row + 1 < rows && block[row + 1] != selected)) break;
             }
+            /* Exactly the rows a token was selected from are committed. */
+            if (head && used && head->commit(head->owner, head_session, position, used, block,
+                                             (const float *)(const void *)first))
+                head = NULL;
             if(lmb_resident_memory_check()) {
                 snprintf(error,error_size,"Edge physical residency lost; resident preparation must be renewed");goto cleanup;
             }
@@ -2016,6 +2057,9 @@ static int segment_generate(ColiEdgeEngine *edge,
             snprintf(error,error_size,"Edge physical residency lost; resident preparation must be renewed");goto cleanup;
         }
         last_selected_at=monotonic_seconds();
+        if (head && head->commit(head->owner, head_session, prompt_count + generated_count - 1, 1,
+                                 &token, (const float *)(const void *)first))
+            head = NULL;
         if (history) history[prompt_count + generated_count] = generated[generated_count];
         generated_count++;
         if (result->drafts.rounds) { /* a mixed reply still counts every round */
@@ -2155,6 +2199,8 @@ cleanup:
     } else {
         for (size_t index = 0; index < opened; index++)
             remote_close(&active_chain[index]);
+        if (head_session && lmb_draft_head())
+            lmb_draft_head()->session_destroy(lmb_draft_head()->owner, head_session);
     }
     free(prompt_tokens);
     free(generated);
@@ -2541,6 +2587,9 @@ static int segment_serve_loop(ColiEdgeEngine *edge,
                     result.drafts.proposed, result.drafts.accepted,
                     result.drafts.discards,
                     lmb_draft_rounds_per_token(&result.drafts));
+            if (result.head_proposed)
+                fprintf(stderr, "[segment-drafts] request=%u head_proposed=%u head_accepted=%u\n",
+                        request_id, result.head_proposed, result.head_accepted);
         }
         int links_valid = result.stages_valid && result.stage_count && result.stage_count <= LMB_STAGE_PROFILE_MAX;
         for (size_t i = 0; links_valid && i < result.stage_count; i++)
@@ -2674,6 +2723,8 @@ int main(int argc, char **argv) {
         .model_dir = model_dir,
         .backend_mask = segment_backend_mask,
     };
+    if (segment_drafts.mode >= LMB_DRAFT_HEAD)
+        edge_options.reserved_u64[0] = LMB_EDGE_OPEN_DRAFT_HEAD;
     const char *edge_limit = getenv("LUMABRI_EDGE_RAM_BYTES");
     if (edge_limit && (parse_u64(edge_limit, &edge_options.memory_limit_bytes) ||
                         !edge_options.memory_limit_bytes)) {
@@ -2923,11 +2974,13 @@ int main(int argc, char **argv) {
         if (lmb_draft_metrics_valid(&generated.drafts))
             printf("\"draft_metrics\":{\"version\":1,\"mode\":\"%s\",\"rounds\":%u,"
                    "\"tokens\":%u,\"proposed\":%u,\"accepted\":%u,\"discards\":%u,"
+                   "\"head_proposed\":%u,\"head_accepted\":%u,"
                    "\"rounds_per_token\":%.6f},",
                    lmb_draft_mode_name(segment_drafts.mode),
                    generated.drafts.rounds, generated.drafts.tokens,
                    generated.drafts.proposed, generated.drafts.accepted,
                    generated.drafts.discards,
+                   generated.head_proposed, generated.head_accepted,
                    lmb_draft_rounds_per_token(&generated.drafts));
         printf("\"stage_observations\":");
         stage_observations_print(stdout, &generated);

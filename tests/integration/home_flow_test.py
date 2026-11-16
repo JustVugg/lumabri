@@ -132,6 +132,9 @@ def main():
                         help="kill a donor TUI after generation; assert engines and leases are released")
     parser.add_argument("--crash-requester", action="store_true",
                         help="resident contract: lose the chatter, retain weights beyond the control lease, reconnect")
+    parser.add_argument("--expect-draft-head", action="store_true",
+                        help="LUMABRI_DRAFTS is on and the checkpoint carries a draft head: the Edge host "
+                             "loads it and decode rounds carry its proposals")
     parser.add_argument("--resident-default", action="store_true",
                         help="exercise resident household without setting a resident environment flag")
     parser.add_argument("--stall-preparation-ui", action="store_true",
@@ -678,7 +681,16 @@ def main():
                 assert generated, "missing token count for stage-profile validation"
                 # EOS on the first sampled token is a valid prefill-only turn.
                 # It must not fabricate a decode traversal or a speed sample.
-                assert counts == {int(generated[-1]) - 1}, (counts, generated[-1])
+                if args.expect_draft_head:
+                    # A round carries several rows; only the rounds that carried
+                    # one are timed per range, and every range saw the same ones.
+                    text = edge_log.read_text(errors="replace")
+                    assert len(counts) == 1 and 0 < min(counts) <= int(generated[-1]) - 1, (counts, generated[-1])
+                    assert "draft head resident at the Edge" in text, "the Edge host did not load the draft head"
+                    assert re.search(r"\[segment-drafts\] request=\d+ head_proposed=[1-9]", text), \
+                        "no decode round carried a proposal of the draft head"
+                else:
+                    assert counts == {int(generated[-1]) - 1}, (counts, generated[-1])
                 for s in profile["stages"]:
                     assert s["prefill_calls"] > 0 and s["prefill_rows"] > 0
                     assert 0 <= s["decode_min_seconds"] <= s["decode_max_seconds"]

@@ -145,6 +145,20 @@ static inline int lmb_draft_script_load(LmbDraftScript *script) {
     return 0;
 }
 
+/* Test instrument: LUMABRI_DRAFT_TRACE names a file that receives one line
+ * per block the draft head proposed for, "position draft draft ...", so a
+ * gate can compare the household head with the engine's own. */
+static inline void lmb_draft_trace(uint64_t position, const int32_t *drafts, uint32_t count) {
+    const char *path = getenv("LUMABRI_DRAFT_TRACE");
+    if (!path || !*path || !count) return;
+    FILE *out = fopen(path, "a");
+    if (!out) return;
+    fprintf(out, "%llu", (unsigned long long)position);
+    for (uint32_t i = 0; i < count; i++) fprintf(out, " %d", drafts[i]);
+    fputc('\n', out);
+    fclose(out);
+}
+
 /* Proposals for the tokens after reply token `generated - 1`. */
 static inline size_t lmb_draft_scripted(const LmbDraftScript *script,
                                         size_t generated,

@@ -16,7 +16,7 @@ the token the model selects anyway.
 | Prompt lookup, the source that needs no weights | implemented, every family whose segments can roll back |
 | Capability negotiation and fallback with older segments | implemented |
 | Observations and an explicit setting | implemented, default off |
-| Qwen3.8 MTP head as a source | **not implemented**; design below |
+| Qwen3.8 MTP head as a source | implemented for a head stored in the model's GGUF; a head in a separate file is not read yet |
 | DeepSeek V4.1 (any source, DSpark included) | **not possible on today's V4.1 chain**; reason and design below |
 | Chained blocks (pipelining) | **not implemented**; design below |
 
@@ -95,43 +95,66 @@ weights and no memory beyond the token history the Edge already holds. It pays
 on quoted text, code edits and repeated structure; on free text it proposes
 little.
 
-**Qwen3.8 MTP head (design, not implemented).** In Colibri the head is one
-extra transformer layer (`blk.<num_layers>`, with its own attention, experts
-and `nextn.eh_proj`) that shares the embedding and the output head. It is fed
-the final streams of every position paired with the token after it
-(`q38_mtp_feed`), keeps its own KV rows for verified pairs only, and drafts
-with `q38_mtp_draft` / `q38_mtp_draft_more`. The Edge already receives every
-final row, prefill included, so the head belongs at the Edge. What stands
-between the engine's implementation and a household:
+**Qwen3.8 MTP head.** The checkpoint can carry one more attention layer
+(`blk.<layers>` with `nextn.*` projections) trained to guess the next tokens
+from the model's final state. It shares the embedding and the output head.
+The Edge already receives every final row, prefill included, so the head runs
+at the Edge:
 
-1. `q38_mtp_attach` refuses unless the **whole model** is loaded in one
-   process (`range_begin == 0 && range_end == layers` and a resident output
-   head). The Edge holds no layer. The build-copy patch has to open the Edge's
-   model with the range `[layers, layers + 1)` so that only the head's layer
-   loads, and lift that check for this case;
-2. the head's state lives in the engine's single `Model` (`K/V/IK[layers]`,
-   `mtp_len`, `mtp_pend`). A resident Edge serves several conversations, so
-   that state must become per conversation, swapped in around each call as
-   the Segment adapters do for their sessions, and must roll back with the
-   block. `q38_mtp_feed` already tolerates a rewind: rows above the new
-   position are dropped;
-3. the Edge ABI has no call for "these rows were committed" or "propose";
-   both need reserved Edge entry points, as `segment_draft.h` does for the
-   Segment side;
-4. the head's layer (attention, all its experts, `eh_proj`) and its KV per
-   conversation must be priced in the Edge's resident reservation and loaded
-   before READY (`planner_adapters`, the GGUF inspector, which today refuses
-   unknown tensors);
-5. the reduced fixture needs `blk.<layers>.*` tensors. The generator in
-   `tests/integration/qwen38_native_gguf_test.py` is numpy only and can be
-   extended without torch. A random head on a random model accepts almost
-   nothing, so its gate proves identity under rejection; the round count
-   still needs scripted drafts or a fixture built to agree.
+- **Loading.** With `--drafts head` or `auto` the chatter asks the Edge for
+  the head (`LMB_EDGE_OPEN_DRAFT_HEAD`). The build-copy patch
+  (`engine_patches/qwen38_draft_head.h`, applied by
+  `tools/prepare_qwen38_mtp.py`) loads the head's layer, **all** of its routed
+  experts and its projections into the Edge's model before the Edge reports
+  ready. Nothing of the head is read from disk during a reply. The Edge still
+  holds none of the model's layers. A checkpoint without a head, and every
+  other family, opens exactly as before.
+- **State per conversation.** The head has its own attention rows. Each
+  conversation owns them; they are lent to the engine around a call, as the
+  Segment adapters do with their sessions. They survive across turns, so a
+  turn that extends the previous one is proposed for from its first token.
+- **What it reads.** After every round the chatter commits exactly the rows
+  a token was selected from (and every prefill row). The head never sees a
+  provisional row that was thrown away, so it needs no rollback of its own.
+  If its place and the conversation's ever disagree (it does not happen in
+  the normal flow) it stops proposing until the conversation starts again
+  at position 0; it never guesses.
+- **What it proposes.** Up to three tokens per round, the depth the head is
+  trained for: the first from the model's state, the next ones from its own.
+  In `auto` the head proposes where it can and prompt lookup stands in where
+  it cannot; `head` uses the head only.
+- **Memory.** The GGUF inspector accepts `qwen4exp.nextn_predict_layers = 1`
+  with a complete head at `blk.<layers>` and refuses an incomplete one, a
+  second one, or a configuration that disagrees. The head's weights, its
+  expert index and kernel workspace are added to the Edge's resident price,
+  and its rows to the Edge's price per conversation, **whenever the file has
+  a head**, also with drafts off: a household that turns drafts on later
+  needs no new plan. Segments never load the head.
 
-The chain side needs nothing new: proposals are token ids, and rows are
-verified and rolled back exactly as for lookup. This is the largest remaining
-piece: an engine patch of a few hundred lines against the least stable part
-of the Qwen3.8 source, plus the planner and inspector contracts.
+Arithmetic is Colibri's (`q38_mtp_feed`, `q38_mtp_draft`,
+`q38_mtp_draft_more`), unchanged. The gate compares the household head's
+proposals with the unmodified engine's head, whole model in one process,
+token for token.
+
+Not covered yet:
+
+- a head shipped as **its own file** (`mtp-*.gguf` beside the model, as some
+  conversions do). Only a head inside the model's GGUF is recognised; a
+  model without one decodes with prompt lookup or without drafts;
+- a head in a **safetensors** checkpoint (`mtp.*`): ignored, as before;
+- **failover with the head on has no gate of its own.** By construction a
+  failover leaves the head where it was (the committed rows it has read do
+  not change when another computer recomputes them), and a conversation
+  rebuilt from position 0 is read again as it is prefilled;
+- on a turn with an image the head pairs image positions with the image
+  token's embedding instead of the vision row. Only how often it is right
+  can change;
+- **how often the head is right has not been measured here.** The reduced
+  fixture's head is random and is almost never right, which is what makes
+  it a rollback test. Because the proposals are the engine's own, the
+  acceptance on the real checkpoint should be what Colibri measures for the
+  first draft; the saving in a household still has to be measured on the
+  real model.
 
 **DeepSeek V4.1 (not possible today; design).** Two independent obstacles.
 
@@ -215,7 +238,7 @@ once it is measured.
 
 | | |
 |---|---|
-| `--drafts off\|lookup\|head\|auto` or `LUMABRI_DRAFTS` | `auto` uses the family's draft head where one exists, then prompt lookup; today `auto` is prompt lookup and `head` proposes nothing |
+| `--drafts off\|lookup\|head\|auto` or `LUMABRI_DRAFTS` | `auto` uses the checkpoint's draft head where there is one (Qwen3.8 with an MTP head in its GGUF) and prompt lookup where the head cannot propose; `head` uses the head only and proposes nothing without one |
 | `--draft-rows 2..16` or `LUMABRI_DRAFT_BLOCK` | rows per block, the certain row included (default 5) |
 | `LUMABRI_DRAFT_ROWS=0` on a segment | the segment does not offer provisional rows |
 
@@ -231,7 +254,8 @@ metrics (`GENERATION_METRICS.md`):
 - `rounds`: chain traversals during decode, discard-only ones included;
 - `tokens`: tokens those rounds selected (`decode_steps`);
 - `proposed` / `accepted`: draft rows sent, and draft rows whose output
-  selected a token;
+  selected a token; `head_proposed` / `head_accepted` (JSON and the Edge
+  log) are the part of them the draft head proposed;
 - `discards`: rounds that only took rows back.
 
 `rounds / tokens` is the network cost per token; without drafts it is 1.

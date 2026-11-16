@@ -283,3 +283,5 @@ if __name__ == "__main__":
     prepare_v4(root)
     from prepare_draft_rows import prepare as prepare_draft_rows
     prepare_draft_rows(root)
+    from prepare_qwen38_mtp import prepare as prepare_qwen38_mtp
+    prepare_qwen38_mtp(root)
