@@ -245,7 +245,7 @@ lumabri: $(HOME_NET_DEPS) src/runtime/lumabri_probe_deadline.h lumabri.c src/ui/
 		lumabri_inventory.h lumabri_home.h lumabri_home_runtime.h src/ui/lumabri_home_ui.h lumabri_ready.h \
 		lumabri_families.h lumabri_planner.h lumabri_cluster.h lumabri_memory_budget.h lumabri_checkpoint_inventory.h lumabri_content.h \
 		lumabri_calibration.h $(SECURE_DEPS) $(MACHINE_DEPS)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread lumabri.c src/ui/lumabri_tui.c $(MACHINE_SRC) lumabri_run_gate.c -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread lumabri.c src/ui/lumabri_tui.c $(MACHINE_SRC) lumabri_run_gate.c -o $@ -lm
 
 # ---- phase 2: peers execute experts ------------------------------------
 # Both sides are built from the engine's own source so the expert math cannot
