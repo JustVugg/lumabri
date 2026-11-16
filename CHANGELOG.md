@@ -19,8 +19,8 @@ a tag stay under Unreleased until a new tag is created.
   sampling alike. Prompt lookup is the draft source; OLMoE and Qwen3.8
   segments support rollback (Qwen3.8 keeps one copy of its recurrent state
   per row). A chain with an older or unsupporting segment decodes as before.
-  The Qwen3.8 MTP head and DeepSeek V4.1 are not wired; `docs/DRAFTS.md` says
-  why and how. New `LMB_SEG_DRAFT` operation, `DRAFTS1` in `STAT`,
+  DeepSeek V4.1 is not wired; `docs/DRAFTS.md` says why and how. New
+  `LMB_SEG_DRAFT` operation, `DRAFTS1` in `STAT`,
   `draft_metrics` in `segment_chat --json`, `make test-drafts`.
 - Release archives: `.github/workflows/release.yml` builds one self-contained
   CPU archive for Windows x86-64, Linux x86-64 and ARM64, macOS Apple Silicon
@@ -30,6 +30,15 @@ a tag stay under Unreleased until a new tag is created.
   archives link OpenMP statically and need only glibc 2.35 and, for model
   download, the system libcurl. Linux packages now carry `SHA256SUMS` like
   macOS. The archives are unsigned. See `docs/RELEASE_ARCHIVES.md`.
+- Qwen3.8's own draft head (MTP) proposes the drafts (`--drafts head|auto`)
+  when the model's GGUF carries it (`nextn_predict_layers = 1`, block
+  `layers`). The Edge loads the head resident, with all of its experts and
+  none of the model's layers, and keeps the head's rows per conversation.
+  Its proposals equal the unmodified engine's head token for token. The
+  planner prices the head at the Edge whenever the file has one; a GGUF with
+  a head was refused before and is now accepted. A head in a separate
+  `mtp-*.gguf` or in safetensors is not read yet, and the saving on the real
+  checkpoint is not measured yet.
 - `lumabri start` no longer fails its first model on computers with a small
   locked-memory allowance: when no residency policy was requested, its sharing
   service locks a load whose reservation fits the allowance and otherwise

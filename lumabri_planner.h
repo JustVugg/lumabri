@@ -78,6 +78,10 @@ typedef struct {
     uint32_t boundary_width;    /* zero: hidden; otherwise the actual Edge/Segment state width */
     uint64_t edge_resident_bytes;
     uint64_t edge_scratch_fixed_bytes;
+    /* A draft head that runs at the Edge (Qwen3.8 MTP): its own attention
+     * rows per conversation. Zero for every family without one. */
+    uint64_t edge_session_fixed_bytes, edge_session_token_bytes;
+    int draft_head;             /* the checkpoint carries a head the Edge can draft with */
     uint64_t segment_fixed_bytes;
     uint64_t session_fixed_bytes, session_token_bytes; /* engine-wide session allocations */
     uint64_t scratch_fixed_bytes, scratch_token_bytes;
@@ -228,7 +232,8 @@ static LmbRangeCost LMB_UNUSED lmb_estimate_edge(const LmbModelShape *m,
         if (m->memory_contract != 1 || !m->max_context || ctx > m->max_context) return c;
         c.resident_bytes = c.working_set_bytes = m->edge_resident_bytes;
         uint32_t width = m->boundary_width ? m->boundary_width : m->hidden;
-        c.state_bytes = lmb_size_mul(lmb_size_mul((uint64_t)ctx * width, 4),
+        c.state_bytes = lmb_size_mul(lmb_size_add(lmb_size_mul((uint64_t)ctx * width, 4),
+            lmb_size_add(m->edge_session_fixed_bytes, lmb_size_mul(m->edge_session_token_bytes, ctx))),
                                      sessions ? sessions : 1);
         c.scratch_bytes = lmb_size_add(m->edge_scratch_fixed_bytes, lmb_size_mul(m->vocab, 16));
         c.ok = lmb_size_add(c.resident_bytes, lmb_size_add(c.state_bytes,

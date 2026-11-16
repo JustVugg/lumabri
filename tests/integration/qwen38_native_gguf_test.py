@@ -33,7 +33,8 @@ def gguf_bytes(metadata,tensors):
         writer.close();return path.read_bytes()
 
 
-def fixture(kind):
+def fixture(kind,mtp=False):
+    """mtp: the file also holds the MTP draft head as block `layers`, llama.cpp's layout."""
     import numpy as np
     import gguf
     rng=np.random.default_rng(20261112);h=256;hc=2;rank=32;layers=4;experts=4
@@ -53,8 +54,8 @@ def fixture(kind):
     vocab=[17,19,23,29,31,37,41,43];offsets=[];rows=0
     for size in vocab:offsets.append(rows);rows+=size
     weight('per_layer_token_embd.weight',(rows,32),True)
-    for l in range(layers):
-        p=f'blk.{l}.'
+    for l in range(layers+bool(mtp)):
+        p=f'blk.{l}.';head=l==layers
         for prefix in ('hc_attn','hc_ffn'):
             weight(p+prefix+'_norm.weight',(hc*h,),norm=True)
             weight(p+prefix+'_down.weight',(rank,hc*h),True);weight(p+prefix+'_up.weight',(hc*h,rank),True)
@@ -62,7 +63,7 @@ def fixture(kind):
         weight(p+'ffn_gate_inp.weight',(experts,h),True);weight(p+'ffn_gate_inp_shexp.weight',(h,))
         for part in ('gate','up','down'):
             weight(p+f'ffn_{part}_shexp.weight',(h,h),True);weight(p+f'ffn_{part}_exps.weight',(experts,h,h),True)
-        if l%2:
+        if l%2 or head:
             for name,shape in [('attn_q',(512,h)),('attn_k',(128,h)),('attn_v',(128,h)),('attn_output',(h,256)),
                                ('indexer.q_proj',(128,h)),('indexer.k_proj',(64,h))]:weight(p+name+'.weight',shape,True)
             for name in ('attn_q_norm','attn_k_norm','indexer.q_norm','indexer.k_norm'):weight(p+name+'.weight',(64,),norm=True)
@@ -70,6 +71,11 @@ def fixture(kind):
             for name,shape in [('attn_qkv',(256,h)),('attn_gate',(128,h)),('ssm_alpha',(4,h)),('ssm_beta',(4,h)),('ssm_out',(h,128))]:weight(p+name+'.weight',shape,True)
             weight(p+'ssm_conv1d.weight',(256,4));weight(p+'ssm_dt.bias',(4,));weight(p+'ssm_a',(4,),negative=True)
             weight(p+'ssm_norm.weight',(32,),norm=True)
+        if head:
+            weight(p+'nextn.eh_proj.weight',(h,2*h),True)
+            weight(p+'nextn.enorm.weight',(h,),norm=True);weight(p+'nextn.hnorm.weight',(hc*h,),norm=True)
+            weight(p+'nextn.hc_head_norm.weight',(hc*h,),norm=True)
+            weight(p+'nextn.hc_head_down.weight',(rank,hc*h),True);weight(p+'nextn.hc_head_up.weight',(hc*h,rank),True)
         if l==1:
             weight(p+'ple_key.weight',(hc*h,256),True);weight(p+'ple_value.weight',(h,256),True)
             for name in ('ple_norm_key','ple_norm_query','ple_norm_conv'):weight(p+name+'.weight',(hc*h,),norm=True)
@@ -83,6 +89,7 @@ def fixture(kind):
         'expert_count':experts,'expert_used_count':2,'expert_feed_forward_length':h,'expert_shared_feed_forward_length':h,
         'ssm.group_count':2,'ssm.time_step_rank':4,'ssm.inner_size':128,'ssm.state_size':32,'ssm.conv_kernel':4,
         'embedding_length_per_layer_input':32,'ple.ngram_size':3,'ple.heads_per_ngram':4,'ple.conv_kernel':4}
+    if mtp:numbers.update({'block_count':layers+1,'nextn_predict_layers':1})
     kv += [('qwen4exp.'+k,4,v) for k,v in numbers.items()]
     arrays={'attention.compress_ratios':(4,[0,2,0,2]),'attention.recurrent_layers':(7,[1,0,1,0]),
         'ple.layers':(4,[1]),'ple.layer_multipliers':(11,[1009,1013,1019]),
@@ -183,6 +190,56 @@ def main():
                 catalog=json.loads(run(['./lumabri','models','--models-dir',raw,'--context','512','--json'],{**env,'LUMABRI_NO_DISK_PROBE':'1'}))['models']
                 assert len(catalog)==1 and catalog[0]['sizing_verified'],catalog
                 print(run([sys.executable,'tests/integration/home_flow_test.py','--models-dir',raw,'--resident-default','--crash-requester','--context','512'],env,600),end='',flush=True)
+    # The same model with its MTP draft head in the file (block `layers`,
+    # llama.cpp's layout). Segments never load the head: every cut still
+    # gives the tokens of the model without one, and the Edge pays for it.
+    root=dest/'head';root.mkdir(exist_ok=True);kv,ts=fixture('float',True)
+    (root/'model.gguf').write_bytes(_gguf_bytes(kv,ts));(root/'gguf.json').write_text(json.dumps({'format':'colibri-gguf-v1','gguf':'model.gguf'}))
+    meta=json.loads(run(['build/test_gguf_inventory','--metadata',root],env))
+    for key,value in meta.items():(root/(key+'.json')).write_text(json.dumps(value))
+    assert meta['config']['num_hidden_layers']==4 and meta['config']['mtp_num_hidden_layers']==1,meta['config']
+    assert len(run(['build/test_gguf_inventory','--cost',root],env).splitlines())==10
+    with_head=run(['build/test_gguf_inventory','--edge',root],env).split();without=run(['build/test_gguf_inventory','--edge',dest/'float'],env).split()
+    assert with_head[3]=='1' and without[3]=='0' and all(int(a)>int(b) for a,b in zip(with_head[:3],without[:3])),(with_head,without)
+    run(['build/qwen38-upstream-oracle',root,root/'oracle.json'],env)
+    assert json.loads((root/'oracle.json').read_text())==json.loads((dest/'float'/'oracle.json').read_text())
+    for cut in range(1,4):run(['build/gguf-segment-oracle','qwen38',root,root/'oracle.json'],{**env,'LMB_ORACLE_CUT':str(cut)})
+    print('Qwen3.8 with an MTP head in the file: all cuts give the tokens of the model without it; the Edge is priced for the head PASS',flush=True)
+    with tempfile.TemporaryDirectory(prefix='lmb-q38-head-contract-') as temp:
+        tmp=Path(temp);(tmp/'gguf.json').write_text((root/'gguf.json').read_text())
+        def denied(tensors,metadata=kv,config=meta['config']):
+            (tmp/'config.json').write_text(json.dumps(config))
+            (tmp/'model.gguf').write_bytes(_gguf_bytes(metadata,tensors))
+            r=subprocess.run(['build/test_gguf_inventory','--cost',tmp],env=env,capture_output=True)
+            assert r.returncode!=0,'invalid Qwen3.8 draft head admitted'
+        for name in ('blk.4.nextn.eh_proj.weight','blk.4.nextn.hnorm.weight','blk.4.nextn.hc_head_up.weight','blk.4.attn_q.weight',
+                     'blk.4.indexer.k_proj.weight','blk.4.ffn_up_exps.weight','blk.4.hc_ffn_inject.weight'):
+            denied([t for t in ts if t[0]!=name])
+        denied(ts+[('blk.4.nextn.unknown.weight',0,[1],b'\0'*4)])
+        denied(ts+[('blk.5.attn_q.weight',0,[1],b'\0'*4)])
+        # Two heads, a head the count does not announce, a count without a head.
+        denied(ts,[(k,t,2 if k=='qwen4exp.nextn_predict_layers' else 6 if k=='qwen4exp.block_count' else v) for k,t,v in kv])
+        denied(ts,[(k,t,v) for k,t,v in kv if k!='qwen4exp.nextn_predict_layers'])
+        denied([t for t in ts if not t[0].startswith('blk.4.')])
+        # The configuration and the file must agree about the head.
+        denied(ts,config={k:v for k,v in meta['config'].items() if not k.startswith('mtp')})
+        denied(ts,config={**meta['config'],'mtp_use_dedicated_embeddings':True})
+        denied(ts,config={**meta['config'],'mtp':{'layer_types':['full_attention'],'rope_theta':5000.0}})
+        plain_kv,plain_ts=fixture('float')
+        denied(plain_ts,plain_kv,config=meta['config'])
+    print('Qwen3.8 MTP head: incomplete or unannounced heads and disagreeing configuration refused PASS',flush=True)
+    if args.household:
+        # The whole household on the file with a head: once with drafts off
+        # (the head is priced and left unread), once with drafts on (the Edge
+        # host loads it under the resident contract and proposes with it).
+        raw=root/'raw';raw.mkdir(exist_ok=True);target=raw/'model.gguf'
+        if not target.exists():os.link(root/'model.gguf',target)
+        catalog=json.loads(run(['./lumabri','models','--models-dir',raw,'--context','512','--json'],{**env,'LUMABRI_NO_DISK_PROBE':'1'}))['models']
+        assert len(catalog)==1 and catalog[0]['sizing_verified'],catalog
+        flow=[sys.executable,'tests/integration/home_flow_test.py','--models-dir',raw,'--resident-default','--context','512','--donor-ram-gb','1']
+        print(run(flow,env,600),end='',flush=True)
+        print(run(flow+['--expect-draft-head'],{**env,'LUMABRI_DRAFTS':'auto'},600),end='',flush=True)
+        print('Qwen3.8 MTP head in a household: prepared and served with drafts off and on PASS',flush=True)
     cmd=['build/qwen38-mixed-oracle']
     for kind in ('float','Q8_0','mixed'):cmd.extend([dest/kind,dest/kind/'oracle.json'])
     print(run(cmd,{**env,'LUMABRI_RESIDENCY_POLICY':'engine-locked','LMB_ORACLE_ACCOUNTING':'1'},180),end='',flush=True)

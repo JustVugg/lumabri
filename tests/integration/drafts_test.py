@@ -285,6 +285,94 @@ def check_end_of_turn(tmp, family, model_dir, ranges, env, text, reply, stop):
               f'the next turn reuses the resident state PASS', flush=True)
 
 
+def check_head_resident(tmp, model_dir, ranges, env, text, reply, stop):
+    """The head's rows stay with the conversation. The second turn extends
+    the first, so it is prefilled on top of the resident state and the head
+    must continue from the rows it already read: a head that lost its place
+    proposes nothing."""
+    (tmp / 'head-resident').mkdir()
+    with Household(tmp / 'head-resident', 'qwen38', model_dir, ranges, env) as home:
+        turns = [(text, 9), (lambda replies: text + replies[0].decode('latin-1') + ' ' + text[:7], 9)]
+        off_replies, _, off_log = home.serve('off', turns)
+        on_replies, on_stats, on_log = home.serve('head', turns)
+        assert off_replies == on_replies, f'draft head changed a resident conversation\n{off_replies}\n{on_replies}'
+        assert ' STOP1 eos ' in on_stats[0] and all(drafts_stat(stat) for stat in on_stats), on_stats
+        assert off_log.count('Segment KV reuse') == on_log.count('Segment KV reuse') == 1, on_log[-2000:]
+        proposed = {}
+        for request in (1, 2):
+            line = next((l for l in on_log.splitlines() if f'request={request} head_proposed=' in l), None)
+            assert line, (request, on_log[-2000:])
+            proposed[request] = int(line.split('head_proposed=')[1].split()[0])
+        assert proposed[1] and proposed[2] >= 3, proposed
+        assert 'could not discard' not in on_log, on_log[-2000:]
+        print(f'qwen38 draft head: a resident conversation is proposed for in both turns '
+              f'({proposed[1]} and {proposed[2]} rows), the second on top of reused state PASS', flush=True)
+
+
+def check_head(tmp, model_dir, plain_dir, ranges, env, prompt, tokens):
+    """The checkpoint's own draft head (Qwen3.8 MTP), resident at the Edge.
+
+    The fixture's head is random, so it is almost never right: every block
+    is rolled back, and the reply must still be the plain one. What the head
+    proposes must be exactly what the unmodified engine's head proposes with
+    the whole model in one process, position by position; how often a real
+    head is right is then the engine's own measurement, not ours."""
+    family = 'qwen38'
+    for name in ('head', 'head-mixed'):
+        (tmp / name).mkdir()
+    with Household(tmp / 'head', family, model_dir, ranges, env) as home:
+        plain = home.chat(prompt, tokens, 'off')
+        trace = tmp / 'head-trace'
+        home.env = {**home.env, 'LUMABRI_DRAFT_TRACE': str(trace)}
+        for mode in ('head', 'auto'):
+            trace.unlink(missing_ok=True)
+            reply = home.chat(prompt, tokens, mode)
+            assert reply['token_ids'] == plain['token_ids'], \
+                f'draft head ({mode}) changed the reply\n{plain["token_ids"]}\n{reply["token_ids"]}\n{home.logs()}'
+            metrics = reply['draft_metrics']
+            check_metrics(family, metrics, tokens)
+            assert metrics['head_proposed'] == metrics['proposed'] > tokens, metrics
+            assert metrics['head_accepted'] == metrics['accepted'], metrics
+            traced = [list(map(int, line.split())) for line in trace.read_text().splitlines()]
+            # Every round but the last, which has room for the certain row only.
+            assert len(traced) == metrics['rounds'] - metrics['discards'] - 1, (len(traced), metrics)
+        home.env.pop('LUMABRI_DRAFT_TRACE')
+        full = prompt + plain['token_ids']
+        oracle = subprocess.run([str(ROOT / 'build/qwen38-mtp-oracle'), str(model_dir), str(len(prompt)),
+                                 ','.join(map(str, full))], env=env, capture_output=True, text=True, timeout=180)
+        assert oracle.returncode == 0, oracle.stderr[-3000:]
+        engine_head = {int(line.split()[0]): list(map(int, line.split()[1:])) for line in oracle.stdout.splitlines()}
+        deepest = 0
+        for position, *drafts in traced:
+            assert drafts == engine_head[position][:len(drafts)], \
+                f'position {position}: household head {drafts}, engine head {engine_head[position]}'
+            deepest = max(deepest, len(drafts))
+        assert deepest == 3, traced
+        # Scripted drafts take the block instead of the head; the head keeps
+        # reading the committed rows and the reply is still the plain one.
+        scripted = home.chat(prompt, tokens, 'head', script=spoil(plain['token_ids'], 6))
+        assert scripted['token_ids'] == plain['token_ids'] and scripted['draft_metrics']['head_proposed'] == 0, scripted
+        print(f'qwen38 draft head: replies identical with every block rolled back '
+              f'({metrics["proposed"]} rows proposed, {metrics["accepted"]} kept); {len(traced)} proposals '
+              f'equal the unmodified engine\'s head token for token PASS',
+              flush=True)
+    with Household(tmp / 'head-mixed', family, model_dir, ranges, env, plain=[len(ranges) - 1]) as home:
+        mixed = home.chat(prompt, tokens, 'head')
+        assert mixed['token_ids'] == plain['token_ids'] and 'draft_metrics' not in mixed, mixed
+        print('qwen38 draft head: a chain with one older segment decodes without drafts PASS', flush=True)
+    # At the Edge alone: memory against the planner's price, conversations apart.
+    planned = subprocess.run([str(ROOT / 'build/test_gguf_inventory'), '--edge', str(model_dir)], env=env,
+                             check=True, capture_output=True, text=True).stdout.split()
+    assert planned[3] == '1', planned
+    for arguments in ([str(model_dir), planned[0], planned[1]], [str(plain_dir), 'none']):
+        oracle = subprocess.run([str(ROOT / 'build/draft-head-oracle'), *arguments],
+                                env={**env, 'LUMABRI_RESIDENCY_POLICY': 'engine-locked'},
+                                capture_output=True, text=True, timeout=120)
+        assert oracle.returncode == 0, oracle.stdout[-2000:] + oracle.stderr[-4000:]
+        assert 'not counted' not in oracle.stdout, oracle.stdout
+        print(oracle.stdout.strip().splitlines()[-1], flush=True)
+
+
 def olmoe(tmp, env, eos=None):
     import struct
     from gguf_olmoe_fixture import create
@@ -293,13 +381,13 @@ def olmoe(tmp, env, eos=None):
     return root, [(0, 1), (1, 2)], dict(env)
 
 
-def qwen38(tmp, env, engine, eos=None):
+def qwen38(tmp, env, engine, eos=None, mtp=False):
     sys.path.insert(0, str(engine / 'tools'))
     from qwen38_native_gguf_test import fixture, gguf_bytes
     env = {**env, 'Q38_TRUNK_CPU_INT8': '0', 'Q38_TRUNK_CPU_INT4': '0', 'Q38_KV': 'f32', 'GQ_EXACT': '1'}
-    root = tmp / f'qwen38-model-{eos}'
+    root = tmp / f'qwen38-model-{eos}{"-head" if mtp else ""}'
     root.mkdir()
-    kv, tensors = fixture('float')
+    kv, tensors = fixture('float', mtp)
     if eos is not None:
         kv = [(k, t, eos if k == 'tokenizer.ggml.eos_token_id' else v) for k, t, v in kv]
     (root / 'model.gguf').write_bytes(gguf_bytes(kv, tensors))
@@ -349,8 +437,15 @@ def main():
                 # fixture does not have; Qwen3.8 takes it from metadata.
                 assert ending, 'no fixture reply starts with printable byte tokens'
                 text, reply, stop = ending
+                plain_root = root
                 root, ranges, family_env = build(reply[stop])
                 check_end_of_turn(tmp / family, family, root, ranges, family_env, text, reply, stop)
+                # The head's tensors come after the model's in the fixture, so
+                # the model, and with it `reply`, is the same with a head.
+                root, ranges, family_env = qwen38(tmp, env, args.engine.resolve(), mtp=True)
+                check_head(tmp / family, root, plain_root, ranges, family_env, prompt, 40)
+                root, ranges, family_env = qwen38(tmp, env, args.engine.resolve(), reply[stop], mtp=True)
+                check_head_resident(tmp / family, root, ranges, family_env, text, reply, stop)
     print('DRAFTS ACROSS SEGMENTS: PASS', flush=True)
 
 

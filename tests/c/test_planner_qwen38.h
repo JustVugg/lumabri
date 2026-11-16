@@ -7,6 +7,17 @@ static int q38_metadata_visit(const LmbPlanTensor *t, void *opaque) {
     return 0;
 }
 static void qwen38_contract_test(void) {
+    {   /* A draft head at the Edge keeps its own rows for every conversation. */
+        LmbModelShape e={.layers=4,.hidden=32,.vocab=256,.memory_contract=1,.sizing_verified=1,
+            .max_context=128,.boundary_width=128,.edge_resident_bytes=1000};
+        LmbRangeCost plain=lmb_estimate_edge(&e,64,2);
+        e.edge_session_fixed_bytes=100;e.edge_session_token_bytes=10;
+        LmbRangeCost head=lmb_estimate_edge(&e,64,2);
+        CHECK(plain.ok && head.ok && head.resident_bytes==plain.resident_bytes &&
+              head.state_bytes==plain.state_bytes+2u*(100u+64u*10u),"Edge draft head rows not priced per conversation");
+        e.edge_session_token_bytes=UINT64_MAX;
+        CHECK(!lmb_estimate_edge(&e,64,2).ok,"Edge draft head state overflow admitted");
+    }
     LmbModelShape m={.layers=4,.hidden=32,.vocab=256,.memory_contract=1,
         .sizing_verified=1,.max_context=128,.boundary_width=128};
     LmbQwen38Inventory v={.m=&m,.h=32,.hc=4,.rank=8,.ple=0,.pd=32,.pc=4,.nh=4,.nd=8,.parts=2};

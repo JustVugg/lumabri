@@ -20,6 +20,15 @@ int main(int argc,char **argv) {
         if(lmb_shape_from_config(argv[2],&m) || !m.sizing_verified)return 1;
         printf("%u\n",m.boundary_width?m.boundary_width:m.hidden);return 0;
     }
+    if(argc==3 && !strcmp(argv[1],"--edge")) { /* resident, state of one 64-token session, scratch, draft head */
+        LmbModelShape m;
+        if(lmb_shape_from_config(argv[2],&m) || !m.sizing_verified)return 1;
+        LmbRangeCost c=lmb_estimate_edge(&m,64,1);
+        if(!c.ok)return 1;
+        printf("%llu %llu %llu %d\n",(unsigned long long)c.resident_bytes,(unsigned long long)c.state_bytes,
+            (unsigned long long)c.scratch_bytes,m.draft_head);
+        return 0;
+    }
     if(argc==3 && !strcmp(argv[1],"--cost")) {
         LmbModelShape m;
         if(lmb_shape_from_config(argv[2],&m) || !m.sizing_verified)return 1;

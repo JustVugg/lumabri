@@ -282,7 +282,12 @@ static inline int lmb_gguf_qwen38_config(const LmbGguf *g,LmbGgufJson *j) {
     lmb_gguf_json_printf(j,",\"rms_norm_eps\":%.17g,\"partial_rotary_factor\":%.17g,\"rope_parameters\":{\"rope_type\":\"default\",\"rope_theta\":%.17g,\"partial_rotary_factor\":%.17g}",c.eps,(double)c.rot/c.hd,c.theta,(double)c.rot/c.hd);
     lmb_gguf_json_printf(j,",\"ple_layer_ids\":[%u],\"layer_types\":[",c.ple+1);
     for(uint32_t i=0;i<c.layers;i++)lmb_gguf_json_printf(j,"%s\"%s\"",i?",":"",c.full[i]?"full_attention":"linear_attention");
-    lmb_gguf_json_printf(j,"],\"norm_topk_prob\":true,\"hidden_act\":\"silu\",\"output_gate_type\":\"sigmoid\",\"attention_bias\":false,\"tie_word_embeddings\":false}");
+    lmb_gguf_json_printf(j,"],\"norm_topk_prob\":true,\"hidden_act\":\"silu\",\"output_gate_type\":\"sigmoid\",\"attention_bias\":false,\"tie_word_embeddings\":false");
+    /* The MTP draft head, as Colibri's importer describes it: one attention
+     * layer over the model's embedding, with the model's RoPE base. */
+    if(c.mtp)lmb_gguf_json_printf(j,",\"mtp_num_hidden_layers\":1,\"mtp_use_dedicated_embeddings\":false,"
+        "\"mtp\":{\"layer_types\":[\"full_attention\"],\"rope_theta\":%.17g}",c.theta);
+    lmb_gguf_json_printf(j,"}");
     return j->bad?-1:0;
 }
 
