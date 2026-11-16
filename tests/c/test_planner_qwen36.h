@@ -13,6 +13,25 @@ static void qwen36_contract_test(void) {
     LmbModelShape m;
     CHECK(!lmb_shape_from_config(dir, &m) && !m.sizing_verified,
           "Qwen without converted metadata was enabled");
+    /* A released config.json runs to tens of kilobytes; one that large
+     * must read the same as the short one, and still be one JSON object. */
+    snprintf(path, sizeof path, "%s/config.json", dir);
+    for (int broken = 1; broken >= 0; broken--) {
+        f = fopen(path, "w");
+        CHECK(f != NULL, "cannot create large Qwen config");
+        if (!f) break;
+        fputs("{\"padding\":\"", f);
+        for (unsigned i = 0; i < 100000; i++) fputc('x', f);
+        fprintf(f, "\",\"model_type\":\"qwen3_5_moe_text\",\"hidden_size\":64,"
+          "\"num_hidden_layers\":2,\"vocab_size\":320,\"num_experts\":8,"
+          "\"num_experts_per_tok\":2%s", broken ? "" : "}");
+        fclose(f);
+        memset(&m, 0, sizeof m);
+        int rc = lmb_shape_from_config(dir, &m);
+        CHECK(broken ? rc != 0 : (!rc && m.layers == 2 && m.hidden == 64 && !m.sizing_verified),
+              broken ? "a large truncated config produced a shape"
+                     : "a config larger than 64 KB was not read");
+    }
     snprintf(path, sizeof path, "%s/qwen36_meta.json", dir);
     for (int grouped = 0; grouped < 2; grouped++) {
         f = fopen(path, "w");
