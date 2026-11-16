@@ -71,6 +71,11 @@ static int donor_approval_request_json(Cap *body,const HomeServiceSnapshot *s) {
             o->runs_edge ? "true" : "false",o->hybrid_role==LMB_HYBRID_ACCELERATOR ? "true" : "false",
             repeat ? "true" : "false",donor_approval_locked(s));
 }
+#ifdef _WIN32
+/* The Windows donor does not keep a standing consent yet: every request is
+ * accepted or declined, and the consent route is not served there. */
+static int donor_consent_on(void) { return 0; }
+#else
 /* This computer's standing consent for its saved household, read from the
  * owner-only record on every call: the gateway caches no authority. */
 static int donor_consent_state(HomeSettings *settings,char *path,size_t cap,LmbStandingConsent *c,int *found) {
@@ -86,6 +91,7 @@ static int donor_consent_on(void) {
     if (settings) lmb_api_wipe(settings,sizeof *settings);
     free(settings); return on;
 }
+#endif
 static int donor_approval_json(Cap *body,const HomeServiceSnapshot *s,int observed) {
     const char *consent=donor_consent_on() ? "true" : "false";
     if (observed) return api_addf(body,"{\"schema\":1,\"scope\":\"this_computer\",\"sharing\":false,"
@@ -133,6 +139,7 @@ static int donor_approval_parse(const char *text,size_t size,uint32_t *operation
     else return -1;
     return 0;
 }
+#ifndef _WIN32
 /* GET shows the switch and what it accepted; POST {"enabled":true|false} is
  * the owner's explicit choice. Same authority as the decision itself: the
  * management capability, on this computer's own page, never through a proxy
@@ -178,6 +185,7 @@ done:
     if (settings) lmb_api_wipe(settings,sizeof *settings);
     free(settings); free(recent); free(body.p);
 }
+#endif
 static void api_donor_approval(int fd,const char *tracker,int proxied,const char *input,size_t size) {
     if (proxied) { api_error(fd,403,"donor_approval_local_page_only"); return; }
     HomeServiceSnapshot current; Cap body={0};
