@@ -16,6 +16,18 @@ a tag stay under Unreleased until a new tag is created.
   exchange, the tracker allows five attempts per code, and joining with the
   full key is unchanged. The exchange is checked against the published
   CPace and RFC 9380 test vectors; see docs/PAIRING.md.
+- Preparing a model on the computer that also holds its files is several
+  times faster. The donor's loader now reads blocks from the user's own
+  source directory instead of pulling them through the encrypted transport on
+  loopback, and SHA-256 uses the x86 SHA extensions when the CPU has them.
+  The 7.4 GB OLMoE Q8_0 checkpoint on one PC went from 119.5 s to 22.7 s with
+  an existing hash index. Integrity is unchanged: the local directory is only
+  a hint taken from a private, same-user record, and every block is verified
+  against the same authenticated per-MiB hashes as a block from a peer; a
+  mismatch retires the local file and the peers serve it. Weights are still
+  loaded fully into RAM and sealed before READY. Across computers, and on a
+  Windows donor, nothing changes. See
+  `docs/RESIDENT_RUNTIME.md#when-the-source-is-this-same-computer`.
 - Drafts across the segments (off by default; `--drafts`/`LUMABRI_DRAFTS`):
   several candidate tokens cross the whole chain as one block of rows in one
   network round, and each segment discards the rows whose candidate was

@@ -62,16 +62,100 @@ static void lmb_sha_block(LmbSha *s, const uint8_t *p) {
     s->h[4]+=e; s->h[5]+=f; s->h[6]+=g; s->h[7]+=h;
 }
 
+/* Hardware SHA-256 (x86 SHA extensions). Same function, same digests: the
+ * scalar rounds above stay the reference and the fallback, and the choice is
+ * made once per process from CPUID. A model is hashed once by its source and
+ * once more by every computer that loads it, so this is the difference
+ * between a few hundred megabytes and a couple of gigabytes per second. */
+#if (defined(__x86_64__) || defined(__i386__)) && (defined(__GNUC__) || defined(__clang__))
+#include <cpuid.h>
+#include <immintrin.h>
+#define LMB_SHA_X86 1
+
+__attribute__((target("sha,sse4.1,ssse3")))
+static void lmb_sha_blocks_x86(uint32_t h[8], const uint8_t *p, size_t blocks) {
+    const __m128i mask = _mm_set_epi64x(0x0c0d0e0f08090a0bLL, 0x0405060700010203LL);
+    __m128i tmp = _mm_loadu_si128((const __m128i *)&h[0]);
+    __m128i st1 = _mm_loadu_si128((const __m128i *)&h[4]);
+    tmp = _mm_shuffle_epi32(tmp, 0xB1);              /* CDAB */
+    st1 = _mm_shuffle_epi32(st1, 0x1B);              /* EFGH */
+    __m128i st0 = _mm_alignr_epi8(tmp, st1, 8);      /* ABEF */
+    st1 = _mm_blend_epi16(st1, tmp, 0xF0);           /* CDGH */
+    while (blocks--) {
+        __m128i save0 = st0, save1 = st1, m[4], msg;
+        for (int i = 0; i < 4; i++)
+            m[i] = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i *)(p + 16 * i)), mask);
+        for (int r = 0; r < 16; r++) {
+            /* m[r&3] holds message words 4r..4r+3 */
+            msg = _mm_add_epi32(m[r & 3],
+                                _mm_loadu_si128((const __m128i *)&lmb_sha_k[4 * r]));
+            st1 = _mm_sha256rnds2_epu32(st1, st0, msg);
+            msg = _mm_shuffle_epi32(msg, 0x0E);
+            st0 = _mm_sha256rnds2_epu32(st0, st1, msg);
+            if (r >= 3 && r < 15) {
+                /* schedule words 4(r+1)..4(r+1)+3 into the slot they replace */
+                __m128i w0 = m[(r + 1) & 3], w1 = m[(r + 2) & 3];
+                __m128i w2 = m[(r + 3) & 3], w3 = m[r & 3];
+                __m128i x = _mm_sha256msg1_epu32(w0, w1);
+                x = _mm_add_epi32(x, _mm_alignr_epi8(w3, w2, 4));
+                m[(r + 1) & 3] = _mm_sha256msg2_epu32(x, w3);
+            }
+        }
+        st0 = _mm_add_epi32(st0, save0);
+        st1 = _mm_add_epi32(st1, save1);
+        p += 64;
+    }
+    tmp = _mm_shuffle_epi32(st0, 0x1B);              /* FEBA */
+    st1 = _mm_shuffle_epi32(st1, 0xB1);              /* DCHG */
+    st0 = _mm_blend_epi16(tmp, st1, 0xF0);           /* DCBA */
+    st1 = _mm_alignr_epi8(st1, tmp, 8);              /* HGFE */
+    _mm_storeu_si128((__m128i *)&h[0], st0);
+    _mm_storeu_si128((__m128i *)&h[4], st1);
+}
+
+/* 1 = this CPU has the SHA extensions and the SSE levels the code needs.
+ * LUMABRI_SHA_SCALAR forces the reference rounds (tests compare the two). */
+static int lmb_sha_x86_ok(void) {
+    static int state;                 /* 0 unknown · 1 yes · 2 no; idempotent */
+    int s = state;
+    if (!s) {
+        unsigned a = 0, b = 0, c = 0, d = 0;
+        s = 2;
+        if (__get_cpuid(1, &a, &b, &c, &d) && (c & (1u << 9)) && (c & (1u << 19)) &&
+            __get_cpuid_count(7, 0, &a, &b, &c, &d) && (b & (1u << 29)) &&
+            !getenv("LUMABRI_SHA_SCALAR"))
+            s = 1;
+        state = s;
+    }
+    return s == 1;
+}
+#endif
+
+/* Whole 64-byte blocks, straight from the caller's buffer. */
+static void lmb_sha_blocks(LmbSha *s, const uint8_t *p, size_t blocks) {
+#ifdef LMB_SHA_X86
+    if (lmb_sha_x86_ok()) { lmb_sha_blocks_x86(s->h, p, blocks); return; }
+#endif
+    while (blocks--) { lmb_sha_block(s, p); p += 64; }
+}
+
 static void lmb_sha_update(LmbSha *s, const void *data, size_t n) {
     const uint8_t *p = (const uint8_t *)data;
     s->len += n;
-    while (n) {
+    if (s->off) {
         size_t take = 64 - s->off;
         if (take > n) take = n;
         memcpy(s->buf + s->off, p, take);
         s->off += take; p += take; n -= take;
-        if (s->off == 64) { lmb_sha_block(s, s->buf); s->off = 0; }
+        if (s->off < 64) return;
+        lmb_sha_blocks(s, s->buf, 1); s->off = 0;
     }
+    if (n >= 64) {
+        /* no bounce through the 64-byte buffer for the bulk of the data */
+        lmb_sha_blocks(s, p, n / 64);
+        p += n / 64 * 64; n %= 64;
+    }
+    if (n) { memcpy(s->buf, p, n); s->off = n; }
 }
 
 static void lmb_sha_final(LmbSha *s, uint8_t out[32]) {
