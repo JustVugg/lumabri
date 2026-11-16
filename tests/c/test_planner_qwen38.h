@@ -42,6 +42,18 @@ static void qwen38_contract_test(void) {
     snprintf(t.name,sizeof t.name,"model.layers.0.mlp.experts.0.up_proj.weight");
     snprintf(t.dtype,sizeof t.dtype,"F8_E8M0");
     CHECK(lmb_q38_tensor(&t,&v)!=0,"scale-only FP8 type admitted as an expert weight");
+    /* The release ships the n-gram table as FP8 shards; an integer table is
+     * still not a table. */
+    snprintf(t.name,sizeof t.name,"model.layers.0.ple.ple_embedding.ngram_embedding.shard_0.weight");
+    snprintf(t.dtype,sizeof t.dtype,"F8_E4M3");
+    t.rank=2; t.shape[0]=16; t.shape[1]=8; t.elements=128; t.bytes=128;
+    CHECK(!lmb_q38_tensor(&t,&v) && v.rows[0]==16,"FP8 PLE table shard refused");
+    CHECK(lmb_q38_tensor(&t,&v)!=0,"duplicate PLE table shard admitted");
+    snprintf(t.name,sizeof t.name,"model.layers.0.ple.ple_embedding.ngram_embedding.shard_1.weight");
+    snprintf(t.dtype,sizeof t.dtype,"I64");
+    CHECK(lmb_q38_tensor(&t,&v)!=0,"integer PLE table shard admitted");
+    snprintf(t.dtype,sizeof t.dtype,"F8_E8M0");
+    CHECK(lmb_q38_tensor(&t,&v)!=0,"scale-only FP8 type admitted as a PLE table");
     m.memory[0].state_fixed_bytes=4096;
     m.memory[1].state_token_bytes=144;
     LmbRangeCost dn=lmb_estimate_segment(&m,0,1,64,2), qsa=lmb_estimate_segment(&m,1,2,64,2);

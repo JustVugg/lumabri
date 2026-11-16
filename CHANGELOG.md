@@ -5,6 +5,10 @@ a tag stay under Unreleased until a new tag is created.
 
 ## Unreleased
 
+- The planner reads a released Qwen3.8 checkpoint: a `config.json` larger
+  than 64 KB is read whole (the released one is 72 KB) and the n-gram table
+  is accepted as FP8 shards, which is how the release stores it. A truncated
+  config and an integer table are still refused.
 - A computer can join a household with a short one-time code instead of the
   32-character key: `lumabri pair` and `lumabri join --code`, `/pair` and
   `/join` in the workspace, and Computers > Add a computer / I have a code on

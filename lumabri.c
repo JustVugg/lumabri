@@ -492,14 +492,20 @@ static const char *segment_engine_for(const char *model_type) {
 /* model_type from a local config.json; "" when absent or unparseable */
 static void local_model_type(const char *model_dir, char *out, size_t cap) {
     out[0] = 0;
-    char p[1200], buf[4096];
+    /* The whole file: a released config.json can be tens of kilobytes and
+     * a truncated one is not JSON. */
+    char p[1200];
     snprintf(p, sizeof p, "%s/config.json", model_dir);
     FILE *f = fopen(p, "r");
     if (!f) return;
-    size_t n = fread(buf, 1, sizeof buf - 1, f);
+    char *buf = (char *)malloc(LMB_PLAN_CONFIG_MAX);
+    if (buf) {
+        size_t n = fread(buf, 1, LMB_PLAN_CONFIG_MAX - 1, f);
+        buf[n] = 0;
+        (void)lmb_json_string(buf, "model_type", out, cap);
+        free(buf);
+    }
     fclose(f);
-    buf[n] = 0;
-    (void)lmb_json_string(buf, "model_type", out, cap);
 }
 
 /* All current Colibri families publish num_hidden_layers in config.json.

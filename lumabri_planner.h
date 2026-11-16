@@ -347,6 +347,10 @@ static int LMB_UNUSED lmb_json_string(const char *object, const char *key,
 
 #include "planner_adapters/registry.h"
 
+/* A released config.json can be large: Qwen3.8-Flash-Next's is 72 KB. */
+#define LMB_PLAN_CONFIG_MAX (4u << 20)
+static int lmb_shape_from_json(const char *model_dir, const char *buf,
+                               int pipeline_index, LmbModelShape *out);
 static LMB_UNUSED int lmb_shape_from_config(const char *model_dir,
                                             LmbModelShape *out) {
     memset(out, 0, sizeof *out);
@@ -362,14 +366,23 @@ static LMB_UNUSED int lmb_shape_from_config(const char *model_dir,
         f=lmb_plan_fopen(path);pipeline_index=1;
     }
     if (!f) return -1;
-    char buf[65536];
-    size_t n = fread(buf, 1, sizeof buf - 1, f);
-    int invalid=ferror(f) || (n==sizeof buf-1 && fgetc(f)!=EOF);
+    char *buf = (char *)malloc(LMB_PLAN_CONFIG_MAX);
+    if (!buf) { fclose(f); return -1; }
+    size_t n = fread(buf, 1, LMB_PLAN_CONFIG_MAX - 1, f);
+    int invalid=ferror(f) || (n==LMB_PLAN_CONFIG_MAX-1 && fgetc(f)!=EOF);
     fclose(f);
-    if(invalid || memchr(buf,0,n)) return -1;
-    buf[n] = 0;
-    const char *end=lmb_plan_object_end(lmb_plan_space(buf));
-    if(!end || *lmb_plan_space(end)) return -1;
+    int rc = -1;
+    if(!invalid && !memchr(buf,0,n)) {
+        buf[n] = 0;
+        const char *end=lmb_plan_object_end(lmb_plan_space(buf));
+        if(end && !*lmb_plan_space(end)) rc = lmb_shape_from_json(model_dir, buf, pipeline_index, out);
+    }
+    free(buf);
+    return rc;
+}
+
+static int lmb_shape_from_json(const char *model_dir, const char *buf,
+                               int pipeline_index, LmbModelShape *out) {
 
     if (pipeline_index) {
         char kind[64];
