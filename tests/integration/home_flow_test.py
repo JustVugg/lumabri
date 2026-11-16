@@ -907,8 +907,14 @@ def main():
                     assert "tok/s" not in current_frame(view), "stale catalogue retained a numerical speed"
                 elif "stale" in current_frame(view):
                     view.send("\r")
-                    until(lambda: "Placement guided by previous stage timings" in current_frame(view) or "tok/s (last)" in current_frame(view),
-                          message="current runtime was marked stale without a revised placement")
+                    try:
+                        until(lambda: "Placement guided by previous stage timings" in current_frame(view) or "tok/s (last)" in current_frame(view),
+                              message="current runtime was marked stale without a revised placement")
+                    except AssertionError:
+                        # Which condition moved is on the screen; a bare timeout does not say.
+                        shown = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "\n", current_frame(view))
+                        print("\n".join(line for line in shown.splitlines() if line.strip()), file=sys.stderr)
+                        raise
                     assert "stale" not in current_frame(view) or "tok/s (last)" not in current_frame(view)
                     view.send("\x1b")
                 view.send("q")
