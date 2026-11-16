@@ -1,0 +1,179 @@
+name: Lumabri release archives
+
+# Builds the five downloadable archives. Nothing here publishes: a tag gets a
+# DRAFT release with the archives attached, and a person publishes it.
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lumabri-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # The engine revision every archive is built from; the same pin as CI.
+  COLIBRI_REF: 704a3f68184b78367a04cb5526e428dc2f90f05b
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - id: version
+        name: Name the archives after the tag, or after the commit of a manual run
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            version="${GITHUB_REF_NAME#v}"
+            printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.+-][0-9A-Za-z.+-]{1,24})?$' ||
+              { echo "Tag $GITHUB_REF_NAME is not vMAJOR.MINOR.PATCH" >&2; exit 1; }
+          else
+            version="0.0.0-dev.${GITHUB_SHA::12}"
+          fi
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+
+  unix:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        # CPU only. A GPU backend is added as further rows (for example
+        # linux-x86_64-<backend>) once it exists; nothing GPU is built here.
+        include:
+          # The older Ubuntu sets the oldest C library the Linux archives run on.
+          - platform: linux-x86_64
+            runner: ubuntu-22.04
+          - platform: linux-arm64
+            runner: ubuntu-22.04-arm
+          - platform: macos-arm64
+            runner: macos-15
+          - platform: macos-x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: lumabri
+      - uses: actions/checkout@v4
+        with:
+          repository: JustVugg/colibri
+          ref: ${{ env.COLIBRI_REF }}
+          path: colibri
+      - uses: ./lumabri/.github/actions/release-archive
+        with:
+          platform: ${{ matrix.platform }}
+          version: ${{ needs.plan.outputs.version }}
+          retention-days: '14'
+
+  windows:
+    # Same native build and package as the windows-segment CI job, without its
+    # inference gates: those run on every pull request.
+    needs: plan
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: msys2 {0}
+        working-directory: lumabri
+    env:
+      PYTHONUTF8: '1'
+      ARCHIVE_VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: lumabri
+      - uses: actions/checkout@v4
+        with:
+          repository: JustVugg/colibri
+          ref: ${{ env.COLIBRI_REF }}
+          path: colibri
+      - name: Preserve checkout Git for package provenance
+        shell: pwsh
+        run: |
+          $checkoutGit = Get-Command git -CommandType Application | Select-Object -First 1 -ExpandProperty Source
+          if (-not $checkoutGit) { throw 'Checkout Git was not found' }
+          "LUMABRI_BUILD_GIT=$checkoutGit" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884
+        with:
+          msystem: UCRT64
+          update: false
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-binutils
+            mingw-w64-ucrt-x86_64-python
+      - name: Build the native CPU runtime
+        run: python3 tools/build_windows_segment.py --engine ../colibri/c --only inference
+      - name: Package, verify and archive
+        run: |
+          python3 tools/package_household.py --runtime-dir build/windows-segment --colibri-root ../colibri --output build/release-candidate
+          python3 tools/package_household.py --verify build/release-candidate
+          python3 tools/release_archive.py --candidate build/release-candidate --platform windows-x86_64 --version "$ARCHIVE_VERSION" --output-dir build/release --require-clean
+      - name: Run Lumabri from the unpacked archive
+        run: python3 tests/integration/release_archive_smoke_test.py --archive build/release/lumabri-*.zip --work-dir "$RUNNER_TEMP"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-archive-windows-x86_64
+          path: lumabri/build/release/
+          if-no-files-found: error
+          retention-days: 14
+
+  collect:
+    needs: [plan, unix, windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-archive-*
+          merge-multiple: true
+          path: build/release
+      - name: Check every archive against its build checksum and write SHA256SUMS
+        run: |
+          test "$(python3 tools/release_archive.py --checksums build/release | wc -l)" = 5
+          (cd build/release && sha256sum -c SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lumabri-release-${{ needs.plan.outputs.version }}
+          path: |
+            build/release/lumabri-*.tar.gz
+            build/release/lumabri-*.zip
+            build/release/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30
+
+  draft-release:
+    # Tags only, and a draft only: publishing stays a person's decision.
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    needs: [plan, collect]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: lumabri-release-${{ needs.plan.outputs.version }}
+          path: release
+      - name: Attach the archives to a draft release
+        run: |
+          (cd release && sha256sum -c SHA256SUMS)
+          if state="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null)"; then
+            # Never touch a release that has already been published.
+            test "$state" = true || { echo "Release $GITHUB_REF_NAME is already published; not changing it." >&2; exit 1; }
+            gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber release/*
+          else
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+              --title "Lumabri $VERSION" \
+              --notes "Draft. CPU archives for Windows, Linux and macOS; unsigned, with SHA256SUMS. See docs/RELEASE_ARCHIVES.md before publishing." \
+              release/*
+          fi
