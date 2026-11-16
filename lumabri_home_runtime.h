@@ -49,6 +49,7 @@ static int home_resident_environment(void) {
 #include "src/runtime/lumabri_service.h"
 #include "src/runtime/lumabri_donor_policy_store.h"
 #include "src/runtime/lumabri_content_identity.h"
+#include "src/runtime/lumabri_standing_consent.h"
 #define LMB_COMPUTE_BROKER_SERVER
 #include "src/runtime/lumabri_compute_broker.h"
 static LmbComputeBroker home_compute_broker;
@@ -378,6 +379,36 @@ static uint64_t home_donor_room(const HomeDonor *d, uint64_t available) {
             loading = lmb_size_add(loading, d->parked[i].transaction.offer.ram_bytes);
     available = available > loading ? available - loading : 0;
     return available < room ? available : room;
+}
+
+/* The owner's standing consent for this household, read again for a pending
+ * request so that turning it off holds for the next one. It answers only
+ * "may the click be skipped": the caller then takes the ordinary acceptance
+ * path with every admission check, and a request that a click could not have
+ * loaded is refused in the same way. Background resident sharing only: in a
+ * foreground session the person is at the screen. */
+static int home_standing_consent(const HomeDonor *d,const char *tracker) {
+    static double checked; static uint8_t checked_id[32];
+    const LmbHomeOffer *o=&d->transaction.offer;
+    if (d->transaction.phase!=LMB_HOME_PENDING || !home_resident_required() || strcmp(o->tracker,tracker)) return 0;
+    double now=nowd();
+    if (!memcmp(checked_id,o->id,32) && now-checked<1) return 0;
+    memcpy(checked_id,o->id,32); checked=now;
+    char path[1200];
+    return !home_service_directory(path,sizeof path) &&
+        lmb_standing_consent_for(path,tracker,getenv("LUMABRI_TOKEN"),NULL,NULL);
+}
+/* The same facts a person would have seen before clicking, kept where the
+ * owner can read them afterwards: who asked, what, and how much memory. */
+static void home_standing_record(const HomeDonor *d,int accepted) {
+    const LmbHomeOffer *o=&d->transaction.offer; char path[1200];
+    LmbStandingAccepted a={.when=(uint64_t)time(NULL),.ram_bytes=o->ram_bytes,.begin=o->begin,.end=o->end};
+    lmb_hex(a.allocation,o->id,32); lmb_hex(a.requester,o->requester,32);
+    snprintf(a.model,sizeof a.model,"%s",o->model);
+    fprintf(stderr,"[standing-consent] %s allocation=%s requester=%s model=%.200s layers=%u-%u ram_bytes=%llu\n",
+        accepted ? "accepted" : "refused",a.allocation,a.requester,a.model,o->begin,o->end,(unsigned long long)o->ram_bytes);
+    if (accepted && (home_service_directory(path,sizeof path) || lmb_standing_journal_append(path,&a)))
+        fprintf(stderr,"[standing-consent] the acceptance could not be added to the private journal\n");
 }
 
 static void home_donor_swap(HomeDonor *d, uint32_t index) {
@@ -1245,11 +1276,14 @@ static int cmd_donor_inner(int argc, char **argv) {
             key='y'; policy_approved=1;
             memcpy(d.admission_policy,policy.id,32); d.admission_policy_revision=policy.revision;
         }
+        int standing_approved=0;
+        if (background && key<0 && home_standing_consent(&d,tracker)) { key='y'; standing_approved=1; }
         if (key == 'x') home_donor_disconnect(&d, "Stopped by this computer's owner.");
         if ((key == 'y' || key == 'n') && d.transaction.phase == LMB_HOME_PENDING) {
             if (background) {
                 snprintf(service.snapshot.detail, sizeof service.snapshot.detail, "%s", policy_approved ?
-                    "Owner's bounded policy authorized this new allocation; acquiring resources." : key == 'y' ?
+                    "Owner's bounded policy authorized this new allocation; acquiring resources." : standing_approved ?
+                    "Owner's standing consent authorized this household allocation; acquiring resources." : key == 'y' ?
                     "Owner approved this immutable allocation; acquiring resources." : "Owner declined this allocation.");
                 if (home_service_save(&service)) { (void)home_fail("Cannot persist the owner's decision; no allocation was approved."); break; }
             }
@@ -1285,6 +1319,12 @@ static int cmd_donor_inner(int argc, char **argv) {
                 char id[65]; lmb_hex(id,d.admission_policy,32);
                 snprintf(d.transaction.reason,sizeof d.transaction.reason,"Authorized by owner policy %.12s revision %u; waiting for the complete plan.",id,d.admission_policy_revision);
                 fprintf(stderr,"[donor-policy] accepted grant=%s revision=%u\n",id,d.admission_policy_revision);
+            }
+            if (standing_approved) {
+                int accepted=d.transaction.phase==LMB_HOME_ACCEPTED;
+                if (accepted) snprintf(d.transaction.reason,sizeof d.transaction.reason,
+                    "Accepted automatically by this computer's standing consent; waiting for the complete plan.");
+                home_standing_record(&d,accepted);
             }
             if (d.client >= 0 && home_status_send(d.client, &d.transaction, 0, 0))
                 home_donor_disconnect(&d, "The requester disconnected.");

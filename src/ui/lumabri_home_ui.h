@@ -462,7 +462,7 @@ static int cmd_home(void) {
                 "See resources. Choose who participates.", "Review a request before anything is loaded.", "Verify, chat with or release approved resident plans."};
             static const char *commands[] = {"/create", "/join", "/settings", "/quit", "/network", "/storage", "/service", "/pair"};
             static const char *command_help[] = {"Create or show this household", "Find your household on the LAN; join with a short code or its key",
-                "Model folder and maximum RAM to share", "Close this interface; background services keep running", "Set up trusted LAN access once (Windows/WSL)",
+                "Model folder, maximum RAM to share, automatic acceptance", "Close this interface; background services keep running", "Set up trusted LAN access once (Windows/WSL)",
                 "Inspect and clear unused household weight caches", "View service status or explicitly stop all local resources",
                 "Add a computer: show a short one-time code for it to join"};
             ui_text(top, 5, UI_TEXT, actions ? "Workspace actions" : "What would you like to do?");
@@ -562,8 +562,21 @@ static int cmd_home(void) {
                 setenv("LUMABRI_TOKEN", s.token, 1);
                 home_error_dialog("Could not save household settings", "Check that your home directory is writable, then retry.");
             } else {
+                /* An installation set up by `lumabri start`, whose owner never
+                 * touched the switch, keeps accepting automatically for the
+                 * household it deliberately joins with that household's key.
+                 * Any explicit choice, and any older installation, is left
+                 * alone: the new household then asks each time. */
+                char service_dir[1200]; LmbStandingConsent standing; int carried = 0;
+                if (strcmp(s.tracker, next.tracker) || strcmp(s.token, next.token))
+                    carried = !home_service_directory(service_dir, sizeof service_dir) && s.tracker[0] &&
+                        lmb_standing_consent_for(service_dir, s.tracker, s.token, &standing, NULL) &&
+                        standing.origin == LMB_STANDING_START &&
+                        !lmb_standing_consent_set(service_dir, next.tracker, next.token, 1, LMB_STANDING_START);
                 s = next;
-                snprintf(notice, sizeof notice, "Connected. Open Your computers; helpers must keep Share resources active.");
+                snprintf(notice, sizeof notice, carried ?
+                    "Connected. This computer accepts this household's requests automatically; /settings turns that off." :
+                    "Connected. Open Your computers; helpers must keep Share resources active.");
             }
         } else if (key == 's') {
             HomeSettings next = s;
@@ -573,6 +586,18 @@ static int cmd_home(void) {
                            next.sessions, sizeof next.sessions, 0) ||
                 home_field("Context tokens per new plan (1–1048576; higher values reserve more memory)",
                            next.context, sizeof next.context, 0)) continue;
+            /* Standing consent belongs to the household, not to a model. */
+            char service_dir[1200], standing[8] = "off"; int standing_was = 0, standing_known = 0;
+            if (next.tracker[0] && !home_service_directory(service_dir, sizeof service_dir)) {
+                standing_known = 1;
+                standing_was = lmb_standing_consent_for(service_dir, next.tracker, next.token, NULL, NULL);
+                strcpy(standing, standing_was ? "on" : "off");
+                if (home_field("Accept this household's requests automatically, within the shared RAM (on or off; "
+                               "off asks you each time)", standing, sizeof standing, 0)) continue;
+                if (strcmp(standing, "on") && strcmp(standing, "off")) {
+                    snprintf(notice, sizeof notice, "Automatic acceptance must be on or off. Nothing was changed."); continue;
+                }
+            }
             if (strlen(next.sessions) != 1 || next.sessions[0] < '1' || next.sessions[0] > '8') {
                 snprintf(notice, sizeof notice, "Choose 1–8 conversation slots. Additional slots reserve separate conversation memory."); continue;
             }
@@ -589,6 +614,14 @@ static int cmd_home(void) {
             else {
                 s = next;
                 snprintf(notice, sizeof notice, "Settings saved. Context %u for new plans; RAM %.20s GB on next sharing start. Active allocations unchanged.", context, s.ram);
+                int standing_now = !strcmp(standing, "on");
+                if (standing_known && standing_now != standing_was) {
+                    if (lmb_standing_consent_set(service_dir, s.tracker, s.token, standing_now, LMB_STANDING_OWNER))
+                        home_error_dialog("Could not save automatic acceptance", "The private service directory is not writable. Requests are handled as before.");
+                    else snprintf(notice, sizeof notice, standing_now ?
+                        "Settings saved. This household's requests that fit the shared RAM are now accepted automatically." :
+                        "Settings saved. Each request now waits for your approval, starting with the next one. Loaded models stay.");
+                }
             }
         } else if (key == 'n') {
             if (tracker_child <= 0 && home_tracker_resume(&s, &tracker_child, notice, sizeof notice)) continue;

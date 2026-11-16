@@ -43,6 +43,64 @@ static int donor_policy_review(int dir,HomeServiceSnapshot *s,LmbDonorPolicy *p,
     if (!bad) { lmb_donor_policy_digest(b.p,b.len,digest); lmb_hex(review,digest,32); }
     free(b.p); return bad ? -1 : 0;
 }
+/* Standing consent for the household saved in this computer's settings. It
+ * is a different thing from the bounded grants below: no scope to review, no
+ * expiry, and one switch. Only this OS user, on this computer, reaches it. */
+static void consent_when(uint64_t when,char *out,size_t cap) {
+    time_t t=(time_t)when; struct tm tm;
+    if (!localtime_r(&t,&tm) || !strftime(out,cap,"%Y-%m-%d %H:%M",&tm)) snprintf(out,cap,"?");
+}
+static int cmd_consent(int argc,char **argv) {
+    char path[1200]; HomeSettings s; home_settings_load(&s);
+    int json=argc==2 && !strcmp(argv[0],"status") && !strcmp(argv[1],"--json");
+    int change=argc==1 && (!strcmp(argv[0],"on") || !strcmp(argv[0],"off"));
+    if (!change && !json && !(argc==1 && !strcmp(argv[0],"status")) && argc) {
+        fprintf(stderr,"lumabri consent [status [--json] | on | off]\n"
+            "  on   accept this household's requests to load a model on this computer without\n"
+            "       asking each time. Every other check stays: shared memory, household key,\n"
+            "       computer identity, memory policy and model integrity.\n"
+            "  off  ask each time again, starting with the next request. Loaded models stay.\n");
+        return 2;
+    }
+    if (home_service_directory(path,sizeof path)) return home_fail("Cannot open the private household service directory.");
+    if (!s.tracker[0]) return home_fail("This computer has not created or joined a household yet.");
+    if (change) {
+        int enable=!strcmp(argv[0],"on");
+        if (lmb_standing_consent_set(path,s.tracker,s.token,enable,LMB_STANDING_OWNER))
+            return home_fail("The setting was not saved. Requests are handled as before.");
+    }
+    LmbStandingConsent c; int found=0,enabled=lmb_standing_consent_for(path,s.tracker,s.token,&c,&found);
+    LmbStandingAccepted *recent=calloc(LMB_STANDING_RECENT,sizeof *recent);
+    unsigned count=recent ? lmb_standing_journal_recent(path,recent,LMB_STANDING_RECENT) : 0;
+    if (json) {
+        fputs("{\"schema\":1,\"scope\":\"this_computer\",\"household\":",stdout); json_string(stdout,s.tracker);
+        printf(",\"enabled\":%s,\"chosen\":%s,\"origin\":\"%s\",\"changed\":%llu,\"accepted\":[",
+            enabled ? "true" : "false",found ? "true" : "false",
+            !found ? "none" : c.origin==LMB_STANDING_START ? "start" : "owner",(unsigned long long)c.changed);
+        for (unsigned i=0;i<count;i++) {
+            printf("%s{\"time\":%llu,\"requester\":\"%s\",\"allocation\":\"%s\",\"model\":",i ? "," : "",
+                (unsigned long long)recent[i].when,recent[i].requester,recent[i].allocation);
+            json_string(stdout,recent[i].model);
+            printf(",\"begin\":%u,\"end\":%u,\"ram_bytes\":%llu}",recent[i].begin,recent[i].end,
+                (unsigned long long)recent[i].ram_bytes);
+        }
+        puts("]}");
+    } else {
+        printf("Automatic acceptance: %s for the household at %s\n",enabled ? "ON" : "OFF",s.tracker);
+        if (enabled) printf("  This computer accepts its household's requests to load a model without asking,\n"
+            "  within the %s GB it shares%s. Turn it off with: lumabri consent off\n",s.ram,
+            c.origin==LMB_STANDING_START ? " (switched on by lumabri start)" : "");
+        else printf("  Every request waits for a person at this computer%s.\n"
+            "  Turn it on with: lumabri consent on\n",change ? ", starting with the next one; loaded models stay" : "");
+        if (count) printf("Accepted without asking (newest last):\n");
+        for (unsigned i=0;i<count;i++) {
+            char when[32]; consent_when(recent[i].when,when,sizeof when);
+            printf("  %s  requester %.12s  %s  layers %u-%u  %.2f GB\n",when,recent[i].requester,recent[i].model,
+                recent[i].begin,recent[i].end,(double)recent[i].ram_bytes/1e9);
+        }
+    }
+    free(recent); return 0;
+}
 static int cmd_donor_policy(int argc,char **argv) {
     char path[1200];
     if (argc<1 || home_service_directory(path,sizeof path)) return 1;

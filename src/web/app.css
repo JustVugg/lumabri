@@ -272,6 +272,15 @@ main:has(#chat:not([hidden]) #empty:not([hidden])) #composer-area { margin-botto
 }
 @keyframes blink { 50% { opacity: .15; } }
 
+/* ---- standing consent of this computer ---- */
+.consent { margin: 18px 0; padding: 16px 18px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); }
+.consent h2 { margin: 0 0 10px; }
+.consent-switch { display: flex; align-items: center; gap: 10px; font-size: 14px; color: var(--ink); cursor: pointer; }
+.consent-switch input { width: 18px; height: 18px; flex: none; }
+.consent p { margin: 8px 0 0; font-size: 13px; line-height: 1.6; }
+.consent-accepted { margin: 10px 0 0; padding: 0; list-style: none; font-size: 12.5px; line-height: 1.7; color: var(--text); }
+.consent-accepted:empty, #consent-status:empty { display: none; }
+.consent-accepted li { overflow-wrap: anywhere; }
 /* ---- approval of a load on this computer ---- */
 .approval { flex: none; width: calc(100% - 48px); max-width: 772px; margin: 14px auto 0; max-height: 72dvh; overflow-y: auto; scrollbar-width: thin; }
 .approval-card { padding: 20px 22px; border: 1px solid var(--line); border-radius: 18px; background: var(--panel); box-shadow: var(--shadow-soft); }
