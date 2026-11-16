@@ -2529,7 +2529,7 @@ static int handle_rexec(LmbSocket fd, LmbMsg *m) {
 }
 
 static int segment_request_op(uint32_t op) {
-    return op == LMB_SEG_OPEN || op == LMB_SEG_RUN ||
+    return op == LMB_SEG_OPEN || op == LMB_SEG_RUN || op == LMB_SEG_DRAFT ||
            op == LMB_SEG_SNAPSHOT || op == LMB_SEG_RESTORE ||
            op == LMB_SEG_CLOSE || op == LMB_SEG_HEALTH;
 }

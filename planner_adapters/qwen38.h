@@ -90,7 +90,9 @@ static int lmb_q38_tensor(const LmbPlanTensor *t, void *opaque) {
                 if (!end || strcmp(end,".weight") || index>=v->parts || v->table_whole) return -1;
                 part=(unsigned)index;
             }
-            if (v->rows[part] || !lmb_q38_float(t->dtype) || t->rank!=2 ||
+            /* The release stores the table as FP8 with one scale
+             * (ngram_embedding.weight_scale); the engine decodes both. */
+            if (v->rows[part] || (!lmb_q38_float(t->dtype) && strcmp(t->dtype,"F8_E4M3")) || t->rank!=2 ||
                 !t->shape[0] || t->shape[1]!=v->nd) return -1;
             v->rows[part]=t->shape[0];
             bytes=t->bytes; /* complete, engine-owned PLE source representation */

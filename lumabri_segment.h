@@ -54,6 +54,18 @@ enum {
     LMB_SEG_XFER_END = 1u << 1,
 };
 
+/* LmbSegReply.flags. An executor sets DRAFT_ROWS in SEG_OPEN_R when its
+ * engine can discard provisional rows; a requester that does not know the
+ * bit ignores it, and an executor that does not know it never sets it. */
+enum {
+    LMB_SEG_REPLY_DRAFT_ROWS = 1u << 0,
+    /* With DRAFT_ROWS: bits 8..15 carry how many rows one LMB_SEG_DRAFT of
+     * this session may hold (2..255), the certain row included. It is what
+     * the session's memory reservation covers; more is refused. */
+    LMB_SEG_REPLY_DRAFT_ROWS_SHIFT = 8,
+    LMB_SEG_REPLY_DRAFT_ROWS_MASK = 0xffu << 8,
+};
+
 typedef enum {
     LMB_SEG_STATUS_OK = 0,
     LMB_SEG_STATUS_DUPLICATE = 1,
@@ -161,6 +173,12 @@ int lmb_seg_run_encode(const LmbSegRun *run,
                        uint8_t **body, uint32_t *body_len);
 int lmb_seg_run_decode(const void *body, size_t body_len, LmbSegRun *run,
                        int32_t *token_ids, size_t token_capacity);
+/* LMB_SEG_DRAFT uses the run envelope. rows == 0 keeps the rows below
+ * `position` and discards the rest without running anything. */
+int lmb_seg_draft_encode(const LmbSegRun *run,
+                         uint8_t **body, uint32_t *body_len);
+int lmb_seg_draft_decode(const void *body, size_t body_len, LmbSegRun *run,
+                         int32_t *token_ids, size_t token_capacity);
 int lmb_seg_transfer_encode(const LmbSegTransfer *transfer,
                             uint8_t **body, uint32_t *body_len);
 int lmb_seg_transfer_decode(const void *body, size_t body_len,
@@ -196,6 +214,17 @@ LmbSegStatus lmb_seg_table_run_begin(LmbSegTable *table,
                                      const LmbSegRun *run,
                                      const void *payload,
                                      size_t payload_bytes, uint64_t now_ms);
+/* A draft may begin anywhere from the second row of the previous committed
+ * draft up to the current position: the rows at and above run->position are
+ * discarded when it commits. Its own rows become the next provisional window.
+ * Every other operation closes the window. Commit with run_commit; abort with
+ * draft_abort, which demands a restore once engine state was rewound. */
+LmbSegStatus lmb_seg_table_draft_begin(LmbSegTable *table,
+                                       const LmbSegRun *run,
+                                       const void *payload,
+                                       size_t payload_bytes, uint64_t now_ms);
+LmbSegStatus lmb_seg_table_draft_abort(LmbSegTable *table,
+                                       const LmbSegRun *run, int rewound);
 LmbSegStatus lmb_seg_table_run_commit(LmbSegTable *table,
                                       const LmbSegRun *run, uint64_t now_ms);
 LmbSegStatus lmb_seg_table_run_abort(LmbSegTable *table,

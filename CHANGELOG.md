@@ -13,6 +13,10 @@ a tag stay under Unreleased until a new tag is created.
   estimate and the reason. Estimates come from a short machine probe, link
   probes and calibration records, and were checked on fixtures only. See
   `docs/SPEED_PLANNER.md`.
+- The planner reads a released Qwen3.8 checkpoint: a `config.json` larger
+  than 64 KB is read whole (the released one is 72 KB) and the n-gram table
+  is accepted as FP8 shards, which is how the release stores it. A truncated
+  config and an integer table are still refused.
 - A computer can join a household with a short one-time code instead of the
   32-character key: `lumabri pair` and `lumabri join --code`, `/pair` and
   `/join` in the workspace, and Computers > Add a computer / I have a code on
@@ -20,6 +24,28 @@ a tag stay under Unreleased until a new tag is created.
   exchange, the tracker allows five attempts per code, and joining with the
   full key is unchanged. The exchange is checked against the published
   CPace and RFC 9380 test vectors; see docs/PAIRING.md.
+- Preparing a model on the computer that also holds its files is several
+  times faster. The donor's loader now reads blocks from the user's own
+  source directory instead of pulling them through the encrypted transport on
+  loopback, and SHA-256 uses the x86 SHA extensions when the CPU has them.
+  The 7.4 GB OLMoE Q8_0 checkpoint on one PC went from 119.5 s to 22.7 s with
+  an existing hash index. Integrity is unchanged: the local directory is only
+  a hint taken from a private, same-user record, and every block is verified
+  against the same authenticated per-MiB hashes as a block from a peer; a
+  mismatch retires the local file and the peers serve it. Weights are still
+  loaded fully into RAM and sealed before READY. Across computers, and on a
+  Windows donor, nothing changes. See
+  `docs/RESIDENT_RUNTIME.md#when-the-source-is-this-same-computer`.
+- Drafts across the segments (off by default; `--drafts`/`LUMABRI_DRAFTS`):
+  several candidate tokens cross the whole chain as one block of rows in one
+  network round, and each segment discards the rows whose candidate was
+  wrong. Replies are identical to decode without drafts, greedy and seeded
+  sampling alike. Prompt lookup is the draft source; OLMoE and Qwen3.8
+  segments support rollback (Qwen3.8 keeps one copy of its recurrent state
+  per row). A chain with an older or unsupporting segment decodes as before.
+  DeepSeek V4.1 is not wired; `docs/DRAFTS.md` says why and how. New
+  `LMB_SEG_DRAFT` operation, `DRAFTS1` in `STAT`,
+  `draft_metrics` in `segment_chat --json`, `make test-drafts`.
 - Release archives: `.github/workflows/release.yml` builds one self-contained
   CPU archive for Windows x86-64, Linux x86-64 and ARM64, macOS Apple Silicon
   and Intel, on a `v*` tag or by hand. Each archive is verified, unpacked and
@@ -28,6 +54,15 @@ a tag stay under Unreleased until a new tag is created.
   archives link OpenMP statically and need only glibc 2.35 and, for model
   download, the system libcurl. Linux packages now carry `SHA256SUMS` like
   macOS. The archives are unsigned. See `docs/RELEASE_ARCHIVES.md`.
+- Qwen3.8's own draft head (MTP) proposes the drafts (`--drafts head|auto`)
+  when the model's GGUF carries it (`nextn_predict_layers = 1`, block
+  `layers`). The Edge loads the head resident, with all of its experts and
+  none of the model's layers, and keeps the head's rows per conversation.
+  Its proposals equal the unmodified engine's head token for token. The
+  planner prices the head at the Edge whenever the file has one; a GGUF with
+  a head was refused before and is now accepted. A head in a separate
+  `mtp-*.gguf` or in safetensors is not read yet, and the saving on the real
+  checkpoint is not measured yet.
 - `lumabri start` no longer fails its first model on computers with a small
   locked-memory allowance: when no residency policy was requested, its sharing
   service locks a load whose reservation fits the allowance and otherwise

@@ -65,6 +65,7 @@
 #include "lumabri_sha.h"
 #include "lumabri_sign.h"
 #include "src/runtime/lumabri_prepare_limits.h"
+#include "src/runtime/lumabri_local_source.h"
 
 #define FD_LIMIT      65536
 #define MAX_RPEERS    32
@@ -167,6 +168,8 @@ typedef struct {
     char truth_model[64];
     uint8_t truth_sig[64];
     int truth_has_sig;
+    int local_state;      /* same-computer source: 0 untried · 1 open · 2 retired */
+    int local_fd;
     pthread_mutex_t lk;
     pthread_mutex_t commit_lk;
     pthread_cond_t cv;
@@ -191,6 +194,10 @@ static struct {
     _Atomic int dense_state;        /* 0 off · 1 running · 2 ready · 3 failed */
     int direct_weights;
     _Atomic int weights_sealed;
+    /* Directory this same user publishes the model from, on this computer.
+     * A hint for where verified bytes may be read; see local_source_block. */
+    char local_root[LMB_LOCAL_SOURCE_ROOT_MAX];
+    _Atomic uint64_t local_bytes, local_blocks;
     pthread_once_t once;
 } g = { .cache_lock_fd = -1, .reset_lock_fd = -1, .once = PTHREAD_ONCE_INIT };
 
@@ -534,7 +541,7 @@ static RFile *file_add(const char *rel, uint64_t size) {
     memset(f, 0, sizeof *f);
     snprintf(f->rel, sizeof f->rel, "%s", rel);
     f->size = size;
-    f->wfd = f->map_fd = -1;
+    f->wfd = f->map_fd = f->local_fd = -1;
     return f;
 }
 
@@ -862,6 +869,7 @@ static pthread_mutex_t pf_lk = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t pf_cv = PTHREAD_COND_INITIALIZER;
 
 static int ensure_block(RFile *f, uint32_t blk);      /* fwd */
+static void local_source_discover(void);              /* fwd */
 static int ensure_range(RFile *f, uint64_t off, uint64_t len);   /* fwd */
 
 static void *prefetch_thread(void *arg) {
@@ -1425,6 +1433,7 @@ static void shim_init_impl(void) {
             pthread_detach(t);
         else atomic_store(&g.dense_state, 3);
     }
+    if (g.direct_weights) local_source_discover();
     fprintf(stderr, "[lumabri] %d files · %.1f GB · %.1f%% already local · "
                     "%d peer(s) · block %u MiB · prefetch %d%s\n",
             g.nfiles, (double)total / 1e9,
@@ -1947,6 +1956,97 @@ static int ensure_range(RFile *f, uint64_t off, uint64_t len) {
 
 static int ensure_full(RFile *f) { return ensure_range(f, 0, f->size); }
 
+/* ---- same-computer source ---------------------------------------------
+ *
+ * Resident preparation only. When this user also publishes the model from
+ * this computer, the launcher leaves a record of the directory (see
+ * lumabri_local_source.h) and the blocks are read from those files instead
+ * of travelling through the encrypted transport on loopback. The record and
+ * the path are hints: a block is used only after it hashes to the same
+ * authenticated truth a peer's block must hash to, and the first mismatch
+ * retires the file so the peers serve the rest. Bytes still go straight into
+ * engine memory; nothing is mapped and nothing is read after the seal. */
+static void local_source_discover(void) {
+    const char *dir = getenv(LMB_LOCAL_SOURCES_ENV), *model = getenv("LUMABRI_MODEL");
+    if (!dir || dir[0] != '/' || !lmb_local_source_name_ok(model)) return;
+    int dfd = real_open(dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (dfd < 0) return;
+    struct stat st;
+    char root[LMB_LOCAL_SOURCE_ROOT_MAX];
+    ssize_t got = -1;
+    int fd = -1;
+    if (!fstat(dfd, &st) && S_ISDIR(st.st_mode) && lmb_local_source_private(&st))
+        fd = real_openat(dfd, model, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    if (fd >= 0 && !fstat(fd, &st) && S_ISREG(st.st_mode) && lmb_local_source_private(&st) &&
+        st.st_size > 1 && st.st_size < (off_t)sizeof root)
+        do got = real_pread(fd, root, (size_t)st.st_size, 0);
+        while (got < 0 && errno == EINTR);
+    if (fd >= 0) real_close(fd);
+    real_close(dfd);
+    if (got < 2 || root[0] != '/' || memchr(root, 0, (size_t)got) ||
+        memchr(root, '\n', (size_t)got)) return;
+    root[got] = 0;
+    /* the directory itself must be this user's too */
+    if (stat(root, &st) || !S_ISDIR(st.st_mode) || st.st_uid != geteuid()) return;
+    snprintf(g.local_root, sizeof g.local_root, "%s", root);
+    fprintf(stderr, "[lumabri] this computer also holds the model (%s): blocks are read "
+                    "from its files and verified against the same truth\n", g.local_root);
+}
+
+static void local_source_retire(RFile *f) {
+    if (f->local_fd >= 0) real_close(f->local_fd);
+    f->local_fd = -1;
+    f->local_state = 2;
+}
+
+/* One verified block from this computer's own copy, or NULL: the caller then
+ * asks the peers exactly as if no local copy existed. Caller serializes. */
+static uint8_t *local_source_block(RFile *f, uint64_t off, uint32_t len) {
+    if (!g.local_root[0] || f->local_state == 2 || f->hstate != 1) return NULL;
+    if (!f->local_state) {
+        char path[LMB_LOCAL_SOURCE_ROOT_MAX + LMB_PATH_MAX + 2];
+        struct stat st;
+        f->local_state = 2;
+        if (!lmb_rel_ok(f->rel) ||
+            path_printf(path, sizeof path, "%s/%s", g.local_root, f->rel)) return NULL;
+        int fd = real_open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+        if (fd < 0) return NULL;
+        if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_uid != geteuid() ||
+            (uint64_t)st.st_size != f->size) {
+            fprintf(stderr, "[lumabri] local copy of %s is not the announced file "
+                            "(owner, type or size) — using the peers\n", f->rel);
+            real_close(fd);
+            return NULL;
+        }
+#if defined(POSIX_FADV_SEQUENTIAL) && !defined(__APPLE__)
+        (void)posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
+#endif
+        f->local_fd = fd;
+        f->local_state = 1;
+    }
+    uint8_t *data = (uint8_t *)malloc(len ? len : 1);
+    if (!data) return NULL;
+    uint32_t got = 0;
+    while (got < len) {
+        ssize_t n = real_pread(f->local_fd, data + got, len - got, (off_t)(off + got));
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        got += (uint32_t)n;
+    }
+    if (got != len || block_verify(f, off, data, len)) {
+        fprintf(stderr, "[lumabri] local copy of %s %s at offset %llu — refusing the "
+                        "local file, using the peers\n", f->rel,
+                got != len ? "could not be read" : "does NOT match the authenticated truth",
+                (unsigned long long)off);
+        free(data);
+        local_source_retire(f);
+        return NULL;
+    }
+    atomic_fetch_add(&g.local_bytes, len);
+    atomic_fetch_add(&g.local_blocks, 1);
+    return data;
+}
+
 /* Bounded preparation buffers, never a second copy of the model. Bytes
  * travel from the authenticated source directly into engine-owned tensors.
  * The sparse descriptors exist for fstat/offset compatibility only: no
@@ -2003,6 +2103,13 @@ int lmb_weights_seal(void) {
     }
     fprintf(stderr, "[resident] preparation block cache: %llu fetches, %llu hits; buffers released\n",
             (unsigned long long)direct_weight_fetches, (unsigned long long)direct_weight_hits);
+    if (g.local_root[0]) {
+        uint64_t local = atomic_load(&g.local_blocks);
+        fprintf(stderr, "[resident] preparation source: %llu verified block(s) from this "
+                        "computer's own files, %llu from peers\n", (unsigned long long)local,
+                (unsigned long long)(direct_weight_fetches - local));
+        for (int i = 0; i < g.nfiles; i++) local_source_retire(&g.files[i]);
+    }
     pthread_mutex_unlock(&direct_weight_lock);
     fprintf(stderr, "[resident] weight input sealed; assigned weights prepared in engine memory\n");
     return 0;
@@ -2054,6 +2161,8 @@ static ssize_t direct_weight_read(RFile *f, void *buf, size_t n, off_t off) {
             }
             /* Evict before fetching, including authentication/hash failures. */
             free(block->data); memset(block, 0, sizeof *block);
+            block->data = local_source_block(f, start, len);
+            int from_peer = !block->data;
             for (int i = 0; i < f->npeers && !block->data; i++) {
                 uint8_t *data = peer_fetch(&g.peers[f->peer_idx[i]], f->rel, start, len);
                 if (data && block_verify(f, start, data, len)) {
@@ -2070,7 +2179,9 @@ static ssize_t direct_weight_read(RFile *f, void *buf, size_t n, off_t off) {
             }
             block->file = f; block->offset = start; block->length = len;
             direct_weight_fetches++;
-            atomic_fetch_add(&g.net_bytes, len); atomic_fetch_add(&g.net_blocks, 1);
+            if (from_peer) {
+                atomic_fetch_add(&g.net_bytes, len); atomic_fetch_add(&g.net_blocks, 1);
+            }
         }
         block->used = ++direct_weight_clock;
         size_t within = (size_t)(pos - start);

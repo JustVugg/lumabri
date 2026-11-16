@@ -78,6 +78,10 @@ typedef struct {
     uint32_t boundary_width;    /* zero: hidden; otherwise the actual Edge/Segment state width */
     uint64_t edge_resident_bytes;
     uint64_t edge_scratch_fixed_bytes;
+    /* A draft head that runs at the Edge (Qwen3.8 MTP): its own attention
+     * rows per conversation. Zero for every family without one. */
+    uint64_t edge_session_fixed_bytes, edge_session_token_bytes;
+    int draft_head;             /* the checkpoint carries a head the Edge can draft with */
     uint64_t segment_fixed_bytes;
     uint64_t session_fixed_bytes, session_token_bytes; /* engine-wide session allocations */
     uint64_t scratch_fixed_bytes, scratch_token_bytes;
@@ -228,7 +232,8 @@ static LmbRangeCost LMB_UNUSED lmb_estimate_edge(const LmbModelShape *m,
         if (m->memory_contract != 1 || !m->max_context || ctx > m->max_context) return c;
         c.resident_bytes = c.working_set_bytes = m->edge_resident_bytes;
         uint32_t width = m->boundary_width ? m->boundary_width : m->hidden;
-        c.state_bytes = lmb_size_mul(lmb_size_mul((uint64_t)ctx * width, 4),
+        c.state_bytes = lmb_size_mul(lmb_size_add(lmb_size_mul((uint64_t)ctx * width, 4),
+            lmb_size_add(m->edge_session_fixed_bytes, lmb_size_mul(m->edge_session_token_bytes, ctx))),
                                      sessions ? sessions : 1);
         c.scratch_bytes = lmb_size_add(m->edge_scratch_fixed_bytes, lmb_size_mul(m->vocab, 16));
         c.ok = lmb_size_add(c.resident_bytes, lmb_size_add(c.state_bytes,
@@ -347,6 +352,10 @@ static int LMB_UNUSED lmb_json_string(const char *object, const char *key,
 
 #include "planner_adapters/registry.h"
 
+/* A released config.json can be large: Qwen3.8-Flash-Next's is 72 KB. */
+#define LMB_PLAN_CONFIG_MAX (4u << 20)
+static int lmb_shape_from_json(const char *model_dir, const char *buf,
+                               int pipeline_index, LmbModelShape *out);
 static LMB_UNUSED int lmb_shape_from_config(const char *model_dir,
                                             LmbModelShape *out) {
     memset(out, 0, sizeof *out);
@@ -362,14 +371,29 @@ static LMB_UNUSED int lmb_shape_from_config(const char *model_dir,
         f=lmb_plan_fopen(path);pipeline_index=1;
     }
     if (!f) return -1;
-    char buf[65536];
-    size_t n = fread(buf, 1, sizeof buf - 1, f);
-    int invalid=ferror(f) || (n==sizeof buf-1 && fgetc(f)!=EOF);
+    /* Sized to the file, never to the limit: inside a Segment this buffer
+     * comes from the locked allocator, before the lock allowance is checked. */
+    long size = fseek(f, 0, SEEK_END) ? -1 : ftell(f);
+    if (size < 0 || (unsigned long)size >= LMB_PLAN_CONFIG_MAX || fseek(f, 0, SEEK_SET)) {
+        fclose(f); return -1;
+    }
+    char *buf = (char *)malloc((size_t)size + 1);
+    if (!buf) { fclose(f); return -1; }
+    size_t n = fread(buf, 1, (size_t)size, f);
+    int invalid=ferror(f) || n!=(size_t)size || fgetc(f)!=EOF;
     fclose(f);
-    if(invalid || memchr(buf,0,n)) return -1;
-    buf[n] = 0;
-    const char *end=lmb_plan_object_end(lmb_plan_space(buf));
-    if(!end || *lmb_plan_space(end)) return -1;
+    int rc = -1;
+    if(!invalid && !memchr(buf,0,n)) {
+        buf[n] = 0;
+        const char *end=lmb_plan_object_end(lmb_plan_space(buf));
+        if(end && !*lmb_plan_space(end)) rc = lmb_shape_from_json(model_dir, buf, pipeline_index, out);
+    }
+    free(buf);
+    return rc;
+}
+
+static int lmb_shape_from_json(const char *model_dir, const char *buf,
+                               int pipeline_index, LmbModelShape *out) {
 
     if (pipeline_index) {
         char kind[64];

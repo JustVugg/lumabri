@@ -474,12 +474,138 @@ static void test_concurrent_sessions(void) {
     lmb_seg_table_destroy(table);
 }
 
+/* Provisional rows: a draft may continue from inside the previous draft,
+ * never from before it, and nothing else may move a position backwards. */
+static void draft_step(LmbSegTable *table, const LmbSegOpen *open,
+                       unsigned seed, uint64_t sequence, uint64_t position,
+                       uint32_t rows, LmbSegStatus expected) {
+    int32_t tokens[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+    LmbSegRun run = make_run(open, seed, sequence, position, rows, rows ? tokens : NULL);
+    size_t bytes = 0;
+    if (rows && lmb_seg_run_payload_bytes(open, &run, &bytes)) bytes = 0;
+    uint8_t *payload = (uint8_t *)calloc(bytes ? bytes : 1, 1);
+    assert(payload);
+    LmbSegStatus status = lmb_seg_table_draft_begin(table, &run, payload, bytes, 200);
+    if (status != expected)
+        fprintf(stderr, "draft step %u: status %d, expected %d\n", seed, (int)status, (int)expected);
+    assert(status == expected);
+    if (status == LMB_SEG_STATUS_OK)
+        assert(lmb_seg_table_run_commit(table, &run, 201) == LMB_SEG_STATUS_OK);
+    free(payload);
+}
+
+static void test_draft_rows(void) {
+    LmbSegOpen open = make_open(&tiny_schemas[0], 510);
+    int32_t tokens[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+    uint8_t *body = NULL;
+    uint32_t body_len = 0;
+    int32_t decoded[8];
+
+    /* The draft envelope is the run envelope, plus a discard-only form that
+     * RUN itself keeps refusing. */
+    LmbSegRun discard = make_run(&open, 511, 3, 5, 0, NULL);
+    LmbSegRun out;
+    assert(lmb_seg_run_encode(&discard, &body, &body_len) != 0);
+    assert(!lmb_seg_draft_encode(&discard, &body, &body_len));
+    assert(lmb_seg_run_decode(body, body_len, &out, decoded, 8) != 0);
+    assert(!lmb_seg_draft_decode(body, body_len, &out, decoded, 8));
+    assert(out.rows == 0 && out.position == 5 && out.sequence == 3 && !out.token_ids);
+    assert(lmb_seg_draft_decode(body, body_len - 1, &out, decoded, 8) != 0);
+    free(body);
+    LmbSegRun rows = make_run(&open, 512, 0, 0, 4, tokens);
+    assert(!lmb_seg_draft_encode(&rows, &body, &body_len));
+    assert(!lmb_seg_draft_decode(body, body_len, &out, decoded, 8));
+    assert(out.rows == 4 && out.token_count == 4 && decoded[3] == 4);
+    free(body);
+
+    LmbSegTable *table = lmb_seg_table_create(2);
+    assert(table);
+    assert(lmb_seg_table_open(table, &open, 100) == LMB_SEG_STATUS_OK);
+    uint64_t sequence = 0, position = 0;
+    int needs_restore = 0;
+
+    /* A plain prefill of 6 rows: nothing in it is provisional. */
+    LmbSegRun prefill = make_run(&open, 520, 0, 0, 6, tokens);
+    size_t bytes = 0;
+    assert(!lmb_seg_run_payload_bytes(&open, &prefill, &bytes));
+    uint8_t *payload = (uint8_t *)calloc(bytes, 1);
+    assert(payload);
+    assert(lmb_seg_table_run_begin(table, &prefill, payload, bytes, 110) == LMB_SEG_STATUS_OK);
+    assert(lmb_seg_table_run_commit(table, &prefill, 111) == LMB_SEG_STATUS_OK);
+    free(payload);
+    draft_step(table, &open, 521, 1, 5, 2, LMB_SEG_STATUS_OUT_OF_ORDER); /* into the prefill */
+    draft_step(table, &open, 522, 1, 7, 2, LMB_SEG_STATUS_OUT_OF_ORDER); /* a gap */
+    draft_step(table, &open, 523, 2, 6, 2, LMB_SEG_STATUS_OUT_OF_ORDER); /* wrong sequence */
+
+    /* Block of 4 at 6..9; the model kept two rows, so the next block starts at 8. */
+    draft_step(table, &open, 524, 1, 6, 4, LMB_SEG_STATUS_OK);
+    assert(lmb_seg_table_state(table, &open.session_id, &sequence, &position, &needs_restore) == LMB_SEG_STATUS_OK);
+    assert(sequence == 2 && position == 10);
+    draft_step(table, &open, 525, 2, 6, 3, LMB_SEG_STATUS_OUT_OF_ORDER); /* the certain row stays */
+    draft_step(table, &open, 526, 2, 8, 3, LMB_SEG_STATUS_OK);           /* rows 8, 9 discarded */
+    assert(lmb_seg_table_state(table, &open.session_id, &sequence, &position, &needs_restore) == LMB_SEG_STATUS_OK);
+    assert(sequence == 3 && position == 11);
+    /* The window is the LAST draft only: 7 belonged to the one before. */
+    draft_step(table, &open, 527, 3, 7, 1, LMB_SEG_STATUS_OUT_OF_ORDER);
+    /* A plain RUN never rewinds, whatever is provisional. */
+    LmbSegRun plain = make_run(&open, 528, 3, 9, 1, tokens);
+    assert(!lmb_seg_run_payload_bytes(&open, &plain, &bytes));
+    payload = (uint8_t *)calloc(bytes, 1);
+    assert(payload);
+    assert(lmb_seg_table_run_begin(table, &plain, payload, bytes, 120) == LMB_SEG_STATUS_OUT_OF_ORDER);
+    free(payload);
+
+    /* Discard only: keep the rows below 9, then the window is closed. */
+    draft_step(table, &open, 529, 3, 9, 0, LMB_SEG_STATUS_OK);
+    assert(lmb_seg_table_state(table, &open.session_id, &sequence, &position, &needs_restore) == LMB_SEG_STATUS_OK);
+    assert(sequence == 4 && position == 9 && !needs_restore);
+    draft_step(table, &open, 530, 4, 8, 0, LMB_SEG_STATUS_OUT_OF_ORDER);
+
+    /* A retried draft is recognised, not run again; a different request
+     * under the same id is a conflict. */
+    LmbSegRun retry = make_run(&open, 531, 4, 9, 2, tokens);
+    assert(!lmb_seg_run_payload_bytes(&open, &retry, &bytes));
+    payload = (uint8_t *)calloc(bytes, 1);
+    assert(payload);
+    assert(lmb_seg_table_draft_begin(table, &retry, payload, bytes, 130) == LMB_SEG_STATUS_OK);
+    assert(lmb_seg_table_run_commit(table, &retry, 131) == LMB_SEG_STATUS_OK);
+    assert(lmb_seg_table_draft_begin(table, &retry, payload, bytes, 132) == LMB_SEG_STATUS_DUPLICATE);
+    payload[0] ^= 1;
+    assert(lmb_seg_table_draft_begin(table, &retry, payload, bytes, 133) == LMB_SEG_STATUS_CONFLICT);
+    payload[0] ^= 1;
+
+    /* An abort before the engine discarded anything changes nothing; after
+     * it, the table no longer trusts its own position. */
+    LmbSegRun failed = make_run(&open, 532, 5, 10, 2, tokens);
+    assert(lmb_seg_table_draft_begin(table, &failed, payload, bytes, 140) == LMB_SEG_STATUS_OK);
+    assert(lmb_seg_table_draft_abort(table, &failed, 0) == LMB_SEG_STATUS_OK);
+    assert(lmb_seg_table_state(table, &open.session_id, &sequence, &position, &needs_restore) == LMB_SEG_STATUS_OK);
+    assert(sequence == 5 && position == 11 && !needs_restore);
+    failed = make_run(&open, 533, 5, 10, 2, tokens);
+    assert(lmb_seg_table_draft_begin(table, &failed, payload, bytes, 141) == LMB_SEG_STATUS_OK);
+    assert(lmb_seg_table_draft_abort(table, &failed, 1) == LMB_SEG_STATUS_OK);
+    assert(lmb_seg_table_state(table, &open.session_id, &sequence, &position, &needs_restore) == LMB_SEG_STATUS_OK);
+    assert(needs_restore);
+    draft_step(table, &open, 534, 5, 10, 2, LMB_SEG_STATUS_NEEDS_RESTORE);
+    free(payload);
+
+    /* Rows past the session's context are refused before any engine sees them. */
+    LmbSegOpen small = make_open(&tiny_schemas[0], 540);
+    small.context_tokens = 4;
+    assert(lmb_seg_table_open(table, &small, 100) == LMB_SEG_STATUS_OK);
+    draft_step(table, &small, 541, 0, 0, 5, LMB_SEG_STATUS_BAD_REQUEST);
+    draft_step(table, &small, 542, 0, 0, 4, LMB_SEG_STATUS_OK);
+    draft_step(table, &small, 543, 1, 3, 2, LMB_SEG_STATUS_BAD_REQUEST);
+    lmb_seg_table_destroy(table);
+}
+
 int main(void) {
+    test_draft_rows();
     test_open_matrix();
     test_run_wire();
     test_control_wire();
     test_session_table();
     test_concurrent_sessions();
-    puts("SEGMENT V2: PASS (six state schemas, wire bounds, isolation, dedupe, fencing, TTL)");
+    puts("SEGMENT V2: PASS (six state schemas, wire bounds, isolation, dedupe, fencing, TTL, draft rows)");
     return 0;
 }

@@ -97,6 +97,11 @@ SEG_CLOSE      SEG_CLOSE_R
 SEG_HEALTH     SEG_HEALTH_R
 ```
 
+`SEG_DRAFT`/`SEG_DRAFT_R` is an additive seventh operation with the `SEG_RUN`
+envelope: its rows are provisional and the next request may take some of them
+back. It is offered per session in `SEG_OPEN_R` and described in
+[DRAFTS.md](DRAFTS.md).
+
 Every body starts with `SEG2` and protocol version 2. State-mutating requests
 carry all of:
 
