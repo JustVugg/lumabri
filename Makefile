@@ -1313,6 +1313,7 @@ test: all test_weight_cache test_key_rotation test_hedge test_local_fallback tes
 	python3 ./tests/integration/chat_ui_test.py
 	python3 ./tests/integration/home_flow_output_test.py
 	python3 ./tests/integration/package_household_test.py
+	python3 ./tests/integration/release_archive_test.py
 	python3 ./tests/integration/prepare_engine_source_test.py
 	python3 ./tests/integration/preload_path_test.py
 	python3 tests/ui_text_test.py

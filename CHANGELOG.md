@@ -22,6 +22,14 @@ a tag stay under Unreleased until a new tag is created.
   model and memory. `lumabri start` turns it on for a household it creates on
   a fresh installation and says so; existing installations stay off. Turning
   it off holds from the next request and unloads nothing. POSIX only for now.
+- Release archives: `.github/workflows/release.yml` builds one self-contained
+  CPU archive for Windows x86-64, Linux x86-64 and ARM64, macOS Apple Silicon
+  and Intel, on a `v*` tag or by hand. Each archive is verified, unpacked and
+  started on its runner (page, sign-in, first-model offer, `service stop`), and
+  a tag attaches the archives and `SHA256SUMS` to a draft release. Linux
+  archives link OpenMP statically and need only glibc 2.35 and, for model
+  download, the system libcurl. Linux packages now carry `SHA256SUMS` like
+  macOS. The archives are unsigned. See `docs/RELEASE_ARCHIVES.md`.
 - `lumabri start` no longer fails its first model on computers with a small
   locked-memory allowance: when no residency policy was requested, its sharing
   service locks a load whose reservation fits the allowance and otherwise

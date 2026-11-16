@@ -483,7 +483,7 @@ def gateway_tests(base, hub):
         reservation.bind(("127.0.0.1", 0)); port = reservation.getsockname()[1]
     env = {**os.environ, "HOME": temporary, "LUMABRI_PEER_KEY": temporary + "/peer.key",
            "LUMABRI_KNOWN_HOSTS": temporary + "/known", "LUMABRI_ADVERTISE": "127.0.0.1",
-           "LUMABRI_HOME_PORT_BASE": str(12000 + (port % 200) * 160),
+           "LUMABRI_HOME_PORT_BASE": str(12000 + (port % 120) * 160),
            "LUMABRI_NO_DISK_PROBE": "1", "LUMABRI_RAM_RESERVE_MB": "256"}
     for name in ("LUMABRI_ENCRYPT", "LUMABRI_TOKEN", "LUMABRI_HOME_FOREGROUND"):
         env.pop(name, None)
@@ -546,7 +546,11 @@ def gateway_tests(base, hub):
         assert not state.exists() or not (state / "state").exists()
 
         # ---- the list: what fits, what is too large, what is not available ----
+        # The keeper reports this computer's share a moment after `start` returns.
+        deadline = time.monotonic() + 60
         status, listing = call("GET", token)
+        while status == 200 and not listing["offered_memory_bytes"] and time.monotonic() < deadline:
+            time.sleep(0.2); status, listing = call("GET", token)
         assert status == 200 and listing["catalogue"] == "owner_file" and listing["downloader_available"] is True
         assert [m["id"] for m in listing["models"]] == ["tiny", "giant", "named"] and listing["unavailable_hidden"] == 1
         assert model(listing, "named")["named_files"] == 1 and model(listing, "named")["size_bytes"] == len(BIG)
