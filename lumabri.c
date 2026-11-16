@@ -5729,6 +5729,8 @@ int main(int argc, char **argv) {
         return cmd_join(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "donor-policy"))
         return cmd_donor_policy(argc - 2, argv + 2);
+    if (argc >= 2 && !strcmp(argv[1], "consent"))
+        return cmd_consent(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "models"))
         return cmd_models(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "worker"))
@@ -5766,6 +5768,7 @@ int main(int argc, char **argv) {
         "  lumabri worker --join HOST:PORT [--ram-gb N]              publish LAN inventory\n"
         "  lumabri donor --headless --join HOST:PORT --ram-gb N      supervised resident donor\n"
         "  lumabri donor-policy inspect | accept-current REVIEW      review/approve one local offer\n"
+        "  lumabri consent [status | on | off]                       accept this household's loads without asking\n"
         "  lumabri models --tracker HOST:PORT                       cluster planning preview\n"
         "  lumabri host --model NAME [--port 7350] [--tracker H:P]   hosted conversation service\n"
         "  lumabri status | limits | pause | resume                    resource governor\n"

@@ -530,7 +530,8 @@ static void api_connection_dispatch(int fd, int access_dir, unsigned port, const
     const char *preparation_after="/api/v1/preparation/after/";
     int preparation_page=!strncmp(request.path,preparation_after,strlen(preparation_after));
     int approval=!strcmp(request.path,"/api/v1/donor/approval");
-    int management=preparation || policy || elastic || capacity || capacity_apply || approval || !strncmp(request.path,"/api/v1/allocations/",20);
+    int consent=!strcmp(request.path,"/api/v1/donor/consent");
+    int management=preparation || policy || elastic || capacity || capacity_apply || approval || consent || !strncmp(request.path,"/api/v1/allocations/",20);
     if (!strcmp(request.path,"/api/v1/client-config") && !strcmp(request.method,"GET") && !request.length) {
         char origin[160];
         if (https_origin) snprintf(origin,sizeof origin,"%s",https_origin);
@@ -553,6 +554,10 @@ static void api_connection_dispatch(int fd, int access_dir, unsigned port, const
     else if (approval && !strcmp(request.method,"GET") && !request.length) {
         /* Reading a request is part of deciding it: same capability as POST. */
         if (lmb_management_allows(access_dir,&user)) api_donor_approval(fd,tracker,https_origin!=NULL,NULL,0);
+        else api_error(fd,403,"management_permission_required");
+    }
+    else if (consent && !strcmp(request.method,"GET") && !request.length) {
+        if (lmb_management_allows(access_dir,&user)) api_donor_consent(fd,https_origin!=NULL,NULL,0);
         else api_error(fd,403,"management_permission_required");
     }
     else if (!strcmp(request.method,"GET") && !strcmp(request.path,"/api/v1/session") && !request.length) {
@@ -617,6 +622,7 @@ static void api_connection_dispatch(int fd, int access_dir, unsigned port, const
             else if (policy) api_policy_http(fd,access_dir,tracker,body,at);
             else if (elastic) api_elastic_http(fd,access_dir,tracker,body,at);
             else if (approval) api_donor_approval(fd,tracker,https_origin!=NULL,body,at);
+            else if (consent) api_donor_consent(fd,https_origin!=NULL,body,at);
             else if (capacity_apply) api_capacity_apply_http(fd,access_dir,tracker,body,at);
             else if (capacity) api_capacity_http(fd,access_dir,tracker,request.path,body,at);
             else if (management) api_management(fd,access_dir,tracker,&user,&request,body,at);
