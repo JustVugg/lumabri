@@ -118,6 +118,9 @@ typedef struct {
     uint64_t restored_sequence;
     uint64_t restored_position;
     int restored_valid;
+    /* Rows one provisional run may carry inside this session's memory
+     * reservation; 0 when the session was not offered draft rows. */
+    uint32_t draft_rows;
 } NodeSession;
 
 typedef struct {
@@ -469,7 +472,7 @@ static int tracker_compute_send(LmbSocket fd, TrackerRegistration *r) {
 }
 
 static int segment_request_op(uint32_t op) {
-    return op == LMB_SEG_OPEN || op == LMB_SEG_RUN ||
+    return op == LMB_SEG_OPEN || op == LMB_SEG_RUN || op == LMB_SEG_DRAFT ||
            op == LMB_SEG_SNAPSHOT || op == LMB_SEG_RESTORE ||
            op == LMB_SEG_CLOSE || op == LMB_SEG_HEALTH;
 }
@@ -821,6 +824,15 @@ static int snapshot_read(void *opaque, void *data, size_t size) {
     return 0;
 }
 
+/* Whether this executor can take provisional rows back (docs/DRAFTS.md).
+ * LUMABRI_DRAFT_ROWS=0 makes it answer exactly as a release that predates
+ * drafts does, which is also how the mixed-version gate gets such a peer. */
+static int node_draft_rows(const Node *node) {
+    const char *setting = getenv("LUMABRI_DRAFT_ROWS");
+    if (setting && !strcmp(setting, "0")) return 0;
+    return lmb_segment_engine_draft_rows(node->engine);
+}
+
 static int handle_open(Node *node, LmbSocket fd, const LmbMsg *msg) {
     LmbSegOpen open;
     if (msg->pay_len || lmb_seg_open_decode(msg->body, msg->body_len, &open))
@@ -865,6 +877,13 @@ static int handle_open(Node *node, LmbSocket fd, const LmbMsg *msg) {
                     slot->used = 1;
                     slot->id = open.session_id;
                     slot->session = session;
+                    slot->draft_rows = 0;
+                    if (node_draft_rows(node) &&
+                        !lmb_segment_session_draft_room(
+                            session, node->session_memory_limit_bytes,
+                            &slot->draft_rows) &&
+                        slot->draft_rows > open.max_rows)
+                        slot->draft_rows = open.max_rows < 2 ? 0 : open.max_rows;
                     pthread_mutex_lock(&node->registration.lock);
                     node->registration.advert.active_sessions++;
                     pthread_mutex_unlock(&node->registration.lock);
@@ -893,22 +912,50 @@ static int handle_open(Node *node, LmbSocket fd, const LmbMsg *msg) {
     }
     LmbSegReply reply = make_reply(&open.session_id, &open.request_id,
                                    &open.owner, status);
+    if (status == LMB_SEG_STATUS_OK || status == LMB_SEG_STATUS_DUPLICATE) {
+        NodeSession *offered = session_lock_id(node, &open.session_id);
+        if (offered) {
+            if (offered->draft_rows)
+                reply.flags |= LMB_SEG_REPLY_DRAFT_ROWS |
+                               (offered->draft_rows << LMB_SEG_REPLY_DRAFT_ROWS_SHIFT);
+            pthread_mutex_unlock(&offered->lock);
+        }
+    }
     if (status == LMB_SEG_STATUS_OK || status == LMB_SEG_STATUS_DUPLICATE)
         reply_state(node, &reply);
     return send_reply(fd, LMB_SEG_OPEN_R, &reply, NULL, 0);
 }
 
-static int handle_run(Node *node, LmbSocket fd, const LmbMsg *msg) {
+/* RUN and DRAFT share one path. A DRAFT first discards the provisional rows
+ * at and above its position, then runs its own rows as the next provisional
+ * window; with no rows it only discards. */
+static int handle_run_op(Node *node, LmbSocket fd, const LmbMsg *msg, int draft) {
+    const uint32_t reply_op = draft ? LMB_SEG_DRAFT_R : LMB_SEG_RUN_R;
+    if (draft && !node_draft_rows(node))
+        return lmb_send(fd, LMB_ERR, "unsupported Segment operation", 29,
+                        NULL, 0);
     int32_t *tokens = calloc(node->cap.max_batch_rows, sizeof *tokens);
     if (!tokens) return -1;
     LmbSegRun run;
-    if (lmb_seg_run_decode(msg->body, msg->body_len, &run, tokens,
-                           node->cap.max_batch_rows)) {
+    if (draft ? lmb_seg_draft_decode(msg->body, msg->body_len, &run, tokens,
+                                     node->cap.max_batch_rows)
+              : lmb_seg_run_decode(msg->body, msg->body_len, &run, tokens,
+                                   node->cap.max_batch_rows)) {
         free(tokens);
         return -1;
     }
-    LmbSegStatus status = lmb_seg_table_run_begin(
-        node->table, &run, msg->pay, msg->pay_len, now_ms());
+    /* Sessions are serialized, so the position read here is the one the
+     * request is checked against: below it, rows are about to be discarded. */
+    uint64_t position_before = 0;
+    if (draft)
+        (void)lmb_seg_table_state(node->table, &run.session_id, NULL,
+                                  &position_before, NULL);
+    LmbSegStatus status = draft
+        ? lmb_seg_table_draft_begin(node->table, &run, msg->pay, msg->pay_len,
+                                    now_ms())
+        : lmb_seg_table_run_begin(node->table, &run, msg->pay, msg->pay_len,
+                                  now_ms());
+    int rewound = 0;
     LmbSegReply reply = make_reply(&run.session_id, &run.request_id,
                                    &run.owner, status);
     uint64_t run_compute_us = 0;
@@ -917,7 +964,7 @@ static int handle_run(Node *node, LmbSocket fd, const LmbMsg *msg) {
         if (slot && lmb_seg_id_equal(&slot->cached_request, &run.request_id) &&
             slot->cached_output) {
             reply_state(node, &reply);
-            int rc = send_reply(fd, LMB_SEG_RUN_R, &reply,
+            int rc = send_reply(fd, reply_op, &reply,
                                 slot->cached_output, slot->cached_bytes);
             pthread_mutex_unlock(&slot->lock);
             free(tokens);
@@ -930,9 +977,25 @@ static int handle_run(Node *node, LmbSocket fd, const LmbMsg *msg) {
         ColiSegmentSession *session = slot ? slot->session : NULL;
         size_t bytes = lmb_state_bytes(run.rows, node->cap.state_width,
                                        node->cap.state_dtype);
-        uint8_t *output = bytes ? malloc(bytes) : NULL;
+        uint8_t *output = bytes || (draft && !run.rows) ? malloc(bytes ? bytes : 1) : NULL;
+        char rewind_error[256] = "";
         if (!session || !output || bytes != msg->pay_len) {
             status = LMB_SEG_STATUS_INTERNAL;
+        } else if (draft && (!slot->draft_rows || run.rows > slot->draft_rows)) {
+            /* More rows than this session's reservation covers, or a
+             * session that was never offered any. */
+            status = LMB_SEG_STATUS_UNSUPPORTED;
+        } else if (draft && !run.rows) {
+            /* Nothing to run: the discard is the whole request. A refused
+             * rewind leaves the engine session as it was. */
+            if (lmb_segment_session_rewind(session, run.position, rewind_error,
+                                           sizeof rewind_error)) {
+                fprintf(stderr, "[segment-node %s %u:%u] draft rewind to position "
+                        "%llu refused: %s\n", node->advert.peer_name,
+                        node->advert.layer_begin, node->advert.layer_end,
+                        (unsigned long long)run.position, engine_error(rewind_error));
+                status = LMB_SEG_STATUS_INTERNAL;
+            }
         } else {
             uint64_t admission_began = lmb_compute_now();
             int admitted = lmb_resident_memory_check() ? -1 : lmb_run_gate_enter(&node->run_gate,
@@ -968,6 +1031,7 @@ static int handle_run(Node *node, LmbSocket fd, const LmbMsg *msg) {
                 .output_bytes = bytes,
                 .should_cancel = run_should_cancel,
                 .cancel_user_data = node,
+                .reserved_u64 = { draft ? LMB_SEGMENT_RUN_PROVISIONAL : 0 },
             };
             char error[256] = "";
             LmbComputePermit permit = LMB_COMPUTE_INVALID;
@@ -975,7 +1039,14 @@ static int handle_run(Node *node, LmbSocket fd, const LmbMsg *msg) {
             if (admitted == 1 && (!remaining || lmb_compute_acquire(&permit, remaining, run_should_cancel, node)))
                 status = LMB_SEG_STATUS_BUSY;
             int run_failed = 0;
-            if (admitted == 1 && status == LMB_SEG_STATUS_OK) {
+            /* Discard only once the run is admitted: a busy or refused
+             * request must leave the provisional rows where they are. */
+            if (draft && admitted == 1 && status == LMB_SEG_STATUS_OK) {
+                if (lmb_segment_session_rewind(session, run.position, error,
+                                               sizeof error)) run_failed = 1;
+                else rewound = run.position < position_before;
+            }
+            if (admitted == 1 && status == LMB_SEG_STATUS_OK && !run_failed) {
                 uint64_t began = now_us();
                 run_failed = coli_segment_run(session, &request, error, sizeof error);
                 uint64_t ended = now_us();
@@ -1012,7 +1083,9 @@ static int handle_run(Node *node, LmbSocket fd, const LmbMsg *msg) {
             if (admitted == 1) lmb_run_gate_leave(&node->run_gate);
         }
         if (status != LMB_SEG_STATUS_OK) {
-            (void)lmb_seg_table_run_abort(node->table, &run);
+            /* Rows already discarded cannot come back: the table then asks
+             * for a restore instead of trusting its old position. */
+            (void)lmb_seg_table_draft_abort(node->table, &run, rewound);
             free(output);
             if (slot) pthread_mutex_unlock(&slot->lock);
         } else {
@@ -1021,7 +1094,7 @@ static int handle_run(Node *node, LmbSocket fd, const LmbMsg *msg) {
                 /* Only committed one-row RUNs represent steady decode cost.
                  * Failed, cancelled, duplicate, prefill and replay requests
                  * never update the advertised compute estimate. */
-                if (run.rows == 1 && run_compute_us) {
+                if (!draft && run.rows == 1 && run_compute_us) {
                     pthread_mutex_lock(&node->registration.lock);
                     lmb_seg_compute_observe(&node->registration.compute,
                                             run_compute_us);
@@ -1053,7 +1126,7 @@ static int handle_run(Node *node, LmbSocket fd, const LmbMsg *msg) {
                 slot->snapshot_bytes = 0;
                 reply.status = status;
                 reply_state(node, &reply);
-                int rc = send_reply(fd, LMB_SEG_RUN_R, &reply, output, bytes);
+                int rc = send_reply(fd, reply_op, &reply, output, bytes);
                 pthread_mutex_unlock(&slot->lock);
                 free(tokens);
                 return rc;
@@ -1065,7 +1138,11 @@ static int handle_run(Node *node, LmbSocket fd, const LmbMsg *msg) {
     }
     reply_state(node, &reply);
     free(tokens);
-    return send_reply(fd, LMB_SEG_RUN_R, &reply, NULL, 0);
+    return send_reply(fd, reply_op, &reply, NULL, 0);
+}
+
+static int handle_run(Node *node, LmbSocket fd, const LmbMsg *msg) {
+    return handle_run_op(node, fd, msg, 0);
 }
 
 static int handle_snapshot(Node *node, LmbSocket fd, const LmbMsg *msg) {
@@ -1371,6 +1448,7 @@ static void *connection_worker(void *opaque) {
         else if (msg.op == LMB_HOME_EXPERT || msg.op == LMB_HOME_FEATURES)
             rc = handle_home_expert(node, fd, &msg);
         else if (msg.op == LMB_SEG_RUN) rc = handle_run(node, fd, &msg);
+        else if (msg.op == LMB_SEG_DRAFT) rc = handle_run_op(node, fd, &msg, 1);
         else if (msg.op == LMB_SEG_SNAPSHOT) rc = handle_snapshot(node, fd, &msg);
         else if (msg.op == LMB_SEG_RESTORE) rc = handle_restore(node, fd, &msg);
         else if (msg.op == LMB_SEG_CLOSE || msg.op == LMB_SEG_HEALTH)

@@ -22,7 +22,7 @@ def main():
         # to the LAN, and a household running on this machine is not touched.
         env = {**os.environ, "HOME": temporary, "LUMABRI_PEER_KEY": temporary + "/peer.key",
                "LUMABRI_KNOWN_HOSTS": temporary + "/known", "LUMABRI_ADVERTISE": "127.0.0.1",
-               "LUMABRI_HOME_PORT_BASE": str(12000 + (port % 200) * 160),
+               "LUMABRI_HOME_PORT_BASE": str(12000 + (port % 120) * 160),
                "LUMABRI_NO_DISK_PROBE": "1", "LUMABRI_RAM_RESERVE_MB": "256"}
         for name in ("LUMABRI_ENCRYPT", "LUMABRI_TOKEN", "LUMABRI_HOME_FOREGROUND"):
             env.pop(name, None)

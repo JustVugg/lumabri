@@ -22,6 +22,10 @@ hash-checked build copy of the engine into the household binaries.
   state. Immutable weights are shared. Reset/reopen does not reload the weights.
 - Prefill and decode use **single-row execution**. Multi-row RUN is refused.
   Cancellation is checked between tokens, not in the middle of a kernel.
+- Drafts across segments are not available: the per-token feedback from the
+  chain's tail to its head means a block of rows cannot cross it in one
+  round, and DSpark needs hidden states of layers the Edge does not hold
+  ([DRAFTS.md](DRAFTS.md)).
 - GPU, vision, DSpark, disk streaming and state snapshots are not advertised.
   Recovery uses the existing history replay path, not a fabricated snapshot.
   Loader failures stay in the supervised runtime subprocess.

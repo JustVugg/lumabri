@@ -47,6 +47,19 @@ static void turn_tests(void) {
     CHECK(!lmb_turn_observation(&record,&seed,&seed.key,stat,1,"cpu-test",15.5,1000,LMB_CAL_SOURCE_SESSION), "valid completed turn rejected");
     CHECK(record.generated_tokens==9 && record.prompt_tokens==20 && record.decode_tok_s==4 &&
           record.ttft_seconds==15.5 && record.stage_count==2 && record.samples==1, "turn fields diverged");
+    /* Drafts: 5 rounds selected the 8 decode tokens; 3 of them carried one
+     * row and are the timed steps. Stage evidence must survive. */
+    LmbCalibration drafted;
+    const char *draft_stat="STAT 9 4 0 0 20 0 STOP1 length DRAFTS1 5 8 6 3 0 STAGES1 2 0 22 3 0.3 22 44 3 0.45 PERF1 9 8 15 2 17.2";
+    CHECK(!lmb_turn_observation(&drafted,&seed,&seed.key,draft_stat,1,"cpu-test",15.5,1000,LMB_CAL_SOURCE_SESSION) &&
+          drafted.stage_count==2 && fabs(drafted.stage_decode_seconds[0]-0.1)<1e-12 &&
+          fabs(drafted.stage_decode_seconds[1]-0.15)<1e-12, "one-row rounds of a drafted turn lost their stage evidence");
+    const char *uneven="STAT 9 4 0 0 20 0 STOP1 length DRAFTS1 5 8 6 3 0 STAGES1 2 0 22 3 0.3 22 44 2 0.45 PERF1 9 8 15 2 17.2";
+    CHECK(!lmb_turn_observation(&drafted,&seed,&seed.key,uneven,1,"cpu-test",15.5,1000,LMB_CAL_SOURCE_SESSION) &&
+          drafted.stage_count==0, "ranges that timed different steps were accepted");
+    const char *too_many="STAT 9 4 0 0 20 0 STOP1 length DRAFTS1 5 8 6 3 0 STAGES1 2 0 22 6 0.3 22 44 6 0.45 PERF1 9 8 15 2 17.2";
+    CHECK(!lmb_turn_observation(&drafted,&seed,&seed.key,too_many,1,"cpu-test",15.5,1000,LMB_CAL_SOURCE_SESSION) &&
+          drafted.stage_count==0, "more timed steps than rounds were accepted");
     seed=record;
     CHECK(!lmb_turn_observation(&record,&seed,&seed.key,stat,1,"cpu-test",16,1001,LMB_CAL_SOURCE_SESSION) &&
           record.samples==2, "same-condition completed turn not counted");

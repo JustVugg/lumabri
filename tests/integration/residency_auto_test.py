@@ -60,7 +60,7 @@ class Household:
             reservation.bind(("127.0.0.1", 0)); self.port = reservation.getsockname()[1]
         self.env = {**os.environ, "HOME": str(self.home), "LUMABRI_PEER_KEY": str(self.home / "peer.key"),
                     "LUMABRI_KNOWN_HOSTS": str(self.home / "known"), "LUMABRI_ADVERTISE": "127.0.0.1",
-                    "LUMABRI_HOME_PORT_BASE": str(12000 + (self.port % 200) * 160),
+                    "LUMABRI_HOME_PORT_BASE": str(12000 + (self.port % 120) * 160),
                     "LUMABRI_NO_DISK_PROBE": "1", "LUMABRI_RAM_RESERVE_MB": "256"}
         for name in ("LUMABRI_ENCRYPT", "LUMABRI_TOKEN", "LUMABRI_HOME_FOREGROUND", "LUMABRI_RESIDENT_REQUIRED",
                      "LUMABRI_RESIDENCY_POLICY"):
