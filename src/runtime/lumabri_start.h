@@ -60,7 +60,7 @@ static int start_local_user(int dir, char token[98], int *created) {
     int lock=-1;
     for (unsigned attempt=0; attempt<40 && lock<0; attempt++) {
         lock=lmb_api_access_lock(dir);
-        if (lock<0) { if (errno!=EAGAIN && errno!=EWOULDBLOCK) return -1; (void)poll(NULL,0,50); }
+        if (lock<0) { if (errno!=EAGAIN && errno!=EWOULDBLOCK) return -1; home_service_wait_ms(50); }
     }
     if (lock<0) return -1;
     int rc=-1; LmbApiUser user;
@@ -79,6 +79,9 @@ static int start_local_user(int dir, char token[98], int *created) {
     lmb_api_wipe(&user,sizeof user);
     close(lock); return rc;
 }
+#ifdef _WIN32
+#include "src/runtime/lumabri_start_windows.h"
+#else
 /* Inference grants name exact approved allocations; there is no wildcard and
  * none is invented here. Give the local identity every plan and managed model
  * this household has approved so far, through the ordinary grant command.
@@ -357,4 +360,5 @@ usage:
         "  --ram-gb N    memory a new household shares (default: about 60%% of this computer)\n");
     return 2;
 }
+#endif /* _WIN32 */
 #endif

@@ -274,3 +274,12 @@ preparation. It requires complete inference binaries from
 package gate reuses this flow, then switches to a separately built version and
 back with fresh approvals and chat after each switch. Physical mixed-machine
 acceptance is still a separate release check.
+
+`test_api_gateway_windows.exe` runs the actual `lumabri.exe` as the web
+gateway: the compiled page and its headers, Host checks, owner-only credential
+records (and refusal of a record whose access list was widened), operator and
+management capabilities, per-credential history, a streamed chat turn against
+an encrypted fixture host pinned by a saved plan, the routes that answer
+`not_available_on_windows_yet`, and `lumabri start --no-browser` with the real
+tracker. It needs only the `--only contracts` build. Preparing a model from
+the page with real donors is not covered by an automated gate yet.

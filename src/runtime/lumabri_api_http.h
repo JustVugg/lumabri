@@ -7,7 +7,11 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
+#ifdef _WIN32
+#include <ws2tcpip.h>
+#else
 #include <arpa/inet.h>
+#endif
 
 #define LMB_API_HEADER_MAX 8192u
 #define LMB_API_BODY_MAX (1u << 20)
