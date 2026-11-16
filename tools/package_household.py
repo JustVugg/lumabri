@@ -207,8 +207,11 @@ def package_windows(runtime, colibri, output, repository=ROOT, objdump="objdump"
     return manifest
 
 
-def package(runtime, colibri, output, repository=ROOT, openmp_prefix=None, pe_objdump="objdump", runtime_repository=None):
+def package(runtime, colibri, output, repository=ROOT, openmp_prefix=None, pe_objdump="objdump", runtime_repository=None,
+            static_openmp=False):
     system = platform.system()
+    if static_openmp and system != "Linux":
+        raise ValueError("statically linked OpenMP is a native Linux packaging option")
     if system == "Windows":
         if openmp_prefix is not None:
             raise ValueError("bundled OpenMP is a native macOS packaging option")
@@ -250,6 +253,15 @@ def package(runtime, colibri, output, repository=ROOT, openmp_prefix=None, pe_ob
                       (provenance, "licenses/OpenMP-SOURCE.json", 0o644)])
     report = {name: dependencies(runtime / name, system, library) if omp else dependencies(runtime / name, system)
               for name in (*BINARIES, shim)}
+    if static_openmp:
+        # A release archive must not need the builder's compiler runtime on
+        # the user's computer: libgomp is linked into the Segment programs
+        # (make OMP_LIBS='-Wl,-Bstatic -lgomp -Wl,-Bdynamic') and its notice ships.
+        linked = sorted(name for name, text in report.items() if "libgomp" in text)
+        if linked:
+            raise ValueError(f"OpenMP is not statically linked in: {', '.join(linked)}")
+        files.append((regular(repository / "deploy/linux-runtime-notices.txt"),
+                      "licenses/Linux-runtime-NOTICES.txt", 0o644))
     if omp:
         report["libomp.dylib"] = dependencies(library, system)
         if not any(Path(link).name == "libomp.dylib" for link in macos_links(report["segment_node"], runtime / "segment_node")):
@@ -274,6 +286,8 @@ def package(runtime, colibri, output, repository=ROOT, openmp_prefix=None, pe_ob
                 "dependencies": report, "files": {}}
     if omp:
         manifest["openmp"] = {**omp, "signature": "ad-hoc, not notarized"}
+    if static_openmp:
+        manifest["openmp"] = {"runtime": "GNU libgomp", "linkage": "static"}
     # No model-runtime provenance is inferred from a directory name: retain
     # hashes of the actual shipped bytes as well as source checkout metadata.
     output.mkdir(mode=0o755)
@@ -287,10 +301,11 @@ def package(runtime, colibri, output, repository=ROOT, openmp_prefix=None, pe_ob
         manifest["dependencies"] = {name: dependencies(
             output / (f"lib/lumabri/{name}" if name.endswith(".dylib") else f"bin/{name}"),
             system, output / "lib/lumabri/libomp.dylib", packaged=True) for name in report}
-    if system == "Darwin":
-        # Verify payloads with macOS's shipped shasum before executing an
-        # unsigned candidate; Python remains build tooling only. This does
-        # not authenticate the publisher or replace Gatekeeper approval.
+    # Linux and macOS alike (the Windows package has Verify-Lumabri.ps1).
+    if system in ("Linux", "Darwin"):
+        # Verify payloads with the system's own shasum/sha256sum before
+        # executing an unsigned candidate; Python remains build tooling only.
+        # This does not authenticate the publisher or replace Gatekeeper approval.
         sums = output / "SHA256SUMS"
         sums.write_text(''.join(f"{checksum(output / relative)}  {relative}\n"
                                 for _, relative, _ in files), encoding="utf-8")
@@ -348,6 +363,8 @@ def main():
                         help="read-only source checkout used for the native build, including LICENSE")
     parser.add_argument("--openmp-prefix", type=Path,
                         help="native LLVM OpenMP installation built by tools/build_macos_openmp.py")
+    parser.add_argument("--static-openmp", action="store_true",
+                        help="Linux release archive: require libgomp linked into the binaries and ship its notice")
     parser.add_argument("--pe-objdump", default="objdump", help="PE dependency inspector for the Windows build")
     parser.add_argument("--runtime-repository", type=Path,
                         help="exact source checkout of a separately built previous Windows runtime")
@@ -363,7 +380,8 @@ def main():
             print("Native candidate contents and hashes: PASS")
             return 0
         manifest = package(args.runtime_dir, args.colibri_root, args.output, openmp_prefix=args.openmp_prefix,
-                           pe_objdump=args.pe_objdump, runtime_repository=args.runtime_repository)
+                           pe_objdump=args.pe_objdump, runtime_repository=args.runtime_repository,
+                           static_openmp=args.static_openmp)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         print(f"Household candidate was not completed: {error}", file=sys.stderr)
         return 1

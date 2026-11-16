@@ -211,7 +211,7 @@ def main():
     # would have its own IP on a physical LAN. Reusing one loopback endpoint
     # for two different donor identities must (correctly) fail persistent
     # TOFU authentication; do not erase known_hosts to make a repeat pass.
-    service_base = 12000 + (port % 200) * 160
+    service_base = 12000 + (port % 120) * 160
     service_slots = {"donor-a": 1, "donor-b": 2, "reject": 3,
                      "chatter": 4, "chatter-repeat": 5, "chatter-parallel": 6}
 

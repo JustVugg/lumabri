@@ -61,7 +61,7 @@ class PackageTest(unittest.TestCase):
         self.assertEqual(set(p.name for p in (self.output / "bin").iterdir()), set(module.BINARIES))
         # The double-click start ships beside the launcher, which keeps its name.
         self.assertEqual({name for name in names if "/" not in name},
-                         {"manifest.json", "START_HERE.md", "start-lumabri", "start-here.sh"})
+                         {"manifest.json", "START_HERE.md", "start-lumabri", "start-here.sh", "SHA256SUMS"})
         self.assertEqual(result["files"]["start-here.sh"]["mode"], "0o755")
         self.assertEqual((self.output / "start-here.sh").read_bytes(), (ROOT / "deploy/start-here.sh").read_bytes())
         self.assertEqual((self.output / "start-lumabri").read_bytes(), (ROOT / "deploy/household-launcher.sh").read_bytes())

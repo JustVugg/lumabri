@@ -25,6 +25,19 @@ promising that every additional device makes inference faster.
 
 ![The household workspace](docs/images/workspace.png)
 
+## Download
+
+Each release has one archive per platform: Windows x86-64, Linux x86-64 and
+ARM64, macOS Apple Silicon and Intel. Unpack it and double-click
+`START-HERE.bat` (Windows), `START-HERE.command` (macOS) or `start-here.sh`
+(Linux). No Python or compiler is needed. The archives run on CPU.
+
+They are not code-signed. Compare the download with the release's `SHA256SUMS`
+first. Windows SmartScreen then needs **More info → Run anyway**; macOS needs
+**Open Anyway** under **System Settings → Privacy & Security**. See
+[release archives](docs/RELEASE_ARCHIVES.md) for contents, checks and what each
+platform needs.
+
 ## Connect your application
 
 Use the same resident service through OpenAI Chat Completions, OpenAI Responses

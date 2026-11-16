@@ -22,6 +22,14 @@ a tag stay under Unreleased until a new tag is created.
   DeepSeek V4.1 is not wired; `docs/DRAFTS.md` says why and how. New
   `LMB_SEG_DRAFT` operation, `DRAFTS1` in `STAT`,
   `draft_metrics` in `segment_chat --json`, `make test-drafts`.
+- Release archives: `.github/workflows/release.yml` builds one self-contained
+  CPU archive for Windows x86-64, Linux x86-64 and ARM64, macOS Apple Silicon
+  and Intel, on a `v*` tag or by hand. Each archive is verified, unpacked and
+  started on its runner (page, sign-in, first-model offer, `service stop`), and
+  a tag attaches the archives and `SHA256SUMS` to a draft release. Linux
+  archives link OpenMP statically and need only glibc 2.35 and, for model
+  download, the system libcurl. Linux packages now carry `SHA256SUMS` like
+  macOS. The archives are unsigned. See `docs/RELEASE_ARCHIVES.md`.
 - Qwen3.8's own draft head (MTP) proposes the drafts (`--drafts head|auto`)
   when the model's GGUF carries it (`nextn_predict_layers = 1`, block
   `layers`). The Edge loads the head resident, with all of its experts and
