@@ -5,6 +5,14 @@ a tag stay under Unreleased until a new tag is created.
 
 ## Unreleased
 
+- A range is reserved for its own tensors when the layer map is known. The
+  guard charged every range a proportional share of the checkpoint plus 5% of
+  the whole, which assumes equal layers. In a checkpoint where one layer holds
+  a large table (Qwen3.8-Flash-Next: about 30 GB in one layer of 48) the other
+  ranges were over-reserved by many gigabytes, and a model that fits in the
+  household's memory was reported as impossible to place. With an explicit
+  layer map the guard is now the described bytes plus 5%, never more than
+  before; estimates without a layer map are unchanged.
 - Choosing the next token no longer sorts the whole vocabulary. Sampling
   weighed and sorted every token on each step, which on a 248,000-token
   vocabulary cost more than the head projection. Only the heaviest tokens
