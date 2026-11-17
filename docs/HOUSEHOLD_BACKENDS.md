@@ -48,7 +48,14 @@ if the pinned engine source no longer matches.
 
 Measured on one computer (14 cores, one 24 GB card), real Qwen3.6 35B GGUF
 (Q4_K_M), whole model on that computer: 82 ms per token on the CPU, 34 ms with
-the card. Not measured: other cards, several cards, Windows.
+the card. The same model split between that computer (layers 11 to 40, on the
+card) and a second, CPU-only computer 55 to 70 ms away (layers 0 to 11, chat
+host): 192 ms per token, against 280 ms for a comparable split with both on
+the CPU. Not measured: other cards, several cards, Windows.
+
+Every computer of the household needs a runtime with this policy: an older
+chat host refuses a Segment that advertises `CPU | CUDA` and reports that no
+chain can be formed.
 
 Limits: Qwen3.6 only (`qwen36` engine; OLMoE, Qwen3.8 and the other families
 stay on the CPU); the catalogue's measured speed does not yet distinguish a
