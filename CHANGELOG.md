@@ -5,6 +5,14 @@ a tag stay under Unreleased until a new tag is created.
 
 ## Unreleased
 
+- Placement is chosen for speed: every computer that can hold a model alone is
+  a candidate, and a split is selected only when no single computer fits or
+  when it is estimated at least 5% faster. Reviewing one model with no
+  computer ticked lets the planner choose among all sharing computers; the
+  review, the API (`speed_plan`), the terminal and `--speed-plan` show the
+  estimate and the reason. Estimates come from a short machine probe, link
+  probes and calibration records, and were checked on fixtures only. See
+  `docs/SPEED_PLANNER.md`.
 - The planner reads a released Qwen3.8 checkpoint: a `config.json` larger
   than 64 KB is read whole (the released one is 72 KB) and the n-gram table
   is accepted as FP8 shards, which is how the release stores it. A truncated

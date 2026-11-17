@@ -843,6 +843,10 @@ static int home_donor_offer(HomeDonor *d, int incoming, const char *tracker,
             (void)lmb_send(incoming, LMB_OK, version, sizeof version, NULL, 0);
             lmb_msg_free(&m); return -1; /* capability probe grants no lease */
         }
+        if (m.op == LMB_LINK_PROBE) {
+            lmb_link_probe_serve(incoming, &m);
+            lmb_msg_free(&m); return -1; /* a bounded echo grants no lease */
+        }
         LmbCur c = {m.body, m.body_len, 0};
         rc = m.op != LMB_HOME_OFFER || m.pay_len ||
              lmb_home_offer_unpack(&c, &offer) ||

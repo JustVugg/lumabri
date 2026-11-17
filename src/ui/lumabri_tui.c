@@ -584,7 +584,11 @@ static void draw_workspace(const LmbTuiState *st, int tab, int sel, int detail,
                   m->shape.model_type, m->shape.layers, st->context, st->sessions);
         ui_printf(12, 5, UI_MUTED, "Support: %s (%s) · format: %s · verification: not recorded",
             lmb_catalogue_support_state(m), lmb_catalogue_tier(m), lmb_weight_format_name(m->weight_formats));
-        ui_printf(13, 5, UI_TEXT, "Plan: %s%s    Speed: %s", state_word(m), m->plan.hybrid ? " (Hybrid)" : "", speed);
+        char estimate[96] = "";
+        if (m->speed_planned && m->speed_estimated)
+            snprintf(estimate, sizeof estimate, "    Estimate: %.1f tok/s on %d computer%s", m->speed_tok_s,
+                     m->speed_computers, m->speed_computers == 1 ? "" : "s");
+        ui_printf(13, 5, UI_TEXT, "Plan: %s%s    Speed: %s%s", state_word(m), m->plan.hybrid ? " (Hybrid)" : "", speed, estimate);
         if (m->stage_cost_placement)
             ui_text(14, 5, UI_MUTED, "Placement guided by previous stage timings; changed ranges need calibration.");
         if (m->advice_flags)

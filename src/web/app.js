@@ -688,14 +688,19 @@ $("prepare-form").onsubmit = event => {
     const selected = id => Array.from($(id).querySelectorAll("input:checked"), input => input.value);
     const intent = {models: selected("prepare-models"), nodes: selected("prepare-nodes"),
       context: Number($("prepare-context").value), sessions: Number($("prepare-sessions").value), max_new: Number($("prepare-output").value)};
-    if (!intent.models.length || !intent.nodes.length) throw new Error("Choose at least one model and one computer.");
+    // No computer ticked: the planner chooses among every sharing computer, for one model at a time.
+    if (!intent.models.length) throw new Error("Choose at least one model.");
+    if (!intent.nodes.length && intent.models.length > 1) throw new Error("Choose the computers when preparing several models together.");
     preparationInvalidate();
     const data = await request("/api/v1/preparation", "POST", {action: "preview", ...intent});
     if (!valid()) return;
+    const speed = data.speed_plan, speedText = !speed ? "" : speed.status === "chosen" && speed.chosen.estimated_tok_s
+      ? `Estimated ${speed.chosen.estimated_tok_s.toFixed(1)} tokens per second. ${speed.reason}` : speed.reason || "";
+    if (!data.review) { $("prepare-status").textContent = speedText || "No placement was found."; return; }
     preparationReview = {intent, review: data.review};
     for (const model of data.plan.models) workspaceCard($("prepare-review"), model.name, model.slices.map(slice => [
       `Layers ${slice.begin}–${slice.end - 1}`, `${preparationNames.get(data.plan.nodes[slice.node].id) || data.plan.nodes[slice.node].id.slice(0, 12)} · ${gib(slice.reserved_bytes)} reserved${slice.node === model.edge_node ? " · chat host" : ""}`]));
-    $("prepare-start").hidden = false; $("prepare-status").textContent = "Resident Segment plan. Speed is not calibrated. Review and request approval below.";
+    $("prepare-start").hidden = false; $("prepare-status").textContent = `${speedText || "Resident Segment plan. Speed is not calibrated."} Review and request approval below.`;
   });
 };
 $("prepare-start").onclick = () => preparationTask(async valid => {

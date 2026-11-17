@@ -261,10 +261,17 @@ static LMB_UNUSED int lmb_home_plan_budgets(const LmbModelShape *shape,
         if (plan->hybrid) r.total_bytes = lmb_budget_add(r.total_bytes, lmb_home_hybrid_extra(shape));
         next = s->layer_end; has_edge += (uint32_t)edge;
         s->bytes_resident = r.total_bytes;
-        s->state = r.total_bytes <= nodes[s->node].ram_budget_bytes ?
-                   LMB_PLAN_RESIDENT : LMB_PLAN_UNRUNNABLE;
-        if (s->state == LMB_PLAN_UNRUNNABLE)
-            missing = lmb_budget_add(missing, r.total_bytes - nodes[s->node].ram_budget_bytes);
+        /* Two budgets, never summed. The CPU reservation asks for no VRAM,
+         * and inventoried VRAM is offered only to a need that names it. */
+        LmbMemoryBudget need = {r.total_bytes, r.vram_bytes};
+        LmbMemoryBudget offer = {nodes[s->node].ram_budget_bytes, nodes[s->node].vram_budget_bytes};
+        LmbAdmission admitted = lmb_budget_admit(&need, &offer);
+        if (admitted == LMB_ADMIT_INVALID) return -1;
+        s->state = admitted == LMB_ADMIT_OK ? LMB_PLAN_RESIDENT : LMB_PLAN_UNRUNNABLE;
+        if (admitted == LMB_ADMIT_RAM_SHORT)
+            missing = lmb_budget_add(missing, need.ram_bytes - offer.ram_bytes);
+        else if (admitted == LMB_ADMIT_VRAM_SHORT)
+            missing = lmb_budget_add(missing, need.vram_bytes - offer.vram_bytes);
     }
     if ((!plan->hybrid && next != shape->layers) || has_edge != 1) return -1;
     plan->missing_bytes = missing;

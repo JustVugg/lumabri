@@ -7,8 +7,9 @@
 #include "src/planner/lumabri_resource_facts.h"
 #include "src/planner/lumabri_workload_facts.h"
 #include "src/planner/lumabri_runtime_roles.h"
+#include "src/planner/lumabri_machine_speed.h"
 
-#define LMB_INVENTORY_VERSION 6u
+#define LMB_INVENTORY_VERSION 7u
 #define LMB_INVENTORY_MAX 32u
 #define LMB_INVENTORY_TTL_MS 15000u
 #define LMB_INVENTORY_HEARTBEAT_MS 5000u
@@ -24,6 +25,8 @@ typedef struct {
     LmbResourceFacts facts;
     LmbWorkloadFacts workload;
     LmbRuntimeRoles roles;
+    LmbMachineSpeed speed;      /* version 7: bounded self-probe; unknown on older peers */
+    LmbMachineLinks links;      /* version 7: this computer's own echoes to its peers */
 } LmbMachineReport;
 
 /* Lengths and control characters are checked before any field reaches a
@@ -59,7 +62,7 @@ static LMB_MAYBE_UNUSED int lmb_inventory_pack(LmbBuf *b,
     INV_U64(vram_total_bytes); INV_U64(vram_available_bytes);
     INV_U64(disk_available_bytes); INV_U64(disk_read_bps);
 #undef INV_U64
-    return lmb_buf_u64(b, r->ram_budget_bytes) || lmb_buf_str(b, r->control_addr) ||
+    if (lmb_buf_u64(b, r->ram_budget_bytes) || lmb_buf_str(b, r->control_addr) ||
            lmb_buf_str(b, r->runtime_id) || lmb_buf_u32(b, r->runtime_threads) ||
            lmb_buf_u32(b, r->facts.known) || lmb_buf_u32(b, r->facts.load_milli) ||
            lmb_buf_u64(b, r->facts.price_micro_per_hour) ||
@@ -70,7 +73,17 @@ static LMB_MAYBE_UNUSED int lmb_inventory_pack(LmbBuf *b,
            lmb_buf_u32(b, r->workload.queued) || lmb_buf_u64(b, r->workload.reserved_bytes) ||
            lmb_buf_bytes(b, r->workload.allocation_set, 32) ||
            lmb_buf_u32(b,r->roles.known) || lmb_buf_str(b,r->roles.segment) ||
-           lmb_buf_str(b,r->roles.edge) || lmb_buf_str(b,r->roles.hybrid);
+           lmb_buf_str(b,r->roles.edge) || lmb_buf_str(b,r->roles.hybrid)) return -1;
+    if (!lmb_machine_speed_valid(&r->speed) || !lmb_machine_links_valid(&r->links, r->identity) ||
+        lmb_buf_u32(b, r->speed.known) || lmb_buf_u64(b, r->speed.segment_bytes_per_s) ||
+        lmb_buf_u64(b, r->speed.edge_bytes_per_s) || lmb_buf_u32(b, r->speed.threads) ||
+        lmb_buf_u32(b, r->speed.age_seconds) || lmb_buf_u32(b, r->links.count)) return -1;
+    for (uint32_t i = 0; i < r->links.count; i++) {
+        const LmbMachineLink *l = &r->links.links[i];
+        if (lmb_buf_bytes(b, l->peer, 32) || lmb_buf_u32(b, l->rtt_micros) ||
+            lmb_buf_u64(b, l->bytes_per_s) || lmb_buf_u32(b, l->age_seconds)) return -1;
+    }
+    return 0;
 }
 
 static LMB_MAYBE_UNUSED int lmb_inventory_unpack(LmbCur *c,
@@ -120,6 +133,21 @@ static LMB_MAYBE_UNUSED int lmb_inventory_unpack(LmbCur *c,
         lmb_inventory_string(c,r->roles.edge,sizeof r->roles.edge) ||
         lmb_inventory_string(c,r->roles.hybrid,sizeof r->roles.hybrid) ||
         !lmb_runtime_roles_valid(&r->roles) || (r->roles.known && !r->runtime_id[0]))) return -1;
+    /* V6 peers remain usable; their speed and links stay unknown, never zero-cost. */
+    if (version >= 7) {
+        if (lmb_cur_u32(c, &r->speed.known) || lmb_cur_u64(c, &r->speed.segment_bytes_per_s) ||
+            lmb_cur_u64(c, &r->speed.edge_bytes_per_s) || lmb_cur_u32(c, &r->speed.threads) ||
+            lmb_cur_u32(c, &r->speed.age_seconds) || !lmb_machine_speed_valid(&r->speed) ||
+            lmb_cur_u32(c, &r->links.count) || r->links.count > LMB_MACHINE_LINKS_MAX) return -1;
+        for (uint32_t i = 0; i < r->links.count; i++) {
+            LmbMachineLink *l = &r->links.links[i];
+            if (c->off > c->len || c->len - c->off < 32) return -1;
+            memcpy(l->peer, c->p + c->off, 32); c->off += 32;
+            if (lmb_cur_u32(c, &l->rtt_micros) || lmb_cur_u64(c, &l->bytes_per_s) ||
+                lmb_cur_u32(c, &l->age_seconds)) return -1;
+        }
+        if (!lmb_machine_links_valid(&r->links, r->identity)) return -1;
+    }
     m->load_one = r->facts.known & LMB_FACT_LOAD ? r->facts.load_milli / 1000.0 : -1;
     if (r->runtime_threads > 256 || (!!r->runtime_threads != !!r->runtime_id[0])) return -1;
     if (r->runtime_id[0]) {

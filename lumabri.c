@@ -79,6 +79,7 @@
 #include "lumabri_checkpoint_identity.h"
 #include "lumabri_calibration_store.h"
 #include "src/runtime/lumabri_probe_deadline.h"
+#include "src/runtime/lumabri_machine_probe.h"
 
 /* Borrowed by the synchronous household chat only. Ordinary/legacy hosts
  * cannot create an entry without an approved plan and actual numeric metadata. */
@@ -4741,6 +4742,7 @@ static int catalog_calibration_dir(char out[1200]) {
 #include "src/planner/lumabri_stage_placement.h"
 
 #include "src/planner/lumabri_calibration_key.h"
+#include "src/planner/lumabri_speed_catalogue.h"
 
 static int catalog_runtime_revalidate_tracker(const char *tracker, const LmbCalKey *key,
     char *why, size_t cap) {
@@ -4834,6 +4836,21 @@ static int catalog_state_refresh(LmbTuiState *st, void *unused) {
         }
         st->nmodels++;
     }
+    /* One speed plan per model over the selected computers, or over every
+     * eligible one when none is selected. Text and estimate only: the plan a
+     * person approves is still the one they reviewed. */
+    LmbSpeedSnapshot *speed = st->tracker[0] && st->inventory_ok ? malloc(sizeof *speed) : NULL;
+    for (int i = 0; speed && i < st->nmodels; i++) {
+        LmbTuiModel *m = &st->models[i];
+        int rc = catalog_speed_build(st, i, 0, NULL, 0, speed);
+        m->speed_planned = rc >= 0 && speed->node_count;
+        if (!m->speed_planned) continue;
+        const LmbSpeedCandidate *c = rc ? NULL : &speed->decision.candidates[speed->decision.chosen];
+        m->speed_estimated = c && c->estimated; m->speed_tok_s = c ? c->tok_s : 0;
+        m->speed_computers = c ? (int)c->machines : 0;
+        snprintf(m->speed_reason, sizeof m->speed_reason, "%s", speed->decision.reason);
+    }
+    free(speed);
     catalog_advice_refresh(st);
     catalog_joint_refresh(st);
     free(found);
@@ -5074,7 +5091,7 @@ static void catalog_json(const LmbTuiState *st) {
 #include "src/runtime/lumabri_joint_prepare.h"
 
 static int cmd_models(int argc, char **argv) {
-    const char *root = NULL, *disk = ".", *keys = NULL, *tracker = NULL;
+    const char *root = NULL, *disk = ".", *keys = NULL, *tracker = NULL, *speed_model = NULL, *speed_current = NULL;
     uint32_t context = LMB_HOME_DEFAULT_CONTEXT, sessions = 1, max_new = 256;
     const char *together[LMB_PORTFOLIO_MODELS], *node_ids[LMB_CLUSTER_MAX_NODES];
     uint32_t ntogether = 0, nids = 0;
@@ -5087,6 +5104,8 @@ static int cmd_models(int argc, char **argv) {
         else if (!strcmp(argv[i], "--tracker") && i + 1 < argc) tracker = argv[++i];
         else if (!strcmp(argv[i], "--together") && i + 1 < argc && ntogether < LMB_PORTFOLIO_MODELS)
             together[ntogether++] = argv[++i];
+        else if (!strcmp(argv[i], "--speed-plan") && i + 1 < argc && !speed_model) speed_model = argv[++i];
+        else if (!strcmp(argv[i], "--current") && i + 1 < argc && !speed_current) speed_current = argv[++i];
         else if (!strcmp(argv[i], "--node") && i + 1 < argc && nids < LMB_CLUSTER_MAX_NODES) {
             const char *id = argv[++i]; uint8_t decoded[32];
             if (strlen(id) != 64 || lmb_unhex(decoded, id, sizeof decoded)) return 2;
@@ -5115,7 +5134,8 @@ static int cmd_models(int argc, char **argv) {
                             "[--disk PATH] [--context N] [--sessions N] [--tracker H:P]\n"
                             "                      [--plain|--json] [--snapshot] "
                             "[--keys SEQUENCE]\n"
-                            "  joint preview: --json --together NAME [--together NAME] --node ID [--node ID]\n");
+                            "  joint preview: --json --together NAME [--together NAME] --node ID [--node ID]\n"
+                            "  speed plan: --tracker H:P --speed-plan NAME [--node ID ...] [--current ID:B-E,...] [--json]\n");
             return 2;
         }
     }
@@ -5129,6 +5149,9 @@ static int cmd_models(int argc, char **argv) {
     memset(&st, 0, sizeof st);
     if (!max_new || max_new > 4096) return 2;
     st.context = context; st.sessions = sessions; st.max_new = max_new;
+    if (speed_model && (!tracker || ntogether)) {
+        fprintf(stderr, "A speed plan requires --tracker and one model name.\n"); return 2;
+    }
     if (ntogether && (!json || !tracker || !nids)) {
         fprintf(stderr, "Joint preview requires --json, --tracker and explicit --node selections.\n"); return 2;
     }
@@ -5139,6 +5162,44 @@ static int cmd_models(int argc, char **argv) {
         (tracker && checked_printf(st.tracker, sizeof st.tracker, "%s", tracker))) return 2;
     st.refresh = catalog_state_refresh;
     catalog_state_refresh(&st, NULL);
+    if (speed_model) {
+        /* Which computers should hold this model, at what estimated speed and
+         * why. Listed computers bound the choice; none listed means all. */
+        int found = -1, matches = 0;
+        for (int i = 0; i < st.nmodels; i++) if (!strcmp(speed_model, st.models[i].name)) { found = i; matches++; }
+        if (matches != 1) { fprintf(stderr, "No single model named %s in the catalogue.\n", speed_model); return 2; }
+        /* --current ID:BEGIN-END[,ID:BEGIN-END...] names the placement that
+         * is loaded now, chat host first. The answer is advice only. */
+        LmbClusterPlan current = {0}; int have_current = 0;
+        for (const char *p = speed_current; p && *p && current.nslices < LMB_CLUSTER_MAX_NODES; ) {
+            char id[65]; unsigned begin, end; int used = 0;
+            if (sscanf(p, "%64[0-9a-f]:%u-%u%n", id, &begin, &end, &used) != 3 || strlen(id) != 64 ||
+                begin >= end || (p[used] && p[used] != ',')) {
+                fprintf(stderr, "--current takes ID:BEGIN-END[,ID:BEGIN-END...], chat host first.\n"); return 2;
+            }
+            uint32_t node = UINT32_MAX;   /* a computer that left stays unknown */
+            for (uint32_t j = 0; j < st.nnodes; j++) if (!strcmp(id, st.identities[j])) node = j;
+            if (!current.nslices) current.edge_node = node;
+            current.slices[current.nslices++] = (LmbSlice){.node = node, .layer_begin = begin, .layer_end = end};
+            p += used + (p[used] == ','); have_current = 1;
+        }
+        /* The planner names ranges in layer order; the host need not hold the first. */
+        for (uint32_t a = 1; a < current.nslices; a++)
+            for (uint32_t b = a; b && current.slices[b].layer_begin < current.slices[b - 1].layer_begin; b--) {
+                LmbSlice x = current.slices[b]; current.slices[b] = current.slices[b - 1]; current.slices[b - 1] = x;
+            }
+        LmbSpeedSnapshot *speed = malloc(sizeof *speed);
+        if (!speed) return 1;
+        int rc = catalog_speed_build(&st, found, 0, have_current ? &current : NULL, 1, speed), status;
+        if (json) {
+            LmbSpeedText text = {0};
+            status = catalog_speed_json(&st, speed, rc, &text) ? 1 : rc ? 1 : 0;
+            if (text.p && !text.bad) printf("%s\n", text.p);
+            free(text.p);
+        } else status = catalog_speed_print(&st, speed, rc, stdout);
+        free(speed);
+        return status;
+    }
     if (ntogether) return catalog_portfolio_json(&st, together, ntogether);
     if (!plain) {
         int action = lmb_tui_run(&st, snapshot, keys);
@@ -5223,6 +5284,13 @@ static int cmd_worker(int argc, char **argv) {
             lmb_runtime_thread_capacity(runtime_binary, &runtime_threads) ||
             lmb_runtime_identity(runtime_dir, runtime_epoch, &runtime_cache, runtime_id)) return 1;
     }
+    /* Measured without being asked: this computer's speed when no valid
+     * record exists, and its link to every other household computer. */
+    LmbMachineSpeedState *speed_state = calloc(1, sizeof *speed_state);
+    LmbPeerLinkState *link_state = calloc(1, sizeof *link_state);
+    char speed_dir[1200];
+    int speed_stored = !catalog_calibration_dir(speed_dir);
+    if (!speed_state || !link_state) { free(speed_state); free(link_state); return 1; }
     printf("worker: reporting this computer to %s; waiting for a model plan\n", tracker);
     fflush(stdout);
     while (!g_stopping) {
@@ -5269,6 +5337,14 @@ static int cmd_worker(int argc, char **argv) {
                 }
             }
             if (lmb_governor_manual_paused()) report.ram_budget_bytes = 0;
+            if (control[0]) {
+                int idle = !report.workload.known || (!report.workload.active && !report.workload.queued);
+                lmb_machine_speed_refresh(speed_state, speed_stored ? speed_dir : NULL, &profile,
+                                          runtime_threads, idle);
+                report.speed = speed_state->speed;
+                lmb_peer_links_refresh(link_state, tracker, pk);
+                lmb_peer_links_export(link_state, &report.links);
+            }
             LmbBuf body = {0}, signed_data = {0};
             uint8_t sig[64];
             int bad = lmb_inventory_pack(&body, &report) ||
@@ -5295,6 +5371,7 @@ static int cmd_worker(int argc, char **argv) {
             for (int i = 0; i < 20 && !g_stopping; i++) (void)poll(NULL, 0, 100);
         }
     }
+    free(speed_state); free(link_state);
     memset(sk, 0, sizeof sk);
     return 0;
 }

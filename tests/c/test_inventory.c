@@ -85,6 +85,9 @@ int main(int argc, char **argv) {
     assert(!lmb_inventory_pack(&roles,&r) && decode(&roles));free(roles.p);
     r.roles=(LmbRuntimeRoles){0};
     /* V4 has no workload observations; V3 has no optional facts either. */
+    b.p[0] = 6; b.len -= 32; /* V7 unknown speed and an empty link list. */
+    cur = (LmbCur){b.p, b.len, 0};
+    assert(!lmb_inventory_unpack(&cur, &got) && !got.speed.known && !got.links.count && cur.off == cur.len);
     b.p[0] = 5; b.len -= 10; /* V6 empty role extension. */
     cur = (LmbCur){b.p, b.len, 0};
     assert(!lmb_inventory_unpack(&cur, &got) && !got.roles.known && cur.off == cur.len);
@@ -132,6 +135,35 @@ int main(int argc, char **argv) {
         if (i == 4) invalid.control_addr[0] = 0;
         b = (LmbBuf){0}; assert(!lmb_inventory_pack(&b, &invalid));
         assert(decode(&b)); free(b.p);
+    }
+    /* Version 7: what the computer measured about itself and its links. */
+    r = fixture();
+    r.speed = (LmbMachineSpeed){.known = LMB_SPEED_SEGMENT | LMB_SPEED_EDGE, .segment_bytes_per_s = 3000000000u,
+        .edge_bytes_per_s = 1500000000u, .threads = 4, .age_seconds = 60};
+    r.links.count = 2;
+    memset(r.links.links[0].peer, 2, 32); memset(r.links.links[1].peer, 3, 32);
+    r.links.links[0].rtt_micros = 350; r.links.links[0].bytes_per_s = 90000000u; r.links.links[0].age_seconds = 5;
+    r.links.links[1].rtt_micros = 4200; r.links.links[1].bytes_per_s = 6000000u;
+    b = (LmbBuf){0}; assert(!lmb_inventory_pack(&b, &r)); assert(!decode(&b));
+    cur = (LmbCur){b.p, b.len, 0};
+    assert(!lmb_inventory_unpack(&cur, &got) && !memcmp(&got.speed, &r.speed, sizeof r.speed) &&
+           got.links.count == 2 && got.links.links[1].rtt_micros == 4200 &&
+           got.links.links[0].bytes_per_s == 90000000u && !memcmp(got.links.links[1].peer, r.links.links[1].peer, 32));
+    for (size_t i = 0; i < b.len; i++) { LmbBuf cut = b; cut.len = i; assert(decode(&cut)); }
+    /* An older reader's version cannot carry the newer tail. */
+    b.p[0] = 6; assert(decode(&b)); free(b.p);
+    for (unsigned i = 0; i < 9; i++) {
+        LmbMachineReport invalid = r;
+        if (i == 0) invalid.speed.known = 4;
+        if (i == 1) invalid.speed.segment_bytes_per_s = 0;
+        if (i == 2) invalid.speed.threads = 0;
+        if (i == 3) invalid.speed.age_seconds = LMB_MACHINE_SPEED_TTL_SECONDS + 1;
+        if (i == 4) { invalid.speed = (LmbMachineSpeed){0}; invalid.speed.edge_bytes_per_s = 1; }
+        if (i == 5) memcpy(invalid.links.links[0].peer, invalid.identity, 32);      /* a link to itself */
+        if (i == 6) memcpy(invalid.links.links[1].peer, invalid.links.links[0].peer, 32);
+        if (i == 7) invalid.links.links[0].rtt_micros = 0;
+        if (i == 8) invalid.links.links[1].age_seconds = LMB_MACHINE_LINK_TTL_SECONDS + 1;
+        b = (LmbBuf){0}; assert(lmb_inventory_pack(&b, &invalid)); free(b.p);
     }
     if (argc == 2) {
         assert(!lmb_secure_init());

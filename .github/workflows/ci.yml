@@ -357,6 +357,8 @@ jobs:
           ./test_compute_broker
           make test_portfolio CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
           ./test_portfolio
+          make test_speed_plan CC=clang CFLAGS='-O2 -Wall -Wextra -Werror'
+          ./test_speed_plan
           ./test_chat_ui service-codec
           ./test_chat_ui home-settings
           python3 tests/integration/test_prerequisites_test.py
@@ -688,6 +690,7 @@ jobs:
           mkdir -p build/home-flow-models
           cp -a ../colibri/c/olmoe_tiny_merged build/home-flow-models/olmoe-tiny
           python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models
+          python3 tests/integration/speed_plan_flow_test.py --models-dir build/home-flow-models
           python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester
           make test_hosted_sessions
           LUMABRI_RESIDENCY_POLICY=engine-locked python3 tests/integration/household_service_flow_test.py --models-dir build/home-flow-models --keep-requester --multi-model --sessions 2

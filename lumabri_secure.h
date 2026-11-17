@@ -331,11 +331,12 @@ static LMB_MAYBE_UNUSED int lmb_secure_peer_id(LmbSocket fd, uint8_t pk[32]) {
     return have ? 0 : -1;
 }
 
-/* Household pairing only: an encrypted connection whose peer identity is
- * neither checked against a pin nor learned. The handshake still proves that
- * the peer holds the key it presents; whether that key is the right one is
- * for the caller to establish (a password-authenticated exchange bound to
- * it) before it calls lmb_sec_check_peer() and sends anything of value. */
+/* An encrypted connection whose peer identity is neither checked against a
+ * pin nor learned. The handshake still proves that the peer holds the key it
+ * presents; whether that key is the right one is for the caller to establish
+ * before it sends anything of value: pairing by a password-authenticated
+ * exchange bound to the key, followed by lmb_sec_check_peer(); a link
+ * measurement by lmb_secure_peer_matches() against the inventory. */
 static LMB_MAYBE_UNUSED LmbSocket lmb_secure_connect_unpinned(const char *addr, int timeout_ms,
                                                               int io_timeout_ms) {
     if (!lmb_secure_enabled()) { errno = EACCES; return LMB_INVALID_SOCKET; }
