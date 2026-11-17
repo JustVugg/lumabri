@@ -300,6 +300,20 @@ int main(void) {
     assert(!(r.segment_bytes % mib) && !(r.edge_bytes % mib));
     assert(r.total_bytes == r.segment_bytes + r.edge_bytes);
     assert(lmb_checkpoint_floor(101, 4, 1, 4) == 75 + 5);
+    {
+        /* One layer holds a table as large as the rest of the checkpoint. A
+         * range without it is guarded for its own tensors, not for a share
+         * of the table; a range with it is unchanged; and without a layer
+         * map the proportional share still applies. */
+        LmbModelShape uneven = {0};
+        uneven.layers = 4; uneven.memory_contract = 1;
+        const uint64_t table = 3000 * mib, layer = 100 * mib, whole = table + 4 * layer;
+        assert(lmb_range_weight_guard(&uneven, whole, 2, 4, 2 * layer) == 2 * layer + 2 * layer / 20);
+        assert(lmb_range_weight_guard(&uneven, whole, 2, 4, 2 * layer) < lmb_checkpoint_floor(whole, 4, 2, 4));
+        assert(lmb_range_weight_guard(&uneven, whole, 0, 2, table + 2 * layer) == lmb_checkpoint_floor(whole, 4, 0, 2));
+        uneven.memory_contract = 0;
+        assert(lmb_range_weight_guard(&uneven, whole, 2, 4, 2 * layer) == lmb_checkpoint_floor(whole, 4, 2, 4));
+    }
     assert(lmb_checkpoint_floor(1, 0, 0, 1) == UINT64_MAX);
     assert(lmb_budget_add(UINT64_MAX, 1) == UINT64_MAX);
     assert(lmb_budget_mib(UINT64_MAX - 1) == UINT64_MAX);

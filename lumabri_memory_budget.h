@@ -106,6 +106,20 @@ static LMB_UNUSED uint64_t lmb_checkpoint_floor(uint64_t bytes,
     return lmb_budget_add(share, bytes / 20u);
 }
 
+/* The weight bytes a range is guarded for. A historical estimate keeps the
+ * proportional share of the checkpoint plus 5% of the whole. That share
+ * assumes equal layers: when one layer holds a large table, every other
+ * range is charged for it, and a model that fits cannot be placed. With an
+ * explicit layer map the described bytes are the tensors actually assigned,
+ * so the guard is those bytes plus 5%, and never more than the old one. */
+static LMB_UNUSED uint64_t lmb_range_weight_guard(const LmbModelShape *shape,
+    uint64_t checkpoint_bytes, uint32_t begin, uint32_t end, uint64_t resident_bytes) {
+    uint64_t share = lmb_checkpoint_floor(checkpoint_bytes, shape->layers, begin, end);
+    if (shape->memory_contract != 1) return share;
+    uint64_t described = lmb_budget_add(resident_bytes, resident_bytes / 20u);
+    return described < share ? described : share;
+}
+
 static LMB_UNUSED int lmb_home_reservation_sessions(const LmbModelShape *shape,
     uint64_t checkpoint_bytes, uint32_t begin, uint32_t end,
     uint32_t context, uint32_t sessions, int runs_edge, LmbHomeReservation *out) {
@@ -114,7 +128,7 @@ static LMB_UNUSED int lmb_home_reservation_sessions(const LmbModelShape *shape,
     if (!shape || !sessions || sessions > LMB_HOST_MAX_SESSIONS || (runs_edge != 0 && runs_edge != 1)) return -1;
     LmbRangeCost segment = lmb_estimate_segment(shape, begin, end, context, sessions);
     if (!segment.ok) return -1;
-    uint64_t floor = lmb_checkpoint_floor(checkpoint_bytes, shape->layers, begin, end);
+    uint64_t floor = lmb_range_weight_guard(shape, checkpoint_bytes, begin, end, segment.resident_bytes);
     uint64_t live = lmb_budget_add(segment.state_bytes, segment.scratch_bytes);
     uint64_t guarded = lmb_budget_add(lmb_budget_add(floor, UINT64_C(128) << 20), live);
     uint64_t described = lmb_budget_add(segment.resident_bytes, live);

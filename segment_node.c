@@ -1839,6 +1839,12 @@ int main(int argc, char **argv) {
     if (!model_bytes && model_dir) model_bytes = directory_bytes(model_dir, 0);
     if (process_limit && model_bytes && model_layers) {
         uint64_t estimated = lmb_checkpoint_floor(model_bytes, model_layers, begin, end);
+        if (shaped && shape.sizing_verified && shape.memory_contract == 1 && end <= shape.layers) {
+            /* The same guard the plan used: the range's own tensors. */
+            LmbRangeCost described = lmb_estimate_segment(&shape, begin, end, 1, 1);
+            if (described.ok)
+                estimated = lmb_range_weight_guard(&shape, model_bytes, begin, end, described.resident_bytes);
+        }
         if (estimated > process_limit) {
             fprintf(stderr, "[segment-node] assigned range %u:%u needs about "
                     "%.1f GB but the donor budget is %.1f GB; releasing it "
