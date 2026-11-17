@@ -38,6 +38,15 @@ a tag stay under Unreleased until a new tag is created.
   about 25 ms, the plan's reason names that computer and the delay, and the
   API reports `slowest_link_seconds` and `slow_link`. The split is still
   planned when no single computer can hold the model.
+- A donor with an NVIDIA card can compute its Qwen3.6 layers on it. Built with
+  `make CUDA=1`, the Segment runtime links the engine's CUDA expert tier: the
+  weights stay resident in RAM as planned and approved, and the experts and
+  dense trunk of the assigned layers are also held and computed on the card
+  when its memory allows. The plan and the approval do not change, households
+  can mix donors with and without a card, and `LUMABRI_GPU=off` disables it.
+  Measured on one computer with a real Qwen3.6 35B GGUF: 82 ms per token on
+  the CPU, 34 ms with a 24 GB card. Default builds are unchanged. See
+  [household backends](docs/HOUSEHOLD_BACKENDS.md).
 - Placement is chosen for speed: every computer that can hold a model alone is
   a candidate, and a split is selected only when no single computer fits or
   when it is estimated at least 5% faster. Reviewing one model with no

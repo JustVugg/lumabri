@@ -22,7 +22,15 @@ int main(int argc, char **argv) {
     assert(lmb_backend_matches(backend, LMB_SEG_CAP_CPU | LMB_SEG_CAP_SNAPSHOT));
     assert(!lmb_backend_matches(backend, 0));
     assert(!lmb_backend_matches(backend, LMB_SEG_CAP_CUDA));
-    assert(!lmb_backend_matches(backend, LMB_SEG_CAP_CPU | LMB_SEG_CAP_CUDA));
+    /* RAM-resident weights that are also computed on a CUDA device still
+     * satisfy the CPU contract; every other combination does not. */
+    assert(lmb_backend_matches(backend, LMB_SEG_CAP_CPU | LMB_SEG_CAP_CUDA));
+    assert(!lmb_backend_matches(backend, LMB_SEG_CAP_CPU | LMB_SEG_CAP_VULKAN));
+    assert(!lmb_backend_matches(backend, LMB_SEG_CAP_CPU | LMB_SEG_CAP_CUDA | LMB_SEG_CAP_METAL));
+    /* This test is an ordinary build: a Segment never asks for CUDA in it. */
+    assert(lmb_backend_segment_request(backend, "cuda", "qwen36") == LMB_SEG_CAP_CPU);
+    assert(lmb_backend_segment_request(0, "cuda", "qwen36") == 0);
+    assert(!strcmp(lmb_backend_built(), "cpu"));
     assert(!lmb_backend_matches(LMB_SEG_CAP_CUDA, LMB_SEG_CAP_CUDA));
     assert(lmb_backend_matches(0, LMB_SEG_CAP_CUDA));
     const char *bad_backend[] = {"", "CPU", "cuda", "metal", "hip", "vulkan", "cpu ", "cpu,cuda"};
