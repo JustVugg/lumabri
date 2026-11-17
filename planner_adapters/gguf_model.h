@@ -79,7 +79,7 @@ static inline int lmb_gguf_load(const char *root,const char *ref,LmbGguf *out) {
         g.header_bytes=lmb_size_add(g.header_bytes,one.header_bytes);g.file_bytes=lmb_size_add(g.file_bytes,one.file_bytes);
         lmb_gguf_free(&one);
     }
-    if(expected_tensors && expected_tensors!=g.ntensors)goto fail;
+    if(!g.ntensors || (expected_tensors && expected_tensors!=g.ntensors))goto fail;
     qsort(g.tensors,g.ntensors,sizeof *g.tensors,lmb_gguf_tensor_cmp);
     for(uint32_t i=1;i<g.ntensors;i++)if(!strcmp(g.tensors[i-1].name,g.tensors[i].name))goto fail;
     *out=g;return 0;

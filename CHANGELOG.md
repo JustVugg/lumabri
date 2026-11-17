@@ -23,6 +23,11 @@ a tag stay under Unreleased until a new tag is created.
   GGUF print its end marker and run to the token limit. The id now comes from
   the checkpoint's `config.json`, with the names as a fallback. Checked with
   the published OLMoE-1B-7B-0125-Instruct Q4_K_M GGUF.
+- A split GGUF whose first part carries only the metadata is accepted. The
+  reader required tensors in every file and padding after every header, so
+  published three-part checkpoints such as Qwen3.8-Flash-Next were listed as
+  "GGUF import unavailable". A file without tensors is still not a checkpoint
+  by itself, and the parts together must declare tensors.
 - Placement is chosen for speed: every computer that can hold a model alone is
   a candidate, and a split is selected only when no single computer fits or
   when it is estimated at least 5% faster. Reviewing one model with no

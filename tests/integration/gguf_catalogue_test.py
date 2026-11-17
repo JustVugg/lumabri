@@ -18,11 +18,13 @@ with tempfile.TemporaryDirectory(prefix='lmb-gguf-catalogue-') as tmp:
         p=subprocess.run([str(binary),'models','--models-dir',str(path),'--context','128','--json'],
                          cwd=cwd,env=env,capture_output=True,text=True,check=True)
         return json.loads(p.stdout)['models']
-    for split in (False,True):
-        fixture=create(tmp/('fixture-split' if split else 'fixture-single'),mixed=True,byte_vocab=True,split=split)
-        raw=tmp/('raw-split' if split else 'raw-single');raw.mkdir()
+    for split in (False,True,'metadata-first'):
+        label='single' if not split else 'split' if split is True else 'split-metadata-first'
+        fixture=create(tmp/('fixture-'+label),mixed=True,byte_vocab=True,split=split)
+        raw=tmp/('raw-'+label);raw.mkdir()
         for part in fixture.glob('*.gguf'):shutil.copy2(part,raw/part.name)
-        first=raw/('weights-00001-of-00002.gguf' if split else 'weights.gguf')
+        count=len(list(raw.glob('*.gguf')))
+        first=raw/(f'weights-00001-of-{count:05}.gguf' if split else 'weights.gguf')
         originals={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in raw.glob('*.gguf')}
         for root,cwd in ((raw,None),(first,None),(first.name,raw)):
             models=catalogue(root,cwd)
@@ -44,7 +46,7 @@ with tempfile.TemporaryDirectory(prefix='lmb-gguf-catalogue-') as tmp:
         cfg.write_bytes(saved)
         assert catalogue(first)[0]['sizing_verified']
         if split:
-            second=raw/'weights-00002-of-00002.gguf';hold=raw/'held.part';second.rename(hold)
+            second=raw/f'weights-{count:05}-of-{count:05}.gguf';hold=raw/'held.part';second.rename(hold)
             assert not catalogue(first)[0]['planned'], 'missing part accepted from an old cache'
             hold.rename(second)
         # An abandoned private import cannot poison the next valid import.
@@ -55,8 +57,13 @@ with tempfile.TemporaryDirectory(prefix='lmb-gguf-catalogue-') as tmp:
         assert len(list(raw.glob('.lumabri-gguf-*')))==len(before)+2
     # User-owned symlink sources (e.g. local model snapshots) are resolved into
     # hard links; the resulting signed checkpoint contains no escaping paths.
+    # A file that declares no tensor is not a checkpoint by itself.
+    empty=tmp/'empty';empty.mkdir()
+    shutil.copy2(tmp/'raw-split-metadata-first/weights-00001-of-00003.gguf',empty/'weights.gguf')
+    models=catalogue(empty)
+    assert len(models)==1 and not models[0]['planned'],models
     links=tmp/'links';links.mkdir();(links/'weights.gguf').symlink_to(tmp/'raw-single/weights.gguf')
     assert catalogue(links)[0]['sizing_verified']
     wrapper=next(links.glob('.lumabri-gguf-*'))
     assert not (wrapper/'weights.gguf').is_symlink()
-print('GGUF CATALOGUE: PASS (raw files, splits, relative path, source identity, incomplete/corrupt import refusal)')
+print('GGUF CATALOGUE: PASS (raw files, splits, metadata-only first part, relative path, source identity, incomplete/corrupt import refusal)')

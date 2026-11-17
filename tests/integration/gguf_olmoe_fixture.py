@@ -76,6 +76,8 @@ def create(root, mixed=False, extra_metadata=(), byte_vocab=False, split=False, 
             add(prefix+name+'.weight', shape, 1 if mixed and layer == 1 else 8)
 
     parts=[tensors] if not split else [tensors[::2],tensors[1::2]]
+    # Published split checkpoints often keep the metadata alone in part one.
+    if split=='metadata-first': parts=[[]]+parts
     filenames=[]
     for part,group in enumerate(parts):
         kv=list(metadata) if not part else metadata[:2]
@@ -109,7 +111,7 @@ def create(root, mixed=False, extra_metadata=(), byte_vocab=False, split=False, 
                 f.write(header+b'\0'*(data_start-len(header)))
                 for at,data in writes:f.seek(at);f.write(data)
         else:
-            (root/filename).write_bytes(header+b'\0'*((-len(header)) % 32)+payload)
+            (root/filename).write_bytes(header+(b'\0'*((-len(header)) % 32) if group else b'')+payload)
     (root/'config.json').write_text(json.dumps(cfg))
     (root/'gguf.json').write_text(json.dumps({'format': 'colibri-gguf-v1', 'gguf': filenames[0]}))
     (root/'tokenizer.json').write_text(json.dumps({'model': {'type': 'BPE', 'vocab': dict(zip(tokens, range(vocab))), 'merges': []}}))
