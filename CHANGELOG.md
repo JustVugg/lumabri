@@ -11,6 +11,12 @@ a tag stay under Unreleased until a new tag is created.
   that already hold the nucleus mass are sorted now, and the draw is the same
   token as before for the same seed. Measured on one x86-64 computer with a
   real Qwen3.6 35B GGUF: 111 ms per token before, 80 ms after.
+- The engine is compiled for x86-64-v3 (AVX2, FMA, BMI2) by default on x86-64
+  Linux and Windows, as Colibri compiles its own release engines. The previous
+  baseline build ran the quantized row kernels as scalar code: a real Qwen3.6
+  35B GGUF decoded at 274 ms per token on one computer and at 111 ms with this
+  level. A processor without these instructions gets a refusal that names the
+  missing one instead of a crash. `ENGINE_CPU_FLAGS=` restores the baseline.
 - Placement is chosen for speed: every computer that can hold a model alone is
   a candidate, and a split is selected only when no single computer fits or
   when it is estimated at least 5% faster. Reviewing one model with no

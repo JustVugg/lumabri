@@ -12,8 +12,17 @@ SHIM_LIB = liblumabri.so
 SHIM_FLAGS = -shared -fPIC -ldl
 OMP_FLAGS = -fopenmp
 OMP_LIBS =
-# Optional CPU tuning for a locally built cluster. Distributed candidates stay
-# portable by default; -march=native binaries must not be copied to other CPUs.
+# The engine is compiled for x86-64-v3 (AVX2, FMA, BMI2), the level Colibri
+# builds its own release engines for. Without it the quantized row kernels fall
+# back to scalar code and a real checkpoint decodes several times slower. The
+# engine's own processor check refuses to start on a CPU without these
+# instructions and says which one is missing. ENGINE_CPU_FLAGS= restores a
+# baseline build; -march=native binaries must not be copied to other CPUs.
+ifeq ($(shell uname -m),x86_64)
+ifneq ($(PLATFORM),Darwin)
+ENGINE_CPU_FLAGS ?= -march=x86-64-v3
+endif
+endif
 ENGINE_CPU_FLAGS ?=
 ifeq ($(PLATFORM),Darwin)
 override CPPFLAGS += -D_DARWIN_C_SOURCE
