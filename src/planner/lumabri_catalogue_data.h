@@ -104,6 +104,11 @@ static void inventory_id_text(const uint8_t id[32], char out[65]) {
     for (size_t i = 0; i < 32; i++) snprintf(out + i * 2, 3, "%02x", id[i]);
 }
 
+static int catalog_report_order(const void *left, const void *right) {
+    return memcmp(((const LmbMachineReport *)left)->identity,
+                  ((const LmbMachineReport *)right)->identity, 32);
+}
+
 static int catalog_inventory(LmbTuiState *st) {
     memset(st->nodes, 0, sizeof st->nodes);
     memset(st->identities, 0, sizeof st->identities);
@@ -129,6 +134,11 @@ static int catalog_inventory(LmbTuiState *st) {
     if (lmb_inventory_fetch(st->tracker, reports, &n)) {
         st->inventory_ok = 0; return -1;
     }
+    /* The tracker lists computers in the order their leases were last
+     * (re)created, which changes whenever one of them reconnects. A plan and
+     * its measurement name computers by position, so the same household must
+     * always be seen in the same order: by identity, this computer first. */
+    qsort(reports, n, sizeof *reports, catalog_report_order);
     for (uint32_t i = 0; i < n; i++) {
         LmbMachineReport *r = &reports[i];
         uint32_t at;
