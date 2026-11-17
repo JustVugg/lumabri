@@ -83,16 +83,18 @@ static inline const char *lmb_gguf_text(const LmbGgufValue *v) {
     return v && v->type==8 && !memchr(v->data,0,(size_t)v->bytes) ? (const char *)v->data : NULL;
 }
 /* The caller owns the open file. No weight byte is read, even at EOF. */
+/* A file may declare no tensor: the first part of a split checkpoint often
+ * carries only the metadata. The model loader requires tensors overall. */
 static inline int lmb_gguf_parse_reader(LmbGgufReader r,LmbGguf *out) {
     LmbGguf g={0};
     unsigned char magic[4];uint64_t version,nt,nv,alignment=32;
     if(lmb_gguf_read(&r,magic,4) || memcmp(magic,"GGUF",4) ||
        lmb_gguf_u(&r,4,&version) || version<2 || version>3 || lmb_gguf_u(&r,8,&nt) ||
-       lmb_gguf_u(&r,8,&nv) || nt>131072 || nv>65536 || !nt) goto fail;
+       lmb_gguf_u(&r,8,&nv) || nt>131072 || nv>65536) goto fail;
     uint64_t allocations=nt*sizeof *g.tensors+nv*sizeof *g.values;
     if(allocations>r.budget) goto fail;
     r.budget-=allocations;
-    g.values=calloc((size_t)nv+1,sizeof *g.values);g.tensors=calloc((size_t)nt,sizeof *g.tensors);
+    g.values=calloc((size_t)nv+1,sizeof *g.values);g.tensors=calloc((size_t)nt+1,sizeof *g.tensors);
     if(!g.values || !g.tensors) goto fail;
     for(uint32_t i=0;i<nv;i++) {
         LmbGgufValue *v=&g.values[g.nvalues++];uint64_t kind,bytes=0;
@@ -151,7 +153,8 @@ static inline int lmb_gguf_parse_reader(LmbGgufReader r,LmbGguf *out) {
     }
     if(r.pos>UINT64_MAX-(alignment-1))goto fail;
     g.header_bytes=(r.pos+alignment-1)&~(alignment-1);g.file_bytes=r.size;
-    if(g.header_bytes>r.size)goto fail;
+    /* A metadata-only file ends where its metadata ends, without padding. */
+    if(g.header_bytes>r.size) {if(g.ntensors)goto fail;g.header_bytes=r.size;}
     for(uint32_t i=0;i<g.ntensors;i++) {
         LmbGgufTensor *t=&g.tensors[i];
         if(t->offset>r.size-g.header_bytes || t->bytes>r.size-g.header_bytes-t->offset)goto fail;
