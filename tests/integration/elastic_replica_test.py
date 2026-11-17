@@ -224,7 +224,10 @@ def verify_elastic(api, until, service, env, terminal, artifacts):
         assert waiting["reserved_bytes"] == grown["reserved_bytes"], waiting
         # A subsequent query can race the socket idle timeout. Check the
         # exact instance's drain refusal, not a later unrelated observation.
-        logs = "\n".join((Path(env(n)["HOME"]) / ".lumabri/home/engines.log").read_text() for n in ("a", "b"))
+        # Placement is chosen for speed, so one computer may hold every
+        # replica and the other never starts an engine: it has no log then.
+        engine_logs = [Path(env(n)["HOME"]) / ".lumabri/home/engines.log" for n in ("a", "b")]
+        logs = "\n".join(path.read_text() for path in engine_logs if path.exists())
         assert re.search(r"action=retire instance=" + connected["instance"] + r"[^\n]*conflict=1 connections=[1-9][^\n]*admitted=[1-9]", logs)
         for held in permits:
             held.communicate("release\n", timeout=5); assert held.returncode == 0
