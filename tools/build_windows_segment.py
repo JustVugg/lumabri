@@ -124,13 +124,18 @@ def main():
         memory=root/'src/runtime/lumabri_engine_memory_override.h'
         inputs=root/'src/runtime/lumabri_engine_io_windows_override.h'
         objects=[]
+        machine=subprocess.run([args.cc,'-dumpmachine'],capture_output=True,text=True).stdout
+        x86_64=machine.startswith(('x86_64','amd64'))
         for name in ('olmoe','segment_runtime','edge_runtime','engine_memory','engine_io_windows'):
             file=(source/(name+'.c') if name in ('olmoe','segment_runtime','edge_runtime')
                   else root/'src/runtime'/('lumabri_'+name+'.c'))
             extra=['-Werror']
+            if name in ('olmoe','segment_runtime','edge_runtime') and x86_64:
+                # Same level as the Makefile and as Colibri's release engines.
+                extra+=['-march=x86-64-v3']
             if name=='olmoe':
                 # Upstream embedding units contain unused standalone helpers.
-                extra=['-Werror=implicit-function-declaration','-Wno-unused-function',
+                extra+=['-Wno-error','-Werror=implicit-function-declaration','-Wno-unused-function',
                        '-DCOLI_SEGMENT_ADAPTER','-DCOLI_EDGE_ADAPTER',
                        '-DOLMOE_NO_MAIN','-DLUMABRI_P2P','-include','pthread.h',
                        '-include',root/'lumi_v4_ext.h']
