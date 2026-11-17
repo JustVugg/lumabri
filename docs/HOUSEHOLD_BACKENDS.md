@@ -17,11 +17,50 @@ Low-level Segment callers retain `auto` when the variable is unset. Unsupported
 values are errors, not automatic fallback. The ordinary household TUI does not
 expose this internal policy as another user decision.
 
-All pinned upstream Edge/Segment adapters currently support CPU execution.
-Colibri remains unchanged. A future GPU backend needs a matching memory contract
-(VRAM, scratch, state, RAM staging), explicit placement and an actual execution
-test before household admission may request it. This guard does not implement
-or advertise CUDA, Metal, HIP or Vulkan household execution.
+All pinned upstream Edge/Segment adapters support CPU execution, and the CPU
+policy above stays the only memory contract: every assigned weight is resident
+in RAM and the reservation a donor approves is a RAM reservation.
+
+## CUDA acceleration of a Qwen3.6 range
+
+A runtime built with `make CUDA=1` (Linux, NVIDIA toolkit at `CUDA_HOME`,
+default `/usr/local/cuda`) links the engine's own CUDA expert tier into
+`segment_node`. A donor that runs such a runtime computes its Qwen3.6 range on
+the card:
+
+- the weights are loaded into RAM exactly as planned and approved, and the
+  routed experts and the dense trunk of the assigned layers are also copied to
+  the card, as far as its free memory allows; anything that does not fit is
+  computed on the CPU from the RAM copy;
+- the plan, the reservation and the approval screen do not change, and VRAM is
+  not planned or reserved: it is used when free and not required;
+- the chat host's Edge stays on the CPU;
+- the Segment logs
+  `backend policy=cpu adapter_mask=0x300 (resident in RAM, computing on CUDA)`
+  and keeps advertising the CPU contract it was approved for, so a household
+  can mix donors with and without a card, and computers of earlier versions.
+  The CPU policy accepts exactly `CPU` or `CPU | CUDA` from the adapter; any
+  other backend is still refused;
+- a donor's runtime identity changes when its card is switched off, so a
+  speed measured with the card is not shown for a run without it.
+
+`LUMABRI_GPU=off` in the donor's environment leaves the card untouched. A
+default build contains no CUDA code and needs no toolkit; `segment_node
+--backends` prints what a runtime was built with. Colibri remains unchanged:
+`tools/prepare_cuda_segment.py` edits Lumabri's build copy and fails the build
+if the pinned engine source no longer matches.
+
+Measured on one computer (14 cores, one 24 GB card), real Qwen3.6 35B GGUF
+(Q4_K_M), whole model on that computer: 82 ms per token on the CPU, 34 ms with
+the card. The same model split between that computer (layers 11 to 40, on the
+card) and a second, CPU-only computer 55 to 70 ms away (layers 0 to 11, chat
+host): 192 ms per token, against 280 ms for a comparable split with both on
+the CPU. Not measured: other cards, several cards, Windows.
+
+
+Limits: Qwen3.6 only (`qwen36` engine; OLMoE, Qwen3.8 and the other families
+stay on the CPU); Metal, HIP and Vulkan household
+execution are not implemented or advertised.
 
 Regression coverage includes strict policy parsing, rejected/mixed backend
 masks, early rejection by both executables, and real two-donor generation with

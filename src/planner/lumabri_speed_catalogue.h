@@ -212,7 +212,10 @@ static void speed_json_candidate(LmbSpeedText *t, const LmbTuiState *st, const L
     speed_text(t, "],\"seconds_per_token\":{\"layers\":"); speed_json_number(t, terms, c->layer_seconds);
     speed_text(t, ",\"chat_host\":"); speed_json_number(t, terms, c->edge_seconds);
     speed_text(t, ",\"network\":"); speed_json_number(t, terms, c->link_seconds);
-    speed_text(t, "},\"reference_prompt_network_seconds\":");
+    speed_text(t, "},\"slowest_link_seconds\":");
+    speed_json_number(t, c->machines > 1 && c->slowest_link_seconds > 0, c->slowest_link_seconds);
+    speed_text(t, ",\"slow_link\":%s", c->machines > 1 && c->slowest_link_seconds > LMB_SPEED_SLOW_LINK_SECONDS ? "true" : "false");
+    speed_text(t, ",\"reference_prompt_network_seconds\":");
     speed_json_number(t, c->machines > 1 && c->prefill_link_seconds > 0, c->prefill_link_seconds);
     speed_text(t, ",\"reserved_bytes\":%llu}", (unsigned long long)c->reserved_bytes);
 }

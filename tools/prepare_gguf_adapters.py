@@ -85,13 +85,41 @@ static int lmb_olm_index(shards *S, const char *dir) {
     return gguf;
 }
 
+/* The end token the checkpoint itself declares in config.json, or -1. The
+ * published OLMoE vocabularies disagree on which named entry ends a reply,
+ * so a name alone picks the wrong id for one of them. */
+static int lmb_olm_declared_eos(const char *dir, int vocab) {
+    char path[4096], text[8192];
+    if (!dir || snprintf(path, sizeof path, "%s/config.json", dir) >= (int)sizeof path) return -1;
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    size_t n = fread(text, 1, sizeof text - 1, f);
+    fclose(f);
+    text[n] = 0;
+    const char *at = text;
+    /* 34 is the JSON quote, 32/9/10/13 its whitespace. */
+    while ((at = strstr(at, "eos_token_id")) && (at == text || at[-1] != 34 || at[12] != 34)) at++;
+    if (!at) return -1;
+    at += 13;
+    while (*at == 32 || *at == 9 || *at == 10 || *at == 13) at++;
+    if (*at++ != ':') return -1;
+    while (*at == 32 || *at == 9 || *at == 10 || *at == 13) at++;
+    if (*at < '0' || *at > '9') return -1;
+    long id = 0;
+    while (*at >= '0' && *at <= '9' && id <= vocab) id = id * 10 + (*at++ - '0');
+    return id < vocab ? (int)id : -1;
+}
+
 '''+anchor)
     s=replace_once(s,'    st_init(&m->S, snap);','    (void)lmb_olm_index(&m->S, snap);')
-    # OLMoE ends a reply with <|endoftext|>. The upstream capability names the
-    # tokenizer's |||IP_ADDRESS||| entry, which is a different id in the real
-    # vocabulary, so a hosted chat never stopped and ran to its token limit.
+    # The end token is the one the checkpoint declares. The two published
+    # OLMoE vocabularies give |||IP_ADDRESS||| and <|endoftext|> opposite ids,
+    # and each ends a reply with a different one of them, so either name alone
+    # lets one checkpoint print its end marker and run to the token limit.
     s=replace_once(s,'    capabilities->eos_token_id = tok_id_of(&engine->tokenizer, "|||IP_ADDRESS|||");',
-                   '''    capabilities->eos_token_id = tok_id_of(&engine->tokenizer, "<|endoftext|>");
+                   '''    capabilities->eos_token_id = lmb_olm_declared_eos(options->model_dir, config->vocab);
+    if (capabilities->eos_token_id < 0)
+        capabilities->eos_token_id = tok_id_of(&engine->tokenizer, "<|endoftext|>");
     if (capabilities->eos_token_id < 0)
         capabilities->eos_token_id = tok_id_of(&engine->tokenizer, "|||IP_ADDRESS|||");''')
     s=replace_once(s,'    st_init(&engine->model.S, options->model_dir);',

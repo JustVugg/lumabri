@@ -1583,6 +1583,10 @@ int main(int argc, char **argv) {
         printf("%u\n", lmb_engine_thread_capacity());
         return 0;
     }
+    if (argc == 2 && !strcmp(argv[1], "--backends")) {
+        printf("%s\n", lmb_backend_built());
+        return 0;
+    }
     uint64_t backend_mask = 0;
     if (lmb_backend_request(getenv("LUMABRI_ENGINE_BACKEND"), &backend_mask)) {
         fprintf(stderr, "unsupported execution backend policy; use cpu or auto\n");
@@ -1839,6 +1843,12 @@ int main(int argc, char **argv) {
     if (!model_bytes && model_dir) model_bytes = directory_bytes(model_dir, 0);
     if (process_limit && model_bytes && model_layers) {
         uint64_t estimated = lmb_checkpoint_floor(model_bytes, model_layers, begin, end);
+        if (shaped && shape.sizing_verified && shape.memory_contract == 1 && end <= shape.layers) {
+            /* The same guard the plan used: the range's own tensors. */
+            LmbRangeCost described = lmb_estimate_segment(&shape, begin, end, 1, 1);
+            if (described.ok)
+                estimated = lmb_range_weight_guard(&shape, model_bytes, begin, end, described.resident_bytes);
+        }
         if (estimated > process_limit) {
             fprintf(stderr, "[segment-node] assigned range %u:%u needs about "
                     "%.1f GB but the donor budget is %.1f GB; releasing it "
@@ -1901,7 +1911,7 @@ int main(int argc, char **argv) {
         .layer_end = end,
         .context_tokens = context,
         .memory_limit_bytes = process_limit,
-        .backend_mask = backend_mask,
+        .backend_mask = lmb_backend_segment_request(backend_mask, getenv("LUMABRI_SEGMENT_GPU"), engine_id),
     };
     char error[256] = "";
     if (coli_segment_engine_open(engine_id, &options, &node.engine,
@@ -1958,9 +1968,10 @@ int main(int argc, char **argv) {
                                      resolved_model_root);
         return 1;
     }
-    fprintf(stderr, "[segment-node] backend policy=%s adapter_mask=0x%llx\n",
+    fprintf(stderr, "[segment-node] backend policy=%s adapter_mask=0x%llx%s\n",
             backend_mask ? "cpu" : "auto",
-            (unsigned long long)(node.cap.flags & LMB_EXEC_BACKEND_MASK));
+            (unsigned long long)(node.cap.flags & LMB_EXEC_BACKEND_MASK),
+            (node.cap.flags & LMB_SEG_CAP_CUDA) ? " (resident in RAM, computing on CUDA)" : "");
     uint64_t engine_rss = resident_memory_bytes();
     LmbProcessMemory prepared_memory={0};(void)lmb_process_memory_probe(&prepared_memory,1);
     uint64_t engine_charge=lmb_process_memory_charge(&prepared_memory);
@@ -2009,7 +2020,10 @@ int main(int argc, char **argv) {
     if (relay_only) a->flags |= LMB_SEG_ADVERT_RELAY_ONLY;
     if (!lmb_governor_accepting(&node.governor))
         a->flags |= LMB_SEG_ADVERT_DRAINING;
-    a->capabilities = node.cap.flags & LMB_SEG_CAP_KNOWN_MASK;
+    /* The advert states the memory contract, which is CPU RAM. Computing on
+     * a card is this donor's own business and is not advertised, so a chat
+     * host of an earlier version accepts the route unchanged. */
+    a->capabilities = node.cap.flags & LMB_SEG_CAP_KNOWN_MASK & ~LMB_SEG_CAP_CUDA;
     /* Registration happens after engine_open, so this is measured resident
      * memory, not a model-size promise. A zero value remains valid on systems
      * without an RSS counter, but the node is still READY only after open. */

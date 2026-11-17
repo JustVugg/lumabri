@@ -5,12 +5,56 @@ a tag stay under Unreleased until a new tag is created.
 
 ## Unreleased
 
+- A range is reserved for its own tensors when the layer map is known. The
+  guard charged every range a proportional share of the checkpoint plus 5% of
+  the whole, which assumes equal layers. In a checkpoint where one layer holds
+  a large table (Qwen3.8-Flash-Next: about 30 GB in one layer of 48) the other
+  ranges were over-reserved by many gigabytes, and a model that fits in the
+  household's memory was reported as impossible to place. With an explicit
+  layer map the guard is now the described bytes plus 5%, never more than
+  before; estimates without a layer map are unchanged.
 - Choosing the next token no longer sorts the whole vocabulary. Sampling
   weighed and sorted every token on each step, which on a 248,000-token
   vocabulary cost more than the head projection. Only the heaviest tokens
   that already hold the nucleus mass are sorted now, and the draw is the same
   token as before for the same seed. Measured on one x86-64 computer with a
   real Qwen3.6 35B GGUF: 111 ms per token before, 80 ms after.
+- The engine is compiled for x86-64-v3 (AVX2, FMA, BMI2) by default on x86-64
+  Linux and Windows, as Colibri compiles its own release engines. The previous
+  baseline build ran the quantized row kernels as scalar code: a real Qwen3.6
+  35B GGUF decoded at 274 ms per token on one computer and at 111 ms with this
+  level. A processor without these instructions gets a refusal that names the
+  missing one instead of a crash. `ENGINE_CPU_FLAGS=` restores the baseline.
+- OLMoE stops at the end token its checkpoint declares. The two published
+  vocabularies give `<|endoftext|>` and `|||IP_ADDRESS|||` opposite ids and
+  end a reply with different ones, so choosing by name let the 0125 Instruct
+  GGUF print its end marker and run to the token limit. The id now comes from
+  the checkpoint's `config.json`, with the names as a fallback. Checked with
+  the published OLMoE-1B-7B-0125-Instruct Q4_K_M GGUF.
+- A split GGUF whose first part carries only the metadata is accepted. The
+  reader required tensors in every file and padding after every header, so
+  published three-part checkpoints such as Qwen3.8-Flash-Next were listed as
+  "GGUF import unavailable". A file without tensors is still not a checkpoint
+  by itself, and the parts together must declare tensors.
+- The computers of a household are always seen in the same order. The
+  catalogue took them in the order the tracker listed them, which changes
+  when one reconnects; a plan and its measurement name computers by position,
+  so an unchanged household could show its measured speed as "stale (which
+  machines changed)". They are now ordered by identity, this computer first.
+- A split that crosses a slow link says so. When the longest round trip
+  between the chat host and another computer of the chosen split is above
+  about 25 ms, the plan's reason names that computer and the delay, and the
+  API reports `slowest_link_seconds` and `slow_link`. The split is still
+  planned when no single computer can hold the model.
+- A donor with an NVIDIA card can compute its Qwen3.6 layers on it. Built with
+  `make CUDA=1`, the Segment runtime links the engine's CUDA expert tier: the
+  weights stay resident in RAM as planned and approved, and the experts and
+  dense trunk of the assigned layers are also held and computed on the card
+  when its memory allows. The plan and the approval do not change, households
+  can mix donors with and without a card, and `LUMABRI_GPU=off` disables it.
+  Measured on one computer with a real Qwen3.6 35B GGUF: 82 ms per token on
+  the CPU, 34 ms with a 24 GB card. Default builds are unchanged. See
+  [household backends](docs/HOUSEHOLD_BACKENDS.md).
 - Placement is chosen for speed: every computer that can hold a model alone is
   a candidate, and a split is selected only when no single computer fits or
   when it is estimated at least 5% faster. Reviewing one model with no

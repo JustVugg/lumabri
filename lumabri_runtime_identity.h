@@ -107,6 +107,10 @@ static LMB_MAYBE_UNUSED int lmb_runtime_identity_details(const char *bin_dir, co
         cache->files[4].valid = 0;
         lmb_sha_update(&sha, "absent", sizeof "absent");
     }
+    /* The same executables compute at a different speed with the card kept
+     * off, so a measurement taken one way must not be shown for the other. */
+    const char *gpu = getenv("LUMABRI_GPU");
+    if (gpu && !strcmp(gpu, "off")) lmb_sha_update(&sha, "card-off", sizeof "card-off");
     uint8_t digest[32]; lmb_sha_final(&sha, digest);
     for (unsigned i = 0; i < 32; i++) snprintf(out + 2 * i, 3, "%02x", digest[i]);
     if (component) *component=NULL;

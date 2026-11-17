@@ -627,9 +627,12 @@ native CI for the revised commit or establish an acceleration over the PC.
 `make build/bench_home_hybrid ENGINE=...` builds this opt-in OLMoE diagnostic
 against prepared sources. It reuses already approved routes and requests no
 new donor allocation. Its numbers are milliseconds per MoE layer, not full
-generation throughput. `ENGINE_CPU_FLAGS` permits explicit local tuning and
-invalidates the generated archive; portable packages leave it empty. A native
-build must not be redistributed to a different CPU, and changing SIMD/math
+generation throughput. On x86-64 Linux and Windows the engine is compiled for
+`x86-64-v3` (AVX2, FMA, BMI2) by default, the level Colibri builds its own
+release engines for; the engine refuses to start on a processor without them
+and names the missing instruction. `ENGINE_CPU_FLAGS` overrides the level and
+invalidates the generated archive (`ENGINE_CPU_FLAGS=` gives a baseline
+build). A native build must not be redistributed to a different CPU, and changing SIMD/math
 paths requires renewed numerical and performance validation. Colibri's source
 checkout remains unchanged.
 
