@@ -5,6 +5,11 @@ a tag stay under Unreleased until a new tag is created.
 
 ## Unreleased
 
+- The computers of a household are always seen in the same order. The
+  catalogue took them in the order the tracker listed them, which changes
+  when one reconnects; a plan and its measurement name computers by position,
+  so an unchanged household could show its measured speed as "stale (which
+  machines changed)". They are now ordered by identity, this computer first.
 - Placement is chosen for speed: every computer that can hold a model alone is
   a candidate, and a split is selected only when no single computer fits or
   when it is estimated at least 5% faster. Reviewing one model with no
