@@ -5,6 +5,12 @@ a tag stay under Unreleased until a new tag is created.
 
 ## Unreleased
 
+- Choosing the next token no longer sorts the whole vocabulary. Sampling
+  weighed and sorted every token on each step, which on a 248,000-token
+  vocabulary cost more than the head projection. Only the heaviest tokens
+  that already hold the nucleus mass are sorted now, and the draw is the same
+  token as before for the same seed. Measured on one x86-64 computer with a
+  real Qwen3.6 35B GGUF: 111 ms per token before, 80 ms after.
 - Placement is chosen for speed: every computer that can hold a model alone is
   a candidate, and a split is selected only when no single computer fits or
   when it is estimated at least 5% faster. Reviewing one model with no
