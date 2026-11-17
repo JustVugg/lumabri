@@ -35,10 +35,14 @@ the card:
 - the plan, the reservation and the approval screen do not change, and VRAM is
   not planned or reserved: it is used when free and not required;
 - the chat host's Edge stays on the CPU;
-- the Segment advertises `CPU | CUDA` and logs
-  `backend policy=cpu adapter_mask=0x300 (resident in RAM, computing on CUDA)`.
-  The CPU policy accepts exactly that combination, so a household can mix
-  donors with and without a card. Any other backend is still refused.
+- the Segment logs
+  `backend policy=cpu adapter_mask=0x300 (resident in RAM, computing on CUDA)`
+  and keeps advertising the CPU contract it was approved for, so a household
+  can mix donors with and without a card, and computers of earlier versions.
+  The CPU policy accepts exactly `CPU` or `CPU | CUDA` from the adapter; any
+  other backend is still refused;
+- a donor's runtime identity changes when its card is switched off, so a
+  speed measured with the card is not shown for a run without it.
 
 `LUMABRI_GPU=off` in the donor's environment leaves the card untouched. A
 default build contains no CUDA code and needs no toolkit; `segment_node
@@ -53,13 +57,9 @@ card) and a second, CPU-only computer 55 to 70 ms away (layers 0 to 11, chat
 host): 192 ms per token, against 280 ms for a comparable split with both on
 the CPU. Not measured: other cards, several cards, Windows.
 
-Every computer of the household needs a runtime with this policy: an older
-chat host refuses a Segment that advertises `CPU | CUDA` and reports that no
-chain can be formed.
 
 Limits: Qwen3.6 only (`qwen36` engine; OLMoE, Qwen3.8 and the other families
-stay on the CPU); the catalogue's measured speed does not yet distinguish a
-donor that switched its card on or off; Metal, HIP and Vulkan household
+stay on the CPU); Metal, HIP and Vulkan household
 execution are not implemented or advertised.
 
 Regression coverage includes strict policy parsing, rejected/mixed backend

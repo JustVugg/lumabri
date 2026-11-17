@@ -2014,7 +2014,10 @@ int main(int argc, char **argv) {
     if (relay_only) a->flags |= LMB_SEG_ADVERT_RELAY_ONLY;
     if (!lmb_governor_accepting(&node.governor))
         a->flags |= LMB_SEG_ADVERT_DRAINING;
-    a->capabilities = node.cap.flags & LMB_SEG_CAP_KNOWN_MASK;
+    /* The advert states the memory contract, which is CPU RAM. Computing on
+     * a card is this donor's own business and is not advertised, so a chat
+     * host of an earlier version accepts the route unchanged. */
+    a->capabilities = node.cap.flags & LMB_SEG_CAP_KNOWN_MASK & ~LMB_SEG_CAP_CUDA;
     /* Registration happens after engine_open, so this is measured resident
      * memory, not a model-size promise. A zero value remains valid on systems
      * without an RSS counter, but the node is still READY only after open. */
