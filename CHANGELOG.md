@@ -17,6 +17,12 @@ a tag stay under Unreleased until a new tag is created.
   35B GGUF decoded at 274 ms per token on one computer and at 111 ms with this
   level. A processor without these instructions gets a refusal that names the
   missing one instead of a crash. `ENGINE_CPU_FLAGS=` restores the baseline.
+- OLMoE stops at the end token its checkpoint declares. The two published
+  vocabularies give `<|endoftext|>` and `|||IP_ADDRESS|||` opposite ids and
+  end a reply with different ones, so choosing by name let the 0125 Instruct
+  GGUF print its end marker and run to the token limit. The id now comes from
+  the checkpoint's `config.json`, with the names as a fallback. Checked with
+  the published OLMoE-1B-7B-0125-Instruct Q4_K_M GGUF.
 - Placement is chosen for speed: every computer that can hold a model alone is
   a candidate, and a split is selected only when no single computer fits or
   when it is estimated at least 5% faster. Reviewing one model with no
