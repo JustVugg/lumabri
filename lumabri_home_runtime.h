@@ -273,6 +273,7 @@ typedef struct HomeDonor {
     LmbHybridRoutes hybrid_routes;
     int hybrid_routes_ready;
     unsigned thread_capacity;
+    int segment_cuda; /* the installed Segment runtime links the CUDA tier */
     int retained; /* owner's sharing lifetime, independent of any chat */
     int persistent; /* rendering only: the service is not owned by this view */
     uint64_t offer_revision;
@@ -705,7 +706,14 @@ static int home_donor_launch(HomeDonor *d, int edge,char *error,size_t error_siz
     char *envv[] = {e_shim, e_vroot, e_cache, e_cas, e_tracker, e_model, e_root,
                    e_key, "LUMABRI_SEGMENT_REQUIRED=1", "LUMABRI_VERIFY=0",
                    "LUMABRI_PREFETCH=0", "LUMABRI_NO_EXEC=1",
-                   "LUMABRI_ENGINE_BACKEND=cpu", e_log,
+                   "LUMABRI_ENGINE_BACKEND=cpu",
+                   /* The plan stays a CPU RAM plan. A CUDA runtime may also
+                    * compute a Qwen3.6 range on the card; LUMABRI_GPU=off keeps
+                    * the card untouched. The chat host's Edge stays on the CPU. */
+                   !edge && d->segment_cuda && !strcmp(family->segment_id, "qwen36") &&
+                       !(getenv("LUMABRI_GPU") && !strcmp(getenv("LUMABRI_GPU"), "off"))
+                       ? "LUMABRI_SEGMENT_GPU=cuda" : "LUMABRI_SEGMENT_GPU=off",
+                   e_log,
                    edge ? e_limit : "LUMABRI_HOME_SEGMENT=1", e_omp, e_omp_limit, e_hybrid, e_accelerator,
                    e_local,
                    unlocked ? "LUMABRI_RESIDENCY_POLICY=observe" : NULL, NULL};
@@ -1135,6 +1143,7 @@ static int cmd_donor_inner(int argc, char **argv) {
     if (checked_printf(service_path, sizeof service_path, "%s/segment_node", d.bin_dir) ||
         lmb_runtime_thread_capacity(service_path, &d.thread_capacity))
         return home_fail("Cannot query the installed Segment runtime. Rebuild the complete household runtime; no resources were shared.");
+    d.segment_cuda = lmb_runtime_has_cuda(service_path);
     uint8_t epoch[32]; lmb_random(epoch, sizeof epoch); lmb_hex(d.runtime_epoch, epoch, sizeof epoch);
     if (lmb_runtime_identity(d.bin_dir, d.runtime_epoch, &d.runtime_cache, d.runtime_id))
         return home_fail("Cannot identify the installed household runtime. No resources were shared.");

@@ -1044,12 +1044,29 @@ HYBRID_ENGINE_DIR = build/segment-hybrid-colibri
 COLIBRI_SEGMENT_LIB = $(HYBRID_ENGINE_DIR)/build/segment/libcolibri_segment_edge.a
 HYBRID_ROOT = $(abspath .)
 ENGINE_MEMORY_FLAGS = -include $(HYBRID_ROOT)/src/runtime/lumabri_engine_memory_override.h
-SEGMENT_CFLAGS = $(CFLAGS) -I. -I$(ENGINE) $(OMP_FLAGS) $(ENGINE_MEMORY_FLAGS)
+# CUDA=1 (Linux, NVIDIA toolkit at CUDA_HOME) links the engine's CUDA expert
+# tier into the Segment runtime. A Qwen3.6 range then keeps its weights in RAM
+# as approved and also computes on the card. The default build has no CUDA
+# code and needs no toolkit. See docs/HOUSEHOLD_BACKENDS.md.
+CUDA ?= 0
+CUDA_HOME ?= /usr/local/cuda
+CUDA_ENGINE_OBJS = backend_cuda.o cuda_chain.o cu_xb.o cu_tier.o qwen36_tier.o
+SEGMENT_GPU_FLAGS =
+ifeq ($(CUDA),1)
+SEGMENT_GPU_FLAGS = -DLMB_SEGMENT_CUDA
+# The CUDA objects are the engine's own, unmodified, and stay outside the
+# checked engine archive: their host allocations are device bookkeeping and
+# transient staging, not resident weights, so they do not go through the
+# locked allocator that the memory boundary check enforces.
+COLIBRI_SEGMENT_CUDA_LIB = $(HYBRID_ENGINE_DIR)/libcolibri_segment_cuda.a
+OMP_LIBS += $(COLIBRI_SEGMENT_CUDA_LIB) -L$(CUDA_HOME)/lib64 -Wl,-rpath,$(CUDA_HOME)/lib64 -lcudart -lcublasLt -lcublas -lstdc++
+endif
+SEGMENT_CFLAGS = $(CFLAGS) -I. -I$(ENGINE) $(OMP_FLAGS) $(ENGINE_MEMORY_FLAGS) $(SEGMENT_GPU_FLAGS)
 SEGMENT_COMMON = segment_colibri.h src/runtime/lumabri_thread_capacity.h src/runtime/lumabri_resident.h src/runtime/lumabri_process_memory.h src/runtime/lumabri_resident_guard.h src/runtime/lumabri_backend_policy.h lumabri_segment.c lumabri_segment.h \
 		lumabri_segment_discovery.c lumabri_segment_discovery.h \
 		$(PROTO_DEPS) $(SIGN_DEPS) lumabri_sha.h $(SECURE_DEPS)
 
-HYBRID_PATCH_INPUTS = tools/prepare_gguf_adapters.py tools/prepare_draft_rows.py engine_patches/segment_draft.h tools/prepare_qwen38_mtp.py engine_patches/qwen38_draft_head.h src/runtime/lumabri_draft_head.h tools/prepare_qwen_variants.py tools/prepare_qwen_gguf.py engine_patches/qwen_gguf_source.h tools/prepare_resident_adapters.py engine_patches/make_patches.py \
+HYBRID_PATCH_INPUTS = tools/prepare_cuda_segment.py tools/prepare_gguf_adapters.py tools/prepare_draft_rows.py engine_patches/segment_draft.h tools/prepare_qwen38_mtp.py engine_patches/qwen38_draft_head.h src/runtime/lumabri_draft_head.h tools/prepare_qwen_variants.py tools/prepare_qwen_gguf.py engine_patches/qwen_gguf_source.h tools/prepare_resident_adapters.py engine_patches/make_patches.py \
 	tools/prepare_mistral_segments.py tools/prepare_glm53_gguf.py tools/prepare_kimi_gguf.py tools/prepare_inkling_gguf.py tools/prepare_qwen38_gguf.py tools/prepare_v4_gguf.py engine_patches/mistral_boundary.h \
 	engine_patches/qwen38_vision_edge.h src/runtime/lumabri_vision.h src/runtime/lumabri_image.h \
 	src/runtime/lumabri_engine_memory_override.h src/runtime/lumabri_engine_memory.h \
@@ -1065,7 +1082,7 @@ segment-options-force:
 # An installed libomp or changed build flags must invalidate both the runtime
 # archive and its bridge, without requiring users to discover make -B.
 build/segment-options: segment-options-force tools/update_build_stamp.py
-	python3 tools/update_build_stamp.py $@ '$(CC)' '$(CPPFLAGS)' '$(CFLAGS)' '$(OMP_FLAGS)' '$(OMP_LIBS)' '$(abspath $(ENGINE))' '$(ENGINE_CPU_FLAGS)' '$(ENGINE_MEMORY_FLAGS)'
+	python3 tools/update_build_stamp.py $@ '$(CC)' '$(CPPFLAGS)' '$(CFLAGS)' '$(OMP_FLAGS)' '$(OMP_LIBS)' '$(abspath $(ENGINE))' '$(ENGINE_CPU_FLAGS)' '$(ENGINE_MEMORY_FLAGS)' 'CUDA=$(CUDA)' '$(CUDA_HOME)'
 
 # Track every copied adapter/header/build input, including new upstream files,
 # deletions and preserved-mtime edits. This reads sources only, never weights.
@@ -1081,6 +1098,7 @@ $(HYBRID_ENGINE_DIR)/.prepared: Makefile build/segment-options build/segment-sou
 	python3 engine_patches/make_patches.py --engine-dir $(ENGINE) --apply-one qwen36.c --out $(HYBRID_ENGINE_DIR)/qwen36.c
 	python3 engine_patches/deepseek_v4_p2p.py $(ENGINE)/deepseek_v4.c $(HYBRID_ENGINE_DIR)/deepseek_v4.c
 	python3 tools/prepare_resident_adapters.py --copy $(HYBRID_ENGINE_DIR)
+	python3 tools/prepare_cuda_segment.py $(HYBRID_ENGINE_DIR)/qwen36.c
 	touch $@
 
 build/segment_hybrid_bridge.o: build/segment-options lumi_v4_bridge.c $(HYBRID_PATCH_INPUTS)
@@ -1106,6 +1124,16 @@ $(COLIBRI_SEGMENT_LIB): $(HYBRID_ENGINE_DIR)/.prepared build/segment_hybrid_brid
 		COLI_V4_SUPPORTED=1 CC='$(CC)' \
 		CFLAGS='-O2 $(ENGINE_CPU_FLAGS) $(CPPFLAGS) $(OMP_FLAGS) $(ENGINE_MEMORY_FLAGS) -pthread -I$(HYBRID_ROOT) -include $(HYBRID_ROOT)/lumi_v4_ext.h -DLUMABRI_P2P -DLUMIBRI_P2P' \
 		segment-edge-library
+ifeq ($(CUDA),1)
+	env -u MAKEFLAGS $(MAKE) -C $(HYBRID_ENGINE_DIR) MAKEOVERRIDES= CUDA=1 CUDA_HOME='$(CUDA_HOME)' \
+		NVCC='$(CUDA_HOME)/bin/nvcc' $(CUDA_ENGINE_OBJS)
+	cd $(HYBRID_ENGINE_DIR) && $(CC) -O2 $(ENGINE_CPU_FLAGS) $(CPPFLAGS) $(OMP_FLAGS) $(ENGINE_MEMORY_FLAGS) -pthread \
+		-I$(HYBRID_ROOT) -include $(HYBRID_ROOT)/lumi_v4_ext.h -DLUMABRI_P2P -DLUMIBRI_P2P -include pthread.h \
+		-DCOLI_SEGMENT_ADAPTER -DCOLI_EDGE_ADAPTER -DQWEN36_NO_MAIN -DCOLI_CUDA -c qwen36.c -o build/segment/qwen36.o
+	$(AR) rcs $@ $(HYBRID_ENGINE_DIR)/build/segment/qwen36.o
+	rm -f $(COLIBRI_SEGMENT_CUDA_LIB)
+	$(AR) rcs $(COLIBRI_SEGMENT_CUDA_LIB) $(addprefix $(HYBRID_ENGINE_DIR)/,$(CUDA_ENGINE_OBJS))
+endif
 	$(AR) rcs $@ build/segment_hybrid_bridge.o build/v41_adapter.o build/engine_memory.o build/image.o build/vision.o build/draft_head.o
 	python3 tools/check_engine_memory.py $@
 

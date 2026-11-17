@@ -1583,6 +1583,10 @@ int main(int argc, char **argv) {
         printf("%u\n", lmb_engine_thread_capacity());
         return 0;
     }
+    if (argc == 2 && !strcmp(argv[1], "--backends")) {
+        printf("%s\n", lmb_backend_built());
+        return 0;
+    }
     uint64_t backend_mask = 0;
     if (lmb_backend_request(getenv("LUMABRI_ENGINE_BACKEND"), &backend_mask)) {
         fprintf(stderr, "unsupported execution backend policy; use cpu or auto\n");
@@ -1901,7 +1905,7 @@ int main(int argc, char **argv) {
         .layer_end = end,
         .context_tokens = context,
         .memory_limit_bytes = process_limit,
-        .backend_mask = backend_mask,
+        .backend_mask = lmb_backend_segment_request(backend_mask, getenv("LUMABRI_SEGMENT_GPU"), engine_id),
     };
     char error[256] = "";
     if (coli_segment_engine_open(engine_id, &options, &node.engine,
@@ -1958,9 +1962,10 @@ int main(int argc, char **argv) {
                                      resolved_model_root);
         return 1;
     }
-    fprintf(stderr, "[segment-node] backend policy=%s adapter_mask=0x%llx\n",
+    fprintf(stderr, "[segment-node] backend policy=%s adapter_mask=0x%llx%s\n",
             backend_mask ? "cpu" : "auto",
-            (unsigned long long)(node.cap.flags & LMB_EXEC_BACKEND_MASK));
+            (unsigned long long)(node.cap.flags & LMB_EXEC_BACKEND_MASK),
+            (node.cap.flags & LMB_SEG_CAP_CUDA) ? " (resident in RAM, computing on CUDA)" : "");
     uint64_t engine_rss = resident_memory_bytes();
     LmbProcessMemory prepared_memory={0};(void)lmb_process_memory_probe(&prepared_memory,1);
     uint64_t engine_charge=lmb_process_memory_charge(&prepared_memory);
