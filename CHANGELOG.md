@@ -5,6 +5,11 @@ a tag stay under Unreleased until a new tag is created.
 
 ## Unreleased
 
+- A split that crosses a slow link says so. When the longest round trip
+  between the chat host and another computer of the chosen split is above
+  about 25 ms, the plan's reason names that computer and the delay, and the
+  API reports `slowest_link_seconds` and `slow_link`. The split is still
+  planned when no single computer can hold the model.
 - Placement is chosen for speed: every computer that can hold a model alone is
   a candidate, and a split is selected only when no single computer fits or
   when it is estimated at least 5% faster. Reviewing one model with no
