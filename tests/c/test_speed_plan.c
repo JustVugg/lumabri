@@ -127,7 +127,18 @@ static void does_not_fit_one(void) {
     assert(!d->fits_single && d->best_single < 0 && c->machines == 2 && d->why == LMB_SPEED_WHY_SPLIT_REQUIRED);
     assert(c->estimated && c->link_seconds > 0.001 && c->prefill_link_seconds > c->link_seconds);
     assert(c->plan.slices[0].layer_end == 4 && strstr(d->reason, "No single computer"));
+    /* A home network hop is not called slow. */
+    assert(c->slowest_link_seconds == 0.001 && !strstr(d->reason, "limits the speed"));
     free(d);
+    /* The same split over a 60 ms link still runs, and says what limits it. */
+    lan(links, 3, 0.060, 3e6);
+    d = decide(m, 3, links, &model, NULL, 0, NULL, 0);
+    c = &d->candidates[d->chosen];
+    assert(c->machines == 2 && d->why == LMB_SPEED_WHY_SPLIT_REQUIRED && c->slowest_link_seconds == 0.060);
+    assert(c->slowest_link_node != c->plan.edge_node);
+    assert(strstr(d->reason, "takes 60 ms per round trip") && strstr(d->reason, "limits the speed"));
+    free(d);
+    lan(links, 3, 0.001, 50e6);
     /* Without any measurement it is still placed, and says the speed is unknown. */
     for (unsigned i = 0; i < 3; i++) m[i].speed = (LmbMachineSpeed){0};
     d = decide(m, 3, NULL, &model, NULL, 0, NULL, 0);

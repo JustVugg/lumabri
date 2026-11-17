@@ -38,6 +38,9 @@
 #define LMB_SPEED_SPLIT_MARGIN 1.05  /* a split must beat one computer by 5% */
 #define LMB_SPEED_SWITCH_MARGIN 1.10 /* re-planning proposes only above 10% */
 #define LMB_SPEED_TIE 0.10           /* single computers this close are equal */
+/* Above this round trip a hop costs about as much as a layer range does on a
+ * fast computer: the link, not the computers, then sets the speed. */
+#define LMB_SPEED_SLOW_LINK_SECONDS 0.025
 
 enum { LMB_SPEED_BASIS_PROBE = 1u, LMB_SPEED_BASIS_OBSERVED = 2u, LMB_SPEED_BASIS_MEASURED_PLAN = 4u };
 
@@ -72,6 +75,8 @@ typedef struct {
     double tok_s, seconds_per_token;
     double layer_seconds, edge_seconds, link_seconds;
     double prefill_link_seconds; /* hops for the reference prompt; 0 = none or unknown */
+    double slowest_link_seconds; /* longest measured round trip among the hops; 0 = none */
+    uint32_t slowest_link_node;  /* the computer at the far end of it */
     double tok_s_all_sessions_busy; /* one turn at a time: rate / sessions */
     uint64_t reserved_bytes;
 } LmbSpeedCandidate;
@@ -172,6 +177,7 @@ static LMB_UNUSED void lmb_speed_estimate(const LmbSpeedMachine *machines, uint3
     const LmbClusterPlan *p = &c->plan;
     c->machines = p->nslices; c->basis = 0; c->estimated = 1;
     c->layer_seconds = c->edge_seconds = c->link_seconds = c->prefill_link_seconds = 0;
+    c->slowest_link_seconds = 0; c->slowest_link_node = 0;
     c->reserved_bytes = 0;
     double width = (double)(model->shape->boundary_width ? model->shape->boundary_width : model->shape->hidden) * 4.0;
     int prefill_known = model->prompt_tokens != 0;
@@ -185,6 +191,9 @@ static LMB_UNUSED void lmb_speed_estimate(const LmbSpeedMachine *machines, uint3
         const LmbSpeedLink *link = lmb_speed_link(links, count, p->edge_node, s->node);
         if (!link) { c->estimated = 0; prefill_known = 0; continue; }
         c->link_seconds += link->rtt_seconds + 2.0 * width / link->bytes_per_second;
+        if (link->rtt_seconds > c->slowest_link_seconds) {
+            c->slowest_link_seconds = link->rtt_seconds; c->slowest_link_node = s->node;
+        }
         c->prefill_link_seconds += link->rtt_seconds +
             2.0 * width * (double)model->prompt_tokens / link->bytes_per_second;
     }
@@ -271,6 +280,14 @@ static LMB_UNUSED void lmb_speed_explain(LmbSpeedDecision *d, const LmbSpeedMach
     default:
         snprintf(d->reason, sizeof d->reason, "Whole model on %s: %s. It is the only computer that can hold "
             "the model.", names, speed);
+    }
+    /* Say so when a hop of the chosen split is slow enough to set the pace. */
+    if (c->machines > 1 && c->slowest_link_seconds > LMB_SPEED_SLOW_LINK_SECONDS) {
+        size_t used = strlen(d->reason);
+        snprintf(d->reason + used, sizeof d->reason - used, " The link to %.40s takes %.0f ms per round trip: "
+            "above about %.0f ms the network, not the computers, limits the speed.",
+            machines[c->slowest_link_node].node.name, c->slowest_link_seconds * 1e3,
+            LMB_SPEED_SLOW_LINK_SECONDS * 1e3);
     }
 }
 

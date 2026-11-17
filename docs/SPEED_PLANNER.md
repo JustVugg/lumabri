@@ -36,6 +36,12 @@ probe between computers, and `scale` corrects probe-only computers once one
 computer has both a probe and an observation of the checkpoint. A placement
 that was measured exactly as it stands uses that measurement.
 
+A hop whose measured round trip is above about 25 ms costs as much as a range
+of layers does on a fast computer, so it sets the speed whatever the computers
+are. Such a split is still planned when nothing else can hold the model, and
+its reason names the link ("The link to NAME takes 60 ms per round trip...").
+The same fact is in the API as `slowest_link_seconds` and `slow_link`.
+
 The estimate is a ranking aid, not a promise. It has been checked on small
 fixtures with simulated machine speeds, not on real multi-computer
 households.
