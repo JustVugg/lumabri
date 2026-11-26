@@ -4,9 +4,8 @@ on:
   pull_request:
   push:
     branches: [main]
-  schedule:
-    # Nightly run of the complete native matrix on main.
-    - cron: '30 2 * * *'
+  # No scheduled run: the complete native matrix runs on every merge to main
+  # and can be started by hand.
   workflow_dispatch:
 
 permissions:
@@ -1146,8 +1145,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # A pull request runs one variant; every merge to main, the nightly
-        # run and a manual run keep both runners and both OpenMP settings.
+        # A pull request runs one variant; every merge to main and a
+        # manual run keep both runners and both OpenMP settings.
         runner: ${{ fromJSON(github.event_name == 'pull_request' && '["macos-15-intel"]' || '["macos-15-intel","macos-15"]') }}
         openmp: ${{ fromJSON(github.event_name == 'pull_request' && '["enabled"]' || '["enabled","disabled"]') }}
     runs-on: ${{ matrix.runner }}
